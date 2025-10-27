@@ -49,9 +49,30 @@ P1_MB=$(to_mib "$PART1_SIZE")
 P2_MB=$(to_mib "$PART2_SIZE")
 TOTAL_MB=$((P1_MB + P2_MB + 2))
 
-# Install prerequisites
-apt update
-apt install -y parted dosfstools util-linux python3-flask samba samba-common-bin
+# Install prerequisites (only fetch/install if something is missing)
+REQUIRED_PACKAGES=(
+  parted
+  dosfstools
+  util-linux
+  python3-flask
+  samba
+  samba-common-bin
+)
+
+MISSING_PACKAGES=()
+for pkg in "${REQUIRED_PACKAGES[@]}"; do
+  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+    MISSING_PACKAGES+=("$pkg")
+  fi
+done
+
+if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+  echo "Installing missing packages: ${MISSING_PACKAGES[*]}"
+  apt-get update
+  apt-get install -y "${MISSING_PACKAGES[@]}"
+else
+  echo "All required packages already installed; skipping apt install."
+fi
 
 # Ensure config.txt contains dtoverlay=dwc2 under [all]
 if [ -f "$CONFIG_FILE" ]; then

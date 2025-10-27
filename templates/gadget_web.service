@@ -12,7 +12,6 @@ Restart=on-failure
 RestartSec=5
 
 # Security settings
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only

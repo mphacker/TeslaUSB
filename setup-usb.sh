@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ================= Configuration =================
-GADGET_DIR_DEFAULT="/home/mhacker/gadget"
+GADGET_DIR_DEFAULT="/home/mhacker/TeslaUSB"
 IMG_NAME="usb_dual.img"
 PART1_SIZE="20G"  
 PART2_SIZE="16G"

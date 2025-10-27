@@ -34,6 +34,24 @@ LOOP=$(sudo losetup --show -fP "$IMG")
 echo "Using loop device: $LOOP"
 sleep 0.5
 
+# Ensure the partition device nodes exist before proceeding
+for p in 1 2; do
+  if [ ! -e "${LOOP}p${p}" ]; then
+    echo "  Warning: ${LOOP}p${p} missing; waiting for partition nodes..."
+    for wait in 1 2 3 4 5; do
+      sleep 0.5
+      if [ -e "${LOOP}p${p}" ]; then
+        echo "  ${LOOP}p${p} detected after ${wait}/5 checks"
+        break
+      fi
+      if [ $wait -eq 5 ]; then
+        echo "Error: partition node ${LOOP}p${p} did not appear" >&2
+        exit 1
+      fi
+    done
+  fi
+done
+
 # Mount partitions
 echo "Mounting partitions..."
 for PART_NUM in 1 2; do

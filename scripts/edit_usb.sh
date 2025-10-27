@@ -5,11 +5,10 @@ set -euo pipefail
 # This script removes the USB gadget, mounts partitions locally, and starts Samba
 
 # Configuration (will be updated by setup-usb.sh)
-GADGET_DIR="__GADGET_DIR__"
-IMG="$GADGET_DIR/__IMG_NAME__"
+IMG="__GADGET_DIR__/__IMG_NAME__"
 MNT_DIR="__MNT_DIR__"
 TARGET_USER="__TARGET_USER__"
-STATE_FILE="$GADGET_DIR/state.txt"
+STATE_FILE="__GADGET_DIR__/state.txt"
 
 echo "Switching to edit mode (local mount + Samba)..."
 

@@ -125,12 +125,12 @@ cleanup_mount_dirs() {
 cleanup_gadget_files() {
   echo "Cleaning up gadget directory files..."
   
-  # List of files created by setup-usb.sh (excluding this script)
+  # List of files created by setup-usb.sh (excluding this script and templates)
   local files_to_remove=(
     "present_usb.sh"
     "edit_usb.sh" 
     "web_control.py"
-    "$IMG_NAME"
+    "state.txt"
   )
   
   for file in "${files_to_remove[@]}"; do
@@ -144,6 +144,9 @@ cleanup_gadget_files() {
   # Remove any backup files or logs that might have been created
   echo "  Removing any backup or temporary files..."
   rm -f "$GADGET_DIR"/*.bak "$GADGET_DIR"/*.tmp "$GADGET_DIR"/*.log 2>/dev/null || true
+  
+  # Note: We intentionally leave the scripts/ and templates/ directories
+  # as they are part of the source repository, not generated files
 }
 
 # Main cleanup sequence
@@ -197,7 +200,8 @@ main() {
   echo "  - Removed USB gadget module and detached loop devices"
   echo "  - Cleaned up Samba share configuration"
   echo "  - Removed mount directories ($MNT_DIR)"
-  echo "  - Removed gadget files (scripts, web UI, disk image)"
+  echo "  - Removed gadget files (scripts, web UI, state file)"
+  echo "  - Disk image ($IMG_PATH) preserved for manual review"
   echo
   echo "Note: This cleanup script itself remains in $GADGET_DIR"
   echo "      You may delete it manually if no longer needed."
@@ -214,8 +218,8 @@ echo "  - Systemd services (gadget_web, present_usb_on_boot)"
 echo "  - USB gadget module and loop devices"
 echo "  - Samba share configuration"
 echo "  - Mount directories ($MNT_DIR)"
-echo "  - All files in $GADGET_DIR (except this script)"
-echo "  - Disk image: $IMG_PATH"
+echo "  - Generated files in $GADGET_DIR (scripts, web UI, state file)"
+echo "  - Disk image will be preserved at $IMG_PATH"
 echo
 read -p "Are you sure you want to proceed? (y/N): " -n 1 -r
 echo

@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""
+USB Gadget Web Control Interface
+
+A simple Flask web application for controlling USB gadget modes.
+Provides buttons to switch between "Present USB" and "Edit USB" modes.
+"""
+
+from flask import Flask, render_template_string, redirect, url_for, flash
+import subprocess
+import os
+
+app = Flask(__name__)
+# Configuration (will be updated by setup-usb.sh)
+app.secret_key = "__SECRET_KEY__"
+GADGET_DIR = "__GADGET_DIR__"
+MNT_DIR = "__MNT_DIR__"
+STATE_FILE = os.path.join(GADGET_DIR, "state.txt")
+
+MODE_DISPLAY = {
+    "present": ("USB Gadget Mode", "present"),
+    "edit": ("Edit Mode", "edit"),
+    "unknown": ("Unknown", "unknown"),
+}
+
+
+def detect_mode():
+    """Attempt to infer the current mode when the state file is missing."""
+    try:
+        result = subprocess.run(
+            ["lsmod"], capture_output=True, text=True, check=False, timeout=5
+        )
+        if result.stdout and "g_mass_storage" in result.stdout:
+            return "present"
+    except Exception:
+        pass
+
+    try:
+        for part in ("part1", "part2"):
+            mp = os.path.join(MNT_DIR, part)
+            if os.path.ismount(mp):
+                return "edit"
+    except Exception:
+        pass
+
+    return "unknown"
+
+
+def current_mode():
+    """Read the current mode from the state file, falling back when needed."""
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as state_file:
+            token = state_file.read().strip().lower()
+            if token in MODE_DISPLAY:
+                return token
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+    return detect_mode()
+
+
+def mode_display():
+    """Return the canonical token along with display label and CSS class."""
+    token = current_mode()
+    label, css_class = MODE_DISPLAY.get(token, MODE_DISPLAY["unknown"])
+    return token, label, css_class
+
+HTML_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tesla USB Gadget Control</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            padding: 20px;
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        button {
+            padding: 15px 25px;
+            margin: 10px;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+            max-width: 250px;
+            display: block;
+            margin: 10px auto;
+        }
+        .present-btn {
+            background-color: #007bff;
+            color: white;
+        }
+        .edit-btn {
+            background-color: #28a745;
+            color: white;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        .messages {
+            margin: 20px 0;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 5px 0;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 5px 0;
+        }
+        .info {
+            background-color: #e2e3e5;
+            color: #383d41;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+        .status-label {
+            text-align: center;
+            font-weight: 600;
+            margin-bottom: 20px;
+            padding: 12px;
+            border-radius: 6px;
+        }
+        .status-label.present {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status-label.edit {
+            background-color: #d1ecf1;
+            color: #0c5460;
+        }
+        .status-label.unknown {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚗 Tesla USB Gadget Control</h1>
+        <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+        
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="messages">
+                    {% for cat, msg in messages %}
+                        <div class="{{cat}}">{{msg}}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        
+        <form method="post" action="{{url_for('present_usb')}}">
+            <button type="submit" class="present-btn">📱 Present USB Gadget</button>
+        </form>
+        
+        <form method="post" action="{{url_for('edit_usb')}}">
+            <button type="submit" class="edit-btn">📁 Edit USB (mount + Samba)</button>
+        </form>
+        
+        <div class="info">
+            <strong>Present USB Mode:</strong> Pi appears as USB storage to Tesla<br>
+            <strong>Edit USB Mode:</strong> Partitions mounted locally with Samba access
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+def run_script(script_name):
+    """Execute a script and return success status and message."""
+    script_path = os.path.join(GADGET_DIR, script_name)
+    
+    if not os.path.exists(script_path):
+        return False, f"Script not found: {script_name}"
+    
+    try:
+        result = subprocess.run(
+            ["sudo", script_path],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        message = output if output else f"{script_name} executed successfully"
+        return True, message
+    except subprocess.CalledProcessError as e:
+        parts = [getattr(e, "stderr", ""), getattr(e, "stdout", "")]
+        combined = "\n".join(part for part in parts if part)
+        error_msg = combined.strip() if combined else str(e)
+        return False, f"Error executing {script_name}: {error_msg}"
+    except subprocess.TimeoutExpired:
+        return False, f"Timeout executing {script_name}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+@app.route("/")
+def index():
+    """Main page with control buttons."""
+    _, label, css_class = mode_display()
+    return render_template_string(HTML_TEMPLATE, mode_label=label, mode_class=css_class)
+
+@app.route("/present_usb", methods=["POST"])
+def present_usb():
+    """Switch to USB gadget presentation mode."""
+    success, message = run_script("present_usb.sh")
+    flash(message, "success" if success else "error")
+    return redirect(url_for("index"))
+
+@app.route("/edit_usb", methods=["POST"])
+def edit_usb():
+    """Switch to edit mode with local mounts and Samba."""
+    success, message = run_script("edit_usb.sh")
+    flash(message, "success" if success else "error")
+    return redirect(url_for("index"))
+
+@app.route("/status")
+def status():
+    """Simple status endpoint for health checks."""
+    token, label, css_class = mode_display()
+    return {
+        "status": "running",
+        "gadget_dir": GADGET_DIR,
+        "mode": token,
+        "mode_label": label,
+        "mode_class": css_class,
+    }
+
+if __name__ == "__main__":
+    print(f"Starting Tesla USB Gadget Web Control")
+    print(f"Gadget directory: {GADGET_DIR}")
+    print(f"Access the interface at: http://0.0.0.0:__WEB_PORT__/")
+    app.run(host="0.0.0.0", port=__WEB_PORT__, debug=False)

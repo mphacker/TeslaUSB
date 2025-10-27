@@ -206,151 +206,66 @@ EOF
 # Restart Samba
 systemctl restart smbd nmbd 2>/dev/null || systemctl restart smbd || true
 
-# ===== present_usb.sh =====
-cat > "$GADGET_DIR/present_usb.sh" <<SH
-#!/bin/bash
-set -euo pipefail
-IMG="$GADGET_DIR/$IMG_NAME"
-MNT_DIR="$MNT_DIR"
-# Stop Samba
-sudo systemctl stop smbd || true
-# Unmount partitions if mounted
-for mp in "\$MNT_DIR/part1" "\$MNT_DIR/part2"; do
-  if mountpoint -q "\$mp"; then sudo umount "\$mp"; fi
-done
-# Detach loop devices for the image
-for loop in \$(losetup -j "\$IMG" | cut -d: -f1); do
-  sudo losetup -d "\$loop" || true
-done
-# Remove gadget module if present
-if lsmod | grep -q '^g_mass_storage'; then sudo rmmod g_mass_storage || true; sleep 1; fi
-# Present gadget
-sudo modprobe g_mass_storage file="\$IMG" stall=0 removable=1 ro=0
-echo "Presented USB gadget."
-SH
+# ===== Install and configure scripts from templates =====
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATES_DIR="$SCRIPT_DIR/templates"
+SCRIPTS_DIR="$SCRIPT_DIR/scripts"
 
-# ===== edit_usb.sh =====
-cat > "$GADGET_DIR/edit_usb.sh" <<SH
-#!/bin/bash
-set -euo pipefail
-GADGET_DIR="$GADGET_DIR"
-IMG="\$GADGET_DIR/$IMG_NAME"
-MNT_DIR="$MNT_DIR"
-TARGET_USER="$TARGET_USER"
-UID_VAL=\$(id -u "$TARGET_USER")
-GID_VAL=\$(id -g "$TARGET_USER")
-# Remove gadget if active
-if lsmod | grep -q '^g_mass_storage'; then
-  sudo rmmod g_mass_storage || true
-  sleep 1
+# Function to configure template files
+configure_template() {
+  local template_file="$1"
+  local output_file="$2"
+  
+  if [ ! -f "$template_file" ]; then
+    echo "Error: Template file not found: $template_file"
+    exit 1
+  fi
+  
+  echo "Configuring: $(basename "$output_file")"
+  
+  # Generate a random secret key for the web interface
+  SECRET_KEY=$(openssl rand -hex 32 2>/dev/null || date +%s | sha256sum | head -c 32)
+  
+  # Replace placeholders in template with actual values
+  sed -e "s|__GADGET_DIR__|$GADGET_DIR|g" \
+      -e "s|__IMG_NAME__|$IMG_NAME|g" \
+      -e "s|__MNT_DIR__|$MNT_DIR|g" \
+      -e "s|__TARGET_USER__|$TARGET_USER|g" \
+      -e "s|__WEB_PORT__|$WEB_PORT|g" \
+      -e "s|__SECRET_KEY__|$SECRET_KEY|g" \
+      "$template_file" > "$output_file"
+  
+  chmod +x "$output_file"
+  chown "$TARGET_USER:$TARGET_USER" "$output_file"
+}
+
+# Install script files from templates
+echo "Installing script files from templates..."
+configure_template "$SCRIPTS_DIR/present_usb.sh" "$GADGET_DIR/present_usb.sh"
+configure_template "$SCRIPTS_DIR/edit_usb.sh" "$GADGET_DIR/edit_usb.sh"
+configure_template "$SCRIPTS_DIR/web_control.py" "$GADGET_DIR/web_control.py"
+
+STATE_FILE="$GADGET_DIR/state.txt"
+if [ ! -f "$STATE_FILE" ]; then
+  echo "Initializing mode state file..."
+  echo "unknown" > "$STATE_FILE"
+  chown "$TARGET_USER:$TARGET_USER" "$STATE_FILE"
 fi
-# Prepare mount points
-sudo mkdir -p "\$MNT_DIR/part1" "\$MNT_DIR/part2"
-sudo chown "$TARGET_USER:$TARGET_USER" "\$MNT_DIR/part1" "\$MNT_DIR/part2"
-# Setup loop device
-LOOP=\$(sudo losetup --show -fP "\$IMG")
-sleep 0.5
-# Mount partitions
-for PART_NUM in 1 2; do
-  LOOP_PART="\${LOOP}p\${PART_NUM}"
-  MP="\$MNT_DIR/part\${PART_NUM}"
-  if mountpoint -q "\$MP"; then sudo umount "\$MP"; fi
-  sudo mount -o uid=\$UID_VAL,gid=\$GID_VAL,umask=002 "\$LOOP_PART" "\$MP"
-done
-# Start Samba
-sudo systemctl restart smbd || true
-echo "Partitions mounted and Samba started."
-SH
 
-chmod +x "$GADGET_DIR/present_usb.sh" "$GADGET_DIR/edit_usb.sh"
-chown -R "$TARGET_USER:$TARGET_USER" "$GADGET_DIR"
+# ===== Systemd services from templates =====
+echo "Installing systemd services from templates..."
 
-# ===== Web UI =====
-WEB_FILE="$GADGET_DIR/web_control.py"
-cat > "$WEB_FILE" <<PY
-#!/usr/bin/env python3
-from flask import Flask, render_template_string, redirect, url_for, flash
-import subprocess
-app = Flask(__name__)
-app.secret_key = "localdevsecret"
-GADGET_DIR="$GADGET_DIR"
-HTML_TEMPLATE = """
-<!doctype html><html><head><meta charset='utf-8'><title>USB Gadget</title>
-<style>body{font-family:sans-serif;padding:20px}button{padding:12px 20px;margin:10px}</style>
-</head><body>
-<h1>USB Gadget Control</h1>
-{% with messages = get_flashed_messages(with_categories=true) %}
-  {% if messages %}
-    <ul>{% for cat,msg in messages %}<li class="{{cat}}">{{msg}}</li>{% endfor %}</ul>
-  {% endif %}
-{% endwith %}
-<form method="post" action="{{url_for('present_usb')}}"><button type="submit">Present USB Gadget</button></form>
-<form method="post" action="{{url_for('edit_usb')}}"><button type="submit">Edit USB (mount + Samba)</button></form>
-</body></html>
-"""
-def run_script(name):
-    path = f"{GADGET_DIR}/{name}"
-    try:
-        subprocess.run(["sudo", path], check=True)
-        return True, f"{name} executed"
-    except subprocess.CalledProcessError as e:
-        return False, str(e)
-@app.route("/")
-def index():
-    return render_template_string(HTML_TEMPLATE)
-@app.route("/present_usb", methods=["POST"])
-def present_usb():
-    ok,msg = run_script("present_usb.sh")
-    flash(msg, "success" if ok else "error")
-    return redirect(url_for("index"))
-@app.route("/edit_usb", methods=["POST"])
-def edit_usb():
-    ok,msg = run_script("edit_usb.sh")
-    flash(msg, "success" if ok else "error")
-    return redirect(url_for("index"))
-if __name__=="__main__":
-    app.run(host="0.0.0.0", port=$WEB_PORT)
-PY
-
-chown "$TARGET_USER:$TARGET_USER" "$WEB_FILE"
-chmod +x "$WEB_FILE"
-
-# ===== Systemd service for web UI =====
+# Web UI service
 SERVICE_FILE="/etc/systemd/system/gadget_web.service"
-cat > "$SERVICE_FILE" <<EOF
-[Unit]
-Description=USB Gadget Web Control
-After=network.target
+configure_template "$TEMPLATES_DIR/gadget_web.service" "$SERVICE_FILE"
 
-[Service]
-Type=simple
-User=$TARGET_USER
-ExecStart=/usr/bin/python3 $WEB_FILE
-Restart=on-failure
+# Auto-present service  
+AUTO_SERVICE="/etc/systemd/system/present_usb_on_boot.service"
+configure_template "$TEMPLATES_DIR/present_usb_on_boot.service" "$AUTO_SERVICE"
 
-[Install]
-WantedBy=multi-user.target
-EOF
-
+# Reload systemd and enable services
 systemctl daemon-reload
 systemctl enable --now gadget_web.service || systemctl restart gadget_web.service
-
-# ===== Systemd service to present gadget at boot =====
-AUTO_SERVICE="/etc/systemd/system/present_usb_on_boot.service"
-cat > "$AUTO_SERVICE" <<EOF
-[Unit]
-Description=Present USB gadget at boot
-After=multi-user.target
-Wants=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=$GADGET_DIR/present_usb.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
 
 systemctl daemon-reload
 systemctl enable present_usb_on_boot.service || true

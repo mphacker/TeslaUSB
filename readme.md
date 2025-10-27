@@ -11,6 +11,7 @@ This script (`setup-usb.sh`) transforms your Raspberry Pi into a USB storage dev
 - **Dual Partition USB Gadget**: Creates two separate FAT32 partitions (configurable sizes)
 - **Samba Network Sharing**: Access files remotely via network shares with authentication
 - **Web Control Interface**: Browser-based control panel for switching between modes
+- **Live Mode Indicator**: Web UI shows whether the gadget is in USB or Edit mode
 - **Auto-Boot Presentation**: Automatically presents the USB gadget when Pi boots
 - **Manual Control Scripts**: Command-line scripts for switching between present/edit modes
 - **Robust Error Handling**: Comprehensive error checking and cleanup for reliability
@@ -103,17 +104,54 @@ When in Edit USB mode, access files via Samba shares:
 - **Username**: Your Pi username (or SUDO_USER if run with sudo)
 - **Password**: Value set in `SAMBA_PASS` (default: "tesla")
 
+## Project Structure
+
+```
+TeslaUSB/
+├── setup-usb.sh              # Main setup script
+├── cleanup.sh                # Cleanup script  
+├── scripts/                  # Source script templates
+│   ├── present_usb.sh           # USB gadget presentation script
+│   ├── edit_usb.sh              # Edit mode script  
+│   └── web_control.py           # Flask web interface
+├── templates/                # Systemd service templates
+│   ├── gadget_web.service       # Web interface service
+│   └── present_usb_on_boot.service # Auto-present service
+├── README.md                 # This documentation
+└── README_scripts.md         # Script template documentation
+```
+
 ## Generated Files
 
-The script creates several files in the gadget directory:
+The setup script copies and configures template files to the gadget directory:
 
-| File | Purpose |
-|------|---------|
-| `usb_dual.img` | Disk image with two FAT32 partitions |
-| `present_usb.sh` | Script to activate USB gadget mode |
-| `edit_usb.sh` | Script to activate edit/mount mode |
-| `web_control.py` | Flask web interface application |
-| `cleanup.sh` | Script to safely remove all setup artifacts |
+| File | Source Template | Purpose |
+|------|-----------------|---------|
+| `usb_dual.img` | *Generated* | Disk image with two FAT32 partitions |
+| `present_usb.sh` | `scripts/present_usb.sh` | Script to activate USB gadget mode |
+| `edit_usb.sh` | `scripts/edit_usb.sh` | Script to activate edit/mount mode |
+| `web_control.py` | `scripts/web_control.py` | Flask web interface application |
+| `state.txt` | *Generated* | Stores the last-known USB gadget mode |
+| `cleanup.sh` | *Repository file* | Script to safely remove all setup artifacts |
+
+**Note**: Scripts are now maintained as individual template files in the repository, making them easier to update and version control. See `README_scripts.md` for details.
+
+## Customizing Scripts
+
+To modify script behavior:
+
+1. **Edit source files**: Modify files in `scripts/` or `templates/` directories
+2. **Re-run setup**: Execute `sudo ./setup-usb.sh` to apply changes
+3. **Manual updates**: For testing, you can edit the generated files directly in the gadget directory
+
+**Example**: To add custom logging to the present script:
+```bash
+# Edit the source template
+nano scripts/present_usb.sh
+
+# Re-run setup to apply changes
+sudo ./setup-usb.sh
+```
 
 ## Systemd Services
 

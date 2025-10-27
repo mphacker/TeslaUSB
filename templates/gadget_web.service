@@ -1,0 +1,22 @@
+[Unit]
+Description=USB Gadget Web Control Interface
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=__TARGET_USER__
+WorkingDirectory=__GADGET_DIR__
+ExecStart=/usr/bin/python3 __GADGET_DIR__/web_control.py
+Restart=on-failure
+RestartSec=5
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__GADGET_DIR__
+
+[Install]
+WantedBy=multi-user.target

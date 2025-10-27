@@ -9,6 +9,7 @@ Provides buttons to switch between "Present USB" and "Edit USB" modes.
 from flask import Flask, render_template_string, redirect, url_for, flash
 import subprocess
 import os
+import socket
 
 app = Flask(__name__)
 # Configuration (will be updated by setup-usb.sh)
@@ -62,10 +63,19 @@ def current_mode():
 
 
 def mode_display():
-    """Return the canonical token along with display label and CSS class."""
+    """Return mode metadata and share paths when applicable."""
     token = current_mode()
     label, css_class = MODE_DISPLAY.get(token, MODE_DISPLAY["unknown"])
-    return token, label, css_class
+    share_paths = []
+
+    if token == "edit":
+        hostname = socket.gethostname()
+        share_paths = [
+            f"\\\\{hostname}\\gadget_part1",
+            f"\\\\{hostname}\\gadget_part2",
+        ]
+
+    return token, label, css_class, share_paths
 
 HTML_TEMPLATE = """
 <!doctype html>
@@ -160,6 +170,23 @@ HTML_TEMPLATE = """
             background-color: #fff3cd;
             color: #856404;
         }
+        .shares {
+            background-color: #f8f9fa;
+            border: 1px solid #d6d8db;
+            border-radius: 6px;
+            padding: 12px;
+            margin-top: 20px;
+            font-size: 14px;
+        }
+        .shares ul {
+            margin: 8px 0 0;
+            padding-left: 18px;
+        }
+        .shares code {
+            background: #eef0f3;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
@@ -189,6 +216,17 @@ HTML_TEMPLATE = """
             <strong>Present USB Mode:</strong> Pi appears as USB storage to Tesla<br>
             <strong>Edit USB Mode:</strong> Partitions mounted locally with Samba access
         </div>
+
+        {% if share_paths %}
+        <div class="shares">
+            <strong>Network Shares:</strong>
+            <ul>
+                {% for path in share_paths %}
+                <li><code>{{ path }}</code></li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
     </div>
 </body>
 </html>
@@ -225,8 +263,13 @@ def run_script(script_name):
 @app.route("/")
 def index():
     """Main page with control buttons."""
-    _, label, css_class = mode_display()
-    return render_template_string(HTML_TEMPLATE, mode_label=label, mode_class=css_class)
+    _, label, css_class, share_paths = mode_display()
+    return render_template_string(
+        HTML_TEMPLATE,
+        mode_label=label,
+        mode_class=css_class,
+        share_paths=share_paths,
+    )
 
 @app.route("/present_usb", methods=["POST"])
 def present_usb():
@@ -245,13 +288,14 @@ def edit_usb():
 @app.route("/status")
 def status():
     """Simple status endpoint for health checks."""
-    token, label, css_class = mode_display()
+    token, label, css_class, share_paths = mode_display()
     return {
         "status": "running",
         "gadget_dir": GADGET_DIR,
         "mode": token,
         "mode_label": label,
         "mode_class": css_class,
+        "share_paths": share_paths,
     }
 
 if __name__ == "__main__":

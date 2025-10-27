@@ -48,7 +48,7 @@ for PART_NUM in 1 2; do
   fi
   
   echo "  Mounting $LOOP_PART to $MP"
-  sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002 "$LOOP_PART" "$MP"
+  sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP"
 done
 
 # Start Samba

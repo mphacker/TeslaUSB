@@ -21,9 +21,15 @@ echo "Unmounting partitions..."
 for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   if mountpoint -q "$mp" 2>/dev/null; then
     echo "  Unmounting $mp"
-    sudo umount "$mp" || true
+    if ! sudo umount "$mp"; then
+      echo "  Warning: failed to unmount $mp" >&2
+    fi
   fi
 done
+
+# Flush any pending writes to the image before detaching loops
+echo "Flushing pending filesystem buffers..."
+sync
 
 # Detach loop devices for the image
 echo "Detaching loop devices..."

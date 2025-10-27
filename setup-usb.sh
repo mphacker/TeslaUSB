@@ -4,10 +4,10 @@ set -euo pipefail
 # ================= Configuration =================
 GADGET_DIR_DEFAULT="/home/mhacker/gadget"
 IMG_NAME="usb_dual.img"
-PART1_SIZE="16G"  
+PART1_SIZE="20G"  
 PART2_SIZE="16G"
-LABEL1="DRIVE_A"
-LABEL2="DRIVE_B"
+LABEL1="TeslaCam"
+LABEL2="Lightshow"
 MNT_DIR="/mnt/gadget"
 CONFIG_FILE="/boot/firmware/config.txt"
 WEB_PORT=5000
@@ -74,23 +74,89 @@ fi
 mkdir -p "$GADGET_DIR"
 chown "$TARGET_USER:$TARGET_USER" "$GADGET_DIR"
 
+# Cleanup function for loop device
+cleanup_loop_device() {
+  if [ -n "${LOOP_DEV:-}" ]; then
+    echo "Cleaning up loop device: $LOOP_DEV"
+    losetup -d "$LOOP_DEV" 2>/dev/null || true
+    LOOP_DEV=""
+  fi
+}
+
 # Create image (if missing)
 if [ -f "$IMG_PATH" ]; then
   echo "Image already exists at $IMG_PATH — skipping creation."
 else
+  # Set trap to cleanup on exit/error
+  trap cleanup_loop_device EXIT INT TERM
+  
   echo "Creating image $IMG_PATH (${TOTAL_MB}M)..."
-    # Create sparse file (thin provisioned) - only allocates space as needed
-  truncate -s "${TOTAL_MB}M" "$IMG_PATH"
-  LOOP_DEV=$(losetup --find --show "$IMG_PATH")
+  # Create sparse file (thin provisioned) - only allocates space as needed
+  truncate -s "${TOTAL_MB}M" "$IMG_PATH" || {
+    echo "Error: Failed to create image file"
+    exit 1
+  }
+  
+  LOOP_DEV=$(losetup --find --show "$IMG_PATH") || {
+    echo "Error: Failed to create loop device"
+    exit 1
+  }
+  
+  # Validate loop device was created
+  if [ -z "$LOOP_DEV" ] || [ ! -e "$LOOP_DEV" ]; then
+    echo "Error: Loop device creation failed or device not accessible"
+    exit 1
+  fi
+  
   echo "Using loop device: $LOOP_DEV"
-  parted -s "$LOOP_DEV" mklabel msdos
-  parted -s "$LOOP_DEV" mkpart primary fat32 1MiB $((1+P1_MB))MiB
-  parted -s "$LOOP_DEV" mkpart primary fat32 $((1+P1_MB))MiB 100%
+  
+  # Create partition table with error checking
+  parted -s "$LOOP_DEV" mklabel msdos || {
+    echo "Error: Failed to create partition table"
+    exit 1
+  }
+  
+  parted -s "$LOOP_DEV" mkpart primary fat32 1MiB $((1+P1_MB))MiB || {
+    echo "Error: Failed to create first partition"
+    exit 1
+  }
+  
+  parted -s "$LOOP_DEV" mkpart primary fat32 $((1+P1_MB))MiB 100% || {
+    echo "Error: Failed to create second partition"
+    exit 1
+  }
+  
   partprobe "$LOOP_DEV" || true
-  sleep 1
-  mkfs.vfat -F 32 -n "$LABEL1" "${LOOP_DEV}p1"
-  mkfs.vfat -F 32 -n "$LABEL2" "${LOOP_DEV}p2"
-  losetup -d "$LOOP_DEV"
+  
+  # Wait for partition nodes to appear (up to 10 seconds)
+  echo "Waiting for partition nodes to appear..."
+  for i in {1..10}; do
+    if [ -e "${LOOP_DEV}p1" ] && [ -e "${LOOP_DEV}p2" ]; then
+      echo "Partition nodes ready after ${i} seconds"
+      break
+    fi
+    if [ $i -eq 10 ]; then
+      echo "Error: Partition nodes ${LOOP_DEV}p1 and ${LOOP_DEV}p2 did not appear after 10 seconds"
+      exit 1
+    fi
+    sleep 1
+  done
+  
+  # Format partitions with error checking
+  mkfs.vfat -F 32 -n "$LABEL1" "${LOOP_DEV}p1" || {
+    echo "Error: Failed to format first partition"
+    exit 1
+  }
+  
+  mkfs.vfat -F 32 -n "$LABEL2" "${LOOP_DEV}p2" || {
+    echo "Error: Failed to format second partition"
+    exit 1
+  }
+  
+  # Clean up loop device (will also be called by trap)
+  cleanup_loop_device
+  trap - EXIT INT TERM  # Remove trap since we're cleaning up normally
+  
   echo "Image created and partitions formatted."
 fi
 
@@ -141,55 +207,55 @@ EOF
 systemctl restart smbd nmbd 2>/dev/null || systemctl restart smbd || true
 
 # ===== present_usb.sh =====
-cat > "$GADGET_DIR/present_usb.sh" <<'SH'
+cat > "$GADGET_DIR/present_usb.sh" <<SH
 #!/bin/bash
 set -euo pipefail
-IMG="/home/mhacker/gadget/usb_dual.img"
-MNT_DIR="/mnt/gadget"
+IMG="$GADGET_DIR/$IMG_NAME"
+MNT_DIR="$MNT_DIR"
 # Stop Samba
 sudo systemctl stop smbd || true
 # Unmount partitions if mounted
-for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
-  if mountpoint -q "$mp"; then sudo umount "$mp"; fi
+for mp in "\$MNT_DIR/part1" "\$MNT_DIR/part2"; do
+  if mountpoint -q "\$mp"; then sudo umount "\$mp"; fi
 done
 # Detach loop devices for the image
-for loop in $(losetup -j "$IMG" | cut -d: -f1); do
-  sudo losetup -d "$loop" || true
+for loop in \$(losetup -j "\$IMG" | cut -d: -f1); do
+  sudo losetup -d "\$loop" || true
 done
 # Remove gadget module if present
 if lsmod | grep -q '^g_mass_storage'; then sudo rmmod g_mass_storage || true; sleep 1; fi
 # Present gadget
-sudo modprobe g_mass_storage file="$IMG" stall=0 removable=1 ro=0
+sudo modprobe g_mass_storage file="\$IMG" stall=0 removable=1 ro=0
 echo "Presented USB gadget."
 SH
 
 # ===== edit_usb.sh =====
-cat > "$GADGET_DIR/edit_usb.sh" <<'SH'
+cat > "$GADGET_DIR/edit_usb.sh" <<SH
 #!/bin/bash
 set -euo pipefail
-GADGET_DIR="/home/mhacker/gadget"
-IMG="$GADGET_DIR/usb_dual.img"
-MNT_DIR="/mnt/gadget"
-TARGET_USER="mhacker"
-UID_VAL=$(id -u "$TARGET_USER")
-GID_VAL=$(id -g "$TARGET_USER")
+GADGET_DIR="$GADGET_DIR"
+IMG="\$GADGET_DIR/$IMG_NAME"
+MNT_DIR="$MNT_DIR"
+TARGET_USER="$TARGET_USER"
+UID_VAL=\$(id -u "$TARGET_USER")
+GID_VAL=\$(id -g "$TARGET_USER")
 # Remove gadget if active
 if lsmod | grep -q '^g_mass_storage'; then
   sudo rmmod g_mass_storage || true
   sleep 1
 fi
 # Prepare mount points
-sudo mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
-sudo chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
+sudo mkdir -p "\$MNT_DIR/part1" "\$MNT_DIR/part2"
+sudo chown "$TARGET_USER:$TARGET_USER" "\$MNT_DIR/part1" "\$MNT_DIR/part2"
 # Setup loop device
-LOOP=$(sudo losetup --show -fP "$IMG")
+LOOP=\$(sudo losetup --show -fP "\$IMG")
 sleep 0.5
 # Mount partitions
 for PART_NUM in 1 2; do
-  LOOP_PART="${LOOP}p${PART_NUM}"
-  MP="$MNT_DIR/part${PART_NUM}"
-  if mountpoint -q "$MP"; then sudo umount "$MP"; fi
-  sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002 "$LOOP_PART" "$MP"
+  LOOP_PART="\${LOOP}p\${PART_NUM}"
+  MP="\$MNT_DIR/part\${PART_NUM}"
+  if mountpoint -q "\$MP"; then sudo umount "\$MP"; fi
+  sudo mount -o uid=\$UID_VAL,gid=\$GID_VAL,umask=002 "\$LOOP_PART" "\$MP"
 done
 # Start Samba
 sudo systemctl restart smbd || true
@@ -207,7 +273,7 @@ from flask import Flask, render_template_string, redirect, url_for, flash
 import subprocess
 app = Flask(__name__)
 app.secret_key = "localdevsecret"
-GADGET_DIR="/home/mhacker/gadget"
+GADGET_DIR="$GADGET_DIR"
 HTML_TEMPLATE = """
 <!doctype html><html><head><meta charset='utf-8'><title>USB Gadget</title>
 <style>body{font-family:sans-serif;padding:20px}button{padding:12px 20px;margin:10px}</style>
@@ -279,7 +345,7 @@ Wants=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/$TARGET_USER/gadget/present_usb.sh
+ExecStart=$GADGET_DIR/present_usb.sh
 RemainAfterExit=yes
 
 [Install]

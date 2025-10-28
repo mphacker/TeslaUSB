@@ -32,6 +32,11 @@ echo "Stopping Samba services..."
 sudo systemctl stop smbd || true
 sudo systemctl stop nmbd || true
 
+# Force all buffered data to disk before unmounting
+echo "Flushing buffered writes to disk..."
+sync
+sleep 1
+
 # Helper to unmount even if Samba clients are still attached
 unmount_with_retry() {
   local target="$1"
@@ -66,11 +71,19 @@ unmount_with_retry() {
 # Unmount partitions if mounted
 echo "Unmounting partitions..."
 for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
+  # Sync each partition before unmounting
+  if mountpoint -q "$mp" 2>/dev/null; then
+    echo "  Syncing $mp..."
+    sudo sync -f "$mp" 2>/dev/null || sync
+  fi
   if ! unmount_with_retry "$mp"; then
     echo "  Aborting gadget presentation to avoid corruption." >&2
     exit 1
   fi
 done
+
+# One final sync after all unmounts
+sync
 
 # Run filesystem checks to ensure clean FAT volumes before presenting to the host
 echo "Running filesystem checks..."

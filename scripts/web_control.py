@@ -13,6 +13,8 @@ import socket
 import wave
 import contextlib
 import shutil
+import threading
+import time
 
 app = Flask(__name__)
 # Configuration (will be updated by setup-usb.sh)
@@ -146,6 +148,9 @@ HTML_TEMPLATE = """
 <head>
     <meta charset='utf-8'>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% if auto_refresh %}
+    <meta http-equiv="refresh" content="15">
+    {% endif %}
     <title>Tesla USB Gadget Control</title>
     <style>
         body {
@@ -192,21 +197,28 @@ HTML_TEMPLATE = """
         .messages {
             margin: 20px 0;
         }
-        .success {
+        .messages .success {
             background-color: #d4edda;
             color: #155724;
             padding: 10px;
             border-radius: 5px;
             margin: 5px 0;
         }
-        .error {
+        .messages .info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 5px 0;
+        }
+        .messages .error {
             background-color: #f8d7da;
             color: #721c24;
             padding: 10px;
             border-radius: 5px;
             margin: 5px 0;
         }
-        .info {
+        .info-box {
             background-color: #e2e3e5;
             color: #383d41;
             padding: 15px;
@@ -298,7 +310,7 @@ HTML_TEMPLATE = """
             <button type="submit" class="edit-btn">📁 Edit USB (mount + Samba)</button>
         </form>
         
-        <div class="info">
+        <div class="info-box">
             <strong>Present USB Mode:</strong> Pi appears as USB storage to Tesla<br>
             <strong>Edit USB Mode:</strong> Partitions mounted locally with Samba access
         </div>
@@ -339,7 +351,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def run_script(script_name):
+def run_script(script_name, background=False):
     """Execute a script and return success status and message."""
     script_path = os.path.join(GADGET_DIR, script_name)
     
@@ -349,6 +361,25 @@ def run_script(script_name):
     cmd = ["sudo", "-n", script_path]
     env = os.environ.copy()
     env["PATH"] = env.get("PATH", "/usr/bin:/bin")
+
+    if background:
+        # Run in background and redirect output to a log file
+        log_file = os.path.join(GADGET_DIR, f"{script_name}.log")
+        try:
+            # Start process detached from this process
+            with open(log_file, "w") as log:
+                subprocess.Popen(
+                    cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    cwd=GADGET_DIR,
+                    env=env,
+                    start_new_session=True,
+                )
+            return True, f"{script_name} started in background. Check {log_file} for details. Please wait 5-10 seconds, then refresh."
+        except Exception as e:
+            return False, f"Failed to start {script_name}: {str(e)}"
 
     try:
         result = subprocess.run(
@@ -511,6 +542,12 @@ def index():
     lock_chime_ready = lock_chime_ui_available(token)
     show_lock_chime = token != "present"
     wav_options = list_available_wavs() if lock_chime_ready else []
+    
+    # Check if we should auto-refresh (when switching modes)
+    messages = list(app._get_flashed_messages())
+    auto_refresh = any("switching to" in str(msg).lower() or "please wait" in str(msg).lower() 
+                       for msg in messages)
+    
     return render_template_string(
         HTML_TEMPLATE,
         mode_label=label,
@@ -520,25 +557,59 @@ def index():
         lock_chime_ready=lock_chime_ready,
         show_lock_chime=show_lock_chime,
         wav_options=wav_options,
+        auto_refresh=auto_refresh,
     )
 
 @app.route("/present_usb", methods=["POST"])
 def present_usb():
     """Switch to USB gadget presentation mode."""
-    success, message = run_script("present_usb.sh")
-    flash(message, "success" if success else "error")
+    def run_in_background():
+        time.sleep(1)  # Let HTTP response complete first
+        log_path = os.path.join(GADGET_DIR, "present_usb.log")
+        try:
+            with open(log_path, "w") as log:
+                result = subprocess.run(
+                    ["sudo", "-n", os.path.join(GADGET_DIR, "present_usb.sh")],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=60,
+                    cwd=GADGET_DIR,
+                )
+                log.write(f"\n\nExit code: {result.returncode}\n")
+        except Exception as e:
+            with open(log_path, "a") as log:
+                log.write(f"\n\nException: {str(e)}\n")
+    
+    thread = threading.Thread(target=run_in_background, daemon=True)
+    thread.start()
+    
+    flash("Switching to Present Mode... This page will auto-refresh in 15 seconds.", "info")
     return redirect(url_for("index"))
 
 @app.route("/edit_usb", methods=["POST"])
 def edit_usb():
     """Switch to edit mode with local mounts and Samba."""
-    success, message = run_script("edit_usb.sh")
-    flash(message, "success" if success else "error")
-
-    if success:
-        lock_chime_issues = validate_lock_chime()
-        for issue in lock_chime_issues:
-            flash(issue, "error")
+    def run_in_background():
+        time.sleep(1)  # Let HTTP response complete first
+        log_path = os.path.join(GADGET_DIR, "edit_usb.log")
+        try:
+            with open(log_path, "w") as log:
+                result = subprocess.run(
+                    ["sudo", "-n", os.path.join(GADGET_DIR, "edit_usb.sh")],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=60,
+                    cwd=GADGET_DIR,
+                )
+                log.write(f"\n\nExit code: {result.returncode}\n")
+        except Exception as e:
+            with open(log_path, "a") as log:
+                log.write(f"\n\nException: {str(e)}\n")
+    
+    thread = threading.Thread(target=run_in_background, daemon=True)
+    thread.start()
+    
+    flash("Switching to Edit Mode... This page will auto-refresh in 15 seconds.", "info")
     return redirect(url_for("index"))
 
 
@@ -634,4 +705,4 @@ if __name__ == "__main__":
     print(f"Starting Tesla USB Gadget Web Control")
     print(f"Gadget directory: {GADGET_DIR}")
     print(f"Access the interface at: http://0.0.0.0:__WEB_PORT__/")
-    app.run(host="0.0.0.0", port=__WEB_PORT__, debug=False)
+    app.run(host="0.0.0.0", port=__WEB_PORT__, debug=False, threaded=True)

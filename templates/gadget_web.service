@@ -8,8 +8,9 @@ Type=simple
 User=__TARGET_USER__
 WorkingDirectory=__GADGET_DIR__
 ExecStart=/usr/bin/python3 __GADGET_DIR__/web_control.py
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
 
 # Security settings
 PrivateTmp=true

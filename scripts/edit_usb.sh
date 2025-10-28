@@ -16,7 +16,39 @@ echo "Switching to edit mode (local mount + Samba)..."
 UID_VAL=$(id -u "$TARGET_USER")
 GID_VAL=$(id -g "$TARGET_USER")
 
-safe_unmount_dir() {
+# Remove gadget if active (with force to prevent hanging)
+if lsmod | grep -q '^g_mass_storage'; then
+  echo "Removing USB gadget module..."
+  # Sync all pending writes first
+  sync
+  sleep 1
+  
+  # Try to unbind the UDC (USB Device Controller) first to cleanly disconnect
+  UDC_DIR="/sys/class/udc"
+  if [ -d "$UDC_DIR" ]; then
+    for udc in "$UDC_DIR"/*; do
+      if [ -e "$udc" ]; then
+        UDC_NAME=$(basename "$udc")
+        echo "  Unbinding UDC: $UDC_NAME"
+        echo "" | sudo tee /sys/kernel/config/usb_gadget/*/UDC 2>/dev/null || true
+      fi
+    done
+    sleep 1
+  fi
+  
+  # Now try to remove the module
+  echo "  Removing g_mass_storage module..."
+  if sudo timeout 5 rmmod g_mass_storage 2>/dev/null; then
+    echo "  USB gadget module removed successfully"
+  else
+    echo "  WARNING: Module removal timed out or failed. Forcing..."
+    # Kill any processes holding the module
+    sudo lsof 2>/dev/null | grep g_mass_storage | awk '{print $2}' | xargs -r sudo kill -9 2>/dev/null || true
+    # Try one more time
+    sudo rmmod -f g_mass_storage 2>/dev/null || true
+  fi
+  sleep 1
+fi
   local target="$1"
   local attempt
   if ! mountpoint -q "$target" 2>/dev/null; then
@@ -49,6 +81,9 @@ safe_unmount_dir() {
 # Remove gadget if active
 if lsmod | grep -q '^g_mass_storage'; then
   echo "Removing USB gadget module..."
+  # Ensure no active I/O before removing module
+  sync
+  sleep 2
   sudo rmmod g_mass_storage || true
   sleep 1
 fi

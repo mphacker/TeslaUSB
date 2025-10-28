@@ -87,15 +87,15 @@ def mode_display():
 
 def lock_chime_ui_available(mode_token):
     """Determine if the lock chime UI should be active."""
-    if mode_token == "edit":
-        return True
+    return any(True for _ in iter_mounted_partitions())
 
+
+def iter_mounted_partitions():
+    """Yield mounted USB partitions and their paths."""
     for part in USB_PARTITIONS:
         mount_path = os.path.join(MNT_DIR, part)
         if os.path.ismount(mount_path):
-            return True
-
-    return False
+            yield part, mount_path
 
 HTML_TEMPLATE = """
 <!doctype html>
@@ -327,12 +327,7 @@ def list_available_wavs():
     """Return selectable WAV files in USB roots excluding LockChime."""
     options = []
 
-    for part in USB_PARTITIONS:
-        mount_path = os.path.join(MNT_DIR, part)
-
-        if not os.path.isdir(mount_path):
-            continue
-
+    for part, mount_path in iter_mounted_partitions():
         try:
             entries = os.listdir(mount_path)
         except OSError:
@@ -360,12 +355,7 @@ def validate_lock_chime():
     issues = []
     chime_files = []
 
-    for part in USB_PARTITIONS:
-        mount_path = os.path.join(MNT_DIR, part)
-
-        if not os.path.isdir(mount_path):
-            issues.append(f"Unable to access mounted USB partition at {mount_path}.")
-            continue
+    for part, mount_path in iter_mounted_partitions():
 
         try:
             entries = os.listdir(mount_path)

@@ -559,10 +559,14 @@ def set_chime():
         try:
             if os.path.isfile(backup_path):
                 os.remove(backup_path)
-            os.rename(existing_path, backup_path)
+            shutil.copyfile(existing_path, backup_path)
             backup_info = (existing_path, backup_path)
         except OSError as exc:
-            flash(f"Unable to prepare existing lock chime for replacement: {exc}", "error")
+            flash(
+                "Unable to prepare existing lock chime for replacement. Ensure the USB drive is writable.",
+                "error",
+            )
+            flash(str(exc), "error")
             return redirect(url_for("index"))
 
     try:
@@ -588,9 +592,10 @@ def set_chime():
             os.remove(backup_info[1])
         except OSError as exc:
             flash(
-                f"Lock chime updated, but unable to delete OldLockChime.wav: {exc}. Please remove manually.",
+                "Lock chime updated, but unable to delete OldLockChime.wav automatically. Remove it manually.",
                 "error",
             )
+            flash(str(exc), "error")
             return redirect(url_for("index"))
 
     flash("Custom lock chime updated successfully.", "success")

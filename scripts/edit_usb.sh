@@ -52,6 +52,28 @@ for p in 1 2; do
   fi
 done
 
+# Run filesystem checks before mounting to auto-repair FAT issues
+echo "Running filesystem checks..."
+for PART_NUM in 1 2; do
+  LOOP_PART="${LOOP}p${PART_NUM}"
+  LOG_FILE="/tmp/fsck_gadget_part${PART_NUM}.log"
+  echo "  Checking ${LOOP_PART}..."
+  sudo fsck.vfat -a "$LOOP_PART" >"$LOG_FILE" 2>&1
+  FSCK_STATUS=$?
+
+  if [ $FSCK_STATUS -ge 4 ]; then
+    echo "  Critical filesystem errors detected on ${LOOP_PART}. See $LOG_FILE" >&2
+    sudo losetup -d "$LOOP" 2>/dev/null || true
+    exit 1
+  fi
+
+  if [ $FSCK_STATUS -eq 0 ]; then
+    rm -f "$LOG_FILE"
+  else
+    echo "  Filesystem repairs applied on ${LOOP_PART}. Details saved to $LOG_FILE"
+  fi
+done
+
 # Mount partitions
 echo "Mounting partitions..."
 for PART_NUM in 1 2; do

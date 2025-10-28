@@ -48,7 +48,7 @@ This script (`setup-usb.sh`) transforms your Raspberry Pi into a USB storage dev
 4. **To remove everything later:**
    ```bash
    # Navigate to the gadget directory and run cleanup
-   cd /home/mhacker/gadget  # or your configured GADGET_DIR
+   cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
    sudo ./cleanup.sh
    ```
 
@@ -58,12 +58,12 @@ Edit the configuration section at the top of `setup-usb.sh`:
 
 ```bash
 # ================= Configuration =================
-GADGET_DIR_DEFAULT="/home/mhacker/gadget"  # Installation directory
+GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"  # Installation directory
 IMG_NAME="usb_dual.img"                    # Disk image filename
 PART1_SIZE="16G"                           # First partition size
 PART2_SIZE="16G"                           # Second partition size
-LABEL1="DRIVE_A"                           # First partition label
-LABEL2="DRIVE_B"                           # Second partition label
+LABEL1="TeslaCam"                           # First partition label
+LABEL2="LightShow"                           # Second partition label
 MNT_DIR="/mnt/gadget"                      # Mount point directory
 CONFIG_FILE="/boot/firmware/config.txt"   # Pi config file location
 WEB_PORT=5000                              # Web interface port
@@ -81,7 +81,7 @@ When in this mode:
 
 **Activate via:**
 - Web interface: Click "Present USB Gadget"
-- Command line: `sudo /home/mhacker/gadget/present_usb.sh`
+- Command line: `sudo /home/pi/TeslaUSB/present_usb.sh`
 - Auto-activated on boot by default
 
 ### Edit USB Mode  
@@ -93,7 +93,7 @@ When in this mode:
 
 **Activate via:**
 - Web interface: Click "Edit USB (mount + Samba)"
-- Command line: `sudo /home/mhacker/gadget/edit_usb.sh`
+- Command line: `sudo /home/pi/TeslaUSB/edit_usb.sh`
 
 ## Network Access
 
@@ -183,7 +183,7 @@ The repository includes a comprehensive cleanup script (`cleanup.sh`) that safel
 **Usage:**
 ```bash
 # Navigate to the gadget directory
-cd /home/mhacker/gadget  # or your configured GADGET_DIR
+cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
 
 # Run the cleanup script (requires sudo)
 sudo ./cleanup.sh
@@ -209,8 +209,8 @@ sudo ./cleanup.sh
 ```bash
 Tesla USB Gadget Cleanup Script
 ===============================
-Gadget directory: /home/mhacker/gadget
-Image file: /home/mhacker/gadget/usb_dual.img
+Gadget directory: /home/pi/TeslaUSB
+Image file: /home/pi/TeslaUSB/usb_dual.img
 
 This will remove all USB gadget configuration and files.
 The following will be cleaned up:
@@ -218,8 +218,8 @@ The following will be cleaned up:
   - USB gadget module and loop devices
   - Samba share configuration
   - Mount directories (/mnt/gadget)
-  - All files in /home/mhacker/gadget (except this script)
-  - Disk image: /home/mhacker/gadget/usb_dual.img
+  - All files in /home/pi/TeslaUSB (except this script)
+  - Disk image: /home/pi/TeslaUSB/usb_dual.img
 
 Are you sure you want to proceed? (y/N): y
 
@@ -280,7 +280,7 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 
 **For automatic cleanup, use the provided cleanup script instead:**
 ```bash
-cd /home/mhacker/gadget  # or your GADGET_DIR
+cd /home/pi/TeslaUSB  # or your GADGET_DIR
 sudo ./cleanup.sh
 ```
 
@@ -325,14 +325,3 @@ sudo systemctl stop gadget_web.service present_usb_on_boot.service
 - Trap handlers for graceful script interruption
 - Partition detection polling (avoids race conditions)
 
-## Contributing
-
-When contributing to this project:
-1. Test changes on actual Raspberry Pi hardware
-2. Verify both USB gadget and Samba functionality
-3. Check error handling with invalid inputs
-4. Update this README for any configuration changes
-
-## License
-
-[Add your license information here]

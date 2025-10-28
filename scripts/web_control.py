@@ -87,6 +87,8 @@ def mode_display():
 
 def lock_chime_ui_available(mode_token):
     """Determine if the lock chime UI should be active."""
+    if mode_token == "edit":
+        return True
     return any(True for _ in iter_mounted_partitions())
 
 
@@ -94,7 +96,7 @@ def iter_mounted_partitions():
     """Yield mounted USB partitions and their paths."""
     for part in USB_PARTITIONS:
         mount_path = os.path.join(MNT_DIR, part)
-        if os.path.ismount(mount_path):
+        if os.path.isdir(mount_path):
             yield part, mount_path
 
 HTML_TEMPLATE = """

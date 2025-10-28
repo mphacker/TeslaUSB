@@ -36,9 +36,9 @@ def close_samba_share(partition_key):
     """Ask Samba to close and reopen the relevant share so new files appear immediately."""
     share_name = PART_LABEL_MAP.get(partition_key, f"gadget_{partition_key}")
     commands = [
-        ["sudo", "-n", "smbcontrol", "all", "close-share", share_name],
-        ["sudo", "-n", "smbcontrol", "all", "reload-config"],
-        ["sudo", "-n", "smbcontrol", "all", "open-share", share_name],
+    ["sudo", "-n", "smbcontrol", "all", "close-share", share_name],
+    ["sudo", "-n", "smbcontrol", "all", "reload-config"],
+    ["sudo", "-n", "smbcontrol", "all", "close-share", share_name],
     ]
     for cmd in commands:
         try:

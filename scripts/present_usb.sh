@@ -27,6 +27,10 @@ for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   fi
 done
 
+# Remove mount directories to avoid accidental access
+echo "Removing mount directories..."
+sudo rmdir "$MNT_DIR/part1" "$MNT_DIR/part2" 2>/dev/null || true
+
 # Flush any pending writes to the image before detaching loops
 echo "Flushing pending filesystem buffers..."
 sync

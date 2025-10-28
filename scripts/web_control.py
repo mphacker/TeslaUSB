@@ -543,9 +543,6 @@ def index():
     show_lock_chime = token != "present"
     wav_options = list_available_wavs() if lock_chime_ready else []
     
-    # Check if we should auto-refresh (detect if switching message in query params)
-    auto_refresh = request.args.get('refresh', 'false') == 'true'
-    
     return render_template_string(
         HTML_TEMPLATE,
         mode_label=label,
@@ -555,90 +552,68 @@ def index():
         lock_chime_ready=lock_chime_ready,
         show_lock_chime=show_lock_chime,
         wav_options=wav_options,
-        auto_refresh=auto_refresh,
+        auto_refresh=False,
     )
 
 @app.route("/present_usb", methods=["POST"])
 def present_usb():
     """Switch to USB gadget presentation mode."""
-    def run_in_background():
-        time.sleep(1)  # Let HTTP response complete first
-        log_path = os.path.join(GADGET_DIR, "present_usb.log")
-        script_path = os.path.join(GADGET_DIR, "present_usb.sh")
+    script_path = os.path.join(GADGET_DIR, "present_usb.sh")
+    
+    try:
+        # Run synchronously - wait for completion
+        result = subprocess.run(
+            ["sudo", "-n", script_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=GADGET_DIR,
+        )
         
-        try:
-            with open(log_path, "w") as log:
-                log.write(f"Starting present_usb.sh at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                log.write(f"Script path: {script_path}\n")
-                log.write(f"Current user: {os.getenv('USER', 'unknown')}\n")
-                log.write(f"Working directory: {GADGET_DIR}\n")
-                log.write("-" * 50 + "\n\n")
-                log.flush()
-                
-                # Run the script WITH sudo - passwordless sudo is configured
-                result = subprocess.run(
-                    ["sudo", "-n", script_path],
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    timeout=60,
-                    cwd=GADGET_DIR,
-                    env=os.environ.copy(),
-                )
-                log.write(f"\n\nExit code: {result.returncode}\n")
-                log.write(f"Completed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        except subprocess.TimeoutExpired as e:
-            with open(log_path, "a") as log:
-                log.write(f"\n\nERROR: Script timed out after 60 seconds\n")
-        except Exception as e:
-            with open(log_path, "a") as log:
-                log.write(f"\n\nERROR: Exception occurred: {type(e).__name__}: {str(e)}\n")
+        if result.returncode == 0:
+            flash("Successfully switched to Present Mode", "success")
+        else:
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            flash(f"Error switching to Present Mode: {error_msg}", "error")
+            
+    except subprocess.TimeoutExpired:
+        flash("Error: Script timed out after 30 seconds", "error")
+    except Exception as e:
+        flash(f"Error: {str(e)}", "error")
     
-    thread = threading.Thread(target=run_in_background, daemon=True)
-    thread.start()
-    
-    flash("Switching to Present Mode... This page will auto-refresh in 15 seconds.", "info")
-    return redirect(url_for("index", refresh="true"))
+    return redirect(url_for("index"))
 
 @app.route("/edit_usb", methods=["POST"])
 def edit_usb():
     """Switch to edit mode with local mounts and Samba."""
-    def run_in_background():
-        time.sleep(1)  # Let HTTP response complete first
-        log_path = os.path.join(GADGET_DIR, "edit_usb.log")
-        script_path = os.path.join(GADGET_DIR, "edit_usb.sh")
+    script_path = os.path.join(GADGET_DIR, "edit_usb.sh")
+    
+    try:
+        # Run synchronously - wait for completion
+        result = subprocess.run(
+            ["sudo", "-n", script_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=GADGET_DIR,
+        )
         
-        try:
-            with open(log_path, "w") as log:
-                log.write(f"Starting edit_usb.sh at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                log.write(f"Script path: {script_path}\n")
-                log.write(f"Current user: {os.getenv('USER', 'unknown')}\n")
-                log.write(f"Working directory: {GADGET_DIR}\n")
-                log.write("-" * 50 + "\n\n")
-                log.flush()
-                
-                # Run the script WITH sudo - passwordless sudo is configured
-                result = subprocess.run(
-                    ["sudo", "-n", script_path],
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    timeout=60,
-                    cwd=GADGET_DIR,
-                    env=os.environ.copy(),
-                )
-                log.write(f"\n\nExit code: {result.returncode}\n")
-                log.write(f"Completed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        except subprocess.TimeoutExpired as e:
-            with open(log_path, "a") as log:
-                log.write(f"\n\nERROR: Script timed out after 60 seconds\n")
-        except Exception as e:
-            with open(log_path, "a") as log:
-                log.write(f"\n\nERROR: Exception occurred: {type(e).__name__}: {str(e)}\n")
+        if result.returncode == 0:
+            flash("Successfully switched to Edit Mode", "success")
+            # Validate lock chime after successful edit mode switch
+            lock_chime_issues = validate_lock_chime()
+            for issue in lock_chime_issues:
+                flash(issue, "error")
+        else:
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            flash(f"Error switching to Edit Mode: {error_msg}", "error")
+            
+    except subprocess.TimeoutExpired:
+        flash("Error: Script timed out after 30 seconds", "error")
+    except Exception as e:
+        flash(f"Error: {str(e)}", "error")
     
-    thread = threading.Thread(target=run_in_background, daemon=True)
-    thread.start()
-    
-    flash("Switching to Edit Mode... This page will auto-refresh in 15 seconds.", "info")
-    return redirect(url_for("index", refresh="true"))
+    return redirect(url_for("index"))
 
 
 @app.route("/set_chime", methods=["POST"])

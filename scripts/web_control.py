@@ -1,11 +1,15 @@
 def close_samba_share(partition_key):
     """Ask Samba to close the relevant share so new files appear immediately."""
     share_name = PART_LABEL_MAP.get(partition_key, f"gadget_{partition_key}")
-    cmd = ["sudo", "-n", "smbcontrol", "all", "close-share", share_name]
-    try:
-        subprocess.run(cmd, check=False, timeout=5, cwd=GADGET_DIR)
-    except Exception:
-        pass
+    commands = [
+        ["sudo", "-n", "smbcontrol", "all", "close-share", share_name],
+        ["sudo", "-n", "smbcontrol", "all", "reload-config"],
+    ]
+    for cmd in commands:
+        try:
+            subprocess.run(cmd, check=False, timeout=5, cwd=GADGET_DIR)
+        except Exception:
+            pass
 #!/usr/bin/env python3
 """
 USB Gadget Web Control Interface
@@ -543,7 +547,8 @@ def set_chime():
         flash("Selected WAV file is no longer available.", "error")
         return redirect(url_for("index"))
 
-    target_path = os.path.join(source_dir, LOCK_CHIME_FILENAME)
+    target_part = part
+    target_dir = source_dir
 
     existing_lock_paths = []
     for usb_part in USB_PARTITIONS:
@@ -561,8 +566,9 @@ def set_chime():
     backup_info = None
 
     if existing_lock_paths:
-        _, existing_path = existing_lock_paths[0]
-        backup_path = os.path.join(os.path.dirname(existing_path), "OldLockChime.wav")
+        target_part, existing_path = existing_lock_paths[0]
+        target_dir = os.path.dirname(existing_path)
+        backup_path = os.path.join(target_dir, "OldLockChime.wav")
 
         try:
             if os.path.isfile(backup_path):
@@ -576,6 +582,8 @@ def set_chime():
             )
             flash(str(exc), "error")
             return redirect(url_for("index"))
+
+    target_path = os.path.join(target_dir, LOCK_CHIME_FILENAME)
 
     try:
         replace_lock_chime(source_path, target_path)
@@ -607,10 +615,21 @@ def set_chime():
             return redirect(url_for("index"))
 
     close_samba_share(part)
+
     try:
         subprocess.run(["sync"], check=True, timeout=10)
     except Exception:
         pass
+
+    close_samba_share(part)
+
+    if target_part != part:
+        close_samba_share(target_part)
+        try:
+            subprocess.run(["sync"], check=True, timeout=10)
+        except Exception:
+            pass
+        close_samba_share(target_part)
 
     flash("Custom lock chime updated successfully.", "success")
 

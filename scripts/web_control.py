@@ -273,6 +273,7 @@ HTML_TEMPLATE = """
         </div>
         {% endif %}
 
+        {% if show_lock_chime %}
         <div class="lock-chime">
             <h2>Custom Lock Chime</h2>
             {% if not lock_chime_ready %}
@@ -291,6 +292,7 @@ HTML_TEMPLATE = """
             <p>No additional WAV files found in the root of gadget_part1 or gadget_part2.</p>
             {% endif %}
         </div>
+        {% endif %}
     </div>
 </body>
 </html>
@@ -420,6 +422,7 @@ def index():
     """Main page with control buttons."""
     token, label, css_class, share_paths = mode_display()
     lock_chime_ready = lock_chime_ui_available(token)
+    show_lock_chime = token != "present"
     wav_options = list_available_wavs() if lock_chime_ready else []
     return render_template_string(
         HTML_TEMPLATE,
@@ -428,6 +431,7 @@ def index():
         share_paths=share_paths,
         mode_token=token,
         lock_chime_ready=lock_chime_ready,
+        show_lock_chime=show_lock_chime,
         wav_options=wav_options,
     )
 

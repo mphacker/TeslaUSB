@@ -25,6 +25,7 @@ safe_unmount_dir() {
 
   for attempt in 1 2 3; do
     if sudo umount "$target" 2>/dev/null; then
+      echo "  Unmounted $target"
       return 0
     fi
     echo "  $target busy (attempt $attempt). Terminating remaining clients..."
@@ -32,8 +33,17 @@ safe_unmount_dir() {
     sleep 1
   done
 
-  echo "Error: failed to unmount $target cleanly." >&2
-  return 1
+  echo "  Unable to unmount $target cleanly; forcing lazy unmount..."
+  sudo umount -lf "$target" 2>/dev/null || true
+  sleep 1
+
+  if mountpoint -q "$target" 2>/dev/null; then
+    echo "Error: $target still mounted after forced unmount." >&2
+    return 1
+  fi
+
+  echo "  Lazy unmount succeeded for $target"
+  return 0
 }
 
 # Remove gadget if active

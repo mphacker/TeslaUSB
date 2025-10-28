@@ -13,6 +13,7 @@ import socket
 import wave
 import contextlib
 import shutil
+import tempfile
 
 app = Flask(__name__)
 # Configuration (will be updated by setup-usb.sh)
@@ -305,13 +306,19 @@ def run_script(script_name):
     if not os.path.exists(script_path):
         return False, f"Script not found: {script_name}"
     
+    if os.geteuid() == 0:
+        cmd = [script_path]
+    else:
+        cmd = ["sudo", "-n", script_path]
+
     try:
         result = subprocess.run(
-            ["sudo", script_path],
+            cmd,
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=GADGET_DIR,
         )
         output = (result.stdout or result.stderr or "").strip()
         message = output if output else f"{script_name} executed successfully"
@@ -416,6 +423,37 @@ def validate_lock_chime():
             issues.append(f"Unable to read {entry} on {part}: {exc}")
 
     return issues
+
+
+def replace_lock_chime(source_path, destination_path):
+    """Copy the selected WAV into place atomically."""
+    temp_dir = os.path.dirname(destination_path)
+    src_size = os.path.getsize(source_path)
+
+    if src_size == 0:
+        raise ValueError("Selected WAV file is empty.")
+
+    fd, temp_path = tempfile.mkstemp(prefix=".lockchime_tmp_", suffix=".wav", dir=temp_dir)
+    try:
+        with os.fdopen(fd, "wb") as temp_file:
+            with open(source_path, "rb") as src_file:
+                shutil.copyfileobj(src_file, temp_file, length=1024 * 1024)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+
+        temp_size = os.path.getsize(temp_path)
+        if temp_size != src_size:
+            raise IOError(
+                f"Copied file size mismatch (expected {src_size} bytes, got {temp_size} bytes)."
+            )
+
+        os.replace(temp_path, destination_path)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
 
 @app.route("/")
 def index():
@@ -522,7 +560,7 @@ def set_chime():
             return redirect(url_for("index"))
 
     try:
-        shutil.copyfile(source_path, target_path)
+        replace_lock_chime(source_path, target_path)
     except Exception as exc:
         if backup_info and os.path.isfile(backup_info[1]):
             try:

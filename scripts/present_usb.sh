@@ -15,6 +15,7 @@ echo "Switching to USB gadget presentation mode..."
 # Stop Samba
 echo "Stopping Samba services..."
 sudo systemctl stop smbd || true
+sudo systemctl stop nmbd || true
 
 # Unmount partitions if mounted
 echo "Unmounting partitions..."
@@ -29,7 +30,7 @@ done
 
 # Remove mount directories to avoid accidental access
 echo "Removing mount directories..."
-sudo rmdir "$MNT_DIR/part1" "$MNT_DIR/part2" 2>/dev/null || true
+sudo rm -rf "$MNT_DIR/part1" "$MNT_DIR/part2"
 
 # Flush any pending writes to the image before detaching loops
 echo "Flushing pending filesystem buffers..."

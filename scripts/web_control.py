@@ -564,19 +564,34 @@ def present_usb():
     def run_in_background():
         time.sleep(1)  # Let HTTP response complete first
         log_path = os.path.join(GADGET_DIR, "present_usb.log")
+        script_path = os.path.join(GADGET_DIR, "present_usb.sh")
+        
         try:
             with open(log_path, "w") as log:
+                log.write(f"Starting present_usb.sh at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                log.write(f"Script path: {script_path}\n")
+                log.write(f"Current user: {os.getenv('USER', 'unknown')}\n")
+                log.write(f"Working directory: {GADGET_DIR}\n")
+                log.write("-" * 50 + "\n\n")
+                log.flush()
+                
+                # Run the script without sudo - the script itself uses sudo internally
                 result = subprocess.run(
-                    ["sudo", "-n", os.path.join(GADGET_DIR, "present_usb.sh")],
+                    [script_path],
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     timeout=60,
                     cwd=GADGET_DIR,
+                    env=os.environ.copy(),
                 )
                 log.write(f"\n\nExit code: {result.returncode}\n")
+                log.write(f"Completed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        except subprocess.TimeoutExpired as e:
+            with open(log_path, "a") as log:
+                log.write(f"\n\nERROR: Script timed out after 60 seconds\n")
         except Exception as e:
             with open(log_path, "a") as log:
-                log.write(f"\n\nException: {str(e)}\n")
+                log.write(f"\n\nERROR: Exception occurred: {type(e).__name__}: {str(e)}\n")
     
     thread = threading.Thread(target=run_in_background, daemon=True)
     thread.start()
@@ -590,19 +605,34 @@ def edit_usb():
     def run_in_background():
         time.sleep(1)  # Let HTTP response complete first
         log_path = os.path.join(GADGET_DIR, "edit_usb.log")
+        script_path = os.path.join(GADGET_DIR, "edit_usb.sh")
+        
         try:
             with open(log_path, "w") as log:
+                log.write(f"Starting edit_usb.sh at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                log.write(f"Script path: {script_path}\n")
+                log.write(f"Current user: {os.getenv('USER', 'unknown')}\n")
+                log.write(f"Working directory: {GADGET_DIR}\n")
+                log.write("-" * 50 + "\n\n")
+                log.flush()
+                
+                # Run the script without sudo - the script itself uses sudo internally
                 result = subprocess.run(
-                    ["sudo", "-n", os.path.join(GADGET_DIR, "edit_usb.sh")],
+                    [script_path],
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     timeout=60,
                     cwd=GADGET_DIR,
+                    env=os.environ.copy(),
                 )
                 log.write(f"\n\nExit code: {result.returncode}\n")
+                log.write(f"Completed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        except subprocess.TimeoutExpired as e:
+            with open(log_path, "a") as log:
+                log.write(f"\n\nERROR: Script timed out after 60 seconds\n")
         except Exception as e:
             with open(log_path, "a") as log:
-                log.write(f"\n\nException: {str(e)}\n")
+                log.write(f"\n\nERROR: Exception occurred: {type(e).__name__}: {str(e)}\n")
     
     thread = threading.Thread(target=run_in_background, daemon=True)
     thread.start()

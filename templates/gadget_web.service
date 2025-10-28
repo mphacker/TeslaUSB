@@ -12,11 +12,9 @@ Restart=always
 RestartSec=3
 TimeoutStopSec=10
 
-# Security settings
+# Security settings - relaxed for sudo operations
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=__GADGET_DIR__ __MNT_DIR__ /run/samba
+ReadWritePaths=__GADGET_DIR__ __MNT_DIR__ /run/samba /tmp
 
 [Install]
 WantedBy=multi-user.target

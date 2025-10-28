@@ -276,15 +276,44 @@ if [ ! -d "$SUDOERS_D_DIR" ]; then
   chmod 755 "$SUDOERS_D_DIR"
 fi
 
+# Create comprehensive sudoers file for all commands used by the scripts
 cat > "$SUDOERS_ENTRY" <<EOF
+# Allow $TARGET_USER to run gadget control scripts and all required system commands
+# without password for web interface automation
 $TARGET_USER ALL=(ALL) NOPASSWD: \
   $GADGET_DIR/present_usb.sh, \
   $GADGET_DIR/edit_usb.sh, \
   /usr/bin/systemctl restart smbd, \
   /usr/bin/systemctl restart nmbd, \
-  /usr/bin/smbcontrol
+  /usr/bin/systemctl stop smbd, \
+  /usr/bin/systemctl stop nmbd, \
+  /usr/sbin/smbcontrol, \
+  /usr/sbin/rmmod, \
+  /usr/sbin/modprobe, \
+  /usr/sbin/losetup, \
+  /usr/bin/mount, \
+  /usr/bin/umount, \
+  /usr/bin/fuser, \
+  /usr/bin/mkdir, \
+  /usr/bin/chown, \
+  /usr/bin/rm, \
+  /usr/sbin/fsck.vfat, \
+  /usr/bin/tee, \
+  /usr/bin/lsof, \
+  /usr/bin/kill, \
+  /usr/bin/sync, \
+  /usr/bin/timeout
 EOF
 chmod 440 "$SUDOERS_ENTRY"
+
+# Validate sudoers file syntax
+if ! visudo -c -f "$SUDOERS_ENTRY" >/dev/null 2>&1; then
+  echo "ERROR: Generated sudoers file has syntax errors. Rolling back..."
+  rm -f "$SUDOERS_ENTRY"
+  exit 1
+fi
+
+echo "Sudoers configuration completed successfully."
 
 STATE_FILE="$GADGET_DIR/state.txt"
 if [ ! -f "$STATE_FILE" ]; then

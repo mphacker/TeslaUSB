@@ -1,15 +1,3 @@
-def close_samba_share(partition_key):
-    """Ask Samba to close the relevant share so new files appear immediately."""
-    share_name = PART_LABEL_MAP.get(partition_key, f"gadget_{partition_key}")
-    commands = [
-        ["sudo", "-n", "smbcontrol", "all", "close-share", share_name],
-        ["sudo", "-n", "smbcontrol", "all", "reload-config"],
-    ]
-    for cmd in commands:
-        try:
-            subprocess.run(cmd, check=False, timeout=5, cwd=GADGET_DIR)
-        except Exception:
-            pass
 #!/usr/bin/env python3
 """
 USB Gadget Web Control Interface
@@ -42,6 +30,43 @@ MODE_DISPLAY = {
     "edit": ("Edit Mode", "edit"),
     "unknown": ("Unknown", "unknown"),
 }
+
+
+def close_samba_share(partition_key):
+    """Ask Samba to close and reopen the relevant share so new files appear immediately."""
+    share_name = PART_LABEL_MAP.get(partition_key, f"gadget_{partition_key}")
+    commands = [
+        ["sudo", "-n", "smbcontrol", "all", "close-share", share_name],
+        ["sudo", "-n", "smbcontrol", "all", "reload-config"],
+        ["sudo", "-n", "smbcontrol", "all", "open-share", share_name],
+    ]
+    for cmd in commands:
+        try:
+            subprocess.run(cmd, check=False, timeout=5, cwd=GADGET_DIR)
+        except Exception:
+            pass
+
+
+def remove_other_lock_chimes(exempt_part):
+    """Remove LockChime.wav from partitions other than the active one."""
+    for usb_part in USB_PARTITIONS:
+        if usb_part == exempt_part:
+            continue
+        other_path = os.path.join(MNT_DIR, usb_part, LOCK_CHIME_FILENAME)
+        if os.path.isfile(other_path):
+            try:
+                os.remove(other_path)
+            except OSError:
+                pass
+
+
+def restart_samba_services():
+    """Force Samba to reload so new files are visible to clients."""
+    for service in ("smbd", "nmbd"):
+        try:
+            subprocess.run(["sudo", "-n", "systemctl", "restart", service], check=False, timeout=10)
+        except Exception:
+            pass
 
 
 def detect_mode():
@@ -465,6 +490,8 @@ def replace_lock_chime(source_path, destination_path):
             raise IOError(
                 f"Copied file size mismatch (expected {src_size} bytes, got {dest_size} bytes)."
             )
+        with open(destination_path, "rb") as dest_file:
+            os.fsync(dest_file.fileno())
     except Exception:
         if os.path.isfile(backup_path) and not os.path.isfile(destination_path):
             os.rename(backup_path, destination_path)
@@ -547,6 +574,8 @@ def set_chime():
         flash("Selected WAV file is no longer available.", "error")
         return redirect(url_for("index"))
 
+    close_samba_share(part)
+
     target_part = part
     target_dir = source_dir
 
@@ -569,6 +598,8 @@ def set_chime():
         target_part, existing_path = existing_lock_paths[0]
         target_dir = os.path.dirname(existing_path)
         backup_path = os.path.join(target_dir, "OldLockChime.wav")
+
+        close_samba_share(target_part)
 
         try:
             if os.path.isfile(backup_path):
@@ -603,6 +634,8 @@ def set_chime():
         flash(f"Unable to set custom lock chime: {exc}", "error")
         return redirect(url_for("index"))
 
+    remove_other_lock_chimes(target_part)
+
     if backup_info and os.path.isfile(backup_info[1]):
         try:
             os.remove(backup_info[1])
@@ -614,24 +647,14 @@ def set_chime():
             flash(str(exc), "error")
             return redirect(url_for("index"))
 
-    close_samba_share(part)
-
     try:
         subprocess.run(["sync"], check=True, timeout=10)
     except Exception:
         pass
 
-    close_samba_share(part)
+    restart_samba_services()
 
-    if target_part != part:
-        close_samba_share(target_part)
-        try:
-            subprocess.run(["sync"], check=True, timeout=10)
-        except Exception:
-            pass
-        close_samba_share(target_part)
-
-    flash("Custom lock chime updated successfully.", "success")
+    flash(f"Custom lock chime updated successfully using '{filename}' on {PART_LABEL_MAP.get(target_part, target_part)}.", "success")
 
     for issue in validate_lock_chime():
         flash(issue, "error")

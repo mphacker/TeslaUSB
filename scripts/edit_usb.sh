@@ -58,8 +58,10 @@ for PART_NUM in 1 2; do
   LOOP_PART="${LOOP}p${PART_NUM}"
   LOG_FILE="/tmp/fsck_gadget_part${PART_NUM}.log"
   echo "  Checking ${LOOP_PART}..."
+  set +e
   sudo fsck.vfat -a "$LOOP_PART" >"$LOG_FILE" 2>&1
   FSCK_STATUS=$?
+  set -e
 
   if [ $FSCK_STATUS -ge 4 ]; then
     echo "  Critical filesystem errors detected on ${LOOP_PART}. See $LOG_FILE" >&2

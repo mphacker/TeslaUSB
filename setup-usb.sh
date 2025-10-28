@@ -305,6 +305,9 @@ systemctl enable --now gadget_web.service || systemctl restart gadget_web.servic
 systemctl daemon-reload
 systemctl enable present_usb_on_boot.service || true
 
+# Ensure the web service picks up the latest code changes
+systemctl restart gadget_web.service || true
+
 echo
 echo "Installation complete."
 echo " - present script: $GADGET_DIR/present_usb.sh"

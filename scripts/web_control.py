@@ -343,7 +343,8 @@ def list_available_wavs():
             full_path = os.path.join(mount_path, entry)
 
             if os.path.isfile(full_path):
-                label = f"{entry} ({PART_LABEL_MAP.get(part, part)})"
+                relative_root = PART_LABEL_MAP.get(part, part)
+                label = f"{entry} ({relative_root}: {mount_path})"
                 value = f"{part}:{entry}"
                 options.append({"label": label, "value": value})
 

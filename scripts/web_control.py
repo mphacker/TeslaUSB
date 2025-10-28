@@ -1,3 +1,11 @@
+def close_samba_share(partition_key):
+    """Ask Samba to close the relevant share so new files appear immediately."""
+    share_name = PART_LABEL_MAP.get(partition_key, f"gadget_{partition_key}")
+    cmd = ["sudo", "-n", "smbcontrol", "all", "close-share", share_name]
+    try:
+        subprocess.run(cmd, check=False, timeout=5, cwd=GADGET_DIR)
+    except Exception:
+        pass
 #!/usr/bin/env python3
 """
 USB Gadget Web Control Interface
@@ -598,9 +606,10 @@ def set_chime():
             flash(str(exc), "error")
             return redirect(url_for("index"))
 
+    close_samba_share(part)
     try:
-        os.sync()
-    except AttributeError:
+        subprocess.run(["sync"], check=True, timeout=10)
+    except Exception:
         pass
 
     flash("Custom lock chime updated successfully.", "success")

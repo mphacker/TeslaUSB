@@ -68,9 +68,12 @@ for PART_NUM in 1 2; do
   sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP"
 done
 
-# Start Samba
-echo "Starting Samba services..."
+# Refresh Samba so shares expose the freshly mounted partitions
+echo "Refreshing Samba shares..."
+sudo smbcontrol all close-share gadget_part1 2>/dev/null || true
+sudo smbcontrol all close-share gadget_part2 2>/dev/null || true
 sudo systemctl restart smbd || true
+sudo systemctl restart nmbd || true
 
 echo "Updating mode state..."
 echo "edit" > "$STATE_FILE"

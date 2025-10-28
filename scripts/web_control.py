@@ -575,9 +575,9 @@ def present_usb():
                 log.write("-" * 50 + "\n\n")
                 log.flush()
                 
-                # Run the script without sudo - the script itself uses sudo internally
+                # Run the script WITH sudo - passwordless sudo is configured
                 result = subprocess.run(
-                    [script_path],
+                    ["sudo", "-n", script_path],
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     timeout=60,
@@ -616,9 +616,9 @@ def edit_usb():
                 log.write("-" * 50 + "\n\n")
                 log.flush()
                 
-                # Run the script without sudo - the script itself uses sudo internally
+                # Run the script WITH sudo - passwordless sudo is configured
                 result = subprocess.run(
-                    [script_path],
+                    ["sudo", "-n", script_path],
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     timeout=60,

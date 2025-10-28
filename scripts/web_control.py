@@ -10,6 +10,8 @@ from flask import Flask, render_template_string, redirect, url_for, flash
 import subprocess
 import os
 import socket
+import wave
+import contextlib
 
 app = Flask(__name__)
 # Configuration (will be updated by setup-usb.sh)
@@ -17,6 +19,10 @@ app.secret_key = "__SECRET_KEY__"
 GADGET_DIR = "__GADGET_DIR__"
 MNT_DIR = "__MNT_DIR__"
 STATE_FILE = os.path.join(GADGET_DIR, "state.txt")
+LOCK_CHIME_FILENAME = "LockChime.wav"
+MAX_LOCK_CHIME_SIZE = 1024 * 1024  # 1 MiB
+USB_PARTITIONS = ("part1", "part2")
+PART_LABEL_MAP = {"part1": "gadget_part1", "part2": "gadget_part2"}
 
 MODE_DISPLAY = {
     "present": ("USB Gadget Mode", "present"),
@@ -37,7 +43,7 @@ def detect_mode():
         pass
 
     try:
-        for part in ("part1", "part2"):
+        for part in USB_PARTITIONS:
             mp = os.path.join(MNT_DIR, part)
             if os.path.ismount(mp):
                 return "edit"
@@ -260,6 +266,74 @@ def run_script(script_name):
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
+
+def validate_lock_chime():
+    """Validate the custom lock chime file against Tesla requirements."""
+    issues = []
+    chime_files = []
+
+    for part in USB_PARTITIONS:
+        mount_path = os.path.join(MNT_DIR, part)
+
+        if not os.path.isdir(mount_path):
+            issues.append(f"Unable to access mounted USB partition at {mount_path}.")
+            continue
+
+        try:
+            entries = os.listdir(mount_path)
+        except OSError as exc:
+            issues.append(f"Unable to read contents of {mount_path}: {exc}")
+            continue
+
+        matches = [entry for entry in entries if entry.lower() == LOCK_CHIME_FILENAME.lower()]
+
+        for entry in matches:
+            full_path = os.path.join(mount_path, entry)
+            display_part = PART_LABEL_MAP.get(part, part)
+
+            if not os.path.isfile(full_path):
+                issues.append(f"{entry} on {display_part} must be a file, not a directory.")
+                continue
+
+            chime_files.append((full_path, entry, display_part))
+
+            if entry != LOCK_CHIME_FILENAME:
+                issues.append(
+                    f"{entry} on {display_part} must be renamed exactly {LOCK_CHIME_FILENAME}."
+                )
+
+    if not chime_files:
+        return issues
+
+    if len(chime_files) > 1:
+        partitions = ", ".join(part for _, _, part in chime_files)
+        issues.append(
+            f"Multiple {LOCK_CHIME_FILENAME} files detected on: {partitions}. Only one lock chime may exist across both USB drives."
+        )
+
+    for full_path, entry, part in chime_files:
+        try:
+            size_bytes = os.path.getsize(full_path)
+        except OSError as exc:
+            issues.append(f"Unable to read size of {entry} on {part}: {exc}")
+            continue
+
+        if size_bytes > MAX_LOCK_CHIME_SIZE:
+            size_mb = size_bytes / (1024 * 1024)
+            issues.append(
+                f"{entry} on {part} is {size_mb:.2f} MiB. Tesla requires the file to be 1 MiB or smaller."
+            )
+
+        try:
+            with contextlib.closing(wave.open(full_path, "rb")) as wav_file:
+                wav_file.getparams()
+        except (wave.Error, EOFError):
+            issues.append(f"{entry} on {part} is not a valid WAV file.")
+        except OSError as exc:
+            issues.append(f"Unable to read {entry} on {part}: {exc}")
+
+    return issues
+
 @app.route("/")
 def index():
     """Main page with control buttons."""
@@ -283,6 +357,11 @@ def edit_usb():
     """Switch to edit mode with local mounts and Samba."""
     success, message = run_script("edit_usb.sh")
     flash(message, "success" if success else "error")
+
+    if success:
+        lock_chime_issues = validate_lock_chime()
+        for issue in lock_chime_issues:
+            flash(issue, "error")
     return redirect(url_for("index"))
 
 @app.route("/status")

@@ -280,29 +280,29 @@ fi
 cat > "$SUDOERS_ENTRY" <<EOF
 # Allow $TARGET_USER to run gadget control scripts and all required system commands
 # without password for web interface automation
-$TARGET_USER ALL=(ALL) NOPASSWD: \
-  $GADGET_DIR/present_usb.sh, \
-  $GADGET_DIR/edit_usb.sh, \
-  /usr/bin/systemctl restart smbd, \
-  /usr/bin/systemctl restart nmbd, \
-  /usr/bin/systemctl stop smbd, \
-  /usr/bin/systemctl stop nmbd, \
-  /usr/sbin/smbcontrol, \
-  /usr/sbin/rmmod, \
-  /usr/sbin/modprobe, \
-  /usr/sbin/losetup, \
-  /usr/bin/mount, \
-  /usr/bin/umount, \
-  /usr/bin/fuser, \
-  /usr/bin/mkdir, \
-  /usr/bin/chown, \
-  /usr/bin/rm, \
-  /usr/sbin/fsck.vfat, \
-  /usr/bin/tee, \
-  /usr/bin/lsof, \
-  /usr/bin/kill, \
-  /usr/bin/sync, \
-  /usr/bin/timeout
+
+# First, allow the main scripts to run with full sudo privileges
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/present_usb.sh
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/edit_usb.sh
+
+# Allow all system commands used within the scripts
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/smbcontrol
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/rmmod
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/modprobe
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/losetup
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/mount
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/umount
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/fuser
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/chown
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/rm
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/fsck.vfat
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/tee
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/lsof
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/kill
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sync
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/timeout
 EOF
 chmod 440 "$SUDOERS_ENTRY"
 

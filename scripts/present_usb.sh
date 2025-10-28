@@ -23,9 +23,8 @@ for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   if mountpoint -q "$mp" 2>/dev/null; then
     echo "  Unmounting $mp"
     if ! sudo umount "$mp"; then
-      echo "  Warning: failed to unmount $mp" >&2
-      echo "  Attempting lazy unmount of $mp"
-      sudo umount -l "$mp" 2>/dev/null || true
+      echo "  Error: failed to unmount $mp. Close any open files or Samba connections and try again." >&2
+      exit 1
     fi
   fi
 done

@@ -598,6 +598,11 @@ def set_chime():
             flash(str(exc), "error")
             return redirect(url_for("index"))
 
+    try:
+        os.sync()
+    except AttributeError:
+        pass
+
     flash("Custom lock chime updated successfully.", "success")
 
     for issue in validate_lock_chime():

@@ -49,15 +49,19 @@ def close_samba_share(partition_key):
 
 def remove_other_lock_chimes(exempt_part):
     """Remove LockChime.wav from partitions other than the active one."""
+    removed = []
     for usb_part in USB_PARTITIONS:
         if usb_part == exempt_part:
             continue
         other_path = os.path.join(MNT_DIR, usb_part, LOCK_CHIME_FILENAME)
         if os.path.isfile(other_path):
+            close_samba_share(usb_part)
             try:
                 os.remove(other_path)
+                removed.append(PART_LABEL_MAP.get(usb_part, usb_part))
             except OSError:
                 pass
+    return removed
 
 
 def restart_samba_services():
@@ -578,74 +582,15 @@ def set_chime():
 
     target_part = part
     target_dir = source_dir
-
-    existing_lock_paths = []
-    for usb_part in USB_PARTITIONS:
-        candidate = os.path.join(MNT_DIR, usb_part, LOCK_CHIME_FILENAME)
-        if os.path.isfile(candidate):
-            existing_lock_paths.append((usb_part, candidate))
-
-    if len(existing_lock_paths) > 1:
-        flash(
-            "Multiple LockChime.wav files detected. Resolve duplicates before updating the custom chime.",
-            "error",
-        )
-        return redirect(url_for("index"))
-
-    backup_info = None
-
-    if existing_lock_paths:
-        target_part, existing_path = existing_lock_paths[0]
-        target_dir = os.path.dirname(existing_path)
-        backup_path = os.path.join(target_dir, "OldLockChime.wav")
-
-        close_samba_share(target_part)
-
-        try:
-            if os.path.isfile(backup_path):
-                os.remove(backup_path)
-            shutil.copyfile(existing_path, backup_path)
-            backup_info = (existing_path, backup_path)
-        except OSError as exc:
-            flash(
-                "Unable to prepare existing lock chime for replacement. Ensure the USB drive is writable.",
-                "error",
-            )
-            flash(str(exc), "error")
-            return redirect(url_for("index"))
-
     target_path = os.path.join(target_dir, LOCK_CHIME_FILENAME)
 
     try:
         replace_lock_chime(source_path, target_path)
     except Exception as exc:
-        if backup_info and os.path.isfile(backup_info[1]):
-            try:
-                os.rename(backup_info[1], backup_info[0])
-            except OSError as revert_exc:
-                flash(
-                    "Failed to restore original LockChime after an error. Manual fix required.",
-                    "error",
-                )
-                flash(f"Restore error: {revert_exc}", "error")
-            flash(f"Unable to set custom lock chime: {exc}", "error")
-            return redirect(url_for("index"))
-
         flash(f"Unable to set custom lock chime: {exc}", "error")
         return redirect(url_for("index"))
 
-    remove_other_lock_chimes(target_part)
-
-    if backup_info and os.path.isfile(backup_info[1]):
-        try:
-            os.remove(backup_info[1])
-        except OSError as exc:
-            flash(
-                "Lock chime updated, but unable to delete OldLockChime.wav automatically. Remove it manually.",
-                "error",
-            )
-            flash(str(exc), "error")
-            return redirect(url_for("index"))
+    removed_duplicates = remove_other_lock_chimes(target_part)
 
     try:
         subprocess.run(["sync"], check=True, timeout=10)
@@ -654,7 +599,17 @@ def set_chime():
 
     restart_samba_services()
 
-    flash(f"Custom lock chime updated successfully using '{filename}' on {PART_LABEL_MAP.get(target_part, target_part)}.", "success")
+    if removed_duplicates:
+        duplicate_list = ", ".join(removed_duplicates)
+        flash(
+            f"Removed stale LockChime.wav copies from: {duplicate_list} to maintain a single active chime.",
+            "info",
+        )
+
+    flash(
+        f"Custom lock chime updated successfully using '{filename}' on {PART_LABEL_MAP.get(target_part, target_part)}.",
+        "success",
+    )
 
     for issue in validate_lock_chime():
         flash(issue, "error")

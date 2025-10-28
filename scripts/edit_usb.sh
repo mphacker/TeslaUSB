@@ -16,6 +16,36 @@ echo "Switching to edit mode (local mount + Samba)..."
 UID_VAL=$(id -u "$TARGET_USER")
 GID_VAL=$(id -g "$TARGET_USER")
 
+safe_unmount_dir() {
+  local target="$1"
+  local attempt
+  if ! mountpoint -q "$target" 2>/dev/null; then
+    return 0
+  fi
+
+  for attempt in 1 2 3; do
+    if sudo umount "$target" 2>/dev/null; then
+      echo "  Unmounted $target"
+      return 0
+    fi
+    echo "  $target busy (attempt $attempt). Terminating remaining clients..."
+    sudo fuser -km "$target" 2>/dev/null || true
+    sleep 1
+  done
+
+  echo "  Unable to unmount $target cleanly; forcing lazy unmount..."
+  sudo umount -lf "$target" 2>/dev/null || true
+  sleep 1
+
+  if mountpoint -q "$target" 2>/dev/null; then
+    echo "Error: $target still mounted after forced unmount." >&2
+    return 1
+  fi
+
+  echo "  Lazy unmount succeeded for $target"
+  return 0
+}
+
 # Remove gadget if active (with force to prevent hanging)
 if lsmod | grep -q '^g_mass_storage'; then
   echo "Removing USB gadget module..."
@@ -47,44 +77,6 @@ if lsmod | grep -q '^g_mass_storage'; then
     # Try one more time
     sudo rmmod -f g_mass_storage 2>/dev/null || true
   fi
-  sleep 1
-fi
-  local target="$1"
-  local attempt
-  if ! mountpoint -q "$target" 2>/dev/null; then
-    return 0
-  fi
-
-  for attempt in 1 2 3; do
-    if sudo umount "$target" 2>/dev/null; then
-      echo "  Unmounted $target"
-      return 0
-    fi
-    echo "  $target busy (attempt $attempt). Terminating remaining clients..."
-    sudo fuser -km "$target" 2>/dev/null || true
-    sleep 1
-  done
-
-  echo "  Unable to unmount $target cleanly; forcing lazy unmount..."
-  sudo umount -lf "$target" 2>/dev/null || true
-  sleep 1
-
-  if mountpoint -q "$target" 2>/dev/null; then
-    echo "Error: $target still mounted after forced unmount." >&2
-    return 1
-  fi
-
-  echo "  Lazy unmount succeeded for $target"
-  return 0
-}
-
-# Remove gadget if active
-if lsmod | grep -q '^g_mass_storage'; then
-  echo "Removing USB gadget module..."
-  # Ensure no active I/O before removing module
-  sync
-  sleep 2
-  sudo rmmod g_mass_storage || true
   sleep 1
 fi
 

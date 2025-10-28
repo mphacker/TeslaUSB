@@ -598,6 +598,7 @@ def set_chime():
         pass
 
     restart_samba_services()
+    close_samba_share(target_part)
 
     if removed_duplicates:
         duplicate_list = ", ".join(removed_duplicates)

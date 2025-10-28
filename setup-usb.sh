@@ -54,6 +54,7 @@ REQUIRED_PACKAGES=(
   parted
   dosfstools
   util-linux
+  psmisc
   python3-flask
   samba
   samba-common-bin

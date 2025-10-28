@@ -16,6 +16,26 @@ echo "Switching to edit mode (local mount + Samba)..."
 UID_VAL=$(id -u "$TARGET_USER")
 GID_VAL=$(id -g "$TARGET_USER")
 
+safe_unmount_dir() {
+  local target="$1"
+  local attempt
+  if ! mountpoint -q "$target" 2>/dev/null; then
+    return 0
+  fi
+
+  for attempt in 1 2 3; do
+    if sudo umount "$target" 2>/dev/null; then
+      return 0
+    fi
+    echo "  $target busy (attempt $attempt). Terminating remaining clients..."
+    sudo fuser -km "$target" 2>/dev/null || true
+    sleep 1
+  done
+
+  echo "Error: failed to unmount $target cleanly." >&2
+  return 1
+}
+
 # Remove gadget if active
 if lsmod | grep -q '^g_mass_storage'; then
   echo "Removing USB gadget module..."
@@ -28,11 +48,28 @@ echo "Preparing mount points..."
 sudo mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
 sudo chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
 
+# Clean up any stale loop devices tied to the image before assigning a new one
+for existing in $(losetup -j "$IMG" 2>/dev/null | cut -d: -f1); do
+  if [ -n "$existing" ]; then
+    echo "Detaching stale loop device: $existing"
+    sudo losetup -d "$existing" 2>/dev/null || true
+  fi
+done
+
 # Setup loop device
 echo "Setting up loop device..."
 LOOP=$(sudo losetup --show -fP "$IMG")
 echo "Using loop device: $LOOP"
 sleep 0.5
+
+cleanup_loop_on_failure() {
+  if [ -n "${LOOP:-}" ]; then
+    if ! mountpoint -q "$MNT_DIR/part1" 2>/dev/null && ! mountpoint -q "$MNT_DIR/part2" 2>/dev/null; then
+      sudo losetup -d "$LOOP" 2>/dev/null || true
+    fi
+  fi
+}
+trap cleanup_loop_on_failure EXIT
 
 # Ensure the partition device nodes exist before proceeding
 for p in 1 2; do
@@ -85,7 +122,10 @@ for PART_NUM in 1 2; do
   # Unmount if already mounted
   if mountpoint -q "$MP" 2>/dev/null; then
     echo "  Unmounting existing mount at $MP"
-    sudo umount "$MP" || true
+    if ! safe_unmount_dir "$MP"; then
+      echo "Error: could not clear existing mount at $MP" >&2
+      exit 1
+    fi
   fi
   
   echo "  Mounting $LOOP_PART to $MP"
@@ -102,6 +142,9 @@ sudo systemctl restart nmbd || true
 echo "Updating mode state..."
 echo "edit" > "$STATE_FILE"
 chown "$TARGET_USER:$TARGET_USER" "$STATE_FILE" 2>/dev/null || true
+
+echo "Ensuring buffered writes are flushed..."
+sync
 
 echo "Edit mode activated successfully!"
 echo "Partitions are now mounted locally and accessible via Samba shares:"

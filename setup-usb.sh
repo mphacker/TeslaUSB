@@ -276,7 +276,12 @@ if [ ! -d "$SUDOERS_D_DIR" ]; then
 fi
 
 cat > "$SUDOERS_ENTRY" <<EOF
-$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/present_usb.sh, $GADGET_DIR/edit_usb.sh
+$TARGET_USER ALL=(ALL) NOPASSWD: \
+  $GADGET_DIR/present_usb.sh, \
+  $GADGET_DIR/edit_usb.sh, \
+  /usr/bin/systemctl restart smbd, \
+  /usr/bin/systemctl restart nmbd, \
+  /usr/bin/smbcontrol
 EOF
 chmod 440 "$SUDOERS_ENTRY"
 

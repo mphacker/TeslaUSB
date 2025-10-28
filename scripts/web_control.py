@@ -6,12 +6,13 @@ A simple Flask web application for controlling USB gadget modes.
 Provides buttons to switch between "Present USB" and "Edit USB" modes.
 """
 
-from flask import Flask, render_template_string, redirect, url_for, flash
+from flask import Flask, render_template_string, redirect, url_for, flash, request
 import subprocess
 import os
 import socket
 import wave
 import contextlib
+import shutil
 
 app = Flask(__name__)
 # Configuration (will be updated by setup-usb.sh)
@@ -193,6 +194,29 @@ HTML_TEMPLATE = """
             padding: 2px 4px;
             border-radius: 4px;
         }
+        .lock-chime {
+            margin-top: 30px;
+            padding: 20px;
+            border: 1px solid #d6d8db;
+            border-radius: 6px;
+            background-color: #f8f9fa;
+        }
+        .lock-chime h2 {
+            margin-top: 0;
+            font-size: 20px;
+        }
+        .lock-chime select {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0 15px;
+            border-radius: 4px;
+            border: 1px solid #ced4da;
+            font-size: 15px;
+        }
+        .set-chime-btn {
+            background-color: #6f42c1;
+            color: white;
+        }
     </style>
 </head>
 <body>
@@ -233,6 +257,25 @@ HTML_TEMPLATE = """
             </ul>
         </div>
         {% endif %}
+
+        {% if mode_token == "edit" %}
+        <div class="lock-chime">
+            <h2>Custom Lock Chime</h2>
+            {% if wav_options %}
+            <form method="post" action="{{ url_for('set_chime') }}">
+                <label for="selected_wav">Choose a WAV file to use as LockChime:</label>
+                <select name="selected_wav" id="selected_wav" required>
+                    {% for option in wav_options %}
+                    <option value="{{ option.value }}">{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="set-chime-btn">🔔 Set Chime</button>
+            </form>
+            {% else %}
+            <p>No additional WAV files found in the root of gadget_part1 or gadget_part2.</p>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
 </body>
 </html>
@@ -265,6 +308,38 @@ def run_script(script_name):
         return False, f"Timeout executing {script_name}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+
+
+def list_available_wavs():
+    """Return selectable WAV files in USB roots excluding LockChime."""
+    options = []
+
+    for part in USB_PARTITIONS:
+        mount_path = os.path.join(MNT_DIR, part)
+
+        if not os.path.isdir(mount_path):
+            continue
+
+        try:
+            entries = os.listdir(mount_path)
+        except OSError:
+            continue
+
+        for entry in entries:
+            if not entry.lower().endswith(".wav"):
+                continue
+
+            if entry.lower() == LOCK_CHIME_FILENAME.lower():
+                continue
+
+            full_path = os.path.join(mount_path, entry)
+
+            if os.path.isfile(full_path):
+                label = f"{entry} ({PART_LABEL_MAP.get(part, part)})"
+                value = f"{part}:{entry}"
+                options.append({"label": label, "value": value})
+
+    return sorted(options, key=lambda item: item["label"].lower())
 
 
 def validate_lock_chime():
@@ -337,12 +412,15 @@ def validate_lock_chime():
 @app.route("/")
 def index():
     """Main page with control buttons."""
-    _, label, css_class, share_paths = mode_display()
+    token, label, css_class, share_paths = mode_display()
+    wav_options = list_available_wavs() if token == "edit" else []
     return render_template_string(
         HTML_TEMPLATE,
         mode_label=label,
         mode_class=css_class,
         share_paths=share_paths,
+        mode_token=token,
+        wav_options=wav_options,
     )
 
 @app.route("/present_usb", methods=["POST"])
@@ -362,6 +440,104 @@ def edit_usb():
         lock_chime_issues = validate_lock_chime()
         for issue in lock_chime_issues:
             flash(issue, "error")
+    return redirect(url_for("index"))
+
+
+@app.route("/set_chime", methods=["POST"])
+def set_chime():
+    """Replace LockChime.wav with a selected WAV file while in edit mode."""
+    if current_mode() != "edit":
+        flash("Custom lock chime can only be updated while in Edit Mode.", "error")
+        return redirect(url_for("index"))
+
+    selection = request.form.get("selected_wav", "").strip()
+
+    if not selection:
+        flash("Select a WAV file to set as the lock chime.", "error")
+        return redirect(url_for("index"))
+
+    if ":" not in selection:
+        flash("Invalid selection for lock chime.", "error")
+        return redirect(url_for("index"))
+
+    part, filename = selection.split(":", 1)
+    part = part.strip()
+    filename = os.path.basename(filename.strip())
+
+    if part not in USB_PARTITIONS or not filename:
+        flash("Invalid partition or filename for lock chime selection.", "error")
+        return redirect(url_for("index"))
+
+    source_dir = os.path.join(MNT_DIR, part)
+    source_path = os.path.join(source_dir, filename)
+
+    if not os.path.isfile(source_path):
+        flash("Selected WAV file is no longer available.", "error")
+        return redirect(url_for("index"))
+
+    target_path = os.path.join(source_dir, LOCK_CHIME_FILENAME)
+
+    existing_lock_paths = []
+    for usb_part in USB_PARTITIONS:
+        candidate = os.path.join(MNT_DIR, usb_part, LOCK_CHIME_FILENAME)
+        if os.path.isfile(candidate):
+            existing_lock_paths.append((usb_part, candidate))
+
+    if len(existing_lock_paths) > 1:
+        flash(
+            "Multiple LockChime.wav files detected. Resolve duplicates before updating the custom chime.",
+            "error",
+        )
+        return redirect(url_for("index"))
+
+    backup_info = None
+
+    if existing_lock_paths:
+        _, existing_path = existing_lock_paths[0]
+        backup_path = os.path.join(os.path.dirname(existing_path), "OldLockChime.wav")
+
+        try:
+            if os.path.isfile(backup_path):
+                os.remove(backup_path)
+            os.rename(existing_path, backup_path)
+            backup_info = (existing_path, backup_path)
+        except OSError as exc:
+            flash(f"Unable to prepare existing lock chime for replacement: {exc}", "error")
+            return redirect(url_for("index"))
+
+    try:
+        shutil.copyfile(source_path, target_path)
+    except Exception as exc:
+        if backup_info and os.path.isfile(backup_info[1]):
+            try:
+                os.rename(backup_info[1], backup_info[0])
+            except OSError as revert_exc:
+                flash(
+                    "Failed to restore original LockChime after an error. Manual fix required.",
+                    "error",
+                )
+                flash(f"Restore error: {revert_exc}", "error")
+            flash(f"Unable to set custom lock chime: {exc}", "error")
+            return redirect(url_for("index"))
+
+        flash(f"Unable to set custom lock chime: {exc}", "error")
+        return redirect(url_for("index"))
+
+    if backup_info and os.path.isfile(backup_info[1]):
+        try:
+            os.remove(backup_info[1])
+        except OSError as exc:
+            flash(
+                f"Lock chime updated, but unable to delete OldLockChime.wav: {exc}. Please remove manually.",
+                "error",
+            )
+            return redirect(url_for("index"))
+
+    flash("Custom lock chime updated successfully.", "success")
+
+    for issue in validate_lock_chime():
+        flash(issue, "error")
+
     return redirect(url_for("index"))
 
 @app.route("/status")

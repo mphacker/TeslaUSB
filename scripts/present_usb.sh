@@ -24,13 +24,23 @@ for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
     echo "  Unmounting $mp"
     if ! sudo umount "$mp"; then
       echo "  Warning: failed to unmount $mp" >&2
+      echo "  Attempting lazy unmount of $mp"
+      sudo umount -l "$mp" 2>/dev/null || true
     fi
   fi
 done
 
-# Remove mount directories to avoid accidental access
+# Remove mount directories to avoid accidental access when unmounted
 echo "Removing mount directories..."
-sudo rm -rf "$MNT_DIR/part1" "$MNT_DIR/part2"
+for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
+  if mountpoint -q "$mp" 2>/dev/null; then
+    echo "  Skipping removal of $mp (still mounted)" >&2
+    continue
+  fi
+  if [ -d "$mp" ]; then
+    sudo rm -rf "$mp" || true
+  fi
+done
 
 # Flush any pending writes to the image before detaching loops
 echo "Flushing pending filesystem buffers..."

@@ -334,7 +334,7 @@ def list_available_wavs():
             continue
 
         for entry in entries:
-            if not entry.endswith(".wav"):
+            if not entry.lower().endswith(".wav"):
                 continue
 
             if entry.lower() == LOCK_CHIME_FILENAME.lower():
@@ -473,8 +473,8 @@ def set_chime():
         flash("Invalid partition or filename for lock chime selection.", "error")
         return redirect(url_for("index"))
 
-    if not filename.endswith(".wav"):
-        flash("Selected file must use the .wav extension in lowercase.", "error")
+    if not filename.lower().endswith(".wav"):
+        flash("Selected file must use the .wav extension.", "error")
         return redirect(url_for("index"))
 
     source_dir = os.path.join(MNT_DIR, part)

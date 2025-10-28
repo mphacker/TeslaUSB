@@ -543,10 +543,8 @@ def index():
     show_lock_chime = token != "present"
     wav_options = list_available_wavs() if lock_chime_ready else []
     
-    # Check if we should auto-refresh (when switching modes)
-    messages = list(app._get_flashed_messages())
-    auto_refresh = any("switching to" in str(msg).lower() or "please wait" in str(msg).lower() 
-                       for msg in messages)
+    # Check if we should auto-refresh (detect if switching message in query params)
+    auto_refresh = request.args.get('refresh', 'false') == 'true'
     
     return render_template_string(
         HTML_TEMPLATE,
@@ -584,7 +582,7 @@ def present_usb():
     thread.start()
     
     flash("Switching to Present Mode... This page will auto-refresh in 15 seconds.", "info")
-    return redirect(url_for("index"))
+    return redirect(url_for("index", refresh="true"))
 
 @app.route("/edit_usb", methods=["POST"])
 def edit_usb():
@@ -610,7 +608,7 @@ def edit_usb():
     thread.start()
     
     flash("Switching to Edit Mode... This page will auto-refresh in 15 seconds.", "info")
-    return redirect(url_for("index"))
+    return redirect(url_for("index", refresh="true"))
 
 
 @app.route("/set_chime", methods=["POST"])

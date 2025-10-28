@@ -306,10 +306,9 @@ def run_script(script_name):
     if not os.path.exists(script_path):
         return False, f"Script not found: {script_name}"
     
-    if os.geteuid() == 0:
-        cmd = [script_path]
-    else:
-        cmd = ["sudo", "-n", script_path]
+    cmd = ["sudo", "-n", script_path]
+    env = os.environ.copy()
+    env["PATH"] = env.get("PATH", "/usr/bin:/bin")
 
     try:
         result = subprocess.run(
@@ -319,6 +318,7 @@ def run_script(script_name):
             text=True,
             timeout=30,
             cwd=GADGET_DIR,
+            env=env,
         )
         output = (result.stdout or result.stderr or "").strip()
         message = output if output else f"{script_name} executed successfully"
@@ -327,6 +327,13 @@ def run_script(script_name):
         parts = [getattr(e, "stderr", ""), getattr(e, "stdout", "")]
         combined = "\n".join(part for part in parts if part)
         error_msg = combined.strip() if combined else str(e)
+
+        if "a password is required" in error_msg.lower():
+            hint = (
+                "Passwordless sudo is required for the web UI. Add an entry such as "
+                f"'__TARGET_USER__ ALL=(ALL) NOPASSWD: {script_path}' to sudoers."
+            )
+            error_msg = f"sudo password required for {script_name}. {hint}"
         return False, f"Error executing {script_name}: {error_msg}"
     except subprocess.TimeoutExpired:
         return False, f"Timeout executing {script_name}"

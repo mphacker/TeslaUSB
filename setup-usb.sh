@@ -266,6 +266,20 @@ configure_template "$SCRIPTS_DIR/present_usb.sh" "$GADGET_DIR/present_usb.sh"
 configure_template "$SCRIPTS_DIR/edit_usb.sh" "$GADGET_DIR/edit_usb.sh"
 configure_template "$SCRIPTS_DIR/web_control.py" "$GADGET_DIR/web_control.py"
 
+# ===== Configure passwordless sudo for gadget scripts =====
+SUDOERS_D_DIR="/etc/sudoers.d"
+SUDOERS_ENTRY="$SUDOERS_D_DIR/teslausb-gadget"
+echo "Configuring passwordless sudo for gadget scripts..."
+if [ ! -d "$SUDOERS_D_DIR" ]; then
+  mkdir -p "$SUDOERS_D_DIR"
+  chmod 755 "$SUDOERS_D_DIR"
+fi
+
+cat > "$SUDOERS_ENTRY" <<EOF
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/present_usb.sh, $GADGET_DIR/edit_usb.sh
+EOF
+chmod 440 "$SUDOERS_ENTRY"
+
 STATE_FILE="$GADGET_DIR/state.txt"
 if [ ! -f "$STATE_FILE" ]; then
   echo "Initializing mode state file..."

@@ -13,7 +13,6 @@ import socket
 import wave
 import contextlib
 import shutil
-import tempfile
 
 app = Flask(__name__)
 # Configuration (will be updated by setup-usb.sh)
@@ -433,34 +432,34 @@ def validate_lock_chime():
 
 
 def replace_lock_chime(source_path, destination_path):
-    """Copy the selected WAV into place atomically."""
-    temp_dir = os.path.dirname(destination_path)
+    """Swap in the selected WAV using same-directory backup semantics."""
     src_size = os.path.getsize(source_path)
 
     if src_size == 0:
         raise ValueError("Selected WAV file is empty.")
 
-    fd, temp_path = tempfile.mkstemp(prefix=".lockchime_tmp_", suffix=".wav", dir=temp_dir)
+    dest_dir = os.path.dirname(destination_path)
+    backup_path = os.path.join(dest_dir, "oldLockChime.wav")
+
+    if os.path.isfile(destination_path):
+        if os.path.isfile(backup_path):
+            os.remove(backup_path)
+        os.rename(destination_path, backup_path)
+
     try:
-        with os.fdopen(fd, "wb") as temp_file:
-            with open(source_path, "rb") as src_file:
-                shutil.copyfileobj(src_file, temp_file, length=1024 * 1024)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-
-        temp_size = os.path.getsize(temp_path)
-        if temp_size != src_size:
+        shutil.copyfile(source_path, destination_path)
+        dest_size = os.path.getsize(destination_path)
+        if dest_size != src_size:
             raise IOError(
-                f"Copied file size mismatch (expected {src_size} bytes, got {temp_size} bytes)."
+                f"Copied file size mismatch (expected {src_size} bytes, got {dest_size} bytes)."
             )
-
-        os.replace(temp_path, destination_path)
     except Exception:
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
+        if os.path.isfile(backup_path) and not os.path.isfile(destination_path):
+            os.rename(backup_path, destination_path)
         raise
+
+    if os.path.isfile(backup_path):
+        os.remove(backup_path)
 
 @app.route("/")
 def index():

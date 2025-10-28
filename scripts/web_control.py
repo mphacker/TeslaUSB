@@ -84,6 +84,19 @@ def mode_display():
 
     return token, label, css_class, share_paths
 
+
+def lock_chime_ui_available(mode_token):
+    """Determine if the lock chime UI should be active."""
+    if mode_token == "edit":
+        return True
+
+    for part in USB_PARTITIONS:
+        mount_path = os.path.join(MNT_DIR, part)
+        if os.path.ismount(mount_path):
+            return True
+
+    return False
+
 HTML_TEMPLATE = """
 <!doctype html>
 <html>
@@ -258,10 +271,11 @@ HTML_TEMPLATE = """
         </div>
         {% endif %}
 
-        {% if mode_token == "edit" %}
         <div class="lock-chime">
             <h2>Custom Lock Chime</h2>
-            {% if wav_options %}
+            {% if not lock_chime_ready %}
+            <p>Switch to Edit Mode to manage the custom lock chime.</p>
+            {% elif wav_options %}
             <form method="post" action="{{ url_for('set_chime') }}">
                 <label for="selected_wav">Choose a WAV file to use as LockChime:</label>
                 <select name="selected_wav" id="selected_wav" required>
@@ -275,7 +289,6 @@ HTML_TEMPLATE = """
             <p>No additional WAV files found in the root of gadget_part1 or gadget_part2.</p>
             {% endif %}
         </div>
-        {% endif %}
     </div>
 </body>
 </html>
@@ -326,7 +339,7 @@ def list_available_wavs():
             continue
 
         for entry in entries:
-            if not entry.lower().endswith(".wav"):
+            if not entry.endswith(".wav"):
                 continue
 
             if entry.lower() == LOCK_CHIME_FILENAME.lower():
@@ -413,13 +426,15 @@ def validate_lock_chime():
 def index():
     """Main page with control buttons."""
     token, label, css_class, share_paths = mode_display()
-    wav_options = list_available_wavs() if token == "edit" else []
+    lock_chime_ready = lock_chime_ui_available(token)
+    wav_options = list_available_wavs() if lock_chime_ready else []
     return render_template_string(
         HTML_TEMPLATE,
         mode_label=label,
         mode_class=css_class,
         share_paths=share_paths,
         mode_token=token,
+        lock_chime_ready=lock_chime_ready,
         wav_options=wav_options,
     )
 
@@ -466,6 +481,10 @@ def set_chime():
 
     if part not in USB_PARTITIONS or not filename:
         flash("Invalid partition or filename for lock chime selection.", "error")
+        return redirect(url_for("index"))
+
+    if not filename.endswith(".wav"):
+        flash("Selected file must use the .wav extension in lowercase.", "error")
         return redirect(url_for("index"))
 
     source_dir = os.path.join(MNT_DIR, part)

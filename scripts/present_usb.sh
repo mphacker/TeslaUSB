@@ -104,10 +104,28 @@ if [ -n "$LOOP_DEV" ]; then
     LOOP_PART="${LOOP_DEV}p${PART_NUM}"
     if [ -e "$LOOP_PART" ]; then
       LOG_FILE="/tmp/fsck_gadget_part${PART_NUM}.log"
+      
+      # Detect filesystem type
+      FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_PART" 2>/dev/null || echo "unknown")
+      
+      # Skip fsck for large exFAT partitions to avoid OOM issues
+      if [ "$FS_TYPE" = "exfat" ]; then
+        echo "  Skipping fsck for ${LOOP_PART} (exFAT - would cause OOM on large partitions)"
+        continue
+      fi
+      
       echo "  Checking ${LOOP_PART}..."
+      echo "    Filesystem type: $FS_TYPE"
+      
       set +e
-      sudo fsck.vfat -a "$LOOP_PART" >"$LOG_FILE" 2>&1
-      FSCK_STATUS=$?
+      if [ "$FS_TYPE" = "vfat" ]; then
+        # FAT32 filesystem check
+        sudo fsck.vfat -a "$LOOP_PART" >"$LOG_FILE" 2>&1
+        FSCK_STATUS=$?
+      else
+        echo "    Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
+        FSCK_STATUS=0
+      fi
       set -e
 
       if [ $FSCK_STATUS -ge 4 ]; then

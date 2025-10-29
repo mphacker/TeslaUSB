@@ -4,8 +4,8 @@ set -euo pipefail
 # ================= Configuration =================
 GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"
 IMG_NAME="usb_dual.img"
-PART1_SIZE="20G"  
-PART2_SIZE="16G"
+PART1_SIZE="427G"  
+PART2_SIZE="20G"
 LABEL1="TeslaCam"
 LABEL2="Lightshow"
 MNT_DIR="/mnt/gadget"
@@ -53,6 +53,7 @@ TOTAL_MB=$((P1_MB + P2_MB + 2))
 REQUIRED_PACKAGES=(
   parted
   dosfstools
+  exfatprogs
   util-linux
   psmisc
   python3-flask
@@ -76,20 +77,39 @@ else
 fi
 
 # Ensure config.txt contains dtoverlay=dwc2 under [all]
+# Note: We use dtoverlay=dwc2 WITHOUT dr_mode parameter to allow auto-detection
 if [ -f "$CONFIG_FILE" ]; then
-  if ! grep -q '^dtoverlay=dwc2' "$CONFIG_FILE"; then
-    if grep -q '^\[all\]' "$CONFIG_FILE"; then
+  # Check if dtoverlay=dwc2 exists in [all] section (not in platform-specific sections)
+  if grep -q '^\[all\]' "$CONFIG_FILE"; then
+    # [all] section exists - check if dwc2 is already there
+    if ! awk '/^\[all\]/,/^\[/ {if (/^dtoverlay=dwc2$/) exit 0} END {exit 1}' "$CONFIG_FILE"; then
+      # Add dtoverlay=dwc2 right after [all] line
       sed -i '/^\[all\]/a dtoverlay=dwc2' "$CONFIG_FILE"
-      echo "Added dtoverlay=dwc2 under [all] in $CONFIG_FILE"
+      echo "Added dtoverlay=dwc2 under [all] section in $CONFIG_FILE"
     else
-      printf '\n[all]\ndtoverlay=dwc2\n' | tee -a "$CONFIG_FILE" >/dev/null
-      echo "Appended [all] with dtoverlay=dwc2 to $CONFIG_FILE"
+      echo "dtoverlay=dwc2 already present under [all] in $CONFIG_FILE"
     fi
   else
-    echo "dtoverlay=dwc2 already present in $CONFIG_FILE"
+    # No [all] section - append it with dwc2
+    printf '\n[all]\ndtoverlay=dwc2\n' | tee -a "$CONFIG_FILE" >/dev/null
+    echo "Appended [all] section with dtoverlay=dwc2 to $CONFIG_FILE"
   fi
 else
   echo "Warning: $CONFIG_FILE not found. Ensure your Pi uses /boot/firmware/config.txt"
+fi
+
+# Configure modules to load at boot via systemd
+MODULES_LOAD_CONF="/etc/modules-load.d/dwc2.conf"
+if [ ! -f "$MODULES_LOAD_CONF" ]; then
+  echo "Configuring modules to load at boot..."
+  cat > "$MODULES_LOAD_CONF" <<EOF
+# USB gadget modules for Tesla USB storage
+dwc2
+libcomposite
+EOF
+  echo "Created $MODULES_LOAD_CONF"
+else
+  echo "Module loading configuration already exists at $MODULES_LOAD_CONF"
 fi
 
 # Create gadget folder
@@ -164,16 +184,36 @@ else
     sleep 1
   done
   
-  # Format partitions with error checking
-  mkfs.vfat -F 32 -n "$LABEL1" "${LOOP_DEV}p1" || {
-    echo "Error: Failed to format first partition"
-    exit 1
-  }
+  # Format partitions - use exFAT for large partitions (>32GB), FAT32 for smaller
+  echo "Formatting partition 1 (${LABEL1})..."
+  if [ "$P1_MB" -gt 32768 ]; then
+    echo "  Using exFAT (partition size: ${P1_MB}MB > 32GB)"
+    mkfs.exfat -n "$LABEL1" "${LOOP_DEV}p1" || {
+      echo "Error: Failed to format first partition with exFAT"
+      exit 1
+    }
+  else
+    echo "  Using FAT32 (partition size: ${P1_MB}MB <= 32GB)"
+    mkfs.vfat -F 32 -n "$LABEL1" "${LOOP_DEV}p1" || {
+      echo "Error: Failed to format first partition with FAT32"
+      exit 1
+    }
+  fi
   
-  mkfs.vfat -F 32 -n "$LABEL2" "${LOOP_DEV}p2" || {
-    echo "Error: Failed to format second partition"
-    exit 1
-  }
+  echo "Formatting partition 2 (${LABEL2})..."
+  if [ "$P2_MB" -gt 32768 ]; then
+    echo "  Using exFAT (partition size: ${P2_MB}MB > 32GB)"
+    mkfs.exfat -n "$LABEL2" "${LOOP_DEV}p2" || {
+      echo "Error: Failed to format second partition with exFAT"
+      exit 1
+    }
+  else
+    echo "  Using FAT32 (partition size: ${P2_MB}MB <= 32GB)"
+    mkfs.vfat -F 32 -n "$LABEL2" "${LOOP_DEV}p2" || {
+      echo "Error: Failed to format second partition with FAT32"
+      exit 1
+    }
+  fi
   
   # Clean up loop device (will also be called by trap)
   cleanup_loop_device
@@ -205,6 +245,34 @@ awk '
 ' "$SMB_CONF" > "${SMB_CONF}.tmp" || cp "$SMB_CONF" "${SMB_CONF}.tmp"
 mv "${SMB_CONF}.tmp" "$SMB_CONF"
 
+# Configure global security settings to prevent guest access issues with Windows
+# Remove or update problematic guest-related settings in [global] section
+sed -i 's/^[[:space:]]*map to guest.*$/# map to guest = Bad User (disabled for Windows compatibility)/' "$SMB_CONF"
+sed -i 's/^[[:space:]]*usershare allow guests.*$/# usershare allow guests = no (disabled for Windows compatibility)/' "$SMB_CONF"
+
+# Ensure proper authentication settings are in [global] section
+if ! grep -q "^[[:space:]]*security = user" "$SMB_CONF"; then
+  sed -i '/^\[global\]/a \   security = user' "$SMB_CONF"
+fi
+
+# Add min protocol to ensure Windows 10/11 compatibility
+if ! grep -q "server min protocol" "$SMB_CONF"; then
+  sed -i '/^\[global\]/a \   server min protocol = SMB2' "$SMB_CONF"
+fi
+
+# Add NTLM authentication for Windows compatibility
+if ! grep -q "ntlm auth" "$SMB_CONF"; then
+  sed -i '/^\[global\]/a \   ntlm auth = ntlmv2-only' "$SMB_CONF"
+fi
+
+# Add client protocol settings
+if ! grep -q "client min protocol" "$SMB_CONF"; then
+  sed -i '/^\[global\]/a \   client min protocol = SMB2' "$SMB_CONF"
+fi
+if ! grep -q "client max protocol" "$SMB_CONF"; then
+  sed -i '/^\[global\]/a \   client max protocol = SMB3' "$SMB_CONF"
+fi
+
 # Add authenticated shares
 cat >> "$SMB_CONF" <<EOF
 
@@ -213,6 +281,7 @@ cat >> "$SMB_CONF" <<EOF
    browseable = yes
    writable = yes
    valid users = $TARGET_USER
+   guest ok = no
    create mask = 0775
    directory mask = 0775
 
@@ -221,6 +290,7 @@ cat >> "$SMB_CONF" <<EOF
    browseable = yes
    writable = yes
    valid users = $TARGET_USER
+   guest ok = no
    create mask = 0775
    directory mask = 0775
 EOF
@@ -298,12 +368,18 @@ $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/chown
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/rm
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/fsck.vfat
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/fsck.exfat
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/blkid
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/tee
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/lsof
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/kill
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sync
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/timeout
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/nsenter
+
+# Allow cache dropping for exFAT filesystem sync (required for web lock chime updates)
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sh -c echo 3 > /proc/sys/vm/drop_caches
+$TARGET_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo 3 > /proc/sys/vm/drop_caches
 EOF
 chmod 440 "$SUDOERS_ENTRY"
 

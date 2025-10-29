@@ -162,15 +162,30 @@ for p in 1 2; do
   fi
 done
 
-# Run filesystem checks before mounting to auto-repair FAT issues
+# Run filesystem checks before mounting to auto-repair filesystem issues
 echo "Running filesystem checks..."
 for PART_NUM in 1 2; do
   LOOP_PART="${LOOP}p${PART_NUM}"
   LOG_FILE="/tmp/fsck_gadget_part${PART_NUM}.log"
   echo "  Checking ${LOOP_PART}..."
+  
+  # Detect filesystem type
+  FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_PART" 2>/dev/null || echo "unknown")
+  echo "  Filesystem type: $FS_TYPE"
+  
   set +e
-  sudo fsck.vfat -a "$LOOP_PART" >"$LOG_FILE" 2>&1
-  FSCK_STATUS=$?
+  if [ "$FS_TYPE" = "exfat" ]; then
+    # exFAT filesystem check
+    sudo fsck.exfat "$LOOP_PART" >"$LOG_FILE" 2>&1
+    FSCK_STATUS=$?
+  elif [ "$FS_TYPE" = "vfat" ]; then
+    # FAT32 filesystem check
+    sudo fsck.vfat -a "$LOOP_PART" >"$LOG_FILE" 2>&1
+    FSCK_STATUS=$?
+  else
+    echo "  Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
+    FSCK_STATUS=0
+  fi
   set -e
 
   if [ $FSCK_STATUS -ge 4 ]; then
@@ -192,10 +207,21 @@ for PART_NUM in 1 2; do
   LOOP_PART="${LOOP}p${PART_NUM}"
   MP="$MNT_DIR/part${PART_NUM}"
   
-  echo "  Mounting $LOOP_PART to $MP"
-  # Mount in the host mount namespace to ensure visibility everywhere
-  sudo nsenter --mount=/proc/1/ns/mnt -- mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP" || \
-  sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP"
+  # Detect filesystem type for appropriate mount options
+  FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_PART" 2>/dev/null || echo "unknown")
+  
+  echo "  Mounting $LOOP_PART to $MP (type: $FS_TYPE)"
+  
+  # Different mount options for exFAT vs FAT32
+  if [ "$FS_TYPE" = "exfat" ]; then
+    # exFAT mount options (no flush option support)
+    sudo nsenter --mount=/proc/1/ns/mnt -- mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002 "$LOOP_PART" "$MP" || \
+    sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002 "$LOOP_PART" "$MP"
+  else
+    # FAT32 mount options (includes flush)
+    sudo nsenter --mount=/proc/1/ns/mnt -- mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP" || \
+    sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP"
+  fi
 done
 
 # Refresh Samba so shares expose the freshly mounted partitions

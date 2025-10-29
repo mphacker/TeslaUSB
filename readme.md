@@ -20,7 +20,7 @@ This script (`setup-usb.sh`) transforms your Raspberry Pi into a USB storage dev
 ## Requirements
 
 - Raspberry Pi with USB OTG capability (Pi Zero, Pi 4, etc.)
-- Raspberry Pi OS (tested on recent versions)
+- Tested on Raspberry Pi "Trixie" OS Desktop (64-bit)
 - Root/sudo access for installation
 - Internet connection for package installation
 

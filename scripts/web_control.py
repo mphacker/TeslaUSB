@@ -504,7 +504,7 @@ def validate_lock_chime():
 
 
 def replace_lock_chime(source_path, destination_path):
-    """Swap in the selected WAV using same-directory backup semantics."""
+    """Swap in the selected WAV using temporary file to invalidate all caches."""
     src_size = os.path.getsize(source_path)
 
     if src_size == 0:
@@ -512,26 +512,88 @@ def replace_lock_chime(source_path, destination_path):
 
     dest_dir = os.path.dirname(destination_path)
     backup_path = os.path.join(dest_dir, "oldLockChime.wav")
+    temp_path = os.path.join(dest_dir, ".LockChime.wav.tmp")
 
+    # Drop any cached data BEFORE we start
+    try:
+        subprocess.run(
+            ["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
+            check=False,
+            timeout=5
+        )
+    except Exception:
+        pass
+
+    # Backup existing file if present
     if os.path.isfile(destination_path):
         if os.path.isfile(backup_path):
             os.remove(backup_path)
-        os.rename(destination_path, backup_path)
+        shutil.copyfile(destination_path, backup_path)
+        
+        # DELETE the old LockChime.wav completely
+        os.remove(destination_path)
+        
+        # Sync the deletion and wait
+        subprocess.run(["sync"], check=False, timeout=5)
+        time.sleep(0.3)
 
     try:
-        shutil.copyfile(source_path, destination_path)
-        dest_size = os.path.getsize(destination_path)
-        if dest_size != src_size:
+        # Write to a temporary file first with a different name
+        # This ensures Windows never associates it with the old file
+        shutil.copyfile(source_path, temp_path)
+        temp_size = os.path.getsize(temp_path)
+        if temp_size != src_size:
             raise IOError(
-                f"Copied file size mismatch (expected {src_size} bytes, got {dest_size} bytes)."
+                f"Temp file size mismatch (expected {src_size} bytes, got {temp_size} bytes)."
             )
-        with open(destination_path, "rb") as dest_file:
-            os.fsync(dest_file.fileno())
+        
+        # Sync the temp file completely
+        with open(temp_path, "r+b") as temp_file:
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        
+        subprocess.run(["sync"], check=False, timeout=10)
+        time.sleep(0.2)
+        
+        # Now rename temp to final name - this creates a NEW directory entry
+        # while the temp file data is already fully written
+        os.rename(temp_path, destination_path)
+        
+        # Sync the directory metadata (the rename operation)
+        try:
+            dir_fd = os.open(dest_dir, os.O_RDONLY)
+            os.fsync(dir_fd)
+            os.close(dir_fd)
+        except Exception:
+            pass
+        
+        # Final full sync
+        subprocess.run(["sync"], check=False, timeout=10)
+        
+        # Drop ALL caches again
+        try:
+            subprocess.run(
+                ["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
+                check=False,
+                timeout=5
+            )
+        except Exception:
+            pass
+        
+        # Extra time for exFAT to settle
+        time.sleep(0.2)
+            
     except Exception:
+        # Clean up temp file if it exists
+        if os.path.isfile(temp_path):
+            os.remove(temp_path)
+        
+        # Restore backup on failure
         if os.path.isfile(backup_path) and not os.path.isfile(destination_path):
-            os.rename(backup_path, destination_path)
+            shutil.copyfile(backup_path, destination_path)
         raise
 
+    # Clean up backup on success
     if os.path.isfile(backup_path):
         os.remove(backup_path)
 
@@ -650,11 +712,22 @@ def set_chime():
         flash("Selected WAV file is no longer available.", "error")
         return redirect(url_for("index"))
 
+    # Close Samba share BEFORE making changes
     close_samba_share(part)
 
     target_part = part
     target_dir = source_dir
     target_path = os.path.join(target_dir, LOCK_CHIME_FILENAME)
+
+    # Also try to break any oplocks on the specific file
+    try:
+        subprocess.run(
+            ["sudo", "-n", "smbcontrol", "all", "close-denied", target_path],
+            check=False,
+            timeout=5
+        )
+    except Exception:
+        pass
 
     try:
         replace_lock_chime(source_path, target_path)
@@ -664,12 +737,24 @@ def set_chime():
 
     removed_duplicates = remove_other_lock_chimes(target_part)
 
+    # Multiple sync strategies for exFAT
     try:
         subprocess.run(["sync"], check=True, timeout=10)
+        # Force filesystem-specific sync
+        subprocess.run(["sync", "-f", target_dir], check=False, timeout=10)
     except Exception:
         pass
 
+    # Give filesystem time to settle after all operations
+    time.sleep(1)
+
+    # Restart Samba to clear ALL caches and oplocks
     restart_samba_services()
+    
+    # Give Samba more time to fully restart and clear state
+    time.sleep(2)
+    
+    # Close share again after restart to force reconnection
     close_samba_share(target_part)
 
     if removed_duplicates:
@@ -679,8 +764,22 @@ def set_chime():
             "info",
         )
 
+    # Verify the file was actually updated by checking its size
+    try:
+        final_size = os.path.getsize(target_path)
+        expected_size = os.path.getsize(source_path)
+        if final_size != expected_size:
+            flash(
+                f"Warning: File sizes don't match after copy (expected {expected_size}, got {final_size}). "
+                "The file may not have been properly written to the exFAT filesystem.",
+                "error"
+            )
+    except Exception:
+        pass
+
     flash(
-        f"Custom lock chime updated successfully using '{filename}' on {PART_LABEL_MAP.get(target_part, target_part)}.",
+        f"Custom lock chime updated successfully using '{filename}' on {PART_LABEL_MAP.get(target_part, target_part)}. "
+        "If your Windows SMB connection still shows old data, disconnect and reconnect to the share.",
         "success",
     )
 

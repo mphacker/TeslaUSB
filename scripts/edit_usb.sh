@@ -12,6 +12,10 @@ STATE_FILE="__GADGET_DIR__/state.txt"
 
 echo "Switching to edit mode (local mount + Samba)..."
 
+# Stop thumbnail generator to prevent file access during mode switch
+echo "Stopping thumbnail generator..."
+sudo systemctl stop thumbnail_generator.service 2>/dev/null || true
+
 # Get user IDs for mounting
 UID_VAL=$(id -u "$TARGET_USER")
 GID_VAL=$(id -g "$TARGET_USER")

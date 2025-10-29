@@ -76,6 +76,12 @@ cleanup_usb_gadget() {
     fi
   done
   
+  # Remove thumbnail cache directory
+  echo "  Removing thumbnail cache..."
+  if [ -d "$GADGET_DIR/thumbnails" ]; then
+    rm -rf "$GADGET_DIR/thumbnails" || true
+  fi
+  
   # Detach any loop devices associated with the image
   if [ -f "$IMG_PATH" ]; then
     echo "  Detaching loop devices for $IMG_PATH..."
@@ -175,6 +181,8 @@ main() {
   echo "Step 1: Cleaning up systemd services"
   cleanup_service "gadget_web.service" "/etc/systemd/system/gadget_web.service"
   cleanup_service "present_usb_on_boot.service" "/etc/systemd/system/present_usb_on_boot.service"
+  cleanup_service "thumbnail_generator.timer" "/etc/systemd/system/thumbnail_generator.timer"
+  cleanup_service "thumbnail_generator.service" "/etc/systemd/system/thumbnail_generator.service"
   
   # Reload systemd after removing service files
   echo "  Reloading systemd daemon..."

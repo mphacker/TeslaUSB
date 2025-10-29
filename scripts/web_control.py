@@ -16,6 +16,7 @@ import contextlib
 import shutil
 import threading
 import time
+import hashlib
 from datetime import datetime
 
 app = Flask(__name__)
@@ -29,6 +30,7 @@ LOCK_CHIME_FILENAME = "LockChime.wav"
 MAX_LOCK_CHIME_SIZE = 1024 * 1024  # 1 MiB
 USB_PARTITIONS = ("part1", "part2")
 PART_LABEL_MAP = {"part1": "gadget_part1", "part2": "gadget_part2"}
+THUMBNAIL_CACHE_DIR = os.path.join(GADGET_DIR, "thumbnails")
 
 MODE_DISPLAY = {
     "present": ("USB Gadget Mode", "present"),
@@ -213,6 +215,111 @@ def get_teslacam_folders():
     return folders
 
 
+def generate_thumbnail_hash(video_path):
+    """Generate a unique hash for a video file based on path and modification time."""
+    try:
+        stat_info = os.stat(video_path)
+        unique_string = f"{video_path}_{stat_info.st_mtime}_{stat_info.st_size}"
+        return hashlib.md5(unique_string.encode()).hexdigest()
+    except OSError:
+        return None
+
+
+def get_thumbnail_path(folder, filename):
+    """Get the cached thumbnail path for a video file."""
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return None
+    
+    video_path = os.path.join(teslacam_path, folder, filename)
+    if not os.path.isfile(video_path):
+        return None
+    
+    # Generate unique hash for this video
+    video_hash = generate_thumbnail_hash(video_path)
+    if not video_hash:
+        return None
+    
+    # Create thumbnail filename
+    thumbnail_filename = f"{video_hash}.jpg"
+    thumbnail_path = os.path.join(THUMBNAIL_CACHE_DIR, thumbnail_filename)
+    
+    return thumbnail_path, video_path
+
+
+def generate_thumbnail(video_path, thumbnail_path):
+    """Generate a thumbnail from a video file using ffmpeg."""
+    try:
+        # Ensure cache directory exists
+        os.makedirs(THUMBNAIL_CACHE_DIR, exist_ok=True)
+        
+        # Use ffmpeg to extract a frame at 1 second
+        # -ss 1: seek to 1 second
+        # -i: input file
+        # -vframes 1: extract 1 frame
+        # -vf scale=160:-1: resize to width 160px, keep aspect ratio
+        # -y: overwrite output file
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-ss", "1",
+                "-i", video_path,
+                "-vframes", "1",
+                "-vf", "scale=160:-1",
+                "-y",
+                thumbnail_path
+            ],
+            capture_output=True,
+            timeout=10,
+            check=False
+        )
+        
+        if result.returncode == 0 and os.path.isfile(thumbnail_path):
+            return True
+        
+        return False
+    except Exception:
+        return False
+
+
+def cleanup_orphaned_thumbnails():
+    """Remove thumbnails for videos that no longer exist."""
+    try:
+        if not os.path.isdir(THUMBNAIL_CACHE_DIR):
+            return
+        
+        teslacam_path = get_teslacam_path()
+        if not teslacam_path:
+            return
+        
+        # Build set of valid thumbnail hashes from existing videos
+        valid_hashes = set()
+        folders = get_teslacam_folders()
+        
+        for folder in folders:
+            folder_path = os.path.join(teslacam_path, folder['name'])
+            videos = get_video_files(folder_path)
+            
+            for video in videos:
+                video_hash = generate_thumbnail_hash(video['path'])
+                if video_hash:
+                    valid_hashes.add(f"{video_hash}.jpg")
+        
+        # Remove thumbnails not in the valid set
+        removed_count = 0
+        for thumbnail_file in os.listdir(THUMBNAIL_CACHE_DIR):
+            if thumbnail_file.endswith('.jpg') and thumbnail_file not in valid_hashes:
+                try:
+                    os.remove(os.path.join(THUMBNAIL_CACHE_DIR, thumbnail_file))
+                    removed_count += 1
+                except OSError:
+                    pass
+        
+        return removed_count
+    except Exception:
+        return 0
+
+
 HTML_TEMPLATE = """
 <!doctype html>
 <html>
@@ -251,6 +358,11 @@ HTML_TEMPLATE = """
             margin: 0;
             font-size: 20px;
             color: white;
+        }
+        .navbar h1 a {
+            color: white;
+            text-decoration: none;
+            cursor: pointer;
         }
         .nav-links {
             display: flex;
@@ -308,6 +420,41 @@ HTML_TEMPLATE = """
         }
         button:hover {
             opacity: 0.9;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .loading-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+        .spinner {
+            border: 8px solid #f3f3f3;
+            border-top: 8px solid #007bff;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .loading-text {
+            color: white;
+            font-size: 18px;
+            margin-top: 20px;
+            font-weight: 500;
         }
         .messages {
             margin: 20px 0;
@@ -452,9 +599,58 @@ HTML_TEMPLATE = """
             text-decoration: none;
             font-size: 14px;
             display: inline-block;
+            margin-right: 5px;
         }
         .btn-download:hover {
             background-color: #138496;
+        }
+        .btn-delete {
+            background-color: #dc3545;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 14px;
+            display: inline-block;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-delete:hover {
+            background-color: #c82333;
+        }
+        .btn-delete-all {
+            background-color: #dc3545;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            border: none;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+        .btn-delete-all:hover {
+            background-color: #c82333;
+        }
+        .folder-controls {
+            margin-bottom: 20px;
+        }
+        .folder-selector {
+            margin-bottom: 10px;
+        }
+        .delete-all-container {
+            text-align: right;
+            margin-bottom: 10px;
+        }
+        .video-thumbnail {
+            width: 80px;
+            height: 45px;
+            object-fit: cover;
+            border-radius: 4px;
+            display: block;
+        }
+        .thumbnail-cell {
+            text-align: center;
+            width: 90px;
         }
         #videoPlayer {
             width: 100%;
@@ -478,8 +674,10 @@ HTML_TEMPLATE = """
                 margin-top: 10px;
                 flex-wrap: wrap;
             }
-            .video-table th:nth-child(3),
-            .video-table td:nth-child(3) {
+            .video-table th:nth-child(1),
+            .video-table td:nth-child(1),
+            .video-table th:nth-child(4),
+            .video-table td:nth-child(4) {
                 display: none;
             }
         }
@@ -488,7 +686,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="navbar">
         <div class="navbar-content">
-            <h1>🚗 Tesla USB Gadget Control</h1>
+            <h1><a href="{{ url_for('index') }}">🚗 Tesla USB Gadget Control</a></h1>
             <div class="nav-links">
                 <a href="{{ url_for('index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
                 <a href="{{ url_for('file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
@@ -519,12 +717,17 @@ HTML_CONTROL_PAGE = """
 <div class="container">
     <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
     
-    <form method="post" action="{{url_for('present_usb')}}" style="display: inline;">
-        <button type="submit" class="present-btn">📱 Present USB Gadget</button>
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Switching modes, please wait...</div>
+    </div>
+    
+    <form method="post" action="{{url_for('present_usb')}}" id="presentForm" style="display: inline;">
+        <button type="submit" class="present-btn" id="presentBtn">📱 Present USB Gadget</button>
     </form>
     
-    <form method="post" action="{{url_for('edit_usb')}}" style="display: inline;">
-        <button type="submit" class="edit-btn">📁 Edit USB (mount + Samba)</button>
+    <form method="post" action="{{url_for('edit_usb')}}" id="editForm" style="display: inline;">
+        <button type="submit" class="edit-btn" id="editBtn">📁 Edit USB (mount + Samba)</button>
     </form>
     
     <div class="info-box">
@@ -564,6 +767,41 @@ HTML_CONTROL_PAGE = """
     </div>
     {% endif %}
 </div>
+
+<script>
+// Prevent multiple mode switch submissions
+const presentForm = document.getElementById('presentForm');
+const editForm = document.getElementById('editForm');
+const presentBtn = document.getElementById('presentBtn');
+const editBtn = document.getElementById('editBtn');
+const loadingOverlay = document.getElementById('loadingOverlay');
+
+function disableButtons() {
+    presentBtn.disabled = true;
+    editBtn.disabled = true;
+    presentBtn.style.opacity = '0.5';
+    editBtn.style.opacity = '0.5';
+    presentBtn.style.cursor = 'not-allowed';
+    editBtn.style.cursor = 'not-allowed';
+    loadingOverlay.style.display = 'flex';
+}
+
+presentForm.addEventListener('submit', function(e) {
+    if (presentBtn.disabled) {
+        e.preventDefault();
+        return false;
+    }
+    disableButtons();
+});
+
+editForm.addEventListener('submit', function(e) {
+    if (editBtn.disabled) {
+        e.preventDefault();
+        return false;
+    }
+    disableButtons();
+});
+</script>
 {% endblock %}
 """
 
@@ -580,15 +818,26 @@ HTML_BROWSER_PAGE = """
         <p>Make sure the system is in Present or Edit mode and the TeslaCam folder exists.</p>
     </div>
     {% elif folders %}
-    <div class="folder-selector">
-        <label for="folderSelect"><strong>Select Folder:</strong></label>
-        <select id="folderSelect" onchange="loadFolder(this.value)">
-            {% for folder in folders %}
-            <option value="{{ folder.name }}" {% if folder.name == current_folder %}selected{% endif %}>
-                {{ folder.name }}
-            </option>
-            {% endfor %}
-        </select>
+    <div class="folder-controls">
+        <div class="folder-selector">
+            <label for="folderSelect"><strong>Select Folder:</strong></label>
+            <select id="folderSelect" onchange="loadFolder(this.value)">
+                {% for folder in folders %}
+                <option value="{{ folder.name }}" {% if folder.name == current_folder %}selected{% endif %}>
+                    {{ folder.name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        {% if mode_token == 'edit' and videos %}
+        <div class="delete-all-container">
+            <form method="post" action="{{ url_for('delete_all_videos', folder=current_folder) }}" 
+                  onsubmit="return confirm('Are you sure you want to delete ALL {{ videos|length }} videos in {{ current_folder }}? This cannot be undone!');" 
+                  style="display: inline;">
+                <button type="submit" class="btn-delete-all">🗑️ Delete All Videos</button>
+            </form>
+        </div>
+        {% endif %}
     </div>
     
     <video id="videoPlayer" controls></video>
@@ -598,6 +847,7 @@ HTML_BROWSER_PAGE = """
         <table class="video-table">
             <thead>
                 <tr>
+                    <th class="thumbnail-cell">Preview</th>
                     <th>Filename</th>
                     <th>Size</th>
                     <th>Modified</th>
@@ -607,6 +857,13 @@ HTML_BROWSER_PAGE = """
             <tbody>
                 {% for video in videos %}
                 <tr>
+                    <td class="thumbnail-cell">
+                        <img src="{{ url_for('get_thumbnail', folder=current_folder, filename=video.name) }}" 
+                             alt="Thumbnail" 
+                             class="video-thumbnail"
+                             loading="lazy"
+                             onerror="this.style.display='none'">
+                    </td>
                     <td>
                         <a href="#" class="video-name" onclick="playVideo('{{ video.name }}'); return false;">
                             {{ video.name }}
@@ -619,6 +876,13 @@ HTML_BROWSER_PAGE = """
                            class="btn-download" download>
                             ⬇️ Download
                         </a>
+                        {% if mode_token == 'edit' %}
+                        <form method="post" action="{{ url_for('delete_video', folder=current_folder, filename=video.name) }}" 
+                              onsubmit="return confirm('Are you sure you want to delete {{ video.name }}?');" 
+                              style="display: inline;">
+                            <button type="submit" class="btn-delete">🗑️ Delete</button>
+                        </form>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
@@ -964,6 +1228,7 @@ def file_browser():
         page='browser',
         mode_label=label,
         mode_class=css_class,
+        mode_token=token,
         teslacam_available=True,
         folders=folders,
         videos=videos,
@@ -1007,6 +1272,135 @@ def download_video(folder, filename):
         return "Video not found", 404
     
     return send_file(video_path, as_attachment=True, download_name=filename)
+
+
+@app.route("/videos/thumbnail/<folder>/<filename>")
+def get_thumbnail(folder, filename):
+    """Get or generate a thumbnail for a video file."""
+    # Sanitize inputs
+    folder = os.path.basename(folder)
+    filename = os.path.basename(filename)
+    
+    result = get_thumbnail_path(folder, filename)
+    if not result:
+        return "Video not found", 404
+    
+    thumbnail_path, video_path = result
+    
+    # Check if thumbnail exists
+    if os.path.isfile(thumbnail_path):
+        response = send_file(thumbnail_path, mimetype='image/jpeg')
+        # Add aggressive caching headers (cache for 7 days)
+        response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
+        response.headers['Expires'] = '604800'
+        return response
+    
+    # Thumbnail doesn't exist - return 404 so browser doesn't keep trying
+    # The background process will generate it eventually
+    return "Thumbnail not yet generated", 404
+
+
+@app.route("/videos/cleanup_thumbnails", methods=["POST"])
+def cleanup_thumbnails():
+    """Cleanup orphaned thumbnails."""
+    removed = cleanup_orphaned_thumbnails()
+    return jsonify({"success": True, "removed": removed})
+
+
+@app.route("/videos/delete/<folder>/<filename>", methods=["POST"])
+def delete_video(folder, filename):
+    """Delete a single video file."""
+    # Only allow deletion in edit mode
+    if current_mode() != "edit":
+        flash("Videos can only be deleted in Edit Mode.", "error")
+        return redirect(url_for("file_browser", folder=folder))
+    
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        flash("TeslaCam not accessible.", "error")
+        return redirect(url_for("file_browser"))
+    
+    # Sanitize inputs
+    folder = os.path.basename(folder)
+    filename = os.path.basename(filename)
+    
+    video_path = os.path.join(teslacam_path, folder, filename)
+    
+    if not os.path.isfile(video_path):
+        flash("Video not found.", "error")
+        return redirect(url_for("file_browser", folder=folder))
+    
+    try:
+        # Delete the video file
+        os.remove(video_path)
+        
+        # Delete the thumbnail if it exists
+        result = get_thumbnail_path(folder, filename)
+        if result:
+            thumbnail_path, _ = result
+            if os.path.isfile(thumbnail_path):
+                try:
+                    os.remove(thumbnail_path)
+                except OSError:
+                    pass
+        
+        flash(f"Successfully deleted {filename}", "success")
+    except OSError as e:
+        flash(f"Error deleting {filename}: {str(e)}", "error")
+    
+    return redirect(url_for("file_browser", folder=folder))
+
+
+@app.route("/videos/delete_all/<folder>", methods=["POST"])
+def delete_all_videos(folder):
+    """Delete all videos in a folder."""
+    # Only allow deletion in edit mode
+    if current_mode() != "edit":
+        flash("Videos can only be deleted in Edit Mode.", "error")
+        return redirect(url_for("file_browser", folder=folder))
+    
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        flash("TeslaCam not accessible.", "error")
+        return redirect(url_for("file_browser"))
+    
+    # Sanitize input
+    folder = os.path.basename(folder)
+    folder_path = os.path.join(teslacam_path, folder)
+    
+    if not os.path.isdir(folder_path):
+        flash("Folder not found.", "error")
+        return redirect(url_for("file_browser"))
+    
+    # Get all videos in the folder
+    videos = get_video_files(folder_path)
+    deleted_count = 0
+    error_count = 0
+    
+    for video in videos:
+        try:
+            # Delete the video file
+            os.remove(video['path'])
+            deleted_count += 1
+            
+            # Delete the thumbnail if it exists
+            result = get_thumbnail_path(folder, video['name'])
+            if result:
+                thumbnail_path, _ = result
+                if os.path.isfile(thumbnail_path):
+                    try:
+                        os.remove(thumbnail_path)
+                    except OSError:
+                        pass
+        except OSError:
+            error_count += 1
+    
+    if deleted_count > 0:
+        flash(f"Successfully deleted {deleted_count} video(s) from {folder}", "success")
+    if error_count > 0:
+        flash(f"Failed to delete {error_count} video(s)", "error")
+    
+    return redirect(url_for("file_browser", folder=folder))
 
 
 @app.route("/present_usb", methods=["POST"])

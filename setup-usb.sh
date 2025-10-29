@@ -59,6 +59,7 @@ REQUIRED_PACKAGES=(
   python3-flask
   samba
   samba-common-bin
+  ffmpeg
 )
 
 MISSING_PACKAGES=()
@@ -227,6 +228,13 @@ mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
 chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
 chmod 775 "$MNT_DIR/part1" "$MNT_DIR/part2"
 
+# Create thumbnail cache directory in persistent location
+THUMBNAIL_CACHE_DIR="$GADGET_DIR/thumbnails"
+mkdir -p "$THUMBNAIL_CACHE_DIR"
+chown "$TARGET_USER:$TARGET_USER" "$THUMBNAIL_CACHE_DIR"
+chmod 775 "$THUMBNAIL_CACHE_DIR"
+echo "Thumbnail cache directory at: $THUMBNAIL_CACHE_DIR"
+
 # ===== Configure Samba for authenticated user =====
 # Add user to Samba with configured password
 (echo "$SAMBA_PASS"; echo "$SAMBA_PASS") | sudo smbpasswd -s -a "$TARGET_USER" || true
@@ -336,6 +344,7 @@ echo "Installing script files from templates..."
 configure_template "$SCRIPTS_DIR/present_usb.sh" "$GADGET_DIR/present_usb.sh"
 configure_template "$SCRIPTS_DIR/edit_usb.sh" "$GADGET_DIR/edit_usb.sh"
 configure_template "$SCRIPTS_DIR/web_control.py" "$GADGET_DIR/web_control.py"
+configure_template "$SCRIPTS_DIR/generate_thumbnails.py" "$GADGET_DIR/generate_thumbnails.py"
 
 # ===== Configure passwordless sudo for gadget scripts =====
 SUDOERS_D_DIR="/etc/sudoers.d"
@@ -410,12 +419,23 @@ configure_template "$TEMPLATES_DIR/gadget_web.service" "$SERVICE_FILE"
 AUTO_SERVICE="/etc/systemd/system/present_usb_on_boot.service"
 configure_template "$TEMPLATES_DIR/present_usb_on_boot.service" "$AUTO_SERVICE"
 
+# Thumbnail generator service
+THUMBNAIL_SERVICE="/etc/systemd/system/thumbnail_generator.service"
+configure_template "$TEMPLATES_DIR/thumbnail_generator.service" "$THUMBNAIL_SERVICE"
+
+# Thumbnail generator timer
+THUMBNAIL_TIMER="/etc/systemd/system/thumbnail_generator.timer"
+configure_template "$TEMPLATES_DIR/thumbnail_generator.timer" "$THUMBNAIL_TIMER"
+
 # Reload systemd and enable services
 systemctl daemon-reload
 systemctl enable --now gadget_web.service || systemctl restart gadget_web.service
 
 systemctl daemon-reload
 systemctl enable present_usb_on_boot.service || true
+
+# Enable and start thumbnail generator timer
+systemctl enable --now thumbnail_generator.timer || systemctl restart thumbnail_generator.timer
 
 # Ensure the web service picks up the latest code changes
 systemctl restart gadget_web.service || true
@@ -427,3 +447,8 @@ echo " - edit script:    $GADGET_DIR/edit_usb.sh"
 echo " - web UI:         http://<pi_ip>:$WEB_PORT/  (service: gadget_web.service)"
 echo " - gadget auto-present on boot: present_usb_on_boot.service (enabled)"
 echo "Samba shares: use user '$TARGET_USER' and the password set in SAMBA_PASS"
+echo
+echo "Switching to present mode..."
+"$GADGET_DIR/present_usb.sh"
+echo
+echo "Setup complete! The Pi is now in present mode."

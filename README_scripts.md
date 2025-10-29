@@ -6,13 +6,13 @@ This directory contains the template files and source scripts used by the Tesla 
 
 ```
 ├── scripts/           # Source script files with placeholders
-│   ├── present_usb.sh    # USB gadget presentation script
+│   ├── present_usb.sh    # USB gadget presentation script (with read-only mounts)
 │   ├── edit_usb.sh       # Edit mode (mount + Samba) script
-│   └── web_control.py    # Flask web interface
+│   └── web_control.py    # Flask web interface with video browser
 ├── templates/         # Systemd service templates
 │   ├── gadget_web.service           # Web interface service
 │   └── present_usb_on_boot.service  # Auto-present service
-└── README.md         # This file
+└── README_scripts.md  # This file
 ```
 
 ## How It Works
@@ -50,3 +50,33 @@ To modify the behavior:
 | `__SECRET_KEY__` | Flask secret key | `random_hex_string` |
 
 The `present_usb.sh` and `edit_usb.sh` templates update a shared state file (`state.txt`) inside the gadget directory so the web interface can display the current mode.
+
+## Script Features
+
+### present_usb.sh
+- Unmounts read-write partitions from edit mode
+- Runs filesystem checks (fsck) on partitions
+- Presents the USB gadget to the host (Tesla)
+- **Mounts partitions locally in read-only mode** at `/mnt/gadget/part1-ro` and `/mnt/gadget/part2-ro`
+- Allows browsing files while the gadget is active
+- Updates state file to "present"
+
+### edit_usb.sh
+- Removes USB gadget module
+- Unmounts read-only partitions from present mode
+- Runs filesystem checks (fsck) on partitions
+- Mounts partitions locally in read-write mode at `/mnt/gadget/part1` and `/mnt/gadget/part2`
+- Starts Samba services for network file access
+- Updates state file to "edit"
+
+### web_control.py
+- Flask web application providing:
+  - Mode switching interface (Present/Edit)
+  - Real-time mode status display
+  - **TeslaCam video browser** with folder navigation
+  - **In-browser video playback**
+  - **Video download functionality**
+  - Custom lock chime management
+  - Network share information display
+- Automatically detects current mode and adapts functionality
+- Works with both read-only (present) and read-write (edit) mounts

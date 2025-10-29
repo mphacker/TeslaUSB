@@ -1,0 +1,17 @@
+[Unit]
+Description=TeslaCam Thumbnail Generator
+After=network.target
+
+[Service]
+Type=oneshot
+User=__TARGET_USER__
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 __GADGET_DIR__/generate_thumbnails.py
+StandardOutput=journal
+StandardError=journal
+MemoryMax=100M
+MemoryHigh=80M
+
+[Install]
+WantedBy=multi-user.target

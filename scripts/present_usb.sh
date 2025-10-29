@@ -22,6 +22,10 @@ trap cleanup_ephemeral_loop EXIT
 
 echo "Switching to USB gadget presentation mode..."
 
+# Stop thumbnail generator to prevent file access during mode switch
+echo "Stopping thumbnail generator..."
+sudo systemctl stop thumbnail_generator.service 2>/dev/null || true
+
 # Ask Samba to drop any open handles before shutting it down
 echo "Closing Samba shares..."
 sudo smbcontrol all close-share gadget_part1 2>/dev/null || true
@@ -243,6 +247,10 @@ if [ -n "$LOOP_DEV" ]; then
 else
   echo "  Warning: Unable to attach loop device for read-only mounting"
 fi
+
+# Restart thumbnail generator timer now that we're in present mode with read-only mounts
+echo "Restarting thumbnail generator timer..."
+sudo systemctl start thumbnail_generator.timer 2>/dev/null || true
 
 echo "USB gadget presented successfully!"
 echo "The Pi should now appear as a USB storage device when connected."

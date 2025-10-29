@@ -8,7 +8,7 @@ This script (`setup-usb.sh`) transforms your Raspberry Pi into a USB storage dev
 
 ## Why?
 
-I created this solution to allow me to have remote access to my Tesla dashcam footage without needing to physically remove the USB drive from the car. By using a Raspberry Pi Zero 2 W as a USB gadget, I can connect it to the Tesla and have it appear as a standard USB drive while also being able to access the files over the network when needed. This setup provides flexibility to switch between modes easily, manage files remotely, and even browse videos through a web interface. It enhances convenience and usability for Tesla owners who want to efficiently handle their dashcam recordings.
+I created this solution to allow me to have remote access to my Tesla dashcam footage without needing to physically remove the USB drive from the car. By using a Raspberry Pi Zero 2 W as a USB gadget, I can connect it to the Tesla and have it appear as a standard USB drive while also being able to access the files over the network when needed. This setup provides flexibility to switch between modes easily, manage files remotely, and even browse videos through a web interface. It enhances convenience and usability for Tesla owners who want to efficiently handle their dashcam recordings, update lock sounds, or add custom lightshow files without hassle.
 
 ## Features
 
@@ -262,7 +262,7 @@ The setup script copies and configures template files to the gadget directory:
 
 | File | Source Template | Purpose |
 |------|-----------------|---------|
-| `usb_dual.img` | *Generated* | Disk image with two FAT32 partitions |
+| `usb_dual.img` | *Generated* | Disk image with two partitions |
 | `present_usb.sh` | `scripts/present_usb.sh` | Script to activate USB gadget mode |
 | `edit_usb.sh` | `scripts/edit_usb.sh` | Script to activate edit/mount mode |
 | `web_control.py` | `scripts/web_control.py` | Flask web interface application |
@@ -381,9 +381,6 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
 
 ### Common Issues
 
-**"unbound variable" errors:**
-- Ensure the script has been updated with the latest variable escaping fixes
-- Check that `set -euo pipefail` is compatible with your bash version
 
 **Partition nodes not appearing:**
 - The script waits up to 10 seconds for partition nodes to appear
@@ -462,7 +459,7 @@ sudo systemctl stop gadget_web.service present_usb_on_boot.service
 ### Disk Image Structure
 - **Total Size**: PART1_SIZE + PART2_SIZE + 2MB (for partition table)
 - **Partition Table**: MBR/MSDOS style
-- **File System**: FAT32 for both partitions
+- **File System**: FAT32 or exFAT for partitions based on size specified
 - **Sparse File**: Only uses space as needed
 
 ### USB Gadget Implementation

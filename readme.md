@@ -12,7 +12,7 @@ I created this solution to allow me to have remote access to my Tesla dashcam fo
 
 ## Features
 
-- **Dual Partition USB Gadget**: Creates two separate FAT32 partitions (configurable sizes)
+- **Dual Partition USB Gadget**: Creates two separate FAT32 or exFAT partitions (configurable sizes)
 - **Samba Network Sharing**: Access files remotely via network shares with authentication
 - **Web Control Interface**: Browser-based control panel for switching between modes
 - **TeslaCam Video Browser**: Built-in web interface for browsing and playing dashcam videos
@@ -25,38 +25,100 @@ I created this solution to allow me to have remote access to my Tesla dashcam fo
 ## Requirements
 
 - Raspberry Pi with USB OTG capability (Pi Zero, Pi 4, etc.)
+- 128GB or larger microSD card for Pi OS, dashcam storage, and lightshow files
 - Tested on Raspberry Pi "Trixie" OS Desktop (64-bit)
 - Root/sudo access for installation
 - Internet connection for package installation
 
 ## Quick Start
 
-1. **Clone and run the setup script:**
-   ```bash
-   git clone <repository-url>
-   cd TeslaUSB
-   sudo ./setup-usb.sh
-   ```
+### 1. Prepare the Raspberry Pi
 
-2. **The script will:**
-   - Install required packages (parted, dosfstools, python3-flask, samba)
-   - Configure USB gadget kernel module
-   - Create a dual-partition disk image
-   - Set up Samba shares for network access
-   - Create control scripts and web interface
-   - Configure systemd services for auto-start
+**Flash the OS:**
+1. Download and install [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
+2. Insert your microSD card (128GB or larger recommended) into your computer
+3. Launch Raspberry Pi Imager
+4. Click "Choose Device" and select your Raspberry Pi model (e.g., Raspberry Pi Zero 2 W)
+5. Click "Choose OS" → "Raspberry Pi OS (other)" → "Raspberry Pi OS (64-bit)" with Desktop (Debian "Trixie")
+6. Click "Choose Storage" and select your microSD card
+7. Click "Next" and when prompted, click "Edit Settings" to configure:
+   - **General tab:**
+     - Set hostname (e.g., `cybertruckusb`)
+     - Enable SSH with password authentication
+     - Set username and password (recommended username: `pi`)
+     - Configure wireless LAN with your WiFi SSID and password
+     - Set locale settings (timezone and keyboard layout)
+   - **Services tab:**
+     - Enable SSH (if not already enabled)
+8. Click "Save" and then "Yes" to apply OS customization settings
+9. Click "Yes" to confirm writing to the microSD card
+10. Wait for the imaging process to complete
 
-3. **Access the web interface:**
-   - Open `http://<pi-ip-address>:5000` in your browser
-   - Use the buttons to switch between "Present USB" and "Edit USB" modes
-   - Navigate to the "Videos" tab to browse and play TeslaCam footage
+**Boot the Raspberry Pi:**
+1. Remove the microSD card from your computer
+2. Insert the microSD card into your Raspberry Pi
+3. Connect power to the Raspberry Pi
+4. Wait 2-3 minutes for the initial boot and configuration to complete
+5. The Pi will automatically connect to your WiFi network
 
-4. **To remove everything later:**
-   ```bash
-   # Navigate to the gadget directory and run cleanup
-   cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
-   sudo ./cleanup.sh
-   ```
+**Verify Connection:**
+Test SSH access to your Pi:
+```bash
+# Use the hostname you configured (or find the IP address from your router)
+ssh pi@cybertruckusb.local
+# Or if hostname doesn't resolve:
+ssh pi@<pi-ip-address>
+```
+
+### 2. Install TeslaUSB
+
+Once connected via SSH, clone and run the setup script.  Do this in your home directory:
+
+**Clone the repository:**
+```bash
+git clone https://github.com/mphacker/TeslaUSB.git
+cd TeslaUSB
+```
+
+**Run the setup script:**
+```bash
+sudo ./setup-usb.sh
+```
+
+**The script will:**
+- Install required packages (parted, dosfstools, python3-flask, samba)
+- Configure USB gadget kernel module
+- Create a dual-partition disk image
+- Set up Samba shares for network access
+- Create control scripts and web interface
+- Configure systemd services for auto-start
+
+### 3. Access the Web Interface
+
+**Access the web interface:**
+- Open `http://<pi-ip-address>:5000` in your browser
+- Or use the hostname: `http://cybertruckusb.local:5000`
+- Use the buttons to switch between "Present USB" and "Edit USB" modes
+- Navigate to the "Videos" tab to browse and play TeslaCam footage
+
+### 4. Connect to Tesla
+
+1. Switch to "Present USB Gadget" mode via the web interface (if not already in that mode)
+2. Connect the Raspberry Pi to your Tesla's USB port using the appropriate cable:
+   - **Raspberry Pi Zero 2 W**: Use the USB port labeled "USB" (not "PWR")
+   - **Raspberry Pi 4/5**: Use the USB-C port
+3. The Tesla should recognize the Pi as a USB drive
+4. Format the drive when prompted by the Tesla (this is normal on first use)
+5. The Tesla will create the necessary folder structure (TeslaCam, etc.)
+
+### 5. Removal (Optional)
+
+**To remove everything later:**
+```bash
+# Navigate to the gadget directory and run cleanup
+cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
+sudo ./cleanup.sh
+```
 
 ## Configuration
 

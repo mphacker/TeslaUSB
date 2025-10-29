@@ -14,13 +14,19 @@ I created this solution to allow me to have remote access to my Tesla dashcam fo
 
 - **Dual Partition USB Gadget**: Creates two separate FAT32 or exFAT partitions (configurable sizes)
 - **Samba Network Sharing**: Access files remotely via network shares with authentication
-- **Web Control Interface**: Browser-based control panel for switching between modes
+- **Web Control Interface**: Browser-based control panel for switching between modes with visual loading feedback
 - **TeslaCam Video Browser**: Built-in web interface for browsing and playing dashcam videos
+  - **Video thumbnails** with automatic background generation
+  - **Delete functionality** for individual or bulk video removal (Edit mode only)
+  - **Browser caching** for fast page loads
+  - In-browser video playback and download
 - **Live Mode Indicator**: Web UI shows whether the gadget is in USB or Edit mode
+- **Safe Mode Switching**: Buttons disable during transitions to prevent multiple clicks
 - **Auto-Boot Presentation**: Automatically presents the USB gadget when Pi boots
 - **Manual Control Scripts**: Command-line scripts for switching between present/edit modes
 - **Robust Error Handling**: Comprehensive error checking and cleanup for reliability
 - **Dynamic User Support**: Works with any user account (detects SUDO_USER automatically)
+- **Graceful Shutdown**: Background processes stop cleanly during mode switches to prevent corruption
 
 ## Requirements
 
@@ -187,21 +193,35 @@ The web interface includes a built-in TeslaCam video browser accessible in both 
 
 **Features:**
 - Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips, etc.)
+- **Video thumbnails** with automatic background generation for quick preview
 - View videos with sortable table showing filename, size, and date
 - Play videos directly in the browser using the built-in player
 - Download individual videos to your computer
+- **Delete videos** individually or in bulk (Edit mode only)
 - Clean, responsive interface with scrollable table for many videos
+- **Browser caching** for fast page loads with many videos
 - Works in both Present (read-only) and Edit modes
+
+**Thumbnail Generation:**
+- Thumbnails are automatically generated in the background
+- Generated thumbnails are cached persistently (survive reboots)
+- Background process runs every 15 minutes with low priority (Nice=19)
+- Memory-constrained to prevent system overload (100MB limit)
+- Only generates thumbnails for new videos (skips existing)
+- Graceful shutdown when switching modes to prevent file system corruption
 
 **Access:**
 - Navigate to `http://<pi-ip-address>:5000/videos` in your web browser
 - Or click the "Videos" tab in the web interface navigation
+- Click the "Tesla USB Gadget Control" header text to return to the home page
 
 **Usage:**
 1. Select a folder from the dropdown (e.g., RecentClips)
-2. Click any video filename to play it in the browser
-3. Click the Download button to save a video to your computer
-4. Videos are sorted by date (newest first) and the table scrolls for easy navigation
+2. Thumbnails load automatically with lazy loading for smooth scrolling
+3. Click any video filename to play it in the browser
+4. Click the Download button to save a video to your computer
+5. **In Edit mode**: Use Delete buttons to remove individual videos or click "Delete All Videos" for bulk deletion
+6. Videos are sorted by date (newest first) and the table scrolls for easy navigation
 
 ### Present USB Mode (Read-Only)
 When in Present USB mode, you can access files locally on the Pi:
@@ -248,10 +268,13 @@ TeslaUSB/
 ├── scripts/                  # Source script templates
 │   ├── present_usb.sh           # USB gadget presentation script
 │   ├── edit_usb.sh              # Edit mode script  
-│   └── web_control.py           # Flask web interface
+│   ├── web_control.py           # Flask web interface
+│   └── generate_thumbnails.py   # Background thumbnail generator
 ├── templates/                # Systemd service templates
 │   ├── gadget_web.service       # Web interface service
-│   └── present_usb_on_boot.service # Auto-present service
+│   ├── present_usb_on_boot.service # Auto-present service
+│   ├── thumbnail_generator.service # Thumbnail generation service
+│   └── thumbnail_generator.timer   # Thumbnail generation timer
 ├── README.md                 # This documentation
 └── README_scripts.md         # Script template documentation
 ```
@@ -266,6 +289,8 @@ The setup script copies and configures template files to the gadget directory:
 | `present_usb.sh` | `scripts/present_usb.sh` | Script to activate USB gadget mode |
 | `edit_usb.sh` | `scripts/edit_usb.sh` | Script to activate edit/mount mode |
 | `web_control.py` | `scripts/web_control.py` | Flask web interface application |
+| `generate_thumbnails.py` | `scripts/generate_thumbnails.py` | Background thumbnail generation script |
+| `thumbnails/` | *Generated directory* | Persistent cache for video thumbnails |
 | `state.txt` | *Generated* | Stores the last-known USB gadget mode |
 | `cleanup.sh` | *Repository file* | Script to safely remove all setup artifacts |
 
@@ -290,23 +315,35 @@ sudo ./setup-usb.sh
 
 ## Systemd Services
 
-Two services are installed:
+Four services/timers are installed:
 
-| Service | Purpose | Status |
+| Service/Timer | Purpose | Status |
 |---------|---------|---------|
 | `gadget_web.service` | Runs web interface on boot | Enabled |
 | `present_usb_on_boot.service` | Auto-presents USB on boot | Enabled |
+| `thumbnail_generator.service` | Generates video thumbnails | On-demand |
+| `thumbnail_generator.timer` | Schedules thumbnail generation (every 15 min) | Enabled |
 
 **Service management:**
 ```bash
 # Check web interface status
 sudo systemctl status gadget_web.service
 
+# Check thumbnail generator status
+sudo systemctl status thumbnail_generator.service
+sudo systemctl status thumbnail_generator.timer
+
 # Disable auto-present on boot
 sudo systemctl disable present_usb_on_boot.service
 
+# Disable automatic thumbnail generation
+sudo systemctl disable thumbnail_generator.timer
+
 # Restart web interface
 sudo systemctl restart gadget_web.service
+
+# Manually trigger thumbnail generation
+sudo systemctl start thumbnail_generator.service
 ```
 
 ## Cleanup and Removal
@@ -325,12 +362,12 @@ sudo ./cleanup.sh
 ```
 
 **What the cleanup script removes:**
-- **Systemd Services**: Stops and removes `gadget_web.service` and `present_usb_on_boot.service`
+- **Systemd Services**: Stops and removes `gadget_web.service`, `present_usb_on_boot.service`, `thumbnail_generator.service`, and `thumbnail_generator.timer`
 - **USB Gadget Module**: Safely removes `g_mass_storage` kernel module
 - **Loop Devices**: Detaches any loop devices associated with the disk image
 - **Mount Points**: Unmounts all partitions (read-only and read-write) and removes mount directories (`/mnt/gadget`)
 - **Samba Configuration**: Removes gadget share sections from `/etc/samba/smb.conf`
-- **Generated Files**: Removes all scripts, web interface, and disk image
+- **Generated Files**: Removes all scripts, web interface, disk image, and thumbnail cache
 - **System Configuration**: Reloads systemd and restarts Samba
 
 **Safety Features:**
@@ -349,10 +386,11 @@ Image file: /home/pi/TeslaUSB/usb_dual.img
 
 This will remove all USB gadget configuration and files.
 The following will be cleaned up:
-  - Systemd services (gadget_web, present_usb_on_boot)
+  - Systemd services (gadget_web, present_usb_on_boot, thumbnail_generator)
   - USB gadget module and loop devices
   - Samba share configuration
   - Mount directories (/mnt/gadget)
+  - Thumbnail cache directory
   - All files in /home/pi/TeslaUSB (except this script)
   - Disk image: /home/pi/TeslaUSB/usb_dual.img
 
@@ -396,6 +434,20 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
 - Verify TeslaCam folder exists on partition 1
 - Check that the partition is properly mounted (read-only in Present mode, read-write in Edit mode)
 - Videos must have .mp4, .avi, .mov, or .mkv extensions
+
+**Thumbnails not generating:**
+- Check thumbnail generator service: `sudo systemctl status thumbnail_generator.service`
+- Check timer status: `sudo systemctl status thumbnail_generator.timer`
+- View generation logs: `sudo journalctl -u thumbnail_generator.service -f`
+- Manually trigger generation: `sudo systemctl start thumbnail_generator.service`
+- Ensure ffmpeg is installed: `which ffmpeg`
+- Thumbnails are stored in `~/TeslaUSB/thumbnails/` and persist across reboots
+
+**Mode switching fails or causes corruption:**
+- Ensure thumbnail generator stops cleanly during mode switches
+- Check for processes accessing mounted partitions: `sudo lsof | grep /mnt/gadget`
+- The scripts now automatically stop the thumbnail generator before switching modes
+- If corruption occurs, run `chkdsk` on Windows or `fsck` on Linux to repair the filesystem
 
 **Samba access denied:**
 - Verify username and password match the configuration

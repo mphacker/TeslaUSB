@@ -41,12 +41,14 @@ sleep 1
 unmount_with_retry() {
   local target="$1"
   local attempt
-  if ! mountpoint -q "$target" 2>/dev/null; then
+  # Check if mounted in host namespace
+  if ! sudo nsenter --mount=/proc/1/ns/mnt -- mountpoint -q "$target" 2>/dev/null && ! mountpoint -q "$target" 2>/dev/null; then
     return 0
   fi
 
   for attempt in 1 2 3; do
-    if sudo umount "$target" 2>/dev/null; then
+    # Unmount in host namespace to ensure it's visible system-wide
+    if sudo nsenter --mount=/proc/1/ns/mnt -- umount "$target" 2>/dev/null || sudo umount "$target" 2>/dev/null; then
       echo "  Unmounted $target"
       return 0
     fi
@@ -56,10 +58,11 @@ unmount_with_retry() {
   done
 
   echo "  Unable to unmount $target cleanly; forcing lazy unmount..."
-  sudo umount -lf "$target" 2>/dev/null || true
+  sudo nsenter --mount=/proc/1/ns/mnt -- umount -lf "$target" 2>/dev/null || sudo umount -lf "$target" 2>/dev/null || true
   sleep 1
 
-  if mountpoint -q "$target" 2>/dev/null; then
+  # Check again in host namespace
+  if sudo nsenter --mount=/proc/1/ns/mnt -- mountpoint -q "$target" 2>/dev/null || mountpoint -q "$target" 2>/dev/null; then
     echo "  Error: $target still mounted after forced unmount." >&2
     return 1
   fi
@@ -126,7 +129,8 @@ fi
 # Remove mount directories to avoid accidental access when unmounted
 echo "Removing mount directories..."
 for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
-  if mountpoint -q "$mp" 2>/dev/null; then
+  # Check if mounted in host namespace
+  if sudo nsenter --mount=/proc/1/ns/mnt -- mountpoint -q "$mp" 2>/dev/null || mountpoint -q "$mp" 2>/dev/null; then
     echo "  Skipping removal of $mp (still mounted)" >&2
     continue
   fi

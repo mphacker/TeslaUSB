@@ -303,6 +303,7 @@ $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/lsof
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/kill
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sync
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/timeout
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/nsenter
 EOF
 chmod 440 "$SUDOERS_ENTRY"
 

@@ -6,11 +6,16 @@ A comprehensive Raspberry Pi setup script that creates a USB mass storage gadget
 
 This script (`setup-usb.sh`) transforms your Raspberry Pi into a USB storage device that appears as two separate drives when connected to a Tesla vehicle. It provides both manual control scripts and a web interface for managing the USB gadget functionality.
 
+## Why?
+
+I created this solution to allow me to have remote access to my Tesla dashcam footage without needing to physically remove the USB drive from the car. By using a Raspberry Pi Zero 2 W as a USB gadget, I can connect it to the Tesla and have it appear as a standard USB drive while also being able to access the files over the network when needed. This setup provides flexibility to switch between modes easily, manage files remotely, and even browse videos through a web interface. It enhances convenience and usability for Tesla owners who want to efficiently handle their dashcam recordings.
+
 ## Features
 
 - **Dual Partition USB Gadget**: Creates two separate FAT32 partitions (configurable sizes)
 - **Samba Network Sharing**: Access files remotely via network shares with authentication
 - **Web Control Interface**: Browser-based control panel for switching between modes
+- **TeslaCam Video Browser**: Built-in web interface for browsing and playing dashcam videos
 - **Live Mode Indicator**: Web UI shows whether the gadget is in USB or Edit mode
 - **Auto-Boot Presentation**: Automatically presents the USB gadget when Pi boots
 - **Manual Control Scripts**: Command-line scripts for switching between present/edit modes
@@ -44,6 +49,7 @@ This script (`setup-usb.sh`) transforms your Raspberry Pi into a USB storage dev
 3. **Access the web interface:**
    - Open `http://<pi-ip-address>:5000` in your browser
    - Use the buttons to switch between "Present USB" and "Edit USB" modes
+   - Navigate to the "Videos" tab to browse and play TeslaCam footage
 
 4. **To remove everything later:**
    ```bash
@@ -113,6 +119,27 @@ When in Edit USB mode, access files via Samba shares:
 - **Password**: Value set in `SAMBA_PASS` (default: "tesla")
 
 ## Local File Access
+
+### Web-Based Video Browser
+The web interface includes a built-in TeslaCam video browser accessible in both Present and Edit modes:
+
+**Features:**
+- Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips, etc.)
+- View videos with sortable table showing filename, size, and date
+- Play videos directly in the browser using the built-in player
+- Download individual videos to your computer
+- Clean, responsive interface with scrollable table for many videos
+- Works in both Present (read-only) and Edit modes
+
+**Access:**
+- Navigate to `http://<pi-ip-address>:5000/videos` in your web browser
+- Or click the "Videos" tab in the web interface navigation
+
+**Usage:**
+1. Select a folder from the dropdown (e.g., RecentClips)
+2. Click any video filename to play it in the browser
+3. Click the Download button to save a video to your computer
+4. Videos are sorted by date (newest first) and the table scrolls for easy navigation
 
 ### Present USB Mode (Read-Only)
 When in Present USB mode, you can access files locally on the Pi:
@@ -303,6 +330,13 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
 **Web interface not accessible:**
 - Check that port 5000 is open: `sudo netstat -tulpn | grep 5000`
 - Verify service is running: `sudo systemctl status gadget_web.service`
+- View logs for errors: `sudo journalctl -u gadget_web.service -f`
+
+**Video browser not showing videos:**
+- Ensure you're in Present or Edit mode (not Unknown mode)
+- Verify TeslaCam folder exists on partition 1
+- Check that the partition is properly mounted (read-only in Present mode, read-write in Edit mode)
+- Videos must have .mp4, .avi, .mov, or .mkv extensions
 
 **Samba access denied:**
 - Verify username and password match the configuration

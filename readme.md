@@ -76,8 +76,13 @@ SAMBA_PASS="tesla"                         # Samba password
 When in this mode:
 - Pi appears as a USB storage device to connected host (Tesla)
 - Samba shares are stopped
-- Partitions are unmounted for exclusive USB access
+- **NEW**: Partitions are mounted locally in **read-only** mode for browsing
+  - `/mnt/gadget/part1-ro` - Read-only access to partition 1
+  - `/mnt/gadget/part2-ro` - Read-only access to partition 2
 - Tesla can record dashcam/sentry footage directly
+- You can browse/view files locally or via programs (e.g., watch videos, copy files)
+
+**Safety Note**: The read-only mounts allow you to access files while the gadget is active. This is generally safe for read-only access, but be aware that if the Tesla is actively writing, you may see stale cached data. Best practice is to browse files when the Tesla is not actively recording (e.g., after driving).
 
 **Activate via:**
 - Web interface: Click "Present USB Gadget"
@@ -87,7 +92,10 @@ When in this mode:
 ### Edit USB Mode  
 When in this mode:
 - USB gadget is disconnected
-- Partitions are mounted locally on Pi
+- Read-only mounts are unmounted
+- Partitions are mounted locally on Pi in **read-write** mode
+  - `/mnt/gadget/part1` - Read-write access to partition 1
+  - `/mnt/gadget/part2` - Read-write access to partition 2
 - Samba shares are active for network access
 - You can manage files via network or direct Pi access
 
@@ -103,6 +111,44 @@ When in Edit USB mode, access files via Samba shares:
 - **Share 2**: `\\<pi-ip-address>\gadget_part2`
 - **Username**: Your Pi username (or SUDO_USER if run with sudo)
 - **Password**: Value set in `SAMBA_PASS` (default: "tesla")
+
+## Local File Access
+
+### Present USB Mode (Read-Only)
+When in Present USB mode, you can access files locally on the Pi:
+
+- **Partition 1**: `/mnt/gadget/part1-ro` (read-only)
+- **Partition 2**: `/mnt/gadget/part2-ro` (read-only)
+
+**Use cases:**
+- Browse dashcam footage without switching modes
+- Copy files from the Pi to another location
+- Play videos directly using VLC or other media players
+- Check storage usage: `df -h /mnt/gadget/part1-ro`
+
+**Example:**
+```bash
+# List recent dashcam videos
+ls -lht /mnt/gadget/part1-ro/TeslaCam/RecentClips/ | head -10
+
+# Copy a specific video to your home directory
+cp /mnt/gadget/part1-ro/TeslaCam/RecentClips/2025-10-29_12-30-15-front.mp4 ~/
+
+# Watch a video directly
+vlc /mnt/gadget/part1-ro/TeslaCam/RecentClips/2025-10-29_12-30-15-front.mp4
+```
+
+### Edit USB Mode (Read-Write)
+When in Edit USB mode, access files locally with full read-write permissions:
+
+- **Partition 1**: `/mnt/gadget/part1` (read-write)
+- **Partition 2**: `/mnt/gadget/part2` (read-write)
+
+**Use cases:**
+- Delete old footage to free up space
+- Organize files into folders
+- Add custom lightshow files
+- Full filesystem management
 
 ## Project Structure
 
@@ -193,7 +239,7 @@ sudo ./cleanup.sh
 - **Systemd Services**: Stops and removes `gadget_web.service` and `present_usb_on_boot.service`
 - **USB Gadget Module**: Safely removes `g_mass_storage` kernel module
 - **Loop Devices**: Detaches any loop devices associated with the disk image
-- **Mount Points**: Unmounts partitions and removes mount directories (`/mnt/gadget`)
+- **Mount Points**: Unmounts all partitions (read-only and read-write) and removes mount directories (`/mnt/gadget`)
 - **Samba Configuration**: Removes gadget share sections from `/etc/samba/smb.conf`
 - **Generated Files**: Removes all scripts, web interface, and disk image
 - **System Configuration**: Reloads systemd and restarts Samba
@@ -262,6 +308,16 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
 - Verify username and password match the configuration
 - Check that user exists in Samba: `sudo pdbedit -L`
 
+**Read-only mounts showing stale data:**
+- This can happen if Tesla is actively writing while you're browsing
+- Solution: Wait until Tesla is off/disconnected before browsing files
+- Or switch to Edit mode for guaranteed consistent view
+
+**Cannot unmount /mnt/gadget/part1-ro or part2-ro:**
+- Check if any programs are accessing the mount: `sudo lsof | grep /mnt/gadget`
+- Close any open file browsers, media players, or terminal sessions in those directories
+- The scripts will forcefully unmount if needed, but clean unmounts are preferred
+
 ### Log Files
 
 Check systemd logs for issues:
@@ -289,11 +345,11 @@ sudo ./cleanup.sh
 # Remove USB gadget module
 sudo rmmod g_mass_storage
 
+# Unmount all partitions (edit and read-only modes)
+sudo umount /mnt/gadget/part1 /mnt/gadget/part2 /mnt/gadget/part1-ro /mnt/gadget/part2-ro
+
 # Detach loop devices
 sudo losetup -D
-
-# Unmount partitions
-sudo umount /mnt/gadget/part1 /mnt/gadget/part2
 
 # Stop services
 sudo systemctl stop gadget_web.service present_usb_on_boot.service

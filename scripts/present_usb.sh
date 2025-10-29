@@ -85,6 +85,16 @@ for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   fi
 done
 
+# Also unmount any existing read-only mounts from previous present mode
+echo "Unmounting any existing read-only mounts..."
+RO_MNT_DIR="/mnt/gadget"
+for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+  if mountpoint -q "$mp" 2>/dev/null || sudo nsenter --mount=/proc/1/ns/mnt -- mountpoint -q "$mp" 2>/dev/null; then
+    echo "  Unmounting $mp..."
+    unmount_with_retry "$mp" || true
+  fi
+done
+
 # One final sync after all unmounts
 sync
 
@@ -186,5 +196,54 @@ echo "Updating mode state..."
 echo "present" > "$STATE_FILE"
 chown "$TARGET_USER:$TARGET_USER" "$STATE_FILE" 2>/dev/null || true
 
+# Mount partitions locally in read-only mode for browsing
+# NOTE: These mounts allow you to browse/read files while the gadget is presented.
+# This is generally safe for read-only access, but be aware:
+# - If the host (Tesla) is actively writing, you may see stale cached data
+# - Best used when Tesla is not actively recording (e.g., after driving)
+echo "Mounting partitions locally in read-only mode..."
+RO_MNT_DIR="/mnt/gadget"
+sudo mkdir -p "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"
+
+# Get user IDs for mounting
+UID_VAL=$(id -u "$TARGET_USER")
+GID_VAL=$(id -g "$TARGET_USER")
+
+# Set up loop device for local mounting (parallel to gadget access)
+LOOP_DEV=$(losetup -j "$IMG" 2>/dev/null | head -n1 | cut -d: -f1)
+if [ -z "$LOOP_DEV" ]; then
+  LOOP_DEV=$(sudo losetup --show -fP "$IMG")
+fi
+
+# Mount partitions in read-only mode
+if [ -n "$LOOP_DEV" ]; then
+  for PART_NUM in 1 2; do
+    LOOP_PART="${LOOP_DEV}p${PART_NUM}"
+    RO_MP="$RO_MNT_DIR/part${PART_NUM}-ro"
+    
+    if [ -e "$LOOP_PART" ]; then
+      # Detect filesystem type
+      FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_PART" 2>/dev/null || echo "vfat")
+      
+      echo "  Mounting ${LOOP_PART} at $RO_MP (read-only)..."
+      
+      if [ "$FS_TYPE" = "vfat" ]; then
+        sudo mount -t vfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_PART" "$RO_MP"
+      elif [ "$FS_TYPE" = "exfat" ]; then
+        sudo mount -t exfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_PART" "$RO_MP"
+      else
+        sudo mount -o ro "$LOOP_PART" "$RO_MP"
+      fi
+      
+      echo "  Mounted successfully at $RO_MP"
+    else
+      echo "  Warning: Partition ${LOOP_PART} not found, skipping mount"
+    fi
+  done
+else
+  echo "  Warning: Unable to attach loop device for read-only mounting"
+fi
+
 echo "USB gadget presented successfully!"
 echo "The Pi should now appear as a USB storage device when connected."
+echo "Read-only mounts available at: $RO_MNT_DIR/part1-ro and $RO_MNT_DIR/part2-ro"

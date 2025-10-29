@@ -58,9 +58,18 @@ cleanup_usb_gadget() {
     sleep 1
   fi
   
-  # Unmount any mounted partitions
-  echo "  Unmounting partitions..."
+  # Unmount any mounted partitions (edit mode)
+  echo "  Unmounting edit mode partitions..."
   for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
+    if mountpoint -q "$mp" 2>/dev/null; then
+      echo "    Unmounting $mp"
+      umount "$mp" || true
+    fi
+  done
+  
+  # Unmount any read-only mounted partitions (present mode)
+  echo "  Unmounting read-only partitions..."
+  for mp in "$MNT_DIR/part1-ro" "$MNT_DIR/part2-ro"; do
     if mountpoint -q "$mp" 2>/dev/null; then
       echo "    Unmounting $mp"
       umount "$mp" || true
@@ -113,7 +122,7 @@ cleanup_samba() {
 cleanup_mount_dirs() {
   echo "Cleaning up mount directories..."
   
-  for dir in "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR"; do
+  for dir in "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part1-ro" "$MNT_DIR/part2-ro" "$MNT_DIR"; do
     if [ -d "$dir" ]; then
       echo "  Removing directory: $dir"
       rmdir "$dir" 2>/dev/null || true

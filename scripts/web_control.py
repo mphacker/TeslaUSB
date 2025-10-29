@@ -4,9 +4,10 @@ USB Gadget Web Control Interface
 
 A simple Flask web application for controlling USB gadget modes.
 Provides buttons to switch between "Present USB" and "Edit USB" modes.
+Includes a file browser for TeslaCam videos.
 """
 
-from flask import Flask, render_template_string, redirect, url_for, flash, request
+from flask import Flask, render_template_string, redirect, url_for, flash, request, send_file, jsonify
 import subprocess
 import os
 import socket
@@ -15,12 +16,14 @@ import contextlib
 import shutil
 import threading
 import time
+from datetime import datetime
 
 app = Flask(__name__)
 # Configuration (will be updated by setup-usb.sh)
 app.secret_key = "__SECRET_KEY__"
 GADGET_DIR = "__GADGET_DIR__"
 MNT_DIR = "__MNT_DIR__"
+RO_MNT_DIR = "/mnt/gadget"  # Read-only mount directory for present mode
 STATE_FILE = os.path.join(GADGET_DIR, "state.txt")
 LOCK_CHIME_FILENAME = "LockChime.wav"
 MAX_LOCK_CHIME_SIZE = 1024 * 1024  # 1 MiB
@@ -142,6 +145,74 @@ def iter_mounted_partitions():
         if os.path.isdir(mount_path):
             yield part, mount_path
 
+
+def get_teslacam_path():
+    """Get the TeslaCam path based on current mode."""
+    mode = current_mode()
+    
+    if mode == "present":
+        # Use read-only mount in present mode
+        ro_path = os.path.join(RO_MNT_DIR, "part1-ro", "TeslaCam")
+        if os.path.isdir(ro_path):
+            return ro_path
+    elif mode == "edit":
+        # Use read-write mount in edit mode
+        rw_path = os.path.join(MNT_DIR, "part1", "TeslaCam")
+        if os.path.isdir(rw_path):
+            return rw_path
+    
+    return None
+
+
+def get_video_files(folder_path):
+    """Get all video files from a folder with metadata."""
+    video_extensions = ('.mp4', '.avi', '.mov', '.mkv')
+    videos = []
+    
+    try:
+        for entry in os.scandir(folder_path):
+            if entry.is_file() and entry.name.lower().endswith(video_extensions):
+                try:
+                    stat_info = entry.stat()
+                    videos.append({
+                        'name': entry.name,
+                        'path': entry.path,
+                        'size': stat_info.st_size,
+                        'size_mb': round(stat_info.st_size / (1024 * 1024), 2),
+                        'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                        'timestamp': stat_info.st_mtime
+                    })
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    
+    # Sort by modification time, newest first
+    videos.sort(key=lambda x: x['timestamp'], reverse=True)
+    return videos
+
+
+def get_teslacam_folders():
+    """Get available TeslaCam subfolders."""
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return []
+    
+    folders = []
+    try:
+        for entry in os.scandir(teslacam_path):
+            if entry.is_dir():
+                folders.append({
+                    'name': entry.name,
+                    'path': entry.path
+                })
+    except OSError:
+        pass
+    
+    folders.sort(key=lambda x: x['name'])
+    return folders
+
+
 HTML_TEMPLATE = """
 <!doctype html>
 <html>
@@ -153,35 +224,75 @@ HTML_TEMPLATE = """
     {% endif %}
     <title>Tesla USB Gadget Control</title>
     <style>
+        * {
+            box-sizing: border-box;
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            padding: 20px;
-            max-width: 600px;
-            margin: 0 auto;
+            margin: 0;
+            padding: 0;
             background-color: #f5f5f5;
+        }
+        .navbar {
+            background-color: #2c3e50;
+            color: white;
+            padding: 15px 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .navbar-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .navbar h1 {
+            margin: 0;
+            font-size: 20px;
+            color: white;
+        }
+        .nav-links {
+            display: flex;
+            gap: 20px;
+        }
+        .nav-links a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+        .nav-links a:hover {
+            background-color: rgba(255,255,255,0.1);
+        }
+        .nav-links a.active {
+            background-color: rgba(255,255,255,0.2);
+        }
+        .main-content {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 0 20px;
         }
         .container {
             background: white;
             padding: 30px;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
         }
-        h1 {
+        h1, h2 {
             color: #333;
-            text-align: center;
-            margin-bottom: 30px;
+            margin-top: 0;
         }
         button {
-            padding: 15px 25px;
-            margin: 10px;
+            padding: 12px 25px;
+            margin: 10px 5px;
             border: none;
             border-radius: 5px;
             font-size: 16px;
             cursor: pointer;
-            width: 100%;
-            max-width: 250px;
-            display: block;
-            margin: 10px auto;
+            transition: opacity 0.2s;
         }
         .present-btn {
             background-color: #007bff;
@@ -189,6 +300,10 @@ HTML_TEMPLATE = """
         }
         .edit-btn {
             background-color: #28a745;
+            color: white;
+        }
+        .set-chime-btn {
+            background-color: #6f42c1;
             color: white;
         }
         button:hover {
@@ -200,21 +315,21 @@ HTML_TEMPLATE = """
         .messages .success {
             background-color: #d4edda;
             color: #155724;
-            padding: 10px;
+            padding: 12px;
             border-radius: 5px;
             margin: 5px 0;
         }
         .messages .info {
             background-color: #d1ecf1;
             color: #0c5460;
-            padding: 10px;
+            padding: 12px;
             border-radius: 5px;
             margin: 5px 0;
         }
         .messages .error {
             background-color: #f8d7da;
             color: #721c24;
-            padding: 10px;
+            padding: 12px;
             border-radius: 5px;
             margin: 5px 0;
         }
@@ -232,6 +347,7 @@ HTML_TEMPLATE = """
             margin-bottom: 20px;
             padding: 12px;
             border-radius: 6px;
+            font-size: 16px;
         }
         .status-label.present {
             background-color: #d4edda;
@@ -281,17 +397,106 @@ HTML_TEMPLATE = """
             border: 1px solid #ced4da;
             font-size: 15px;
         }
-        .set-chime-btn {
-            background-color: #6f42c1;
+        .folder-selector {
+            margin: 20px 0;
+        }
+        .folder-selector select {
+            width: 100%;
+            padding: 12px;
+            border-radius: 4px;
+            border: 1px solid #ced4da;
+            font-size: 15px;
+        }
+        .video-table-container {
+            max-height: 600px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            margin: 20px 0;
+        }
+        .video-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .video-table th {
+            background-color: #f8f9fa;
+            color: #495057;
+            font-weight: 600;
+            padding: 12px;
+            text-align: left;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            border-bottom: 2px solid #dee2e6;
+        }
+        .video-table td {
+            padding: 12px;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .video-table tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+        .video-name {
+            color: #007bff;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .video-name:hover {
+            text-decoration: underline;
+        }
+        .btn-download {
+            background-color: #17a2b8;
             color: white;
+            padding: 6px 12px;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 14px;
+            display: inline-block;
+        }
+        .btn-download:hover {
+            background-color: #138496;
+        }
+        #videoPlayer {
+            width: 100%;
+            max-width: 100%;
+            margin: 20px 0;
+            display: none;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .no-videos {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        @media (max-width: 768px) {
+            .navbar-content {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .nav-links {
+                margin-top: 10px;
+                flex-wrap: wrap;
+            }
+            .video-table th:nth-child(3),
+            .video-table td:nth-child(3) {
+                display: none;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🚗 Tesla USB Gadget Control</h1>
-        <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
-        
+    <div class="navbar">
+        <div class="navbar-content">
+            <h1>🚗 Tesla USB Gadget Control</h1>
+            <div class="nav-links">
+                <a href="{{ url_for('index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
+                <a href="{{ url_for('file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="main-content">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 <div class="messages">
@@ -302,54 +507,155 @@ HTML_TEMPLATE = """
             {% endif %}
         {% endwith %}
         
-        <form method="post" action="{{url_for('present_usb')}}">
-            <button type="submit" class="present-btn">📱 Present USB Gadget</button>
-        </form>
-        
-        <form method="post" action="{{url_for('edit_usb')}}">
-            <button type="submit" class="edit-btn">📁 Edit USB (mount + Samba)</button>
-        </form>
-        
-        <div class="info-box">
-            <strong>Present USB Mode:</strong> Pi appears as USB storage to Tesla<br>
-            <strong>Edit USB Mode:</strong> Partitions mounted locally with Samba access
-        </div>
-
-        {% if share_paths %}
-        <div class="shares">
-            <strong>Network Shares:</strong>
-            <ul>
-                {% for path in share_paths %}
-                <li><code>{{ path }}</code></li>
-                {% endfor %}
-            </ul>
-        </div>
-        {% endif %}
-
-        {% if show_lock_chime %}
-        <div class="lock-chime">
-            <h2>Custom Lock Chime</h2>
-            {% if not lock_chime_ready %}
-            <p>Switch to Edit Mode to manage the custom lock chime.</p>
-            {% elif wav_options %}
-            <form method="post" action="{{ url_for('set_chime') }}">
-                <label for="selected_wav">Choose a WAV file to use as LockChime:</label>
-                <select name="selected_wav" id="selected_wav" required>
-                    {% for option in wav_options %}
-                    <option value="{{ option.value }}">{{ option.label }}</option>
-                    {% endfor %}
-                </select>
-                <button type="submit" class="set-chime-btn">🔔 Set Chime</button>
-            </form>
-            {% else %}
-            <p>No additional WAV files found in the root of gadget_part1 or gadget_part2.</p>
-            {% endif %}
-        </div>
-        {% endif %}
+        {% block content %}{% endblock %}
     </div>
 </body>
 </html>
 """
+
+HTML_CONTROL_PAGE = """
+{% extends HTML_TEMPLATE %}
+{% block content %}
+<div class="container">
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    <form method="post" action="{{url_for('present_usb')}}" style="display: inline;">
+        <button type="submit" class="present-btn">📱 Present USB Gadget</button>
+    </form>
+    
+    <form method="post" action="{{url_for('edit_usb')}}" style="display: inline;">
+        <button type="submit" class="edit-btn">📁 Edit USB (mount + Samba)</button>
+    </form>
+    
+    <div class="info-box">
+        <strong>Present USB Mode:</strong> Pi appears as USB storage to Tesla. Files are accessible in read-only mode locally.<br>
+        <strong>Edit USB Mode:</strong> Partitions mounted locally with Samba access for full read-write access.
+    </div>
+
+    {% if share_paths %}
+    <div class="shares">
+        <strong>Network Shares:</strong>
+        <ul>
+            {% for path in share_paths %}
+            <li><code>{{ path }}</code></li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if show_lock_chime %}
+    <div class="lock-chime">
+        <h2>Custom Lock Chime</h2>
+        {% if not lock_chime_ready %}
+        <p>Switch to Edit Mode to manage the custom lock chime.</p>
+        {% elif wav_options %}
+        <form method="post" action="{{ url_for('set_chime') }}">
+            <label for="selected_wav">Choose a WAV file to use as LockChime:</label>
+            <select name="selected_wav" id="selected_wav" required>
+                {% for option in wav_options %}
+                <option value="{{ option.value }}">{{ option.label }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="set-chime-btn">🔔 Set Chime</button>
+        </form>
+        {% else %}
+        <p>No additional WAV files found in the root of gadget_part1 or gadget_part2.</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+"""
+
+HTML_BROWSER_PAGE = """
+{% extends HTML_TEMPLATE %}
+{% block content %}
+<div class="container">
+    <h2>📹 TeslaCam Video Browser</h2>
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    {% if not teslacam_available %}
+    <div class="no-videos">
+        <p><strong>TeslaCam folder is not accessible.</strong></p>
+        <p>Make sure the system is in Present or Edit mode and the TeslaCam folder exists.</p>
+    </div>
+    {% elif folders %}
+    <div class="folder-selector">
+        <label for="folderSelect"><strong>Select Folder:</strong></label>
+        <select id="folderSelect" onchange="loadFolder(this.value)">
+            {% for folder in folders %}
+            <option value="{{ folder.name }}" {% if folder.name == current_folder %}selected{% endif %}>
+                {{ folder.name }}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    
+    <video id="videoPlayer" controls></video>
+    
+    {% if videos %}
+    <div class="video-table-container">
+        <table class="video-table">
+            <thead>
+                <tr>
+                    <th>Filename</th>
+                    <th>Size</th>
+                    <th>Modified</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for video in videos %}
+                <tr>
+                    <td>
+                        <a href="#" class="video-name" onclick="playVideo('{{ video.name }}'); return false;">
+                            {{ video.name }}
+                        </a>
+                    </td>
+                    <td>{{ video.size_mb }} MB</td>
+                    <td>{{ video.modified }}</td>
+                    <td>
+                        <a href="{{ url_for('download_video', folder=current_folder, filename=video.name) }}" 
+                           class="btn-download" download>
+                            ⬇️ Download
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="no-videos">
+        <p>No videos found in this folder.</p>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="no-videos">
+        <p>No TeslaCam folders found.</p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+function loadFolder(folderName) {
+    window.location.href = "{{ url_for('file_browser') }}?folder=" + encodeURIComponent(folderName);
+}
+
+function playVideo(filename) {
+    const videoPlayer = document.getElementById('videoPlayer');
+    const folder = document.getElementById('folderSelect').value;
+    videoPlayer.src = "{{ url_for('stream_video', folder='FOLDER_PLACEHOLDER', filename='FILE_PLACEHOLDER') }}"
+        .replace('FOLDER_PLACEHOLDER', encodeURIComponent(folder))
+        .replace('FILE_PLACEHOLDER', encodeURIComponent(filename));
+    videoPlayer.style.display = 'block';
+    videoPlayer.play();
+    videoPlayer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+</script>
+{% endblock %}
+"""
+
 
 def run_script(script_name, background=False):
     """Execute a script and return success status and message."""
@@ -597,6 +903,7 @@ def replace_lock_chime(source_path, destination_path):
     if os.path.isfile(backup_path):
         os.remove(backup_path)
 
+
 @app.route("/")
 def index():
     """Main page with control buttons."""
@@ -605,8 +912,12 @@ def index():
     show_lock_chime = token != "present"
     wav_options = list_available_wavs() if lock_chime_ready else []
     
+    # Render using template inheritance
+    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_CONTROL_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
+    
     return render_template_string(
-        HTML_TEMPLATE,
+        combined_template,
+        page='control',
         mode_label=label,
         mode_class=css_class,
         share_paths=share_paths,
@@ -616,6 +927,87 @@ def index():
         wav_options=wav_options,
         auto_refresh=False,
     )
+
+
+@app.route("/videos")
+def file_browser():
+    """File browser page for TeslaCam videos."""
+    token, label, css_class, share_paths = mode_display()
+    teslacam_path = get_teslacam_path()
+    
+    if not teslacam_path:
+        combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_BROWSER_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
+        return render_template_string(
+            combined_template,
+            page='browser',
+            mode_label=label,
+            mode_class=css_class,
+            teslacam_available=False,
+            folders=[],
+            videos=[],
+            current_folder=None
+        )
+    
+    folders = get_teslacam_folders()
+    current_folder = request.args.get('folder', folders[0]['name'] if folders else None)
+    videos = []
+    
+    if current_folder:
+        folder_path = os.path.join(teslacam_path, current_folder)
+        if os.path.isdir(folder_path):
+            videos = get_video_files(folder_path)
+    
+    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_BROWSER_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
+    
+    return render_template_string(
+        combined_template,
+        page='browser',
+        mode_label=label,
+        mode_class=css_class,
+        teslacam_available=True,
+        folders=folders,
+        videos=videos,
+        current_folder=current_folder
+    )
+
+
+@app.route("/videos/stream/<folder>/<filename>")
+def stream_video(folder, filename):
+    """Stream a video file."""
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return "TeslaCam not accessible", 404
+    
+    # Sanitize inputs
+    folder = os.path.basename(folder)
+    filename = os.path.basename(filename)
+    
+    video_path = os.path.join(teslacam_path, folder, filename)
+    
+    if not os.path.isfile(video_path):
+        return "Video not found", 404
+    
+    return send_file(video_path, mimetype='video/mp4')
+
+
+@app.route("/videos/download/<folder>/<filename>")
+def download_video(folder, filename):
+    """Download a video file."""
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return "TeslaCam not accessible", 404
+    
+    # Sanitize inputs
+    folder = os.path.basename(folder)
+    filename = os.path.basename(filename)
+    
+    video_path = os.path.join(teslacam_path, folder, filename)
+    
+    if not os.path.isfile(video_path):
+        return "Video not found", 404
+    
+    return send_file(video_path, as_attachment=True, download_name=filename)
+
 
 @app.route("/present_usb", methods=["POST"])
 def present_usb():
@@ -645,6 +1037,7 @@ def present_usb():
         flash(f"Error: {str(e)}", "error")
     
     return redirect(url_for("index"))
+
 
 @app.route("/edit_usb", methods=["POST"])
 def edit_usb():
@@ -788,6 +1181,7 @@ def set_chime():
 
     return redirect(url_for("index"))
 
+
 @app.route("/status")
 def status():
     """Simple status endpoint for health checks."""
@@ -800,6 +1194,7 @@ def status():
         "mode_class": css_class,
         "share_paths": share_paths,
     }
+
 
 if __name__ == "__main__":
     print(f"Starting Tesla USB Gadget Web Control")

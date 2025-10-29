@@ -53,6 +53,18 @@ if lsmod | grep -q '^g_mass_storage'; then
   sync
   sleep 1
   
+  # Unmount any read-only mounts from present mode first
+  echo "Unmounting read-only mounts from present mode..."
+  RO_MNT_DIR="/mnt/gadget"
+  for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+    if mountpoint -q "$mp" 2>/dev/null; then
+      echo "  Unmounting $mp..."
+      if ! safe_unmount_dir "$mp"; then
+        echo "  Warning: Could not cleanly unmount $mp"
+      fi
+    fi
+  done
+  
   # Try to unbind the UDC (USB Device Controller) first to cleanly disconnect
   UDC_DIR="/sys/class/udc"
   if [ -d "$UDC_DIR" ]; then

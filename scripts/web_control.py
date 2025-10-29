@@ -1283,11 +1283,11 @@ HTML_LOCK_CHIMES_PAGE = """
                     <td>{{ wav.size_str }}</td>
                     <td>
                         <audio controls preload="none" style="height: 30px; margin-right: 10px;">
-                            <source src="{{ url_for('play_lock_chime', partition=wav.partition_key, filename=wav.filename) }}" type="audio/wav">
+                            <source src="{{ url_for('play_lock_chime', partition=wav.partition_key, filename=wav.filename) }}?v={{ wav.mtime }}_{{ wav.size }}" type="audio/wav">
                         </audio>
                         {% if mode_token == 'edit' %}
                             {% if wav.filename != 'LockChime.wav' %}
-                            <form method="post" action="{{ url_for('set_as_chime', partition=wav.partition_key, filename=wav.filename) }}" style="display: inline;">
+                            <form method="post" action="{{ url_for('set_as_chime', partition=wav.partition_key, filename=wav.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
                                 <button type="submit" class="set-chime-btn">🔔 Set as Chime</button>
                             </form>
                             <form method="post" action="{{ url_for('delete_lock_chime', partition=wav.partition_key, filename=wav.filename) }}" style="display: inline;" 
@@ -1313,6 +1313,41 @@ HTML_LOCK_CHIMES_PAGE = """
     </div>
     {% endif %}
 </div>
+
+<!-- Loading overlay for Set as Chime operation -->
+<div id="chimeLoadingOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center; align-items: center;">
+    <div style="text-align: center; color: white;">
+        <div class="spinner" style="border: 8px solid #f3f3f3; border-top: 8px solid #007bff; border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite; margin: 0 auto 20px;"></div>
+        <h3>Setting lock chime...</h3>
+        <p>Please wait, this may take a few seconds</p>
+    </div>
+</div>
+
+<style>
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+</style>
+
+<script>
+function handleSetChime(form) {
+    // Disable all Set as Chime buttons
+    const allChimeButtons = document.querySelectorAll('.set-chime-btn');
+    allChimeButtons.forEach(btn => {
+        btn.disabled = true;
+        btn.style.opacity = '0.5';
+        btn.style.cursor = 'not-allowed';
+    });
+    
+    // Show loading overlay
+    const overlay = document.getElementById('chimeLoadingOverlay');
+    overlay.style.display = 'flex';
+    
+    // Allow form to submit
+    return true;
+}
+</script>
 {% endblock %}
 """
 
@@ -1551,6 +1586,13 @@ def replace_lock_chime(source_path, destination_path):
     if src_size == 0:
         raise ValueError("Selected WAV file is empty.")
 
+    # Calculate MD5 hash of source file
+    source_md5 = hashlib.md5()
+    with open(source_path, "rb") as src_f:
+        for chunk in iter(lambda: src_f.read(8192), b""):
+            source_md5.update(chunk)
+    source_hash = source_md5.hexdigest()
+
     dest_dir = os.path.dirname(destination_path)
     backup_path = os.path.join(dest_dir, "oldLockChime.wav")
     temp_path = os.path.join(dest_dir, ".LockChime.wav.tmp")
@@ -1594,7 +1636,7 @@ def replace_lock_chime(source_path, destination_path):
             os.fsync(temp_file.fileno())
         
         subprocess.run(["sync"], check=False, timeout=10)
-        time.sleep(0.2)
+        time.sleep(0.5)
         
         # Now rename temp to final name - this creates a NEW directory entry
         # while the temp file data is already fully written
@@ -1608,8 +1650,14 @@ def replace_lock_chime(source_path, destination_path):
         except Exception:
             pass
         
-        # Final full sync
+        # Force sync of the destination file itself
+        with open(destination_path, "r+b") as dest_file:
+            dest_file.flush()
+            os.fsync(dest_file.fileno())
+        
+        # Final full sync - critical for exFAT
         subprocess.run(["sync"], check=False, timeout=10)
+        time.sleep(1.0)
         
         # Drop ALL caches again
         try:
@@ -1621,8 +1669,22 @@ def replace_lock_chime(source_path, destination_path):
         except Exception:
             pass
         
-        # Extra time for exFAT to settle
-        time.sleep(0.2)
+        # Extra time for exFAT to settle and ensure all buffers are flushed
+        time.sleep(0.5)
+        
+        # Verify the file contents match by comparing MD5 hashes
+        dest_md5 = hashlib.md5()
+        with open(destination_path, "rb") as dst_f:
+            for chunk in iter(lambda: dst_f.read(8192), b""):
+                dest_md5.update(chunk)
+        dest_hash = dest_md5.hexdigest()
+        
+        if source_hash != dest_hash:
+            raise IOError(
+                f"File verification failed - MD5 mismatch after sync\n"
+                f"Source: {source_hash}\n"
+                f"Dest:   {dest_hash}"
+            )
             
     except Exception:
         # Clean up temp file if it exists
@@ -2006,12 +2068,14 @@ def lock_chimes():
             full_path = os.path.join(mount_path, entry)
             if os.path.isfile(full_path):
                 size = os.path.getsize(full_path)
+                mtime = int(os.path.getmtime(full_path))
                 wav_files.append({
                     "filename": entry,
                     "size": size,
                     "size_str": format_file_size(size),
                     "partition": PART_LABEL_MAP.get(part, part),
                     "partition_key": part,
+                    "mtime": mtime,
                 })
     
     # Sort with LockChime.wav first
@@ -2122,10 +2186,22 @@ def set_as_chime(partition, filename):
         replace_lock_chime(source_path, target_path)
         removed_duplicates = remove_other_lock_chimes(partition)
         
+        # Additional sync after all operations
         subprocess.run(["sync"], check=False, timeout=10)
-        time.sleep(1)
-        restart_samba_services()
         time.sleep(2)
+        
+        # Drop caches one more time to ensure Samba/web sees fresh data
+        try:
+            subprocess.run(
+                ["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
+                check=False,
+                timeout=5
+            )
+        except Exception:
+            pass
+        
+        restart_samba_services()
+        time.sleep(3)
         close_samba_share(partition)
         
         flash(f"Set {filename} as active lock chime", "success")
@@ -2135,7 +2211,8 @@ def set_as_chime(partition, filename):
     except Exception as e:
         flash(f"Failed to set lock chime: {str(e)}", "error")
     
-    return redirect(url_for("lock_chimes"))
+    # Add timestamp to force browser cache refresh
+    return redirect(url_for("lock_chimes", _=int(time.time())))
 
 
 @app.route("/lock_chimes/delete/<partition>/<filename>", methods=["POST"])

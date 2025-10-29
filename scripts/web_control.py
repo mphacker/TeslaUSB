@@ -1361,8 +1361,8 @@ HTML_LIGHT_SHOWS_PAGE = """
     {% if mode_token == 'edit' %}
     <div class="folder-controls">
         <form method="post" action="{{ url_for('upload_light_show') }}" enctype="multipart/form-data" style="margin-bottom: 20px;">
-            <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File (fseq or mp3):</label>
-            <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3" required style="margin-right: 10px;">
+            <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File (fseq, mp3, or wav):</label>
+            <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3,.wav" required style="margin-right: 10px;">
             <button type="submit" class="edit-btn">📤 Upload</button>
         </form>
     </div>
@@ -1388,17 +1388,21 @@ HTML_LIGHT_SHOWS_PAGE = """
                             <strong>FSEQ:</strong> {{ group.fseq_file.filename }} ({{ group.fseq_file.size_str }})
                         </div>
                         {% endif %}
-                        {% if group.mp3_file %}
+                        {% if group.audio_file %}
                         <div>
-                            <strong>MP3:</strong> {{ group.mp3_file.filename }} ({{ group.mp3_file.size_str }})
+                            <strong>Audio:</strong> {{ group.audio_file.filename }} ({{ group.audio_file.size_str }})
                         </div>
                         {% endif %}
                     </td>
                     <td>
-                        {% if group.mp3_file %}
+                        {% if group.audio_file %}
                         <div style="margin-bottom: 8px;">
                             <audio controls preload="none" style="width: 100%; max-width: 200px; height: 30px;">
-                                <source src="{{ url_for('play_light_show_audio', partition=group.partition_key, filename=group.mp3_file.filename) }}" type="audio/mpeg">
+                                {% if group.audio_file.filename.lower().endswith('.mp3') %}
+                                <source src="{{ url_for('play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/mpeg">
+                                {% else %}
+                                <source src="{{ url_for('play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/wav">
+                                {% endif %}
                             </audio>
                         </div>
                         {% endif %}
@@ -2254,7 +2258,7 @@ def light_shows():
     """Light shows management page."""
     token, label, css_class, share_paths = mode_display()
     
-    # Get all fseq and mp3 files from LightShow folders
+    # Get all fseq, mp3, and wav files from LightShow folders
     files_dict = {}  # Group files by base name
     for part, mount_path in iter_all_partitions():
         lightshow_dir = os.path.join(mount_path, "LightShow")
@@ -2268,7 +2272,7 @@ def light_shows():
         
         for entry in entries:
             lower_entry = entry.lower()
-            if not (lower_entry.endswith(".fseq") or lower_entry.endswith(".mp3")):
+            if not (lower_entry.endswith(".fseq") or lower_entry.endswith(".mp3") or lower_entry.endswith(".wav")):
                 continue
             
             full_path = os.path.join(lightshow_dir, entry)
@@ -2280,7 +2284,7 @@ def light_shows():
                     files_dict[base_name] = {
                         "base_name": base_name,
                         "fseq_file": None,
-                        "mp3_file": None,
+                        "audio_file": None,
                         "partition_key": part,
                         "partition": PART_LABEL_MAP.get(part, part),
                     }
@@ -2292,8 +2296,8 @@ def light_shows():
                         "size": size,
                         "size_str": format_file_size(size),
                     }
-                elif lower_entry.endswith(".mp3"):
-                    files_dict[base_name]["mp3_file"] = {
+                elif lower_entry.endswith(".mp3") or lower_entry.endswith(".wav"):
+                    files_dict[base_name]["audio_file"] = {
                         "filename": entry,
                         "size": size,
                         "size_str": format_file_size(size),
@@ -2331,11 +2335,18 @@ def play_light_show_audio(partition, filename):
     lightshow_dir = os.path.join(mount_path, "LightShow")
     file_path = os.path.join(lightshow_dir, filename)
     
-    if not os.path.isfile(file_path) or not filename.lower().endswith(".mp3"):
+    lower_filename = filename.lower()
+    if not os.path.isfile(file_path) or not (lower_filename.endswith(".mp3") or lower_filename.endswith(".wav")):
         flash("File not found", "error")
         return redirect(url_for("light_shows"))
     
-    return send_file(file_path, mimetype="audio/mpeg")
+    # Determine MIME type based on file extension
+    if lower_filename.endswith(".wav"):
+        mimetype = "audio/wav"
+    else:
+        mimetype = "audio/mpeg"
+    
+    return send_file(file_path, mimetype=mimetype)
 
 
 @app.route("/light_shows/upload", methods=["POST"])
@@ -2355,8 +2366,8 @@ def upload_light_show():
         return redirect(url_for("light_shows"))
     
     lower_filename = file.filename.lower()
-    if not (lower_filename.endswith(".fseq") or lower_filename.endswith(".mp3")):
-        flash("Only fseq and mp3 files are allowed", "error")
+    if not (lower_filename.endswith(".fseq") or lower_filename.endswith(".mp3") or lower_filename.endswith(".wav")):
+        flash("Only fseq, mp3, and wav files are allowed", "error")
         return redirect(url_for("light_shows"))
     
     # Save to part2 LightShow folder
@@ -2398,11 +2409,11 @@ def delete_light_show(partition, base_name):
     
     lightshow_dir = os.path.join(mount_path, "LightShow")
     
-    # Try to delete both fseq and mp3 files
+    # Try to delete fseq, mp3, and wav files
     deleted_files = []
     errors = []
     
-    for ext in [".fseq", ".mp3"]:
+    for ext in [".fseq", ".mp3", ".wav"]:
         filename = base_name + ext
         file_path = os.path.join(lightshow_dir, filename)
         

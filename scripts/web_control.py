@@ -176,13 +176,16 @@ def get_video_files(folder_path):
             if entry.is_file() and entry.name.lower().endswith(video_extensions):
                 try:
                     stat_info = entry.stat()
+                    session_info = parse_session_from_filename(entry.name)
                     videos.append({
                         'name': entry.name,
                         'path': entry.path,
                         'size': stat_info.st_size,
                         'size_mb': round(stat_info.st_size / (1024 * 1024), 2),
                         'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
-                        'timestamp': stat_info.st_mtime
+                        'timestamp': stat_info.st_mtime,
+                        'session': session_info['session'] if session_info else None,
+                        'camera': session_info['camera'] if session_info else None
                     })
                 except OSError:
                     continue
@@ -192,6 +195,33 @@ def get_video_files(folder_path):
     # Sort by modification time, newest first
     videos.sort(key=lambda x: x['timestamp'], reverse=True)
     return videos
+
+
+def parse_session_from_filename(filename):
+    """
+    Parse Tesla video filename to extract session and camera info.
+    Format: 2025-10-29_10-39-36-right_pillar.mp4
+    Returns: {'session': '2025-10-29_10-39-36', 'camera': 'right_pillar'}
+    """
+    import re
+    # Match pattern: YYYY-MM-DD_HH-MM-SS-camera.ext
+    pattern = r'^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.\w+$'
+    match = re.match(pattern, filename)
+    if match:
+        return {
+            'session': match.group(1),
+            'camera': match.group(2)
+        }
+    return None
+
+
+def get_session_videos(folder_path, session_id):
+    """Get all videos from a specific session."""
+    all_videos = get_video_files(folder_path)
+    session_videos = [v for v in all_videos if v['session'] == session_id]
+    # Sort by camera name for consistent ordering
+    session_videos.sort(key=lambda x: x['camera'] or '')
+    return session_videos
 
 
 def get_teslacam_folders():
@@ -604,6 +634,19 @@ HTML_TEMPLATE = """
         .btn-download:hover {
             background-color: #138496;
         }
+        .btn-session {
+            background-color: #6f42c1;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 14px;
+            display: inline-block;
+            margin-right: 5px;
+        }
+        .btn-session:hover {
+            background-color: #5a32a3;
+        }
         .btn-delete {
             background-color: #dc3545;
             color: white;
@@ -665,6 +708,78 @@ HTML_TEMPLATE = """
             padding: 40px;
             color: #6c757d;
         }
+        .session-grid {
+            display: grid;
+            gap: 15px;
+            margin: 20px 0;
+            max-width: 1400px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .session-grid.grid-1 {
+            grid-template-columns: 1fr;
+        }
+        .session-grid.grid-2 {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        .session-grid.grid-3 {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        .session-grid.grid-4 {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        /* Tesla camera layout: 2 rows x 3 columns */
+        .session-grid.tesla-layout {
+            grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: repeat(2, auto);
+            gap: 10px;
+        }
+        /* Specific positioning for Tesla cameras */
+        .tesla-left_pillar { grid-row: 1; grid-column: 1; }
+        .tesla-front { grid-row: 1; grid-column: 2; }
+        .tesla-right_pillar { grid-row: 1; grid-column: 3; }
+        .tesla-left_repeater { grid-row: 2; grid-column: 1; }
+        .tesla-back { grid-row: 2; grid-column: 2; }
+        .tesla-right_repeater { grid-row: 2; grid-column: 3; }
+        /* Fallback for any other camera names */
+        .tesla-unknown {
+            grid-column: span 1;
+        }
+        .session-video-container {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .session-video-container video {
+            width: 100%;
+            max-height: 280px;
+            border-radius: 4px;
+            background: #000;
+        }
+        .session-video-label {
+            text-align: center;
+            font-weight: 600;
+            margin-top: 8px;
+            color: #495057;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .session-video-label:hover {
+            color: #007bff;
+        }
+        .session-controls {
+            text-align: center;
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .session-controls button {
+            margin: 5px;
+            padding: 10px 20px;
+            font-size: 16px;
+        }
         @media (max-width: 768px) {
             .navbar-content {
                 flex-direction: column;
@@ -673,6 +788,26 @@ HTML_TEMPLATE = """
             .nav-links {
                 margin-top: 10px;
                 flex-wrap: wrap;
+            }
+            .session-grid.grid-2,
+            .session-grid.grid-3,
+            .session-grid.grid-4 {
+                grid-template-columns: 1fr;
+            }
+            /* Keep Tesla layout on mobile but make it narrower */
+            .session-grid.tesla-layout {
+                grid-template-columns: repeat(3, 1fr);
+                gap: 5px;
+            }
+            .session-video-container {
+                padding: 5px;
+            }
+            .session-video-container video {
+                max-height: 150px;
+            }
+            .session-video-label {
+                font-size: 11px;
+                margin-top: 4px;
             }
             .video-table th:nth-child(1),
             .video-table td:nth-child(1),
@@ -868,10 +1003,20 @@ HTML_BROWSER_PAGE = """
                         <a href="#" class="video-name" onclick="playVideo('{{ video.name }}'); return false;">
                             {{ video.name }}
                         </a>
+                        {% if video.session %}
+                        <br><small style="color: #6c757d;">Session: {{ video.session }} | Camera: {{ video.camera }}</small>
+                        {% endif %}
                     </td>
                     <td>{{ video.size_mb }} MB</td>
                     <td>{{ video.modified }}</td>
                     <td>
+                        {% if video.session %}
+                        <a href="{{ url_for('view_session', folder=current_folder, session=video.session) }}" 
+                           class="btn-session" 
+                           title="View all cameras for this session">
+                            📹 Session
+                        </a>
+                        {% endif %}
                         <a href="{{ url_for('download_video', folder=current_folder, filename=video.name) }}" 
                            class="btn-download" download>
                             ⬇️ Download
@@ -916,6 +1061,160 @@ function playVideo(filename) {
     videoPlayer.play();
     videoPlayer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
+
+// Auto-play video if 'play' parameter is in URL
+window.addEventListener('DOMContentLoaded', function() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const videoToPlay = urlParams.get('play');
+    if (videoToPlay) {
+        // Small delay to ensure page is fully loaded
+        setTimeout(function() {
+            playVideo(videoToPlay);
+        }, 300);
+    }
+});
+</script>
+{% endblock %}
+"""
+
+HTML_SESSION_PAGE = """
+{% extends HTML_TEMPLATE %}
+{% block content %}
+<div class="container">
+    <h2>📹 Multi-Camera Session View</h2>
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    <div class="info-box">
+        <strong>Session:</strong> {{ session_id }}<br>
+        <strong>Folder:</strong> {{ folder }}<br>
+        <strong>Cameras:</strong> {{ videos|length }} view(s)
+    </div>
+    
+    <div class="session-controls">
+        <button onclick="playAll()" class="present-btn">▶️ Play All</button>
+        <button onclick="pauseAll()" class="edit-btn">⏸️ Pause All</button>
+        <button onclick="seekAll(0)" class="set-chime-btn">⏮️ Restart</button>
+        <button onclick="syncAll()" class="present-btn">🔄 Sync Playback</button>
+    </div>
+    
+    <div class="session-grid tesla-layout">
+        {% for video in videos %}
+        <div class="session-video-container tesla-{{ video.camera|replace('_', '_')|lower }}">
+            <video id="video-{{ loop.index0 }}" controls preload="metadata"
+                   src="{{ url_for('stream_video', folder=folder, filename=video.name) }}">
+                Your browser does not support the video tag.
+            </video>
+            <div class="session-video-label" onclick="openFullVideo('{{ video.name }}')">
+                📹 {{ video.camera|replace('_', ' ')|title }}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    
+    <div style="text-align: center; margin-top: 20px;">
+        <a href="{{ url_for('file_browser', folder=folder) }}" class="btn-download">
+            ← Back to Video List
+        </a>
+    </div>
+</div>
+
+<script>
+// Get all video elements
+const videos = document.querySelectorAll('.session-video-container video');
+
+// Open individual video in full view
+function openFullVideo(filename) {
+    window.location.href = "{{ url_for('file_browser', folder=folder) }}&play=" + encodeURIComponent(filename);
+}
+
+// Sync all videos to the first video's time
+function syncAll() {
+    if (videos.length === 0) return;
+    const masterTime = videos[0].currentTime;
+    videos.forEach((video, index) => {
+        if (index !== 0) {
+            video.currentTime = masterTime;
+        }
+    });
+}
+
+// Play all videos
+function playAll() {
+    syncAll(); // Sync before playing
+    videos.forEach(video => {
+        video.play().catch(e => console.log('Play failed:', e));
+    });
+}
+
+// Pause all videos
+function pauseAll() {
+    videos.forEach(video => video.pause());
+}
+
+// Seek all videos to a specific time
+function seekAll(time) {
+    videos.forEach(video => {
+        video.currentTime = time;
+    });
+}
+
+// Automatically sync videos when the first one plays
+if (videos.length > 0) {
+    videos[0].addEventListener('play', () => {
+        const masterTime = videos[0].currentTime;
+        videos.forEach((video, index) => {
+            if (index !== 0 && video.paused) {
+                video.currentTime = masterTime;
+                video.play().catch(e => console.log('Auto-play failed:', e));
+            }
+        });
+    });
+    
+    videos[0].addEventListener('pause', () => {
+        videos.forEach((video, index) => {
+            if (index !== 0) {
+                video.pause();
+            }
+        });
+    });
+    
+    videos[0].addEventListener('seeked', () => {
+        const masterTime = videos[0].currentTime;
+        videos.forEach((video, index) => {
+            if (index !== 0) {
+                video.currentTime = masterTime;
+            }
+        });
+    });
+}
+
+// Periodically re-sync videos during playback to handle drift
+let syncInterval;
+videos.forEach((video, index) => {
+    video.addEventListener('playing', () => {
+        if (index === 0 && !syncInterval) {
+            syncInterval = setInterval(() => {
+                const masterTime = videos[0].currentTime;
+                videos.forEach((v, i) => {
+                    if (i !== 0 && !v.paused) {
+                        const diff = Math.abs(v.currentTime - masterTime);
+                        // Re-sync if drift is more than 0.3 seconds
+                        if (diff > 0.3) {
+                            v.currentTime = masterTime;
+                        }
+                    }
+                });
+            }, 1000); // Check every second
+        }
+    });
+    
+    video.addEventListener('pause', () => {
+        if (index === 0 && syncInterval) {
+            clearInterval(syncInterval);
+            syncInterval = null;
+        }
+    });
+});
 </script>
 {% endblock %}
 """
@@ -1233,6 +1532,48 @@ def file_browser():
         folders=folders,
         videos=videos,
         current_folder=current_folder
+    )
+
+
+@app.route("/videos/session/<folder>/<session>")
+def view_session(folder, session):
+    """View all videos from a recording session in synchronized multi-camera view."""
+    token, label, css_class, share_paths = mode_display()
+    teslacam_path = get_teslacam_path()
+    
+    if not teslacam_path:
+        flash("TeslaCam path is not accessible", "error")
+        return redirect(url_for("file_browser"))
+    
+    # Sanitize inputs
+    folder = os.path.basename(folder)
+    folder_path = os.path.join(teslacam_path, folder)
+    
+    if not os.path.isdir(folder_path):
+        flash(f"Folder not found: {folder}", "error")
+        return redirect(url_for("file_browser"))
+    
+    # Get all videos for this session
+    session_videos = get_session_videos(folder_path, session)
+    
+    if not session_videos:
+        flash(f"No videos found for session: {session}", "error")
+        return redirect(url_for("file_browser", folder=folder))
+    
+    # Render using template inheritance
+    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", 
+        HTML_SESSION_PAGE.replace("{% extends HTML_TEMPLATE %}", "")
+        .replace("{% block content %}", "").replace("{% endblock %}", ""))
+    
+    return render_template_string(
+        combined_template,
+        page='session',
+        mode_label=label,
+        mode_class=css_class,
+        mode_token=token,
+        folder=folder,
+        session_id=session,
+        videos=session_videos
     )
 
 

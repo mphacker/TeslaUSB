@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ================= Configuration =================
-GADGET_DIR_DEFAULT="/home/mhacker/TeslaUSB"
+GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"
 IMG_NAME="usb_dual.img"
 PART1_SIZE="20G"  
 PART2_SIZE="16G"
@@ -18,7 +18,7 @@ SAMBA_PASS="tesla"   # <-- Configure the Samba password here
 if [ -n "${SUDO_USER-}" ]; then
   TARGET_USER="$SUDO_USER"
 else
-  TARGET_USER="mhacker"
+  TARGET_USER="pi"
 fi
 
 GADGET_DIR="$GADGET_DIR_DEFAULT"

@@ -21,7 +21,7 @@ This directory contains the template files and source scripts used by the Tesla 
 
 2. **Placeholders**: Template files contain placeholders like `__GADGET_DIR__`, `__TARGET_USER__`, etc. that get replaced during setup.
 
-3. **Output**: Configured files are copied to the gadget directory (e.g., `/home/mhacker/gadget/`) and made executable.
+3. **Output**: Configured files are copied to the gadget directory (e.g., `/home/pi/TeslaUSB/`) and made executable.
 
 ## Benefits of This Approach
 
@@ -42,7 +42,7 @@ To modify the behavior:
 
 | Placeholder | Description | Example |
 |-------------|-------------|---------|
-| `__GADGET_DIR__` | Installation directory | `/home/mhacker/gadget` |
+| `__GADGET_DIR__` | Installation directory | `/home/pi/TeslaUSB` |
 | `__IMG_NAME__` | Disk image filename | `usb_dual.img` |
 | `__MNT_DIR__` | Mount point directory | `/mnt/gadget` |
 | `__TARGET_USER__` | Target username | `mhacker` |

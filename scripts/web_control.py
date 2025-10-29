@@ -148,6 +148,54 @@ def iter_mounted_partitions():
             yield part, mount_path
 
 
+def iter_all_partitions():
+    """Yield all accessible USB partitions based on current mode."""
+    mode = current_mode()
+    
+    if mode == "present":
+        # Use read-only mounts in present mode
+        for part in USB_PARTITIONS:
+            ro_path = os.path.join(RO_MNT_DIR, f"{part}-ro")
+            if os.path.isdir(ro_path):
+                yield part, ro_path
+    else:
+        # Use read-write mounts in edit mode
+        for part in USB_PARTITIONS:
+            rw_path = os.path.join(MNT_DIR, part)
+            if os.path.isdir(rw_path):
+                yield part, rw_path
+
+
+def get_mount_path(partition):
+    """Get the mount path for a specific partition based on current mode."""
+    if partition not in USB_PARTITIONS:
+        return None
+    
+    mode = current_mode()
+    
+    if mode == "present":
+        # Use read-only mount in present mode
+        ro_path = os.path.join(RO_MNT_DIR, f"{partition}-ro")
+        if os.path.isdir(ro_path):
+            return ro_path
+    else:
+        # Use read-write mount in edit mode
+        rw_path = os.path.join(MNT_DIR, partition)
+        if os.path.isdir(rw_path):
+            return rw_path
+    
+    return None
+
+
+def format_file_size(size_bytes):
+    """Format file size in human-readable format."""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.2f} TB"
+
+
 def get_teslacam_path():
     """Get the TeslaCam path based on current mode."""
     mode = current_mode()
@@ -587,6 +635,7 @@ HTML_TEMPLATE = """
         .video-table-container {
             max-height: 600px;
             overflow-y: auto;
+            overflow-x: hidden;
             border: 1px solid #dee2e6;
             border-radius: 4px;
             margin: 20px 0;
@@ -825,6 +874,8 @@ HTML_TEMPLATE = """
             <div class="nav-links">
                 <a href="{{ url_for('index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
                 <a href="{{ url_for('file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
+                <a href="{{ url_for('lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
+                <a href="{{ url_for('light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
             </div>
         </div>
     </div>
@@ -878,27 +929,6 @@ HTML_CONTROL_PAGE = """
             <li><code>{{ path }}</code></li>
             {% endfor %}
         </ul>
-    </div>
-    {% endif %}
-
-    {% if show_lock_chime %}
-    <div class="lock-chime">
-        <h2>Custom Lock Chime</h2>
-        {% if not lock_chime_ready %}
-        <p>Switch to Edit Mode to manage the custom lock chime.</p>
-        {% elif wav_options %}
-        <form method="post" action="{{ url_for('set_chime') }}">
-            <label for="selected_wav">Choose a WAV file to use as LockChime:</label>
-            <select name="selected_wav" id="selected_wav" required>
-                {% for option in wav_options %}
-                <option value="{{ option.value }}">{{ option.label }}</option>
-                {% endfor %}
-            </select>
-            <button type="submit" class="set-chime-btn">🔔 Set Chime</button>
-        </form>
-        {% else %}
-        <p>No additional WAV files found in the root of gadget_part1 or gadget_part2.</p>
-        {% endif %}
     </div>
     {% endif %}
 </div>
@@ -1219,6 +1249,148 @@ videos.forEach((video, index) => {
 {% endblock %}
 """
 
+HTML_LOCK_CHIMES_PAGE = """
+{% extends HTML_TEMPLATE %}
+{% block content %}
+<div class="container">
+    <h2>🔔 Lock Chimes</h2>
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    {% if mode_token == 'edit' %}
+    <div class="folder-controls">
+        <form method="post" action="{{ url_for('upload_lock_chime') }}" enctype="multipart/form-data" style="margin-bottom: 20px;">
+            <label for="chime_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload WAV File:</label>
+            <input type="file" name="chime_file" id="chime_file" accept=".wav" required style="margin-right: 10px;">
+            <button type="submit" class="edit-btn">📤 Upload</button>
+        </form>
+    </div>
+    {% endif %}
+    
+    {% if wav_files %}
+    <div class="video-table-container">
+        <table class="video-table">
+            <thead>
+                <tr>
+                    <th>Filename</th>
+                    <th>Size</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for wav in wav_files %}
+                <tr>
+                    <td>{{ wav.filename }}</td>
+                    <td>{{ wav.size_str }}</td>
+                    <td>
+                        <audio controls preload="none" style="height: 30px; margin-right: 10px;">
+                            <source src="{{ url_for('play_lock_chime', partition=wav.partition_key, filename=wav.filename) }}" type="audio/wav">
+                        </audio>
+                        {% if mode_token == 'edit' %}
+                            {% if wav.filename != 'LockChime.wav' %}
+                            <form method="post" action="{{ url_for('set_as_chime', partition=wav.partition_key, filename=wav.filename) }}" style="display: inline;">
+                                <button type="submit" class="set-chime-btn">🔔 Set as Chime</button>
+                            </form>
+                            <form method="post" action="{{ url_for('delete_lock_chime', partition=wav.partition_key, filename=wav.filename) }}" style="display: inline;" 
+                                  onsubmit="return confirm('Are you sure you want to delete {{ wav.filename }}?');">
+                                <button type="submit" class="btn-delete">🗑️ Delete</button>
+                            </form>
+                            {% else %}
+                            <span style="color: #28a745; font-weight: 600;">✓ Active Chime</span>
+                            {% endif %}
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="info-box">
+        <p>No WAV files found in the root of the USB partitions.</p>
+        {% if mode_token != 'edit' %}
+        <p>Switch to Edit Mode to upload files.</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+"""
+
+HTML_LIGHT_SHOWS_PAGE = """
+{% extends HTML_TEMPLATE %}
+{% block content %}
+<div class="container">
+    <h2>💡 Light Shows</h2>
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    {% if mode_token == 'edit' %}
+    <div class="folder-controls">
+        <form method="post" action="{{ url_for('upload_light_show') }}" enctype="multipart/form-data" style="margin-bottom: 20px;">
+            <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File (fseq or mp3):</label>
+            <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3" required style="margin-right: 10px;">
+            <button type="submit" class="edit-btn">📤 Upload</button>
+        </form>
+    </div>
+    {% endif %}
+    
+    {% if show_groups %}
+    <div class="video-table-container">
+        <table class="video-table" style="table-layout: fixed;">
+            <thead>
+                <tr>
+                    <th style="width: 25%;">Show Name</th>
+                    <th style="width: 45%;">Files</th>
+                    <th style="width: 30%;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for group in show_groups %}
+                <tr>
+                    <td style="word-wrap: break-word; overflow-wrap: break-word;">{{ group.base_name }}</td>
+                    <td style="word-wrap: break-word; overflow-wrap: break-word; font-size: 0.9em;">
+                        {% if group.fseq_file %}
+                        <div style="margin-bottom: 5px;">
+                            <strong>FSEQ:</strong> {{ group.fseq_file.filename }} ({{ group.fseq_file.size_str }})
+                        </div>
+                        {% endif %}
+                        {% if group.mp3_file %}
+                        <div>
+                            <strong>MP3:</strong> {{ group.mp3_file.filename }} ({{ group.mp3_file.size_str }})
+                        </div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if group.mp3_file %}
+                        <div style="margin-bottom: 8px;">
+                            <audio controls preload="none" style="width: 100%; max-width: 200px; height: 30px;">
+                                <source src="{{ url_for('play_light_show_audio', partition=group.partition_key, filename=group.mp3_file.filename) }}" type="audio/mpeg">
+                            </audio>
+                        </div>
+                        {% endif %}
+                        {% if mode_token == 'edit' %}
+                        <form method="post" action="{{ url_for('delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" style="display: block;" 
+                              onsubmit="return confirm('Are you sure you want to delete all files for {{ group.base_name }}?');">
+                            <button type="submit" class="btn-delete">🗑️ Delete</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="info-box">
+        <p>No light show files found in the LightShow folders.</p>
+        {% if mode_token != 'edit' %}
+        <p>Switch to Edit Mode to upload files.</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+"""
+
 
 def run_script(script_name, background=False):
     """Execute a script and return success status and message."""
@@ -1471,9 +1643,6 @@ def replace_lock_chime(source_path, destination_path):
 def index():
     """Main page with control buttons."""
     token, label, css_class, share_paths = mode_display()
-    lock_chime_ready = lock_chime_ui_available(token)
-    show_lock_chime = token != "present"
-    wav_options = list_available_wavs() if lock_chime_ready else []
     
     # Render using template inheritance
     combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_CONTROL_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
@@ -1485,12 +1654,8 @@ def index():
         mode_class=css_class,
         share_paths=share_paths,
         mode_token=token,
-        lock_chime_ready=lock_chime_ready,
-        show_lock_chime=show_lock_chime,
-        wav_options=wav_options,
         auto_refresh=False,
     )
-
 
 @app.route("/videos")
 def file_browser():
@@ -1804,119 +1969,6 @@ def edit_usb():
     return redirect(url_for("index"))
 
 
-@app.route("/set_chime", methods=["POST"])
-def set_chime():
-    """Replace LockChime.wav with a selected WAV file while in edit mode."""
-    if current_mode() != "edit":
-        flash("Custom lock chime can only be updated while in Edit Mode.", "error")
-        return redirect(url_for("index"))
-
-    selection = request.form.get("selected_wav", "").strip()
-
-    if not selection:
-        flash("Select a WAV file to set as the lock chime.", "error")
-        return redirect(url_for("index"))
-
-    if ":" not in selection:
-        flash("Invalid selection for lock chime.", "error")
-        return redirect(url_for("index"))
-
-    part, filename = selection.split(":", 1)
-    part = part.strip()
-    filename = os.path.basename(filename.strip())
-
-    if part not in USB_PARTITIONS or not filename:
-        flash("Invalid partition or filename for lock chime selection.", "error")
-        return redirect(url_for("index"))
-
-    if not filename.lower().endswith(".wav"):
-        flash("Selected file must use the .wav extension.", "error")
-        return redirect(url_for("index"))
-
-    source_dir = os.path.join(MNT_DIR, part)
-    source_path = os.path.join(source_dir, filename)
-
-    if not os.path.isfile(source_path):
-        flash("Selected WAV file is no longer available.", "error")
-        return redirect(url_for("index"))
-
-    # Close Samba share BEFORE making changes
-    close_samba_share(part)
-
-    target_part = part
-    target_dir = source_dir
-    target_path = os.path.join(target_dir, LOCK_CHIME_FILENAME)
-
-    # Also try to break any oplocks on the specific file
-    try:
-        subprocess.run(
-            ["sudo", "-n", "smbcontrol", "all", "close-denied", target_path],
-            check=False,
-            timeout=5
-        )
-    except Exception:
-        pass
-
-    try:
-        replace_lock_chime(source_path, target_path)
-    except Exception as exc:
-        flash(f"Unable to set custom lock chime: {exc}", "error")
-        return redirect(url_for("index"))
-
-    removed_duplicates = remove_other_lock_chimes(target_part)
-
-    # Multiple sync strategies for exFAT
-    try:
-        subprocess.run(["sync"], check=True, timeout=10)
-        # Force filesystem-specific sync
-        subprocess.run(["sync", "-f", target_dir], check=False, timeout=10)
-    except Exception:
-        pass
-
-    # Give filesystem time to settle after all operations
-    time.sleep(1)
-
-    # Restart Samba to clear ALL caches and oplocks
-    restart_samba_services()
-    
-    # Give Samba more time to fully restart and clear state
-    time.sleep(2)
-    
-    # Close share again after restart to force reconnection
-    close_samba_share(target_part)
-
-    if removed_duplicates:
-        duplicate_list = ", ".join(removed_duplicates)
-        flash(
-            f"Removed stale LockChime.wav copies from: {duplicate_list} to maintain a single active chime.",
-            "info",
-        )
-
-    # Verify the file was actually updated by checking its size
-    try:
-        final_size = os.path.getsize(target_path)
-        expected_size = os.path.getsize(source_path)
-        if final_size != expected_size:
-            flash(
-                f"Warning: File sizes don't match after copy (expected {expected_size}, got {final_size}). "
-                "The file may not have been properly written to the exFAT filesystem.",
-                "error"
-            )
-    except Exception:
-        pass
-
-    flash(
-        f"Custom lock chime updated successfully using '{filename}' on {PART_LABEL_MAP.get(target_part, target_part)}. "
-        "If your Windows SMB connection still shows old data, disconnect and reconnect to the share.",
-        "success",
-    )
-
-    for issue in validate_lock_chime():
-        flash(issue, "error")
-
-    return redirect(url_for("index"))
-
-
 @app.route("/status")
 def status():
     """Simple status endpoint for health checks."""
@@ -1929,6 +1981,371 @@ def status():
         "mode_class": css_class,
         "share_paths": share_paths,
     }
+
+
+@app.route("/lock_chimes")
+def lock_chimes():
+    """Lock chimes management page."""
+    token, label, css_class, share_paths = mode_display()
+    
+    # Get all WAV files from part2 root
+    wav_files = []
+    for part, mount_path in iter_all_partitions():
+        if part != "part2":  # Lock chimes are only on part2
+            continue
+            
+        try:
+            entries = os.listdir(mount_path)
+        except OSError:
+            continue
+        
+        for entry in entries:
+            if not entry.lower().endswith(".wav"):
+                continue
+            
+            full_path = os.path.join(mount_path, entry)
+            if os.path.isfile(full_path):
+                size = os.path.getsize(full_path)
+                wav_files.append({
+                    "filename": entry,
+                    "size": size,
+                    "size_str": format_file_size(size),
+                    "partition": PART_LABEL_MAP.get(part, part),
+                    "partition_key": part,
+                })
+    
+    # Sort with LockChime.wav first
+    wav_files.sort(key=lambda x: (x["filename"] != "LockChime.wav", x["filename"].lower()))
+    
+    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_LOCK_CHIMES_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
+    
+    return render_template_string(
+        combined_template,
+        page='chimes',
+        mode_label=label,
+        mode_class=css_class,
+        mode_token=token,
+        wav_files=wav_files,
+        auto_refresh=False,
+    )
+
+
+@app.route("/lock_chimes/play/<partition>/<filename>")
+def play_lock_chime(partition, filename):
+    """Stream a lock chime WAV file."""
+    if partition not in USB_PARTITIONS:
+        flash("Invalid partition", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    mount_path = get_mount_path(partition)
+    if not mount_path:
+        flash("Partition not mounted", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    file_path = os.path.join(mount_path, filename)
+    if not os.path.isfile(file_path) or not filename.lower().endswith(".wav"):
+        flash("File not found", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    return send_file(file_path, mimetype="audio/wav")
+
+
+@app.route("/lock_chimes/upload", methods=["POST"])
+def upload_lock_chime():
+    """Upload a new lock chime WAV file."""
+    if current_mode() != "edit":
+        flash("Files can only be uploaded in Edit Mode", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    if "chime_file" not in request.files:
+        flash("No file selected", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    file = request.files["chime_file"]
+    if file.filename == "":
+        flash("No file selected", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    if not file.filename.lower().endswith(".wav"):
+        flash("Only WAV files are allowed", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    filename = os.path.basename(file.filename)
+    
+    # Prevent uploading a file named LockChime.wav
+    if filename.lower() == LOCK_CHIME_FILENAME.lower():
+        flash("Cannot upload a file named LockChime.wav. Please rename your file.", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    # Save to part2
+    mount_path = get_mount_path("part2")
+    if not mount_path:
+        flash("part2 not mounted", "error")
+        return redirect(url_for("lock_chimes"))
+    dest_path = os.path.join(mount_path, filename)
+    
+    try:
+        file.save(dest_path)
+        flash(f"Uploaded {filename} successfully", "success")
+    except Exception as e:
+        flash(f"Failed to upload file: {str(e)}", "error")
+    
+    return redirect(url_for("lock_chimes"))
+
+
+@app.route("/lock_chimes/set/<partition>/<filename>", methods=["POST"])
+def set_as_chime(partition, filename):
+    """Set a WAV file as the active lock chime."""
+    if current_mode() != "edit":
+        flash("Lock chime can only be updated in Edit Mode", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    if partition not in USB_PARTITIONS:
+        flash("Invalid partition", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    mount_path = get_mount_path(partition)
+    if not mount_path:
+        flash("Partition not mounted", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    source_path = os.path.join(mount_path, filename)
+    if not os.path.isfile(source_path):
+        flash("Source file not found", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    target_path = os.path.join(mount_path, LOCK_CHIME_FILENAME)
+    
+    close_samba_share(partition)
+    
+    try:
+        replace_lock_chime(source_path, target_path)
+        removed_duplicates = remove_other_lock_chimes(partition)
+        
+        subprocess.run(["sync"], check=False, timeout=10)
+        time.sleep(1)
+        restart_samba_services()
+        time.sleep(2)
+        close_samba_share(partition)
+        
+        flash(f"Set {filename} as active lock chime", "success")
+        
+        if removed_duplicates:
+            flash(f"Removed duplicate chimes from: {', '.join(removed_duplicates)}", "info")
+    except Exception as e:
+        flash(f"Failed to set lock chime: {str(e)}", "error")
+    
+    return redirect(url_for("lock_chimes"))
+
+
+@app.route("/lock_chimes/delete/<partition>/<filename>", methods=["POST"])
+def delete_lock_chime(partition, filename):
+    """Delete a lock chime file."""
+    if current_mode() != "edit":
+        flash("Files can only be deleted in Edit Mode", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    if filename.lower() == LOCK_CHIME_FILENAME.lower():
+        flash("Cannot delete the active LockChime.wav", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    if partition not in USB_PARTITIONS:
+        flash("Invalid partition", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    mount_path = get_mount_path(partition)
+    if not mount_path:
+        flash("Partition not mounted", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    file_path = os.path.join(mount_path, filename)
+    if not os.path.isfile(file_path):
+        flash("File not found", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    try:
+        os.remove(file_path)
+        flash(f"Deleted {filename}", "success")
+    except Exception as e:
+        flash(f"Failed to delete file: {str(e)}", "error")
+    
+    return redirect(url_for("lock_chimes"))
+
+
+@app.route("/light_shows")
+def light_shows():
+    """Light shows management page."""
+    token, label, css_class, share_paths = mode_display()
+    
+    # Get all fseq and mp3 files from LightShow folders
+    files_dict = {}  # Group files by base name
+    for part, mount_path in iter_all_partitions():
+        lightshow_dir = os.path.join(mount_path, "LightShow")
+        if not os.path.isdir(lightshow_dir):
+            continue
+        
+        try:
+            entries = os.listdir(lightshow_dir)
+        except OSError:
+            continue
+        
+        for entry in entries:
+            lower_entry = entry.lower()
+            if not (lower_entry.endswith(".fseq") or lower_entry.endswith(".mp3")):
+                continue
+            
+            full_path = os.path.join(lightshow_dir, entry)
+            if os.path.isfile(full_path):
+                # Get base name without extension
+                base_name = os.path.splitext(entry)[0]
+                
+                if base_name not in files_dict:
+                    files_dict[base_name] = {
+                        "base_name": base_name,
+                        "fseq_file": None,
+                        "mp3_file": None,
+                        "partition_key": part,
+                        "partition": PART_LABEL_MAP.get(part, part),
+                    }
+                
+                size = os.path.getsize(full_path)
+                if lower_entry.endswith(".fseq"):
+                    files_dict[base_name]["fseq_file"] = {
+                        "filename": entry,
+                        "size": size,
+                        "size_str": format_file_size(size),
+                    }
+                elif lower_entry.endswith(".mp3"):
+                    files_dict[base_name]["mp3_file"] = {
+                        "filename": entry,
+                        "size": size,
+                        "size_str": format_file_size(size),
+                    }
+    
+    # Convert to list and sort by base name
+    show_groups = list(files_dict.values())
+    show_groups.sort(key=lambda x: x["base_name"].lower())
+    
+    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_LIGHT_SHOWS_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
+    
+    return render_template_string(
+        combined_template,
+        page='shows',
+        mode_label=label,
+        mode_class=css_class,
+        mode_token=token,
+        show_groups=show_groups,
+        auto_refresh=False,
+    )
+
+
+@app.route("/light_shows/play/<partition>/<filename>")
+def play_light_show_audio(partition, filename):
+    """Stream a light show audio file."""
+    if partition not in USB_PARTITIONS:
+        flash("Invalid partition", "error")
+        return redirect(url_for("light_shows"))
+    
+    mount_path = get_mount_path(partition)
+    if not mount_path:
+        flash("Partition not mounted", "error")
+        return redirect(url_for("light_shows"))
+    
+    lightshow_dir = os.path.join(mount_path, "LightShow")
+    file_path = os.path.join(lightshow_dir, filename)
+    
+    if not os.path.isfile(file_path) or not filename.lower().endswith(".mp3"):
+        flash("File not found", "error")
+        return redirect(url_for("light_shows"))
+    
+    return send_file(file_path, mimetype="audio/mpeg")
+
+
+@app.route("/light_shows/upload", methods=["POST"])
+def upload_light_show():
+    """Upload a new light show file."""
+    if current_mode() != "edit":
+        flash("Files can only be uploaded in Edit Mode", "error")
+        return redirect(url_for("light_shows"))
+    
+    if "show_file" not in request.files:
+        flash("No file selected", "error")
+        return redirect(url_for("light_shows"))
+    
+    file = request.files["show_file"]
+    if file.filename == "":
+        flash("No file selected", "error")
+        return redirect(url_for("light_shows"))
+    
+    lower_filename = file.filename.lower()
+    if not (lower_filename.endswith(".fseq") or lower_filename.endswith(".mp3")):
+        flash("Only fseq and mp3 files are allowed", "error")
+        return redirect(url_for("light_shows"))
+    
+    # Save to part2 LightShow folder
+    mount_path = get_mount_path("part2")
+    if not mount_path:
+        flash("part2 not mounted", "error")
+        return redirect(url_for("light_shows"))
+    
+    lightshow_dir = os.path.join(mount_path, "LightShow")
+    os.makedirs(lightshow_dir, exist_ok=True)
+    
+    filename = os.path.basename(file.filename)
+    dest_path = os.path.join(lightshow_dir, filename)
+    
+    try:
+        file.save(dest_path)
+        flash(f"Uploaded {filename} successfully", "success")
+    except Exception as e:
+        flash(f"Failed to upload file: {str(e)}", "error")
+    
+    return redirect(url_for("light_shows"))
+
+
+@app.route("/light_shows/delete/<partition>/<base_name>", methods=["POST"])
+def delete_light_show(partition, base_name):
+    """Delete both fseq and mp3 files for a light show."""
+    if current_mode() != "edit":
+        flash("Files can only be deleted in Edit Mode", "error")
+        return redirect(url_for("light_shows"))
+    
+    if partition not in USB_PARTITIONS:
+        flash("Invalid partition", "error")
+        return redirect(url_for("light_shows"))
+    
+    mount_path = get_mount_path(partition)
+    if not mount_path:
+        flash("Partition not mounted", "error")
+        return redirect(url_for("light_shows"))
+    
+    lightshow_dir = os.path.join(mount_path, "LightShow")
+    
+    # Try to delete both fseq and mp3 files
+    deleted_files = []
+    errors = []
+    
+    for ext in [".fseq", ".mp3"]:
+        filename = base_name + ext
+        file_path = os.path.join(lightshow_dir, filename)
+        
+        if os.path.isfile(file_path):
+            try:
+                os.remove(file_path)
+                deleted_files.append(filename)
+            except Exception as e:
+                errors.append(f"{filename}: {str(e)}")
+    
+    if deleted_files:
+        flash(f"Deleted {', '.join(deleted_files)}", "success")
+    
+    if errors:
+        flash(f"Errors: {'; '.join(errors)}", "error")
+    
+    if not deleted_files and not errors:
+        flash("No files found to delete", "error")
+    
+    return redirect(url_for("light_shows"))
 
 
 if __name__ == "__main__":

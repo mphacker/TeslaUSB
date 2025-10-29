@@ -20,6 +20,19 @@ I created this solution to allow me to have remote access to my Tesla dashcam fo
   - **Delete functionality** for individual or bulk video removal (Edit mode only)
   - **Browser caching** for fast page loads
   - In-browser video playback and download
+- **Lock Chimes Management**: Complete interface for managing Tesla lock chime sounds
+  - Upload custom WAV files
+  - Set any chime as the active LockChime.wav
+  - Play/preview chimes with in-browser audio player
+  - Delete unwanted chime files
+  - Works in both Present (view/play only) and Edit (full management) modes
+  - Loading indicators and MD5 verification ensure safe file operations
+- **Light Shows Management**: Interface for managing custom Tesla light show files
+  - Upload FSEQ and MP3 files
+  - Grouped display (pairs FSEQ + MP3 files together)
+  - Play/preview MP3 audio tracks in browser
+  - Delete entire light show sets (removes both files)
+  - Works in both Present (view/play only) and Edit (full management) modes
 - **Live Mode Indicator**: Web UI shows whether the gadget is in USB or Edit mode
 - **Safe Mode Switching**: Buttons disable during transitions to prevent multiple clicks
 - **Auto-Boot Presentation**: Automatically presents the USB gadget when Pi boots
@@ -106,6 +119,8 @@ sudo ./setup-usb.sh
 - Or use the hostname: `http://cybertruckusb.local:5000`
 - Use the buttons to switch between "Present USB" and "Edit USB" modes
 - Navigate to the "Videos" tab to browse and play TeslaCam footage
+- Navigate to "Lock Chimes" to manage custom lock sounds
+- Navigate to "Light Shows" to manage custom light show files
 
 ### 4. Connect to Tesla
 
@@ -146,15 +161,24 @@ SAMBA_PASS="tesla"                         # Samba password
 
 ## Usage Modes
 
+### Web Control Interface
+
+The web interface provides an intuitive control panel for managing your Tesla USB gadget:
+
+<img src="examples/control-panel.png" alt="Web Control Interface" width="400">
+
+Use the control panel to switch between Present USB Mode (for Tesla connection) and Edit USB Mode (for file management). The interface shows your current mode and provides access to all features through the navigation tabs.
+
 ### Present USB Mode
 When in this mode:
 - Pi appears as a USB storage device to connected host (Tesla)
 - Samba shares are stopped
 - **NEW**: Partitions are mounted locally in **read-only** mode for browsing
-  - `/mnt/gadget/part1-ro` - Read-only access to partition 1
-  - `/mnt/gadget/part2-ro` - Read-only access to partition 2
+  - `/mnt/gadget/part1-ro` - Read-only access to partition 1 (TeslaCam)
+  - `/mnt/gadget/part2-ro` - Read-only access to partition 2 (LightShow, Lock Chimes)
 - Tesla can record dashcam/sentry footage directly
-- You can browse/view files locally or via programs (e.g., watch videos, copy files)
+- You can browse/view files locally or via the web interface (e.g., watch videos, play audio)
+- Web interface: View and play videos, lock chimes, and light shows (no editing)
 
 **Safety Note**: The read-only mounts allow you to access files while the gadget is active. This is generally safe for read-only access, but be aware that if the Tesla is actively writing, you may see stale cached data. Best practice is to browse files when the Tesla is not actively recording (e.g., after driving).
 
@@ -168,10 +192,11 @@ When in this mode:
 - USB gadget is disconnected
 - Read-only mounts are unmounted
 - Partitions are mounted locally on Pi in **read-write** mode
-  - `/mnt/gadget/part1` - Read-write access to partition 1
-  - `/mnt/gadget/part2` - Read-write access to partition 2
+  - `/mnt/gadget/part1` - Read-write access to partition 1 (TeslaCam)
+  - `/mnt/gadget/part2` - Read-write access to partition 2 (LightShow, Lock Chimes)
 - Samba shares are active for network access
-- You can manage files via network or direct Pi access
+- You can manage files via network, web interface, or direct Pi access
+- Web interface: Full functionality including upload, delete, and file management
 
 **Activate via:**
 - Web interface: Click "Edit USB (mount + Samba)"
@@ -191,6 +216,8 @@ When in Edit USB mode, access files via Samba shares:
 ### Web-Based Video Browser
 The web interface includes a built-in TeslaCam video browser accessible in both Present and Edit modes:
 
+<img src="examples/videos-browser.png" alt="TeslaCam Video Browser" width="400">
+
 **Features:**
 - Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips, etc.)
 - **Video thumbnails** with automatic background generation for quick preview
@@ -202,18 +229,19 @@ The web interface includes a built-in TeslaCam video browser accessible in both 
 - **Browser caching** for fast page loads with many videos
 - Works in both Present (read-only) and Edit modes
 
-**Thumbnail Generation:**
-- Thumbnails are automatically generated in the background
-- Generated thumbnails are cached persistently (survive reboots)
-- Background process runs every 15 minutes with low priority (Nice=19)
-- Memory-constrained to prevent system overload (100MB limit)
-- Only generates thumbnails for new videos (skips existing)
-- Graceful shutdown when switching modes to prevent file system corruption
+**Multi-Camera Session View:**
+
+<img src="examples/session-view.png" alt="Multi-Camera Session View" width="400">
+
+Click the "Session" button next to any video to view all six camera angles synchronized together. The multi-camera view includes:
+- All 6 Tesla camera angles (Front, Back, Left Pillar, Right Pillar, Left Repeater, Right Repeater)
+- Synchronized playback controls (Play All, Pause All, Restart, Sync Playback)
+- Individual video controls for each camera
+- Session information showing timestamp and camera count
 
 **Access:**
 - Navigate to `http://<pi-ip-address>:5000/videos` in your web browser
 - Or click the "Videos" tab in the web interface navigation
-- Click the "Tesla USB Gadget Control" header text to return to the home page
 
 **Usage:**
 1. Select a folder from the dropdown (e.g., RecentClips)
@@ -222,6 +250,78 @@ The web interface includes a built-in TeslaCam video browser accessible in both 
 4. Click the Download button to save a video to your computer
 5. **In Edit mode**: Use Delete buttons to remove individual videos or click "Delete All Videos" for bulk deletion
 6. Videos are sorted by date (newest first) and the table scrolls for easy navigation
+
+**Thumbnail Generation:**
+- Thumbnails are automatically generated in the background
+- Generated thumbnails are cached persistently (survive reboots)
+- Background process runs every 15 minutes with low priority (Nice=19)
+- Memory-constrained to prevent system overload (100MB limit)
+- Only generates thumbnails for new videos (skips existing)
+- Graceful shutdown when switching modes to prevent file system corruption
+
+### Lock Chimes Management
+The web interface includes a complete lock chimes management system:
+
+<img src="examples/lock-chimes.png" alt="Lock Chimes Management" width="400">
+
+**Features:**
+- View all WAV files stored in the partition 2 root directory
+- **Play/preview** chimes directly in browser with HTML5 audio player
+- **Upload** custom WAV files (Edit mode only)
+- **Set as active chime** - copies your chosen file to LockChime.wav (Edit mode only)
+- **Delete** unwanted chime files (Edit mode only)
+- Prevents uploading files named "LockChime.wav" (reserved for active chime)
+- Visual loading indicator during file operations
+- MD5 hash verification ensures file integrity after updates
+- Cache-busting ensures audio plays correctly after changes
+- Works in both Present (view/play only) and Edit (full management) modes
+
+**Access:**
+- Navigate to `http://<pi-ip-address>:5000/lock_chimes` in your web browser
+- Or click the "Lock Chimes" tab in the web interface navigation
+
+**Usage:**
+1. In Edit mode, upload your custom WAV files using the upload form
+2. Preview any chime by clicking the audio player
+3. Click "Set as Chime" to make a file the active lock sound (becomes LockChime.wav)
+4. The active chime is marked with a green "✓ Active Chime" indicator
+5. Delete unwanted files with the Delete button
+6. In Present mode, you can view and play all chimes but cannot modify them
+
+### Light Shows Management
+The web interface includes a complete light shows management system:
+
+<img src="examples/light-shows.png" alt="Light Shows Management" width="400">
+
+**Features:**
+- View all FSEQ and MP3 files in the partition 2 LightShow directory
+- **Grouped display** - FSEQ and MP3 files with matching names appear together
+- **Play/preview** MP3 audio tracks directly in browser
+- **Upload** custom FSEQ or MP3 files (Edit mode only)
+- **Delete** entire light show sets with one button (removes both FSEQ and MP3) (Edit mode only)
+- Shows file sizes for both FSEQ and MP3 files
+- Visual loading indicator during operations
+- Works in both Present (view/play only) and Edit (full management) modes
+
+**Access:**
+- Navigate to `http://<pi-ip-address>:5000/light_shows` in your web browser
+- Or click the "Light Shows" tab in the web interface navigation
+
+**Usage:**
+1. In Edit mode, upload FSEQ or MP3 files using the upload form
+2. Files with matching names (e.g., "show.fseq" and "show.mp3") are grouped together
+3. Preview audio by clicking the audio player for any MP3 file
+4. Delete entire light shows (both files) with the Delete button
+5. In Present mode, you can view and play audio but cannot modify files
+
+**File Grouping:**
+- Light shows typically consist of two files: an FSEQ file (sequence data) and an MP3 file (audio)
+- The interface automatically groups files by base name (e.g., "MyShow.fseq" + "MyShow.mp3")
+- Deleting removes both files in the group
+- You can upload FSEQ and MP3 separately - they'll be grouped if names match
+
+### Web Interface Navigation
+Click the "Tesla USB Gadget Control" header text on any page to return to the home page.
 
 ### Present USB Mode (Read-Only)
 When in Present USB mode, you can access files locally on the Pi:

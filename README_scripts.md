@@ -76,7 +76,10 @@ The `present_usb.sh` and `edit_usb.sh` templates update a shared state file (`st
   - **TeslaCam video browser** with folder navigation
   - **In-browser video playback**
   - **Video download functionality**
-  - Custom lock chime management
+  - **Lock Chimes management** with upload, playback, set as active chime, and delete
+  - **Light Shows management** with upload, playback, grouped file display (fseq+mp3), and delete
   - Network share information display
 - Automatically detects current mode and adapts functionality
 - Works with both read-only (present) and read-write (edit) mounts
+- Cache-busting for audio playback ensures fresh content after file updates
+- Loading indicators prevent multiple submissions during operations

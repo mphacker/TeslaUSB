@@ -85,7 +85,21 @@ echo "Preparing mount points..."
 sudo mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
 sudo chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
 
-# Clean up any stale loop devices tied to the image before assigning a new one
+# Ensure previous mounts are cleared before setting up new loop device
+# This prevents remounting while partitions are still in use
+for PART_NUM in 1 2; do
+  MP="$MNT_DIR/part${PART_NUM}"
+  if mountpoint -q "$MP" 2>/dev/null; then
+    echo "Unmounting existing mount at $MP"
+    if ! safe_unmount_dir "$MP"; then
+      echo "Error: could not clear existing mount at $MP" >&2
+      exit 1
+    fi
+  fi
+done
+
+# Now clean up stale loop devices tied to the image
+# Only detach devices that are actually attached to our image file
 for existing in $(losetup -j "$IMG" 2>/dev/null | cut -d: -f1); do
   if [ -n "$existing" ]; then
     echo "Detaching stale loop device: $existing"
@@ -93,17 +107,39 @@ for existing in $(losetup -j "$IMG" 2>/dev/null | cut -d: -f1); do
   fi
 done
 
-# Setup loop device
+# Ensure all pending operations complete
+sync
+sleep 1
+
+# Setup loop device with explicit image attachment
 echo "Setting up loop device..."
 LOOP=$(sudo losetup --show -fP "$IMG")
+if [ -z "$LOOP" ]; then
+  echo "ERROR: Failed to create loop device for $IMG"
+  exit 1
+fi
 echo "Using loop device: $LOOP"
+
+# CRITICAL: Verify the loop device is actually attached to our image
+# This catches cases where an empty/orphaned loop device was created
+VERIFY=$(sudo losetup -l | grep "$LOOP" | grep "$IMG" || true)
+if [ -z "$VERIFY" ]; then
+  echo "ERROR: Loop device $LOOP is not attached to $IMG"
+  echo "Loop device status:"
+  sudo losetup -l | grep "$LOOP" || echo "  Device not found"
+  sudo losetup -d "$LOOP" 2>/dev/null || true
+  exit 1
+fi
+echo "Verified: $LOOP is attached to $IMG"
+
 sleep 0.5
 
+# Trap to clean up loop device only on script failure (not on successful exit)
 cleanup_loop_on_failure() {
-  if [ -n "${LOOP:-}" ]; then
-    if ! mountpoint -q "$MNT_DIR/part1" 2>/dev/null && ! mountpoint -q "$MNT_DIR/part2" 2>/dev/null; then
-      sudo losetup -d "$LOOP" 2>/dev/null || true
-    fi
+  local exit_code=$?
+  if [ $exit_code -ne 0 ] && [ -n "${LOOP:-}" ]; then
+    echo "Script failed with exit code $exit_code, cleaning up loop device..."
+    sudo losetup -d "$LOOP" 2>/dev/null || true
   fi
 }
 trap cleanup_loop_on_failure EXIT
@@ -156,16 +192,9 @@ for PART_NUM in 1 2; do
   LOOP_PART="${LOOP}p${PART_NUM}"
   MP="$MNT_DIR/part${PART_NUM}"
   
-  # Unmount if already mounted
-  if mountpoint -q "$MP" 2>/dev/null; then
-    echo "  Unmounting existing mount at $MP"
-    if ! safe_unmount_dir "$MP"; then
-      echo "Error: could not clear existing mount at $MP" >&2
-      exit 1
-    fi
-  fi
-  
   echo "  Mounting $LOOP_PART to $MP"
+  # Mount in the host mount namespace to ensure visibility everywhere
+  sudo nsenter --mount=/proc/1/ns/mnt -- mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP" || \
   sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP"
 done
 

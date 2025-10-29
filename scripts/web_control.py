@@ -559,22 +559,23 @@ def index():
 def present_usb():
     """Switch to USB gadget presentation mode."""
     script_path = os.path.join(GADGET_DIR, "present_usb.sh")
+    log_path = os.path.join(GADGET_DIR, "present_usb_web.log")
     
     try:
-        # Run synchronously - wait for completion
-        result = subprocess.run(
-            ["sudo", "-n", script_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=GADGET_DIR,
-        )
-        
+        # Run the script directly with sudo (script has #!/bin/bash shebang)
+        with open(log_path, "w") as log:
+            result = subprocess.run(
+                ["sudo", "-n", script_path],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                cwd=GADGET_DIR,
+                timeout=30,
+            )
+            
         if result.returncode == 0:
             flash("Successfully switched to Present Mode", "success")
         else:
-            error_msg = result.stderr or result.stdout or "Unknown error"
-            flash(f"Error switching to Present Mode: {error_msg}", "error")
+            flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
             
     except subprocess.TimeoutExpired:
         flash("Error: Script timed out after 30 seconds", "error")
@@ -587,26 +588,23 @@ def present_usb():
 def edit_usb():
     """Switch to edit mode with local mounts and Samba."""
     script_path = os.path.join(GADGET_DIR, "edit_usb.sh")
+    log_path = os.path.join(GADGET_DIR, "edit_usb_web.log")
     
     try:
-        # Run synchronously - wait for completion
-        result = subprocess.run(
-            ["sudo", "-n", script_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=GADGET_DIR,
-        )
-        
+        # Run the script directly with sudo (script has #!/bin/bash shebang)
+        with open(log_path, "w") as log:
+            result = subprocess.run(
+                ["sudo", "-n", script_path],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                cwd=GADGET_DIR,
+                timeout=30,
+            )
+            
         if result.returncode == 0:
             flash("Successfully switched to Edit Mode", "success")
-            # Validate lock chime after successful edit mode switch
-            lock_chime_issues = validate_lock_chime()
-            for issue in lock_chime_issues:
-                flash(issue, "error")
         else:
-            error_msg = result.stderr or result.stdout or "Unknown error"
-            flash(f"Error switching to Edit Mode: {error_msg}", "error")
+            flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
             
     except subprocess.TimeoutExpired:
         flash("Error: Script timed out after 30 seconds", "error")

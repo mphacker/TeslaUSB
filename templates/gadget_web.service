@@ -13,7 +13,8 @@ RestartSec=3
 TimeoutStopSec=10
 
 # Security settings - relaxed for sudo operations
-PrivateTmp=true
+# Note: Disabled mount namespace isolation so mounts are visible system-wide
+MountFlags=shared
 ReadWritePaths=__GADGET_DIR__ __MNT_DIR__ /run/samba /tmp
 
 [Install]

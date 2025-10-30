@@ -82,6 +82,7 @@ fi
 
 # Ensure config.txt contains dtoverlay=dwc2 under [all]
 # Note: We use dtoverlay=dwc2 WITHOUT dr_mode parameter to allow auto-detection
+CONFIG_CHANGED=0
 if [ -f "$CONFIG_FILE" ]; then
   # Check if dtoverlay=dwc2 exists in [all] section (not in platform-specific sections)
   if grep -q '^\[all\]' "$CONFIG_FILE"; then
@@ -90,6 +91,7 @@ if [ -f "$CONFIG_FILE" ]; then
       # Add dtoverlay=dwc2 right after [all] line
       sed -i '/^\[all\]/a dtoverlay=dwc2' "$CONFIG_FILE"
       echo "Added dtoverlay=dwc2 under [all] section in $CONFIG_FILE"
+      CONFIG_CHANGED=1
     else
       echo "dtoverlay=dwc2 already present under [all] in $CONFIG_FILE"
     fi
@@ -97,6 +99,7 @@ if [ -f "$CONFIG_FILE" ]; then
     # No [all] section - append it with dwc2
     printf '\n[all]\ndtoverlay=dwc2\n' | tee -a "$CONFIG_FILE" >/dev/null
     echo "Appended [all] section with dtoverlay=dwc2 to $CONFIG_FILE"
+    CONFIG_CHANGED=1
   fi
 else
   echo "Warning: $CONFIG_FILE not found. Ensure your Pi uses /boot/firmware/config.txt"
@@ -505,7 +508,47 @@ echo " - web UI:         http://<pi_ip>:$WEB_PORT/  (service: gadget_web.service
 echo " - gadget auto-present on boot: present_usb_on_boot.service (enabled)"
 echo "Samba shares: use user '$TARGET_USER' and the password set in SAMBA_PASS"
 echo
-echo "Switching to present mode..."
+
+# Load required kernel modules before presenting USB gadget
+echo "Loading USB gadget kernel modules..."
+modprobe configfs 2>/dev/null || true
+modprobe libcomposite 2>/dev/null || true
+
+# Try to load dwc2 - this might fail on first install if config.txt was just updated
+if ! modprobe dwc2 2>/dev/null; then
+    echo "Warning: dwc2 module not available yet"
+fi
+
+# Ensure configfs is mounted
+if ! mountpoint -q /sys/kernel/config 2>/dev/null; then
+    echo "Mounting configfs..."
+    mount -t configfs none /sys/kernel/config 2>/dev/null || true
+fi
+
+# Check if UDC is available (indicates dwc2 is working)
+if [ ! -d /sys/class/udc ] || [ -z "$(ls -A /sys/class/udc 2>/dev/null)" ]; then
+    echo ""
+    echo "============================================"
+    echo "⚠️  REBOOT REQUIRED"
+    echo "============================================"
+    echo "The USB gadget hardware (dwc2) is not available yet."
+    echo ""
+    if [ "$CONFIG_CHANGED" = "1" ]; then
+        echo "Reason: config.txt was just modified with USB gadget settings."
+        echo ""
+    fi
+    echo "Next steps:"
+    echo "  1. Reboot the Raspberry Pi:  sudo reboot"
+    echo "  2. After reboot, the USB gadget will be automatically enabled"
+    echo "  3. Access the web interface at: http://$(hostname -I | awk '{print $1}'):$WEB_PORT/"
+    echo ""
+    echo "The system is configured and ready, but requires a reboot to activate"
+    echo "the USB gadget hardware support."
+    echo "============================================"
+    exit 0
+fi
+
+echo "USB gadget hardware detected. Switching to present mode..."
 "$GADGET_DIR/present_usb.sh"
 echo
 echo "Setup complete! The Pi is now in present mode."

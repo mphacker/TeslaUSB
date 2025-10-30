@@ -1128,14 +1128,12 @@ HTML_SESSION_PAGE = """
         <button onclick="syncAll()" class="present-btn">🔄 Sync Playback</button>
         <button onclick="toggleAutoSync()" id="autoSyncBtn" class="edit-btn">🔄 Auto-Sync: ON</button>
         <button onclick="toggleLowBandwidth()" id="lowBandwidthBtn" class="edit-btn">📶 Low Bandwidth: ON</button>
-        <button onclick="togglePerformanceMode()" id="perfModeBtn" class="edit-btn">⚡ Performance Mode: ON</button>
     </div>
     
     <div class="info-box" style="background-color: #e3f2fd; border-left: 4px solid #2196f3; margin: 10px 0;">
         <p style="margin: 0; font-size: 13px;">
-            <strong>💡 Performance Tips:</strong> 
+            <strong>💡 Performance Tips:</strong><br>
             • <strong>Low Bandwidth Mode</strong>: Enabled by default - streams videos on-demand (recommended for Pi Zero 2 W)<br>
-            • <strong>Performance Mode</strong>: Reduces video size to 50% and plays only 3 cameras at a time for smoother playback<br>
             • <strong>Auto-Sync</strong>: Keeps cameras synchronized during playback<br>
             • Videos use HTTP streaming - browser buffers only what's needed
         </p>

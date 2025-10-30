@@ -27,6 +27,7 @@ MNT_DIR = "__MNT_DIR__"
 RO_MNT_DIR = "/mnt/gadget"  # Read-only mount directory for present mode
 STATE_FILE = os.path.join(GADGET_DIR, "state.txt")
 LOCK_CHIME_FILENAME = "LockChime.wav"
+CHIMES_FOLDER = "Chimes"  # Folder on part2 where custom chimes are stored
 MAX_LOCK_CHIME_SIZE = 1024 * 1024  # 1 MiB
 USB_PARTITIONS = ("part1", "part2")
 PART_LABEL_MAP = {"part1": "gadget_part1", "part2": "gadget_part2"}
@@ -1259,9 +1260,10 @@ HTML_LOCK_CHIMES_PAGE = """
     {% if mode_token == 'edit' %}
     <div class="folder-controls">
         <form method="post" action="{{ url_for('upload_lock_chime') }}" enctype="multipart/form-data" style="margin-bottom: 20px;">
-            <label for="chime_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload WAV File:</label>
+            <label for="chime_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload New Chime to Library:</label>
             <input type="file" name="chime_file" id="chime_file" accept=".wav" required style="margin-right: 10px;">
             <button type="submit" class="edit-btn">📤 Upload</button>
+            <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Requirements: 16-bit PCM, 44.1 or 48 kHz, under 1MB</p>
         </form>
     </div>
     <div class="info-box" style="background-color: #fff3cd; border-left: 4px solid #ffc107; margin-bottom: 20px;">
@@ -1274,37 +1276,66 @@ HTML_LOCK_CHIMES_PAGE = """
     </div>
     {% endif %}
     
-    {% if wav_files %}
+    <!-- Active Lock Chime -->
+    {% if active_chime %}
+    <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #4caf50;">
+        <h3 style="margin: 0 0 10px 0; color: #2e7d32;">🔊 Active Lock Chime</h3>
+        <div style="display: flex; align-items: center; gap: 15px;">
+            <div>
+                <strong>{{ active_chime.filename }}</strong><br>
+                <span style="color: #666; font-size: 13px;">{{ active_chime.size_str }}</span>
+            </div>
+            <audio controls preload="none" style="flex: 1; max-width: 300px; height: 30px;">
+                <source src="{{ url_for('play_active_chime') }}?v={{ active_chime.mtime }}" type="audio/wav">
+            </audio>
+        </div>
+    </div>
+    {% else %}
+    <div class="info-box" style="background-color: #ffebee; border-left: 4px solid #f44336; margin-bottom: 20px;">
+        <p style="margin: 0;">⚠️ No active lock chime set. Select a chime from the library below.</p>
+    </div>
+    {% endif %}
+    
+    <!-- Chime Library -->
+    <h3 style="margin: 20px 0 10px 0;">📚 Chime Library</h3>
+    {% if chime_files %}
     <div class="video-table-container">
         <table class="video-table">
             <thead>
                 <tr>
                     <th>Filename</th>
                     <th>Size</th>
+                    <th>Status</th>
                     <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
-                {% for wav in wav_files %}
-                <tr>
-                    <td>{{ wav.filename }}</td>
-                    <td>{{ wav.size_str }}</td>
+                {% for chime in chime_files %}
+                <tr style="{% if not chime.is_valid %}background-color: #ffebee;{% endif %}">
+                    <td>{{ chime.filename }}</td>
+                    <td>{{ chime.size_str }}</td>
+                    <td>
+                        {% if chime.is_valid %}
+                        <span style="color: #4caf50;">✓ Valid</span>
+                        {% else %}
+                        <span style="color: #f44336;" title="{{ chime.validation_msg }}">✗ {{ chime.validation_msg[:30] }}...</span>
+                        {% endif %}
+                    </td>
                     <td>
                         <audio controls preload="none" style="height: 30px; margin-right: 10px;">
-                            <source src="{{ url_for('play_lock_chime', partition=wav.partition_key, filename=wav.filename) }}?v={{ wav.mtime }}_{{ wav.size }}" type="audio/wav">
+                            <source src="{{ url_for('play_lock_chime', filename=chime.filename) }}?v={{ chime.mtime }}" type="audio/wav">
                         </audio>
+                        <a href="{{ url_for('download_lock_chime', filename=chime.filename) }}" class="present-btn" style="text-decoration: none; padding: 6px 12px; display: inline-block; margin-right: 5px;">⬇️ Download</a>
                         {% if mode_token == 'edit' %}
-                            {% if wav.filename != 'LockChime.wav' %}
-                            <form method="post" action="{{ url_for('set_as_chime', partition=wav.partition_key, filename=wav.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
-                                <button type="submit" class="set-chime-btn">🔔 Set as Chime</button>
+                            {% if chime.is_valid %}
+                            <form method="post" action="{{ url_for('set_as_chime', filename=chime.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
+                                <button type="submit" class="set-chime-btn">🔔 Set as Active</button>
                             </form>
-                            <form method="post" action="{{ url_for('delete_lock_chime', partition=wav.partition_key, filename=wav.filename) }}" style="display: inline;" 
-                                  onsubmit="return confirm('Are you sure you want to delete {{ wav.filename }}?');">
+                            {% endif %}
+                            <form method="post" action="{{ url_for('delete_lock_chime', filename=chime.filename) }}" style="display: inline;" 
+                                  onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
                                 <button type="submit" class="btn-delete">🗑️ Delete</button>
                             </form>
-                            {% else %}
-                            <span style="color: #28a745; font-weight: 600;">✓ Active Chime</span>
-                            {% endif %}
                         {% endif %}
                     </td>
                 </tr>
@@ -1314,8 +1345,10 @@ HTML_LOCK_CHIMES_PAGE = """
     </div>
     {% else %}
     <div class="info-box">
-        <p>No WAV files found in the root of the USB partitions.</p>
-        {% if mode_token != 'edit' %}
+        <p>No chimes found in the Chimes library.</p>
+        {% if mode_token == 'edit' %}
+        <p>Upload WAV files above to add them to your library.</p>
+        {% else %}
         <p>Switch to Edit Mode to upload files.</p>
         {% endif %}
     </div>
@@ -1340,20 +1373,14 @@ HTML_LOCK_CHIMES_PAGE = """
 
 <script>
 function handleSetChime(form) {
-    // Disable all Set as Chime buttons
+    // Disable all Set as Active buttons
     const allChimeButtons = document.querySelectorAll('.set-chime-btn');
-    allChimeButtons.forEach(btn => {
-        btn.disabled = true;
-        btn.style.opacity = '0.5';
-        btn.style.cursor = 'not-allowed';
-    });
+    allChimeButtons.forEach(btn => btn.disabled = true);
     
     // Show loading overlay
-    const overlay = document.getElementById('chimeLoadingOverlay');
-    overlay.style.display = 'flex';
+    document.getElementById('chimeLoadingOverlay').style.display = 'flex';
     
-    // Allow form to submit
-    return true;
+    return true;  // Allow form submission
 }
 </script>
 {% endblock %}
@@ -1589,6 +1616,51 @@ def validate_lock_chime():
             issues.append(f"Unable to read {entry} on {part}: {exc}")
 
     return issues
+
+
+def validate_tesla_wav(file_path):
+    """
+    Validate WAV file meets Tesla's requirements:
+    - Under 1MB in size
+    - 16-bit PCM
+    - 44.1 kHz or 48 kHz sample rate
+    
+    Returns: (is_valid, error_message)
+    """
+    try:
+        # Check file size
+        size_bytes = os.path.getsize(file_path)
+        if size_bytes > MAX_LOCK_CHIME_SIZE:
+            size_mb = size_bytes / (1024 * 1024)
+            return False, f"File is {size_mb:.2f} MB. Tesla requires lock chimes to be under 1 MB."
+        
+        if size_bytes == 0:
+            return False, "File is empty."
+        
+        # Check WAV format
+        with contextlib.closing(wave.open(file_path, "rb")) as wav_file:
+            params = wav_file.getparams()
+            
+            # Check sample width (16-bit = 2 bytes)
+            if params.sampwidth != 2:
+                bit_depth = params.sampwidth * 8
+                return False, f"File is {bit_depth}-bit. Tesla requires 16-bit PCM."
+            
+            # Check sample rate (44100 Hz or 48000 Hz)
+            if params.framerate not in (44100, 48000):
+                rate_khz = params.framerate / 1000
+                return False, f"Sample rate is {rate_khz:.1f} kHz. Tesla requires 44.1 kHz or 48 kHz."
+            
+            # Check if it's PCM (compression type should be 'NONE')
+            if params.comptype != 'NONE':
+                return False, f"File uses {params.comptype} compression. Tesla requires uncompressed PCM."
+        
+        return True, "Valid"
+        
+    except (wave.Error, EOFError):
+        return False, "Not a valid WAV file."
+    except OSError as exc:
+        return False, f"Unable to read file: {exc}"
 
 
 def replace_lock_chime(source_path, destination_path):
@@ -2074,36 +2146,54 @@ def lock_chimes():
     """Lock chimes management page."""
     token, label, css_class, share_paths = mode_display()
     
-    # Get all WAV files from part2 root
-    wav_files = []
-    for part, mount_path in iter_all_partitions():
-        if part != "part2":  # Lock chimes are only on part2
-            continue
-            
-        try:
-            entries = os.listdir(mount_path)
-        except OSError:
-            continue
-        
-        for entry in entries:
-            if not entry.lower().endswith(".wav"):
-                continue
-            
-            full_path = os.path.join(mount_path, entry)
-            if os.path.isfile(full_path):
-                size = os.path.getsize(full_path)
-                mtime = int(os.path.getmtime(full_path))
-                wav_files.append({
-                    "filename": entry,
-                    "size": size,
-                    "size_str": format_file_size(size),
-                    "partition": PART_LABEL_MAP.get(part, part),
-                    "partition_key": part,
-                    "mtime": mtime,
-                })
+    # Get current active chime from part2 root
+    active_chime = None
+    part2_mount = get_mount_path("part2")
     
-    # Sort with LockChime.wav first
-    wav_files.sort(key=lambda x: (x["filename"] != "LockChime.wav", x["filename"].lower()))
+    if part2_mount:
+        active_chime_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
+        if os.path.isfile(active_chime_path):
+            size = os.path.getsize(active_chime_path)
+            mtime = int(os.path.getmtime(active_chime_path))
+            active_chime = {
+                "filename": LOCK_CHIME_FILENAME,
+                "size": size,
+                "size_str": format_file_size(size),
+                "mtime": mtime,
+            }
+    
+    # Get all WAV files from Chimes folder on part2
+    chime_files = []
+    if part2_mount:
+        chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+        if os.path.isdir(chimes_dir):
+            try:
+                entries = os.listdir(chimes_dir)
+                for entry in entries:
+                    if not entry.lower().endswith(".wav"):
+                        continue
+                    
+                    full_path = os.path.join(chimes_dir, entry)
+                    if os.path.isfile(full_path):
+                        size = os.path.getsize(full_path)
+                        mtime = int(os.path.getmtime(full_path))
+                        
+                        # Validate the file
+                        is_valid, msg = validate_tesla_wav(full_path)
+                        
+                        chime_files.append({
+                            "filename": entry,
+                            "size": size,
+                            "size_str": format_file_size(size),
+                            "mtime": mtime,
+                            "is_valid": is_valid,
+                            "validation_msg": msg,
+                        })
+            except OSError:
+                pass
+    
+    # Sort alphabetically
+    chime_files.sort(key=lambda x: x["filename"].lower())
     
     combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_LOCK_CHIMES_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
     
@@ -2113,29 +2203,68 @@ def lock_chimes():
         mode_label=label,
         mode_class=css_class,
         mode_token=token,
-        wav_files=wav_files,
+        active_chime=active_chime,
+        chime_files=chime_files,
         auto_refresh=False,
     )
 
 
-@app.route("/lock_chimes/play/<partition>/<filename>")
-def play_lock_chime(partition, filename):
-    """Stream a lock chime WAV file."""
-    if partition not in USB_PARTITIONS:
-        flash("Invalid partition", "error")
-        return redirect(url_for("lock_chimes"))
-    
-    mount_path = get_mount_path(partition)
-    if not mount_path:
+@app.route("/lock_chimes/play/active")
+def play_active_chime():
+    """Stream the active LockChime.wav file from part2 root."""
+    part2_mount = get_mount_path("part2")
+    if not part2_mount:
         flash("Partition not mounted", "error")
         return redirect(url_for("lock_chimes"))
     
-    file_path = os.path.join(mount_path, filename)
+    file_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
+    if not os.path.isfile(file_path):
+        flash("Active lock chime not found", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    return send_file(file_path, mimetype="audio/wav")
+
+
+@app.route("/lock_chimes/play/<filename>")
+def play_lock_chime(filename):
+    """Stream a lock chime WAV file from the Chimes folder."""
+    part2_mount = get_mount_path("part2")
+    if not part2_mount:
+        flash("Partition not mounted", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    # Sanitize filename
+    filename = os.path.basename(filename)
+    
+    chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+    file_path = os.path.join(chimes_dir, filename)
+    
     if not os.path.isfile(file_path) or not filename.lower().endswith(".wav"):
         flash("File not found", "error")
         return redirect(url_for("lock_chimes"))
     
     return send_file(file_path, mimetype="audio/wav")
+
+
+@app.route("/lock_chimes/download/<filename>")
+def download_lock_chime(filename):
+    """Download a lock chime WAV file from the Chimes folder."""
+    part2_mount = get_mount_path("part2")
+    if not part2_mount:
+        flash("Partition not mounted", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    # Sanitize filename
+    filename = os.path.basename(filename)
+    
+    chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+    file_path = os.path.join(chimes_dir, filename)
+    
+    if not os.path.isfile(file_path) or not filename.lower().endswith(".wav"):
+        flash("File not found", "error")
+        return redirect(url_for("lock_chimes"))
+    
+    return send_file(file_path, mimetype="audio/wav", as_attachment=True, download_name=filename)
 
 
 @app.route("/lock_chimes/upload", methods=["POST"])
@@ -2165,50 +2294,83 @@ def upload_lock_chime():
         flash("Cannot upload a file named LockChime.wav. Please rename your file.", "error")
         return redirect(url_for("lock_chimes"))
     
-    # Save to part2
-    mount_path = get_mount_path("part2")
-    if not mount_path:
+    # Get part2 mount path
+    part2_mount = get_mount_path("part2")
+    if not part2_mount:
         flash("part2 not mounted", "error")
         return redirect(url_for("lock_chimes"))
-    dest_path = os.path.join(mount_path, filename)
+    
+    # Save to Chimes folder
+    chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+    if not os.path.isdir(chimes_dir):
+        os.makedirs(chimes_dir, exist_ok=True)
+    
+    dest_path = os.path.join(chimes_dir, filename)
     
     try:
-        file.save(dest_path)
+        # Save to temporary location first
+        temp_path = dest_path + ".tmp"
+        file.save(temp_path)
+        
+        # Validate the uploaded file
+        is_valid, validation_msg = validate_tesla_wav(temp_path)
+        if not is_valid:
+            os.remove(temp_path)
+            flash(f"Invalid WAV file: {validation_msg}", "error")
+            return redirect(url_for("lock_chimes"))
+        
+        # Move to final location
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        os.rename(temp_path, dest_path)
+        
+        # Sync to ensure file is written
+        subprocess.run(["sync"], check=False, timeout=5)
+        
+        close_samba_share("part2")
         flash(f"Uploaded {filename} successfully", "success")
     except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
         flash(f"Failed to upload file: {str(e)}", "error")
     
     return redirect(url_for("lock_chimes"))
 
 
-@app.route("/lock_chimes/set/<partition>/<filename>", methods=["POST"])
-def set_as_chime(partition, filename):
-    """Set a WAV file as the active lock chime."""
+@app.route("/lock_chimes/set/<filename>", methods=["POST"])
+def set_as_chime(filename):
+    """Set a WAV file from Chimes folder as the active lock chime."""
     if current_mode() != "edit":
         flash("Lock chime can only be updated in Edit Mode", "error")
         return redirect(url_for("lock_chimes"))
     
-    if partition not in USB_PARTITIONS:
-        flash("Invalid partition", "error")
-        return redirect(url_for("lock_chimes"))
+    # Sanitize filename
+    filename = os.path.basename(filename)
     
-    mount_path = get_mount_path(partition)
-    if not mount_path:
+    part2_mount = get_mount_path("part2")
+    if not part2_mount:
         flash("Partition not mounted", "error")
         return redirect(url_for("lock_chimes"))
     
-    source_path = os.path.join(mount_path, filename)
+    chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+    source_path = os.path.join(chimes_dir, filename)
+    
     if not os.path.isfile(source_path):
-        flash("Source file not found", "error")
+        flash("Source file not found in Chimes folder", "error")
         return redirect(url_for("lock_chimes"))
     
-    target_path = os.path.join(mount_path, LOCK_CHIME_FILENAME)
+    # Validate before setting
+    is_valid, validation_msg = validate_tesla_wav(source_path)
+    if not is_valid:
+        flash(f"Cannot set as chime: {validation_msg}", "error")
+        return redirect(url_for("lock_chimes"))
     
-    close_samba_share(partition)
+    target_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
+    
+    close_samba_share("part2")
     
     try:
         replace_lock_chime(source_path, target_path)
-        removed_duplicates = remove_other_lock_chimes(partition)
         
         # Additional sync after all operations
         subprocess.run(["sync"], check=False, timeout=10)
@@ -2226,12 +2388,9 @@ def set_as_chime(partition, filename):
         
         restart_samba_services()
         time.sleep(3)
-        close_samba_share(partition)
+        close_samba_share("part2")
         
         flash(f"Set {filename} as active lock chime", "success")
-        
-        if removed_duplicates:
-            flash(f"Removed duplicate chimes from: {', '.join(removed_duplicates)}", "info")
     except Exception as e:
         flash(f"Failed to set lock chime: {str(e)}", "error")
     
@@ -2239,27 +2398,24 @@ def set_as_chime(partition, filename):
     return redirect(url_for("lock_chimes", _=int(time.time())))
 
 
-@app.route("/lock_chimes/delete/<partition>/<filename>", methods=["POST"])
-def delete_lock_chime(partition, filename):
-    """Delete a lock chime file."""
+@app.route("/lock_chimes/delete/<filename>", methods=["POST"])
+def delete_lock_chime(filename):
+    """Delete a lock chime file from Chimes folder."""
     if current_mode() != "edit":
         flash("Files can only be deleted in Edit Mode", "error")
         return redirect(url_for("lock_chimes"))
     
-    if filename.lower() == LOCK_CHIME_FILENAME.lower():
-        flash("Cannot delete the active LockChime.wav", "error")
-        return redirect(url_for("lock_chimes"))
+    # Sanitize filename
+    filename = os.path.basename(filename)
     
-    if partition not in USB_PARTITIONS:
-        flash("Invalid partition", "error")
-        return redirect(url_for("lock_chimes"))
-    
-    mount_path = get_mount_path(partition)
-    if not mount_path:
+    part2_mount = get_mount_path("part2")
+    if not part2_mount:
         flash("Partition not mounted", "error")
         return redirect(url_for("lock_chimes"))
     
-    file_path = os.path.join(mount_path, filename)
+    chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+    file_path = os.path.join(chimes_dir, filename)
+    
     if not os.path.isfile(file_path):
         flash("File not found", "error")
         return redirect(url_for("lock_chimes"))

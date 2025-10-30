@@ -454,6 +454,49 @@ systemctl enable --now thumbnail_generator.timer || systemctl restart thumbnail_
 # Ensure the web service picks up the latest code changes
 systemctl restart gadget_web.service || true
 
+# ===== Create Chimes folder on Lightshow partition =====
+echo
+echo "Setting up Chimes folder on Lightshow partition..."
+TEMP_MOUNT="/tmp/lightshow_setup_$$"
+mkdir -p "$TEMP_MOUNT"
+
+# Mount lightshow partition temporarily
+LOOP_SETUP=$(losetup -f)
+losetup "$LOOP_SETUP" "$IMG_LIGHTSHOW_PATH"
+mount "$LOOP_SETUP" "$TEMP_MOUNT"
+
+# Create Chimes directory
+mkdir -p "$TEMP_MOUNT/Chimes"
+mkdir -p "$TEMP_MOUNT/LightShow"  # Also ensure LightShow folder exists
+
+# Migrate any existing WAV files (except LockChime.wav) to Chimes folder
+echo "Migrating existing WAV files to Chimes folder..."
+MIGRATED_COUNT=0
+for wavfile in "$TEMP_MOUNT"/*.wav "$TEMP_MOUNT"/*.WAV; do
+  if [ -f "$wavfile" ]; then
+    filename=$(basename "$wavfile")
+    # Skip LockChime.wav (case-insensitive)
+    if [[ "${filename,,}" != "lockchime.wav" ]]; then
+      echo "  Moving $filename to Chimes/"
+      mv "$wavfile" "$TEMP_MOUNT/Chimes/"
+      MIGRATED_COUNT=$((MIGRATED_COUNT + 1))
+    fi
+  fi
+done
+
+if [ $MIGRATED_COUNT -gt 0 ]; then
+  echo "  Migrated $MIGRATED_COUNT WAV file(s) to Chimes folder"
+else
+  echo "  No WAV files found to migrate"
+fi
+
+# Sync and unmount
+sync
+umount "$TEMP_MOUNT"
+losetup -d "$LOOP_SETUP"
+rmdir "$TEMP_MOUNT"
+echo "Chimes folder setup complete."
+
 echo
 echo "Installation complete."
 echo " - present script: $GADGET_DIR/present_usb.sh"

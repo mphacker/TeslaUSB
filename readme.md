@@ -119,6 +119,8 @@ sudo ./setup_usb.sh
 - Create two separate disk images:
   - **usb_cam.img**: Large exFAT partition for TeslaCam recordings
   - **usb_lightshow.img**: Smaller FAT32 partition for lock chimes and light shows
+- **Create Chimes folder**: Automatically creates `/Chimes` directory on LightShow partition
+- **Migrate existing WAV files**: Moves any existing lock chimes (except active `LockChime.wav`) to Chimes library
 - Configure dual-LUN USB gadget with optimized read-only settings
 - Set up Samba shares for network access
 - Create control scripts and web interface
@@ -147,6 +149,8 @@ sudo ./setup_usb.sh
 5. The Tesla will create the necessary folder structures:
    - **TeslaCam drive**: TeslaCam, SentryClips, SavedClips, RecentClips folders
    - **LightShow drive**: LightShow folder (for FSEQ/MP3 files)
+   - **Note**: The `/Chimes` folder is created by setup and contains your lock chime library
+   - Tesla reads the active lock chime from `LockChime.wav` in the LightShow drive root
 
 ### 5. Removal (Optional)
 
@@ -181,6 +185,7 @@ SAMBA_PASS="tesla"                         # Samba password
 - **TeslaCam LUN (ro=0)**: Read-write access for Tesla to record dashcam footage continuously
 - **Lightshow LUN (ro=1)**: Read-only access provides 15-30% performance improvement when Tesla loads light shows or plays lock chimes
 - Both LUNs appear as independent USB drives to Tesla, preventing filesystem contention
+- **Chimes folder**: Setup automatically creates `/Chimes` directory on LightShow partition and migrates existing WAV files
 
 ## Usage Modes
 
@@ -286,21 +291,34 @@ Click the "Session" button next to any video to view all six camera angles synch
 - Graceful shutdown when switching modes to prevent file system corruption
 
 ### Lock Chimes Management
-The web interface includes a complete lock chimes management system:
+The web interface includes a complete lock chimes management system with organized library storage:
 
 <img src="examples/lock-chimes.png" alt="Lock Chimes Management" width="400">
 
 **Features:**
-- View all WAV files stored in the partition 2 root directory
-- **Play/preview** chimes directly in browser with HTML5 audio player
-- **Upload** custom WAV files (Edit mode only)
-- **Set as active chime** - copies your chosen file to LockChime.wav (Edit mode only)
-- **Delete** unwanted chime files (Edit mode only)
-- Prevents uploading files named "LockChime.wav" (reserved for active chime)
-- Visual loading indicator during file operations
-- MD5 hash verification ensures file integrity after updates
-- Cache-busting ensures audio plays correctly after changes
-- Works in both Present (view/play only) and Edit (full management) modes
+- **Organized Chimes Library**: All custom lock chimes stored in dedicated `/Chimes` folder on LightShow partition
+- **Active Chime Display**: Shows currently active `LockChime.wav` with preview player
+- **Library Browser**: View all available chimes with validation status indicators
+- **WAV Format Validation**: Automatic checking for Tesla compatibility:
+  - 16-bit PCM format required
+  - 44.1 kHz or 48 kHz sample rate
+  - Uncompressed audio (no compression)
+  - File size under 1 MB
+  - Invalid files clearly marked with error messages
+- **Play/Preview**: Built-in audio player for all chimes (active and library)
+- **Download**: Download any chime from the library to your computer
+- **Upload**: Add custom WAV files to the Chimes library (Edit mode only)
+- **Set as Active**: Copy any valid chime from library to root as `LockChime.wav` (Edit mode only)
+- **Delete**: Remove unwanted chimes from library (Edit mode only, cannot delete active chime)
+- **Visual Feedback**: Loading indicators during file operations
+- **Cache-Busting**: Multiple sync operations and timestamp updates ensure Tesla recognizes new chimes
+- Works in both Present (view/play/download only) and Edit (full management) modes
+
+**Architecture:**
+- **Chimes Library**: `/Chimes/` folder on LightShow partition stores all your custom lock chimes
+- **Active Chime**: `LockChime.wav` in partition root - this is what Tesla actually plays
+- **Migration**: Setup automatically migrates existing WAV files to Chimes folder on first run
+- **Workflow**: Upload → Validate → Store in library → Set as active → Copy to root → Cache bust
 
 **Access:**
 - Navigate to `http://<pi-ip-address>:5000/lock_chimes` in your web browser
@@ -308,11 +326,18 @@ The web interface includes a complete lock chimes management system:
 
 **Usage:**
 1. In Edit mode, upload your custom WAV files using the upload form
-2. Preview any chime by clicking the audio player
-3. Click "Set as Chime" to make a file the active lock sound (becomes LockChime.wav)
-4. The active chime is marked with a green "✓ Active Chime" indicator
-5. Delete unwanted files with the Delete button
-6. In Present mode, you can view and play all chimes but cannot modify them
+   - Files are automatically validated for Tesla compatibility
+   - Valid files are stored in the Chimes library
+   - Invalid files are rejected with specific error messages
+2. Preview any chime by clicking the audio player (works in both modes)
+3. Download any chime to your computer with the Download button (works in both modes)
+4. Click "Set as Active" to make a library chime the active lock sound
+   - Copies the file from `/Chimes/` to root as `LockChime.wav`
+   - Uses cache-busting techniques to ensure Tesla recognizes the change
+   - Loading overlay shows progress during the operation
+5. The active chime section shows what's currently set with its own player
+6. Delete unwanted files from the library with the Delete button (Edit mode only)
+7. In Present mode, you can view, play, and download all chimes but cannot modify them
 
 ### Light Shows Management
 The web interface includes a complete light shows management system:
@@ -605,14 +630,22 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
 - The scripts will forcefully unmount if needed, but clean unmounts are preferred
 
 **Tesla not recognizing new lock chime (LockChime.wav):**
-Tesla aggressively caches the LockChime.wav file and may not detect changes immediately. The web interface uses several cache-busting techniques automatically:
-- **Automatic**: The "Set as Chime" function deletes the old file, syncs, creates a new file, updates timestamps, and drops Linux caches
+Tesla aggressively caches the LockChime.wav file and may not detect changes immediately. The web interface uses several cache-busting techniques automatically when you set a new chime:
+- **Automatic**: The "Set as Active" function:
+  1. Validates the chime format (16-bit PCM, 44.1/48 kHz, <1MB)
+  2. Deletes the old `LockChime.wav` from root
+  3. Syncs filesystem to disk (twice for safety)
+  4. Copies validated chime from `/Chimes/` library to root
+  5. Updates file timestamps
+  6. Drops Linux filesystem caches
+  7. Refreshes Samba shares for network visibility
 - **If Tesla still plays old chime**: Try these manual steps:
   1. **Power cycle the Tesla**: Put the car to sleep (close doors, walk away for 5+ minutes), then wake it up
   2. **Switch USB modes**: Go to Edit mode, wait 10 seconds, then back to Present mode. This forces Tesla to re-enumerate the USB device
   3. **Physical reconnect**: Unplug the Pi from Tesla's USB port, wait 10 seconds, plug back in
   4. **Tesla reboot**: As a last resort, do a full Tesla reboot (hold both scroll wheels until screen goes black)
 - **Best practice**: Change lock chimes when the car is parked and in sleep mode, not while actively driving or using the infotainment system
+- **Note**: The organized `/Chimes/` library allows you to keep multiple chimes ready and switch between them easily without re-uploading
 
 ### Log Files
 

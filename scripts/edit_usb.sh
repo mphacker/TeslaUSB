@@ -24,31 +24,37 @@ GID_VAL=$(id -g "$TARGET_USER")
 safe_unmount_dir() {
   local target="$1"
   local attempt
-  if ! mountpoint -q "$target" 2>/dev/null; then
+  
+  # Check if actually mounted in the system mount namespace
+  if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$target" 2>/dev/null; then
     return 0
   fi
 
+  # Try normal unmount in the system mount namespace
   for attempt in 1 2 3; do
-    if sudo umount "$target" 2>/dev/null; then
-      echo "  Unmounted $target"
-      return 0
+    echo "  Unmounting $target (attempt $attempt)..."
+    
+    if sudo nsenter --mount=/proc/1/ns/mnt umount "$target" 2>/dev/null; then
+      sleep 1
+      # Verify it's actually gone
+      if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$target" 2>/dev/null; then
+        echo "  Successfully unmounted $target"
+        return 0
+      else
+        echo "  WARNING: umount succeeded but mount still exists (multiple mounts?)"
+      fi
     fi
-    echo "  $target busy (attempt $attempt). Terminating remaining clients..."
-    sudo fuser -km "$target" 2>/dev/null || true
-    sleep 1
+    
+    # Still mounted, wait before retry
+    if [ $attempt -lt 3 ]; then
+      sleep 2
+    fi
   done
 
-  echo "  Unable to unmount $target cleanly; forcing lazy unmount..."
-  sudo umount -lf "$target" 2>/dev/null || true
-  sleep 1
-
-  if mountpoint -q "$target" 2>/dev/null; then
-    echo "Error: $target still mounted after forced unmount." >&2
-    return 1
-  fi
-
-  echo "  Lazy unmount succeeded for $target"
-  return 0
+  # If still mounted, this is an error - don't continue
+  echo "  ERROR: Cannot unmount $target after 3 attempts" >&2
+  echo "  This mount must be cleared before edit mode can work" >&2
+  return 1
 }
 
 # Remove gadget if active (with force to prevent hanging)
@@ -60,23 +66,11 @@ if [ -d "$CONFIGFS_GADGET" ]; then
   sync
   sleep 1
   
-  # Unmount any read-only mounts from present mode first
-  echo "Unmounting read-only mounts from present mode..."
-  RO_MNT_DIR="/mnt/gadget"
-  for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
-    if mountpoint -q "$mp" 2>/dev/null; then
-      echo "  Unmounting $mp..."
-      if ! safe_unmount_dir "$mp"; then
-        echo "  Warning: Could not cleanly unmount $mp"
-      fi
-    fi
-  done
-  
-  # Unbind UDC first
+  # Unbind UDC FIRST - this disconnects the gadget from USB before touching mounts
   if [ -f "$CONFIGFS_GADGET/UDC" ]; then
     echo "  Unbinding UDC..."
     echo "" | sudo tee "$CONFIGFS_GADGET/UDC" > /dev/null 2>&1 || true
-    sleep 1
+    sleep 2
   fi
   
   # Remove function links
@@ -100,7 +94,21 @@ if [ -d "$CONFIGFS_GADGET" ]; then
   sudo rmdir "$CONFIGFS_GADGET" 2>/dev/null || true
   
   echo "  Configfs gadget removed successfully"
-  sleep 1
+  sleep 2
+  
+  # NOW unmount read-only mounts after gadget is fully disconnected
+  echo "Unmounting read-only mounts from present mode..."
+  RO_MNT_DIR="/mnt/gadget"
+  for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+    if mountpoint -q "$mp" 2>/dev/null; then
+      echo "  Unmounting $mp..."
+      if ! safe_unmount_dir "$mp"; then
+        echo "  ERROR: Could not unmount $mp even after disconnecting gadget"
+        exit 1
+      fi
+    fi
+  done
+  
 # Check for legacy g_mass_storage module
 elif lsmod | grep -q '^g_mass_storage'; then
   echo "Removing legacy g_mass_storage module..."
@@ -147,6 +155,45 @@ elif lsmod | grep -q '^g_mass_storage'; then
   sleep 1
 fi
 
+# Ensure read-only mounts from present mode are unmounted (critical for mode switching)
+# This runs regardless of which gadget type was active, as a safety measure
+echo "Ensuring read-only mounts are cleared..."
+RO_MNT_DIR="/mnt/gadget"
+for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+  if mountpoint -q "$mp" 2>/dev/null; then
+    echo "  Unmounting $mp..."
+    if ! safe_unmount_dir "$mp"; then
+      echo "  WARNING: Could not cleanly unmount $mp, but continuing anyway..." >&2
+    else
+      echo "  Successfully unmounted $mp"
+    fi
+  fi
+done
+
+# Wait for lazy unmounts to complete
+echo "Waiting for mounts to fully release..."
+sleep 3
+sync
+
+# Clean up any stale loop devices that might still be attached to the read-only mounts
+# This is important because loop devices from present mode might still be active
+echo "Cleaning up loop devices from present mode..."
+for existing in $(sudo losetup -j "$IMG_CAM" 2>/dev/null | cut -d: -f1); do
+  if [ -n "$existing" ]; then
+    echo "  Detaching loop device (TeslaCam): $existing"
+    sudo losetup -d "$existing" 2>/dev/null || true
+  fi
+done
+for existing in $(sudo losetup -j "$IMG_LIGHTSHOW" 2>/dev/null | cut -d: -f1); do
+  if [ -n "$existing" ]; then
+    echo "  Detaching loop device (Lightshow): $existing"
+    sudo losetup -d "$existing" 2>/dev/null || true
+  fi
+done
+
+sync
+sleep 2
+
 # Prepare mount points
 echo "Preparing mount points..."
 sudo mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
@@ -165,22 +212,7 @@ for PART_NUM in 1 2; do
   fi
 done
 
-# Clean up stale loop devices tied to the images
-echo "Cleaning up stale loop devices..."
-for existing in $(losetup -j "$IMG_CAM" 2>/dev/null | cut -d: -f1); do
-  if [ -n "$existing" ]; then
-    echo "  Detaching stale loop device (TeslaCam): $existing"
-    sudo losetup -d "$existing" 2>/dev/null || true
-  fi
-done
-for existing in $(losetup -j "$IMG_LIGHTSHOW" 2>/dev/null | cut -d: -f1); do
-  if [ -n "$existing" ]; then
-    echo "  Detaching stale loop device (Lightshow): $existing"
-    sudo losetup -d "$existing" 2>/dev/null || true
-  fi
-done
-
-# Ensure all pending operations complete
+# Ensure all pending operations complete before setting up new loop devices
 sync
 sleep 1
 
@@ -301,41 +333,41 @@ fi
 # Mount partitions
 echo "Mounting partitions..."
 
-# Mount TeslaCam partition (part1)
+# Mount TeslaCam partition (part1) in system mount namespace
 MP="$MNT_DIR/part1"
 FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "unknown")
 echo "  Mounting $LOOP_CAM at $MP..."
 
 if [ "$FS_TYPE" = "exfat" ]; then
-  sudo mount -t exfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_CAM" "$MP"
+  sudo nsenter --mount=/proc/1/ns/mnt mount -t exfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_CAM" "$MP"
 elif [ "$FS_TYPE" = "vfat" ]; then
-  sudo mount -t vfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_CAM" "$MP"
+  sudo nsenter --mount=/proc/1/ns/mnt mount -t vfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_CAM" "$MP"
 else
   echo "  Warning: Unknown filesystem type '$FS_TYPE', attempting generic mount"
-  sudo mount -o rw "$LOOP_CAM" "$MP"
+  sudo nsenter --mount=/proc/1/ns/mnt mount -o rw "$LOOP_CAM" "$MP"
 fi
 
-if ! mountpoint -q "$MP"; then
+if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$MP"; then
   echo "Error: Failed to mount $LOOP_CAM at $MP" >&2
   exit 1
 fi
 echo "  Mounted $LOOP_CAM at $MP (filesystem: $FS_TYPE)"
 
-# Mount Lightshow partition (part2)
+# Mount Lightshow partition (part2) in system mount namespace
 MP="$MNT_DIR/part2"
 FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "unknown")
 echo "  Mounting $LOOP_LIGHTSHOW at $MP..."
 
 if [ "$FS_TYPE" = "exfat" ]; then
-  sudo mount -t exfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_LIGHTSHOW" "$MP"
+  sudo nsenter --mount=/proc/1/ns/mnt mount -t exfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_LIGHTSHOW" "$MP"
 elif [ "$FS_TYPE" = "vfat" ]; then
-  sudo mount -t vfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_LIGHTSHOW" "$MP"
+  sudo nsenter --mount=/proc/1/ns/mnt mount -t vfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_LIGHTSHOW" "$MP"
 else
   echo "  Warning: Unknown filesystem type '$FS_TYPE', attempting generic mount"
-  sudo mount -o rw "$LOOP_LIGHTSHOW" "$MP"
+  sudo nsenter --mount=/proc/1/ns/mnt mount -o rw "$LOOP_LIGHTSHOW" "$MP"
 fi
 
-if ! mountpoint -q "$MP"; then
+if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$MP"; then
   echo "Error: Failed to mount $LOOP_LIGHTSHOW at $MP" >&2
   exit 1
 fi
@@ -343,10 +375,22 @@ echo "  Mounted $LOOP_LIGHTSHOW at $MP (filesystem: $FS_TYPE)"
 
 # Refresh Samba so shares expose the freshly mounted partitions
 echo "Refreshing Samba shares..."
+# Force close any cached shares
 sudo smbcontrol all close-share gadget_part1 2>/dev/null || true
 sudo smbcontrol all close-share gadget_part2 2>/dev/null || true
-sudo systemctl restart smbd || true
-sudo systemctl restart nmbd || true
+# Reload Samba configuration
+sudo smbcontrol all reload-config 2>/dev/null || true
+# Restart Samba services to ensure they see the new mounts
+sudo systemctl restart smbd nmbd 2>/dev/null || true
+# Give Samba a moment to initialize
+sleep 2
+# Verify mounts are accessible
+if [ -d "$MNT_DIR/part1" ]; then
+  echo "  Part1 files: $(ls -A "$MNT_DIR/part1" 2>/dev/null | wc -l) items"
+fi
+if [ -d "$MNT_DIR/part2" ]; then
+  echo "  Part2 files: $(ls -A "$MNT_DIR/part2" 2>/dev/null | wc -l) items"
+fi
 
 echo "Updating mode state..."
 echo "edit" > "$STATE_FILE"

@@ -231,7 +231,7 @@ def get_video_files(folder_path):
                         'path': entry.path,
                         'size': stat_info.st_size,
                         'size_mb': round(stat_info.st_size / (1024 * 1024), 2),
-                        'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                        'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %I:%M:%S %p'),
                         'timestamp': stat_info.st_mtime,
                         'session': session_info['session'] if session_info else None,
                         'camera': session_info['camera'] if session_info else None
@@ -2243,7 +2243,7 @@ def present_usb():
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 cwd=GADGET_DIR,
-                timeout=30,
+                timeout=60,  # Increased from 30s - filesystem checks can take time
             )
             
         if result.returncode == 0:
@@ -2252,7 +2252,7 @@ def present_usb():
             flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
             
     except subprocess.TimeoutExpired:
-        flash("Error: Script timed out after 30 seconds", "error")
+        flash("Error: Script timed out after 60 seconds", "error")
     except Exception as e:
         flash(f"Error: {str(e)}", "error")
     
@@ -2273,7 +2273,7 @@ def edit_usb():
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 cwd=GADGET_DIR,
-                timeout=30,
+                timeout=60,  # Increased from 30s - unmount retries can take time
             )
             
         if result.returncode == 0:
@@ -2282,7 +2282,7 @@ def edit_usb():
             flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
             
     except subprocess.TimeoutExpired:
-        flash("Error: Script timed out after 30 seconds", "error")
+        flash("Error: Script timed out after 60 seconds", "error")
     except Exception as e:
         flash(f"Error: {str(e)}", "error")
     
@@ -2489,7 +2489,10 @@ def upload_lock_chime():
         # Sync to ensure file is written
         subprocess.run(["sync"], check=False, timeout=5)
         
+        # Force Samba to see the new file
         close_samba_share("part2")
+        restart_samba_services()
+        
         flash(f"Uploaded {filename} successfully", "success")
     except Exception as e:
         if os.path.exists(temp_path):

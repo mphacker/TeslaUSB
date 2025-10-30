@@ -457,6 +457,39 @@ systemctl enable --now thumbnail_generator.timer || systemctl restart thumbnail_
 # Ensure the web service picks up the latest code changes
 systemctl restart gadget_web.service || true
 
+# ===== Create TeslaCam folder on TeslaCam partition =====
+echo
+echo "Setting up TeslaCam folder on TeslaCam partition..."
+TEMP_MOUNT="/tmp/teslacam_setup_$$"
+mkdir -p "$TEMP_MOUNT"
+
+# Mount TeslaCam partition temporarily
+LOOP_SETUP=$(losetup -f)
+losetup "$LOOP_SETUP" "$IMG_CAM_PATH"
+
+# Detect filesystem type
+FS_TYPE=$(blkid -o value -s TYPE "$LOOP_SETUP" 2>/dev/null || echo "vfat")
+if [ "$FS_TYPE" = "exfat" ]; then
+  mount -t exfat "$LOOP_SETUP" "$TEMP_MOUNT"
+else
+  mount -t vfat "$LOOP_SETUP" "$TEMP_MOUNT"
+fi
+
+# Create TeslaCam directory if it doesn't exist
+if [ ! -d "$TEMP_MOUNT/TeslaCam" ]; then
+  echo "  Creating TeslaCam folder..."
+  mkdir -p "$TEMP_MOUNT/TeslaCam"
+else
+  echo "  TeslaCam folder already exists"
+fi
+
+# Sync and unmount
+sync
+umount "$TEMP_MOUNT"
+losetup -d "$LOOP_SETUP"
+rmdir "$TEMP_MOUNT"
+echo "TeslaCam folder setup complete."
+
 # ===== Create Chimes folder on Lightshow partition =====
 echo
 echo "Setting up Chimes folder on Lightshow partition..."

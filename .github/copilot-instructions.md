@@ -72,26 +72,41 @@ python3 web_control.py
 ### Filesystem Safety Rules
 1. **Always sync before mode switches**: `sync; sleep 1` before unmounting
 2. **Use fsck during transitions**: Both mode scripts run filesystem checks
-3. **Lazy unmount as last resort**: `umount -lf` only after retries with `fuser -km`
-4. **Check mount namespace**: Use `nsenter --mount=/proc/1/ns/mnt` for system-wide mount visibility (systemd mount isolation issue)
+3. **Mount namespace isolation is critical**: ALL mount/unmount operations in `edit_usb.sh` and `present_usb.sh` MUST use `nsenter --mount=/proc/1/ns/mnt` to operate in the system mount namespace
+   - Problem: When scripts run via web interface subprocess, mounts created in the script's namespace disappear when the subprocess exits
+   - Solution: Prefix all `mount`, `umount`, and `mountpoint` commands with `sudo nsenter --mount=/proc/1/ns/mnt`
+   - Example: `sudo nsenter --mount=/proc/1/ns/mnt mount -t exfat -o rw "$LOOP" "$MOUNTPOINT"`
+   - This ensures mounts persist in the system namespace and are visible to Samba and other services
+4. **UDC must be unbound BEFORE unmounting**: When switching from present to edit mode, unbind the USB Device Controller FIRST, then unmount filesystems
+   - USB gadget system holds references to mounted filesystems through loop devices
+   - Attempting to unmount while UDC is bound will fail with "device busy"
+   - Correct order: Unbind UDC → Remove gadget config → Unmount filesystems → Detach loop devices
 
 ### Modifying Templates
 ```bash
 # 1. Edit source template in scripts/ or templates/
 nano scripts/web_control.py
 
-# 2. Re-run setup to regenerate configured files
+# 2. Re-run setup to regenerate configured files (REQUIRED after any script changes)
 sudo ./setup_usb.sh
 
-# 3. Restart relevant services
+# 3. Restart relevant services (if setup doesn't restart them)
 sudo systemctl restart gadget_web.service
 ```
+
+**CRITICAL**: Always run `setup_usb.sh` after modifying any files in `scripts/` or `templates/` directories. The setup script:
+- Processes template placeholders (`__GADGET_DIR__`, `__TARGET_USER__`, etc.)
+- Copies configured scripts to the working directory
+- Restarts systemd services to pick up changes
+- Simply copying files via `scp` is NOT sufficient - the placeholders won't be replaced
 
 ## Project-Specific Conventions
 
 ### Bash Scripts (`present_usb.sh`, `edit_usb.sh`)
 - **Always use `set -euo pipefail`** for error safety
-- **Unmount with retry logic**: 3 attempts with `fuser -km` before lazy unmount
+- **CRITICAL: All mount operations must use nsenter**: Every `mount`, `umount`, and `mountpoint` command must be prefixed with `sudo nsenter --mount=/proc/1/ns/mnt` to ensure operations happen in the system mount namespace, not the script's isolated namespace
+- **Correct gadget removal order**: When switching to edit mode, MUST unbind UDC before attempting to unmount filesystems (gadget holds references to mounts)
+- **Unmount with retry logic**: Multiple attempts with sleep delays, avoid `fuser -km` (can kill critical processes)
 - **Ephemeral loop devices for fsck**: Create temporary loop, run fsck, detach immediately
 - **Update state file last**: Write to `state.txt` only after successful mode switch
 - **Stop background services first**: Kill `thumbnail_generator.service` before mount operations
@@ -129,11 +144,13 @@ sudo systemctl restart gadget_web.service
 
 ## Common Pitfalls
 
-1. **Mount namespace isolation**: If mounts aren't visible in web service, check `MountFlags=shared` in service file
+1. **Mount namespace isolation**: If mounts aren't visible in web service, ensure ALL mount/unmount commands use `sudo nsenter --mount=/proc/1/ns/mnt`. Without this, mounts created in subprocess namespaces disappear when the subprocess exits
 2. **Stale Samba cache**: Always call `close_samba_share()` after file operations, or Windows won't see new files
-3. **Partition format for large drives**: Use exFAT for partitions >32GB, FAT32 for smaller (see `setup_usb.sh` logic)
-4. **Sudoers configuration required**: Scripts need passwordless sudo for `modprobe`, `mount`, `systemctl` operations
-5. **Loop device cleanup**: Always detach with `losetup -d` in cleanup trap to prevent resource leaks
+3. **UDC unbinding order**: MUST unbind USB Device Controller BEFORE unmounting filesystems when switching to edit mode. The gadget system holds references that prevent clean unmounts
+4. **Partition format for large drives**: Use exFAT for partitions >32GB, FAT32 for smaller (see `setup_usb.sh` logic)
+5. **Sudoers configuration required**: Scripts need passwordless sudo for `modprobe`, `mount`, `systemctl` operations
+6. **Loop device cleanup**: Always detach with `losetup -d` in cleanup trap to prevent resource leaks
+7. **Avoid fuser -km**: Using `fuser -km` to kill processes accessing mounts can hang or kill critical system processes. Use lazy unmount with retries instead
 
 ## Key Files Reference
 - `setup_usb.sh`: Main installer, creates image, configures services (run this first)

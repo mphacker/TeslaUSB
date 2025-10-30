@@ -11,7 +11,17 @@ set -euo pipefail
 echo "Tesla USB Gadget Cleanup Script"
 echo "==============================="
 
-# Configuration - should match setup-usb.sh
+#!/bin/bash
+
+# cleanup.sh - Remove all Tesla USB Gadget files and configuration
+# 
+# This script safely removes all files and system configurations
+# created by setup_usb.sh while ensuring proper cleanup
+# of system resources like loop devices, mounts, and services.
+
+set -euo pipefail
+
+# Configuration - should match setup_usb.sh
 GADGET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMG_NAME="usb_dual.img"
 IMG_PATH="$GADGET_DIR/$IMG_NAME"
@@ -140,7 +150,7 @@ cleanup_mount_dirs() {
 cleanup_gadget_files() {
   echo "Cleaning up gadget directory files..."
   
-  # List of files created by setup-usb.sh (excluding this script and templates)
+  # List of files created by setup_usb.sh (excluding this script and templates)
   local files_to_remove=(
     "present_usb.sh"
     "edit_usb.sh" 

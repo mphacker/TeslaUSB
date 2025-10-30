@@ -29,7 +29,7 @@ TeslaUSB transforms a Raspberry Pi into a dual-mode USB gadget for Tesla vehicle
 
 ### How It Works
 1. Source files in `scripts/` and `templates/` contain placeholders like `__GADGET_DIR__`, `__TARGET_USER__`, `__MNT_DIR__`
-2. `setup-usb.sh` uses `sed` to replace placeholders with actual configuration values
+2. `setup_usb.sh` uses `sed` to replace placeholders with actual configuration values
 3. Configured files are copied to `GADGET_DIR` (default: `/home/pi/TeslaUSB/`)
 4. Systemd services reference the configured scripts
 
@@ -40,7 +40,7 @@ TeslaUSB transforms a Raspberry Pi into a dual-mode USB gadget for Tesla vehicle
 - `__TARGET_USER__`: Linux user running services (detected via `$SUDO_USER` or defaults to `pi`)
 - `__SECRET_KEY__`: Flask secret for sessions
 
-**Never hardcode paths** - always use placeholders in template files. When testing locally, run `setup-usb.sh` to generate configured scripts.
+**Never hardcode paths** - always use placeholders in template files. When testing locally, run `setup_usb.sh` to generate configured scripts.
 
 ## Critical Developer Workflows
 
@@ -81,7 +81,7 @@ python3 web_control.py
 nano scripts/web_control.py
 
 # 2. Re-run setup to regenerate configured files
-sudo ./setup-usb.sh
+sudo ./setup_usb.sh
 
 # 3. Restart relevant services
 sudo systemctl restart gadget_web.service
@@ -131,12 +131,12 @@ sudo systemctl restart gadget_web.service
 
 1. **Mount namespace isolation**: If mounts aren't visible in web service, check `MountFlags=shared` in service file
 2. **Stale Samba cache**: Always call `close_samba_share()` after file operations, or Windows won't see new files
-3. **Partition format for large drives**: Use exFAT for partitions >32GB, FAT32 for smaller (see `setup-usb.sh` logic)
+3. **Partition format for large drives**: Use exFAT for partitions >32GB, FAT32 for smaller (see `setup_usb.sh` logic)
 4. **Sudoers configuration required**: Scripts need passwordless sudo for `modprobe`, `mount`, `systemctl` operations
 5. **Loop device cleanup**: Always detach with `losetup -d` in cleanup trap to prevent resource leaks
 
 ## Key Files Reference
-- `setup-usb.sh`: Main installer, creates image, configures services (run this first)
+- `setup_usb.sh`: Main installer, creates image, configures services (run this first)
 - `scripts/present_usb.sh`: Template for USB gadget mode script
 - `scripts/edit_usb.sh`: Template for network edit mode script  
 - `scripts/web_control.py`: Flask app with video browser, lock chime, and light show management

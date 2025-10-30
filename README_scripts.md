@@ -17,7 +17,7 @@ This directory contains the template files and source scripts used by the Tesla 
 
 ## How It Works
 
-1. **Template Processing**: The `setup-usb.sh` script processes these template files and replaces placeholders with actual configuration values.
+1. **Template Processing**: The `setup_usb.sh` script processes these template files and replaces placeholders with actual configuration values.
 
 2. **Placeholders**: Template files contain placeholders like `__GADGET_DIR__`, `__TARGET_USER__`, etc. that get replaced during setup.
 
@@ -35,7 +35,7 @@ This directory contains the template files and source scripts used by the Tesla 
 To modify the behavior:
 
 1. **Edit the source files** in `scripts/` or `templates/` directories
-2. **Re-run setup** to apply changes: `sudo ./setup-usb.sh`
+2. **Re-run setup** to apply changes: `sudo ./setup_usb.sh`
 3. **Or manually copy** and configure individual files as needed
 
 ## Placeholders Used

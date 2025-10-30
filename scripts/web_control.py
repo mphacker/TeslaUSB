@@ -20,7 +20,7 @@ import hashlib
 from datetime import datetime
 
 app = Flask(__name__)
-# Configuration (will be updated by setup-usb.sh)
+# Configuration (will be updated by setup_usb.sh)
 app.secret_key = "__SECRET_KEY__"
 GADGET_DIR = "__GADGET_DIR__"
 MNT_DIR = "__MNT_DIR__"
@@ -1264,6 +1264,14 @@ HTML_LOCK_CHIMES_PAGE = """
             <button type="submit" class="edit-btn">📤 Upload</button>
         </form>
     </div>
+    <div class="info-box" style="background-color: #fff3cd; border-left: 4px solid #ffc107; margin-bottom: 20px;">
+        <p style="margin: 0; font-size: 14px;"><strong>⚠️ Tesla Cache Note:</strong> Tesla may take 5-30 minutes to recognize a new lock chime due to aggressive caching. If the old chime still plays after setting a new one:</p>
+        <ul style="margin: 8px 0 0 20px; font-size: 13px;">
+            <li>Put car to sleep (walk away for 5+ minutes), then wake it</li>
+            <li>Switch to Present mode, wait 10 seconds, then back to Edit mode (forces USB re-enumeration)</li>
+            <li>Physically unplug/replug the Pi from Tesla's USB port</li>
+        </ul>
+    </div>
     {% endif %}
     
     {% if wav_files %}
@@ -1620,9 +1628,11 @@ def replace_lock_chime(source_path, destination_path):
         # DELETE the old LockChime.wav completely
         os.remove(destination_path)
         
-        # Sync the deletion and wait
+        # Sync the deletion multiple times to ensure it propagates
         subprocess.run(["sync"], check=False, timeout=5)
-        time.sleep(0.3)
+        time.sleep(0.5)
+        subprocess.run(["sync"], check=False, timeout=5)
+        time.sleep(0.5)
 
     try:
         # Write to a temporary file first with a different name
@@ -1670,6 +1680,16 @@ def replace_lock_chime(source_path, destination_path):
                 check=False,
                 timeout=5
             )
+        except Exception:
+            pass
+        
+        # Update file access/modification times to force inode metadata change
+        # This helps Tesla detect the file has changed even if size is the same
+        try:
+            current_time = time.time()
+            os.utime(destination_path, (current_time, current_time))
+            # Sync the metadata change
+            subprocess.run(["sync"], check=False, timeout=5)
         except Exception:
             pass
         

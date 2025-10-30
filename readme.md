@@ -4,7 +4,7 @@ A comprehensive Raspberry Pi setup script that creates a USB mass storage gadget
 
 ## Overview
 
-This script (`setup-usb.sh`) transforms your Raspberry Pi into a dual-LUN USB gadget that appears as **two separate USB drives** when connected to a Tesla vehicle:
+This script (`setup_usb.sh`) transforms your Raspberry Pi into a dual-LUN USB gadget that appears as **two separate USB drives** when connected to a Tesla vehicle:
 
 - **LUN 0 (TeslaCam)**: Large partition for dashcam and sentry mode recordings (read-write)
 - **LUN 1 (Lightshow)**: Smaller partition dedicated to lock chimes and light show files (read-only optimized for 15-30% performance improvement)
@@ -110,7 +110,7 @@ cd TeslaUSB
 
 **Run the setup script:**
 ```bash
-sudo ./setup-usb.sh
+sudo ./setup_usb.sh
 ```
 
 **The script will:**
@@ -159,7 +159,7 @@ sudo ./cleanup.sh
 
 ## Configuration
 
-Edit the configuration section at the top of `setup-usb.sh`:
+Edit the configuration section at the top of `setup_usb.sh`:
 
 ```bash
 # ================= Configuration =================
@@ -389,7 +389,7 @@ When in Edit USB mode, access files locally with full read-write permissions:
 
 ```
 TeslaUSB/
-├── setup-usb.sh              # Main setup script
+├── setup_usb.sh              # Main setup script
 ├── cleanup.sh                # Cleanup script  
 ├── scripts/                  # Source script templates
 │   ├── present_usb.sh           # USB gadget presentation script
@@ -427,7 +427,7 @@ The setup script copies and configures template files to the gadget directory:
 To modify script behavior:
 
 1. **Edit source files**: Modify files in `scripts/` or `templates/` directories
-2. **Re-run setup**: Execute `sudo ./setup-usb.sh` to apply changes
+2. **Re-run setup**: Execute `sudo ./setup_usb.sh` to apply changes
 3. **Manual updates**: For testing, you can edit the generated files directly in the gadget directory
 
 **Example**: To add custom logging to the present script:
@@ -436,7 +436,7 @@ To modify script behavior:
 nano scripts/present_usb.sh
 
 # Re-run setup to apply changes
-sudo ./setup-usb.sh
+sudo ./setup_usb.sh
 ```
 
 ## Systemd Services
@@ -603,6 +603,16 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
 - Check if any programs are accessing the mount: `sudo lsof | grep /mnt/gadget`
 - Close any open file browsers, media players, or terminal sessions in those directories
 - The scripts will forcefully unmount if needed, but clean unmounts are preferred
+
+**Tesla not recognizing new lock chime (LockChime.wav):**
+Tesla aggressively caches the LockChime.wav file and may not detect changes immediately. The web interface uses several cache-busting techniques automatically:
+- **Automatic**: The "Set as Chime" function deletes the old file, syncs, creates a new file, updates timestamps, and drops Linux caches
+- **If Tesla still plays old chime**: Try these manual steps:
+  1. **Power cycle the Tesla**: Put the car to sleep (close doors, walk away for 5+ minutes), then wake it up
+  2. **Switch USB modes**: Go to Edit mode, wait 10 seconds, then back to Present mode. This forces Tesla to re-enumerate the USB device
+  3. **Physical reconnect**: Unplug the Pi from Tesla's USB port, wait 10 seconds, plug back in
+  4. **Tesla reboot**: As a last resort, do a full Tesla reboot (hold both scroll wheels until screen goes black)
+- **Best practice**: Change lock chimes when the car is parked and in sleep mode, not while actively driving or using the infotainment system
 
 ### Log Files
 

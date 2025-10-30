@@ -138,19 +138,12 @@ sudo ./setup_usb.sh
 
 ### 4. Connect to Tesla
 
-1. Switch to "Present USB Gadget" mode via the web interface (if not already in that mode)
-2. Connect the Raspberry Pi to your Tesla's USB port using the appropriate cable:
+1. Connect the Raspberry Pi to your Tesla's USB port using the appropriate cable:
    - **Raspberry Pi Zero 2 W**: Use the USB port labeled "USB" (not "PWR")
    - **Raspberry Pi 4/5**: Use the USB-C port
-3. **The Tesla will detect TWO separate USB drives:**
+2. **The Tesla will detect TWO separate USB drives:**
    - **LUN 0 (TeslaCam)**: Large drive for dashcam and sentry recordings
    - **LUN 1 (LightShow)**: Smaller drive for lock chimes and light show files
-4. Format both drives when prompted by the Tesla (this is normal on first use)
-5. The Tesla will create the necessary folder structures:
-   - **TeslaCam drive**: TeslaCam, SentryClips, SavedClips, RecentClips folders
-   - **LightShow drive**: LightShow folder (for FSEQ/MP3 files)
-   - **Note**: The `/Chimes` folder is created by setup and contains your lock chime library
-   - Tesla reads the active lock chime from `LockChime.wav` in the LightShow drive root
 
 ### 5. Removal (Optional)
 
@@ -267,8 +260,21 @@ The web interface includes a built-in TeslaCam video browser accessible in both 
 Click the "Session" button next to any video to view all six camera angles synchronized together. The multi-camera view includes:
 - All 6 Tesla camera angles (Front, Back, Left Pillar, Right Pillar, Left Repeater, Right Repeater)
 - Synchronized playback controls (Play All, Pause All, Restart, Sync Playback)
+- **Auto-Sync toggle**: Keeps all cameras synchronized automatically during playback (enabled by default)
+- **Low Bandwidth mode**: Optimized for Pi Zero 2 W - streams videos on-demand instead of preloading
 - Individual video controls for each camera
+- Real-time status indicators showing buffer/streaming state
 - Session information showing timestamp and camera count
+
+**Performance Optimization:**
+- **HTTP Range Requests**: Videos stream efficiently using HTTP byte-range requests
+- **Low Bandwidth Mode** (recommended for Pi Zero 2 W):
+  - Click "Low Bandwidth: OFF" to enable
+  - Disables preloading - videos stream only when playing
+  - Significantly reduces memory and bandwidth usage
+  - Allows smooth playback on resource-constrained devices
+- **Normal Mode**: Buffers video metadata for slightly better seek performance
+- **Auto-Sync**: Automatically corrects drift between cameras every 500ms (0.2s threshold)
 
 **Access:**
 - Navigate to `http://<pi-ip-address>:5000/videos` in your web browser

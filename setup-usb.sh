@@ -3,7 +3,8 @@ set -euo pipefail
 
 # ================= Configuration =================
 GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"
-IMG_NAME="usb_dual.img"
+IMG_CAM_NAME="usb_cam.img"        # TeslaCam partition (read-write)
+IMG_LIGHTSHOW_NAME="usb_lightshow.img"  # Lightshow partition (read-only)
 PART1_SIZE="427G"  
 PART2_SIZE="20G"
 LABEL1="TeslaCam"
@@ -22,7 +23,8 @@ else
 fi
 
 GADGET_DIR="$GADGET_DIR_DEFAULT"
-IMG_PATH="$GADGET_DIR/$IMG_NAME"
+IMG_CAM_PATH="$GADGET_DIR/$IMG_CAM_NAME"
+IMG_LIGHTSHOW_PATH="$GADGET_DIR/$IMG_LIGHTSHOW_NAME"
 
 # Validate user exists
 if ! id "$TARGET_USER" >/dev/null 2>&1; then
@@ -47,7 +49,8 @@ to_mib() {
 }
 P1_MB=$(to_mib "$PART1_SIZE")
 P2_MB=$(to_mib "$PART2_SIZE")
-TOTAL_MB=$((P1_MB + P2_MB + 2))
+
+# Note: We no longer need TOTAL_MB since we're creating separate images
 
 # Install prerequisites (only fetch/install if something is missing)
 REQUIRED_PACKAGES=(
@@ -117,111 +120,121 @@ fi
 mkdir -p "$GADGET_DIR"
 chown "$TARGET_USER:$TARGET_USER" "$GADGET_DIR"
 
-# Cleanup function for loop device
-cleanup_loop_device() {
-  if [ -n "${LOOP_DEV:-}" ]; then
-    echo "Cleaning up loop device: $LOOP_DEV"
-    losetup -d "$LOOP_DEV" 2>/dev/null || true
-    LOOP_DEV=""
+# Cleanup function for loop devices
+cleanup_loop_devices() {
+  if [ -n "${LOOP_CAM:-}" ]; then
+    echo "Cleaning up loop device: $LOOP_CAM"
+    losetup -d "$LOOP_CAM" 2>/dev/null || true
+    LOOP_CAM=""
+  fi
+  if [ -n "${LOOP_LIGHTSHOW:-}" ]; then
+    echo "Cleaning up loop device: $LOOP_LIGHTSHOW"
+    losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
+    LOOP_LIGHTSHOW=""
   fi
 }
 
-# Create image (if missing)
-if [ -f "$IMG_PATH" ]; then
-  echo "Image already exists at $IMG_PATH — skipping creation."
+# Create TeslaCam image (if missing)
+if [ -f "$IMG_CAM_PATH" ]; then
+  echo "TeslaCam image already exists at $IMG_CAM_PATH — skipping creation."
 else
   # Set trap to cleanup on exit/error
-  trap cleanup_loop_device EXIT INT TERM
+  trap cleanup_loop_devices EXIT INT TERM
   
-  echo "Creating image $IMG_PATH (${TOTAL_MB}M)..."
+  echo "Creating TeslaCam image $IMG_CAM_PATH (${P1_MB}M)..."
   # Create sparse file (thin provisioned) - only allocates space as needed
-  truncate -s "${TOTAL_MB}M" "$IMG_PATH" || {
-    echo "Error: Failed to create image file"
+  truncate -s "${P1_MB}M" "$IMG_CAM_PATH" || {
+    echo "Error: Failed to create TeslaCam image file"
     exit 1
   }
   
-  LOOP_DEV=$(losetup --find --show "$IMG_PATH") || {
-    echo "Error: Failed to create loop device"
+  LOOP_CAM=$(losetup --find --show "$IMG_CAM_PATH") || {
+    echo "Error: Failed to create loop device for TeslaCam"
     exit 1
   }
   
   # Validate loop device was created
-  if [ -z "$LOOP_DEV" ] || [ ! -e "$LOOP_DEV" ]; then
+  if [ -z "$LOOP_CAM" ] || [ ! -e "$LOOP_CAM" ]; then
     echo "Error: Loop device creation failed or device not accessible"
     exit 1
   fi
   
-  echo "Using loop device: $LOOP_DEV"
+  echo "Using loop device: $LOOP_CAM"
   
-  # Create partition table with error checking
-  parted -s "$LOOP_DEV" mklabel msdos || {
-    echo "Error: Failed to create partition table"
-    exit 1
-  }
-  
-  parted -s "$LOOP_DEV" mkpart primary fat32 1MiB $((1+P1_MB))MiB || {
-    echo "Error: Failed to create first partition"
-    exit 1
-  }
-  
-  parted -s "$LOOP_DEV" mkpart primary fat32 $((1+P1_MB))MiB 100% || {
-    echo "Error: Failed to create second partition"
-    exit 1
-  }
-  
-  partprobe "$LOOP_DEV" || true
-  
-  # Wait for partition nodes to appear (up to 10 seconds)
-  echo "Waiting for partition nodes to appear..."
-  for i in {1..10}; do
-    if [ -e "${LOOP_DEV}p1" ] && [ -e "${LOOP_DEV}p2" ]; then
-      echo "Partition nodes ready after ${i} seconds"
-      break
-    fi
-    if [ $i -eq 10 ]; then
-      echo "Error: Partition nodes ${LOOP_DEV}p1 and ${LOOP_DEV}p2 did not appear after 10 seconds"
-      exit 1
-    fi
-    sleep 1
-  done
-  
-  # Format partitions - use exFAT for large partitions (>32GB), FAT32 for smaller
-  echo "Formatting partition 1 (${LABEL1})..."
+  # Format as single filesystem - use exFAT for large partitions (>32GB), FAT32 for smaller
+  echo "Formatting TeslaCam partition (${LABEL1})..."
   if [ "$P1_MB" -gt 32768 ]; then
     echo "  Using exFAT (partition size: ${P1_MB}MB > 32GB)"
-    mkfs.exfat -n "$LABEL1" "${LOOP_DEV}p1" || {
-      echo "Error: Failed to format first partition with exFAT"
+    mkfs.exfat -n "$LABEL1" "$LOOP_CAM" || {
+      echo "Error: Failed to format TeslaCam partition with exFAT"
       exit 1
     }
   else
     echo "  Using FAT32 (partition size: ${P1_MB}MB <= 32GB)"
-    mkfs.vfat -F 32 -n "$LABEL1" "${LOOP_DEV}p1" || {
-      echo "Error: Failed to format first partition with FAT32"
+    mkfs.vfat -F 32 -n "$LABEL1" "$LOOP_CAM" || {
+      echo "Error: Failed to format TeslaCam partition with FAT32"
       exit 1
     }
   fi
   
-  echo "Formatting partition 2 (${LABEL2})..."
+  # Clean up loop device
+  losetup -d "$LOOP_CAM" 2>/dev/null || true
+  LOOP_CAM=""
+  
+  echo "TeslaCam image created and formatted."
+fi
+
+# Create Lightshow image (if missing)
+if [ -f "$IMG_LIGHTSHOW_PATH" ]; then
+  echo "Lightshow image already exists at $IMG_LIGHTSHOW_PATH — skipping creation."
+else
+  # Set trap to cleanup on exit/error (if not already set)
+  trap cleanup_loop_devices EXIT INT TERM
+  
+  echo "Creating Lightshow image $IMG_LIGHTSHOW_PATH (${P2_MB}M)..."
+  truncate -s "${P2_MB}M" "$IMG_LIGHTSHOW_PATH" || {
+    echo "Error: Failed to create Lightshow image file"
+    exit 1
+  }
+  
+  LOOP_LIGHTSHOW=$(losetup --find --show "$IMG_LIGHTSHOW_PATH") || {
+    echo "Error: Failed to create loop device for Lightshow"
+    exit 1
+  }
+  
+  if [ -z "$LOOP_LIGHTSHOW" ] || [ ! -e "$LOOP_LIGHTSHOW" ]; then
+    echo "Error: Loop device creation failed or device not accessible"
+    exit 1
+  fi
+  
+  echo "Using loop device: $LOOP_LIGHTSHOW"
+  
+  # Format Lightshow partition
+  echo "Formatting Lightshow partition (${LABEL2})..."
   if [ "$P2_MB" -gt 32768 ]; then
     echo "  Using exFAT (partition size: ${P2_MB}MB > 32GB)"
-    mkfs.exfat -n "$LABEL2" "${LOOP_DEV}p2" || {
-      echo "Error: Failed to format second partition with exFAT"
+    mkfs.exfat -n "$LABEL2" "$LOOP_LIGHTSHOW" || {
+      echo "Error: Failed to format Lightshow partition with exFAT"
       exit 1
     }
   else
     echo "  Using FAT32 (partition size: ${P2_MB}MB <= 32GB)"
-    mkfs.vfat -F 32 -n "$LABEL2" "${LOOP_DEV}p2" || {
-      echo "Error: Failed to format second partition with FAT32"
+    mkfs.vfat -F 32 -n "$LABEL2" "$LOOP_LIGHTSHOW" || {
+      echo "Error: Failed to format Lightshow partition with FAT32"
       exit 1
     }
   fi
   
-  # Clean up loop device (will also be called by trap)
-  cleanup_loop_device
-  trap - EXIT INT TERM  # Remove trap since we're cleaning up normally
+  # Clean up loop device
+  losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
+  LOOP_LIGHTSHOW=""
   
-  echo "Image created and partitions formatted."
+  echo "Lightshow image created and formatted."
 fi
+
+# Clean up any remaining loop devices
+cleanup_loop_devices
+trap - EXIT INT TERM  # Remove trap since we're done with image creation
 
 # Create mount points
 mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
@@ -328,7 +341,8 @@ configure_template() {
   
   # Replace placeholders in template with actual values
   sed -e "s|__GADGET_DIR__|$GADGET_DIR|g" \
-      -e "s|__IMG_NAME__|$IMG_NAME|g" \
+      -e "s|__IMG_CAM_NAME__|$IMG_CAM_NAME|g" \
+      -e "s|__IMG_LIGHTSHOW_NAME__|$IMG_LIGHTSHOW_NAME|g" \
       -e "s|__MNT_DIR__|$MNT_DIR|g" \
       -e "s|__TARGET_USER__|$TARGET_USER|g" \
       -e "s|__WEB_PORT__|$WEB_PORT|g" \

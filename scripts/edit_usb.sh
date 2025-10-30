@@ -5,7 +5,8 @@ set -euo pipefail
 # This script removes the USB gadget, mounts partitions locally, and starts Samba
 
 # Configuration (will be updated by setup-usb.sh)
-IMG="__GADGET_DIR__/__IMG_NAME__"
+IMG_CAM="__GADGET_DIR__/__IMG_CAM_NAME__"
+IMG_LIGHTSHOW="__GADGET_DIR__/__IMG_LIGHTSHOW_NAME__"
 MNT_DIR="__MNT_DIR__"
 TARGET_USER="__TARGET_USER__"
 STATE_FILE="__GADGET_DIR__/state.txt"
@@ -51,8 +52,58 @@ safe_unmount_dir() {
 }
 
 # Remove gadget if active (with force to prevent hanging)
-if lsmod | grep -q '^g_mass_storage'; then
-  echo "Removing USB gadget module..."
+# First check for configfs gadget
+CONFIGFS_GADGET="/sys/kernel/config/usb_gadget/teslausb"
+if [ -d "$CONFIGFS_GADGET" ]; then
+  echo "Removing configfs USB gadget..."
+  # Sync all pending writes first
+  sync
+  sleep 1
+  
+  # Unmount any read-only mounts from present mode first
+  echo "Unmounting read-only mounts from present mode..."
+  RO_MNT_DIR="/mnt/gadget"
+  for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+    if mountpoint -q "$mp" 2>/dev/null; then
+      echo "  Unmounting $mp..."
+      if ! safe_unmount_dir "$mp"; then
+        echo "  Warning: Could not cleanly unmount $mp"
+      fi
+    fi
+  done
+  
+  # Unbind UDC first
+  if [ -f "$CONFIGFS_GADGET/UDC" ]; then
+    echo "  Unbinding UDC..."
+    echo "" | sudo tee "$CONFIGFS_GADGET/UDC" > /dev/null 2>&1 || true
+    sleep 1
+  fi
+  
+  # Remove function links
+  echo "  Removing function links..."
+  sudo rm -f "$CONFIGFS_GADGET"/configs/*/mass_storage.* 2>/dev/null || true
+  
+  # Remove configurations
+  sudo rmdir "$CONFIGFS_GADGET"/configs/*/strings/* 2>/dev/null || true
+  sudo rmdir "$CONFIGFS_GADGET"/configs/* 2>/dev/null || true
+  
+  # Remove LUNs from functions
+  sudo rmdir "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.* 2>/dev/null || true
+  
+  # Remove functions
+  sudo rmdir "$CONFIGFS_GADGET"/functions/* 2>/dev/null || true
+  
+  # Remove strings
+  sudo rmdir "$CONFIGFS_GADGET"/strings/* 2>/dev/null || true
+  
+  # Remove gadget
+  sudo rmdir "$CONFIGFS_GADGET" 2>/dev/null || true
+  
+  echo "  Configfs gadget removed successfully"
+  sleep 1
+# Check for legacy g_mass_storage module
+elif lsmod | grep -q '^g_mass_storage'; then
+  echo "Removing legacy g_mass_storage module..."
   # Sync all pending writes first
   sync
   sleep 1
@@ -101,7 +152,7 @@ echo "Preparing mount points..."
 sudo mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
 sudo chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
 
-# Ensure previous mounts are cleared before setting up new loop device
+# Ensure previous mounts are cleared before setting up new loop devices
 # This prevents remounting while partitions are still in use
 for PART_NUM in 1 2; do
   MP="$MNT_DIR/part${PART_NUM}"
@@ -114,11 +165,17 @@ for PART_NUM in 1 2; do
   fi
 done
 
-# Now clean up stale loop devices tied to the image
-# Only detach devices that are actually attached to our image file
-for existing in $(losetup -j "$IMG" 2>/dev/null | cut -d: -f1); do
+# Clean up stale loop devices tied to the images
+echo "Cleaning up stale loop devices..."
+for existing in $(losetup -j "$IMG_CAM" 2>/dev/null | cut -d: -f1); do
   if [ -n "$existing" ]; then
-    echo "Detaching stale loop device: $existing"
+    echo "  Detaching stale loop device (TeslaCam): $existing"
+    sudo losetup -d "$existing" 2>/dev/null || true
+  fi
+done
+for existing in $(losetup -j "$IMG_LIGHTSHOW" 2>/dev/null | cut -d: -f1); do
+  if [ -n "$existing" ]; then
+    echo "  Detaching stale loop device (Lightshow): $existing"
     sudo losetup -d "$existing" 2>/dev/null || true
   fi
 done
@@ -127,118 +184,162 @@ done
 sync
 sleep 1
 
-# Setup loop device with explicit image attachment
-echo "Setting up loop device..."
-LOOP=$(sudo losetup --show -fP "$IMG")
-if [ -z "$LOOP" ]; then
-  echo "ERROR: Failed to create loop device for $IMG"
+# Setup loop device for TeslaCam image (part1)
+echo "Setting up loop device for TeslaCam..."
+LOOP_CAM=$(sudo losetup --show -f "$IMG_CAM")
+if [ -z "$LOOP_CAM" ]; then
+  echo "ERROR: Failed to create loop device for $IMG_CAM"
   exit 1
 fi
-echo "Using loop device: $LOOP"
+echo "Using loop device for TeslaCam: $LOOP_CAM"
 
-# CRITICAL: Verify the loop device is actually attached to our image
-# This catches cases where an empty/orphaned loop device was created
-VERIFY=$(sudo losetup -l | grep "$LOOP" | grep "$IMG" || true)
+# Verify the loop device is actually attached to our image
+VERIFY=$(sudo losetup -l | grep "$LOOP_CAM" | grep "$IMG_CAM" || true)
 if [ -z "$VERIFY" ]; then
-  echo "ERROR: Loop device $LOOP is not attached to $IMG"
-  echo "Loop device status:"
-  sudo losetup -l | grep "$LOOP" || echo "  Device not found"
-  sudo losetup -d "$LOOP" 2>/dev/null || true
+  echo "ERROR: Loop device $LOOP_CAM is not attached to $IMG_CAM"
+  sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
   exit 1
 fi
-echo "Verified: $LOOP is attached to $IMG"
+echo "Verified: $LOOP_CAM is attached to $IMG_CAM"
+
+# Setup loop device for Lightshow image (part2)
+echo "Setting up loop device for Lightshow..."
+LOOP_LIGHTSHOW=$(sudo losetup --show -f "$IMG_LIGHTSHOW")
+if [ -z "$LOOP_LIGHTSHOW" ]; then
+  echo "ERROR: Failed to create loop device for $IMG_LIGHTSHOW"
+  sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
+  exit 1
+fi
+echo "Using loop device for Lightshow: $LOOP_LIGHTSHOW"
+
+# Verify the loop device is actually attached to our image
+VERIFY=$(sudo losetup -l | grep "$LOOP_LIGHTSHOW" | grep "$IMG_LIGHTSHOW" || true)
+if [ -z "$VERIFY" ]; then
+  echo "ERROR: Loop device $LOOP_LIGHTSHOW is not attached to $IMG_LIGHTSHOW"
+  sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
+  sudo losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
+  exit 1
+fi
+echo "Verified: $LOOP_LIGHTSHOW is attached to $IMG_LIGHTSHOW"
 
 sleep 0.5
 
-# Trap to clean up loop device only on script failure (not on successful exit)
-cleanup_loop_on_failure() {
+# Trap to clean up loop devices only on script failure (not on successful exit)
+cleanup_loops_on_failure() {
   local exit_code=$?
-  if [ $exit_code -ne 0 ] && [ -n "${LOOP:-}" ]; then
-    echo "Script failed with exit code $exit_code, cleaning up loop device..."
-    sudo losetup -d "$LOOP" 2>/dev/null || true
+  if [ $exit_code -ne 0 ]; then
+    echo "Script failed with exit code $exit_code, cleaning up loop devices..."
+    [ -n "${LOOP_CAM:-}" ] && sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
+    [ -n "${LOOP_LIGHTSHOW:-}" ] && sudo losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
   fi
 }
-trap cleanup_loop_on_failure EXIT
-
-# Ensure the partition device nodes exist before proceeding
-for p in 1 2; do
-  if [ ! -e "${LOOP}p${p}" ]; then
-    echo "  Warning: ${LOOP}p${p} missing; waiting for partition nodes..."
-    for wait in 1 2 3 4 5; do
-      sleep 0.5
-      if [ -e "${LOOP}p${p}" ]; then
-        echo "  ${LOOP}p${p} detected after ${wait}/5 checks"
-        break
-      fi
-      if [ $wait -eq 5 ]; then
-        echo "Error: partition node ${LOOP}p${p} did not appear" >&2
-        exit 1
-      fi
-    done
-  fi
-done
+trap cleanup_loops_on_failure EXIT
 
 # Run filesystem checks before mounting to auto-repair filesystem issues
 echo "Running filesystem checks..."
-for PART_NUM in 1 2; do
-  LOOP_PART="${LOOP}p${PART_NUM}"
-  LOG_FILE="/tmp/fsck_gadget_part${PART_NUM}.log"
-  echo "  Checking ${LOOP_PART}..."
-  
-  # Detect filesystem type
-  FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_PART" 2>/dev/null || echo "unknown")
-  echo "  Filesystem type: $FS_TYPE"
-  
-  set +e
-  if [ "$FS_TYPE" = "exfat" ]; then
-    # exFAT filesystem check
-    sudo fsck.exfat "$LOOP_PART" >"$LOG_FILE" 2>&1
-    FSCK_STATUS=$?
-  elif [ "$FS_TYPE" = "vfat" ]; then
-    # FAT32 filesystem check
-    sudo fsck.vfat -a "$LOOP_PART" >"$LOG_FILE" 2>&1
-    FSCK_STATUS=$?
-  else
-    echo "  Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
-    FSCK_STATUS=0
-  fi
-  set -e
 
-  if [ $FSCK_STATUS -ge 4 ]; then
-    echo "  Critical filesystem errors detected on ${LOOP_PART}. See $LOG_FILE" >&2
-    sudo losetup -d "$LOOP" 2>/dev/null || true
-    exit 1
-  fi
+# Check TeslaCam partition
+echo "  Checking $LOOP_CAM (TeslaCam)..."
+FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "unknown")
+echo "  Filesystem type: $FS_TYPE"
 
-  if [ $FSCK_STATUS -eq 0 ]; then
-    rm -f "$LOG_FILE"
-  else
-    echo "  Filesystem repairs applied on ${LOOP_PART}. Details saved to $LOG_FILE"
-  fi
-done
+LOG_FILE="/tmp/fsck_gadget_part1.log"
+set +e
+if [ "$FS_TYPE" = "vfat" ]; then
+  sudo fsck.vfat -a "$LOOP_CAM" >"$LOG_FILE" 2>&1
+  FSCK_STATUS=$?
+elif [ "$FS_TYPE" = "exfat" ]; then
+  sudo fsck.exfat -a "$LOOP_CAM" >"$LOG_FILE" 2>&1
+  FSCK_STATUS=$?
+else
+  echo "  Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
+  FSCK_STATUS=0
+fi
+set -e
+
+if [ $FSCK_STATUS -ge 4 ]; then
+  echo "  Critical filesystem errors detected on ${LOOP_CAM}. See $LOG_FILE" >&2
+  exit 1
+fi
+
+if [ $FSCK_STATUS -eq 0 ]; then
+  rm -f "$LOG_FILE"
+else
+  echo "  Filesystem repairs applied on ${LOOP_CAM}. Details saved to $LOG_FILE"
+fi
+
+# Check Lightshow partition
+echo "  Checking $LOOP_LIGHTSHOW (Lightshow)..."
+FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "unknown")
+echo "  Filesystem type: $FS_TYPE"
+
+LOG_FILE="/tmp/fsck_gadget_part2.log"
+set +e
+if [ "$FS_TYPE" = "vfat" ]; then
+  sudo fsck.vfat -a "$LOOP_LIGHTSHOW" >"$LOG_FILE" 2>&1
+  FSCK_STATUS=$?
+elif [ "$FS_TYPE" = "exfat" ]; then
+  sudo fsck.exfat -a "$LOOP_LIGHTSHOW" >"$LOG_FILE" 2>&1
+  FSCK_STATUS=$?
+else
+  echo "  Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
+  FSCK_STATUS=0
+fi
+set -e
+
+if [ $FSCK_STATUS -ge 4 ]; then
+  echo "  Critical filesystem errors detected on ${LOOP_LIGHTSHOW}. See $LOG_FILE" >&2
+  exit 1
+fi
+
+if [ $FSCK_STATUS -eq 0 ]; then
+  rm -f "$LOG_FILE"
+else
+  echo "  Filesystem repairs applied on ${LOOP_LIGHTSHOW}. Details saved to $LOG_FILE"
+fi
 
 # Mount partitions
 echo "Mounting partitions..."
-for PART_NUM in 1 2; do
-  LOOP_PART="${LOOP}p${PART_NUM}"
-  MP="$MNT_DIR/part${PART_NUM}"
-  
-  # Detect filesystem type for appropriate mount options
-  FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_PART" 2>/dev/null || echo "unknown")
-  
-  echo "  Mounting $LOOP_PART to $MP (type: $FS_TYPE)"
-  
-  # Different mount options for exFAT vs FAT32
-  if [ "$FS_TYPE" = "exfat" ]; then
-    # exFAT mount options (no flush option support)
-    sudo nsenter --mount=/proc/1/ns/mnt -- mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002 "$LOOP_PART" "$MP" || \
-    sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002 "$LOOP_PART" "$MP"
-  else
-    # FAT32 mount options (includes flush)
-    sudo nsenter --mount=/proc/1/ns/mnt -- mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP" || \
-    sudo mount -o uid=$UID_VAL,gid=$GID_VAL,umask=002,flush "$LOOP_PART" "$MP"
-  fi
-done
+
+# Mount TeslaCam partition (part1)
+MP="$MNT_DIR/part1"
+FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "unknown")
+echo "  Mounting $LOOP_CAM at $MP..."
+
+if [ "$FS_TYPE" = "exfat" ]; then
+  sudo mount -t exfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_CAM" "$MP"
+elif [ "$FS_TYPE" = "vfat" ]; then
+  sudo mount -t vfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_CAM" "$MP"
+else
+  echo "  Warning: Unknown filesystem type '$FS_TYPE', attempting generic mount"
+  sudo mount -o rw "$LOOP_CAM" "$MP"
+fi
+
+if ! mountpoint -q "$MP"; then
+  echo "Error: Failed to mount $LOOP_CAM at $MP" >&2
+  exit 1
+fi
+echo "  Mounted $LOOP_CAM at $MP (filesystem: $FS_TYPE)"
+
+# Mount Lightshow partition (part2)
+MP="$MNT_DIR/part2"
+FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "unknown")
+echo "  Mounting $LOOP_LIGHTSHOW at $MP..."
+
+if [ "$FS_TYPE" = "exfat" ]; then
+  sudo mount -t exfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_LIGHTSHOW" "$MP"
+elif [ "$FS_TYPE" = "vfat" ]; then
+  sudo mount -t vfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_LIGHTSHOW" "$MP"
+else
+  echo "  Warning: Unknown filesystem type '$FS_TYPE', attempting generic mount"
+  sudo mount -o rw "$LOOP_LIGHTSHOW" "$MP"
+fi
+
+if ! mountpoint -q "$MP"; then
+  echo "Error: Failed to mount $LOOP_LIGHTSHOW at $MP" >&2
+  exit 1
+fi
+echo "  Mounted $LOOP_LIGHTSHOW at $MP (filesystem: $FS_TYPE)"
 
 # Refresh Samba so shares expose the freshly mounted partitions
 echo "Refreshing Samba shares..."

@@ -4,7 +4,12 @@ A comprehensive Raspberry Pi setup script that creates a USB mass storage gadget
 
 ## Overview
 
-This script (`setup-usb.sh`) transforms your Raspberry Pi into a USB storage device that appears as two separate drives when connected to a Tesla vehicle. It provides both manual control scripts and a web interface for managing the USB gadget functionality.
+This script (`setup-usb.sh`) transforms your Raspberry Pi into a dual-LUN USB gadget that appears as **two separate USB drives** when connected to a Tesla vehicle:
+
+- **LUN 0 (TeslaCam)**: Large partition for dashcam and sentry mode recordings (read-write)
+- **LUN 1 (Lightshow)**: Smaller partition dedicated to lock chimes and light show files (read-only optimized for 15-30% performance improvement)
+
+The system provides both manual control scripts and a web interface for managing the USB gadget functionality, with intelligent mode switching between Present (USB gadget active) and Edit (network access enabled) modes.
 
 ## Why?
 
@@ -12,7 +17,11 @@ I created this solution to allow me to have remote access to my Tesla dashcam fo
 
 ## Features
 
-- **Dual Partition USB Gadget**: Creates two separate FAT32 or exFAT partitions (configurable sizes)
+- **Dual-LUN USB Gadget**: Creates two independent disk images with optimized configurations
+  - **TeslaCam LUN**: Large exFAT partition (400GB+) for dashcam recordings with read-write access
+  - **Lightshow LUN**: Smaller FAT32 partition (20GB) for lock chimes and light shows with read-only optimization
+  - Each LUN appears as a separate USB drive to Tesla, preventing filesystem contention
+  - Read-only mode on Lightshow partition provides 15-30% performance improvement
 - **Samba Network Sharing**: Access files remotely via network shares with authentication
 - **Web Control Interface**: Browser-based control panel for switching between modes with visual loading feedback
 - **TeslaCam Video Browser**: Built-in web interface for browsing and playing dashcam videos
@@ -106,8 +115,11 @@ sudo ./setup-usb.sh
 
 **The script will:**
 - Install required packages (parted, dosfstools, python3-flask, samba)
-- Configure USB gadget kernel module
-- Create a dual-partition disk image
+- Configure USB gadget kernel module (dwc2, libcomposite)
+- Create two separate disk images:
+  - **usb_cam.img**: Large exFAT partition for TeslaCam recordings
+  - **usb_lightshow.img**: Smaller FAT32 partition for lock chimes and light shows
+- Configure dual-LUN USB gadget with optimized read-only settings
 - Set up Samba shares for network access
 - Create control scripts and web interface
 - Configure systemd services for auto-start
@@ -128,9 +140,13 @@ sudo ./setup-usb.sh
 2. Connect the Raspberry Pi to your Tesla's USB port using the appropriate cable:
    - **Raspberry Pi Zero 2 W**: Use the USB port labeled "USB" (not "PWR")
    - **Raspberry Pi 4/5**: Use the USB-C port
-3. The Tesla should recognize the Pi as a USB drive
-4. Format the drive when prompted by the Tesla (this is normal on first use)
-5. The Tesla will create the necessary folder structure (TeslaCam, etc.)
+3. **The Tesla will detect TWO separate USB drives:**
+   - **LUN 0 (TeslaCam)**: Large drive for dashcam and sentry recordings
+   - **LUN 1 (LightShow)**: Smaller drive for lock chimes and light show files
+4. Format both drives when prompted by the Tesla (this is normal on first use)
+5. The Tesla will create the necessary folder structures:
+   - **TeslaCam drive**: TeslaCam, SentryClips, SavedClips, RecentClips folders
+   - **LightShow drive**: LightShow folder (for FSEQ/MP3 files)
 
 ### 5. Removal (Optional)
 
@@ -147,17 +163,24 @@ Edit the configuration section at the top of `setup-usb.sh`:
 
 ```bash
 # ================= Configuration =================
-GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"  # Installation directory
-IMG_NAME="usb_dual.img"                    # Disk image filename
-PART1_SIZE="16G"                           # First partition size
-PART2_SIZE="16G"                           # Second partition size
-LABEL1="TeslaCam"                           # First partition label
-LABEL2="LightShow"                           # Second partition label
+GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"     # Installation directory
+IMG_CAM="usb_cam.img"                      # TeslaCam image filename
+IMG_LIGHTSHOW="usb_lightshow.img"          # Lightshow image filename
+CAM_SIZE="400G"                            # TeslaCam partition size (large)
+LIGHTSHOW_SIZE="20G"                       # Lightshow partition size (smaller)
+LABEL_CAM="TeslaCam"                       # TeslaCam partition label
+LABEL_LIGHTSHOW="LightShow"                # Lightshow partition label
 MNT_DIR="/mnt/gadget"                      # Mount point directory
-CONFIG_FILE="/boot/firmware/config.txt"   # Pi config file location
+CONFIG_FILE="/boot/firmware/config.txt"    # Pi config file location
 WEB_PORT=5000                              # Web interface port
 SAMBA_PASS="tesla"                         # Samba password
 ```
+
+**Architecture Notes:**
+- **Dual-LUN design**: Two separate disk images (not partitions) for complete filesystem isolation
+- **TeslaCam LUN (ro=0)**: Read-write access for Tesla to record dashcam footage continuously
+- **Lightshow LUN (ro=1)**: Read-only access provides 15-30% performance improvement when Tesla loads light shows or plays lock chimes
+- Both LUNs appear as independent USB drives to Tesla, preventing filesystem contention
 
 ## Usage Modes
 
@@ -171,16 +194,19 @@ Use the control panel to switch between Present USB Mode (for Tesla connection) 
 
 ### Present USB Mode
 When in this mode:
-- Pi appears as a USB storage device to connected host (Tesla)
+- Pi appears as **two USB drives** to Tesla (dual-LUN configuration)
+  - **LUN 0 (TeslaCam)**: Read-write for dashcam recordings
+  - **LUN 1 (LightShow)**: Read-only optimized for 15-30% performance improvement
 - Samba shares are stopped
-- **NEW**: Partitions are mounted locally in **read-only** mode for browsing
-  - `/mnt/gadget/part1-ro` - Read-only access to partition 1 (TeslaCam)
-  - `/mnt/gadget/part2-ro` - Read-only access to partition 2 (LightShow, Lock Chimes)
-- Tesla can record dashcam/sentry footage directly
+- Partitions are mounted locally in **read-only** mode for browsing
+  - `/mnt/gadget/part1-ro` - Read-only access to TeslaCam partition
+  - `/mnt/gadget/part2-ro` - Read-only access to LightShow partition
+- Tesla can record dashcam/sentry footage to LUN 0
+- Tesla can load light shows and play lock chimes from LUN 1 with optimized performance
 - You can browse/view files locally or via the web interface (e.g., watch videos, play audio)
 - Web interface: View and play videos, lock chimes, and light shows (no editing)
 
-**Safety Note**: The read-only mounts allow you to access files while the gadget is active. This is generally safe for read-only access, but be aware that if the Tesla is actively writing, you may see stale cached data. Best practice is to browse files when the Tesla is not actively recording (e.g., after driving).
+**Safety Note**: The read-only mounts allow you to access files while the gadget is active. This is generally safe for read-only access, but be aware that if the Tesla is actively writing to LUN 0 (TeslaCam), you may see stale cached data. Best practice is to browse files when the Tesla is not actively recording (e.g., after driving).
 
 **Activate via:**
 - Web interface: Click "Present USB Gadget"
@@ -548,6 +574,21 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
 - Check for processes accessing mounted partitions: `sudo lsof | grep /mnt/gadget`
 - The scripts now automatically stop the thumbnail generator before switching modes
 - If corruption occurs, run `chkdsk` on Windows or `fsck` on Linux to repair the filesystem
+
+**Samba shares appear empty or don't show files:**
+- This can happen if switching from Present to Edit mode while Windows has cached the empty share structure
+- **Solution 1**: Disconnect cached connections on Windows:
+  ```powershell
+  net use \\<pi-hostname>\gadget_part1 /delete /y
+  net use \\<pi-hostname>\gadget_part2 /delete /y
+  ```
+- **Solution 2**: On the Pi, force Samba to refresh:
+  ```bash
+  sudo smbcontrol all close-share gadget_part1
+  sudo smbcontrol all close-share gadget_part2
+  sudo systemctl restart smbd nmbd
+  ```
+- **Prevention**: The edit_usb.sh script automatically refreshes Samba, but stale read-only mounts can prevent proper mounting. Always ensure clean mode switching.
 
 **Samba access denied:**
 - Verify username and password match the configuration

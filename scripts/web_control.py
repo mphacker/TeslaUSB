@@ -1758,10 +1758,17 @@ HTML_LOCK_CHIMES_PAGE = """
     <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
     
     {% if mode_token == 'edit' %}
-    <div class="folder-controls">
+    <!-- iOS Safari Warning -->
+    <div id="iosWarning" style="display: none; background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+        <p style="margin: 0; font-size: 14px;"><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
+        <p style="margin: 8px 0 0 0; font-size: 13px; color: #666;">Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+    </div>
+    
+    <div class="folder-controls" id="chimeUploadControls">
         <form method="post" action="{{ url_for('upload_lock_chime') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="chimeUploadForm">
             <label for="chime_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload New Chime to Library:</label>
-            <input type="file" name="chime_file" id="chime_file" accept=".wav" required style="margin-right: 10px;">
+            <input type="file" name="chime_file" id="chime_file" accept=".wav" required 
+                   style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; width: 100%; max-width: 400px; font-size: 14px;">
             <button type="submit" class="edit-btn" id="chimeUploadBtn">📤 Upload</button>
             <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Requirements: 16-bit PCM, 44.1 or 48 kHz, under 1MB</p>
         </form>
@@ -1987,7 +1994,14 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Handle completion
         xhr.addEventListener('load', function() {
-            if (xhr.status === 200 || xhr.status === 302) {
+            let response;
+            try {
+                response = JSON.parse(xhr.responseText);
+            } catch (e) {
+                response = null;
+            }
+            
+            if (xhr.status === 200 && response && response.success) {
                 progressBar.style.width = '100%';
                 progressBar.textContent = '100%';
                 progressBar.style.background = '#28a745';
@@ -2000,7 +2014,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 }, 1000);
             } else {
                 progressBar.style.background = '#dc3545';
-                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                const errorMsg = response && response.error ? response.error : xhr.statusText || 'Upload failed';
+                statusText.textContent = 'Upload failed: ' + errorMsg;
                 statusText.style.color = '#dc3545';
                 uploadBtn.disabled = false;
                 uploadBtn.textContent = '📤 Upload';
@@ -2018,9 +2033,33 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Send the request
         xhr.open('POST', form.action);
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');  // Mark as AJAX request
         xhr.send(formData);
     });
 });
+
+// iOS Browser Detection and Warning Display
+(function() {
+    // Detect iOS device
+    function isIOS() {
+        return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
+    }
+    
+    // Detect Safari (true Safari, not other browsers using WebKit on iOS)
+    function isSafari() {
+        var ua = navigator.userAgent;
+        // Safari should have "Safari" but NOT Chrome, CriOS, EdgiOS, FxiOS, OPiOS
+        return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
+    }
+    
+    // Show warning and hide controls if iOS + not Safari
+    if (isIOS() && !isSafari()) {
+        var warning = document.getElementById('iosWarning');
+        var controls = document.getElementById('chimeUploadControls');
+        if (warning) warning.style.display = 'block';
+        if (controls) controls.style.display = 'none';
+    }
+})();
 </script>
 {% endblock %}
 """
@@ -2033,10 +2072,17 @@ HTML_LIGHT_SHOWS_PAGE = """
     <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
     
     {% if mode_token == 'edit' %}
-    <div class="folder-controls">
+    <!-- iOS Safari Warning -->
+    <div id="iosWarning" style="display: none; background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
+        <p style="margin: 0; font-size: 14px;"><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
+        <p style="margin: 8px 0 0 0; font-size: 13px; color: #666;">Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+    </div>
+    
+    <div class="folder-controls" id="showUploadControls">
         <form method="post" action="{{ url_for('upload_light_show') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="showUploadForm">
             <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File (fseq, mp3, or wav):</label>
-            <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3,.wav" required style="margin-right: 10px;">
+            <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3,.wav" required 
+                   style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; width: 100%; max-width: 400px; font-size: 14px;">
             <button type="submit" class="edit-btn" id="showUploadBtn">📤 Upload</button>
         </form>
         <!-- Upload Progress Bar -->
@@ -2252,6 +2298,29 @@ document.addEventListener('DOMContentLoaded', function() {
         xhr.send(formData);
     });
 });
+
+// iOS Browser Detection and Warning Display
+(function() {
+    // Detect iOS device
+    function isIOS() {
+        return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
+    }
+    
+    // Detect Safari (true Safari, not other browsers using WebKit on iOS)
+    function isSafari() {
+        var ua = navigator.userAgent;
+        // Safari should have "Safari" but NOT Chrome, CriOS, EdgiOS, FxiOS, OPiOS
+        return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
+    }
+    
+    // Show warning and hide controls if iOS + not Safari
+    if (isIOS() && !isSafari()) {
+        var warning = document.getElementById('iosWarning');
+        var controls = document.getElementById('showUploadControls');
+        if (warning) warning.style.display = 'block';
+        if (controls) controls.style.display = 'none';
+    }
+})();
 </script>
 {% endblock %}
 """
@@ -3066,20 +3135,30 @@ def download_lock_chime(filename):
 @app.route("/lock_chimes/upload", methods=["POST"])
 def upload_lock_chime():
     """Upload a new lock chime WAV file."""
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    
     if current_mode() != "edit":
+        if is_ajax:
+            return jsonify({"success": False, "error": "Files can only be uploaded in Edit Mode"}), 400
         flash("Files can only be uploaded in Edit Mode", "error")
         return redirect(url_for("lock_chimes"))
     
     if "chime_file" not in request.files:
+        if is_ajax:
+            return jsonify({"success": False, "error": "No file selected"}), 400
         flash("No file selected", "error")
         return redirect(url_for("lock_chimes"))
     
     file = request.files["chime_file"]
     if file.filename == "":
+        if is_ajax:
+            return jsonify({"success": False, "error": "No file selected"}), 400
         flash("No file selected", "error")
         return redirect(url_for("lock_chimes"))
     
     if not file.filename.lower().endswith(".wav"):
+        if is_ajax:
+            return jsonify({"success": False, "error": "Only WAV files are allowed"}), 400
         flash("Only WAV files are allowed", "error")
         return redirect(url_for("lock_chimes"))
     
@@ -3087,12 +3166,16 @@ def upload_lock_chime():
     
     # Prevent uploading a file named LockChime.wav
     if filename.lower() == LOCK_CHIME_FILENAME.lower():
+        if is_ajax:
+            return jsonify({"success": False, "error": "Cannot upload a file named LockChime.wav. Please rename your file."}), 400
         flash("Cannot upload a file named LockChime.wav. Please rename your file.", "error")
         return redirect(url_for("lock_chimes"))
     
     # Get part2 mount path
     part2_mount = get_mount_path("part2")
     if not part2_mount:
+        if is_ajax:
+            return jsonify({"success": False, "error": "part2 not mounted"}), 500
         flash("part2 not mounted", "error")
         return redirect(url_for("lock_chimes"))
     
@@ -3112,6 +3195,8 @@ def upload_lock_chime():
         is_valid, validation_msg = validate_tesla_wav(temp_path)
         if not is_valid:
             os.remove(temp_path)
+            if is_ajax:
+                return jsonify({"success": False, "error": f"Invalid WAV file: {validation_msg}"}), 400
             flash(f"Invalid WAV file: {validation_msg}", "error")
             return redirect(url_for("lock_chimes"))
         
@@ -3127,10 +3212,14 @@ def upload_lock_chime():
         close_samba_share("part2")
         restart_samba_services()
         
+        if is_ajax:
+            return jsonify({"success": True, "message": f"Uploaded {filename} successfully"}), 200
         flash(f"Uploaded {filename} successfully", "success")
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        if is_ajax:
+            return jsonify({"success": False, "error": f"Failed to upload file: {str(e)}"}), 500
         flash(f"Failed to upload file: {str(e)}", "error")
     
     return redirect(url_for("lock_chimes"))

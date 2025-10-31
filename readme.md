@@ -659,6 +659,17 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
 - Close any open file browsers, media players, or terminal sessions in those directories
 - The scripts will forcefully unmount if needed, but clean unmounts are preferred
 
+**iOS file upload not working (Lock Chimes, Light Shows):**
+- **Issue**: File upload ("Choose File" button) may not work on iOS with Microsoft Edge or other third-party browsers
+- **Root Cause**: Apple requires all iOS browsers to use WebKit (Safari's engine), but third-party browsers like Edge have additional iOS sandbox restrictions that prevent file system access
+- **Solution**: Use **Safari** on iOS for file uploads - it has native permissions that third-party browsers don't have
+- **Workaround**: Use a desktop browser (any browser works fine on Windows, macOS, Linux) or Safari on iOS
+- **Technical Details**: 
+  - All iOS browsers must use WebKit per Apple's App Store requirements
+  - Safari is Apple's native browser with full file system permissions
+  - Third-party browsers (Edge, Chrome, Firefox) on iOS are sandboxed and may have limited file access
+  - Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice
+
 **Tesla not recognizing new lock chime (LockChime.wav):**
 Tesla aggressively caches the LockChime.wav file and may not detect changes immediately. The web interface uses several cache-busting techniques automatically when you set a new chime:
 - **Automatic**: The "Set as Active" function:

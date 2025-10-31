@@ -145,7 +145,21 @@ sudo ./setup_usb.sh
    - **LUN 0 (TeslaCam)**: Large drive for dashcam and sentry recordings
    - **LUN 1 (LightShow)**: Smaller drive for lock chimes and light show files
 
-### 5. Removal (Optional)
+### 5. Upgrading to Latest Version
+
+**To upgrade your installation to the latest code from GitHub:**
+```bash
+# Navigate to the gadget directory and run upgrade script
+cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
+./upgrade.sh
+```
+
+The upgrade script will:
+- Pull the latest code from GitHub (handles file permission conflicts automatically)
+- Prompt you to run setup to apply changes
+- Optionally restore your previous mode (edit/present) after setup
+
+### 6. Removal (Optional)
 
 **To remove everything later:**
 ```bash
@@ -421,7 +435,8 @@ When in Edit USB mode, access files locally with full read-write permissions:
 ```
 TeslaUSB/
 ├── setup_usb.sh              # Main setup script
-├── cleanup.sh                # Cleanup script  
+├── cleanup.sh                # Cleanup script
+├── upgrade.sh                # Upgrade script (pulls latest from GitHub)
 ├── scripts/                  # Source script templates
 │   ├── present_usb.sh           # USB gadget presentation script
 │   ├── edit_usb.sh              # Edit mode script  
@@ -442,7 +457,8 @@ The setup script copies and configures template files to the gadget directory:
 
 | File | Source Template | Purpose |
 |------|-----------------|---------|
-| `usb_dual.img` | *Generated* | Disk image with two partitions |
+| `usb_cam.img` | *Generated* | TeslaCam disk image (large, exFAT) |
+| `usb_lightshow.img` | *Generated* | LightShow disk image (smaller, FAT32) |
 | `present_usb.sh` | `scripts/present_usb.sh` | Script to activate USB gadget mode |
 | `edit_usb.sh` | `scripts/edit_usb.sh` | Script to activate edit/mount mode |
 | `web_control.py` | `scripts/web_control.py` | Flask web interface application |
@@ -450,24 +466,32 @@ The setup script copies and configures template files to the gadget directory:
 | `thumbnails/` | *Generated directory* | Persistent cache for video thumbnails |
 | `state.txt` | *Generated* | Stores the last-known USB gadget mode |
 | `cleanup.sh` | *Repository file* | Script to safely remove all setup artifacts |
+| `upgrade.sh` | *Repository file* | Script to pull latest code and update installation |
 
-**Note**: Scripts are now maintained as individual template files in the repository, making them easier to update and version control. See `README_scripts.md` for details.
+**Note**: Scripts are maintained as template files in the repository, making them easier to update and version control. See `README_scripts.md` for details.
 
 ## Customizing Scripts
 
 To modify script behavior:
 
 1. **Edit source files**: Modify files in `scripts/` or `templates/` directories
-2. **Re-run setup**: Execute `sudo ./setup_usb.sh` to apply changes
-3. **Manual updates**: For testing, you can edit the generated files directly in the gadget directory
+2. **Update installation**: Use the upgrade script or re-run setup
+   ```bash
+   # Option 1: Use upgrade script (pulls latest from GitHub)
+   ./upgrade.sh
+   
+   # Option 2: Re-run setup manually (applies local changes)
+   sudo ./setup_usb.sh
+   ```
+3. **For testing**: Edit generated files directly in the gadget directory (changes will be overwritten on next setup)
 
 **Example**: To add custom logging to the present script:
 ```bash
 # Edit the source template
 nano scripts/present_usb.sh
 
-# Re-run setup to apply changes
-sudo ./setup_usb.sh
+# Apply changes using upgrade script
+./upgrade.sh
 ```
 
 ## Systemd Services

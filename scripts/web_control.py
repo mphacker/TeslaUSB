@@ -525,6 +525,9 @@ HTML_TEMPLATE = """
             max-width: 1200px;
             margin: 20px auto;
             padding: 0 20px;
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 100px);
         }
         .container {
             background: white;
@@ -532,6 +535,10 @@ HTML_TEMPLATE = """
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            overflow: hidden;
         }
         h1, h2 {
             color: #333;
@@ -695,12 +702,13 @@ HTML_TEMPLATE = """
             font-size: 15px;
         }
         .video-table-container {
-            max-height: 600px;
+            flex: 1;
             overflow-y: auto;
             overflow-x: hidden;
             border: 1px solid #dee2e6;
             border-radius: 4px;
-            margin: 20px 0;
+            margin: 20px 0 0 0;
+            min-height: 0;
         }
         .video-table {
             width: 100%;
@@ -920,6 +928,18 @@ HTML_TEMPLATE = """
             .navbar h1 {
                 font-size: 16px;
             }
+            /* Reset main-content and container for mobile */
+            .main-content {
+                height: auto;
+                margin: 10px auto;
+                padding: 0 10px;
+            }
+            .container {
+                padding: 15px;
+                margin-bottom: 10px;
+                flex: initial;
+                overflow: visible;
+            }
             /* Session grid adjustments */
             .session-grid.grid-2,
             .session-grid.grid-3,
@@ -943,6 +963,9 @@ HTML_TEMPLATE = """
             }
             /* Hide desktop tables on mobile */
             .video-table {
+                display: none;
+            }
+            .video-table-container {
                 display: none;
             }
             
@@ -1280,10 +1303,10 @@ HTML_BROWSER_PAGE = """
                 {% endfor %}
             </select>
         </div>
-        {% if mode_token == 'edit' and videos %}
+        {% if mode_token == 'edit' and (videos or remaining_videos) %}
         <div class="delete-all-container">
             <form method="post" action="{{ url_for('delete_all_videos', folder=current_folder) }}" 
-                  onsubmit="return confirm('Are you sure you want to delete ALL {{ videos|length }} videos in {{ current_folder }}? This cannot be undone!');" 
+                  onsubmit="return confirm('Are you sure you want to delete ALL {{ total_video_count }} videos in {{ current_folder }}? This cannot be undone!');" 
                   style="display: inline;">
                 <button type="submit" class="btn-delete-all">🗑️ Delete All Videos</button>
             </form>
@@ -1415,7 +1438,31 @@ HTML_BROWSER_PAGE = """
     {% endif %}
 </div>
 
+<!-- Loading indicator for infinite scroll -->
+<div id="loadingIndicator" style="display: none; text-align: center; padding: 30px; margin: 20px 0;">
+    <div style="display: inline-block;">
+        <div style="border: 4px solid #f3f3f3; border-top: 4px solid #007bff; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto;"></div>
+        <p style="margin-top: 15px; color: #666; font-size: 14px;">Loading more videos...</p>
+    </div>
+</div>
+
+<style>
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+</style>
+
 <script>
+// Remaining videos data for lazy loading
+window.remainingVideos = {{ remaining_videos|tojson|safe }};
+window.currentFolder = {{ current_folder|tojson|safe }};
+window.modeToken = {{ mode_token|tojson|safe }};
+window.videosLoaded = false;
+window.isLoading = false;
+window.currentBatchIndex = 0;
+const BATCH_SIZE = 15;
+
 function loadFolder(folderName) {
     window.location.href = "{{ url_for('file_browser') }}?folder=" + encodeURIComponent(folderName);
 }
@@ -1431,6 +1478,190 @@ function playVideo(filename) {
     videoPlayer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
+// Infinite scroll: Load more videos as user scrolls
+function loadMoreVideos() {
+    if (window.isLoading || !window.remainingVideos || window.remainingVideos.length === 0) {
+        return;
+    }
+    
+    const startIndex = window.currentBatchIndex;
+    const endIndex = Math.min(startIndex + BATCH_SIZE, window.remainingVideos.length);
+    const batch = window.remainingVideos.slice(startIndex, endIndex);
+    
+    if (batch.length === 0) {
+        return;
+    }
+    
+    window.isLoading = true;
+    document.getElementById('loadingIndicator').style.display = 'block';
+    
+    // Small delay to show loading indicator (smoother UX)
+    setTimeout(function() {
+        // Render desktop table rows
+        const tableBody = document.querySelector('.video-table-container tbody');
+        if (tableBody) {
+            batch.forEach(function(video) {
+                const row = createTableRow(video);
+                tableBody.appendChild(row);
+            });
+        }
+        
+        // Render mobile cards
+        const mobileContainer = document.querySelector('.mobile-card-container');
+        if (mobileContainer) {
+            batch.forEach(function(video) {
+                const card = createMobileCard(video);
+                mobileContainer.appendChild(card);
+            });
+        }
+        
+        window.currentBatchIndex = endIndex;
+        window.isLoading = false;
+        document.getElementById('loadingIndicator').style.display = 'none';
+        
+        // If all videos loaded, mark as complete
+        if (window.currentBatchIndex >= window.remainingVideos.length) {
+            window.videosLoaded = true;
+        }
+    }, 100);
+}
+
+// Create table row for desktop view
+function createTableRow(video) {
+    const tr = document.createElement('tr');
+    
+    const sessionInfo = video.session ? 
+        `<br><small style="color: #6c757d;">Session: ${escapeHtml(video.session)} | Camera: ${escapeHtml(video.camera)}</small>` : '';
+    
+    const sessionBtn = video.session ? 
+        `<a href="/videos/session/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.session)}" 
+            class="btn-session" title="View all cameras for this session">📹 Session</a>` : '';
+    
+    const deleteBtn = window.modeToken === 'edit' ? 
+        `<form method="post" action="/videos/delete/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+              onsubmit="return confirm('Are you sure you want to delete ${escapeHtml(video.name)}?');" 
+              style="display: inline;">
+            <button type="submit" class="btn-delete">🗑️ Delete</button>
+        </form>` : '';
+    
+    tr.innerHTML = `
+        <td class="thumbnail-cell">
+            <img src="/videos/thumbnail/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+                 alt="Thumbnail" 
+                 class="video-thumbnail"
+                 loading="lazy"
+                 onerror="this.style.display='none'">
+        </td>
+        <td>
+            <a href="#" class="video-name" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
+                ${escapeHtml(video.name)}
+            </a>
+            ${sessionInfo}
+        </td>
+        <td>${video.size_mb} MB</td>
+        <td>${escapeHtml(video.modified)}</td>
+        <td>
+            ${sessionBtn}
+            <a href="/videos/download/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+               class="btn-download" download>⬇️ Download</a>
+            ${deleteBtn}
+        </td>
+    `;
+    
+    return tr;
+}
+
+// Create mobile card
+function createMobileCard(video) {
+    const div = document.createElement('div');
+    div.className = 'mobile-card';
+    
+    const sessionInfo = video.session ? 
+        `<div class="mobile-card-meta">Session: ${escapeHtml(video.session)} | Camera: ${escapeHtml(video.camera)}</div>` : '';
+    
+    const sessionBtn = video.session ? 
+        `<a href="/videos/session/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.session)}" 
+            class="btn-session" title="View all cameras for this session">📹 Session</a>` : '';
+    
+    const deleteBtn = window.modeToken === 'edit' ? 
+        `<form method="post" action="/videos/delete/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+              onsubmit="return confirm('Are you sure you want to delete ${escapeHtml(video.name)}?');" 
+              style="display: inline;">
+            <button type="submit" class="btn-delete">🗑️ Delete</button>
+        </form>` : '';
+    
+    div.innerHTML = `
+        <div class="mobile-card-header">
+            <img src="/videos/thumbnail/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+                 alt="Thumbnail" 
+                 class="mobile-card-thumbnail"
+                 loading="lazy"
+                 onerror="this.style.display='none'">
+            <div class="mobile-card-title">
+                <a href="#" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
+                    ${escapeHtml(video.name)}
+                </a>
+                ${sessionInfo}
+            </div>
+        </div>
+        <div class="mobile-card-info">
+            <div class="mobile-card-info-row">
+                <span class="mobile-card-info-label">Size:</span>
+                <span class="mobile-card-info-value">${video.size_mb} MB</span>
+            </div>
+            <div class="mobile-card-info-row">
+                <span class="mobile-card-info-label">Modified:</span>
+                <span class="mobile-card-info-value">${escapeHtml(video.modified)}</span>
+            </div>
+        </div>
+        <div class="mobile-card-actions">
+            ${sessionBtn}
+            <a href="/videos/download/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+               class="btn-download" download>⬇️ Download</a>
+            ${deleteBtn}
+        </div>
+    `;
+    
+    return div;
+}
+
+// HTML escape helper
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Scroll event handler with 85% trigger (works for both desktop table and mobile)
+function handleScroll(element) {
+    if (window.videosLoaded) {
+        return;
+    }
+    
+    let scrollPosition, pageHeight, scrollPercentage;
+    
+    // Check if scrolling within desktop table container or window (mobile)
+    if (element && element.classList && element.classList.contains('video-table-container')) {
+        // Desktop: table container scroll
+        scrollPosition = element.scrollTop + element.clientHeight;
+        pageHeight = element.scrollHeight;
+        scrollPercentage = (scrollPosition / pageHeight) * 100;
+    } else {
+        // Mobile: window scroll
+        scrollPosition = window.scrollY + window.innerHeight;
+        pageHeight = document.documentElement.scrollHeight;
+        scrollPercentage = (scrollPosition / pageHeight) * 100;
+    }
+    
+    // Trigger at 85% scroll
+    if (scrollPercentage >= 85) {
+        loadMoreVideos();
+    }
+}
+
+// Debounce scroll events
+let scrollTimeout;
+
 // Auto-play video if 'play' parameter is in URL
 window.addEventListener('DOMContentLoaded', function() {
     const urlParams = new URLSearchParams(window.location.search);
@@ -1440,6 +1671,59 @@ window.addEventListener('DOMContentLoaded', function() {
         setTimeout(function() {
             playVideo(videoToPlay);
         }, 300);
+    }
+    
+    // Only enable infinite scroll if we have remaining videos (Videos page only)
+    if (!window.remainingVideos || window.remainingVideos.length === 0) {
+        return;
+    }
+    
+    // Check if we're on mobile (using card view) or desktop (using table view)
+    const isMobile = function() {
+        return window.innerWidth <= 768;
+    };
+    
+    // Add scroll listener to desktop table container (desktop only)
+    const tableContainer = document.querySelector('.video-table-container');
+    if (tableContainer) {
+        tableContainer.addEventListener('scroll', function() {
+            // Only handle table scroll on desktop
+            if (!isMobile()) {
+                if (scrollTimeout) {
+                    clearTimeout(scrollTimeout);
+                }
+                scrollTimeout = setTimeout(function() {
+                    handleScroll(tableContainer);
+                }, 50);
+            }
+        });
+        
+        // Initial check for desktop table
+        if (!isMobile()) {
+            setTimeout(function() {
+                handleScroll(tableContainer);
+            }, 500);
+        }
+    }
+    
+    // Add scroll listener to window (mobile only)
+    window.addEventListener('scroll', function() {
+        // Only handle window scroll on mobile
+        if (isMobile()) {
+            if (scrollTimeout) {
+                clearTimeout(scrollTimeout);
+            }
+            scrollTimeout = setTimeout(function() {
+                handleScroll(null);
+            }, 50);
+        }
+    });
+    
+    // Initial check for mobile
+    if (isMobile()) {
+        setTimeout(function() {
+            handleScroll(null);
+        }, 500);
     }
 });
 </script>
@@ -2698,12 +2982,19 @@ def file_browser():
     
     folders = get_teslacam_folders()
     current_folder = request.args.get('folder', folders[0]['name'] if folders else None)
-    videos = []
+    all_videos = []
+    initial_videos = []
+    remaining_videos = []
+    total_video_count = 0
     
     if current_folder:
         folder_path = os.path.join(teslacam_path, current_folder)
         if os.path.isdir(folder_path):
-            videos = get_video_files(folder_path)
+            all_videos = get_video_files(folder_path)
+            total_video_count = len(all_videos)
+            # Split into initial load (15) and remaining (for lazy loading)
+            initial_videos = all_videos[:15]
+            remaining_videos = all_videos[15:]
     
     combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_BROWSER_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
     
@@ -2715,7 +3006,9 @@ def file_browser():
         mode_token=token,
         teslacam_available=True,
         folders=folders,
-        videos=videos,
+        videos=initial_videos,
+        remaining_videos=remaining_videos,
+        total_video_count=total_video_count,
         current_folder=current_folder,
         hostname=socket.gethostname(),
     )

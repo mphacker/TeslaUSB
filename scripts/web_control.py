@@ -438,6 +438,67 @@ HTML_TEMPLATE = """
             font-size: 20px;
             color: white;
         }
+        /* Hamburger menu - hidden on desktop */
+        .hamburger {
+            display: none;
+            flex-direction: column;
+            cursor: pointer;
+            padding: 5px;
+        }
+        .hamburger span {
+            width: 25px;
+            height: 3px;
+            background-color: white;
+            margin: 3px 0;
+            transition: 0.3s;
+            border-radius: 3px;
+        }
+        /* Mobile overlay menu - hidden by default */
+        .mobile-menu-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 999;
+        }
+        .mobile-menu {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: -100%;
+            width: 250px;
+            height: 100%;
+            background-color: #2c3e50;
+            z-index: 1000;
+            padding: 20px;
+            transition: left 0.3s ease;
+            overflow-y: auto;
+        }
+        .mobile-menu.active {
+            left: 0;
+        }
+        .mobile-menu-close {
+            color: white;
+            font-size: 30px;
+            cursor: pointer;
+            text-align: left;
+            margin-bottom: 20px;
+        }
+        .mobile-menu a {
+            display: block;
+            color: white;
+            text-decoration: none;
+            padding: 15px 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 16px;
+        }
+        .mobile-menu a:hover,
+        .mobile-menu a.active {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
         .navbar h1 a {
             color: white;
             text-decoration: none;
@@ -830,15 +891,36 @@ HTML_TEMPLATE = """
             padding: 10px 20px;
             font-size: 16px;
         }
+        /* Hide mobile cards on desktop by default */
+        .mobile-card-container {
+            display: none;
+        }
         @media (max-width: 768px) {
-            .navbar-content {
-                flex-direction: column;
-                align-items: flex-start;
+            /* Show hamburger menu on mobile */
+            .hamburger {
+                display: flex;
             }
+            /* Hide desktop navigation on mobile */
             .nav-links {
-                margin-top: 10px;
-                flex-wrap: wrap;
+                display: none;
             }
+            /* Show mobile menu when active */
+            .mobile-menu-overlay.active {
+                display: block;
+            }
+            .mobile-menu {
+                display: block;
+            }
+            /* Navbar adjustments */
+            .navbar-content {
+                flex-direction: row;
+                justify-content: flex-start;
+                gap: 15px;
+            }
+            .navbar h1 {
+                font-size: 16px;
+            }
+            /* Session grid adjustments */
             .session-grid.grid-2,
             .session-grid.grid-3,
             .session-grid.grid-4 {
@@ -859,11 +941,158 @@ HTML_TEMPLATE = """
                 font-size: 11px;
                 margin-top: 4px;
             }
-            .video-table th:nth-child(1),
-            .video-table td:nth-child(1),
-            .video-table th:nth-child(4),
-            .video-table td:nth-child(4) {
+            /* Hide desktop tables on mobile */
+            .video-table {
                 display: none;
+            }
+            
+            /* Mobile card layout */
+            .mobile-card-container {
+                display: block;
+                max-width: 100%;
+                overflow-x: hidden;
+            }
+            .mobile-card {
+                background: white;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                padding: 15px;
+                margin-bottom: 15px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow-wrap: break-word;
+                word-wrap: break-word;
+                word-break: break-word;
+            }
+            .mobile-card-header {
+                display: flex;
+                align-items: flex-start;
+                margin-bottom: 12px;
+                gap: 12px;
+            }
+            .mobile-card-thumbnail {
+                flex-shrink: 0;
+                width: 80px;
+                height: 60px;
+                object-fit: cover;
+                border-radius: 4px;
+                background: #f0f0f0;
+            }
+            .mobile-card-title {
+                flex: 1;
+                min-width: 0;
+            }
+            .mobile-card-title a {
+                color: #007bff;
+                text-decoration: none;
+                font-weight: 500;
+                word-break: break-word;
+            }
+            .mobile-card-meta {
+                font-size: 12px;
+                color: #6c757d;
+                margin-top: 4px;
+            }
+            .mobile-card-info {
+                display: grid;
+                gap: 8px;
+                margin-bottom: 12px;
+                font-size: 14px;
+            }
+            .mobile-card-info-row {
+                display: flex;
+                justify-content: space-between;
+                padding: 6px 0;
+                border-bottom: 1px solid #f0f0f0;
+            }
+            .mobile-card-info-label {
+                font-weight: 600;
+                color: #495057;
+            }
+            .mobile-card-info-value {
+                color: #6c757d;
+                text-align: right;
+                overflow-wrap: break-word;
+                word-wrap: break-word;
+                word-break: break-word;
+                max-width: 100%;
+            }
+            .mobile-card-audio {
+                margin: 12px 0;
+            }
+            .mobile-card-audio audio {
+                width: 100%;
+                height: 35px;
+            }
+            .mobile-card-actions {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-top: 12px;
+                align-items: center;
+            }
+            .mobile-card-actions .btn-session,
+            .mobile-card-actions .btn-download,
+            .mobile-card-actions .present-btn,
+            .mobile-card-actions .set-chime-btn,
+            .mobile-card-actions .btn-delete {
+                flex: 1;
+                min-width: 100px;
+                text-align: center;
+                padding: 10px 8px !important;
+                font-size: 13px !important;
+                border-radius: 4px !important;
+                text-decoration: none !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                line-height: 1.3 !important;
+                box-sizing: border-box !important;
+                height: 44px !important;
+                min-height: 44px !important;
+                max-height: 44px !important;
+            }
+            .mobile-card-actions .present-btn {
+                background-color: #007bff;
+                color: white;
+                border: none;
+            }
+            .mobile-card-actions .set-chime-btn {
+                background-color: #6f42c1;
+                color: white;
+                border: none;
+            }
+            .mobile-card-actions form {
+                flex: 1;
+                min-width: 100px;
+                display: flex;
+            }
+            .mobile-card-actions form button {
+                width: 100% !important;
+                padding: 10px 8px !important;
+                font-size: 13px !important;
+                line-height: 1.3 !important;
+                box-sizing: border-box !important;
+                height: 44px !important;
+                min-height: 44px !important;
+                max-height: 44px !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+            }
+            .mobile-card-status {
+                display: inline-block;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            .mobile-card-status.valid {
+                background-color: #d4edda;
+                color: #155724;
+            }
+            .mobile-card-status.invalid {
+                background-color: #f8d7da;
+                color: #721c24;
             }
         }
     </style>
@@ -871,6 +1100,11 @@ HTML_TEMPLATE = """
 <body>
     <div class="navbar">
         <div class="navbar-content">
+            <div class="hamburger" onclick="toggleMobileMenu()">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
             <h1><a href="{{ url_for('index') }}">🚗 Tesla USB Gadget Control - {{ hostname }}</a></h1>
             <div class="nav-links">
                 <a href="{{ url_for('index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
@@ -879,6 +1113,18 @@ HTML_TEMPLATE = """
                 <a href="{{ url_for('light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
             </div>
         </div>
+    </div>
+    
+    <!-- Mobile Menu Overlay -->
+    <div class="mobile-menu-overlay" id="mobileMenuOverlay" onclick="toggleMobileMenu()"></div>
+    
+    <!-- Mobile Menu -->
+    <div class="mobile-menu" id="mobileMenu">
+        <div class="mobile-menu-close" onclick="toggleMobileMenu()">&times;</div>
+        <a href="{{ url_for('index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
+        <a href="{{ url_for('file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
+        <a href="{{ url_for('lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
+        <a href="{{ url_for('light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
     </div>
     
     <div class="main-content">
@@ -896,6 +1142,17 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
+    // Mobile menu toggle
+    function toggleMobileMenu() {
+        const mobileMenu = document.getElementById('mobileMenu');
+        const overlay = document.getElementById('mobileMenuOverlay');
+        
+        if (mobileMenu && overlay) {
+            mobileMenu.classList.toggle('active');
+            overlay.classList.toggle('active');
+        }
+    }
+    
     // Global audio player management: pause all other audio/video when one starts playing
     // (Excluded from multi-camera session view where multiple videos play simultaneously)
     document.addEventListener('DOMContentLoaded', function() {
@@ -1092,6 +1349,59 @@ HTML_BROWSER_PAGE = """
                 {% endfor %}
             </tbody>
         </table>
+    </div>
+    
+    <!-- Mobile Card Layout -->
+    <div class="mobile-card-container">
+        {% for video in videos %}
+        <div class="mobile-card">
+            <div class="mobile-card-header">
+                <img src="{{ url_for('get_thumbnail', folder=current_folder, filename=video.name) }}" 
+                     alt="Thumbnail" 
+                     class="mobile-card-thumbnail"
+                     loading="lazy"
+                     onerror="this.style.display='none'">
+                <div class="mobile-card-title">
+                    <a href="#" onclick="playVideo('{{ video.name }}'); return false;">
+                        {{ video.name }}
+                    </a>
+                    {% if video.session %}
+                    <div class="mobile-card-meta">Session: {{ video.session }} | Camera: {{ video.camera }}</div>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">{{ video.size_mb }} MB</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Modified:</span>
+                    <span class="mobile-card-info-value">{{ video.modified }}</span>
+                </div>
+            </div>
+            <div class="mobile-card-actions">
+                {% if video.session %}
+                <a href="{{ url_for('view_session', folder=current_folder, session=video.session) }}" 
+                   class="btn-session" 
+                   title="View all cameras for this session">
+                    📹 Session
+                </a>
+                {% endif %}
+                <a href="{{ url_for('download_video', folder=current_folder, filename=video.name) }}" 
+                   class="btn-download" download>
+                    ⬇️ Download
+                </a>
+                {% if mode_token == 'edit' %}
+                <form method="post" action="{{ url_for('delete_video', folder=current_folder, filename=video.name) }}" 
+                      onsubmit="return confirm('Are you sure you want to delete {{ video.name }}?');" 
+                      style="display: inline;">
+                    <button type="submit" class="btn-delete">🗑️ Delete</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
     </div>
     {% else %}
     <div class="no-videos">
@@ -1524,26 +1834,76 @@ HTML_LOCK_CHIMES_PAGE = """
                         {% endif %}
                     </td>
                     <td>
-                        <audio controls preload="none" style="height: 30px; margin-right: 10px;">
-                            <source src="{{ url_for('play_lock_chime', filename=chime.filename) }}?v={{ chime.mtime }}" type="audio/wav">
-                        </audio>
-                        <a href="{{ url_for('download_lock_chime', filename=chime.filename) }}" class="present-btn" style="text-decoration: none; padding: 6px 12px; display: inline-block; margin-right: 5px;">⬇️ Download</a>
-                        {% if mode_token == 'edit' %}
-                            {% if chime.is_valid %}
-                            <form method="post" action="{{ url_for('set_as_chime', filename=chime.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
-                                <button type="submit" class="set-chime-btn">🔔 Set as Active</button>
-                            </form>
-                            {% endif %}
-                            <form method="post" action="{{ url_for('delete_lock_chime', filename=chime.filename) }}" style="display: inline;" 
-                                  onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
-                                <button type="submit" class="btn-delete">🗑️ Delete</button>
-                            </form>
-                        {% endif %}
+                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                            <audio controls preload="none" style="height: 30px; width: 100%; max-width: 300px;">
+                                <source src="{{ url_for('play_lock_chime', filename=chime.filename) }}?v={{ chime.mtime }}" type="audio/wav">
+                            </audio>
+                            <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center;">
+                                <a href="{{ url_for('download_lock_chime', filename=chime.filename) }}" class="present-btn" style="text-decoration: none; padding: 6px 12px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; line-height: 1.5; height: 34px; box-sizing: border-box;">⬇️ Download</a>
+                                {% if mode_token == 'edit' %}
+                                    {% if chime.is_valid %}
+                                    <form method="post" action="{{ url_for('set_as_chime', filename=chime.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
+                                        <button type="submit" class="set-chime-btn" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🔔 Set as Active</button>
+                                    </form>
+                                    {% endif %}
+                                    <form method="post" action="{{ url_for('delete_lock_chime', filename=chime.filename) }}" style="display: inline;" 
+                                          onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
+                                        <button type="submit" class="btn-delete" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🗑️ Delete</button>
+                                    </form>
+                                {% endif %}
+                            </div>
+                        </div>
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+    </div>
+    
+    <!-- Mobile Card Layout for Lock Chimes -->
+    <div class="mobile-card-container">
+        {% for chime in chime_files %}
+        <div class="mobile-card" style="{% if not chime.is_valid %}border-left: 4px solid #f44336;{% endif %}">
+            <div class="mobile-card-title">
+                <strong>{{ chime.filename }}</strong>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">{{ chime.size_str }}</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Status:</span>
+                    <span class="mobile-card-info-value">
+                        {% if chime.is_valid %}
+                        <span class="mobile-card-status valid">✓ Valid</span>
+                        {% else %}
+                        <span class="mobile-card-status invalid" title="{{ chime.validation_msg }}">✗ Invalid</span>
+                        {% endif %}
+                    </span>
+                </div>
+            </div>
+            <div class="mobile-card-audio">
+                <audio controls preload="none">
+                    <source src="{{ url_for('play_lock_chime', filename=chime.filename) }}?v={{ chime.mtime }}" type="audio/wav">
+                </audio>
+            </div>
+            <div class="mobile-card-actions">
+                <a href="{{ url_for('download_lock_chime', filename=chime.filename) }}" class="present-btn">⬇️ Download</a>
+                {% if mode_token == 'edit' %}
+                    {% if chime.is_valid %}
+                    <form method="post" action="{{ url_for('set_as_chime', filename=chime.filename) }}" onsubmit="return handleSetChime(this);">
+                        <button type="submit" class="set-chime-btn">🔔 Set as Active</button>
+                    </form>
+                    {% endif %}
+                    <form method="post" action="{{ url_for('delete_lock_chime', filename=chime.filename) }}" 
+                          onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
+                        <button type="submit" class="btn-delete">🗑️ Delete</button>
+                    </form>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
     </div>
     {% else %}
     <div class="info-box">
@@ -1743,6 +2103,56 @@ HTML_LIGHT_SHOWS_PAGE = """
                 {% endfor %}
             </tbody>
         </table>
+    </div>
+    
+    <!-- Mobile Card Layout for Light Shows -->
+    <div class="mobile-card-container">
+        {% for group in show_groups %}
+        <div class="mobile-card">
+            <div class="mobile-card-title">
+                <strong>{{ group.base_name }}</strong>
+            </div>
+            <div class="mobile-card-info">
+                {% if group.fseq_file %}
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">FSEQ:</span>
+                    <span class="mobile-card-info-value" style="font-size: 12px; word-break: break-word;">
+                        {{ group.fseq_file.filename }}<br>
+                        ({{ group.fseq_file.size_str }})
+                    </span>
+                </div>
+                {% endif %}
+                {% if group.audio_file %}
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Audio:</span>
+                    <span class="mobile-card-info-value" style="font-size: 12px; word-break: break-word;">
+                        {{ group.audio_file.filename }}<br>
+                        ({{ group.audio_file.size_str }})
+                    </span>
+                </div>
+                {% endif %}
+            </div>
+            {% if group.audio_file %}
+            <div class="mobile-card-audio">
+                <audio controls preload="none">
+                    {% if group.audio_file.filename.lower().endswith('.mp3') %}
+                    <source src="{{ url_for('play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/mpeg">
+                    {% else %}
+                    <source src="{{ url_for('play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/wav">
+                    {% endif %}
+                </audio>
+            </div>
+            {% endif %}
+            {% if mode_token == 'edit' %}
+            <div class="mobile-card-actions">
+                <form method="post" action="{{ url_for('delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" 
+                      onsubmit="return confirm('Are you sure you want to delete all files for {{ group.base_name }}?');">
+                    <button type="submit" class="btn-delete">🗑️ Delete</button>
+                </form>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
     </div>
     {% else %}
     <div class="info-box">

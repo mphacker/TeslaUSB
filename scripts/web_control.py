@@ -871,7 +871,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="navbar">
         <div class="navbar-content">
-            <h1><a href="{{ url_for('index') }}">🚗 Tesla USB Gadget Control</a></h1>
+            <h1><a href="{{ url_for('index') }}">🚗 Tesla USB Gadget Control - {{ hostname }}</a></h1>
             <div class="nav-links">
                 <a href="{{ url_for('index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
                 <a href="{{ url_for('file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
@@ -894,6 +894,34 @@ HTML_TEMPLATE = """
         
         {% block content %}{% endblock %}
     </div>
+    
+    <script>
+    // Global audio player management: pause all other audio/video when one starts playing
+    // (Excluded from multi-camera session view where multiple videos play simultaneously)
+    document.addEventListener('DOMContentLoaded', function() {
+        // Check if we're on the multi-camera session view page
+        const isSessionView = document.querySelector('.session-grid') !== null;
+        
+        // Skip auto-pause behavior on session view (has its own sync controls)
+        if (isSessionView) {
+            return;
+        }
+        
+        // Get all audio and video elements on the page
+        const allMediaElements = document.querySelectorAll('audio, video');
+        
+        allMediaElements.forEach(function(media) {
+            media.addEventListener('play', function() {
+                // When this media starts playing, pause all others
+                allMediaElements.forEach(function(otherMedia) {
+                    if (otherMedia !== media && !otherMedia.paused) {
+                        otherMedia.pause();
+                    }
+                });
+            });
+        });
+    });
+    </script>
 </body>
 </html>
 """
@@ -1421,12 +1449,24 @@ HTML_LOCK_CHIMES_PAGE = """
     
     {% if mode_token == 'edit' %}
     <div class="folder-controls">
-        <form method="post" action="{{ url_for('upload_lock_chime') }}" enctype="multipart/form-data" style="margin-bottom: 20px;">
+        <form method="post" action="{{ url_for('upload_lock_chime') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="chimeUploadForm">
             <label for="chime_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload New Chime to Library:</label>
             <input type="file" name="chime_file" id="chime_file" accept=".wav" required style="margin-right: 10px;">
-            <button type="submit" class="edit-btn">📤 Upload</button>
+            <button type="submit" class="edit-btn" id="chimeUploadBtn">📤 Upload</button>
             <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Requirements: 16-bit PCM, 44.1 or 48 kHz, under 1MB</p>
         </form>
+        <!-- Upload Progress Bar -->
+        <div id="chimeUploadProgress" style="display: none; margin-bottom: 20px;">
+            <div style="background: #f0f0f0; border-radius: 8px; padding: 15px; border: 2px solid #007bff;">
+                <h4 style="margin: 0 0 10px 0; color: #007bff;">📤 Uploading Chime...</h4>
+                <div style="background: #e0e0e0; border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                    <div id="chimeProgressBar" style="background: linear-gradient(90deg, #007bff, #0056b3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
+                        0%
+                    </div>
+                </div>
+                <p id="chimeUploadStatus" style="margin: 0; font-size: 13px; color: #666;">Preparing upload...</p>
+            </div>
+        </div>
     </div>
     <div class="info-box" style="background-color: #fff3cd; border-left: 4px solid #ffc107; margin-bottom: 20px;">
         <p style="margin: 0; font-size: 14px;"><strong>⚠️ Tesla Cache Note:</strong> Tesla may take 5-30 minutes to recognize a new lock chime due to aggressive caching. If the old chime still plays after setting a new one:</p>
@@ -1544,6 +1584,83 @@ function handleSetChime(form) {
     
     return true;  // Allow form submission
 }
+
+// Handle chime upload with progress bar
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('chimeUploadForm');
+    if (!form) return;
+    
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const fileInput = document.getElementById('chime_file');
+        const uploadBtn = document.getElementById('chimeUploadBtn');
+        const progressDiv = document.getElementById('chimeUploadProgress');
+        const progressBar = document.getElementById('chimeProgressBar');
+        const statusText = document.getElementById('chimeUploadStatus');
+        
+        if (!fileInput.files || fileInput.files.length === 0) {
+            alert('Please select a file to upload');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        const formData = new FormData(form);
+        
+        // Disable upload button and show progress
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = '⏳ Uploading...';
+        progressDiv.style.display = 'block';
+        
+        // Create AJAX request with progress tracking
+        const xhr = new XMLHttpRequest();
+        
+        // Track upload progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percentComplete + '%';
+                progressBar.textContent = percentComplete + '%';
+                statusText.textContent = `Uploading ${file.name}... (${(e.loaded / 1024).toFixed(1)} KB / ${(e.total / 1024).toFixed(1)} KB)`;
+            }
+        });
+        
+        // Handle completion
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200 || xhr.status === 302) {
+                progressBar.style.width = '100%';
+                progressBar.textContent = '100%';
+                progressBar.style.background = '#28a745';
+                statusText.textContent = 'Upload complete! Redirecting...';
+                statusText.style.color = '#28a745';
+                
+                // Redirect after short delay
+                setTimeout(function() {
+                    window.location.reload();
+                }, 1000);
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '📤 Upload';
+            }
+        });
+        
+        // Handle errors
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = '📤 Upload';
+        });
+        
+        // Send the request
+        xhr.open('POST', form.action);
+        xhr.send(formData);
+    });
+});
 </script>
 {% endblock %}
 """
@@ -1557,11 +1674,23 @@ HTML_LIGHT_SHOWS_PAGE = """
     
     {% if mode_token == 'edit' %}
     <div class="folder-controls">
-        <form method="post" action="{{ url_for('upload_light_show') }}" enctype="multipart/form-data" style="margin-bottom: 20px;">
+        <form method="post" action="{{ url_for('upload_light_show') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="showUploadForm">
             <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File (fseq, mp3, or wav):</label>
             <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3,.wav" required style="margin-right: 10px;">
-            <button type="submit" class="edit-btn">📤 Upload</button>
+            <button type="submit" class="edit-btn" id="showUploadBtn">📤 Upload</button>
         </form>
+        <!-- Upload Progress Bar -->
+        <div id="showUploadProgress" style="display: none; margin-bottom: 20px;">
+            <div style="background: #f0f0f0; border-radius: 8px; padding: 15px; border: 2px solid #6f42c1;">
+                <h4 style="margin: 0 0 10px 0; color: #6f42c1;">📤 Uploading Light Show...</h4>
+                <div style="background: #e0e0e0; border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                    <div id="showProgressBar" style="background: linear-gradient(90deg, #6f42c1, #5a32a3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
+                        0%
+                    </div>
+                </div>
+                <p id="showUploadStatus" style="margin: 0; font-size: 13px; color: #666;">Preparing upload...</p>
+            </div>
+        </div>
     </div>
     {% endif %}
     
@@ -1624,6 +1753,96 @@ HTML_LIGHT_SHOWS_PAGE = """
     </div>
     {% endif %}
 </div>
+
+<script>
+// Handle light show upload with progress bar
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('showUploadForm');
+    if (!form) return;
+    
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const fileInput = document.getElementById('show_file');
+        const uploadBtn = document.getElementById('showUploadBtn');
+        const progressDiv = document.getElementById('showUploadProgress');
+        const progressBar = document.getElementById('showProgressBar');
+        const statusText = document.getElementById('showUploadStatus');
+        
+        if (!fileInput.files || fileInput.files.length === 0) {
+            alert('Please select a file to upload');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        const formData = new FormData(form);
+        
+        // Disable upload button and show progress
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = '⏳ Uploading...';
+        progressDiv.style.display = 'block';
+        
+        // Create AJAX request with progress tracking
+        const xhr = new XMLHttpRequest();
+        
+        // Track upload progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percentComplete + '%';
+                progressBar.textContent = percentComplete + '%';
+                
+                // Format file size display
+                const loadedKB = (e.loaded / 1024).toFixed(1);
+                const totalKB = (e.total / 1024).toFixed(1);
+                const loadedMB = (e.loaded / 1024 / 1024).toFixed(2);
+                const totalMB = (e.total / 1024 / 1024).toFixed(2);
+                
+                if (e.total > 1024 * 1024) {
+                    statusText.textContent = `Uploading ${file.name}... (${loadedMB} MB / ${totalMB} MB)`;
+                } else {
+                    statusText.textContent = `Uploading ${file.name}... (${loadedKB} KB / ${totalKB} KB)`;
+                }
+            }
+        });
+        
+        // Handle completion
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200 || xhr.status === 302) {
+                progressBar.style.width = '100%';
+                progressBar.textContent = '100%';
+                progressBar.style.background = '#28a745';
+                statusText.textContent = 'Upload complete! Redirecting...';
+                statusText.style.color = '#28a745';
+                
+                // Redirect after short delay
+                setTimeout(function() {
+                    window.location.reload();
+                }, 1000);
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '📤 Upload';
+            }
+        });
+        
+        // Handle errors
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = '📤 Upload';
+        });
+        
+        // Send the request
+        xhr.open('POST', form.action);
+        xhr.send(formData);
+    });
+});
+</script>
 {% endblock %}
 """
 
@@ -1975,6 +2194,7 @@ def index():
         share_paths=share_paths,
         mode_token=token,
         auto_refresh=False,
+        hostname=socket.gethostname(),
     )
 
 @app.route("/videos")
@@ -1993,7 +2213,8 @@ def file_browser():
             teslacam_available=False,
             folders=[],
             videos=[],
-            current_folder=None
+            current_folder=None,
+            hostname=socket.gethostname(),
         )
     
     folders = get_teslacam_folders()
@@ -2016,7 +2237,8 @@ def file_browser():
         teslacam_available=True,
         folders=folders,
         videos=videos,
-        current_folder=current_folder
+        current_folder=current_folder,
+        hostname=socket.gethostname(),
     )
 
 
@@ -2058,7 +2280,8 @@ def view_session(folder, session):
         mode_token=token,
         folder=folder,
         session_id=session,
-        videos=session_videos
+        videos=session_videos,
+        hostname=socket.gethostname(),
     )
 
 
@@ -2243,7 +2466,7 @@ def present_usb():
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 cwd=GADGET_DIR,
-                timeout=60,  # Increased from 30s - filesystem checks can take time
+                timeout=120,  # Increased to 120s - large drives can take time for fsck and mounting
             )
             
         if result.returncode == 0:
@@ -2252,7 +2475,7 @@ def present_usb():
             flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
             
     except subprocess.TimeoutExpired:
-        flash("Error: Script timed out after 60 seconds", "error")
+        flash("Error: Script timed out after 120 seconds", "error")
     except Exception as e:
         flash(f"Error: {str(e)}", "error")
     
@@ -2273,7 +2496,7 @@ def edit_usb():
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 cwd=GADGET_DIR,
-                timeout=60,  # Increased from 30s - unmount retries can take time
+                timeout=120,  # Increased to 120s - unmount retries and gadget removal can take time
             )
             
         if result.returncode == 0:
@@ -2282,7 +2505,7 @@ def edit_usb():
             flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
             
     except subprocess.TimeoutExpired:
-        flash("Error: Script timed out after 60 seconds", "error")
+        flash("Error: Script timed out after 120 seconds", "error")
     except Exception as e:
         flash(f"Error: {str(e)}", "error")
     
@@ -2368,6 +2591,7 @@ def lock_chimes():
         active_chime=active_chime,
         chime_files=chime_files,
         auto_refresh=False,
+        hostname=socket.gethostname(),
     )
 
 
@@ -2658,6 +2882,7 @@ def light_shows():
         mode_token=token,
         show_groups=show_groups,
         auto_refresh=False,
+        hostname=socket.gethostname(),
     )
 
 

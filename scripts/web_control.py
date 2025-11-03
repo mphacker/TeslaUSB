@@ -2795,6 +2795,10 @@ def reencode_wav_for_tesla(input_path, output_path):
             # Extract the actual error from FFmpeg output (usually at the end)
             stderr_output = result.stderr.decode('utf-8', errors='ignore')
             
+            # Check for read-only filesystem errors
+            if 'read-only file system' in stderr_output.lower() or 'invalid argument' in stderr_output.lower():
+                return False, "Cannot write to filesystem (may be mounted read-only). Please ensure system is in Edit mode."
+            
             # FFmpeg errors typically appear after "Error" keyword or in last few lines
             error_lines = []
             for line in stderr_output.split('\n'):
@@ -3542,10 +3546,23 @@ def upload_lock_chime():
         flash("part2 not mounted", "error")
         return redirect(url_for("lock_chimes"))
     
+    # Verify mount is writable by checking if it's the read-only path
+    if part2_mount.endswith("-ro"):
+        if is_ajax:
+            return jsonify({"success": False, "error": "System is in Present mode with read-only access. Switch to Edit mode to upload files."}), 400
+        flash("System is in Present mode with read-only access. Switch to Edit mode to upload files.", "error")
+        return redirect(url_for("lock_chimes"))
+    
     # Save to Chimes folder
     chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
     if not os.path.isdir(chimes_dir):
-        os.makedirs(chimes_dir, exist_ok=True)
+        try:
+            os.makedirs(chimes_dir, exist_ok=True)
+        except OSError as e:
+            if is_ajax:
+                return jsonify({"success": False, "error": f"Cannot create Chimes directory (filesystem may be read-only): {str(e)}"}), 500
+            flash(f"Cannot create Chimes directory (filesystem may be read-only): {str(e)}", "error")
+            return redirect(url_for("lock_chimes"))
     
     dest_path = os.path.join(chimes_dir, filename)
     

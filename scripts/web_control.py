@@ -2279,6 +2279,17 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
         
+        // When upload finishes, show processing status
+        xhr.upload.addEventListener('loadend', function() {
+            if (xhr.readyState !== 4) {  // If request not complete yet
+                progressBar.style.width = '100%';
+                progressBar.textContent = '🔄 Processing...';
+                progressBar.style.background = '#ffc107';
+                statusText.textContent = 'Upload complete! Processing and validating file...';
+                statusText.style.color = '#856404';
+            }
+        });
+        
         // Handle completion
         xhr.addEventListener('load', function() {
             let response;
@@ -2290,9 +2301,17 @@ document.addEventListener('DOMContentLoaded', function() {
             
             if (xhr.status === 200 && response && response.success) {
                 progressBar.style.width = '100%';
-                progressBar.textContent = '100%';
+                progressBar.textContent = '✓ Complete';
                 progressBar.style.background = '#28a745';
-                statusText.textContent = 'Upload complete! Redirecting...';
+                
+                // Show re-encoding info if present
+                let successMsg = 'Upload complete!';
+                if (response.reencoded && response.details) {
+                    const details = response.details;
+                    successMsg = `Upload successful! File was automatically re-encoded to ${details.strategy || 'Tesla format'} (${details.size_mb || '<1'} MB)`;
+                }
+                
+                statusText.textContent = successMsg;
                 statusText.style.color = '#28a745';
                 
                 // Redirect after short delay
@@ -2765,75 +2784,112 @@ def validate_lock_chime():
     return issues
 
 
-def reencode_wav_for_tesla(input_path, output_path):
+def reencode_wav_for_tesla(input_path, output_path, progress_callback=None):
     """
-    Re-encode a WAV file to meet Tesla's requirements using FFmpeg:
-    - 16-bit PCM
-    - 48 kHz sample rate (better quality than 44.1 kHz)
-    - Mono (reduces file size)
+    Re-encode a WAV file to meet Tesla's requirements using FFmpeg with multi-pass attempts:
+    - Pass 1: 16-bit PCM, 48 kHz, mono (standard quality)
+    - Pass 2: 16-bit PCM, 44.1 kHz, mono (reduced sample rate)
+    - Pass 3: 8-bit PCM, 44.1 kHz, mono (reduced bit depth - last resort)
     
-    Returns: (success, message)
+    Returns: (success, message, details_dict)
     """
-    try:
-        # Use FFmpeg to re-encode
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-i", input_path,
-                "-acodec", "pcm_s16le",  # 16-bit PCM
-                "-ar", "48000",           # 48 kHz sample rate
-                "-ac", "1",               # Mono (reduces file size)
-                "-y",                     # Overwrite output file
-                output_path
-            ],
-            capture_output=True,
-            timeout=30,
-            check=False
-        )
-        
-        if result.returncode != 0:
-            # Extract the actual error from FFmpeg output (usually at the end)
-            stderr_output = result.stderr.decode('utf-8', errors='ignore')
+    # Define encoding strategies in order of quality (best to worst)
+    strategies = [
+        {
+            "name": "High quality (16-bit, 48kHz, mono)",
+            "args": ["-acodec", "pcm_s16le", "-ar", "48000", "-ac", "1"]
+        },
+        {
+            "name": "Medium quality (16-bit, 44.1kHz, mono)",
+            "args": ["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"]
+        },
+        {
+            "name": "Reduced quality (8-bit, 44.1kHz, mono)",
+            "args": ["-acodec", "pcm_u8", "-ar", "44100", "-ac", "1"]
+        }
+    ]
+    
+    last_error = None
+    
+    for attempt, strategy in enumerate(strategies, 1):
+        try:
+            if progress_callback:
+                progress_callback(f"Attempt {attempt}/{len(strategies)}: {strategy['name']}")
             
-            # Check for read-only filesystem errors
-            if 'read-only file system' in stderr_output.lower() or 'invalid argument' in stderr_output.lower():
-                return False, "Cannot write to filesystem (may be mounted read-only). Please ensure system is in Edit mode."
+            # Build FFmpeg command
+            cmd = ["ffmpeg", "-i", input_path] + strategy["args"] + ["-y", output_path]
             
-            # FFmpeg errors typically appear after "Error" keyword or in last few lines
-            error_lines = []
-            for line in stderr_output.split('\n'):
-                line = line.strip()
-                if line and any(keyword in line.lower() for keyword in ['error', 'invalid', 'could not', 'failed', 'unable']):
-                    error_lines.append(line)
+            # Use FFmpeg to re-encode
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=30,
+                check=False
+            )
             
-            # If we found error lines, use the last few
-            if error_lines:
-                error_msg = '. '.join(error_lines[-3:])[:300]
-            else:
-                # Fall back to last non-empty lines
-                lines = [l.strip() for l in stderr_output.split('\n') if l.strip()]
-                error_msg = '. '.join(lines[-3:])[:300] if lines else "Unknown FFmpeg error"
+            if result.returncode != 0:
+                # Extract the actual error from FFmpeg output
+                stderr_output = result.stderr.decode('utf-8', errors='ignore')
+                
+                # Check for read-only filesystem errors
+                if 'read-only file system' in stderr_output.lower() or 'invalid argument' in stderr_output.lower():
+                    return False, "Cannot write to filesystem (may be mounted read-only). Please ensure system is in Edit mode.", {}
+                
+                # FFmpeg errors typically appear after "Error" keyword or in last few lines
+                error_lines = []
+                for line in stderr_output.split('\n'):
+                    line = line.strip()
+                    if line and any(keyword in line.lower() for keyword in ['error', 'invalid', 'could not', 'failed', 'unable']):
+                        error_lines.append(line)
+                
+                # If we found error lines, use the last few
+                if error_lines:
+                    error_msg = '. '.join(error_lines[-3:])[:300]
+                else:
+                    # Fall back to last non-empty lines
+                    lines = [l.strip() for l in stderr_output.split('\n') if l.strip()]
+                    error_msg = '. '.join(lines[-3:])[:300] if lines else "Unknown FFmpeg error"
+                
+                last_error = f"FFmpeg conversion failed: {error_msg}"
+                continue  # Try next strategy
             
-            return False, f"FFmpeg conversion failed: {error_msg}"
-        
-        # Check if output file was created and is not empty
-        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            return False, "Re-encoding produced an empty file"
-        
-        # Check if re-encoded file is still too large
-        size_bytes = os.path.getsize(output_path)
-        if size_bytes > MAX_LOCK_CHIME_SIZE:
+            # Check if output file was created and is not empty
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                last_error = "Re-encoding produced an empty file"
+                continue
+            
+            # Check if re-encoded file is under size limit
+            size_bytes = os.path.getsize(output_path)
+            if size_bytes > MAX_LOCK_CHIME_SIZE:
+                size_mb = size_bytes / (1024 * 1024)
+                last_error = f"File still too large: {size_mb:.2f} MB (need < 1 MB)"
+                
+                # If not the last strategy, try next one
+                if attempt < len(strategies):
+                    continue
+                else:
+                    return False, f"Unable to compress file below 1 MB even with lowest quality settings. Final size: {size_mb:.2f} MB.", {}
+            
+            # Success! Return with details
             size_mb = size_bytes / (1024 * 1024)
-            return False, f"Re-encoded file is still too large ({size_mb:.2f} MB). Tesla requires files under 1 MB."
-        
-        return True, "Successfully re-encoded to Tesla format"
-        
-    except FileNotFoundError:
-        return False, "FFmpeg is not installed on the system"
-    except subprocess.TimeoutExpired:
-        return False, "Re-encoding timed out (file too large or complex)"
-    except Exception as e:
-        return False, f"Re-encoding error: {str(e)}"
+            details = {
+                "strategy": strategy["name"],
+                "attempt": attempt,
+                "size_mb": f"{size_mb:.2f}"
+            }
+            return True, f"Successfully re-encoded using {strategy['name']} (size: {size_mb:.2f} MB)", details
+            
+        except FileNotFoundError:
+            return False, "FFmpeg is not installed on the system", {}
+        except subprocess.TimeoutExpired:
+            last_error = "Re-encoding timed out (file too large or complex)"
+            continue
+        except Exception as e:
+            last_error = f"Re-encoding error: {str(e)}"
+            continue
+    
+    # All strategies failed
+    return False, f"All re-encoding attempts failed. Last error: {last_error}", {}
 
 
 def validate_tesla_wav(file_path):
@@ -3578,7 +3634,12 @@ def upload_lock_chime():
             # Try to re-encode the file to meet Tesla's requirements (use simple temp name with .wav extension)
             reencoded_path = dest_path.replace('.wav', '_reenc.wav')
             
-            success, reencode_msg = reencode_wav_for_tesla(temp_path, reencoded_path)
+            # Track progress messages (for AJAX, we return these in the response)
+            progress_messages = []
+            def progress_callback(msg):
+                progress_messages.append(msg)
+            
+            success, reencode_msg, details = reencode_wav_for_tesla(temp_path, reencoded_path, progress_callback)
             
             if success:
                 # Re-encoding successful, validate the re-encoded file
@@ -3589,11 +3650,17 @@ def upload_lock_chime():
                     os.remove(temp_path)
                     temp_path = reencoded_path
                     
+                    # Build user-friendly message
+                    strategy_desc = details.get('strategy', 'Tesla-compatible format')
+                    size_info = details.get('size_mb', 'under 1 MB')
+                    
                     if is_ajax:
                         return jsonify({
                             "success": True, 
-                            "message": f"Uploaded {filename} successfully (automatically re-encoded to meet Tesla requirements)",
-                            "reencoded": True
+                            "message": f"Uploaded {filename} successfully!\n\nFile was automatically re-encoded to {strategy_desc} with final size of {size_info} MB.",
+                            "reencoded": True,
+                            "details": details,
+                            "progress": progress_messages
                         }), 200
                 else:
                     # Re-encoded file still doesn't meet requirements
@@ -3610,7 +3677,11 @@ def upload_lock_chime():
                 if os.path.exists(reencoded_path):
                     os.remove(reencoded_path)
                 if is_ajax:
-                    return jsonify({"success": False, "error": f"Invalid WAV file: {validation_msg}. Re-encoding failed: {reencode_msg}"}), 400
+                    return jsonify({
+                        "success": False, 
+                        "error": f"Invalid WAV file: {validation_msg}.\n\nRe-encoding failed: {reencode_msg}",
+                        "progress": progress_messages
+                    }), 400
                 flash(f"Invalid WAV file: {validation_msg}. Re-encoding failed: {reencode_msg}", "error")
                 return redirect(url_for("lock_chimes"))
         

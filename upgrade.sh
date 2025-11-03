@@ -3,8 +3,10 @@ set -euo pipefail
 
 # TeslaUSB Upgrade Script
 # This script pulls the latest code from GitHub and runs setup
+# Supports both git-cloned installations and manual installations
 
-REPO_URL="https://github.com/mphacker/TeslaUSB.git"
+REPO_URL="https://github.com/mphacker/TeslaUSB"
+RAW_URL="https://raw.githubusercontent.com/mphacker/TeslaUSB"
 INSTALL_DIR="/home/pi/TeslaUSB"
 BRANCH="main"
 
@@ -13,44 +15,114 @@ echo "TeslaUSB Upgrade Script"
 echo "==================================="
 echo ""
 
-# Check if we're in the right directory
-if [ ! -d "$INSTALL_DIR/.git" ]; then
-    echo "Error: $INSTALL_DIR is not a git repository"
-    echo "This script must be run from a git-cloned installation"
-    exit 1
-fi
-
-cd "$INSTALL_DIR"
-
-echo "Current directory: $(pwd)"
-echo "Current branch: $(git branch --show-current)"
-echo ""
-
 # Store current mode state if it exists
-if [ -f "state.txt" ]; then
-    CURRENT_MODE=$(cat state.txt)
+if [ -f "$INSTALL_DIR/state.txt" ]; then
+    CURRENT_MODE=$(cat "$INSTALL_DIR/state.txt")
     echo "Current mode: $CURRENT_MODE"
 else
     CURRENT_MODE="unknown"
 fi
 echo ""
 
-# Fetch latest changes
-echo "Fetching latest changes from GitHub..."
-git fetch origin
-
-# Reset any local changes to tracked files (including chmod changes)
-echo "Resetting local changes to tracked files..."
-git reset --hard origin/$BRANCH
-
-# Clean up any untracked files (optional - commented out for safety)
-# git clean -fd
+# Check if this is a git repository
+if [ -d "$INSTALL_DIR/.git" ]; then
+    echo "Git repository detected - using git pull method"
+    echo ""
+    
+    cd "$INSTALL_DIR"
+    
+    echo "Current directory: $(pwd)"
+    echo "Current branch: $(git branch --show-current)"
+    echo ""
+    
+    # Fetch latest changes
+    echo "Fetching latest changes from GitHub..."
+    git fetch origin
+    
+    # Reset any local changes to tracked files (including chmod changes)
+    echo "Resetting local changes to tracked files..."
+    git reset --hard origin/$BRANCH
+    
+    # Clean up any untracked files (optional - commented out for safety)
+    # git clean -fd
+    
+else
+    echo "No git repository detected - using direct download method"
+    echo ""
+    
+    # Create backup directory
+    BACKUP_DIR="${INSTALL_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
+    echo "Creating backup at: $BACKUP_DIR"
+    
+    # Backup important files
+    mkdir -p "$BACKUP_DIR"
+    [ -f "$INSTALL_DIR/state.txt" ] && cp "$INSTALL_DIR/state.txt" "$BACKUP_DIR/"
+    [ -f "$INSTALL_DIR/usb_cam.img" ] && echo "Preserving usb_cam.img (not backed up due to size)"
+    [ -f "$INSTALL_DIR/usb_lightshow.img" ] && echo "Preserving usb_lightshow.img (not backed up due to size)"
+    [ -d "$INSTALL_DIR/thumbnails" ] && cp -r "$INSTALL_DIR/thumbnails" "$BACKUP_DIR/"
+    
+    echo ""
+    echo "Downloading latest files from GitHub..."
+    
+    # Create temp directory for downloads
+    TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR"
+    
+    # Download main scripts and setup files
+    echo "Downloading setup files..."
+    curl -fsSL "${RAW_URL}/${BRANCH}/setup_usb.sh" -o setup_usb.sh
+    curl -fsSL "${RAW_URL}/${BRANCH}/cleanup.sh" -o cleanup.sh
+    curl -fsSL "${RAW_URL}/${BRANCH}/upgrade.sh" -o upgrade.sh
+    curl -fsSL "${RAW_URL}/${BRANCH}/README.md" -o README.md || true
+    
+    # Download scripts directory
+    echo "Downloading scripts..."
+    mkdir -p scripts
+    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/present_usb.sh" -o scripts/present_usb.sh
+    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/edit_usb.sh" -o scripts/edit_usb.sh
+    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web_control.py" -o scripts/web_control.py
+    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/generate_thumbnails.py" -o scripts/generate_thumbnails.py
+    
+    # Download templates directory
+    echo "Downloading templates..."
+    mkdir -p templates
+    curl -fsSL "${RAW_URL}/${BRANCH}/templates/gadget_web.service" -o templates/gadget_web.service
+    curl -fsSL "${RAW_URL}/${BRANCH}/templates/present_usb_on_boot.service" -o templates/present_usb_on_boot.service
+    curl -fsSL "${RAW_URL}/${BRANCH}/templates/thumbnail_generator.service" -o templates/thumbnail_generator.service
+    curl -fsSL "${RAW_URL}/${BRANCH}/templates/thumbnail_generator.timer" -o templates/thumbnail_generator.timer
+    
+    echo ""
+    echo "Copying files to $INSTALL_DIR..."
+    
+    # Copy downloaded files to install directory
+    cp -f setup_usb.sh "$INSTALL_DIR/"
+    cp -f cleanup.sh "$INSTALL_DIR/"
+    cp -f upgrade.sh "$INSTALL_DIR/"
+    [ -f README.md ] && cp -f README.md "$INSTALL_DIR/"
+    
+    cp -rf scripts/* "$INSTALL_DIR/scripts/"
+    cp -rf templates/* "$INSTALL_DIR/templates/"
+    
+    # Restore state file if it was backed up
+    if [ -f "$BACKUP_DIR/state.txt" ]; then
+        cp "$BACKUP_DIR/state.txt" "$INSTALL_DIR/"
+    fi
+    
+    # Clean up temp directory
+    cd "$INSTALL_DIR"
+    rm -rf "$TEMP_DIR"
+    
+    echo ""
+    echo "Files updated successfully!"
+    echo "Backup saved to: $BACKUP_DIR"
+fi
 
 # Ensure scripts are executable
+echo ""
 echo "Setting execute permissions on scripts..."
-chmod +x setup_usb.sh
-chmod +x cleanup.sh
-chmod +x upgrade.sh
+chmod +x "$INSTALL_DIR/setup_usb.sh"
+chmod +x "$INSTALL_DIR/cleanup.sh"
+chmod +x "$INSTALL_DIR/upgrade.sh"
 
 echo ""
 echo "==================================="

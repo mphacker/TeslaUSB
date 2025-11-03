@@ -2792,8 +2792,25 @@ def reencode_wav_for_tesla(input_path, output_path):
         )
         
         if result.returncode != 0:
-            error_msg = result.stderr.decode('utf-8', errors='ignore')
-            return False, f"FFmpeg failed: {error_msg[:200]}"
+            # Extract the actual error from FFmpeg output (usually at the end)
+            stderr_output = result.stderr.decode('utf-8', errors='ignore')
+            
+            # FFmpeg errors typically appear after "Error" keyword or in last few lines
+            error_lines = []
+            for line in stderr_output.split('\n'):
+                line = line.strip()
+                if line and any(keyword in line.lower() for keyword in ['error', 'invalid', 'could not', 'failed', 'unable']):
+                    error_lines.append(line)
+            
+            # If we found error lines, use the last few
+            if error_lines:
+                error_msg = '. '.join(error_lines[-3:])[:300]
+            else:
+                # Fall back to last non-empty lines
+                lines = [l.strip() for l in stderr_output.split('\n') if l.strip()]
+                error_msg = '. '.join(lines[-3:])[:300] if lines else "Unknown FFmpeg error"
+            
+            return False, f"FFmpeg conversion failed: {error_msg}"
         
         # Check if output file was created and is not empty
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:

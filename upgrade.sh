@@ -9,6 +9,40 @@ REPO_URL="https://github.com/mphacker/TeslaUSB"
 RAW_URL="https://raw.githubusercontent.com/mphacker/TeslaUSB"
 INSTALL_DIR="/home/pi/TeslaUSB"
 BRANCH="main"
+BACKUP_DIR=""
+
+# Cleanup function for error handling
+cleanup_on_error() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ] && [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+        echo ""
+        echo "============================================"
+        echo "ERROR: Upgrade failed with exit code $exit_code"
+        echo "============================================"
+        echo ""
+        echo "Restoring from backup: $BACKUP_DIR"
+        
+        # Restore backed up files
+        if [ -f "$BACKUP_DIR/state.txt" ]; then
+            cp "$BACKUP_DIR/state.txt" "$INSTALL_DIR/" 2>/dev/null || true
+        fi
+        if [ -d "$BACKUP_DIR/thumbnails" ]; then
+            rm -rf "$INSTALL_DIR/thumbnails"
+            cp -r "$BACKUP_DIR/thumbnails" "$INSTALL_DIR/" 2>/dev/null || true
+        fi
+        
+        echo "Backup restored."
+        echo "Removing backup directory..."
+        rm -rf "$BACKUP_DIR"
+        echo "Backup directory removed."
+        echo ""
+        echo "System restored to previous state."
+        exit $exit_code
+    fi
+}
+
+# Set trap for error handling (only for non-git path)
+trap cleanup_on_error EXIT
 
 echo "==================================="
 echo "TeslaUSB Upgrade Script"
@@ -50,7 +84,7 @@ else
     echo "No git repository detected - using direct download method"
     echo ""
     
-    # Create backup directory
+    # Create backup directory with timestamp
     BACKUP_DIR="${INSTALL_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
     echo "Creating backup at: $BACKUP_DIR"
     
@@ -70,26 +104,27 @@ else
     
     # Download main scripts and setup files
     echo "Downloading setup files..."
-    curl -fsSL "${RAW_URL}/${BRANCH}/setup_usb.sh" -o setup_usb.sh
-    curl -fsSL "${RAW_URL}/${BRANCH}/cleanup.sh" -o cleanup.sh
-    curl -fsSL "${RAW_URL}/${BRANCH}/upgrade.sh" -o upgrade.sh
-    curl -fsSL "${RAW_URL}/${BRANCH}/README.md" -o README.md || true
+    curl -fsSL "${RAW_URL}/${BRANCH}/setup_usb.sh" -o setup_usb.sh || { echo "Failed to download setup_usb.sh"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/cleanup.sh" -o cleanup.sh || { echo "Failed to download cleanup.sh"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/upgrade.sh" -o upgrade.sh || { echo "Failed to download upgrade.sh"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/readme.md" -o readme.md 2>/dev/null || echo "  (readme.md not found, skipping)"
+    curl -fsSL "${RAW_URL}/${BRANCH}/README_scripts.md" -o README_scripts.md 2>/dev/null || echo "  (README_scripts.md not found, skipping)"
     
     # Download scripts directory
     echo "Downloading scripts..."
     mkdir -p scripts
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/present_usb.sh" -o scripts/present_usb.sh
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/edit_usb.sh" -o scripts/edit_usb.sh
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web_control.py" -o scripts/web_control.py
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/generate_thumbnails.py" -o scripts/generate_thumbnails.py
+    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/present_usb.sh" -o scripts/present_usb.sh || { echo "Failed to download present_usb.sh"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/edit_usb.sh" -o scripts/edit_usb.sh || { echo "Failed to download edit_usb.sh"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web_control.py" -o scripts/web_control.py || { echo "Failed to download web_control.py"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/generate_thumbnails.py" -o scripts/generate_thumbnails.py || { echo "Failed to download generate_thumbnails.py"; exit 1; }
     
     # Download templates directory
     echo "Downloading templates..."
     mkdir -p templates
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/gadget_web.service" -o templates/gadget_web.service
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/present_usb_on_boot.service" -o templates/present_usb_on_boot.service
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/thumbnail_generator.service" -o templates/thumbnail_generator.service
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/thumbnail_generator.timer" -o templates/thumbnail_generator.timer
+    curl -fsSL "${RAW_URL}/${BRANCH}/templates/gadget_web.service" -o templates/gadget_web.service || { echo "Failed to download gadget_web.service"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/templates/present_usb_on_boot.service" -o templates/present_usb_on_boot.service || { echo "Failed to download present_usb_on_boot.service"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/templates/thumbnail_generator.service" -o templates/thumbnail_generator.service || { echo "Failed to download thumbnail_generator.service"; exit 1; }
+    curl -fsSL "${RAW_URL}/${BRANCH}/templates/thumbnail_generator.timer" -o templates/thumbnail_generator.timer || { echo "Failed to download thumbnail_generator.timer"; exit 1; }
     
     echo ""
     echo "Copying files to $INSTALL_DIR..."
@@ -98,7 +133,8 @@ else
     cp -f setup_usb.sh "$INSTALL_DIR/"
     cp -f cleanup.sh "$INSTALL_DIR/"
     cp -f upgrade.sh "$INSTALL_DIR/"
-    [ -f README.md ] && cp -f README.md "$INSTALL_DIR/"
+    [ -f readme.md ] && cp -f readme.md "$INSTALL_DIR/"
+    [ -f README_scripts.md ] && cp -f README_scripts.md "$INSTALL_DIR/"
     
     cp -rf scripts/* "$INSTALL_DIR/scripts/"
     cp -rf templates/* "$INSTALL_DIR/templates/"
@@ -114,8 +150,17 @@ else
     
     echo ""
     echo "Files updated successfully!"
-    echo "Backup saved to: $BACKUP_DIR"
+    
+    # Delete backup if we got here successfully
+    if [ -d "$BACKUP_DIR" ]; then
+        echo "Removing backup (upgrade successful)..."
+        rm -rf "$BACKUP_DIR"
+        echo "Backup removed."
+    fi
 fi
+
+# Disable error trap for git-based updates (they handle their own errors)
+trap - EXIT
 
 # Ensure scripts are executable
 echo ""
@@ -131,7 +176,7 @@ echo "==================================="
 echo ""
 
 # Ask user if they want to run setup
-read -p "Do you want to run setup_usb.sh now? (y/n): " -n 1 -r
+read -p "Do you want to run setup_usb.sh now? [y/n]: " -n 1 -r
 echo ""
 
 if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -148,7 +193,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     if [ "$CURRENT_MODE" = "edit" ]; then
         echo ""
         echo "Previous mode was 'edit'. You may want to switch back to edit mode."
-        read -p "Switch to edit mode now? (y/n): " -n 1 -r
+        read -p "Switch to edit mode now? [y/n]: " -n 1 -r
         echo ""
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             sudo ./edit_usb.sh

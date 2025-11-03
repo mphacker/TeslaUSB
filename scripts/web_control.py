@@ -2055,8 +2055,8 @@ HTML_LOCK_CHIMES_PAGE = """
                    style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; width: 100%; max-width: 400px; font-size: 14px;">
             <button type="submit" class="edit-btn" id="chimeUploadBtn">📤 Upload</button>
             <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">
-                Optimal: 16-bit PCM, 44.1 or 48 kHz, under 1MB<br>
-                Files not meeting requirements will be automatically re-encoded
+                Tesla Requirements: PCM 16-bit, 44.1 kHz, mono/stereo, under 1MB<br>
+                Files will be automatically re-encoded and trimmed if needed
             </p>
         </form>
         <!-- Upload Progress Bar -->
@@ -2787,25 +2787,29 @@ def validate_lock_chime():
 def reencode_wav_for_tesla(input_path, output_path, progress_callback=None):
     """
     Re-encode a WAV file to meet Tesla's requirements using FFmpeg with multi-pass attempts:
-    - Pass 1: 16-bit PCM, 48 kHz, mono (standard quality)
-    - Pass 2: 16-bit PCM, 44.1 kHz, mono (reduced sample rate)
-    - Pass 3: 8-bit PCM, 44.1 kHz, mono (reduced bit depth - last resort)
+    - Pass 1: 16-bit PCM, 44.1 kHz, mono (Tesla standard)
+    - Pass 2: 16-bit PCM, 44.1 kHz, mono, trimmed to fit under 1MB
+    
+    Tesla Lock Chime Requirements:
+    - PCM encoding
+    - 16-bit
+    - 44.1 kHz sample rate
+    - Mono or stereo
+    - 1MB maximum file size
     
     Returns: (success, message, details_dict)
     """
-    # Define encoding strategies in order of quality (best to worst)
+    # Define encoding strategies in order of preference
     strategies = [
         {
-            "name": "High quality (16-bit, 48kHz, mono)",
-            "args": ["-acodec", "pcm_s16le", "-ar", "48000", "-ac", "1"]
+            "name": "Standard (16-bit, 44.1kHz, mono)",
+            "args": ["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"],
+            "trim": False
         },
         {
-            "name": "Medium quality (16-bit, 44.1kHz, mono)",
-            "args": ["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"]
-        },
-        {
-            "name": "Reduced quality (8-bit, 44.1kHz, mono)",
-            "args": ["-acodec", "pcm_u8", "-ar", "44100", "-ac", "1"]
+            "name": "Trimmed (16-bit, 44.1kHz, mono)",
+            "args": ["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1"],
+            "trim": True
         }
     ]
     
@@ -2817,7 +2821,24 @@ def reencode_wav_for_tesla(input_path, output_path, progress_callback=None):
                 progress_callback(f"Attempt {attempt}/{len(strategies)}: {strategy['name']}")
             
             # Build FFmpeg command
-            cmd = ["ffmpeg", "-i", input_path] + strategy["args"] + ["-y", output_path]
+            cmd = ["ffmpeg", "-i", input_path]
+            
+            # If this strategy requires trimming, calculate the duration that fits in 1MB
+            if strategy.get("trim"):
+                # Calculate max duration: 1MB / (44100 Hz * 2 bytes * 1 channel + WAV header overhead)
+                # PCM 16-bit = 2 bytes per sample, 44.1kHz = 44100 samples/sec, mono = 1 channel
+                # 1MB = 1,048,576 bytes, subtract ~200 bytes for WAV headers
+                max_bytes = MAX_LOCK_CHIME_SIZE - 200  # Leave room for WAV header
+                bytes_per_second = 44100 * 2 * 1  # sample_rate * bytes_per_sample * channels
+                max_duration = max_bytes / bytes_per_second
+                
+                if progress_callback:
+                    progress_callback(f"Trimming audio to {max_duration:.1f} seconds to fit 1MB limit")
+                
+                # Add trim filter to keep only the first N seconds
+                cmd.extend(["-t", str(max_duration)])
+            
+            cmd.extend(strategy["args"] + ["-y", output_path])
             
             # Use FFmpeg to re-encode
             result = subprocess.run(
@@ -2864,11 +2885,11 @@ def reencode_wav_for_tesla(input_path, output_path, progress_callback=None):
                 size_mb = size_bytes / (1024 * 1024)
                 last_error = f"File still too large: {size_mb:.2f} MB (need < 1 MB)"
                 
-                # If not the last strategy, try next one
+                # If not the last strategy, try next one (which will trim)
                 if attempt < len(strategies):
                     continue
                 else:
-                    return False, f"Unable to compress file below 1 MB even with lowest quality settings. Final size: {size_mb:.2f} MB.", {}
+                    return False, f"Unable to fit file under 1 MB even after trimming. Final size: {size_mb:.2f} MB.", {}
             
             # Success! Return with details
             size_mb = size_bytes / (1024 * 1024)
@@ -2894,10 +2915,12 @@ def reencode_wav_for_tesla(input_path, output_path, progress_callback=None):
 
 def validate_tesla_wav(file_path):
     """
-    Validate WAV file meets Tesla's requirements:
+    Validate WAV file meets Tesla's lock chime requirements:
     - Under 1MB in size
-    - 16-bit PCM
-    - 44.1 kHz or 48 kHz sample rate
+    - PCM encoding (uncompressed)
+    - 16-bit
+    - 44.1 kHz sample rate
+    - Mono or stereo
     
     Returns: (is_valid, error_message)
     """
@@ -2920,14 +2943,18 @@ def validate_tesla_wav(file_path):
                 bit_depth = params.sampwidth * 8
                 return False, f"File is {bit_depth}-bit. Tesla requires 16-bit PCM."
             
-            # Check sample rate (44100 Hz or 48000 Hz)
-            if params.framerate not in (44100, 48000):
+            # Check sample rate (44.1 kHz only - Tesla requirement)
+            if params.framerate != 44100:
                 rate_khz = params.framerate / 1000
-                return False, f"Sample rate is {rate_khz:.1f} kHz. Tesla requires 44.1 kHz or 48 kHz."
+                return False, f"Sample rate is {rate_khz:.1f} kHz. Tesla requires 44.1 kHz."
             
             # Check if it's PCM (compression type should be 'NONE')
             if params.comptype != 'NONE':
                 return False, f"File uses {params.comptype} compression. Tesla requires uncompressed PCM."
+            
+            # Check channels (1 = mono, 2 = stereo - both acceptable)
+            if params.nchannels not in (1, 2):
+                return False, f"File has {params.nchannels} channels. Tesla requires mono or stereo."
         
         return True, "Valid"
         

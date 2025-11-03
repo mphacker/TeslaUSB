@@ -2054,7 +2054,10 @@ HTML_LOCK_CHIMES_PAGE = """
             <input type="file" name="chime_file" id="chime_file" accept=".wav" required 
                    style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; width: 100%; max-width: 400px; font-size: 14px;">
             <button type="submit" class="edit-btn" id="chimeUploadBtn">📤 Upload</button>
-            <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Requirements: 16-bit PCM, 44.1 or 48 kHz, under 1MB</p>
+            <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">
+                Optimal: 16-bit PCM, 44.1 or 48 kHz, under 1MB<br>
+                Files not meeting requirements will be automatically re-encoded
+            </p>
         </form>
         <!-- Upload Progress Bar -->
         <div id="chimeUploadProgress" style="display: none; margin-bottom: 20px;">
@@ -2760,6 +2763,56 @@ def validate_lock_chime():
             issues.append(f"Unable to read {entry} on {part}: {exc}")
 
     return issues
+
+
+def reencode_wav_for_tesla(input_path, output_path):
+    """
+    Re-encode a WAV file to meet Tesla's requirements using FFmpeg:
+    - 16-bit PCM
+    - 48 kHz sample rate (better quality than 44.1 kHz)
+    - Mono (reduces file size)
+    
+    Returns: (success, message)
+    """
+    try:
+        # Use FFmpeg to re-encode
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-i", input_path,
+                "-acodec", "pcm_s16le",  # 16-bit PCM
+                "-ar", "48000",           # 48 kHz sample rate
+                "-ac", "1",               # Mono (reduces file size)
+                "-y",                     # Overwrite output file
+                output_path
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False
+        )
+        
+        if result.returncode != 0:
+            error_msg = result.stderr.decode('utf-8', errors='ignore')
+            return False, f"FFmpeg failed: {error_msg[:200]}"
+        
+        # Check if output file was created and is not empty
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            return False, "Re-encoding produced an empty file"
+        
+        # Check if re-encoded file is still too large
+        size_bytes = os.path.getsize(output_path)
+        if size_bytes > MAX_LOCK_CHIME_SIZE:
+            size_mb = size_bytes / (1024 * 1024)
+            return False, f"Re-encoded file is still too large ({size_mb:.2f} MB). Tesla requires files under 1 MB."
+        
+        return True, "Successfully re-encoded to Tesla format"
+        
+    except FileNotFoundError:
+        return False, "FFmpeg is not installed on the system"
+    except subprocess.TimeoutExpired:
+        return False, "Re-encoding timed out (file too large or complex)"
+    except Exception as e:
+        return False, f"Re-encoding error: {str(e)}"
 
 
 def validate_tesla_wav(file_path):
@@ -3486,12 +3539,46 @@ def upload_lock_chime():
         
         # Validate the uploaded file
         is_valid, validation_msg = validate_tesla_wav(temp_path)
+        
         if not is_valid:
-            os.remove(temp_path)
-            if is_ajax:
-                return jsonify({"success": False, "error": f"Invalid WAV file: {validation_msg}"}), 400
-            flash(f"Invalid WAV file: {validation_msg}", "error")
-            return redirect(url_for("lock_chimes"))
+            # Try to re-encode the file to meet Tesla's requirements
+            reencoded_path = dest_path + ".reencoded.tmp"
+            
+            success, reencode_msg = reencode_wav_for_tesla(temp_path, reencoded_path)
+            
+            if success:
+                # Re-encoding successful, validate the re-encoded file
+                is_valid_reencoded, validation_msg_reencoded = validate_tesla_wav(reencoded_path)
+                
+                if is_valid_reencoded:
+                    # Use the re-encoded file
+                    os.remove(temp_path)
+                    temp_path = reencoded_path
+                    
+                    if is_ajax:
+                        return jsonify({
+                            "success": True, 
+                            "message": f"Uploaded {filename} successfully (automatically re-encoded to meet Tesla requirements)",
+                            "reencoded": True
+                        }), 200
+                else:
+                    # Re-encoded file still doesn't meet requirements
+                    os.remove(temp_path)
+                    if os.path.exists(reencoded_path):
+                        os.remove(reencoded_path)
+                    if is_ajax:
+                        return jsonify({"success": False, "error": f"Re-encoded file failed validation: {validation_msg_reencoded}"}), 400
+                    flash(f"Re-encoded file failed validation: {validation_msg_reencoded}", "error")
+                    return redirect(url_for("lock_chimes"))
+            else:
+                # Re-encoding failed
+                os.remove(temp_path)
+                if os.path.exists(reencoded_path):
+                    os.remove(reencoded_path)
+                if is_ajax:
+                    return jsonify({"success": False, "error": f"Invalid WAV file: {validation_msg}. Re-encoding failed: {reencode_msg}"}), 400
+                flash(f"Invalid WAV file: {validation_msg}. Re-encoding failed: {reencode_msg}", "error")
+                return redirect(url_for("lock_chimes"))
         
         # Move to final location
         if os.path.exists(dest_path):
@@ -3511,6 +3598,9 @@ def upload_lock_chime():
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        reencoded_path = dest_path + ".reencoded.tmp"
+        if os.path.exists(reencoded_path):
+            os.remove(reencoded_path)
         if is_ajax:
             return jsonify({"success": False, "error": f"Failed to upload file: {str(e)}"}), 500
         flash(f"Failed to upload file: {str(e)}", "error")

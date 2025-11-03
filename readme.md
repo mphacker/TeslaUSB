@@ -325,9 +325,15 @@ The web interface includes a complete lock chimes management system with organiz
   - Uncompressed audio (no compression)
   - File size under 1 MB
   - Invalid files clearly marked with error messages
+- **Automatic Audio Conversion**: Upload WAV or MP3 files - they're automatically converted if needed
+  - **MP3 Support**: MP3 files are automatically converted to 16-bit PCM WAV at 44.1 kHz mono
+  - **Re-encoding**: Non-compliant WAV files (wrong bit depth, sample rate, or format) are automatically re-encoded
+  - **Automatic Trimming**: Files exceeding 1 MB are automatically trimmed to fit the limit
+  - **Progress Indicators**: Real-time feedback during upload, conversion, and processing
+  - All conversions happen server-side using FFmpeg - no manual editing required
 - **Play/Preview**: Built-in audio player for all chimes (active and library)
 - **Download**: Download any chime from the library to your computer
-- **Upload**: Add custom WAV files to the Chimes library (Edit mode only)
+- **Upload**: Add custom WAV or MP3 files to the Chimes library (Edit mode only)
 - **Set as Active**: Copy any valid chime from library to root as `LockChime.wav` (Edit mode only)
 - **Delete**: Remove unwanted chimes from library (Edit mode only, cannot delete active chime)
 - **Visual Feedback**: Loading indicators during file operations
@@ -338,17 +344,21 @@ The web interface includes a complete lock chimes management system with organiz
 - **Chimes Library**: `/Chimes/` folder on LightShow partition stores all your custom lock chimes
 - **Active Chime**: `LockChime.wav` in partition root - this is what Tesla actually plays
 - **Migration**: Setup automatically migrates existing WAV files to Chimes folder on first run
-- **Workflow**: Upload → Validate → Store in library → Set as active → Copy to root → Cache bust
+- **Auto-Conversion**: FFmpeg automatically converts MP3 and non-compliant WAV files to Tesla format
+- **Workflow**: Upload (WAV/MP3) → Auto-convert if needed → Validate → Store in library → Set as active → Copy to root → Cache bust
 
 **Access:**
 - Navigate to `http://<pi-ip-address>:5000/lock_chimes` in your web browser
 - Or click the "Lock Chimes" tab in the web interface navigation
 
 **Usage:**
-1. In Edit mode, upload your custom WAV files using the upload form
-   - Files are automatically validated for Tesla compatibility
-   - Valid files are stored in the Chimes library
-   - Invalid files are rejected with specific error messages
+1. In Edit mode, upload your custom audio files (WAV or MP3) using the upload form
+   - **MP3 files**: Automatically converted to 16-bit PCM WAV at 44.1 kHz mono
+   - **Non-compliant WAV files**: Automatically re-encoded to meet Tesla requirements
+   - **Oversized files**: Automatically trimmed to fit within 1 MB limit
+   - Upload progress shows real-time feedback including conversion status
+   - Files are validated after conversion and stored in the Chimes library
+   - Invalid files that cannot be converted are rejected with error messages
 2. Preview any chime by clicking the audio player (works in both modes)
 3. Download any chime to your computer with the Download button (works in both modes)
 4. Click "Set as Active" to make a library chime the active lock sound

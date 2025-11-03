@@ -2051,12 +2051,14 @@ HTML_LOCK_CHIMES_PAGE = """
     <div class="folder-controls" id="chimeUploadControls">
         <form method="post" action="{{ url_for('upload_lock_chime') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="chimeUploadForm">
             <label for="chime_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload New Chime to Library:</label>
-            <input type="file" name="chime_file" id="chime_file" accept=".wav" required 
-                   style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; width: 100%; max-width: 400px; font-size: 14px;">
-            <button type="submit" class="edit-btn" id="chimeUploadBtn">📤 Upload</button>
-            <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">
+            <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
+                <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required 
+                       style="padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; flex: 1; min-width: 250px; max-width: 400px; font-size: 14px;">
+                <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0;">📤 Upload</button>
+            </div>
+            <p style="margin: 0 0 10px 0; font-size: 12px; color: #666;">
                 Tesla Requirements: PCM 16-bit, 44.1 kHz, mono/stereo, under 1MB<br>
-                Files will be automatically re-encoded and trimmed if needed
+                Upload WAV or MP3 files - they will be automatically converted and trimmed if needed
             </p>
         </form>
         <!-- Upload Progress Bar -->
@@ -2071,14 +2073,6 @@ HTML_LOCK_CHIMES_PAGE = """
                 <p id="chimeUploadStatus" style="margin: 0; font-size: 13px; color: #666;">Preparing upload...</p>
             </div>
         </div>
-    </div>
-    <div class="info-box" style="background-color: #fff3cd; border-left: 4px solid #ffc107; margin-bottom: 20px;">
-        <p style="margin: 0; font-size: 14px;"><strong>⚠️ Tesla Cache Note:</strong> Tesla may take 5-30 minutes to recognize a new lock chime due to aggressive caching. If the old chime still plays after setting a new one:</p>
-        <ul style="margin: 8px 0 0 20px; font-size: 13px;">
-            <li>Put car to sleep (walk away for 5+ minutes), then wake it</li>
-            <li>Switch to Present mode, wait 10 seconds, then back to Edit mode (forces USB re-enumeration)</li>
-            <li>Physically unplug/replug the Pi from Tesla's USB port</li>
-        </ul>
     </div>
     {% endif %}
     
@@ -2943,10 +2937,10 @@ def validate_tesla_wav(file_path):
                 bit_depth = params.sampwidth * 8
                 return False, f"File is {bit_depth}-bit. Tesla requires 16-bit PCM."
             
-            # Check sample rate (44.1 kHz only - Tesla requirement)
-            if params.framerate != 44100:
+            # Check sample rate (44.1 kHz or 48 kHz acceptable)
+            if params.framerate not in (44100, 48000):
                 rate_khz = params.framerate / 1000
-                return False, f"Sample rate is {rate_khz:.1f} kHz. Tesla requires 44.1 kHz."
+                return False, f"Sample rate is {rate_khz:.1f} kHz. Tesla requires 44.1 or 48 kHz."
             
             # Check if it's PCM (compression type should be 'NONE')
             if params.comptype != 'NONE':
@@ -3583,8 +3577,9 @@ def download_lock_chime(filename):
 
 
 @app.route("/lock_chimes/upload", methods=["POST"])
+@app.route("/lock_chimes/upload", methods=["POST"])
 def upload_lock_chime():
-    """Upload a new lock chime WAV file."""
+    """Upload a new lock chime WAV or MP3 file."""
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     
     if current_mode() != "edit":
@@ -3606,13 +3601,16 @@ def upload_lock_chime():
         flash("No file selected", "error")
         return redirect(url_for("lock_chimes"))
     
-    if not file.filename.lower().endswith(".wav"):
+    # Check file extension - allow WAV and MP3
+    file_ext = os.path.splitext(file.filename.lower())[1]
+    if file_ext not in [".wav", ".mp3"]:
         if is_ajax:
-            return jsonify({"success": False, "error": "Only WAV files are allowed"}), 400
-        flash("Only WAV files are allowed", "error")
+            return jsonify({"success": False, "error": "Only WAV and MP3 files are allowed"}), 400
+        flash("Only WAV and MP3 files are allowed", "error")
         return redirect(url_for("lock_chimes"))
     
-    filename = os.path.basename(file.filename)
+    # Final filename will always be .wav
+    filename = os.path.splitext(os.path.basename(file.filename))[0] + ".wav"
     
     # Prevent uploading a file named LockChime.wav
     if filename.lower() == LOCK_CHIME_FILENAME.lower():
@@ -3654,7 +3652,56 @@ def upload_lock_chime():
         temp_path = dest_path.replace('.wav', '_upload.wav')
         file.save(temp_path)
         
-        # Validate the uploaded file
+        # For MP3 files, we need to convert to WAV first before validation
+        if file_ext == ".mp3":
+            # Convert MP3 to temporary WAV for processing
+            mp3_temp_path = temp_path
+            temp_path = dest_path.replace('.wav', '_converted.wav')
+            
+            # Use FFmpeg to convert MP3 to WAV
+            try:
+                cmd = [
+                    "ffmpeg", "-i", mp3_temp_path,
+                    "-acodec", "pcm_s16le",  # 16-bit PCM
+                    "-ar", "44100",          # 44.1 kHz
+                    "-ac", "1",              # Mono
+                    "-y",                    # Overwrite output
+                    temp_path
+                ]
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=30
+                )
+                
+                # Remove the MP3 temp file
+                os.remove(mp3_temp_path)
+                
+                if result.returncode != 0:
+                    stderr_output = result.stderr.decode('utf-8', errors='ignore')
+                    raise RuntimeError(f"FFmpeg MP3 conversion failed: {stderr_output}")
+                    
+            except subprocess.TimeoutExpired:
+                if os.path.exists(mp3_temp_path):
+                    os.remove(mp3_temp_path)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                if is_ajax:
+                    return jsonify({"success": False, "error": "MP3 conversion timed out (file too long?)"}), 500
+                flash("MP3 conversion timed out (file too long?)", "error")
+                return redirect(url_for("lock_chimes"))
+            except Exception as e:
+                if os.path.exists(mp3_temp_path):
+                    os.remove(mp3_temp_path)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                if is_ajax:
+                    return jsonify({"success": False, "error": f"MP3 conversion failed: {str(e)}"}), 500
+                flash(f"MP3 conversion failed: {str(e)}", "error")
+                return redirect(url_for("lock_chimes"))
+        
+        # Validate the uploaded/converted file
         is_valid, validation_msg = validate_tesla_wav(temp_path)
         
         if not is_valid:

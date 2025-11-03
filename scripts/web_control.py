@@ -3568,15 +3568,15 @@ def upload_lock_chime():
     
     try:
         # Save to temporary location first (use underscore to avoid multiple dots issue on FAT/exFAT)
-        temp_path = dest_path.replace('.wav', '_upload.tmp')
+        temp_path = dest_path.replace('.wav', '_upload.wav')
         file.save(temp_path)
         
         # Validate the uploaded file
         is_valid, validation_msg = validate_tesla_wav(temp_path)
         
         if not is_valid:
-            # Try to re-encode the file to meet Tesla's requirements (use simple temp name)
-            reencoded_path = dest_path.replace('.wav', '_reenc.tmp')
+            # Try to re-encode the file to meet Tesla's requirements (use simple temp name with .wav extension)
+            reencoded_path = dest_path.replace('.wav', '_reenc.wav')
             
             success, reencode_msg = reencode_wav_for_tesla(temp_path, reencoded_path)
             

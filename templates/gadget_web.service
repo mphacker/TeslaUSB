@@ -6,8 +6,8 @@ Wants=network.target
 [Service]
 Type=simple
 User=__TARGET_USER__
-WorkingDirectory=__GADGET_DIR__
-ExecStart=/usr/bin/python3 __GADGET_DIR__/web_control.py
+WorkingDirectory=__GADGET_DIR__/scripts/web
+ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/web/web_control.py
 Restart=always
 RestartSec=3
 TimeoutStopSec=10

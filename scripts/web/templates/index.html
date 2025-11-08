@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Switching modes, please wait...</div>
+    </div>
+    
+    <form method="post" action="{{url_for('mode_control.present_usb')}}" id="presentForm" style="display: inline;">
+        <button type="submit" class="present-btn" id="presentBtn">📱 Present USB Gadget</button>
+    </form>
+    
+    <form method="post" action="{{url_for('mode_control.edit_usb')}}" id="editForm" style="display: inline;">
+        <button type="submit" class="edit-btn" id="editBtn">📁 Edit USB (mount + Samba)</button>
+    </form>
+    
+    <div class="info-box">
+        <strong>Present USB Mode:</strong> Pi appears as USB storage to Tesla. Files are accessible in read-only mode locally.<br>
+        <strong>Edit USB Mode:</strong> Partitions mounted locally with Samba access for full read-write access.
+    </div>
+
+    {% if share_paths %}
+    <div class="shares">
+        <strong>Network Shares:</strong>
+        <ul>
+            {% for path in share_paths %}
+            <li><code>{{ path }}</code></li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+// Prevent multiple mode switch submissions
+const presentForm = document.getElementById('presentForm');
+const editForm = document.getElementById('editForm');
+const presentBtn = document.getElementById('presentBtn');
+const editBtn = document.getElementById('editBtn');
+const loadingOverlay = document.getElementById('loadingOverlay');
+
+function disableButtons() {
+    presentBtn.disabled = true;
+    editBtn.disabled = true;
+    presentBtn.style.opacity = '0.5';
+    editBtn.style.opacity = '0.5';
+    presentBtn.style.cursor = 'not-allowed';
+    editBtn.style.cursor = 'not-allowed';
+    loadingOverlay.style.display = 'flex';
+}
+
+presentForm.addEventListener('submit', function(e) {
+    if (presentBtn.disabled) {
+        e.preventDefault();
+        return false;
+    }
+    disableButtons();
+});
+
+editForm.addEventListener('submit', function(e) {
+    if (editBtn.disabled) {
+        e.preventDefault();
+        return false;
+    }
+    disableButtons();
+});
+</script>
+{% endblock %}

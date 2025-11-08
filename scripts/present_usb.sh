@@ -1,18 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-#!/bin/bash
-set -euo pipefail
-
 # present_usb.sh - Present USB gadget with dual-LUN configuration
 # This script unmounts local mounts, presents the USB gadget with optimized read-only settings on LUN 1
 
-# Configuration (will be updated by setup_usb.sh)
-IMG_CAM="__GADGET_DIR__/__IMG_CAM_NAME__"
-IMG_LIGHTSHOW="__GADGET_DIR__/__IMG_LIGHTSHOW_NAME__"
-MNT_DIR="__MNT_DIR__"
-TARGET_USER="__TARGET_USER__"
-STATE_FILE="__GADGET_DIR__/state.txt"
+# Load configuration
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
 
 EPHEMERAL_LOOP=0
 LOOP_DEV_FSCK=""

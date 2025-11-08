@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% if auto_refresh %}
+    <meta http-equiv="refresh" content="15">
+    {% endif %}
+    <title>Tesla USB Gadget Control</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="navbar">
+        <div class="navbar-content">
+            <div class="hamburger" onclick="toggleMobileMenu()">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+            <h1><a href="{{ url_for('mode_control.index') }}">🚗 Tesla USB Gadget Control - {{ hostname }}</a></h1>
+            <div class="nav-links">
+                <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
+                <a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>
+                <a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
+                <a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
+                <a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Mobile Menu Overlay -->
+    <div class="mobile-menu-overlay" id="mobileMenuOverlay" onclick="toggleMobileMenu()"></div>
+    
+    <!-- Mobile Menu -->
+    <div class="mobile-menu" id="mobileMenu">
+        <div class="mobile-menu-close" onclick="toggleMobileMenu()">&times;</div>
+        <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
+        <a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>
+        <a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
+        <a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
+        <a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
+    </div>
+    
+    <div class="main-content">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="messages">
+                    {% for cat, msg in messages %}
+                        <div class="{{cat}}">{{msg}}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        
+        {% block content %}{% endblock %}
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

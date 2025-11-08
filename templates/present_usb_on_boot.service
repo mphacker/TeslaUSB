@@ -5,7 +5,7 @@ Wants=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=__GADGET_DIR__/present_usb.sh
+ExecStart=__GADGET_DIR__/scripts/present_usb.sh
 RemainAfterExit=yes
 User=root
 

@@ -2,31 +2,7 @@
 
 ## 🎯 High-Priority Features
 
-### 1. Storage Analytics Dashboard
-- [ ] **Disk usage visualization** showing free/used space for TeslaCam and LightShow partitions
-- [ ] **Video statistics** by folder (RecentClips, SavedClips, SentryClips)
-- [ ] **Timeline graphs** showing recording trends over time
-- [ ] **Storage alerts** when space drops below threshold (e.g., <10%)
-- [ ] **Estimated remaining recording time** based on current usage patterns
-
-**Impact:** Critical for managing limited SD card space  
-**Difficulty:** Medium
-
----
-
-### 2. Auto-Cleanup/Archive System
-- [ ] **Age-based auto-deletion** of RecentClips (e.g., delete videos older than 30 days)
-- [ ] **Size-based management** (keep only X GB of recent clips)
-- [ ] **Selective preservation** rules (never auto-delete SavedClips/SentryClips)
-- [ ] **Archive to external storage** (auto-copy important clips to network share before deletion)
-- [ ] **Configurable rules** via web UI
-
-**Impact:** Prevents "disk full" problems automatically  
-**Difficulty:** Medium
-
----
-
-### 3. Video Search & Filtering
+### 1. Video Search & Filtering
 - [ ] **Date/time range filtering** ("show me videos from last Tuesday")
 - [ ] **Event type filtering** (Recent/Saved/Sentry)
 - [ ] **Camera angle filtering** (show only front camera clips)
@@ -39,7 +15,7 @@
 
 ---
 
-### 4. Batch Video Operations
+### 2. Batch Video Operations
 - [ ] **Select multiple videos** with checkboxes
 - [ ] **Batch download as ZIP** archive
 - [ ] **Batch move** between folders (Recent → Saved)
@@ -51,7 +27,7 @@
 
 ---
 
-### 5. Video Metadata Viewer
+### 3. Video Metadata Viewer
 - [ ] **Extract & display video metadata** (resolution, framerate, codec, bitrate)
 - [ ] **Show recording duration** and file creation time
 - [ ] **Display GPS coordinates** if embedded (useful for sentry events)
@@ -62,7 +38,7 @@
 
 ---
 
-### 6. Scheduled Mode Switching
+### 4. Scheduled Mode Switching
 - [ ] **Automatic mode transitions** based on schedule
 - [ ] Example: Auto-switch to Edit mode at 2 AM for backups, return to Present mode at 4 AM
 - [ ] **Day-of-week schedules** (Edit mode on weekends only)
@@ -73,7 +49,7 @@
 
 ---
 
-### 7. Mobile-Optimized Interface
+### 5. Mobile-Optimized Interface
 - [ ] **Responsive design improvements** for phone/tablet viewing
 - [ ] **Touch-friendly controls** for video playback
 - [ ] **Progressive Web App (PWA)** support for home screen installation
@@ -84,7 +60,7 @@
 
 ---
 
-### 8. Notification System
+### 6. Notification System
 - [ ] **Email/push notifications** when Sentry clips are recorded
 - [ ] **Storage warnings** when space is low
 - [ ] **Health alerts** (filesystem errors, mode switch failures)
@@ -95,7 +71,7 @@
 
 ---
 
-### 9. Video Annotation & Notes
+### 7. Video Annotation & Notes
 - [ ] **Add text notes** to specific videos ("This is the hit-and-run incident")
 - [ ] **Star/favorite** important clips
 - [ ] **Tag videos** with categories (parking lot dent, road trip, etc.)
@@ -106,7 +82,7 @@
 
 ---
 
-### 10. Advanced Lock Chime Features
+### 8. Advanced Lock Chime Features
 - [ ] **Chime scheduler** (different chimes for different times/days)
 - [ ] **Random chime rotation** (picks random chime from library)
 - [ ] **Seasonal chimes** (auto-switch holiday themes)
@@ -118,7 +94,7 @@
 
 ---
 
-### 11. System Health Monitoring
+### 9. System Health Monitoring
 - [ ] **Pi temperature monitoring** with alerts
 - [ ] **Filesystem health checks** with proactive fsck scheduling
 - [ ] **USB connection status** (is Tesla currently connected?)
@@ -130,7 +106,7 @@
 
 ---
 
-### 12. Backup & Restore
+### 10. Backup & Restore
 - [ ] **One-click full backup** of all TeslaCam videos to network share
 - [ ] **Incremental backup** (only new videos since last backup)
 - [ ] **Restore from backup** functionality
@@ -142,7 +118,7 @@
 
 ---
 
-### 13. Video Clip Exporter
+### 11 Video Clip Exporter
 - [ ] **Create shareable clips** with specific start/end times
 - [ ] **Add watermarks/timestamps** to exported videos
 - [ ] **Format conversion** (Tesla MP4 → other formats)
@@ -157,13 +133,10 @@
 
 These features provide immediate value with minimal implementation effort:
 
-1. [ ] **Disk usage meter** - Simple progress bar showing partition fullness
-2. [ ] **Last recording timestamp** - Show when last video was recorded
-3. [ ] **Video count badges** - Show number of videos per folder in navigation
-4. [ ] **Dark mode toggle** - Easy CSS addition for night viewing
-5. [ ] **Quick delete oldest** - One-click button to delete oldest 10 RecentClips
-6. [ ] **Thumbnail size slider** - User-adjustable thumbnail dimensions
-7. [ ] **Auto-refresh toggle** - Let users enable/disable auto-refresh on video page
+1. [ ] **Dark mode toggle** - Easy CSS addition for night viewing
+2. [ ] **Quick delete oldest** - One-click button to delete oldest 10 RecentClips
+3. [ ] **Thumbnail size slider** - User-adjustable thumbnail dimensions
+4. [ ] **Auto-refresh toggle** - Let users enable/disable auto-refresh on video page
 
 ---
 

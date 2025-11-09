@@ -29,6 +29,19 @@
         </div>
     {% endif %}
     
+    <!-- Storage Management Actions -->
+    <div class="management-actions">
+        <a href="{{ url_for('cleanup.settings') }}" class="action-card">
+            <div class="action-icon">🧹</div>
+            <div class="action-content">
+                <h3>Auto-Cleanup Settings</h3>
+                <p>Configure automatic deletion of old videos to free up space</p>
+            </div>
+            <div class="action-arrow">→</div>
+        </a>
+    </div>
+
+    
     <!-- Partition Usage Cards -->
     <div class="analytics-grid">
         {% for partition_name, usage in analytics.partition_usage.items() %}

@@ -1,11 +1,11 @@
 [Unit]
-Description=Present USB gadget at boot
+Description=Present USB gadget at boot (with optional cleanup)
 After=multi-user.target
 Wants=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=__GADGET_DIR__/scripts/present_usb.sh
+ExecStart=__GADGET_DIR__/scripts/boot_present_with_cleanup.sh
 RemainAfterExit=yes
 User=root
 

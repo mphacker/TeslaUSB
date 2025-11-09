@@ -545,7 +545,7 @@ echo "Installation complete."
 echo " - present script: $GADGET_DIR/scripts/present_usb.sh"
 echo " - edit script:    $GADGET_DIR/scripts/edit_usb.sh"
 echo " - web UI:         http://<pi_ip>:$WEB_PORT/  (service: gadget_web.service)"
-echo " - gadget auto-present on boot: present_usb_on_boot.service (enabled)"
+echo " - gadget auto-present on boot: present_usb_on_boot.service (with optional cleanup)"
 echo "Samba shares: use user '$TARGET_USER' and the password set in SAMBA_PASS"
 echo
 

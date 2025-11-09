@@ -13,5 +13,14 @@ StandardError=journal
 # Nice level for low priority
 Nice=10
 
+# Memory limits (lightweight service)
+MemoryMax=50M
+
+# Restart policy for oneshot service
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
 [Install]
 WantedBy=multi-user.target

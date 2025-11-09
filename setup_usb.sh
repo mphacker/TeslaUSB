@@ -63,6 +63,8 @@ REQUIRED_PACKAGES=(
   samba
   samba-common-bin
   ffmpeg
+  watchdog
+  wireless-tools
 )
 
 MISSING_PACKAGES=()
@@ -80,25 +82,37 @@ else
   echo "All required packages already installed; skipping apt install."
 fi
 
-# Ensure config.txt contains dtoverlay=dwc2 under [all]
+# Ensure config.txt contains dtoverlay=dwc2 and dtparam=watchdog=on under [all]
 # Note: We use dtoverlay=dwc2 WITHOUT dr_mode parameter to allow auto-detection
 CONFIG_CHANGED=0
 if [ -f "$CONFIG_FILE" ]; then
-  # Check if dtoverlay=dwc2 exists in [all] section (not in platform-specific sections)
+  # Check if [all] section exists
   if grep -q '^\[all\]' "$CONFIG_FILE"; then
-    # [all] section exists - check if dwc2 is already there
-    if ! awk '/^\[all\]/,/^\[/ {if (/^dtoverlay=dwc2$/) exit 0} END {exit 1}' "$CONFIG_FILE"; then
+    # [all] section exists - check and add entries if needed
+    
+    # Check and add dtoverlay=dwc2 (only if not already present)
+    if ! grep -q '^dtoverlay=dwc2$' "$CONFIG_FILE"; then
       # Add dtoverlay=dwc2 right after [all] line
       sed -i '/^\[all\]/a dtoverlay=dwc2' "$CONFIG_FILE"
       echo "Added dtoverlay=dwc2 under [all] section in $CONFIG_FILE"
       CONFIG_CHANGED=1
     else
-      echo "dtoverlay=dwc2 already present under [all] in $CONFIG_FILE"
+      echo "dtoverlay=dwc2 already present in $CONFIG_FILE"
+    fi
+    
+    # Check and add dtparam=watchdog=on (only if not already present)
+    if ! grep -q '^dtparam=watchdog=on$' "$CONFIG_FILE"; then
+      # Add dtparam=watchdog=on right after [all] line
+      sed -i '/^\[all\]/a dtparam=watchdog=on' "$CONFIG_FILE"
+      echo "Added dtparam=watchdog=on under [all] section in $CONFIG_FILE"
+      CONFIG_CHANGED=1
+    else
+      echo "dtparam=watchdog=on already present in $CONFIG_FILE"
     fi
   else
-    # No [all] section - append it with dwc2
-    printf '\n[all]\ndtoverlay=dwc2\n' | tee -a "$CONFIG_FILE" >/dev/null
-    echo "Appended [all] section with dtoverlay=dwc2 to $CONFIG_FILE"
+    # No [all] section - append it with both entries
+    printf '\n[all]\ndtoverlay=dwc2\ndtparam=watchdog=on\n' >> "$CONFIG_FILE"
+    echo "Appended [all] section with dtoverlay=dwc2 and dtparam=watchdog=on to $CONFIG_FILE"
     CONFIG_CHANGED=1
   fi
 else
@@ -459,6 +473,17 @@ configure_service "$TEMPLATES_DIR/chime_scheduler.service" "$CHIME_SCHEDULER_SER
 CHIME_SCHEDULER_TIMER="/etc/systemd/system/chime_scheduler.timer"
 configure_service "$TEMPLATES_DIR/chime_scheduler.timer" "$CHIME_SCHEDULER_TIMER"
 
+# WiFi power management disable service
+WIFI_POWERSAVE_SERVICE="/etc/systemd/system/wifi-powersave-off.service"
+configure_service "$TEMPLATES_DIR/wifi-powersave-off.service" "$WIFI_POWERSAVE_SERVICE"
+
+# WiFi monitor service
+WIFI_MONITOR_SERVICE="/etc/systemd/system/wifi-monitor.service"
+configure_service "$TEMPLATES_DIR/wifi-monitor.service" "$WIFI_MONITOR_SERVICE"
+
+# Ensure wifi-monitor.sh is executable (it's already in scripts/)
+chmod +x "$SCRIPT_DIR/scripts/wifi-monitor.sh"
+
 # Reload systemd and enable services
 systemctl daemon-reload
 systemctl enable --now gadget_web.service || systemctl restart gadget_web.service
@@ -472,8 +497,99 @@ systemctl enable --now thumbnail_generator.timer || systemctl restart thumbnail_
 # Enable and start chime scheduler timer
 systemctl enable --now chime_scheduler.timer || systemctl restart chime_scheduler.timer
 
+# Enable and start WiFi monitoring services
+systemctl enable --now wifi-powersave-off.service || systemctl restart wifi-powersave-off.service
+systemctl enable --now wifi-monitor.service || systemctl restart wifi-monitor.service
+
 # Ensure the web service picks up the latest code changes
 systemctl restart gadget_web.service || true
+
+# ===== Configure System Reliability Features =====
+echo
+echo "Configuring system reliability features..."
+
+# Configure sysctl for kernel panic auto-reboot
+SYSCTL_CONF="/etc/sysctl.d/99-teslausb.conf"
+if [ ! -f "$SYSCTL_CONF" ] || ! grep -q "kernel.panic" "$SYSCTL_CONF" 2>/dev/null; then
+  echo "Creating sysctl configuration for kernel panic auto-reboot..."
+  cat > "$SYSCTL_CONF" <<'EOF'
+# TeslaUSB System Reliability Configuration
+
+# Reboot 10 seconds after kernel panic
+kernel.panic = 10
+
+# Treat kernel oops as panic (triggers auto-reboot)
+kernel.panic_on_oops = 1
+
+# Don't panic on OOM - let OOM killer work instead
+vm.panic_on_oom = 0
+
+# Swappiness (how aggressively to use swap) - low value for SD card longevity
+vm.swappiness = 10
+EOF
+  chmod 644 "$SYSCTL_CONF"
+  echo "  Created $SYSCTL_CONF"
+  
+  # Apply sysctl settings immediately
+  sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
+  echo "  Applied sysctl settings"
+else
+  echo "Sysctl configuration already exists at $SYSCTL_CONF"
+fi
+
+# Configure hardware watchdog
+WATCHDOG_CONF="/etc/watchdog.conf"
+if [ ! -f "$WATCHDOG_CONF" ] || ! grep -q "watchdog-device" "$WATCHDOG_CONF" 2>/dev/null; then
+  echo "Configuring hardware watchdog..."
+  cat > "$WATCHDOG_CONF" <<'EOF'
+# TeslaUSB Hardware Watchdog Configuration
+# Tuned for Raspberry Pi Zero 2W (512MB RAM, 4 cores)
+
+# Watchdog device
+watchdog-device = /dev/watchdog
+
+# Watchdog timeout (hardware reset after 15 seconds of no response)
+watchdog-timeout = 15
+
+# Test /dev/watchdog every 10 seconds
+interval = 10
+
+# Reboot if 1-minute load average exceeds 24 (6x the 4 cores)
+max-load-1 = 24
+
+# Reboot if free memory drops below 50MB (about 10% of 512MB)
+min-memory = 50000
+
+# Realtime priority for watchdog daemon
+realtime = yes
+priority = 1
+
+# Log to syslog
+log-dir = /var/log/watchdog
+
+# Repair binary (try to fix issues before forcing reboot)
+repair-binary = /usr/lib/watchdog/repair
+repair-timeout = 60
+
+# Test network connectivity (optional - can be enabled if desired)
+# ping = 8.8.8.8
+# ping-count = 3
+
+# Verbose logging
+verbose = yes
+EOF
+  chmod 644 "$WATCHDOG_CONF"
+  echo "  Created $WATCHDOG_CONF"
+else
+  echo "Watchdog configuration already exists at $WATCHDOG_CONF"
+fi
+
+# Enable and start watchdog service
+echo "Enabling watchdog service..."
+systemctl enable watchdog.service || true
+systemctl restart watchdog.service 2>/dev/null || echo "  Note: Watchdog will start on next reboot (requires dtparam=watchdog=on)"
+
+echo "System reliability features configured."
 
 # ===== Create TeslaCam folder on TeslaCam partition =====
 echo
@@ -559,6 +675,14 @@ echo " - web UI:         http://<pi_ip>:$WEB_PORT/  (service: gadget_web.service
 echo " - gadget auto-present on boot: present_usb_on_boot.service (with optional cleanup)"
 echo "Samba shares: use user '$TARGET_USER' and the password set in SAMBA_PASS"
 echo
+echo "System Reliability Features Enabled:"
+echo " - Hardware watchdog: Auto-reboot on system hang (watchdog.service)"
+echo " - Service auto-restart: All services restart on failure"
+echo " - Memory limits: Services limited to prevent OOM crashes"
+echo " - Kernel panic auto-reboot: 10 second timeout"
+echo " - WiFi auto-reconnect: Active monitoring (wifi-monitor.service)"
+echo " - WiFi power-save disabled: Prevents sleep-related disconnects"
+echo
 
 # Load required kernel modules before presenting USB gadget
 echo "Loading USB gadget kernel modules..."
@@ -591,10 +715,11 @@ if [ ! -d /sys/class/udc ] || [ -z "$(ls -A /sys/class/udc 2>/dev/null)" ]; then
     echo "Next steps:"
     echo "  1. Reboot the Raspberry Pi:  sudo reboot"
     echo "  2. After reboot, the USB gadget will be automatically enabled"
-    echo "  3. Access the web interface at: http://$(hostname -I | awk '{print $1}'):$WEB_PORT/"
+    echo "  3. Hardware watchdog will activate for system protection"
+    echo "  4. Access the web interface at: http://$(hostname -I | awk '{print $1}'):$WEB_PORT/"
     echo ""
     echo "The system is configured and ready, but requires a reboot to activate"
-    echo "the USB gadget hardware support."
+    echo "the USB gadget hardware support and hardware watchdog."
     echo "============================================"
     exit 0
 fi

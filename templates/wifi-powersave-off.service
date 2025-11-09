@@ -1,0 +1,18 @@
+[Unit]
+Description=Disable WiFi Power Management
+After=network.target
+Before=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iwconfig wlan0 power off
+RemainAfterExit=yes
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=WiFi Connection Monitor and Auto-Reconnect
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__GADGET_DIR__/scripts/wifi-monitor.sh
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Memory limit (lightweight script)
+MemoryMax=50M
+
+# Run with low priority
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

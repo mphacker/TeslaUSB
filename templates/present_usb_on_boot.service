@@ -9,5 +9,14 @@ ExecStart=__GADGET_DIR__/scripts/boot_present_with_cleanup.sh
 RemainAfterExit=yes
 User=root
 
+# Restart policy
+Restart=on-failure
+RestartSec=15
+StartLimitBurst=3
+StartLimitIntervalSec=600
+
+# Memory limit
+MemoryMax=100M
+
 [Install]
 WantedBy=multi-user.target

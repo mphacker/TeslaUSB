@@ -49,6 +49,9 @@ LOCK_CHIME_FILENAME = "LockChime.wav"
 CHIMES_FOLDER = "Chimes"  # Folder on part2 where custom chimes are stored
 MAX_LOCK_CHIME_SIZE = 1024 * 1024  # 1 MiB
 
+# Light show configuration
+LIGHT_SHOW_FOLDER = "LightShow"  # Folder on part2 where light shows are stored
+
 # USB partition configuration
 USB_PARTITIONS = ("part1", "part2")
 PART_LABEL_MAP = {"part1": "gadget_part1", "part2": "gadget_part2"}

@@ -44,6 +44,16 @@ def present_usb():
                 cwd=GADGET_DIR,
                 timeout=120,  # Increased to 120s - large drives can take time for fsck and mounting
             )
+        
+        # Check for lock-related errors in the log
+        try:
+            with open(log_path, "r") as log:
+                log_content = log.read()
+                if "file operation still in progress" in log_content.lower():
+                    flash("Cannot switch modes - file operation in progress. Please wait for uploads/downloads to complete.", "warning")
+                    return redirect(url_for("mode_control.index"))
+        except Exception:
+            pass  # If we can't read the log, continue with normal error handling
             
         if result.returncode == 0:
             flash("Successfully switched to Present Mode", "success")
@@ -74,6 +84,16 @@ def edit_usb():
                 cwd=GADGET_DIR,
                 timeout=120,  # Increased to 120s - unmount retries and gadget removal can take time
             )
+        
+        # Check for lock-related errors in the log
+        try:
+            with open(log_path, "r") as log:
+                log_content = log.read()
+                if "file operation still in progress" in log_content.lower():
+                    flash("Cannot switch modes - file operation in progress. Please wait for uploads/downloads to complete.", "warning")
+                    return redirect(url_for("mode_control.index"))
+        except Exception:
+            pass  # If we can't read the log, continue with normal error handling
             
         if result.returncode == 0:
             flash("Successfully switched to Edit Mode", "success")

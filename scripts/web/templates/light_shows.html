@@ -4,7 +4,6 @@
     <h2>💡 Light Shows</h2>
     <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
     
-    {% if mode_token == 'edit' %}
     <!-- iOS Safari Warning -->
     <div id="iosWarning" style="display: none; background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
         <p style="margin: 0; font-size: 14px;"><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
@@ -13,8 +12,12 @@
     
     <div class="folder-controls" id="showUploadControls">
         <form method="post" action="{{ url_for('light_shows.upload_light_show') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="showUploadForm">
-            <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File (fseq, mp3, or wav):</label>
-            <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3,.wav" required 
+            <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File or ZIP:</label>
+            <p style="margin: 0 0 10px 0; font-size: 13px; color: #666;">
+                Individual files: .fseq, .mp3, .wav<br>
+                ZIP files: Can contain multiple light show files in any folder structure
+            </p>
+            <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3,.wav,.zip" required 
                    style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; width: 100%; max-width: 400px; font-size: 14px;">
             <button type="submit" class="edit-btn" id="showUploadBtn">📤 Upload</button>
         </form>
@@ -31,7 +34,6 @@
             </div>
         </div>
     </div>
-    {% endif %}
     
     {% if show_groups %}
     <div class="video-table-container">
@@ -71,12 +73,16 @@
                             </audio>
                         </div>
                         {% endif %}
-                        {% if mode_token == 'edit' %}
-                        <form method="post" action="{{ url_for('light_shows.delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" style="display: block;" 
-                              onsubmit="return confirm('Are you sure you want to delete all files for {{ group.base_name }}?');">
-                            <button type="submit" class="btn-delete">🗑️ Delete</button>
-                        </form>
-                        {% endif %}
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                            <a href="{{ url_for('light_shows.download_light_show', partition=group.partition_key, base_name=group.base_name) }}" 
+                               class="edit-btn" style="text-decoration: none; display: inline-flex; align-items: center; justify-content: center; padding: 6px 12px; font-size: 14px; border-radius: 4px;">
+                                📥 Download ZIP
+                            </a>
+                            <form method="post" action="{{ url_for('light_shows.delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" style="display: inline-block; margin: 0;" 
+                                  onsubmit="return confirm('Are you sure you want to delete all files for {{ group.base_name }}?');">
+                                <button type="submit" class="btn-delete">🗑️ Delete</button>
+                            </form>
+                        </div>
                     </td>
                 </tr>
                 {% endfor %}
@@ -122,23 +128,23 @@
                 </audio>
             </div>
             {% endif %}
-            {% if mode_token == 'edit' %}
-            <div class="mobile-card-actions">
+            <div class="mobile-card-actions" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch;">
+                <a href="{{ url_for('light_shows.download_light_show', partition=group.partition_key, base_name=group.base_name) }}" 
+                   class="edit-btn" style="text-decoration: none; display: flex; align-items: center; justify-content: center; flex: 1; padding: 6px 12px; border-radius: 4px;">
+                    📥 Download
+                </a>
                 <form method="post" action="{{ url_for('light_shows.delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" 
-                      onsubmit="return confirm('Are you sure you want to delete all files for {{ group.base_name }}?');">
-                    <button type="submit" class="btn-delete">🗑️ Delete</button>
+                      onsubmit="return confirm('Are you sure you want to delete all files for {{ group.base_name }}?');"
+                      style="flex: 1; margin: 0;">
+                    <button type="submit" class="btn-delete" style="width: 100%; height: 100%;">🗑️ Delete</button>
                 </form>
             </div>
-            {% endif %}
         </div>
         {% endfor %}
     </div>
     {% else %}
     <div class="info-box">
         <p>No light show files found in the LightShow folders.</p>
-        {% if mode_token != 'edit' %}
-        <p>Switch to Edit Mode to upload files.</p>
-        {% endif %}
     </div>
     {% endif %}
 </div>

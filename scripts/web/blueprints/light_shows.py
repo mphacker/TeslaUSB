@@ -2,12 +2,18 @@
 
 import os
 import socket
+import time
+import logging
 from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file
+
+logger = logging.getLogger(__name__)
 
 from config import USB_PARTITIONS, PART_LABEL_MAP
 from utils import format_file_size
 from services.mode_service import mode_display, current_mode
 from services.partition_service import get_mount_path, iter_all_partitions
+from services.light_show_service import upload_light_show_file, upload_zip_file, delete_light_show_files, create_light_show_zip
+from services.samba_service import close_samba_share, restart_samba_services
 
 light_shows_bp = Blueprint('light_shows', __name__, url_prefix='/light_shows')
 
@@ -107,12 +113,46 @@ def play_light_show_audio(partition, filename):
     return send_file(file_path, mimetype=mimetype)
 
 
+@light_shows_bp.route("/download/<partition>/<base_name>")
+def download_light_show(partition, base_name):
+    """Download a light show as a ZIP file containing all related files."""
+    if partition not in USB_PARTITIONS:
+        flash("Invalid partition", "error")
+        return redirect(url_for("light_shows.light_shows"))
+    
+    mount_path = get_mount_path(partition)
+    if not mount_path:
+        flash("Partition not mounted", "error")
+        return redirect(url_for("light_shows.light_shows"))
+    
+    # Create the ZIP file
+    zip_path, error = create_light_show_zip(base_name, mount_path)
+    
+    if error:
+        flash(error, "error")
+        return redirect(url_for("light_shows.light_shows"))
+    
+    # Send the ZIP file and clean it up after sending
+    try:
+        return send_file(
+            zip_path,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f"{base_name}.zip"
+        )
+    finally:
+        # Clean up the temporary ZIP file after sending
+        try:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+        except Exception as e:
+            logger.error(f"Failed to clean up temporary ZIP file: {e}")
+
+
 @light_shows_bp.route("/upload", methods=["POST"])
 def upload_light_show():
-    """Upload a new light show file."""
-    if current_mode() != "edit":
-        flash("Files can only be uploaded in Edit Mode", "error")
-        return redirect(url_for("light_shows.light_shows"))
+    """Upload a new light show file or ZIP containing light show files."""
+    mode = current_mode()
     
     if "show_file" not in request.files:
         flash("No file selected", "error")
@@ -123,72 +163,82 @@ def upload_light_show():
         flash("No file selected", "error")
         return redirect(url_for("light_shows.light_shows"))
     
-    lower_filename = file.filename.lower()
-    if not (lower_filename.endswith(".fseq") or lower_filename.endswith(".mp3") or lower_filename.endswith(".wav")):
-        flash("Only fseq, mp3, and wav files are allowed", "error")
-        return redirect(url_for("light_shows.light_shows"))
+    # Get part2 mount path (only needed in edit mode, None is fine for present mode)
+    part2_mount_path = get_mount_path("part2") if mode == "edit" else None
     
-    # Save to part2 LightShow folder
-    mount_path = get_mount_path("part2")
-    if not mount_path:
-        flash("part2 not mounted", "error")
-        return redirect(url_for("light_shows.light_shows"))
+    # Check if this is a ZIP file
+    if file.filename.lower().endswith('.zip'):
+        # Handle ZIP file upload
+        success, message, file_count = upload_zip_file(file, part2_mount_path)
+        
+        if success:
+            flash(message, "success")
+            
+            # Refresh Samba shares only if in edit mode
+            if mode == "edit":
+                try:
+                    close_samba_share('gadget_part2')
+                    restart_samba_services()
+                except Exception as e:
+                    flash(f"Files uploaded but Samba refresh failed: {str(e)}", "warning")
+            
+            # Longer delay for filesystem settling after quick_edit remount
+            time.sleep(1.0)
+        else:
+            flash(message, "error")
+    else:
+        # Handle individual file upload
+        success, message = upload_light_show_file(file, file.filename, part2_mount_path)
+        
+        if success:
+            flash(message, "success")
+            
+            # Refresh Samba shares only if in edit mode
+            if mode == "edit":
+                try:
+                    close_samba_share('gadget_part2')
+                    restart_samba_services()
+                except Exception as e:
+                    flash(f"File uploaded but Samba refresh failed: {str(e)}", "warning")
+            
+            # Longer delay for filesystem settling after quick_edit remount
+            time.sleep(1.0)
+        else:
+            flash(message, "error")
     
-    lightshow_dir = os.path.join(mount_path, "LightShow")
-    os.makedirs(lightshow_dir, exist_ok=True)
-    
-    filename = os.path.basename(file.filename)
-    dest_path = os.path.join(lightshow_dir, filename)
-    
-    try:
-        file.save(dest_path)
-        flash(f"Uploaded {filename} successfully", "success")
-    except Exception as e:
-        flash(f"Failed to upload file: {str(e)}", "error")
-    
-    return redirect(url_for("light_shows.light_shows"))
+    # Add timestamp to force browser cache refresh
+    return redirect(url_for("light_shows.light_shows", _=int(time.time())))
 
 
 @light_shows_bp.route("/delete/<partition>/<base_name>", methods=["POST"])
 def delete_light_show(partition, base_name):
     """Delete both fseq and mp3 files for a light show."""
-    if current_mode() != "edit":
-        flash("Files can only be deleted in Edit Mode", "error")
-        return redirect(url_for("light_shows.light_shows"))
+    mode = current_mode()
     
     if partition not in USB_PARTITIONS:
         flash("Invalid partition", "error")
         return redirect(url_for("light_shows.light_shows"))
     
-    mount_path = get_mount_path(partition)
-    if not mount_path:
-        flash("Partition not mounted", "error")
-        return redirect(url_for("light_shows.light_shows"))
+    # Get part2 mount path (only needed in edit mode, None is fine for present mode)
+    part2_mount_path = get_mount_path(partition) if mode == "edit" else None
     
-    lightshow_dir = os.path.join(mount_path, "LightShow")
+    # Delete the files using the service (mode-aware)
+    success, message = delete_light_show_files(base_name, part2_mount_path)
     
-    # Try to delete fseq, mp3, and wav files
-    deleted_files = []
-    errors = []
-    
-    for ext in [".fseq", ".mp3", ".wav"]:
-        filename = base_name + ext
-        file_path = os.path.join(lightshow_dir, filename)
+    if success:
+        flash(message, "success")
         
-        if os.path.isfile(file_path):
+        # Refresh Samba shares only if in edit mode
+        if mode == "edit":
             try:
-                os.remove(file_path)
-                deleted_files.append(filename)
+                close_samba_share('gadget_part2')
+                restart_samba_services()
             except Exception as e:
-                errors.append(f"{filename}: {str(e)}")
-    
-    if deleted_files:
-        flash(f"Deleted {', '.join(deleted_files)}", "success")
-    
-    if errors:
-        flash(f"Errors: {'; '.join(errors)}", "error")
-    
-    if not deleted_files and not errors:
-        flash("No files found to delete", "error")
+                flash(f"Files deleted but Samba refresh failed: {str(e)}", "warning")
+        
+        # Small delay for filesystem settling
+        time.sleep(0.2)
+    else:
+        flash(message, "error")
     
     return redirect(url_for("light_shows.light_shows"))

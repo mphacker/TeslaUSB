@@ -83,9 +83,9 @@
 ---
 
 ### 8. Advanced Lock Chime Features
-- [ ] **Chime scheduler** (different chimes for different times/days)
+- [X] **Chime scheduler** (different chimes for different times/days)
 - [ ] **Random chime rotation** (picks random chime from library)
-- [ ] **Seasonal chimes** (auto-switch holiday themes)
+- [X] **Seasonal chimes** (auto-switch holiday themes)
 - [ ] **Preview multiple chimes** in quick succession
 - [ ] **Volume normalization** (auto-adjust all chimes to consistent loudness)
 

@@ -13,6 +13,7 @@ Designed to run every minute via systemd timer.
 
 import sys
 import os
+import time
 import hashlib
 from pathlib import Path
 import logging
@@ -93,6 +94,27 @@ def main():
     logger.info("=" * 60)
     logger.info("Checking chime schedule")
     logger.info("=" * 60)
+    
+    # CRITICAL: Check for active file operations before attempting any work
+    # If quick_edit_part2() is already running (manual upload/delete), skip this run
+    lock_file = os.path.join(GADGET_DIR, '.quick_edit_part2.lock')
+    
+    if os.path.exists(lock_file):
+        # Check if lock is stale (older than 2 minutes)
+        try:
+            lock_age = time.time() - os.path.getmtime(lock_file)
+            if lock_age > 120:  # 2 minutes
+                logger.warning(f"Removing stale lock file (age: {lock_age:.1f}s)")
+                try:
+                    os.remove(lock_file)
+                except OSError:
+                    pass  # Already removed
+            else:
+                logger.info(f"File operation in progress (lock age: {lock_age:.1f}s), skipping this run")
+                logger.info("Will try again on next scheduled run")
+                return 0
+        except OSError:
+            pass  # Lock file disappeared
     
     try:
         # Load scheduler

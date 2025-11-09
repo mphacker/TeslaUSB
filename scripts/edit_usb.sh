@@ -8,6 +8,40 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
+# Check for active file operations before proceeding
+LOCK_FILE="$GADGET_DIR/.quick_edit_part2.lock"
+LOCK_TIMEOUT=30
+LOCK_CHECK_START=$(date +%s)
+
+if [ -f "$LOCK_FILE" ]; then
+  echo "⚠️  File operation in progress (lock file detected)"
+  echo "Waiting up to ${LOCK_TIMEOUT}s for operation to complete..."
+  
+  while [ -f "$LOCK_FILE" ]; do
+    LOCK_AGE=$(($(date +%s) - LOCK_CHECK_START))
+    
+    if [ $LOCK_AGE -ge $LOCK_TIMEOUT ]; then
+      # Check if lock is stale (older than 2 minutes)
+      if [ -f "$LOCK_FILE" ]; then
+        LOCK_FILE_AGE=$(($(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)))
+        if [ $LOCK_FILE_AGE -gt 120 ]; then
+          echo "⚠️  Removing stale lock file (age: ${LOCK_FILE_AGE}s)"
+          rm -f "$LOCK_FILE"
+          break
+        fi
+      fi
+      
+      echo "❌ ERROR: Cannot switch to edit mode - file operation still in progress" >&2
+      echo "Please wait for current upload/download/scheduler operation to complete" >&2
+      exit 1
+    fi
+    
+    sleep 1
+  done
+  
+  echo "✓ File operation completed, proceeding with mode switch"
+fi
+
 echo "Switching to edit mode (local mount + Samba)..."
 
 # Stop thumbnail generator to prevent file access during mode switch

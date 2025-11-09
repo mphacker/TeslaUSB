@@ -215,6 +215,16 @@ def replace_lock_chime(source_path, destination_path):
     dest_dir = os.path.dirname(destination_path)
     backup_path = os.path.join(dest_dir, "oldLockChime.wav")
     temp_path = os.path.join(dest_dir, ".LockChime.wav.tmp")
+    
+    # Clean up any orphaned temporary files from previous incomplete operations
+    # This can happen if the process was killed or interrupted
+    for orphan_file in [temp_path, backup_path]:
+        if os.path.isfile(orphan_file):
+            try:
+                logger.warning(f"Removing orphaned temporary file: {os.path.basename(orphan_file)}")
+                os.remove(orphan_file)
+            except Exception as e:
+                logger.error(f"Failed to remove orphaned file {orphan_file}: {e}")
 
     # Drop any cached data BEFORE we start
     try:
@@ -330,6 +340,296 @@ def replace_lock_chime(source_path, destination_path):
     # Clean up backup on success
     if os.path.isfile(backup_path):
         os.remove(backup_path)
+
+
+def upload_chime_file(uploaded_file, filename, part2_mount_path=None):
+    """
+    Upload a new chime file to the Chimes/ library.
+    
+    This is a mode-aware function that works in both Present and Edit modes:
+    - In Edit mode: Uses normal file operations
+    - In Present mode: Uses quick_edit_part2() to temporarily mount RW
+    
+    Strategy: In Present mode, do ALL processing (MP3 conversion, validation, re-encoding)
+    in /tmp FIRST, then use quick_edit just to copy the final file. This keeps the
+    quick_edit operation short (< 1 second) to avoid timeouts and process kills.
+    
+    Args:
+        uploaded_file: FileStorage object from Flask request
+        filename: Desired filename (must end in .wav)
+        part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    from services.mode_service import current_mode
+    from services.partition_mount_service import quick_edit_part2
+    from config import LOCK_CHIME_FILENAME, CHIMES_FOLDER
+    import tempfile
+    
+    mode = current_mode()
+    logger.info(f"Uploading chime file {filename} (mode: {mode})")
+    
+    # Validate filename
+    if not filename.lower().endswith('.wav'):
+        return False, "Filename must end with .wav"
+    
+    if filename.lower() == LOCK_CHIME_FILENAME.lower():
+        return False, "Cannot upload a file named LockChime.wav. Please rename your file."
+    
+    # Determine file extension from uploaded file
+    file_ext = os.path.splitext(uploaded_file.filename.lower())[1]
+    if file_ext not in [".wav", ".mp3"]:
+        return False, "Only WAV and MP3 files are allowed"
+    
+    # In Present mode, do all processing in /tmp first
+    if mode == 'present':
+        temp_dir = tempfile.mkdtemp(prefix='chime_upload_')
+        try:
+            # Save uploaded file to temp
+            temp_input = os.path.join(temp_dir, 'input' + file_ext)
+            uploaded_file.seek(0)
+            uploaded_file.save(temp_input)
+            
+            # Convert MP3 to WAV if needed
+            if file_ext == ".mp3":
+                temp_wav = os.path.join(temp_dir, 'converted.wav')
+                cmd = [
+                    "ffmpeg", "-i", temp_input,
+                    "-acodec", "pcm_s16le",  # 16-bit PCM
+                    "-ar", "44100",          # 44.1 kHz
+                    "-ac", "1",              # Mono
+                    "-y",                    # Overwrite output
+                    temp_wav
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, timeout=60)
+                if result.returncode != 0:
+                    shutil.rmtree(temp_dir)
+                    return False, "Failed to convert MP3 to WAV"
+                
+                os.remove(temp_input)
+                temp_input = temp_wav
+            
+            # Validate and re-encode if needed
+            is_valid, msg = validate_tesla_wav(temp_input)
+            
+            if not is_valid:
+                logger.info(f"File needs re-encoding: {msg}")
+                temp_output = os.path.join(temp_dir, 'final.wav')
+                success, reencode_msg, _ = reencode_wav_for_tesla(temp_input, temp_output)
+                
+                if not success:
+                    shutil.rmtree(temp_dir)
+                    return False, f"Upload failed: {reencode_msg}"
+                
+                final_file = temp_output
+                reencoded = True
+            else:
+                final_file = temp_input
+                reencoded = False
+            
+            # Now do a quick copy operation
+            def _do_quick_copy():
+                """Quick file copy - should take < 1 second."""
+                try:
+                    from config import MNT_DIR
+                    rw_mount = os.path.join(MNT_DIR, 'part2')
+                    chimes_dir = os.path.join(rw_mount, CHIMES_FOLDER)
+                    
+                    # Create Chimes directory if needed
+                    if not os.path.isdir(chimes_dir):
+                        os.makedirs(chimes_dir, exist_ok=True)
+                    
+                    dest_path = os.path.join(chimes_dir, filename)
+                    
+                    # Copy the prepared file
+                    shutil.copy2(final_file, dest_path)
+                    
+                    return True, "File copied successfully"
+                except Exception as e:
+                    logger.error(f"Error copying file: {e}", exc_info=True)
+                    return False, f"Error copying file: {str(e)}"
+            
+            # Execute quick copy with short timeout
+            logger.info("Using quick edit part2 for final file copy")
+            success, copy_msg = quick_edit_part2(_do_quick_copy, timeout=30)
+            
+            # Clean up temp directory
+            shutil.rmtree(temp_dir)
+            
+            if success:
+                if reencoded:
+                    return True, f"Successfully uploaded {filename} (re-encoded for Tesla compatibility)"
+                else:
+                    return True, f"Successfully uploaded {filename}"
+            else:
+                return False, copy_msg
+                
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False, "File conversion timed out"
+        except Exception as e:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            logger.error(f"Error uploading chime: {e}", exc_info=True)
+            return False, f"Error uploading file: {str(e)}"
+    
+    else:
+        # Edit mode - original logic (process directly on mounted filesystem)
+        def _do_upload():
+            """Internal function to perform the actual upload."""
+            try:
+                if not part2_mount_path:
+                    return False, "Part2 mount path required in edit mode"
+                
+                rw_mount = part2_mount_path
+                
+                # Create Chimes directory if needed
+                chimes_dir = os.path.join(rw_mount, CHIMES_FOLDER)
+                if not os.path.isdir(chimes_dir):
+                    os.makedirs(chimes_dir, exist_ok=True)
+                
+                dest_path = os.path.join(chimes_dir, filename)
+                
+                # Save to temporary location first
+                temp_path = dest_path.replace('.wav', '_upload.wav')
+                uploaded_file.seek(0)  # Reset file pointer
+                uploaded_file.save(temp_path)
+                
+                # For MP3 files, convert to WAV first
+                if file_ext == ".mp3":
+                    mp3_temp_path = temp_path
+                    temp_path = dest_path.replace('.wav', '_converted.wav')
+                    
+                    # Use FFmpeg to convert MP3 to WAV
+                    cmd = [
+                        "ffmpeg", "-i", mp3_temp_path,
+                        "-acodec", "pcm_s16le",  # 16-bit PCM
+                        "-ar", "44100",          # 44.1 kHz
+                        "-ac", "1",              # Mono
+                        "-y",                    # Overwrite output
+                        temp_path
+                    ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, timeout=60)
+                    os.remove(mp3_temp_path)  # Clean up MP3 temp file
+                    
+                    if result.returncode != 0:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        return False, "Failed to convert MP3 to WAV"
+                
+                # Validate the file
+                is_valid, msg = validate_tesla_wav(temp_path)
+                
+                if is_valid:
+                    # File is valid, move to final location
+                    if os.path.exists(dest_path):
+                        os.remove(dest_path)
+                    os.rename(temp_path, dest_path)
+                    return True, f"Successfully uploaded {filename}"
+                else:
+                    # File needs re-encoding
+                    logger.info(f"File needs re-encoding: {msg}")
+                    success, reencode_msg, _ = reencode_wav_for_tesla(temp_path, dest_path)
+                    
+                    # Clean up temp file
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    
+                    if success:
+                        return True, f"Successfully uploaded {filename} (re-encoded for Tesla compatibility)"
+                    else:
+                        return False, f"Upload failed: {reencode_msg}"
+                        
+            except subprocess.TimeoutExpired:
+                return False, "File conversion timed out"
+            except Exception as e:
+                logger.error(f"Error uploading chime: {e}", exc_info=True)
+                return False, f"Error uploading file: {str(e)}"
+        
+        return _do_upload()
+
+
+def delete_chime_file(filename, part2_mount_path=None):
+    """
+    Delete a chime file from the Chimes/ library.
+    Also deletes any schedules associated with this chime.
+    
+    This is a mode-aware function that works in both Present and Edit modes:
+    - In Edit mode: Uses normal file operations
+    - In Present mode: Uses quick_edit_part2() to temporarily mount RW
+    
+    Args:
+        filename: Name of the chime file to delete
+        part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    from services.mode_service import current_mode
+    from services.partition_mount_service import quick_edit_part2
+    from services.chime_scheduler_service import get_scheduler
+    from config import CHIMES_FOLDER
+    
+    mode = current_mode()
+    logger.info(f"Deleting chime file {filename} (mode: {mode})")
+    
+    # Sanitize filename
+    filename = os.path.basename(filename)
+    
+    # First, delete any schedules associated with this chime
+    try:
+        scheduler = get_scheduler()
+        schedules = scheduler.list_schedules()
+        deleted_schedules = []
+        
+        for schedule in schedules:
+            if schedule.get('chime_filename') == filename:
+                scheduler.delete_schedule(schedule['id'])
+                deleted_schedules.append(schedule['name'])
+                logger.info(f"Deleted schedule '{schedule['name']}' associated with chime {filename}")
+        
+        if deleted_schedules:
+            logger.info(f"Deleted {len(deleted_schedules)} schedule(s) for {filename}: {', '.join(deleted_schedules)}")
+    except Exception as e:
+        logger.warning(f"Error checking/deleting schedules for {filename}: {e}")
+        # Continue with file deletion even if schedule deletion fails
+    
+    def _do_delete():
+        """Internal function to perform the actual deletion."""
+        try:
+            # In quick edit mode, use /mnt/gadget/part2 (RW mount)
+            # Otherwise use the provided mount path
+            if mode == 'present':
+                from config import MNT_DIR
+                rw_mount = os.path.join(MNT_DIR, 'part2')
+            else:
+                if not part2_mount_path:
+                    return False, "Part2 mount path required in edit mode"
+                rw_mount = part2_mount_path
+            
+            chimes_dir = os.path.join(rw_mount, CHIMES_FOLDER)
+            file_path = os.path.join(chimes_dir, filename)
+            
+            if not os.path.isfile(file_path):
+                return False, "File not found"
+            
+            os.remove(file_path)
+            return True, f"Successfully deleted {filename}"
+            
+        except Exception as e:
+            logger.error(f"Error deleting chime: {e}", exc_info=True)
+            return False, f"Error deleting file: {str(e)}"
+    
+    # Execute based on current mode
+    if mode == 'present':
+        # Use quick edit to temporarily mount RW
+        logger.info("Using quick edit part2 for chime deletion")
+        return quick_edit_part2(_do_delete)
+    else:
+        # Normal edit mode operation
+        return _do_delete()
 
 
 def set_active_chime(chime_filename, part2_mount_path):

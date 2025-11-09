@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 # Lock file to prevent concurrent quick edit operations
 QUICK_EDIT_LOCK = os.path.join(GADGET_DIR, '.quick_edit_part2.lock')
+# Maximum age for a lock file before it's considered stale (in seconds)
+LOCK_MAX_AGE = 120  # 2 minutes
 
 
 @contextmanager
@@ -26,8 +28,28 @@ def _acquire_lock(timeout=10):
     start_time = time.time()
     
     while os.path.exists(QUICK_EDIT_LOCK):
+        # Check if lock file is stale (older than LOCK_MAX_AGE)
+        try:
+            lock_age = time.time() - os.path.getmtime(QUICK_EDIT_LOCK)
+            if lock_age > LOCK_MAX_AGE:
+                logger.warning(f"Removing stale lock file (age: {lock_age:.1f}s)")
+                os.remove(QUICK_EDIT_LOCK)
+                break  # Lock removed, proceed to acquire
+        except OSError:
+            pass  # Lock file disappeared, that's fine
+        
         if time.time() - start_time > timeout:
-            raise TimeoutError("Could not acquire lock for quick edit operation")
+            # Before giving up, check one more time if it's stale
+            try:
+                lock_age = time.time() - os.path.getmtime(QUICK_EDIT_LOCK)
+                if lock_age > LOCK_MAX_AGE:
+                    logger.warning(f"Removing stale lock file on timeout (age: {lock_age:.1f}s)")
+                    os.remove(QUICK_EDIT_LOCK)
+                else:
+                    raise TimeoutError("Could not acquire lock for quick edit operation")
+            except OSError:
+                pass  # Lock file disappeared
+            break
         time.sleep(0.1)
     
     try:
@@ -77,26 +99,18 @@ def quick_edit_part2(operation_callback, timeout=10):
             mount_ro = os.path.join(MNT_DIR, 'part2-ro')
             mount_rw = os.path.join(MNT_DIR, 'part2')
             
-            # Step 1: Unbind USB gadget to release the loop device
-            logger.info("Unbinding USB gadget UDC")
-            subprocess.run(
-                ['sudo', 'sh', '-c', 'echo "" > /sys/kernel/config/usb_gadget/*/UDC'],
-                capture_output=True,
-                timeout=5
-            )
-            
-            # Step 1b: Clear the file backing for LUN 1 (lightshow)
+            # Step 1: Clear the file backing for LUN 1 (lightshow) WITHOUT removing LUN structure
+            # This keeps the gadget stable while we work on the filesystem
             logger.info("Clearing file backing for LUN 1")
             subprocess.run(
                 ['sudo', 'sh', '-c', 'echo "" > /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file'],
                 capture_output=True,
                 timeout=5
             )
-            # Ignore errors - may already be cleared
             
             # Step 2: Unmount ALL mounts of the loop device
             logger.info("Unmounting all mounts of loop device")
-            # First find the loop device
+            # First find ALL loop devices for this image
             result = subprocess.run(
                 ['sudo', '/usr/sbin/losetup', '-j', img_path],
                 capture_output=True,
@@ -104,30 +118,40 @@ def quick_edit_part2(operation_callback, timeout=10):
                 text=True
             )
             
+            # Unmount and detach ALL existing loop devices for this image
             if result.returncode == 0 and result.stdout.strip():
-                loop_dev = result.stdout.split(':')[0].strip()
-                logger.info(f"Found loop device: {loop_dev}")
-                
-                # Find all mount points for this loop device
-                result = subprocess.run(
-                    ['mount'],
-                    capture_output=True,
-                    timeout=5,
-                    text=True
-                )
-                
-                for line in result.stdout.splitlines():
-                    if loop_dev in line:
-                        # Extract mount point (third field)
-                        parts = line.split()
-                        if len(parts) >= 3:
+                for line in result.stdout.strip().splitlines():
+                    old_loop_dev = line.split(':')[0].strip()
+                    logger.info(f"Found existing loop device: {old_loop_dev}")
+                    
+                    # Find and unmount any mounts for this loop device
+                    # Use exact match on the device field (first field in mount output)
+                    mount_result = subprocess.run(
+                        ['mount'],
+                        capture_output=True,
+                        timeout=5,
+                        text=True
+                    )
+                    
+                    for mount_line in mount_result.stdout.splitlines():
+                        parts = mount_line.split()
+                        if len(parts) >= 3 and parts[0] == old_loop_dev:
+                            # parts[0] is the device, parts[2] is the mount point
                             mount_point = parts[2]
-                            logger.info(f"Unmounting {mount_point}")
+                            logger.info(f"Unmounting {mount_point} (from {old_loop_dev})")
                             subprocess.run(
                                 ['sudo', 'nsenter', '--mount=/proc/1/ns/mnt', 'umount', mount_point],
                                 capture_output=True,
                                 timeout=5
                             )
+                    
+                    # Detach the loop device
+                    logger.info(f"Detaching old loop device: {old_loop_dev}")
+                    subprocess.run(
+                        ['sudo', '/usr/sbin/losetup', '-d', old_loop_dev],
+                        capture_output=True,
+                        timeout=5
+                    )
             
             #  Step 3: Find or create loop device for the image (reattach if needed)
             logger.info("Setting up loop device")
@@ -219,10 +243,21 @@ def quick_edit_part2(operation_callback, timeout=10):
                 if not success:
                     return False, message
                 
-                # Step 6: Sync filesystem
+                # Step 6: Sync filesystem - critical for ensuring changes are written to image file
                 logger.info("Syncing filesystem")
                 subprocess.run(['sync'], timeout=5, check=True)
-                time.sleep(0.5)  # Give sync time to complete
+                time.sleep(1)  # Give sync time to complete
+                
+                # Drop caches to ensure fresh reads
+                try:
+                    subprocess.run(
+                        ['sudo', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
+                        capture_output=True,
+                        timeout=5
+                    )
+                    logger.info("Dropped caches")
+                except Exception:
+                    pass  # Not critical if this fails
                 
                 return True, message
                 
@@ -230,12 +265,37 @@ def quick_edit_part2(operation_callback, timeout=10):
                 # Step 7: Always cleanup - unmount RW and remount RO
                 logger.info("Cleaning up mounts")
                 
+                # Final sync before unmounting
+                subprocess.run(['sync'], capture_output=True, timeout=5)
+                time.sleep(0.5)
+                
                 # Unmount read-write
                 subprocess.run(
                     ['sudo', 'nsenter', '--mount=/proc/1/ns/mnt', 'umount', mount_rw],
                     capture_output=True,
                     timeout=5
                 )
+                
+                # CRITICAL: Detach and reattach loop device to force kernel to re-read image file
+                # This ensures USB gadget serves the updated content
+                logger.info(f"Detaching loop device {loop_dev} to flush changes")
+                subprocess.run(
+                    ['sudo', '/usr/sbin/losetup', '-d', loop_dev],
+                    capture_output=True,
+                    timeout=5
+                )
+                
+                # Recreate loop device (read-only for present mode)
+                logger.info("Recreating loop device as read-only")
+                result = subprocess.run(
+                    ['sudo', '/usr/sbin/losetup', '--show', '-f', '-r', img_path],
+                    capture_output=True,
+                    timeout=5,
+                    text=True
+                )
+                if result.returncode == 0:
+                    loop_dev = result.stdout.strip()
+                    logger.info(f"Recreated loop device: {loop_dev}")
                 
                 # Remount read-only
                 subprocess.run(
@@ -256,33 +316,50 @@ def quick_edit_part2(operation_callback, timeout=10):
                     timeout=5
                 )
                 
-                # Restore file backing for LUN 1
-                logger.info("Restoring file backing for LUN 1")
+                # Flush all buffers for the loop device to ensure clean state
+                logger.info(f"Flushing buffers for {loop_dev}")
                 subprocess.run(
-                    ['sudo', 'sh', '-c', f'echo "{img_path}" > /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file'],
+                    ['sudo', '/usr/sbin/blockdev', '--flushbufs', loop_dev],
                     capture_output=True,
                     timeout=5
                 )
                 
-                # Rebind USB gadget
-                logger.info("Rebinding USB gadget UDC")
-                # Get UDC device name
+                # Restore file backing for LUN 1 with the IMAGE FILE (not loop device)
+                # This matches how present_usb.sh works and ensures host sees fresh data
+                logger.info(f"Restoring file backing for LUN 1 with image file: {img_path}")
+                
+                # Find the actual gadget path
                 result = subprocess.run(
-                    ['sh', '-c', 'ls /sys/class/udc | head -n1'],
+                    ['sh', '-c', 'ls -d /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file | head -n1'],
                     capture_output=True,
                     timeout=5,
                     text=True
                 )
+                
                 if result.returncode == 0 and result.stdout.strip():
-                    udc_device = result.stdout.strip()
-                    subprocess.run(
-                        ['sudo', 'sh', '-c', f'echo "{udc_device}" > /sys/kernel/config/usb_gadget/*/UDC'],
+                    lun_file_path = result.stdout.strip()
+                    logger.info(f"Setting LUN file: {lun_file_path} = {img_path}")
+                    result = subprocess.run(
+                        ['sudo', 'sh', '-c', f'echo "{img_path}" > {lun_file_path}'],
                         capture_output=True,
-                        timeout=5
+                        timeout=5,
+                        text=True
                     )
-                    logger.info(f"Rebound UDC: {udc_device}")
+                    if result.returncode != 0:
+                        stderr = result.stderr if result.stderr else "No error output"
+                        logger.error(f"Failed to set LUN file backing: {stderr}")
+                    else:
+                        # Verify it was set
+                        verify_result = subprocess.run(
+                            ['cat', lun_file_path],
+                            capture_output=True,
+                            timeout=5,
+                            text=True
+                        )
+                        logger.info(f"LUN file now contains: {verify_result.stdout.strip()}")
                 
                 logger.info("Quick edit part2 operation completed, read-only mount restored")
+                logger.info("Note: Windows may cache the drive contents. Eject and re-insert to see changes.")
     
     except TimeoutError as e:
         logger.error(f"Timeout during quick edit: {e}")

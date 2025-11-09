@@ -68,7 +68,8 @@ def get_video_statistics():
             - folders: {folder_name: {count, total_size_gb, oldest, newest}}
             - totals: {total_videos, total_size_gb}
     """
-    mode = current_mode()
+    from services.partition_service import get_mount_path
+    
     stats = {
         'folders': {},
         'totals': {
@@ -77,14 +78,12 @@ def get_video_statistics():
         }
     }
     
-    # Get TeslaCam path based on mode
-    if mode == "present":
-        teslacam_path = os.path.join(RO_MNT_DIR, "part1-ro", "TeslaCam")
-    elif mode == "edit":
-        teslacam_path = os.path.join(MNT_DIR, "part1", "TeslaCam")
-    else:
+    # Get TeslaCam path using partition service (mode-aware)
+    part1_path = get_mount_path('part1')
+    if not part1_path:
         return stats
     
+    teslacam_path = os.path.join(part1_path, "TeslaCam")
     if not os.path.isdir(teslacam_path):
         return stats
     

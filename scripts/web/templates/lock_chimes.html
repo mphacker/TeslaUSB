@@ -4,7 +4,6 @@
     <h2>🔔 Lock Chimes</h2>
     <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
     
-    {% if mode_token == 'edit' %}
     <!-- iOS Safari Warning -->
     <div id="iosWarning" style="display: none; background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
         <p style="margin: 0; font-size: 14px;"><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
@@ -37,7 +36,6 @@
             </div>
         </div>
     </div>
-    {% endif %}
     
     <!-- Active Lock Chime -->
     {% if active_chime %}
@@ -95,27 +93,27 @@
                         </select>
                     </div>
                     
-                    <!-- Time Selection -->
+                    <!-- Schedule Type Selection -->
                     <div>
-                        <label style="display: block; margin-bottom: 5px; font-weight: 600;">Time:</label>
-                        <div style="display: flex; gap: 10px; align-items: center;">
-                            <select id="hour-select" name="hour" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
-                                {% for h in range(24) %}
-                                <option value="{{ '%02d'|format(h) }}">{{ '%02d'|format(h) }}</option>
-                                {% endfor %}
-                            </select>
-                            <span style="font-weight: bold;">:</span>
-                            <select id="minute-select" name="minute" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
-                                {% for m in range(0, 60, 5) %}
-                                <option value="{{ '%02d'|format(m) }}">{{ '%02d'|format(m) }}</option>
-                                {% endfor %}
-                            </select>
-                            <span style="color: #666; font-size: 13px;">(24-hour format)</span>
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Schedule Type:</label>
+                        <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                                <input type="radio" name="schedule_type" value="weekly" class="schedule-type-radio" checked style="margin-right: 6px;">
+                                <span>📅 Days of Week</span>
+                            </label>
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                                <input type="radio" name="schedule_type" value="date" class="schedule-type-radio" style="margin-right: 6px;">
+                                <span>📆 Specific Date</span>
+                            </label>
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                                <input type="radio" name="schedule_type" value="holiday" class="schedule-type-radio" style="margin-right: 6px;">
+                                <span>🎉 US Holiday</span>
+                            </label>
                         </div>
                     </div>
                     
-                    <!-- Days Selection -->
-                    <div>
+                    <!-- Days Selection (for weekly schedules) -->
+                    <div id="days-selection" class="schedule-type-field">
                         <label style="display: block; margin-bottom: 8px; font-weight: 600;">Days:</label>
                         <div style="display: flex; flex-wrap: wrap; gap: 10px;">
                             {% for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] %}
@@ -126,6 +124,69 @@
                             {% endfor %}
                         </div>
                         <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Select at least one day</p>
+                    </div>
+                    
+                    <!-- Date Selection (for date schedules) -->
+                    <div id="date-selection" class="schedule-type-field" style="display: none;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Date (Month/Day):</label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <select id="month-select" name="month" style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                                <option value="">Month</option>
+                                <option value="1">January</option>
+                                <option value="2">February</option>
+                                <option value="3">March</option>
+                                <option value="4">April</option>
+                                <option value="5">May</option>
+                                <option value="6">June</option>
+                                <option value="7">July</option>
+                                <option value="8">August</option>
+                                <option value="9">September</option>
+                                <option value="10">October</option>
+                                <option value="11">November</option>
+                                <option value="12">December</option>
+                            </select>
+                            <select id="day-select" name="day" style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                                <option value="">Day</option>
+                                {% for d in range(1, 32) %}
+                                <option value="{{ d }}">{{ d }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Chime will play every year on this date</p>
+                    </div>
+                    
+                    <!-- Holiday Selection (for holiday schedules) -->
+                    <div id="holiday-selection" class="schedule-type-field" style="display: none;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Holiday:</label>
+                        <select id="holiday-select" name="holiday" style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                            <option value="">-- Select a holiday --</option>
+                            {% for holiday in holidays %}
+                            <option value="{{ holiday.name }}">{{ holiday.name }} ({{ holiday.month }}/{{ holiday.day }})</option>
+                            {% endfor %}
+                        </select>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Chime will play at 12:00 AM on the holiday</p>
+                    </div>
+                    
+                    <!-- Time Selection (12-hour format) - hidden for holidays -->
+                    <div id="time-selection">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 600;">Time:</label>
+                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                            <select id="hour-select" name="hour" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                                {% for h in range(1, 13) %}
+                                <option value="{{ h }}" {% if h == 12 %}selected{% endif %}>{{ h }}</option>
+                                {% endfor %}
+                            </select>
+                            <span style="font-weight: bold;">:</span>
+                            <select id="minute-select" name="minute" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                                {% for m in range(0, 60, 5) %}
+                                <option value="{{ '%02d'|format(m) }}" {% if m == 0 %}selected{% endif %}>{{ '%02d'|format(m) }}</option>
+                                {% endfor %}
+                            </select>
+                            <select id="ampm-select" name="am_pm" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                                <option value="AM" id="ampm-am-option" selected>AM</option>
+                                <option value="PM" id="ampm-pm-option">PM</option>
+                            </select>
+                        </div>
                     </div>
                     
                     <!-- Enable Schedule -->
@@ -161,8 +222,7 @@
                         </div>
                         <div style="font-size: 13px; color: #666;">
                             <div>🔔 {{ schedule.chime_filename }}</div>
-                            <div>🕐 {{ schedule.time }}</div>
-                            <div>📅 {{ schedule.days|join(', ') }}</div>
+                            <div>⏰ {{ format_schedule(schedule) }}</div>
                         </div>
                     </div>
                     <div style="display: flex; gap: 5px; flex-wrap: wrap;">
@@ -223,17 +283,15 @@
                             </audio>
                             <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center;">
                                 <a href="{{ url_for('lock_chimes.download_lock_chime', filename=chime.filename) }}" class="present-btn" style="text-decoration: none; padding: 6px 12px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; line-height: 1.5; height: 34px; box-sizing: border-box;">⬇️ Download</a>
-                                {% if mode_token == 'edit' %}
-                                    {% if chime.is_valid %}
-                                    <form method="post" action="{{ url_for('lock_chimes.set_as_chime', filename=chime.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
-                                        <button type="submit" class="set-chime-btn" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🔔 Set as Active</button>
-                                    </form>
-                                    {% endif %}
-                                    <form method="post" action="{{ url_for('lock_chimes.delete_lock_chime', filename=chime.filename) }}" style="display: inline;" 
-                                          onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
-                                        <button type="submit" class="btn-delete" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🗑️ Delete</button>
-                                    </form>
+                                {% if chime.is_valid %}
+                                <form method="post" action="{{ url_for('lock_chimes.set_as_chime', filename=chime.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
+                                    <button type="submit" class="set-chime-btn" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🔔 Set as Active</button>
+                                </form>
                                 {% endif %}
+                                <form method="post" action="{{ url_for('lock_chimes.delete_lock_chime', filename=chime.filename) }}" style="display: inline;" 
+                                      onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
+                                    <button type="submit" class="btn-delete" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🗑️ Delete</button>
+                                </form>
                             </div>
                         </div>
                     </td>
@@ -273,17 +331,15 @@
             </div>
             <div class="mobile-card-actions">
                 <a href="{{ url_for('lock_chimes.download_lock_chime', filename=chime.filename) }}" class="present-btn">⬇️ Download</a>
-                {% if mode_token == 'edit' %}
-                    {% if chime.is_valid %}
-                    <form method="post" action="{{ url_for('lock_chimes.set_as_chime', filename=chime.filename) }}" onsubmit="return handleSetChime(this);">
-                        <button type="submit" class="set-chime-btn">🔔 Set as Active</button>
-                    </form>
-                    {% endif %}
-                    <form method="post" action="{{ url_for('lock_chimes.delete_lock_chime', filename=chime.filename) }}" 
-                          onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
-                        <button type="submit" class="btn-delete">🗑️ Delete</button>
-                    </form>
+                {% if chime.is_valid %}
+                <form method="post" action="{{ url_for('lock_chimes.set_as_chime', filename=chime.filename) }}" onsubmit="return handleSetChime(this);">
+                    <button type="submit" class="set-chime-btn">🔔 Set as Active</button>
+                </form>
                 {% endif %}
+                <form method="post" action="{{ url_for('lock_chimes.delete_lock_chime', filename=chime.filename) }}" 
+                      onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
+                    <button type="submit" class="btn-delete">🗑️ Delete</button>
+                </form>
             </div>
         </div>
         {% endfor %}
@@ -291,11 +347,7 @@
     {% else %}
     <div class="info-box">
         <p>No chimes found in the Chimes library.</p>
-        {% if mode_token == 'edit' %}
         <p>Upload WAV files above to add them to your library.</p>
-        {% else %}
-        <p>Switch to Edit Mode to upload files.</p>
-        {% endif %}
     </div>
     {% endif %}
 </div>
@@ -327,6 +379,63 @@ function handleSetChime(form) {
     
     return true;  // Allow form submission
 }
+
+// Handle schedule type switching
+document.addEventListener('DOMContentLoaded', function() {
+    const scheduleTypeRadios = document.querySelectorAll('.schedule-type-radio');
+    const daysSelection = document.getElementById('days-selection');
+    const dateSelection = document.getElementById('date-selection');
+    const holidaySelection = document.getElementById('holiday-selection');
+    const timeSelection = document.getElementById('time-selection');
+    const hourSelect = document.getElementById('hour-select');
+    const minuteSelect = document.getElementById('minute-select');
+    const ampmSelect = document.getElementById('ampm-select');
+    
+    function updateScheduleTypeFields() {
+        const selectedType = document.querySelector('.schedule-type-radio:checked').value;
+        
+        // Hide all type-specific fields
+        daysSelection.style.display = 'none';
+        dateSelection.style.display = 'none';
+        holidaySelection.style.display = 'none';
+        
+        // Show relevant field and manage time selection
+        if (selectedType === 'weekly') {
+            daysSelection.style.display = 'block';
+            timeSelection.style.display = 'block';
+            // Make time fields required
+            hourSelect.required = true;
+            minuteSelect.required = true;
+            ampmSelect.required = true;
+        } else if (selectedType === 'date') {
+            dateSelection.style.display = 'block';
+            timeSelection.style.display = 'block';
+            // Make time fields required
+            hourSelect.required = true;
+            minuteSelect.required = true;
+            ampmSelect.required = true;
+        } else if (selectedType === 'holiday') {
+            holidaySelection.style.display = 'block';
+            // Hide time selection for holidays
+            timeSelection.style.display = 'none';
+            // Auto-set time to 12:00 AM and make fields not required
+            hourSelect.value = '12';
+            minuteSelect.value = '00';
+            ampmSelect.value = 'AM';
+            hourSelect.required = false;
+            minuteSelect.required = false;
+            ampmSelect.required = false;
+        }
+    }
+    
+    // Add listeners to schedule type radios
+    scheduleTypeRadios.forEach(radio => {
+        radio.addEventListener('change', updateScheduleTypeFields);
+    });
+    
+    // Initialize on page load
+    updateScheduleTypeFields();
+});
 
 // Handle chime upload with progress bar
 document.addEventListener('DOMContentLoaded', function() {
@@ -474,21 +583,37 @@ async function editSchedule(scheduleId) {
         document.getElementById('schedule-name').value = schedule.name;
         document.getElementById('chime-select').value = schedule.chime_filename;
         
-        // Parse time
-        const timeParts = schedule.time.split(':');
-        document.getElementById('hour-select').value = timeParts[0];
-        document.getElementById('minute-select').value = timeParts[1];
+        // Set schedule type
+        const scheduleTypeRadio = document.querySelector(`.schedule-type-radio[value="${schedule.schedule_type}"]`);
+        if (scheduleTypeRadio) {
+            scheduleTypeRadio.checked = true;
+            // Trigger change event to show appropriate fields
+            scheduleTypeRadio.dispatchEvent(new Event('change'));
+        }
         
-        // Clear all day checkboxes first
-        document.querySelectorAll('.day-checkbox').forEach(cb => {
-            cb.checked = false;
-        });
+        // Set time (12-hour format)
+        document.getElementById('hour-select').value = schedule.hour_12;
+        document.getElementById('minute-select').value = schedule.minute;
+        document.getElementById('ampm-select').value = schedule.am_pm;
         
-        // Check selected days
-        schedule.days.forEach(day => {
-            const checkbox = document.getElementById('day-' + day);
-            if (checkbox) checkbox.checked = true;
-        });
+        // Set type-specific fields
+        if (schedule.schedule_type === 'weekly') {
+            // Clear all day checkboxes first
+            document.querySelectorAll('.day-checkbox').forEach(cb => {
+                cb.checked = false;
+            });
+            
+            // Check selected days
+            schedule.days.forEach(day => {
+                const checkbox = document.getElementById('day-' + day);
+                if (checkbox) checkbox.checked = true;
+            });
+        } else if (schedule.schedule_type === 'date') {
+            document.getElementById('month-select').value = schedule.month;
+            document.getElementById('day-select').value = schedule.day;
+        } else if (schedule.schedule_type === 'holiday') {
+            document.getElementById('holiday-select').value = schedule.holiday;
+        }
         
         // Set enabled checkbox
         document.getElementById('enabled-checkbox').checked = schedule.enabled;
@@ -521,6 +646,13 @@ function cancelEdit() {
     form.reset();
     form.action = '{{ url_for("lock_chimes.add_schedule") }}';
     delete form.dataset.editingId;
+    
+    // Reset schedule type to weekly
+    const weeklyRadio = document.querySelector('.schedule-type-radio[value="weekly"]');
+    if (weeklyRadio) {
+        weeklyRadio.checked = true;
+        weeklyRadio.dispatchEvent(new Event('change'));
+    }
     
     // Reset UI
     document.getElementById('form-title').textContent = '➕ Add New Schedule';

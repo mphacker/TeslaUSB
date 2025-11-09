@@ -3,12 +3,16 @@ Chime scheduler service for managing scheduled lock chime changes.
 
 Stores schedules in JSON format with user-friendly time/day selections.
 Calculates which chime should be active at any given time.
+Supports three schedule types:
+- Weekly: Days of week + time
+- Date: Specific date (month/day) + time
+- Holiday: US Holiday + time
 """
 
 import os
 import json
 import logging
-from datetime import datetime, time as datetime_time
+from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -21,6 +25,107 @@ SCHEDULE_FILE = os.path.join(GADGET_DIR, 'chime_schedules.json')
 
 # Days of week (0=Monday, 6=Sunday for Python datetime)
 DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+# US Holidays (month, day) - these are fixed-date holidays
+US_HOLIDAYS = {
+    "New Year's Day": (1, 1),
+    "Valentine's Day": (2, 14),
+    "St. Patrick's Day": (3, 17),
+    "Independence Day": (7, 4),
+    "Halloween": (10, 31),
+    "Veterans Day": (11, 11),
+    "Christmas Eve": (12, 24),
+    "Christmas Day": (12, 25),
+    "New Year's Eve": (12, 31),
+}
+
+# Movable holidays (calculated)
+def get_movable_holiday_date(year: int, holiday_name: str) -> Optional[tuple]:
+    """Calculate date for movable US holidays."""
+    if holiday_name == "Martin Luther King Jr. Day":
+        # Third Monday of January
+        return _nth_weekday_of_month(year, 1, 0, 3)
+    elif holiday_name == "Presidents' Day":
+        # Third Monday of February
+        return _nth_weekday_of_month(year, 2, 0, 3)
+    elif holiday_name == "Memorial Day":
+        # Last Monday of May
+        return _last_weekday_of_month(year, 5, 0)
+    elif holiday_name == "Labor Day":
+        # First Monday of September
+        return _nth_weekday_of_month(year, 9, 0, 1)
+    elif holiday_name == "Columbus Day":
+        # Second Monday of October
+        return _nth_weekday_of_month(year, 10, 0, 2)
+    elif holiday_name == "Thanksgiving":
+        # Fourth Thursday of November
+        return _nth_weekday_of_month(year, 11, 3, 4)
+    elif holiday_name == "Mother's Day":
+        # Second Sunday of May
+        return _nth_weekday_of_month(year, 5, 6, 2)
+    elif holiday_name == "Father's Day":
+        # Third Sunday of June
+        return _nth_weekday_of_month(year, 6, 6, 3)
+    elif holiday_name == "Easter":
+        # Calculate Easter using Meeus/Jones/Butcher algorithm
+        return _calculate_easter(year)
+    return None
+
+def _nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> tuple:
+    """Get the nth occurrence of a weekday in a month (0=Monday, 6=Sunday)."""
+    # Start with first day of month
+    first_day = datetime(year, month, 1)
+    # Find first occurrence of target weekday
+    days_ahead = (weekday - first_day.weekday()) % 7
+    first_occurrence = first_day + timedelta(days=days_ahead)
+    # Add weeks to get nth occurrence
+    target_date = first_occurrence + timedelta(weeks=n-1)
+    return (target_date.month, target_date.day)
+
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> tuple:
+    """Get the last occurrence of a weekday in a month."""
+    # Start with last day of month
+    if month == 12:
+        last_day = datetime(year, 12, 31)
+    else:
+        last_day = datetime(year, month + 1, 1) - timedelta(days=1)
+    
+    # Find last occurrence of target weekday
+    days_back = (last_day.weekday() - weekday) % 7
+    target_date = last_day - timedelta(days=days_back)
+    return (target_date.month, target_date.day)
+
+def _calculate_easter(year: int) -> tuple:
+    """Calculate Easter Sunday using Meeus/Jones/Butcher algorithm."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return (month, day)
+
+# Complete list of all holidays
+ALL_HOLIDAYS = list(US_HOLIDAYS.keys()) + [
+    "Martin Luther King Jr. Day",
+    "Presidents' Day", 
+    "Easter",
+    "Mother's Day",
+    "Memorial Day",
+    "Father's Day",
+    "Labor Day",
+    "Columbus Day",
+    "Thanksgiving"
+]
+ALL_HOLIDAYS.sort()
 
 
 class ChimeScheduler:
@@ -60,14 +165,22 @@ class ChimeScheduler:
             logger.error(f"Error saving schedules: {e}")
             return False
     
-    def validate_schedule_conflict(self, time_str: str, days: List[str], 
+    def validate_schedule_conflict(self, schedule_type: str, time_str: str, 
+                                   days: Optional[List[str]] = None,
+                                   month: Optional[int] = None,
+                                   day: Optional[int] = None,
+                                   holiday: Optional[str] = None,
                                    exclude_schedule_id: Optional[int] = None) -> Tuple[bool, Optional[str]]:
         """
         Check if a schedule conflicts with existing schedules.
         
         Args:
-            time_str: Time in HH:MM format
-            days: List of day names
+            schedule_type: 'weekly', 'date', or 'holiday'
+            time_str: Time in HH:MM format (24-hour)
+            days: List of day names (for weekly schedules)
+            month: Month number 1-12 (for date schedules)
+            day: Day of month (for date schedules)
+            holiday: Holiday name (for holiday schedules)
             exclude_schedule_id: Schedule ID to exclude from conflict check (for updates)
         
         Returns:
@@ -78,20 +191,46 @@ class ChimeScheduler:
             if exclude_schedule_id and schedule.get('id') == exclude_schedule_id:
                 continue
             
-            # Check if schedules have overlapping days
-            existing_days = set(schedule.get('days', []))
-            new_days = set(days)
-            overlapping_days = existing_days & new_days
+            existing_type = schedule.get('schedule_type', 'weekly')
+            existing_time = schedule.get('time')
             
-            # If there are overlapping days and the time is the same
-            if overlapping_days and schedule.get('time') == time_str:
-                day_list = ', '.join(sorted(overlapping_days, key=lambda d: DAYS_OF_WEEK.index(d)))
-                return (False, f"Conflict with schedule '{schedule.get('name', 'Unnamed')}': "
-                              f"already runs at {time_str} on {day_list}")
+            # Times must match for a conflict
+            if existing_time != time_str:
+                continue
+            
+            # Check type-specific conflicts
+            if schedule_type == 'weekly' and existing_type == 'weekly':
+                # Check if schedules have overlapping days
+                existing_days = set(schedule.get('days', []))
+                new_days = set(days or [])
+                overlapping_days = existing_days & new_days
+                
+                if overlapping_days:
+                    day_list = ', '.join(sorted(overlapping_days, key=lambda d: DAYS_OF_WEEK.index(d)))
+                    return (False, f"Conflict with schedule '{schedule.get('name', 'Unnamed')}': "
+                                  f"already runs at {time_str} on {day_list}")
+            
+            elif schedule_type == 'date' and existing_type == 'date':
+                # Check if same month/day
+                if (schedule.get('month') == month and 
+                    schedule.get('day') == day):
+                    return (False, f"Conflict with schedule '{schedule.get('name', 'Unnamed')}': "
+                                  f"already runs at {time_str} on {month}/{day}")
+            
+            elif schedule_type == 'holiday' and existing_type == 'holiday':
+                # Check if same holiday
+                if schedule.get('holiday') == holiday:
+                    return (False, f"Conflict with schedule '{schedule.get('name', 'Unnamed')}': "
+                                  f"already runs at {time_str} on {holiday}")
         
         return (True, None)
     
-    def add_schedule(self, chime_filename: str, time_str: str, days: List[str], 
+    def add_schedule(self, chime_filename: str, time_str: str, 
+                    schedule_type: str = 'weekly',
+                    days: Optional[List[str]] = None,
+                    month: Optional[int] = None,
+                    day: Optional[int] = None, 
+                    holiday: Optional[str] = None,
                     name: str = "", enabled: bool = True) -> Tuple[bool, str, Optional[int]]:
         """
         Add a new chime schedule.
@@ -99,7 +238,11 @@ class ChimeScheduler:
         Args:
             chime_filename: Name of the chime file (from Chimes/ folder)
             time_str: Time in HH:MM format (24-hour)
-            days: List of day names (e.g., ['Monday', 'Friday'])
+            schedule_type: 'weekly', 'date', or 'holiday'
+            days: List of day names (for weekly schedules)
+            month: Month 1-12 (for date schedules)
+            day: Day of month (for date schedules)
+            holiday: Holiday name (for holiday schedules)
             name: Optional friendly name for the schedule
             enabled: Whether schedule is active
         
@@ -126,18 +269,61 @@ class ChimeScheduler:
         except (ValueError, IndexError):
             return False, "Invalid time format. Use HH:MM (e.g., 14:30)", None
         
-        # Validate days
-        if not days:
-            return False, "At least one day must be selected", None
+        # Validate based on schedule type
+        if schedule_type == 'weekly':
+            if not days:
+                return False, "At least one day must be selected for weekly schedules", None
+            
+            invalid_days = [d for d in days if d not in DAYS_OF_WEEK]
+            if invalid_days:
+                return False, f"Invalid days: {', '.join(invalid_days)}", None
+            
+            # Check for conflicts
+            is_valid, conflict_error = self.validate_schedule_conflict(
+                schedule_type, time_str, days=days
+            )
+            if not is_valid:
+                return False, conflict_error, None
         
-        invalid_days = [d for d in days if d not in DAYS_OF_WEEK]
-        if invalid_days:
-            return False, f"Invalid days: {', '.join(invalid_days)}", None
+        elif schedule_type == 'date':
+            if month is None or day is None:
+                return False, "Month and day are required for date schedules", None
+            
+            if not (1 <= month <= 12):
+                return False, "Month must be between 1 and 12", None
+            
+            if not (1 <= day <= 31):
+                return False, "Day must be between 1 and 31", None
+            
+            # Validate the date is valid for the given month
+            try:
+                datetime(2024, month, day)  # Use leap year to allow Feb 29
+            except ValueError:
+                return False, f"Invalid date: {month}/{day}", None
+            
+            # Check for conflicts
+            is_valid, conflict_error = self.validate_schedule_conflict(
+                schedule_type, time_str, month=month, day=day
+            )
+            if not is_valid:
+                return False, conflict_error, None
         
-        # Check for conflicts
-        is_valid, conflict_error = self.validate_schedule_conflict(time_str, days)
-        if not is_valid:
-            return False, conflict_error, None
+        elif schedule_type == 'holiday':
+            if not holiday:
+                return False, "Holiday is required for holiday schedules", None
+            
+            if holiday not in ALL_HOLIDAYS:
+                return False, f"Invalid holiday: {holiday}", None
+            
+            # Check for conflicts
+            is_valid, conflict_error = self.validate_schedule_conflict(
+                schedule_type, time_str, holiday=holiday
+            )
+            if not is_valid:
+                return False, conflict_error, None
+        
+        else:
+            return False, f"Invalid schedule type: {schedule_type}", None
         
         # Generate schedule ID (simple incrementing ID)
         schedule_id = max([s.get('id', 0) for s in self.schedules], default=0) + 1
@@ -148,15 +334,24 @@ class ChimeScheduler:
             'name': name or f"Schedule {schedule_id}",
             'chime_filename': chime_filename,
             'time': time_str,
-            'days': sorted(days, key=lambda d: DAYS_OF_WEEK.index(d)),  # Sort by weekday order
+            'schedule_type': schedule_type,
             'enabled': enabled,
             'created_at': datetime.now().isoformat()
         }
         
+        # Add type-specific fields
+        if schedule_type == 'weekly':
+            schedule['days'] = sorted(days, key=lambda d: DAYS_OF_WEEK.index(d))
+        elif schedule_type == 'date':
+            schedule['month'] = month
+            schedule['day'] = day
+        elif schedule_type == 'holiday':
+            schedule['holiday'] = holiday
+        
         self.schedules.append(schedule)
         
         if self._save_schedules():
-            logger.info(f"Added schedule {schedule_id}: {chime_filename} at {time_str} on {', '.join(days)}")
+            logger.info(f"Added {schedule_type} schedule {schedule_id}: {chime_filename} at {time_str}")
             return True, "Schedule created successfully", schedule_id
         else:
             self.schedules.pop()  # Remove from memory if save failed
@@ -168,7 +363,7 @@ class ChimeScheduler:
         
         Args:
             schedule_id: ID of schedule to update
-            **kwargs: Fields to update (chime_filename, time, days, name, enabled)
+            **kwargs: Fields to update (chime_filename, time, schedule_type, days, month, day, holiday, name, enabled)
         
         Returns:
             (success, message)
@@ -189,29 +384,88 @@ class ChimeScheduler:
             except (ValueError, IndexError):
                 return False, "Invalid time format. Use HH:MM"
         
-        if 'days' in kwargs:
-            days = kwargs['days']
-            if not days:
-                return False, "At least one day must be selected"
-            invalid_days = [d for d in days if d not in DAYS_OF_WEEK]
-            if invalid_days:
-                return False, f"Invalid days: {', '.join(invalid_days)}"
-            kwargs['days'] = sorted(days, key=lambda d: DAYS_OF_WEEK.index(d))
+        # Get effective schedule type
+        schedule_type = kwargs.get('schedule_type', schedule.get('schedule_type', 'weekly'))
         
-        # Check for conflicts if time or days are being updated
-        if 'time' in kwargs or 'days' in kwargs:
+        # Validate type-specific fields
+        if schedule_type == 'weekly':
+            if 'days' in kwargs:
+                days = kwargs['days']
+                if not days:
+                    return False, "At least one day must be selected"
+                invalid_days = [d for d in days if d not in DAYS_OF_WEEK]
+                if invalid_days:
+                    return False, f"Invalid days: {', '.join(invalid_days)}"
+                kwargs['days'] = sorted(days, key=lambda d: DAYS_OF_WEEK.index(d))
+        
+        elif schedule_type == 'date':
+            if 'month' in kwargs or 'day' in kwargs:
+                month = kwargs.get('month', schedule.get('month'))
+                day = kwargs.get('day', schedule.get('day'))
+                
+                if month is None or day is None:
+                    return False, "Month and day are required"
+                
+                if not (1 <= month <= 12):
+                    return False, "Month must be between 1 and 12"
+                
+                if not (1 <= day <= 31):
+                    return False, "Day must be between 1 and 31"
+                
+                try:
+                    datetime(2024, month, day)
+                except ValueError:
+                    return False, f"Invalid date: {month}/{day}"
+        
+        elif schedule_type == 'holiday':
+            if 'holiday' in kwargs:
+                holiday = kwargs['holiday']
+                if holiday not in ALL_HOLIDAYS:
+                    return False, f"Invalid holiday: {holiday}"
+        
+        # Check for conflicts if relevant fields are being updated
+        if any(k in kwargs for k in ['time', 'schedule_type', 'days', 'month', 'day', 'holiday']):
             check_time = kwargs.get('time', schedule['time'])
-            check_days = kwargs.get('days', schedule['days'])
-            is_valid, conflict_error = self.validate_schedule_conflict(
-                check_time, check_days, exclude_schedule_id=schedule_id
-            )
+            check_type = schedule_type
+            
+            # Prepare conflict check parameters
+            conflict_params = {
+                'schedule_type': check_type,
+                'time_str': check_time,
+                'exclude_schedule_id': schedule_id
+            }
+            
+            if check_type == 'weekly':
+                conflict_params['days'] = kwargs.get('days', schedule.get('days', []))
+            elif check_type == 'date':
+                conflict_params['month'] = kwargs.get('month', schedule.get('month'))
+                conflict_params['day'] = kwargs.get('day', schedule.get('day'))
+            elif check_type == 'holiday':
+                conflict_params['holiday'] = kwargs.get('holiday', schedule.get('holiday'))
+            
+            is_valid, conflict_error = self.validate_schedule_conflict(**conflict_params)
             if not is_valid:
                 return False, conflict_error
         
         # Update schedule
+        valid_keys = ['chime_filename', 'time', 'schedule_type', 'days', 'month', 'day', 'holiday', 'name', 'enabled']
         for key, value in kwargs.items():
-            if key in ['chime_filename', 'time', 'days', 'name', 'enabled']:
+            if key in valid_keys:
                 schedule[key] = value
+        
+        # If schedule type changed, remove old type-specific fields
+        if 'schedule_type' in kwargs:
+            if schedule_type == 'weekly':
+                schedule.pop('month', None)
+                schedule.pop('day', None)
+                schedule.pop('holiday', None)
+            elif schedule_type == 'date':
+                schedule.pop('days', None)
+                schedule.pop('holiday', None)
+            elif schedule_type == 'holiday':
+                schedule.pop('days', None)
+                schedule.pop('month', None)
+                schedule.pop('day', None)
         
         schedule['updated_at'] = datetime.now().isoformat()
         
@@ -257,10 +511,16 @@ class ChimeScheduler:
         """
         Determine which chime should be active at the given time.
         
+        Precedence order (highest to lowest):
+        1. Holiday schedules - if a holiday is today, use its chime for the entire day
+        2. Specific date schedules - if a date schedule matches and time has passed
+        3. Weekly day schedules - default fallback for recurring weekly schedules
+        
         Logic:
-        - Finds all enabled schedules that match the current day and have passed
+        - Evaluates all enabled schedules (weekly, date, and holiday)
+        - For each type, finds schedules matching current day that have passed
         - If no schedule has passed today, checks yesterday's schedules
-        - Returns the chime from the most recent schedule
+        - Returns the chime from the most recent schedule of the highest priority type
         - If no matching schedule, returns None (keep current chime)
         
         Args:
@@ -272,75 +532,279 @@ class ChimeScheduler:
         if check_time is None:
             check_time = datetime.now()
         
-        current_day = DAYS_OF_WEEK[check_time.weekday()]
+        current_day_name = DAYS_OF_WEEK[check_time.weekday()]
+        current_month = check_time.month
+        current_day = check_time.day
         current_time = check_time.time()
         
-        # Find all enabled schedules for today that have passed
-        matching_schedules = []
+        # Get today's holidays
+        today_holidays = self._get_holidays_for_date(check_time.year, current_month, current_day)
+        
+        # Separate schedules by type
+        holiday_schedules = []
+        date_schedules = []
+        weekly_schedules = []
         
         for schedule in self.schedules:
             if not schedule.get('enabled', True):
                 continue
             
-            if current_day not in schedule.get('days', []):
-                continue
+            schedule_type = schedule.get('schedule_type', 'weekly')
             
             # Parse schedule time
             try:
                 time_parts = schedule['time'].split(':')
                 schedule_time = datetime_time(int(time_parts[0]), int(time_parts[1]))
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, KeyError):
                 logger.warning(f"Invalid time in schedule {schedule.get('id')}: {schedule.get('time')}")
                 continue
             
-            # Check if schedule time has passed today
-            if current_time >= schedule_time:
-                matching_schedules.append({
-                    'schedule': schedule,
-                    'time': schedule_time,
-                    'day_offset': 0  # Today
-                })
+            # Categorize by type and check if matches today
+            if schedule_type == 'holiday':
+                if schedule.get('holiday') in today_holidays:
+                    # Holiday schedules apply for entire day, check if time has passed
+                    if current_time >= schedule_time:
+                        holiday_schedules.append({
+                            'schedule': schedule,
+                            'time': schedule_time,
+                            'day_offset': 0
+                        })
+            
+            elif schedule_type == 'date':
+                if (schedule.get('month') == current_month and 
+                    schedule.get('day') == current_day):
+                    # Date schedule matches today
+                    if current_time >= schedule_time:
+                        date_schedules.append({
+                            'schedule': schedule,
+                            'time': schedule_time,
+                            'day_offset': 0
+                        })
+            
+            elif schedule_type == 'weekly':
+                if current_day_name in schedule.get('days', []):
+                    # Weekly schedule matches today
+                    if current_time >= schedule_time:
+                        weekly_schedules.append({
+                            'schedule': schedule,
+                            'time': schedule_time,
+                            'day_offset': 0
+                        })
         
-        # If no schedule has passed today, check yesterday's schedules
-        if not matching_schedules:
-            yesterday_day = DAYS_OF_WEEK[(check_time.weekday() - 1) % 7]
+        # If no schedules have passed today, check yesterday's schedules
+        if not holiday_schedules and not date_schedules and not weekly_schedules:
+            yesterday = check_time - timedelta(days=1)
+            yesterday_day_name = DAYS_OF_WEEK[yesterday.weekday()]
+            yesterday_month = yesterday.month
+            yesterday_day = yesterday.day
+            yesterday_holidays = self._get_holidays_for_date(yesterday.year, yesterday_month, yesterday_day)
             
             for schedule in self.schedules:
                 if not schedule.get('enabled', True):
                     continue
                 
-                if yesterday_day not in schedule.get('days', []):
-                    continue
+                schedule_type = schedule.get('schedule_type', 'weekly')
                 
                 # Parse schedule time
                 try:
                     time_parts = schedule['time'].split(':')
                     schedule_time = datetime_time(int(time_parts[0]), int(time_parts[1]))
-                except (ValueError, IndexError):
-                    logger.warning(f"Invalid time in schedule {schedule.get('id')}: {schedule.get('time')}")
+                except (ValueError, IndexError, KeyError):
                     continue
                 
-                # All of yesterday's schedules have "passed" (they're in the past)
-                matching_schedules.append({
-                    'schedule': schedule,
-                    'time': schedule_time,
-                    'day_offset': -1  # Yesterday
-                })
+                # Check if schedule matches yesterday
+                if schedule_type == 'holiday':
+                    if schedule.get('holiday') in yesterday_holidays:
+                        holiday_schedules.append({
+                            'schedule': schedule,
+                            'time': schedule_time,
+                            'day_offset': -1
+                        })
+                
+                elif schedule_type == 'date':
+                    if (schedule.get('month') == yesterday_month and 
+                        schedule.get('day') == yesterday_day):
+                        date_schedules.append({
+                            'schedule': schedule,
+                            'time': schedule_time,
+                            'day_offset': -1
+                        })
+                
+                elif schedule_type == 'weekly':
+                    if yesterday_day_name in schedule.get('days', []):
+                        weekly_schedules.append({
+                            'schedule': schedule,
+                            'time': schedule_time,
+                            'day_offset': -1
+                        })
         
-        if not matching_schedules:
+        # Apply precedence: Holiday > Date > Weekly
+        # Within each type, use the most recent (latest time)
+        most_recent = None
+        schedule_type_used = None
+        
+        if holiday_schedules:
+            most_recent = max(holiday_schedules, key=lambda x: x['time'])
+            schedule_type_used = 'holiday'
+        elif date_schedules:
+            most_recent = max(date_schedules, key=lambda x: x['time'])
+            schedule_type_used = 'date'
+        elif weekly_schedules:
+            most_recent = max(weekly_schedules, key=lambda x: x['time'])
+            schedule_type_used = 'weekly'
+        
+        if not most_recent:
             logger.debug("No matching schedules for current time or yesterday")
             return None
         
-        # Find the most recent schedule (latest time that has passed)
-        # If multiple schedules from yesterday, pick the latest one
-        most_recent = max(matching_schedules, key=lambda x: x['time'])
         chime_filename = most_recent['schedule']['chime_filename']
-        
         day_label = "today" if most_recent['day_offset'] == 0 else "yesterday"
-        logger.info(f"Active chime at {check_time.strftime('%H:%M')}: {chime_filename} (schedule {most_recent['schedule']['id']} from {day_label})")
+        
+        logger.info(f"Active chime at {check_time.strftime('%H:%M')}: {chime_filename} "
+                   f"({schedule_type_used} schedule {most_recent['schedule']['id']} from {day_label})")
         return chime_filename
+    
+    def _get_holidays_for_date(self, year: int, month: int, day: int) -> List[str]:
+        """
+        Get list of holidays that fall on the given date.
+        
+        Args:
+            year: Year
+            month: Month (1-12)
+            day: Day of month
+        
+        Returns:
+            List of holiday names
+        """
+        holidays = []
+        
+        # Check fixed holidays
+        for holiday_name, (h_month, h_day) in US_HOLIDAYS.items():
+            if h_month == month and h_day == day:
+                holidays.append(holiday_name)
+        
+        # Check movable holidays
+        movable_holiday_names = [
+            "Martin Luther King Jr. Day",
+            "Presidents' Day",
+            "Easter",
+            "Mother's Day",
+            "Memorial Day",
+            "Father's Day",
+            "Labor Day",
+            "Columbus Day",
+            "Thanksgiving"
+        ]
+        
+        for holiday_name in movable_holiday_names:
+            holiday_date = get_movable_holiday_date(year, holiday_name)
+            if holiday_date and holiday_date[0] == month and holiday_date[1] == day:
+                holidays.append(holiday_name)
+        
+        return holidays
 
 
 def get_scheduler(schedule_file=None) -> ChimeScheduler:
     """Get a ChimeScheduler instance."""
     return ChimeScheduler(schedule_file)
+
+
+def get_holidays_list() -> List[str]:
+    """Get sorted list of all US holidays."""
+    return ALL_HOLIDAYS.copy()
+
+
+def get_holidays_with_dates(year: int = None) -> List[Dict[str, any]]:
+    """
+    Get list of all US holidays with their dates for a specific year.
+    
+    Args:
+        year: Year to calculate dates for (default: current year)
+    
+    Returns:
+        List of dicts with 'name', 'month', 'day' keys
+    """
+    if year is None:
+        year = datetime.now().year
+    
+    holidays_with_dates = []
+    
+    # Add fixed holidays
+    for holiday_name, (month, day) in US_HOLIDAYS.items():
+        holidays_with_dates.append({
+            'name': holiday_name,
+            'month': month,
+            'day': day
+        })
+    
+    # Add movable holidays
+    movable_holiday_names = [
+        "Martin Luther King Jr. Day",
+        "Presidents' Day",
+        "Easter",
+        "Mother's Day",
+        "Memorial Day",
+        "Father's Day",
+        "Labor Day",
+        "Columbus Day",
+        "Thanksgiving"
+    ]
+    
+    for holiday_name in movable_holiday_names:
+        date = get_movable_holiday_date(year, holiday_name)
+        if date:
+            month, day = date
+            holidays_with_dates.append({
+                'name': holiday_name,
+                'month': month,
+                'day': day
+            })
+    
+    # Sort by date (month, then day)
+    holidays_with_dates.sort(key=lambda h: (h['month'], h['day']))
+    
+    return holidays_with_dates
+
+
+def format_schedule_display(schedule: Dict) -> str:
+    """
+    Format a schedule for display.
+    
+    Args:
+        schedule: Schedule dictionary
+    
+    Returns:
+        Formatted string describing when the schedule runs
+    """
+    schedule_type = schedule.get('schedule_type', 'weekly')
+    time_str = schedule.get('time', '00:00')
+    
+    # Convert 24-hour time to 12-hour format
+    try:
+        time_parts = time_str.split(':')
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+        
+        am_pm = 'AM' if hour < 12 else 'PM'
+        display_hour = hour % 12
+        if display_hour == 0:
+            display_hour = 12
+        
+        time_12h = f"{display_hour}:{minute:02d} {am_pm}"
+    except (ValueError, IndexError):
+        time_12h = time_str
+    
+    if schedule_type == 'weekly':
+        days = schedule.get('days', [])
+        return f"{', '.join(days)} at {time_12h}"
+    
+    elif schedule_type == 'date':
+        month = schedule.get('month', 1)
+        day = schedule.get('day', 1)
+        return f"{month}/{day} at {time_12h}"
+    
+    elif schedule_type == 'holiday':
+        holiday = schedule.get('holiday', 'Unknown')
+        return f"{holiday} at {time_12h}"
+    
+    return "Unknown schedule type"

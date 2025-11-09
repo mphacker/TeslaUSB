@@ -27,6 +27,7 @@ from config import GADGET_DIR, LOCK_CHIME_FILENAME, CHIMES_FOLDER
 from services.chime_scheduler_service import get_scheduler
 from services.lock_chime_service import set_active_chime
 from services.partition_service import get_mount_path
+from services.mode_service import current_mode
 
 # Configure logging
 logging.basicConfig(
@@ -106,39 +107,52 @@ def main():
         
         logger.info(f"Schedule says chime should be: {target_chime}")
         
-        # Get current part2 mount path
-        part2_mount = get_mount_path('part2')
+        # Get current mode
+        mode = current_mode()
+        logger.info(f"Current mode: {mode}")
         
-        if not part2_mount:
-            logger.error("Part2 not mounted, cannot apply schedule")
-            return 1
-        
-        # Verify target chime exists in library
-        chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
-        target_chime_path = os.path.join(chimes_dir, target_chime)
-        
-        if not os.path.isfile(target_chime_path):
-            logger.error(f"Scheduled chime not found in library: {target_chime}")
-            return 1
-        
-        # Check if current active chime is already the target
-        # Use MD5 hash comparison to definitively check if files are identical
-        active_chime_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
-        
-        if os.path.isfile(active_chime_path):
-            active_md5 = get_file_md5(active_chime_path)
-            target_md5 = get_file_md5(target_chime_path)
+        # In present mode, we don't need to validate file existence
+        # because quick_edit_part2() will handle mounting part2 RW temporarily
+        # In edit mode, validate the chime file exists before proceeding
+        if mode == 'edit':
+            part2_mount = get_mount_path('part2')
             
-            if active_md5 and target_md5 and active_md5 == target_md5:
-                # Files are identical - no need to replace
-                logger.info(f"Active chime is already {target_chime} (MD5 match), skipping replacement")
-                return 0
+            if not part2_mount:
+                logger.error("Part2 not mounted, cannot apply schedule")
+                return 1
             
-            logger.info(f"Active chime differs from {target_chime} (MD5 mismatch), will replace")
+            # Verify target chime exists in library
+            chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+            target_chime_path = os.path.join(chimes_dir, target_chime)
+            
+            if not os.path.isfile(target_chime_path):
+                logger.error(f"Scheduled chime not found in library: {target_chime}")
+                return 1
+            
+            # Check if current active chime is already the target
+            # Use MD5 hash comparison to definitively check if files are identical
+            active_chime_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
+            
+            if os.path.isfile(active_chime_path):
+                active_md5 = get_file_md5(active_chime_path)
+                target_md5 = get_file_md5(target_chime_path)
+                
+                if active_md5 and target_md5 and active_md5 == target_md5:
+                    # Files are identical - no need to replace
+                    logger.info(f"Active chime is already {target_chime} (MD5 match), skipping replacement")
+                    return 0
+                
+                logger.info(f"Active chime differs from {target_chime} (MD5 mismatch), will replace")
+        else:
+            # In present mode, we can't easily check MD5 without mounting
+            # Let set_active_chime handle it via quick_edit_part2
+            logger.info("Present mode: delegating file operations to set_active_chime")
+            part2_mount = None  # Will be handled by quick_edit_part2
         
         # Apply the schedule - set the target chime as active
         logger.info(f"Applying schedule: setting {target_chime} as active chime")
         
+        # set_active_chime is mode-aware and will use quick_edit_part2() in present mode
         success, message = set_active_chime(target_chime, part2_mount)
         
         if success:

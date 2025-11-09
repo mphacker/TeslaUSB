@@ -342,7 +342,7 @@ def set_active_chime(chime_filename, part2_mount_path):
     
     Args:
         chime_filename: Name of the chime file in Chimes/ folder
-        part2_mount_path: Current mount path for part2 (RO or RW)
+        part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
     
     Returns:
         (success: bool, message: str)
@@ -351,20 +351,24 @@ def set_active_chime(chime_filename, part2_mount_path):
     from services.partition_mount_service import quick_edit_part2
     from config import LOCK_CHIME_FILENAME, CHIMES_FOLDER
     
-    # Validate chime exists
-    chimes_dir = os.path.join(part2_mount_path, CHIMES_FOLDER)
-    source_path = os.path.join(chimes_dir, chime_filename)
-    
-    if not os.path.isfile(source_path):
-        return False, f"Chime file not found: {chime_filename}"
-    
-    # Validate it's a proper Tesla WAV
-    is_valid, msg = validate_tesla_wav(source_path)
-    if not is_valid:
-        return False, f"Invalid chime file: {msg}"
-    
     mode = current_mode()
     logger.info(f"Setting active chime to {chime_filename} (mode: {mode})")
+    
+    # Validate chime exists (only in edit mode when we have access to mount)
+    if mode == 'edit':
+        if not part2_mount_path:
+            return False, "Part2 mount path required in edit mode"
+            
+        chimes_dir = os.path.join(part2_mount_path, CHIMES_FOLDER)
+        source_path = os.path.join(chimes_dir, chime_filename)
+        
+        if not os.path.isfile(source_path):
+            return False, f"Chime file not found: {chime_filename}"
+        
+        # Validate it's a proper Tesla WAV
+        is_valid, msg = validate_tesla_wav(source_path)
+        if not is_valid:
+            return False, f"Invalid chime file: {msg}"
     
     def _do_chime_replacement():
         """Internal function to perform the actual chime replacement."""
@@ -376,8 +380,17 @@ def set_active_chime(chime_filename, part2_mount_path):
                 rw_mount = os.path.join(MNT_DIR, 'part2')
                 source = os.path.join(rw_mount, CHIMES_FOLDER, chime_filename)
                 dest = os.path.join(rw_mount, LOCK_CHIME_FILENAME)
+                
+                # Validate file exists in present mode (we're inside quick_edit now)
+                if not os.path.isfile(source):
+                    return False, f"Chime file not found: {chime_filename}"
+                
+                # Validate it's a proper Tesla WAV
+                is_valid, msg = validate_tesla_wav(source)
+                if not is_valid:
+                    return False, f"Invalid chime file: {msg}"
             else:
-                source = source_path
+                source = os.path.join(part2_mount_path, CHIMES_FOLDER, chime_filename)
                 dest = os.path.join(part2_mount_path, LOCK_CHIME_FILENAME)
             
             # Perform the replacement

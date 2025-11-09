@@ -147,7 +147,66 @@ sudo ./setup_usb.sh
 
 ### 5. Upgrading to Latest Version
 
-**To upgrade your installation to the latest code from GitHub:**
+**⚠️ IMPORTANT: The refactored branch has significant architectural changes. Follow these steps carefully.**
+
+#### Recommended Upgrade Process (Refactored Branch)
+
+**Step 1: Backup your data**
+```bash
+# Navigate to installation directory
+cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
+
+# Backup configuration files (these contain your settings)
+cp cleanup_config.json cleanup_config.json.backup 2>/dev/null || true
+cp chime_schedules.json chime_schedules.json.backup 2>/dev/null || true
+cp state.txt state.txt.backup 2>/dev/null || true
+```
+
+**Step 2: Switch to refactored branch**
+```bash
+# If using git (recommended)
+git fetch origin
+git checkout refactored
+git pull origin refactored
+
+# If not using git, clone fresh or download files manually
+cd ~
+git clone -b refactored https://github.com/mphacker/TeslaUSB.git TeslaUSB-refactored
+```
+
+**Step 3: Clean installation directory (PRESERVE .img FILES!)**
+```bash
+cd /home/pi/TeslaUSB
+
+# Remove all files EXCEPT .img files and backups
+find . -maxdepth 1 -type f ! -name '*.img' ! -name '*.backup' -delete
+find . -maxdepth 1 -type d ! -name '.' ! -name '..' ! -name '.git' ! -name 'thumbnails' -exec rm -rf {} + 2>/dev/null || true
+
+# If you cloned to a new directory, copy files from there instead:
+# cp -r ~/TeslaUSB-refactored/* /home/pi/TeslaUSB/
+```
+
+**Step 4: Run setup to configure new architecture**
+```bash
+cd /home/pi/TeslaUSB
+sudo ./setup_usb.sh
+```
+
+**Step 5: Restore configuration files**
+```bash
+# Restore your backup configuration files
+cp cleanup_config.json.backup cleanup_config.json 2>/dev/null || true
+cp chime_schedules.json.backup chime_schedules.json 2>/dev/null || true
+cp state.txt.backup state.txt 2>/dev/null || true
+
+# Restart web service to pick up restored settings
+sudo systemctl restart gadget_web.service
+```
+
+#### Alternative: Automated Upgrade Script (For Future Updates)
+
+Once you're on the refactored branch, you can use the upgrade script for future updates:
+
 ```bash
 # Navigate to the gadget directory and run upgrade script
 cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
@@ -158,6 +217,8 @@ The upgrade script will:
 - Pull the latest code from GitHub (handles file permission conflicts automatically)
 - Prompt you to run setup to apply changes
 - Optionally restore your previous mode (edit/present) after setup
+
+**Note**: The upgrade script preserves your `.img` files, `state.txt`, and `thumbnails/` directory automatically.
 
 ### 6. Removal (Optional)
 
@@ -401,6 +462,108 @@ The web interface includes a complete light shows management system:
 - Deleting removes both files in the group
 - You can upload FSEQ and MP3 separately - they'll be grouped if names match
 
+### Lock Chime Scheduler
+The web interface includes an advanced scheduling system for automatically changing lock chimes based on time, day, or holiday:
+
+**Features:**
+- **Three Schedule Types:**
+  - **Weekly**: Set chimes for specific days of the week at a certain time (e.g., "Friday Night" at 5:00 PM)
+  - **Date**: Set chimes for specific dates (e.g., "Birthday" on March 15 at 12:00 AM)
+  - **Holiday**: Set chimes for US holidays (fixed and movable - e.g., "Christmas", "Thanksgiving")
+- **Automatic Chime Switching**: Runs every 60 seconds via systemd timer to apply scheduled changes
+- **Smart Scheduling**: Only changes chime if it differs from currently active chime (avoids unnecessary writes)
+- **US Holiday Support**: Includes both fixed-date holidays (Christmas, Independence Day) and calculated holidays (Easter, Thanksgiving, Memorial Day)
+- **Priority System**: Date schedules override holiday schedules, which override weekly schedules
+- **Web Interface**: Full CRUD operations for schedules (Create, Read, Update, Delete)
+- **Race Condition Protection**: Scheduler respects lock files to prevent conflicts with manual chime changes
+
+**Access:**
+- Navigate to `http://<pi-ip-address>:5000/lock_chimes` and scroll to "Scheduled Chime Changes"
+- Or click the "Lock Chimes" tab and view the scheduler section at the bottom
+
+**Usage:**
+1. In Edit mode, click "Add New Schedule" to create a scheduled chime change
+2. Select schedule type (Weekly, Date, or Holiday)
+3. Choose the chime file from your library
+4. Set the time and day/date/holiday parameters
+5. Enable the schedule with the toggle switch
+6. The scheduler runs every 60 seconds and applies matching schedules automatically
+7. View all schedules in a sortable table with enable/disable toggles
+8. Edit or delete schedules as needed
+
+**Technical Details:**
+- Schedules stored in `chime_schedules.json` in the installation directory
+- `check_chime_schedule.py` runs every minute via `chime_scheduler.timer`
+- Respects `.quick_edit_part2.lock` file to prevent race conditions
+- Logs all chime changes to systemd journal for debugging
+
+### Storage Analytics
+The web interface provides detailed storage analytics for monitoring TeslaCam partition usage:
+
+**Features:**
+- **Partition Usage Overview**: Total size, used space, available space with visual gauge
+- **Folder Breakdown**: Storage usage by TeslaCam folder (RecentClips, SavedClips, SentryClips, etc.)
+- **Video Statistics**: Count and total size of videos in each folder
+- **Disk Usage Chart**: Visual bar chart showing percentage of storage used by each folder
+- **Real-Time Updates**: Data refreshes when page loads or mode switches
+- **Operation-Aware**: Shows loading banner if partition is temporarily unavailable during operations
+
+**Access:**
+- Navigate to `http://<pi-ip-address>:5000/analytics` in your web browser
+- Or click the "Analytics" tab in the web interface navigation
+
+**Usage:**
+1. View partition usage gauge showing total capacity and used/available space
+2. Check folder-by-folder breakdown with video counts and sizes
+3. Identify which folders are consuming the most storage
+4. Use this information to configure cleanup policies (see below)
+5. Works in both Present and Edit modes
+
+### Automatic Cleanup
+The web interface includes a powerful cleanup system for automatically managing old dashcam footage:
+
+**Features:**
+- **Per-Folder Configuration**: Set different policies for RecentClips, SavedClips, SentryClips, etc.
+- **Three Cleanup Criteria** (can be used individually or combined):
+  - **Age-Based**: Delete videos older than X days
+  - **Size-Based**: Keep folder size below X GB (deletes oldest first)
+  - **Count-Based**: Keep only the newest X videos
+- **Automatic Cleanup on Boot**: Optionally run cleanup during boot before presenting USB to Tesla
+- **Manual Cleanup**: Preview what will be deleted, then execute manually
+- **Safety Features**:
+  - Disabled by default for all folders
+  - Dry-run preview shows exactly what will be deleted
+  - Detailed execution report with deletion counts and freed space
+  - Protected folders (SavedClips, SentryClips) default to conservative settings
+- **Folder Auto-Detection**: Automatically discovers TeslaCam folders and creates policies
+- **Persistent Configuration**: Settings stored in `cleanup_config.json`
+
+**Access:**
+- Navigate to `http://<pi-ip-address>:5000/cleanup/settings` in your web browser
+- Or click the "Analytics" tab (cleanup is part of analytics section)
+
+**Usage:**
+1. In Edit mode, navigate to Cleanup Settings
+2. Enable cleanup for desired folders with the toggle switch
+3. Configure criteria (age, size, count) for each folder
+4. Optionally enable "Run cleanup on boot" for automatic cleanup
+5. Click "Preview Cleanup" to see what will be deleted (dry-run)
+6. Review the preview report showing files to delete and space to free
+7. Execute cleanup from preview page if results look correct
+8. View execution report with deletion statistics
+
+**Boot Cleanup:**
+- When "Run cleanup on boot" is enabled, the system runs cleanup during boot sequence
+- Happens before presenting USB gadget to Tesla (partitions mounted read-write)
+- Results logged to `boot_cleanup.log` in installation directory
+- Only processes folders with "enabled: true" in configuration
+
+**Technical Details:**
+- Cleanup configuration: `cleanup_config.json` in installation directory
+- Boot cleanup: `boot_present_with_cleanup.sh` (wrapper) and `run_boot_cleanup.py` (execution)
+- Service: `present_usb_on_boot.service` calls the boot cleanup wrapper
+- Manual cleanup: Web interface uses `cleanup_service.py` for preview and execution
+
 ### Web Interface Navigation
 Click the "Tesla USB Gadget Control" header text on any page to return to the home page.
 
@@ -450,16 +613,83 @@ TeslaUSB/
 ├── scripts/                  # Source script templates
 │   ├── present_usb.sh           # USB gadget presentation script
 │   ├── edit_usb.sh              # Edit mode script  
-│   ├── web_control.py           # Flask web interface
-│   └── generate_thumbnails.py   # Background thumbnail generator
+│   ├── config.sh                # Configuration variables
+│   ├── boot_present_with_cleanup.sh  # Boot-time cleanup wrapper
+│   ├── run_boot_cleanup.py      # Automatic cleanup on boot
+│   ├── check_chime_schedule.py  # Chime scheduler (runs every minute)
+│   ├── generate_thumbnails.py   # Background thumbnail generator
+│   └── web/                     # Web interface (Flask app)
+│       ├── web_control.py           # Main Flask application
+│       ├── config.py                # Web app configuration
+│       ├── utils.py                 # Utility functions
+│       ├── blueprints/              # Flask blueprints (routes)
+│       │   ├── __init__.py
+│       │   ├── mode_control.py      # Present/Edit mode switching
+│       │   ├── videos.py            # Video browser
+│       │   ├── lock_chimes.py       # Lock chime management & scheduler
+│       │   ├── light_shows.py       # Light show management
+│       │   ├── analytics.py         # Storage analytics
+│       │   ├── cleanup.py           # Cleanup configuration & execution
+│       │   └── api.py               # API endpoints (operation status)
+│       ├── services/                # Service layer (business logic)
+│       │   ├── __init__.py
+│       │   ├── mode_service.py      # Mode detection
+│       │   ├── partition_service.py # Partition path resolution
+│       │   ├── partition_mount_service.py  # Quick edit & lock management
+│       │   ├── samba_service.py     # Samba cache management
+│       │   ├── video_service.py     # Video browsing
+│       │   ├── thumbnail_service.py # Thumbnail generation
+│       │   ├── lock_chime_service.py  # Lock chime operations
+│       │   ├── light_show_service.py  # Light show operations
+│       │   ├── chime_scheduler_service.py  # Chime scheduling logic
+│       │   ├── analytics_service.py    # Storage analytics
+│       │   └── cleanup_service.py      # Cleanup operations
+│       ├── static/                  # CSS, JavaScript
+│       │   ├── css/
+│       │   │   ├── style.css        # Main stylesheet
+│       │   │   ├── analytics.css    # Analytics page styles
+│       │   │   └── cleanup.css      # Cleanup page styles
+│       │   └── js/
+│       │       └── main.js          # Client-side JavaScript (auto-refresh polling)
+│       └── templates/               # HTML templates (Jinja2)
+│           ├── base.html            # Base template with navigation
+│           ├── index.html           # Home page (mode control)
+│           ├── videos.html          # Video browser
+│           ├── session.html         # Multi-camera session view
+│           ├── lock_chimes.html     # Lock chime management
+│           ├── light_shows.html     # Light show management
+│           ├── analytics.html       # Storage analytics
+│           ├── cleanup_settings.html    # Cleanup configuration
+│           ├── cleanup_preview.html     # Cleanup preview
+│           └── cleanup_report.html      # Cleanup execution report
 ├── templates/                # Systemd service templates
 │   ├── gadget_web.service       # Web interface service
-│   ├── present_usb_on_boot.service # Auto-present service
+│   ├── present_usb_on_boot.service # Auto-present service (with cleanup)
 │   ├── thumbnail_generator.service # Thumbnail generation service
-│   └── thumbnail_generator.timer   # Thumbnail generation timer
+│   ├── thumbnail_generator.timer   # Thumbnail generation timer
+│   ├── chime_scheduler.service     # Chime scheduler service
+│   └── chime_scheduler.timer       # Chime scheduler timer (every 60s)
 ├── README.md                 # This documentation
 └── README_scripts.md         # Script template documentation
 ```
+
+### Architecture Overview
+
+**Blueprint-Based Flask Application:**
+- **Blueprints**: Organize routes by feature (videos, lock chimes, light shows, analytics, cleanup, api)
+- **Services**: Business logic layer for clean separation of concerns
+- **Templates**: Jinja2 HTML templates with shared base layout
+- **Static Assets**: CSS and JavaScript with cache-busting timestamps
+
+**Concurrency Protection:**
+- **Lock Files**: `.quick_edit_part2.lock` prevents race conditions during file operations
+- **Operation Status API**: `/api/operation_status` endpoint for real-time operation detection
+- **Auto-Refresh**: JavaScript polling (3s intervals) for seamless UX during operations
+
+**Automatic Features:**
+- **Cleanup Service**: Configurable automatic cleanup on boot with age/size/count policies
+- **Chime Scheduler**: Runs every 60 seconds to apply scheduled lock chime changes
+- **Thumbnail Generator**: Background service (every 15 minutes) for video thumbnails
 
 ## Generated Files
 
@@ -471,10 +701,17 @@ The setup script copies and configures template files to the gadget directory:
 | `usb_lightshow.img` | *Generated* | LightShow disk image (smaller, FAT32) |
 | `present_usb.sh` | `scripts/present_usb.sh` | Script to activate USB gadget mode |
 | `edit_usb.sh` | `scripts/edit_usb.sh` | Script to activate edit/mount mode |
-| `web_control.py` | `scripts/web_control.py` | Flask web interface application |
+| `config.sh` | `scripts/config.sh` | Configuration variables for scripts |
+| `boot_present_with_cleanup.sh` | `scripts/boot_present_with_cleanup.sh` | Boot wrapper with optional cleanup |
+| `run_boot_cleanup.py` | `scripts/run_boot_cleanup.py` | Automatic cleanup execution on boot |
+| `check_chime_schedule.py` | `scripts/check_chime_schedule.py` | Chime scheduler (runs every 60s) |
+| `web/` | `scripts/web/` | Complete Flask web application directory |
 | `generate_thumbnails.py` | `scripts/generate_thumbnails.py` | Background thumbnail generation script |
 | `thumbnails/` | *Generated directory* | Persistent cache for video thumbnails |
 | `state.txt` | *Generated* | Stores the last-known USB gadget mode |
+| `cleanup_config.json` | *Generated on first use* | Cleanup policies configuration |
+| `chime_schedules.json` | *Generated on first use* | Chime scheduler configuration |
+| `boot_cleanup.log` | *Generated on boot* | Boot cleanup execution log |
 | `cleanup.sh` | *Repository file* | Script to safely remove all setup artifacts |
 | `upgrade.sh` | *Repository file* | Script to pull latest code and update installation |
 
@@ -506,14 +743,16 @@ nano scripts/present_usb.sh
 
 ## Systemd Services
 
-Four services/timers are installed:
+Six services/timers are installed:
 
 | Service/Timer | Purpose | Status |
 |---------|---------|---------|
 | `gadget_web.service` | Runs web interface on boot | Enabled |
-| `present_usb_on_boot.service` | Auto-presents USB on boot | Enabled |
+| `present_usb_on_boot.service` | Auto-presents USB on boot (with optional cleanup) | Enabled |
 | `thumbnail_generator.service` | Generates video thumbnails | On-demand |
 | `thumbnail_generator.timer` | Schedules thumbnail generation (every 15 min) | Enabled |
+| `chime_scheduler.service` | Applies scheduled chime changes | On-demand |
+| `chime_scheduler.timer` | Runs chime scheduler (every 60 seconds) | Enabled |
 
 **Service management:**
 ```bash
@@ -524,18 +763,52 @@ sudo systemctl status gadget_web.service
 sudo systemctl status thumbnail_generator.service
 sudo systemctl status thumbnail_generator.timer
 
+# Check chime scheduler status
+sudo systemctl status chime_scheduler.service
+sudo systemctl status chime_scheduler.timer
+
 # Disable auto-present on boot
 sudo systemctl disable present_usb_on_boot.service
 
 # Disable automatic thumbnail generation
 sudo systemctl disable thumbnail_generator.timer
 
+# Disable chime scheduler
+sudo systemctl disable chime_scheduler.timer
+
 # Restart web interface
 sudo systemctl restart gadget_web.service
 
 # Manually trigger thumbnail generation
 sudo systemctl start thumbnail_generator.service
+
+# Manually trigger chime scheduler check
+sudo systemctl start chime_scheduler.service
+
+# View chime scheduler logs
+sudo journalctl -u chime_scheduler.service -f
 ```
+
+**Boot Sequence with Cleanup:**
+When `present_usb_on_boot.service` starts:
+1. Calls `boot_present_with_cleanup.sh` wrapper script
+2. Checks if any folder has cleanup enabled in `cleanup_config.json`
+3. If cleanup enabled:
+   - Mounts partitions read-write
+   - Runs `run_boot_cleanup.py` to delete files matching policies
+   - Logs results to `boot_cleanup.log`
+   - Unmounts partitions
+4. Calls `present_usb.sh` to present USB gadget to Tesla
+5. System ready for Tesla connection
+
+**Concurrency Protection:**
+- All services respect `.quick_edit_part2.lock` file
+- Lock prevents race conditions between:
+  - Manual mode switches (`edit_usb.sh`, `present_usb.sh`)
+  - Chime scheduler (`check_chime_schedule.py`)
+  - File uploads/deletes (web interface)
+- Lock timeout: 10 seconds (script waits for lock to release)
+- Stale lock detection: 120 seconds (auto-removed if process died)
 
 ## Cleanup and Removal
 
@@ -679,6 +952,40 @@ sudo apt remove --autoremove python3-flask samba samba-common-bin
   - Safari is Apple's native browser with full file system permissions
   - Third-party browsers (Edge, Chrome, Firefox) on iOS are sandboxed and may have limited file access
   - Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice
+
+**Web interface showing "Operation in Progress" banner:**
+The system includes automatic operation detection to prevent data inconsistencies:
+- **What it means**: An operation is temporarily making files unavailable (mode switch, file upload, chime scheduler, etc.)
+- **Lock file**: `.quick_edit_part2.lock` exists in the installation directory during operations
+- **Auto-refresh**: Page polls `/api/operation_status` every 3 seconds and automatically refreshes when operation completes
+- **Progressive messages**: 
+  - 0-15s: "This should only take a few moments..."
+  - 15-30s: "Almost done..."
+  - 30-60s: "Taking longer than usual..."
+  - 60s+: "Please refresh manually if this message persists"
+- **Max wait time**: 60 seconds (20 retries × 3 seconds), then prompts manual refresh
+- **What to do**: Wait for the operation to complete (usually 3-10 seconds), page will refresh automatically
+- **If stuck**: Check lock file age manually:
+  ```bash
+  ls -lh /home/pi/TeslaUSB/.quick_edit_part2.lock
+  # If older than 120 seconds, remove it (stale lock)
+  rm /home/pi/TeslaUSB/.quick_edit_part2.lock
+  ```
+
+**Chime scheduler not changing chimes:**
+- Check scheduler is running: `sudo systemctl status chime_scheduler.timer`
+- View scheduler logs: `sudo journalctl -u chime_scheduler.service -f`
+- Verify schedule is enabled in web interface (toggle switch)
+- Check schedule time matches current time (scheduler checks every 60 seconds)
+- Ensure scheduled chime file exists in `/Chimes/` library
+- If lock file exists, scheduler skips run (waits for operation to complete)
+
+**Cleanup not running on boot:**
+- Verify "Run cleanup on boot" is enabled for at least one folder in cleanup settings
+- Check boot cleanup log: `cat /home/pi/TeslaUSB/boot_cleanup.log`
+- View boot service status: `sudo systemctl status present_usb_on_boot.service`
+- Ensure cleanup policies are saved in `cleanup_config.json`
+- Boot cleanup only runs if `cleanup_config.json` has at least one folder with `"enabled": true`
 
 **Tesla not recognizing new lock chime (LockChime.wav):**
 Tesla aggressively caches the LockChime.wav file and may not detect changes immediately. The web interface uses several cache-busting techniques automatically when you set a new chime:

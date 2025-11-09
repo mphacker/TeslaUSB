@@ -12,6 +12,7 @@ from config import USB_PARTITIONS, PART_LABEL_MAP
 from utils import format_file_size
 from services.mode_service import mode_display, current_mode
 from services.partition_service import get_mount_path, iter_all_partitions
+from services.partition_mount_service import check_operation_in_progress
 from services.light_show_service import upload_light_show_file, upload_zip_file, delete_light_show_files, create_light_show_zip
 from services.samba_service import close_samba_share, restart_samba_services
 
@@ -22,6 +23,25 @@ light_shows_bp = Blueprint('light_shows', __name__, url_prefix='/light_shows')
 def light_shows():
     """Light shows management page."""
     token, label, css_class, share_paths = mode_display()
+    
+    # Check if file operation is in progress
+    op_status = check_operation_in_progress()
+    
+    # If operation in progress, show limited page with operation banner
+    if op_status['in_progress']:
+        return render_template(
+            'light_shows.html',
+            page='shows',
+            mode_label=label,
+            mode_class=css_class,
+            mode_token=token,
+            show_groups=[],
+            auto_refresh=False,
+            hostname=socket.gethostname(),
+            operation_in_progress=True,
+            lock_age=op_status['lock_age'],
+            estimated_completion=op_status['estimated_completion'],
+        )
     
     # Get all fseq, mp3, and wav files from LightShow folders
     files_dict = {}  # Group files by base name
@@ -81,6 +101,7 @@ def light_shows():
         show_groups=show_groups,
         auto_refresh=False,
         hostname=socket.gethostname(),
+        operation_in_progress=False,
     )
 
 

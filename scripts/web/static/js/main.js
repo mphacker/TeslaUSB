@@ -35,4 +35,73 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         });
     });
+    
+    // Operation in progress auto-refresh polling
+    if (window.operationInProgress) {
+        initOperationPolling();
+    }
 });
+
+// Operation polling for auto-refresh
+let pollCount = 0;
+const MAX_POLLS = 20; // Max 60 seconds (20 polls × 3s)
+
+function initOperationPolling() {
+    pollCount = 0;
+    setTimeout(checkOperationStatus, 3000); // Start polling after 3 seconds
+}
+
+function checkOperationStatus() {
+    pollCount++;
+    
+    fetch('/api/operation_status')
+        .then(response => response.json())
+        .then(data => {
+            if (data.in_progress) {
+                // Operation still in progress
+                updateCountdownMessage(pollCount);
+                
+                if (pollCount < MAX_POLLS) {
+                    // Continue polling
+                    setTimeout(checkOperationStatus, 3000);
+                } else {
+                    // Max retries reached
+                    showMaxRetryMessage();
+                }
+            } else {
+                // Operation complete - refresh page
+                console.log('Operation completed, refreshing page...');
+                location.reload();
+            }
+        })
+        .catch(error => {
+            console.error('Error checking operation status:', error);
+            // Retry on error
+            if (pollCount < MAX_POLLS) {
+                setTimeout(checkOperationStatus, 3000);
+            }
+        });
+}
+
+function updateCountdownMessage(count) {
+    const countdownEl = document.getElementById('retry-countdown');
+    if (countdownEl) {
+        const elapsed = count * 3;
+        const remaining = Math.max(0, MAX_POLLS * 3 - elapsed);
+        
+        if (elapsed < 15) {
+            countdownEl.textContent = `Checking again in 3s... (${Math.floor(remaining / 60)}m ${remaining % 60}s remaining)`;
+        } else if (elapsed < 30) {
+            countdownEl.textContent = `Still processing... Auto-refresh in 3s (${Math.floor(remaining / 60)}m ${remaining % 60}s)`;
+        } else {
+            countdownEl.textContent = `Operation taking longer than usual... Will keep checking (${Math.floor(remaining / 60)}m ${remaining % 60}s)`;
+        }
+    }
+}
+
+function showMaxRetryMessage() {
+    const countdownEl = document.getElementById('retry-countdown');
+    if (countdownEl) {
+        countdownEl.innerHTML = '<strong>Operation is taking longer than expected. Please manually refresh the page.</strong>';
+    }
+}

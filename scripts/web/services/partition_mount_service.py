@@ -377,3 +377,46 @@ def quick_edit_part2(operation_callback, timeout=10):
     except Exception as e:
         logger.error(f"Unexpected error during quick edit: {e}", exc_info=True)
         return False, f"Unexpected error: {str(e)}"
+
+
+def check_operation_in_progress():
+    """
+    Check if a file operation is currently in progress.
+    
+    Returns dict with:
+        - in_progress (bool): True if operation is active
+        - lock_age (float): Age of lock file in seconds (if exists)
+        - estimated_completion (int): Estimated seconds until completion
+        - operation_type (str): 'quick_edit' or 'unknown'
+    """
+    import time
+    
+    if not os.path.exists(QUICK_EDIT_LOCK):
+        return {
+            'in_progress': False,
+            'lock_age': 0,
+            'estimated_completion': 0,
+            'operation_type': None
+        }
+    
+    try:
+        lock_age = time.time() - os.path.getmtime(QUICK_EDIT_LOCK)
+        
+        # Most quick_edit operations complete in 3-10 seconds
+        # Estimate completion time, with max of 10 seconds
+        estimated_completion = max(0, 10 - int(lock_age))
+        
+        return {
+            'in_progress': True,
+            'lock_age': lock_age,
+            'estimated_completion': estimated_completion,
+            'operation_type': 'quick_edit'
+        }
+    except OSError:
+        # Lock file disappeared between check and stat
+        return {
+            'in_progress': False,
+            'lock_age': 0,
+            'estimated_completion': 0,
+            'operation_type': None
+        }

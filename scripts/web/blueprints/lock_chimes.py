@@ -10,6 +10,7 @@ from config import GADGET_DIR, LOCK_CHIME_FILENAME, CHIMES_FOLDER, MAX_LOCK_CHIM
 from utils import format_file_size
 from services.mode_service import mode_display, current_mode
 from services.partition_service import get_mount_path
+from services.partition_mount_service import check_operation_in_progress
 from services.samba_service import close_samba_share, restart_samba_services
 from services.lock_chime_service import (
     validate_tesla_wav,
@@ -28,6 +29,29 @@ lock_chimes_bp = Blueprint('lock_chimes', __name__, url_prefix='/lock_chimes')
 def lock_chimes():
     """Lock chimes management page."""
     token, label, css_class, share_paths = mode_display()
+    
+    # Check if file operation is in progress
+    op_status = check_operation_in_progress()
+    
+    # If operation in progress, show limited page with operation banner
+    if op_status['in_progress']:
+        return render_template(
+            'lock_chimes.html',
+            page='chimes',
+            mode_label=label,
+            mode_class=css_class,
+            mode_token=token,
+            active_chime=None,
+            chime_files=[],
+            schedules=[],
+            holidays=[],
+            format_schedule=format_schedule_display,
+            auto_refresh=False,
+            hostname=socket.gethostname(),
+            operation_in_progress=True,
+            lock_age=op_status['lock_age'],
+            estimated_completion=op_status['estimated_completion'],
+        )
     
     # Get current active chime from part2 root
     active_chime = None
@@ -99,6 +123,7 @@ def lock_chimes():
         auto_refresh=False,
         expandable=True,  # Allow page to expand beyond viewport for scheduler
         hostname=socket.gethostname(),
+        operation_in_progress=False,
     )
 
 

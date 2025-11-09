@@ -451,6 +451,14 @@ configure_service "$TEMPLATES_DIR/thumbnail_generator.service" "$THUMBNAIL_SERVI
 THUMBNAIL_TIMER="/etc/systemd/system/thumbnail_generator.timer"
 configure_service "$TEMPLATES_DIR/thumbnail_generator.timer" "$THUMBNAIL_TIMER"
 
+# Chime scheduler service
+CHIME_SCHEDULER_SERVICE="/etc/systemd/system/chime_scheduler.service"
+configure_service "$TEMPLATES_DIR/chime_scheduler.service" "$CHIME_SCHEDULER_SERVICE"
+
+# Chime scheduler timer
+CHIME_SCHEDULER_TIMER="/etc/systemd/system/chime_scheduler.timer"
+configure_service "$TEMPLATES_DIR/chime_scheduler.timer" "$CHIME_SCHEDULER_TIMER"
+
 # Reload systemd and enable services
 systemctl daemon-reload
 systemctl enable --now gadget_web.service || systemctl restart gadget_web.service
@@ -460,6 +468,9 @@ systemctl enable present_usb_on_boot.service || true
 
 # Enable and start thumbnail generator timer
 systemctl enable --now thumbnail_generator.timer || systemctl restart thumbnail_generator.timer
+
+# Enable and start chime scheduler timer
+systemctl enable --now chime_scheduler.timer || systemctl restart chime_scheduler.timer
 
 # Ensure the web service picks up the latest code changes
 systemctl restart gadget_web.service || true

@@ -138,6 +138,12 @@ body {
     height: calc(100vh - 100px);
 }
 
+/* Allow specific pages to expand beyond viewport */
+.main-content.expandable {
+    height: auto;
+    min-height: calc(100vh - 100px);
+}
+
 .container {
     background: white;
     padding: 30px;

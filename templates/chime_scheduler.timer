@@ -1,0 +1,14 @@
+[Unit]
+Description=TeslaUSB Chime Scheduler Timer
+Requires=chime_scheduler.service
+
+[Timer]
+# Run every minute
+OnCalendar=*:*:00
+# Run immediately if system was powered off during scheduled time
+Persistent=true
+# Start 30 seconds after boot to ensure system is ready
+OnBootSec=30sec
+
+[Install]
+WantedBy=timers.target

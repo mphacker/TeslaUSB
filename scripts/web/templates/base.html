@@ -42,7 +42,7 @@
         <a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
     </div>
     
-    <div class="main-content">
+    <div class="main-content{% if expandable %} expandable{% endif %}">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 <div class="messages">

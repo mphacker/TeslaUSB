@@ -59,6 +59,138 @@
     </div>
     {% endif %}
     
+    <!-- Chime Scheduler -->
+    <details {% if schedules %}open{% endif %} style="margin-bottom: 20px;">
+        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: #e3f2fd; border-radius: 8px; border-left: 4px solid #2196f3; color: #1976d2; font-size: 18px; list-style: none;">
+            <span style="display: inline-block; margin-right: 5px;">▶</span> 📅 Chime Scheduler {% if schedules %}({{ schedules|length }} schedule{{ 's' if schedules|length != 1 else '' }}){% endif %}
+        </summary>
+        
+        <div style="background: #e3f2fd; padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid #2196f3; border-right: 1px solid #2196f3; border-bottom: 1px solid #2196f3; margin-top: -8px;">
+            <!-- Add New Schedule Form -->
+            <details {% if not schedules %}open{% endif %} style="margin-bottom: 15px;" id="schedule-form-details">
+                <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 4px; list-style: none;">
+                    <span style="display: inline-block; margin-right: 5px;">▶</span> <span id="form-title">➕ Add New Schedule</span>
+                </summary>
+            
+            <form id="schedule-form" method="post" action="{{ url_for('lock_chimes.add_schedule') }}" style="background: white; padding: 15px; border-radius: 4px; margin-top: 10px;">
+                <div style="display: grid; gap: 15px;">
+                    <!-- Schedule Name -->
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: 600;">Schedule Name:</label>
+                        <input type="text" id="schedule-name" name="schedule_name" placeholder="e.g., Morning Chime" required
+                               style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px; box-sizing: border-box;">
+                    </div>
+                    
+                    <!-- Chime Selection -->
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: 600;">Chime:</label>
+                        <select id="chime-select" name="chime_filename" required
+                                style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                            <option value="">-- Select a chime --</option>
+                            {% for chime in chime_files %}
+                                {% if chime.is_valid %}
+                                <option value="{{ chime.filename }}">{{ chime.filename }}</option>
+                                {% endif %}
+                            {% endfor %}
+                        </select>
+                    </div>
+                    
+                    <!-- Time Selection -->
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: 600;">Time:</label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <select id="hour-select" name="hour" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                                {% for h in range(24) %}
+                                <option value="{{ '%02d'|format(h) }}">{{ '%02d'|format(h) }}</option>
+                                {% endfor %}
+                            </select>
+                            <span style="font-weight: bold;">:</span>
+                            <select id="minute-select" name="minute" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                                {% for m in range(0, 60, 5) %}
+                                <option value="{{ '%02d'|format(m) }}">{{ '%02d'|format(m) }}</option>
+                                {% endfor %}
+                            </select>
+                            <span style="color: #666; font-size: 13px;">(24-hour format)</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Days Selection -->
+                    <div>
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Days:</label>
+                        <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                            {% for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] %}
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                                <input type="checkbox" name="days" value="{{ day }}" class="day-checkbox" id="day-{{ day }}" style="margin-right: 6px;">
+                                <span>{{ day[:3] }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Select at least one day</p>
+                    </div>
+                    
+                    <!-- Enable Schedule -->
+                    <div>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="enabled-checkbox" name="enabled" value="true" checked style="margin-right: 8px;">
+                            <span style="font-weight: 600;">Enable this schedule immediately</span>
+                        </label>
+                    </div>
+                    
+                    <!-- Submit Button -->
+                    <div>
+                        <button type="submit" id="submit-btn" class="edit-btn" style="margin: 0; padding: 12px 25px;">💾 Save Schedule</button>
+                        <button type="button" id="cancel-btn" class="btn-delete" style="margin-left: 10px; display: none; padding: 12px 25px;" onclick="cancelEdit()">❌ Cancel</button>
+                    </div>
+                </div>
+            </form>
+            </details>
+        
+        <!-- Existing Schedules List -->
+        {% if schedules %}
+        <div style="margin-top: 15px;">
+            <h4 style="margin: 0 0 10px 0;">Active Schedules:</h4>
+            {% for schedule in schedules %}
+            <div style="background: white; padding: 12px; border-radius: 4px; margin-bottom: 10px; border-left: 4px solid {% if schedule.enabled %}#4caf50{% else %}#999{% endif %};">
+                <div style="display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: 10px;">
+                    <div style="flex: 1; min-width: 200px;">
+                        <div style="font-weight: 600; margin-bottom: 4px;">
+                            {{ schedule.name }}
+                            {% if not schedule.enabled %}
+                            <span style="background: #ffc107; color: #000; padding: 2px 6px; border-radius: 3px; font-size: 11px; margin-left: 6px;">DISABLED</span>
+                            {% endif %}
+                        </div>
+                        <div style="font-size: 13px; color: #666;">
+                            <div>🔔 {{ schedule.chime_filename }}</div>
+                            <div>🕐 {{ schedule.time }}</div>
+                            <div>📅 {{ schedule.days|join(', ') }}</div>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 5px; flex-wrap: wrap;">
+                        <button type="button" onclick="editSchedule({{ schedule.id }})" class="edit-btn" style="padding: 6px 10px; font-size: 13px; margin: 0;">✏️ Edit</button>
+                        <form method="post" action="{{ url_for('lock_chimes.toggle_schedule', schedule_id=schedule.id) }}" style="display: inline;">
+                            <button type="submit" class="present-btn" style="padding: 6px 10px; font-size: 13px; margin: 0;">
+                                {% if schedule.enabled %}⏸️ Disable{% else %}▶️ Enable{% endif %}
+                            </button>
+                        </form>
+                        <form method="post" action="{{ url_for('lock_chimes.delete_schedule', schedule_id=schedule.id) }}" 
+                              style="display: inline;" onsubmit="return confirm('Delete schedule {{ schedule.name }}?');">
+                            <button type="submit" class="btn-delete" style="padding: 6px 10px; font-size: 13px; margin: 0;">🗑️</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p style="margin: 10px 0 0 0; color: #666; font-size: 14px;">No schedules configured. Add one above to automatically change chimes at specific times.</p>
+        {% endif %}
+        
+        <div style="background: #fff8e1; padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px;">
+            <strong>ℹ️ How it works:</strong> Schedules run automatically every minute. The most recent schedule for each day will be active. Chimes change without interrupting Tesla recording!
+        </div>
+        </div>
+    </details>
+    
     <!-- Chime Library -->
     <h3 style="margin: 20px 0 10px 0;">📚 Chime Library</h3>
     {% if chime_files %}
@@ -323,5 +455,102 @@ document.addEventListener('DOMContentLoaded', function() {
         if (controls) controls.style.display = 'none';
     }
 })();
+
+// Schedule edit functionality
+async function editSchedule(scheduleId) {
+    try {
+        // Fetch schedule data
+        const response = await fetch(`/lock_chimes/schedule/${scheduleId}/edit`);
+        const data = await response.json();
+        
+        if (!data.success) {
+            alert('Error loading schedule: ' + (data.error || 'Unknown error'));
+            return;
+        }
+        
+        const schedule = data.schedule;
+        
+        // Populate form fields
+        document.getElementById('schedule-name').value = schedule.name;
+        document.getElementById('chime-select').value = schedule.chime_filename;
+        
+        // Parse time
+        const timeParts = schedule.time.split(':');
+        document.getElementById('hour-select').value = timeParts[0];
+        document.getElementById('minute-select').value = timeParts[1];
+        
+        // Clear all day checkboxes first
+        document.querySelectorAll('.day-checkbox').forEach(cb => {
+            cb.checked = false;
+        });
+        
+        // Check selected days
+        schedule.days.forEach(day => {
+            const checkbox = document.getElementById('day-' + day);
+            if (checkbox) checkbox.checked = true;
+        });
+        
+        // Set enabled checkbox
+        document.getElementById('enabled-checkbox').checked = schedule.enabled;
+        
+        // Change form to edit mode
+        const form = document.getElementById('schedule-form');
+        form.action = `/lock_chimes/schedule/${scheduleId}/edit`;
+        form.dataset.editingId = scheduleId;
+        
+        // Update UI
+        document.getElementById('form-title').textContent = '✏️ Edit Schedule';
+        document.getElementById('submit-btn').textContent = '💾 Update Schedule';
+        document.getElementById('cancel-btn').style.display = 'inline-block';
+        
+        // Open the form
+        document.getElementById('schedule-form-details').open = true;
+        
+        // Scroll to form
+        document.getElementById('schedule-form-details').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        
+    } catch (error) {
+        console.error('Error loading schedule:', error);
+        alert('Error loading schedule. Please try again.');
+    }
+}
+
+function cancelEdit() {
+    // Reset form
+    const form = document.getElementById('schedule-form');
+    form.reset();
+    form.action = '{{ url_for("lock_chimes.add_schedule") }}';
+    delete form.dataset.editingId;
+    
+    // Reset UI
+    document.getElementById('form-title').textContent = '➕ Add New Schedule';
+    document.getElementById('submit-btn').textContent = '💾 Save Schedule';
+    document.getElementById('cancel-btn').style.display = 'none';
+    
+    // Close the form
+    document.getElementById('schedule-form-details').open = false;
+}
 </script>
+
+<style>
+/* Rotate arrow when details is open */
+details[open] > summary > span:first-child {
+    transform: rotate(90deg);
+    display: inline-block;
+}
+
+details > summary > span:first-child {
+    transition: transform 0.2s;
+    display: inline-block;
+}
+
+/* Remove default marker */
+details > summary {
+    list-style: none;
+}
+
+details > summary::-webkit-details-marker {
+    display: none;
+}
+</style>
 {% endblock %}

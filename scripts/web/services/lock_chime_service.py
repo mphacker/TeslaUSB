@@ -11,8 +11,11 @@ import hashlib
 import shutil
 import wave
 import contextlib
+import logging
 
 from config import MAX_LOCK_CHIME_SIZE
+
+logger = logging.getLogger(__name__)
 
 
 def validate_tesla_wav(file_path):
@@ -327,3 +330,70 @@ def replace_lock_chime(source_path, destination_path):
     # Clean up backup on success
     if os.path.isfile(backup_path):
         os.remove(backup_path)
+
+
+def set_active_chime(chime_filename, part2_mount_path):
+    """
+    Set a chime from the Chimes/ library as the active lock chime.
+    
+    This is a mode-aware function that works in both Present and Edit modes:
+    - In Edit mode: Uses normal file operations
+    - In Present mode: Uses quick_edit_part2() to temporarily mount RW
+    
+    Args:
+        chime_filename: Name of the chime file in Chimes/ folder
+        part2_mount_path: Current mount path for part2 (RO or RW)
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    from services.mode_service import current_mode
+    from services.partition_mount_service import quick_edit_part2
+    from config import LOCK_CHIME_FILENAME, CHIMES_FOLDER
+    
+    # Validate chime exists
+    chimes_dir = os.path.join(part2_mount_path, CHIMES_FOLDER)
+    source_path = os.path.join(chimes_dir, chime_filename)
+    
+    if not os.path.isfile(source_path):
+        return False, f"Chime file not found: {chime_filename}"
+    
+    # Validate it's a proper Tesla WAV
+    is_valid, msg = validate_tesla_wav(source_path)
+    if not is_valid:
+        return False, f"Invalid chime file: {msg}"
+    
+    mode = current_mode()
+    logger.info(f"Setting active chime to {chime_filename} (mode: {mode})")
+    
+    def _do_chime_replacement():
+        """Internal function to perform the actual chime replacement."""
+        try:
+            # In quick edit mode, we need to use /mnt/gadget/part2 (RW mount)
+            # Otherwise use the provided mount path
+            if mode == 'present':
+                from config import MNT_DIR
+                rw_mount = os.path.join(MNT_DIR, 'part2')
+                source = os.path.join(rw_mount, CHIMES_FOLDER, chime_filename)
+                dest = os.path.join(rw_mount, LOCK_CHIME_FILENAME)
+            else:
+                source = source_path
+                dest = os.path.join(part2_mount_path, LOCK_CHIME_FILENAME)
+            
+            # Perform the replacement
+            replace_lock_chime(source, dest)
+            
+            return True, f"Successfully set {chime_filename} as active lock chime"
+            
+        except Exception as e:
+            logger.error(f"Error replacing chime: {e}", exc_info=True)
+            return False, f"Error setting chime: {str(e)}"
+    
+    # Execute based on current mode
+    if mode == 'present':
+        # Use quick edit to temporarily mount RW
+        logger.info("Using quick edit part2 for chime replacement")
+        return quick_edit_part2(_do_chime_replacement)
+    else:
+        # Normal edit mode operation
+        return _do_chime_replacement()

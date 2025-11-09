@@ -15,7 +15,9 @@ from services.lock_chime_service import (
     validate_tesla_wav,
     reencode_wav_for_tesla,
     replace_lock_chime,
+    set_active_chime,
 )
+from services.chime_scheduler_service import get_scheduler
 
 lock_chimes_bp = Blueprint('lock_chimes', __name__, url_prefix='/lock_chimes')
 
@@ -74,6 +76,10 @@ def lock_chimes():
     # Sort alphabetically
     chime_files.sort(key=lambda x: x["filename"].lower())
     
+    # Load schedules
+    scheduler = get_scheduler()
+    schedules = scheduler.list_schedules()
+    
     return render_template(
         'lock_chimes.html',
         page='chimes',
@@ -82,7 +88,9 @@ def lock_chimes():
         mode_token=token,
         active_chime=active_chime,
         chime_files=chime_files,
+        schedules=schedules,
         auto_refresh=False,
+        expandable=True,  # Allow page to expand beyond viewport for scheduler
         hostname=socket.gethostname(),
     )
 
@@ -445,3 +453,182 @@ def delete_lock_chime(filename):
         flash(f"Failed to delete file: {str(e)}", "error")
     
     return redirect(url_for("lock_chimes.lock_chimes"))
+
+
+# ============================================================================
+# Chime Scheduler Routes
+# ============================================================================
+
+@lock_chimes_bp.route("/schedule/add", methods=["POST"])
+def add_schedule():
+    """Add a new chime schedule."""
+    try:
+        # Get form data
+        schedule_name = request.form.get('schedule_name', '').strip()
+        chime_filename = request.form.get('chime_filename', '').strip()
+        hour = request.form.get('hour', '00')
+        minute = request.form.get('minute', '00')
+        days = request.form.getlist('days')
+        enabled = request.form.get('enabled') == 'true'
+        
+        # Validate inputs
+        if not schedule_name:
+            flash("Schedule name is required", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+        
+        if not chime_filename:
+            flash("Please select a chime", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+        
+        if not days:
+            flash("Please select at least one day", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+        
+        # Format time as HH:MM
+        time_str = f"{hour}:{minute}"
+        
+        # Add schedule
+        scheduler = get_scheduler()
+        success, message, schedule_id = scheduler.add_schedule(
+            chime_filename=chime_filename,
+            time_str=time_str,
+            days=days,
+            name=schedule_name,
+            enabled=enabled
+        )
+        
+        if success:
+            flash(f"Schedule '{schedule_name}' created successfully", "success")
+        else:
+            flash(f"Failed to create schedule: {message}", "error")
+    
+    except Exception as e:
+        flash(f"Error adding schedule: {str(e)}", "error")
+    
+    return redirect(url_for("lock_chimes.lock_chimes"))
+
+
+@lock_chimes_bp.route("/schedule/<int:schedule_id>/toggle", methods=["POST"])
+def toggle_schedule(schedule_id):
+    """Enable or disable a schedule."""
+    try:
+        scheduler = get_scheduler()
+        schedule = scheduler.get_schedule(schedule_id)
+        
+        if not schedule:
+            flash("Schedule not found", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+        
+        # Toggle enabled state
+        new_enabled = not schedule.get('enabled', True)
+        success, message = scheduler.update_schedule(schedule_id, enabled=new_enabled)
+        
+        if success:
+            status = "enabled" if new_enabled else "disabled"
+            flash(f"Schedule '{schedule['name']}' {status}", "success")
+        else:
+            flash(f"Failed to update schedule: {message}", "error")
+    
+    except Exception as e:
+        flash(f"Error toggling schedule: {str(e)}", "error")
+    
+    return redirect(url_for("lock_chimes.lock_chimes"))
+
+
+@lock_chimes_bp.route("/schedule/<int:schedule_id>/delete", methods=["POST"])
+def delete_schedule(schedule_id):
+    """Delete a schedule."""
+    try:
+        scheduler = get_scheduler()
+        schedule = scheduler.get_schedule(schedule_id)
+        
+        if not schedule:
+            flash("Schedule not found", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+        
+        success, message = scheduler.delete_schedule(schedule_id)
+        
+        if success:
+            flash(f"Schedule '{schedule['name']}' deleted", "success")
+        else:
+            flash(f"Failed to delete schedule: {message}", "error")
+    
+    except Exception as e:
+        flash(f"Error deleting schedule: {str(e)}", "error")
+    
+    return redirect(url_for("lock_chimes.lock_chimes"))
+
+
+@lock_chimes_bp.route("/schedule/<int:schedule_id>/edit", methods=["GET", "POST"])
+def edit_schedule(schedule_id):
+    """Edit an existing schedule (GET returns JSON, POST updates)."""
+    scheduler = get_scheduler()
+    schedule = scheduler.get_schedule(schedule_id)
+    
+    if not schedule:
+        if request.method == "GET":
+            return jsonify({"success": False, "error": "Schedule not found"}), 404
+        else:
+            flash("Schedule not found", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+    
+    if request.method == "GET":
+        # Return schedule data as JSON for form population
+        return jsonify({
+            "success": True,
+            "schedule": {
+                "id": schedule['id'],
+                "name": schedule['name'],
+                "chime_filename": schedule['chime_filename'],
+                "time": schedule['time'],
+                "days": schedule['days'],
+                "enabled": schedule.get('enabled', True)
+            }
+        })
+    
+    # POST - Update schedule
+    try:
+        # Get form data
+        schedule_name = request.form.get('schedule_name', '').strip()
+        chime_filename = request.form.get('chime_filename', '').strip()
+        hour = request.form.get('hour', '00')
+        minute = request.form.get('minute', '00')
+        days = request.form.getlist('days')
+        enabled = request.form.get('enabled') == 'true'
+        
+        # Validate inputs
+        if not schedule_name:
+            flash("Schedule name is required", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+        
+        if not chime_filename:
+            flash("Please select a chime", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+        
+        if not days:
+            flash("Please select at least one day", "error")
+            return redirect(url_for("lock_chimes.lock_chimes"))
+        
+        # Format time as HH:MM
+        time_str = f"{hour}:{minute}"
+        
+        # Update schedule
+        success, message = scheduler.update_schedule(
+            schedule_id=schedule_id,
+            chime_filename=chime_filename,
+            time=time_str,
+            days=days,
+            name=schedule_name,
+            enabled=enabled
+        )
+        
+        if success:
+            flash(f"Schedule '{schedule_name}' updated successfully", "success")
+        else:
+            flash(f"Failed to update schedule: {message}", "error")
+    
+    except Exception as e:
+        flash(f"Error updating schedule: {str(e)}", "error")
+    
+    return redirect(url_for("lock_chimes.lock_chimes"))
+

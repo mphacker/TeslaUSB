@@ -470,21 +470,29 @@ The web interface includes a complete light shows management system:
 - You can upload FSEQ and MP3 separately - they'll be grouped if names match
 
 ### Lock Chime Scheduler
-The web interface includes an advanced scheduling system for automatically changing lock chimes based on time, day, or holiday:
+The web interface includes an advanced scheduling system for automatically changing lock chimes based on time, day, holiday, or recurring intervals:
 
 **Features:**
-- **Three Schedule Types:**
+- **Four Schedule Types:**
   - **Weekly**: Set chimes for specific days of the week at a certain time (e.g., "Friday Night" at 5:00 PM)
   - **Date**: Set chimes for specific dates (e.g., "Birthday" on March 15 at 12:00 AM)
   - **Holiday**: Set chimes for US holidays (fixed and movable - e.g., "Christmas", "Thanksgiving")
-- **Random Chime Option**: Select "Random Chime" to automatically pick a different chime from your library each time the schedule runs
+  - **Recurring Rotation**: Automatically rotate to a random chime at regular intervals (every 15/30 minutes, 1/2/4/6/12 hours, or on every boot)
+- **Random Chime Option**: Available for all schedule types - automatically picks a different chime from your library each time
+  - **Smart Random Selection**: Avoids repeating the currently active chime when selecting randomly
+- **Recurring Schedule Rules**: Designed for "always-on" automatic rotation
+  - **Only one recurring schedule allowed**: Multiple interval-based schedules would conflict
+  - **Mutual exclusivity**: Recurring schedules disable all time-based schedules (Weekly/Date/Holiday) and vice versa
+  - **Confirmation dialogs**: System warns before disabling other schedules with detailed information
+  - **Interval options**: On boot, 15min, 30min, 1hour, 2hour, 4hour, 6hour, 12hour
+  - **Boot detection**: "On boot" schedules execute once per boot session (uses system uptime to detect reboots)
 - **Last Run Tracking**: UI displays when each schedule last executed (e.g., "Today at 3:00 PM", "Yesterday at 8:00 AM")
 - **Automatic Chime Switching**: Runs every 60 seconds via systemd timer to apply scheduled changes
 - **Smart Scheduling**: Only changes chime if it differs from currently active chime (avoids unnecessary writes)
 - **US Holiday Support**: Includes both fixed-date holidays (Christmas, Independence Day) and calculated holidays (Easter, Thanksgiving, Memorial Day)
 - **Priority System**: Holiday schedules override date schedules, which override weekly schedules when multiple schedules match the same time
 - **Smart Catch-Up**: If device is offline and misses multiple schedules, only the most recent applicable schedule runs when device comes back online (e.g., schedules at 8 AM, 10 AM, 3 PM - if device comes online at 3:15 PM, only 3 PM executes)
-- **Automatic Reset**: Editing a schedule's time, days, date, or holiday clears the last run timestamp, allowing immediate execution if the new time has already passed
+- **Automatic Reset**: Editing a schedule's time, days, date, holiday, or interval clears the last run timestamp, allowing immediate execution if appropriate
 - **Web Interface**: Full CRUD operations for schedules (Create, Read, Update, Delete)
 - **Race Condition Protection**: Scheduler respects lock files to prevent conflicts with manual chime changes
 
@@ -494,13 +502,25 @@ The web interface includes an advanced scheduling system for automatically chang
 
 **Usage:**
 1. In Edit mode, click "Add New Schedule" to create a scheduled chime change
-2. Select schedule type (Weekly, Date, or Holiday)
-3. Choose a specific chime file from your library, or select "Random Chime" for variety
-4. Set the time and day/date/holiday parameters
-5. Enable the schedule with the toggle switch
-6. The scheduler runs every 60 seconds and applies matching schedules automatically
-7. View all schedules with their last run timestamps (e.g., "Today at 3:00 PM")
-8. Edit or delete schedules as needed - editing timing clears last run for immediate re-execution
+2. Select schedule type:
+   - **Weekly/Date/Holiday**: For time-based schedules with specific chimes or random selection
+   - **Recurring Rotation**: For automatic interval-based rotation (always uses random chimes)
+3. For time-based schedules: Choose a specific chime file or "Random Chime"
+4. For recurring schedules: Select interval (15min, 30min, 1hour, etc., or "On every boot/startup")
+5. Set the time and day/date/holiday parameters (not applicable for recurring schedules)
+6. Enable the schedule with the toggle switch
+7. **Important**: When enabling a recurring schedule with other active schedules, system will prompt for confirmation to disable them
+8. The scheduler runs every 60 seconds and applies matching schedules automatically
+9. View all schedules with their last run timestamps and interval information
+10. Edit or delete schedules as needed - editing timing/interval clears last run for immediate re-execution
+
+**Schedule Conflicts:**
+The system enforces mutual exclusivity between schedule types:
+- **Only one recurring schedule can be enabled** at a time (prevents interval conflicts)
+- **Recurring schedules disable all time-based schedules** (they're "always active" and would override timed schedules)
+- **Cannot enable time-based schedules while recurring is active** (must disable recurring first)
+- **Confirmation dialogs**: System shows which schedules will be disabled before proceeding
+- **Disabled schedules preserved**: You can keep multiple disabled schedules and switch between them
 
 **Technical Details:**
 - Schedules stored in `chime_schedules.json` in the installation directory

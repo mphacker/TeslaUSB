@@ -91,7 +91,7 @@
     </details>
     
     <!-- Chime Scheduler -->
-    <details style="margin-bottom: 20px;">
+    <details id="scheduler-section" style="margin-bottom: 20px;">
         <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: #e3f2fd; border-radius: 8px; border-left: 4px solid #2196f3; color: #1976d2; font-size: 18px; list-style: none;">
             <span style="display: inline-block; margin-right: 5px;">▶</span> 📅 Chime Scheduler {% if schedules %}({{ schedules|length }} schedule{{ 's' if schedules|length != 1 else '' }}){% endif %}
         </summary>
@@ -143,7 +143,25 @@
                                 <input type="radio" name="schedule_type" value="holiday" class="schedule-type-radio" style="margin-right: 6px;">
                                 <span>🎉 US Holiday</span>
                             </label>
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                                <input type="radio" name="schedule_type" value="recurring" class="schedule-type-radio" style="margin-right: 6px;">
+                                <span>🔄 Recurring Rotation</span>
+                            </label>
                         </div>
+                    </div>
+                    
+                    <!-- Interval Selection (for recurring schedules) -->
+                    <div id="interval-selection" class="schedule-type-field" style="display: none;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600;">Rotation Frequency:</label>
+                        <select id="interval-select" name="interval" style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                            <option value="">-- Select frequency --</option>
+                            {% for interval_value, interval_name in recurring_intervals.items() %}
+                            <option value="{{ interval_value }}">{{ interval_name }}</option>
+                            {% endfor %}
+                        </select>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">
+                            ℹ️ Recurring schedules always use <strong>Random Chime</strong> and automatically avoid repeating the currently active chime
+                        </p>
                     </div>
                     
                     <!-- Days Selection (for weekly schedules) -->
@@ -408,6 +426,43 @@
 </style>
 
 <script>
+// Preserve scheduler section state across page loads
+document.addEventListener('DOMContentLoaded', function() {
+    const schedulerSection = document.getElementById('scheduler-section');
+    const scheduleFormDetails = document.getElementById('schedule-form-details');
+    
+    // Check if there are any flash messages (indicates an action was just performed)
+    const hasFlashMessages = document.querySelector('.flash-message') !== null;
+    
+    // Open scheduler section if:
+    // 1. There are flash messages (user just performed an action)
+    // 2. Session storage indicates it was previously open
+    // 3. User manually opened it (tracked in session storage)
+    const wasOpen = sessionStorage.getItem('schedulerSectionOpen') === 'true';
+    
+    if (hasFlashMessages || wasOpen) {
+        schedulerSection.open = true;
+        sessionStorage.setItem('schedulerSectionOpen', 'true');
+    }
+    
+    // Track when user manually opens/closes the section
+    schedulerSection.addEventListener('toggle', function() {
+        sessionStorage.setItem('schedulerSectionOpen', schedulerSection.open ? 'true' : 'false');
+    });
+    
+    // Similarly track the form details section
+    if (scheduleFormDetails) {
+        const formWasOpen = sessionStorage.getItem('scheduleFormOpen') === 'true';
+        if (formWasOpen || hasFlashMessages) {
+            scheduleFormDetails.open = true;
+        }
+        
+        scheduleFormDetails.addEventListener('toggle', function() {
+            sessionStorage.setItem('scheduleFormOpen', scheduleFormDetails.open ? 'true' : 'false');
+        });
+    }
+});
+
 function handleSetChime(form) {
     // Disable all Set as Active buttons
     const allChimeButtons = document.querySelectorAll('.set-chime-btn');
@@ -425,10 +480,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const daysSelection = document.getElementById('days-selection');
     const dateSelection = document.getElementById('date-selection');
     const holidaySelection = document.getElementById('holiday-selection');
+    const intervalSelection = document.getElementById('interval-selection');
     const timeSelection = document.getElementById('time-selection');
     const hourSelect = document.getElementById('hour-select');
     const minuteSelect = document.getElementById('minute-select');
     const ampmSelect = document.getElementById('ampm-select');
+    const chimeSelect = document.getElementById('chime-select');
     
     function updateScheduleTypeFields() {
         const selectedType = document.querySelector('.schedule-type-radio:checked').value;
@@ -437,8 +494,15 @@ document.addEventListener('DOMContentLoaded', function() {
         daysSelection.style.display = 'none';
         dateSelection.style.display = 'none';
         holidaySelection.style.display = 'none';
+        intervalSelection.style.display = 'none';
         
-        // Show relevant field and manage time selection
+        // Reset chime select to normal state
+        chimeSelect.disabled = false;
+        chimeSelect.style.pointerEvents = '';
+        chimeSelect.style.opacity = '';
+        chimeSelect.style.cursor = '';
+        
+        // Show relevant field and manage time selection/chime selection
         if (selectedType === 'weekly') {
             daysSelection.style.display = 'block';
             timeSelection.style.display = 'block';
@@ -464,6 +528,18 @@ document.addEventListener('DOMContentLoaded', function() {
             hourSelect.required = false;
             minuteSelect.required = false;
             ampmSelect.required = false;
+        } else if (selectedType === 'recurring') {
+            intervalSelection.style.display = 'block';
+            // Hide time selection for recurring schedules
+            timeSelection.style.display = 'none';
+            // Force chime to RANDOM - don't disable so value submits
+            chimeSelect.value = 'RANDOM';
+            chimeSelect.style.pointerEvents = 'none';
+            chimeSelect.style.opacity = '0.6';
+            chimeSelect.style.cursor = 'not-allowed';
+            hourSelect.required = false;
+            minuteSelect.required = false;
+            ampmSelect.required = false;
         }
     }
     
@@ -474,6 +550,60 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Initialize on page load
     updateScheduleTypeFields();
+});
+
+// Handle recurring schedule confirmation for disabling other schedules
+document.addEventListener('DOMContentLoaded', function() {
+    const scheduleForm = document.getElementById('schedule-form');
+    if (!scheduleForm) return;
+    
+    scheduleForm.addEventListener('submit', async function(e) {
+        const scheduleType = document.querySelector('.schedule-type-radio:checked').value;
+        const enabled = document.getElementById('enabled-checkbox').checked;
+        const confirmField = scheduleForm.querySelector('input[name="confirm_disable_others"]');
+        
+        // Only intercept for enabled recurring schedules
+        if (scheduleType === 'recurring' && enabled && (!confirmField || confirmField.value !== 'true')) {
+            e.preventDefault();
+            
+            // Submit via AJAX to check if confirmation needed
+            const formData = new FormData(scheduleForm);
+            
+            try {
+                const response = await fetch(scheduleForm.action, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.needs_confirmation) {
+                    // Show confirmation dialog
+                    const schedulesText = data.schedules_to_disable.map(s => `  • ${s.name}`).join('\n');
+                    const confirmed = confirm(
+                        `${data.message}\n\nSchedules that will be disabled:\n${schedulesText}`
+                    );
+                    
+                    if (confirmed) {
+                        // Add confirmation field and resubmit
+                        const input = document.createElement('input');
+                        input.type = 'hidden';
+                        input.name = 'confirm_disable_others';
+                        input.value = 'true';
+                        scheduleForm.appendChild(input);
+                        scheduleForm.submit();
+                    }
+                } else {
+                    // No confirmation needed, redirect handled by server
+                    window.location.reload();
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                // Fall back to normal form submission
+                scheduleForm.submit();
+            }
+        }
+    });
 });
 
 // Handle chime upload with progress bar
@@ -631,9 +761,11 @@ async function editSchedule(scheduleId) {
         }
         
         // Set time (12-hour format)
-        document.getElementById('hour-select').value = schedule.hour_12;
-        document.getElementById('minute-select').value = schedule.minute;
-        document.getElementById('ampm-select').value = schedule.am_pm;
+        if (schedule.hour_12 && schedule.minute && schedule.am_pm) {
+            document.getElementById('hour-select').value = schedule.hour_12;
+            document.getElementById('minute-select').value = schedule.minute;
+            document.getElementById('ampm-select').value = schedule.am_pm;
+        }
         
         // Set type-specific fields
         if (schedule.schedule_type === 'weekly') {
@@ -652,6 +784,8 @@ async function editSchedule(scheduleId) {
             document.getElementById('day-select').value = schedule.day;
         } else if (schedule.schedule_type === 'holiday') {
             document.getElementById('holiday-select').value = schedule.holiday;
+        } else if (schedule.schedule_type === 'recurring') {
+            document.getElementById('interval-select').value = schedule.interval;
         }
         
         // Set enabled checkbox

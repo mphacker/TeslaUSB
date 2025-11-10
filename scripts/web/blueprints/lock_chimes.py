@@ -20,7 +20,7 @@ from services.lock_chime_service import (
     upload_chime_file,
     delete_chime_file,
 )
-from services.chime_scheduler_service import get_scheduler, get_holidays_list, get_holidays_with_dates, format_schedule_display, format_last_run
+from services.chime_scheduler_service import get_scheduler, get_holidays_list, get_holidays_with_dates, get_recurring_intervals, format_schedule_display, format_last_run
 
 lock_chimes_bp = Blueprint('lock_chimes', __name__, url_prefix='/lock_chimes')
 
@@ -53,6 +53,7 @@ def lock_chimes():
             chime_files=[],
             schedules=[],
             holidays=[],
+            recurring_intervals={},
             format_schedule=format_schedule_display,
             format_last_run=format_last_run,
             auto_refresh=False,
@@ -118,6 +119,9 @@ def lock_chimes():
     # Get holidays list with dates for current year
     holidays = get_holidays_with_dates()
     
+    # Get recurring intervals for the dropdown
+    recurring_intervals = get_recurring_intervals()
+    
     return render_template(
         'lock_chimes.html',
         page='chimes',
@@ -128,6 +132,7 @@ def lock_chimes():
         chime_files=chime_files,
         schedules=schedules,
         holidays=holidays,
+        recurring_intervals=recurring_intervals,
         format_schedule=format_schedule_display,
         format_last_run=format_last_run,
         auto_refresh=False,
@@ -340,8 +345,8 @@ def add_schedule():
         chime_filename = request.form.get('chime_filename', '').strip()
         schedule_type = request.form.get('schedule_type', 'weekly').strip()
         
-        # Get time - for holidays, default to 12:00 AM
-        if schedule_type == 'holiday':
+        # Get time - for holidays and recurring, default to 12:00 AM
+        if schedule_type in ['holiday', 'recurring']:
             hour_24 = 0
             minute = '00'
         else:
@@ -402,18 +407,62 @@ def add_schedule():
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['holiday'] = holiday
         
+        elif schedule_type == 'recurring':
+            interval = request.form.get('interval', '').strip()
+            if not interval:
+                flash("Please select an interval", "error")
+                return redirect(url_for("lock_chimes.lock_chimes"))
+            params['interval'] = interval
+            
+            # Check if user confirmed disabling other schedules
+            confirm_disable = request.form.get('confirm_disable_others') == 'true'
+        
         else:
             flash(f"Invalid schedule type: {schedule_type}", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
         
         # Add schedule
         scheduler = get_scheduler()
-        success, message, schedule_id = scheduler.add_schedule(**params)
         
-        if success:
-            flash(f"Schedule '{schedule_name}' created successfully", "success")
+        # Handle recurring schedules specially if enabled
+        if schedule_type == 'recurring' and enabled:
+            # First try adding normally to check for conflicts
+            success, message, schedule_id = scheduler.add_schedule(**params)
+            
+            if not success and message == "CONFIRM_DISABLE_OTHERS":
+                # Need user confirmation to disable other schedules
+                if confirm_disable:
+                    # User confirmed - disable others and add
+                    success, message, schedule_id, num_disabled = scheduler.add_recurring_schedule_with_disable(
+                        chime_filename=params['chime_filename'],
+                        interval=params['interval'],
+                        name=params['name'],
+                        enabled=enabled
+                    )
+                    if success:
+                        flash(f"Recurring schedule '{schedule_name}' created and {num_disabled} other schedule(s) disabled", "success")
+                    else:
+                        flash(f"Failed to create schedule: {message}", "error")
+                else:
+                    # Ask for confirmation - return JSON for AJAX handling
+                    other_schedules = [s for s in scheduler.get_enabled_schedules() if s.get('schedule_type') != 'recurring']
+                    return jsonify({
+                        "needs_confirmation": True,
+                        "message": f"Creating this recurring schedule will disable {len(other_schedules)} other active schedule(s). Continue?",
+                        "schedules_to_disable": [{"id": s['id'], "name": s['name']} for s in other_schedules]
+                    })
+            elif success:
+                flash(f"Schedule '{schedule_name}' created successfully", "success")
+            else:
+                flash(f"Failed to create schedule: {message}", "error")
         else:
-            flash(f"Failed to create schedule: {message}", "error")
+            # Normal schedule addition
+            success, message, schedule_id = scheduler.add_schedule(**params)
+            
+            if success:
+                flash(f"Schedule '{schedule_name}' created successfully", "success")
+            else:
+                flash(f"Failed to create schedule: {message}", "error")
     
     except Exception as e:
         flash(f"Error adding schedule: {str(e)}", "error")
@@ -440,7 +489,15 @@ def toggle_schedule(schedule_id):
             status = "enabled" if new_enabled else "disabled"
             flash(f"Schedule '{schedule['name']}' {status}", "success")
         else:
-            flash(f"Failed to update schedule: {message}", "error")
+            # Handle special error codes
+            if message == "CONFIRM_DISABLE_OTHERS":
+                if schedule.get('schedule_type') == 'recurring':
+                    other_schedules = [s for s in scheduler.get_enabled_schedules() if s.get('schedule_type') != 'recurring']
+                    flash(f"Cannot enable recurring schedule: {len(other_schedules)} other schedule(s) are currently active. Disable them first, or create a new recurring schedule which will disable them automatically.", "error")
+                else:
+                    flash("Cannot enable this schedule due to conflicts with other active schedules", "error")
+            else:
+                flash(f"Failed to update schedule: {message}", "error")
     
     except Exception as e:
         flash(f"Error toggling schedule: {str(e)}", "error")
@@ -518,6 +575,8 @@ def edit_schedule(schedule_id):
                 schedule_data['day'] = schedule.get('day', 1)
             elif schedule_data['schedule_type'] == 'holiday':
                 schedule_data['holiday'] = schedule.get('holiday', '')
+            elif schedule_data['schedule_type'] == 'recurring':
+                schedule_data['interval'] = schedule.get('interval', 'on_boot')
             
             return jsonify({
                 "success": True,
@@ -533,8 +592,8 @@ def edit_schedule(schedule_id):
         chime_filename = request.form.get('chime_filename', '').strip()
         schedule_type = request.form.get('schedule_type', 'weekly').strip()
         
-        # Get time - for holidays, default to 12:00 AM
-        if schedule_type == 'holiday':
+        # Get time - for holidays and recurring, default to 12:00 AM
+        if schedule_type in ['holiday', 'recurring']:
             hour_24 = 0
             minute = '00'
         else:
@@ -594,6 +653,13 @@ def edit_schedule(schedule_id):
                 flash("Please select a holiday", "error")
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['holiday'] = holiday
+        
+        elif schedule_type == 'recurring':
+            interval = request.form.get('interval', '').strip()
+            if not interval:
+                flash("Please select an interval", "error")
+                return redirect(url_for("lock_chimes.lock_chimes"))
+            params['interval'] = interval
         
         else:
             flash(f"Invalid schedule type: {schedule_type}", "error")

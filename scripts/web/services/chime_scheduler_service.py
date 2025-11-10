@@ -3,10 +3,11 @@ Chime scheduler service for managing scheduled lock chime changes.
 
 Stores schedules in JSON format with user-friendly time/day selections.
 Calculates which chime should be active at any given time.
-Supports three schedule types:
+Supports four schedule types:
 - Weekly: Days of week + time
 - Date: Specific date (month/day) + time
 - Holiday: US Holiday + time
+- Recurring: Interval-based rotation (on boot, every X minutes/hours)
 """
 
 import os
@@ -25,6 +26,29 @@ SCHEDULE_FILE = os.path.join(GADGET_DIR, 'chime_schedules.json')
 
 # Days of week (0=Monday, 6=Sunday for Python datetime)
 DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+# Recurring schedule intervals (interval_value: display_name)
+RECURRING_INTERVALS = {
+    'on_boot': 'On every boot/startup',
+    '15min': 'Every 15 minutes',
+    '30min': 'Every 30 minutes',
+    '1hour': 'Every hour',
+    '2hour': 'Every 2 hours',
+    '4hour': 'Every 4 hours',
+    '6hour': 'Every 6 hours',
+    '12hour': 'Every 12 hours',
+}
+
+# Convert interval to minutes for calculation
+INTERVAL_TO_MINUTES = {
+    '15min': 15,
+    '30min': 30,
+    '1hour': 60,
+    '2hour': 120,
+    '4hour': 240,
+    '6hour': 360,
+    '12hour': 720,
+}
 
 # US Holidays (month, day) - these are fixed-date holidays
 US_HOLIDAYS = {
@@ -225,49 +249,147 @@ class ChimeScheduler:
         
         return (True, None)
     
-    def add_schedule(self, chime_filename: str, time_str: str, 
+    def get_enabled_schedules(self, schedule_type: Optional[str] = None) -> List[Dict]:
+        """
+        Get all enabled schedules, optionally filtered by type.
+        
+        Args:
+            schedule_type: Optional filter by schedule type ('weekly', 'date', 'holiday', 'recurring')
+        
+        Returns:
+            List of enabled schedule dictionaries
+        """
+        enabled = [s for s in self.schedules if s.get('enabled', True)]
+        if schedule_type:
+            enabled = [s for s in enabled if s.get('schedule_type') == schedule_type]
+        return enabled
+    
+    def has_enabled_recurring_schedule(self) -> Tuple[bool, Optional[Dict]]:
+        """
+        Check if there's an enabled recurring schedule.
+        
+        Returns:
+            (has_recurring, recurring_schedule_dict or None)
+        """
+        recurring = self.get_enabled_schedules('recurring')
+        if recurring:
+            return True, recurring[0]
+        return False, None
+    
+    def disable_all_schedules_except(self, exclude_id: Optional[int] = None, exclude_type: Optional[str] = None) -> int:
+        """
+        Disable all schedules except those matching criteria.
+        
+        Args:
+            exclude_id: Optional schedule ID to exclude from disabling
+            exclude_type: Optional schedule type to exclude from disabling
+        
+        Returns:
+            Number of schedules disabled
+        """
+        disabled_count = 0
+        for schedule in self.schedules:
+            if not schedule.get('enabled', True):
+                continue  # Already disabled
+            
+            # Skip if matches exclusion criteria
+            if exclude_id is not None and schedule['id'] == exclude_id:
+                continue
+            if exclude_type is not None and schedule.get('schedule_type') == exclude_type:
+                continue
+            
+            schedule['enabled'] = False
+            disabled_count += 1
+        
+        if disabled_count > 0:
+            self._save_schedules()
+            logger.info(f"Disabled {disabled_count} schedules")
+        
+        return disabled_count
+    
+    def add_schedule(self, chime_filename: str, time_str: str = "00:00", 
                     schedule_type: str = 'weekly',
                     days: Optional[List[str]] = None,
                     month: Optional[int] = None,
                     day: Optional[int] = None, 
                     holiday: Optional[str] = None,
+                    interval: Optional[str] = None,
                     name: str = "", enabled: bool = True) -> Tuple[bool, str, Optional[int]]:
         """
         Add a new chime schedule.
         
         Args:
-            chime_filename: Name of the chime file (from Chimes/ folder)
-            time_str: Time in HH:MM format (24-hour)
-            schedule_type: 'weekly', 'date', or 'holiday'
+            chime_filename: Name of the chime file (from Chimes/ folder) or 'RANDOM'
+            time_str: Time in HH:MM format (24-hour) - not used for recurring schedules
+            schedule_type: 'weekly', 'date', 'holiday', or 'recurring'
             days: List of day names (for weekly schedules)
             month: Month 1-12 (for date schedules)
             day: Day of month (for date schedules)
             holiday: Holiday name (for holiday schedules)
+            interval: Interval value (for recurring schedules) - e.g., '15min', '1hour', 'on_boot'
             name: Optional friendly name for the schedule
             enabled: Whether schedule is active
         
         Returns:
             (success, message, schedule_id)
         """
-        # Validate time format
-        try:
-            time_parts = time_str.split(':')
-            if len(time_parts) != 2:
-                return False, "Time must be in HH:MM format", None
+        # Check for mutual exclusivity between recurring and other schedules
+        if enabled:
+            has_recurring, existing_recurring = self.has_enabled_recurring_schedule()
             
-            hour = int(time_parts[0])
-            minute = int(time_parts[1])
+            if schedule_type == 'recurring':
+                # Only allow ONE enabled recurring schedule
+                if has_recurring:
+                    return False, f"A recurring schedule '{existing_recurring['name']}' is already active. Only one recurring schedule can be enabled at a time.", None
+                
+                # Check if there are other enabled schedules
+                other_enabled = [s for s in self.get_enabled_schedules() if s.get('schedule_type') != 'recurring']
+                if other_enabled:
+                    # This will be handled by the UI with a confirmation dialog
+                    # For now, we'll return a special error code that the UI can detect
+                    return False, "CONFIRM_DISABLE_OTHERS", None
             
-            if not (0 <= hour <= 23):
-                return False, "Hour must be between 00 and 23", None
-            if not (0 <= minute <= 59):
-                return False, "Minute must be between 00 and 59", None
+            else:
+                # Trying to add a non-recurring schedule while recurring is active
+                if has_recurring:
+                    return False, f"Cannot add schedule while recurring schedule '{existing_recurring['name']}' is active. Disable the recurring schedule first.", None
+        
+        # Validate based on schedule type
+        if schedule_type == 'recurring':
+            # Recurring schedules don't need time validation, but need interval
+            if not interval:
+                return False, "Interval is required for recurring schedules", None
             
-            # Create datetime.time object to validate
-            schedule_time = datetime_time(hour, minute)
+            if interval not in RECURRING_INTERVALS:
+                return False, f"Invalid interval: {interval}. Must be one of {list(RECURRING_INTERVALS.keys())}", None
             
-        except (ValueError, IndexError):
-            return False, "Invalid time format. Use HH:MM (e.g., 14:30)", None
+            # Recurring schedules should use RANDOM chime
+            if chime_filename != 'RANDOM':
+                logger.warning(f"Recurring schedule should use RANDOM chime, got {chime_filename}. Forcing to RANDOM.")
+                chime_filename = 'RANDOM'
+            
+            # No conflict checking for recurring schedules (they're time-independent)
+            
+        else:
+            # Validate time format for non-recurring schedules
+            try:
+                time_parts = time_str.split(':')
+                if len(time_parts) != 2:
+                    return False, "Time must be in HH:MM format", None
+                
+                hour = int(time_parts[0])
+                minute = int(time_parts[1])
+                
+                if not (0 <= hour <= 23):
+                    return False, "Hour must be between 00 and 23", None
+                if not (0 <= minute <= 59):
+                    return False, "Minute must be between 00 and 59", None
+                
+                # Create datetime.time object to validate
+                schedule_time = datetime_time(hour, minute)
+                
+            except (ValueError, IndexError):
+                return False, "Invalid time format. Use HH:MM (e.g., 14:30)", None
         
         # Validate based on schedule type
         if schedule_type == 'weekly':
@@ -322,7 +444,8 @@ class ChimeScheduler:
             if not is_valid:
                 return False, conflict_error, None
         
-        else:
+        elif schedule_type != 'recurring':
+            # If it's not weekly, date, holiday, or recurring, it's invalid
             return False, f"Invalid schedule type: {schedule_type}", None
         
         # Generate schedule ID (simple incrementing ID)
@@ -333,11 +456,14 @@ class ChimeScheduler:
             'id': schedule_id,
             'name': name or f"Schedule {schedule_id}",
             'chime_filename': chime_filename,
-            'time': time_str,
             'schedule_type': schedule_type,
             'enabled': enabled,
             'created_at': datetime.now().isoformat()
         }
+        
+        # Add time only for non-recurring schedules
+        if schedule_type != 'recurring':
+            schedule['time'] = time_str
         
         # Add type-specific fields
         if schedule_type == 'weekly':
@@ -347,6 +473,8 @@ class ChimeScheduler:
             schedule['day'] = day
         elif schedule_type == 'holiday':
             schedule['holiday'] = holiday
+        elif schedule_type == 'recurring':
+            schedule['interval'] = interval
         
         self.schedules.append(schedule)
         
@@ -373,6 +501,30 @@ class ChimeScheduler:
         if not schedule:
             return False, f"Schedule {schedule_id} not found"
         
+        # Check for enable conflicts BEFORE making any changes
+        if 'enabled' in kwargs and kwargs['enabled'] == True:
+            current_type = schedule.get('schedule_type')
+            was_disabled = not schedule.get('enabled', True)
+            
+            # Only check conflicts if we're enabling a previously disabled schedule
+            if was_disabled:
+                has_recurring, existing_recurring = self.has_enabled_recurring_schedule()
+                
+                if current_type == 'recurring':
+                    # Trying to enable a recurring schedule
+                    if has_recurring and existing_recurring['id'] != schedule_id:
+                        return False, f"Cannot enable: recurring schedule '{existing_recurring['name']}' is already active"
+                    
+                    # Check if other schedules are enabled
+                    other_enabled = [s for s in self.get_enabled_schedules() if s.get('schedule_type') != 'recurring']
+                    if other_enabled:
+                        return False, "CONFIRM_DISABLE_OTHERS"
+                
+                else:
+                    # Trying to enable a non-recurring schedule
+                    if has_recurring:
+                        return False, f"Cannot enable while recurring schedule '{existing_recurring['name']}' is active"
+        
         # Validate and update fields
         if 'time' in kwargs:
             try:
@@ -388,7 +540,17 @@ class ChimeScheduler:
         schedule_type = kwargs.get('schedule_type', schedule.get('schedule_type', 'weekly'))
         
         # Validate type-specific fields
-        if schedule_type == 'weekly':
+        if schedule_type == 'recurring':
+            if 'interval' in kwargs:
+                interval = kwargs['interval']
+                if interval not in RECURRING_INTERVALS:
+                    return False, f"Invalid interval: {interval}"
+            # Recurring schedules should use RANDOM chime
+            if 'chime_filename' in kwargs and kwargs['chime_filename'] != 'RANDOM':
+                logger.warning(f"Recurring schedule should use RANDOM chime. Forcing to RANDOM.")
+                kwargs['chime_filename'] = 'RANDOM'
+        
+        elif schedule_type == 'weekly':
             if 'days' in kwargs:
                 days = kwargs['days']
                 if not days:
@@ -448,14 +610,14 @@ class ChimeScheduler:
                 return False, conflict_error
         
         # Update schedule
-        valid_keys = ['chime_filename', 'time', 'schedule_type', 'days', 'month', 'day', 'holiday', 'name', 'enabled']
+        valid_keys = ['chime_filename', 'time', 'schedule_type', 'days', 'month', 'day', 'holiday', 'interval', 'name', 'enabled']
         for key, value in kwargs.items():
             if key in valid_keys:
                 schedule[key] = value
         
-        # Clear last_run if schedule timing changed (time, days, date, or holiday)
+        # Clear last_run if schedule timing changed (time, days, date, holiday, or interval)
         # This allows the schedule to run again even if it already ran today
-        if any(k in kwargs for k in ['time', 'schedule_type', 'days', 'month', 'day', 'holiday']):
+        if any(k in kwargs for k in ['time', 'schedule_type', 'days', 'month', 'day', 'holiday', 'interval']):
             schedule.pop('last_run', None)
             logger.info(f"Cleared last_run for schedule {schedule_id} due to timing change")
         
@@ -465,13 +627,22 @@ class ChimeScheduler:
                 schedule.pop('month', None)
                 schedule.pop('day', None)
                 schedule.pop('holiday', None)
+                schedule.pop('interval', None)
             elif schedule_type == 'date':
                 schedule.pop('days', None)
                 schedule.pop('holiday', None)
+                schedule.pop('interval', None)
             elif schedule_type == 'holiday':
                 schedule.pop('days', None)
                 schedule.pop('month', None)
                 schedule.pop('day', None)
+                schedule.pop('interval', None)
+            elif schedule_type == 'recurring':
+                schedule.pop('days', None)
+                schedule.pop('month', None)
+                schedule.pop('day', None)
+                schedule.pop('holiday', None)
+                schedule.pop('time', None)  # Recurring doesn't need time
         
         schedule['updated_at'] = datetime.now().isoformat()
         
@@ -494,6 +665,34 @@ class ChimeScheduler:
             return True, "Schedule deleted successfully"
         else:
             return False, "Failed to save changes"
+    
+    def add_recurring_schedule_with_disable(self, chime_filename: str, interval: str, 
+                                           name: str = "", enabled: bool = True) -> Tuple[bool, str, Optional[int], int]:
+        """
+        Add a recurring schedule and disable all other schedules.
+        
+        Args:
+            chime_filename: Name of the chime file (should be 'RANDOM')
+            interval: Interval value - e.g., '15min', '1hour', 'on_boot'
+            name: Optional friendly name for the schedule
+            enabled: Whether schedule is active
+        
+        Returns:
+            (success, message, schedule_id, num_disabled)
+        """
+        # Disable all other schedules first
+        num_disabled = self.disable_all_schedules_except(exclude_type='recurring')
+        
+        # Now add the recurring schedule (bypassing the conflict check)
+        success, message, schedule_id = self.add_schedule(
+            chime_filename=chime_filename,
+            schedule_type='recurring',
+            interval=interval,
+            name=name,
+            enabled=enabled
+        )
+        
+        return success, message, schedule_id, num_disabled
     
     def get_schedule(self, schedule_id: int) -> Optional[Dict]:
         """Get a specific schedule by ID."""
@@ -681,15 +880,18 @@ class ChimeScheduler:
                    f"({schedule_type_used} schedule {most_recent['schedule']['id']} from {day_label})")
         return chime_filename
     
-    def _select_random_chime(self) -> Optional[str]:
+    def _select_random_chime(self, exclude_current: bool = True) -> Optional[str]:
         """
         Select a random chime from the Chimes library.
+        
+        Args:
+            exclude_current: If True, excludes the currently active LockChime.wav from selection
         
         Returns:
             Random chime filename or None if no valid chimes found
         """
         import random
-        from config import CHIMES_FOLDER
+        from config import CHIMES_FOLDER, LOCK_CHIME_FILENAME
         from services.partition_service import get_mount_path
         from services.lock_chime_service import validate_tesla_wav
         
@@ -698,6 +900,31 @@ class ChimeScheduler:
         if not part2_mount:
             logger.error("Cannot select random chime: part2 not mounted")
             return None
+        
+        # Get currently active chime filename if we should exclude it
+        current_chime = None
+        if exclude_current:
+            active_chime_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
+            if os.path.isfile(active_chime_path):
+                # Check Chimes library to find matching file (by content hash or size)
+                # For simplicity, we'll compare file size and assume matching size = same file
+                current_size = os.path.getsize(active_chime_path)
+                
+                chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+                if os.path.isdir(chimes_dir):
+                    try:
+                        for entry in os.listdir(chimes_dir):
+                            if not entry.lower().endswith('.wav'):
+                                continue
+                            entry_path = os.path.join(chimes_dir, entry)
+                            if os.path.isfile(entry_path):
+                                if os.path.getsize(entry_path) == current_size:
+                                    # Likely the same file - exclude it
+                                    current_chime = entry
+                                    logger.info(f"Identified current active chime as: {current_chime}")
+                                    break
+                    except OSError:
+                        pass
         
         chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
         if not os.path.isdir(chimes_dir):
@@ -711,6 +938,11 @@ class ChimeScheduler:
                 if not entry.lower().endswith('.wav'):
                     continue
                 
+                # Skip current chime if excluding
+                if exclude_current and current_chime and entry == current_chime:
+                    logger.info(f"Excluding current active chime from random selection: {entry}")
+                    continue
+                
                 full_path = os.path.join(chimes_dir, entry)
                 if os.path.isfile(full_path):
                     # Validate the chime
@@ -722,6 +954,10 @@ class ChimeScheduler:
             return None
         
         if not valid_chimes:
+            # If no valid chimes after excluding current, try including current
+            if exclude_current and current_chime:
+                logger.warning("No other valid chimes found, will include current chime")
+                return self._select_random_chime(exclude_current=False)
             logger.warning("No valid chimes found in library")
             return None
         
@@ -729,6 +965,76 @@ class ChimeScheduler:
         selected = random.choice(valid_chimes)
         logger.info(f"Randomly selected chime: {selected} from {len(valid_chimes)} valid chimes")
         return selected
+    
+    def _should_execute_recurring(self, schedule: Dict, check_time: datetime) -> Tuple[bool, Optional[str], str]:
+        """
+        Determine if a recurring schedule should execute based on interval.
+        
+        Args:
+            schedule: The recurring schedule dictionary
+            check_time: Current time to check against
+        
+        Returns:
+            (should_execute, chime_filename, reason)
+        """
+        interval = schedule.get('interval')
+        if not interval:
+            return False, None, "No interval specified for recurring schedule"
+        
+        # Check if schedule has run before
+        last_run = schedule.get('last_run')
+        if not last_run:
+            # Never run before - execute now (including on_boot)
+            chime_filename = schedule.get('chime_filename', 'RANDOM')
+            return True, chime_filename, "Recurring schedule never executed before"
+        
+        # For 'on_boot' interval, check if last_run was before system boot time
+        if interval == 'on_boot':
+            try:
+                # Get system boot time
+                with open('/proc/uptime', 'r') as f:
+                    uptime_seconds = float(f.read().split()[0])
+                boot_time = check_time - timedelta(seconds=uptime_seconds)
+                
+                # Parse last_run timestamp
+                last_run_dt = datetime.fromisoformat(last_run)
+                
+                # If last_run was before boot, execute now
+                if last_run_dt < boot_time:
+                    chime_filename = schedule.get('chime_filename', 'RANDOM')
+                    return True, chime_filename, f"On-boot: Last run ({last_run_dt.strftime('%Y-%m-%d %H:%M:%S')}) was before current boot ({boot_time.strftime('%Y-%m-%d %H:%M:%S')})"
+                else:
+                    return False, None, f"On-boot schedule already executed this boot session (ran at {last_run_dt.strftime('%H:%M:%S')})"
+                    
+            except (OSError, ValueError, IndexError) as e:
+                logger.warning(f"Error checking boot time for on_boot schedule: {e}")
+                # If we can't determine boot time, don't execute (safer to skip than duplicate)
+                return False, None, f"Unable to determine boot time: {e}"
+        
+        try:
+            last_run_dt = datetime.fromisoformat(last_run)
+            
+            # Get interval in minutes
+            interval_minutes = INTERVAL_TO_MINUTES.get(interval)
+            if interval_minutes is None:
+                return False, None, f"Invalid interval: {interval}"
+            
+            # Calculate time since last run
+            time_since_last = (check_time - last_run_dt).total_seconds() / 60
+            
+            if time_since_last >= interval_minutes:
+                # Enough time has passed
+                chime_filename = schedule.get('chime_filename', 'RANDOM')
+                return True, chime_filename, f"Interval {RECURRING_INTERVALS[interval]} elapsed (last run: {last_run_dt.strftime('%H:%M:%S')})"
+            else:
+                remaining = interval_minutes - time_since_last
+                return False, None, f"Only {time_since_last:.0f} minutes since last run, need {interval_minutes} ({remaining:.0f} min remaining)"
+                
+        except ValueError:
+            logger.warning(f"Invalid last_run timestamp for recurring schedule {schedule.get('id')}: {last_run}")
+            # If timestamp is invalid, allow execution
+            chime_filename = schedule.get('chime_filename', 'RANDOM')
+            return True, chime_filename, "Invalid last_run timestamp, executing now"
     
     def should_execute_schedule(self, schedule_id: int, check_time: Optional[datetime] = None) -> Tuple[bool, Optional[str], Optional[str]]:
         """
@@ -759,7 +1065,13 @@ class ChimeScheduler:
         if not schedule.get('enabled', True):
             return False, None, "Schedule is disabled"
         
-        # Parse schedule time
+        schedule_type = schedule.get('schedule_type', 'weekly')
+        
+        # Handle recurring schedules differently (interval-based, not time-based)
+        if schedule_type == 'recurring':
+            return self._should_execute_recurring(schedule, check_time)
+        
+        # Parse schedule time (not needed for recurring)
         try:
             time_parts = schedule['time'].split(':')
             schedule_time = datetime_time(int(time_parts[0]), int(time_parts[1]))
@@ -772,7 +1084,6 @@ class ChimeScheduler:
         current_day = check_time.day
         
         # Check if schedule matches current time/day
-        schedule_type = schedule.get('schedule_type', 'weekly')
         matches_today = False
         
         if schedule_type == 'weekly':
@@ -895,6 +1206,11 @@ def get_holidays_list() -> List[str]:
     return ALL_HOLIDAYS.copy()
 
 
+def get_recurring_intervals() -> Dict[str, str]:
+    """Get dictionary of recurring interval values and display names."""
+    return RECURRING_INTERVALS.copy()
+
+
 def get_holidays_with_dates(year: int = None) -> List[Dict[str, any]]:
     """
     Get list of all US holidays with their dates for a specific year.
@@ -958,6 +1274,13 @@ def format_schedule_display(schedule: Dict) -> str:
         Formatted string describing when the schedule runs
     """
     schedule_type = schedule.get('schedule_type', 'weekly')
+    
+    # Recurring schedules don't have time, just interval
+    if schedule_type == 'recurring':
+        interval = schedule.get('interval', 'unknown')
+        interval_display = RECURRING_INTERVALS.get(interval, interval)
+        return interval_display
+    
     time_str = schedule.get('time', '00:00')
     
     # Convert 24-hour time to 12-hour format

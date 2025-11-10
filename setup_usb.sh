@@ -591,6 +591,34 @@ systemctl restart watchdog.service 2>/dev/null || echo "  Note: Watchdog will st
 
 echo "System reliability features configured."
 
+# ===== Create Persistent Swapfile for FSCK Operations =====
+echo
+echo "Creating persistent swapfile for filesystem checks..."
+SWAP_DIR="/var/swap"
+SWAP_FILE="$SWAP_DIR/fsck.swap"
+SWAP_SIZE_MB=1024  # 1GB swap
+
+if [ ! -f "$SWAP_FILE" ]; then
+  mkdir -p "$SWAP_DIR"
+  
+  # Create swapfile using fallocate (faster than dd)
+  echo "  Creating 1GB swapfile at $SWAP_FILE..."
+  fallocate -l ${SWAP_SIZE_MB}M "$SWAP_FILE" || {
+    # Fallback to dd if fallocate fails
+    echo "  fallocate failed, using dd instead..."
+    dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$SWAP_SIZE_MB status=progress
+  }
+  
+  # Secure permissions and format as swap
+  chmod 600 "$SWAP_FILE"
+  mkswap "$SWAP_FILE"
+  
+  echo "  ✓ Swapfile created successfully"
+  echo "  Note: Swap will only be enabled during filesystem checks (not continuous)"
+else
+  echo "  Swapfile already exists at $SWAP_FILE"
+fi
+
 # ===== Create TeslaCam folder on TeslaCam partition =====
 echo
 echo "Setting up TeslaCam folder on TeslaCam partition..."

@@ -154,27 +154,34 @@ if [ -f "$IMG_CAM" ]; then
     # Detect filesystem type
     FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_DEV" 2>/dev/null || echo "unknown")
     
-    # Skip fsck for large exFAT partitions to avoid OOM issues
-    if [ "$FS_TYPE" = "exfat" ]; then
-      echo "  Skipping fsck for ${LOOP_DEV} (exFAT - would cause OOM on large partitions)"
-    elif [ "$FS_TYPE" = "vfat" ]; then
-      echo "  Checking ${LOOP_DEV} (TeslaCam)..."
-      echo "    Filesystem type: $FS_TYPE"
-      
+    echo "  Checking ${LOOP_DEV} (TeslaCam) - Type: $FS_TYPE"
+    
+    if [ "$FS_TYPE" = "exfat" ] || [ "$FS_TYPE" = "vfat" ]; then
+      # Use helper script with swap support for memory-safe checking
       set +e
-      sudo fsck.vfat -a "$LOOP_DEV" >"$LOG_FILE" 2>&1
+      sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" quick
       FSCK_STATUS=$?
       set -e
 
-      if [ $FSCK_STATUS -ge 4 ]; then
-        echo "  Critical filesystem errors detected on ${LOOP_DEV}. See $LOG_FILE" >&2
-        exit 1
-      fi
-
       if [ $FSCK_STATUS -eq 0 ]; then
-        rm -f "$LOG_FILE"
-      else
-        echo "  Filesystem repairs applied on ${LOOP_DEV}. Details saved to $LOG_FILE"
+        echo "    ✓ Filesystem healthy"
+      elif [ $FSCK_STATUS -eq 124 ]; then
+        # Timeout - likely very large partition, continue anyway
+        echo "    ⚠ Quick check timed out (large partition) - continuing"
+      elif [ $FSCK_STATUS -ge 4 ]; then
+        # Corruption detected, attempt repair
+        echo "    ⚠ Corruption detected, attempting auto-repair..."
+        set +e
+        sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" repair
+        REPAIR_STATUS=$?
+        set -e
+        
+        if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
+          echo "    ✓ Filesystem repaired successfully"
+        else
+          echo "    ✗ Repair failed (code: $REPAIR_STATUS) - see /var/log/teslausb/"
+          echo "    Continuing anyway to allow data recovery..."
+        fi
       fi
     else
       echo "    Warning: Unknown filesystem type '$FS_TYPE' for TeslaCam, skipping fsck"
@@ -207,26 +214,32 @@ if [ -f "$IMG_LIGHTSHOW" ]; then
     # Detect filesystem type
     FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_DEV" 2>/dev/null || echo "unknown")
     
-    if [ "$FS_TYPE" = "exfat" ]; then
-      echo "  Skipping fsck for ${LOOP_DEV} (exFAT - would cause OOM on large partitions)"
-    elif [ "$FS_TYPE" = "vfat" ]; then
-      echo "  Checking ${LOOP_DEV} (Lightshow)..."
-      echo "    Filesystem type: $FS_TYPE"
-      
+    echo "  Checking ${LOOP_DEV} (Lightshow) - Type: $FS_TYPE"
+    
+    if [ "$FS_TYPE" = "exfat" ] || [ "$FS_TYPE" = "vfat" ]; then
+      # Use helper script with swap support for memory-safe checking
       set +e
-      sudo fsck.vfat -a "$LOOP_DEV" >"$LOG_FILE" 2>&1
+      sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" quick
       FSCK_STATUS=$?
       set -e
 
-      if [ $FSCK_STATUS -ge 4 ]; then
-        echo "  Critical filesystem errors detected on ${LOOP_DEV}. See $LOG_FILE" >&2
-        exit 1
-      fi
-
       if [ $FSCK_STATUS -eq 0 ]; then
-        rm -f "$LOG_FILE"
-      else
-        echo "  Filesystem repairs applied on ${LOOP_DEV}. Details saved to $LOG_FILE"
+        echo "    ✓ Filesystem healthy"
+      elif [ $FSCK_STATUS -eq 124 ]; then
+        echo "    ⚠ Quick check timed out (large partition) - continuing"
+      elif [ $FSCK_STATUS -ge 4 ]; then
+        echo "    ⚠ Corruption detected, attempting auto-repair..."
+        set +e
+        sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" repair
+        REPAIR_STATUS=$?
+        set -e
+        
+        if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
+          echo "    ✓ Filesystem repaired successfully"
+        else
+          echo "    ✗ Repair failed (code: $REPAIR_STATUS) - see /var/log/teslausb/"
+          echo "    Continuing anyway to allow data recovery..."
+        fi
       fi
     else
       echo "    Warning: Unknown filesystem type '$FS_TYPE' for Lightshow, skipping fsck"

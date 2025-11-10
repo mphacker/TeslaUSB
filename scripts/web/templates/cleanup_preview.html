@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}Cleanup Preview - Tesla USB Gadget Control{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/cleanup.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="cleanup-container">
+    <h1>🔍 Cleanup Preview</h1>
+    
+    {% if cleanup_plan['total_count'] == 0 %}
+        <div class="alert alert-success">
+            <h2>✅ No Files to Delete</h2>
+            <p>Based on your current cleanup rules, no files need to be deleted.</p>
+            <p>All videos are within the configured limits.</p>
+        </div>
+        
+        <div class="button-group">
+            <a href="{{ url_for('cleanup.settings') }}" class="btn btn-secondary">← Back to Settings</a>
+        </div>
+    {% else %}
+        <div class="alert alert-warning">
+            <h2>⚠️ Cleanup Preview</h2>
+            <p>Based on your current rules, the following files will be deleted:</p>
+        </div>
+        
+        <!-- Summary -->
+        <div class="preview-summary">
+            <div class="summary-card">
+                <div class="summary-icon">🗑️</div>
+                <div class="summary-content">
+                    <h3>{{ cleanup_plan['total_count'] }}</h3>
+                    <p>Videos to Delete</p>
+                </div>
+            </div>
+            
+            <div class="summary-card">
+                <div class="summary-icon">💾</div>
+                <div class="summary-content">
+                    <h3>{{ cleanup_plan['total_size_gb'] }} GB</h3>
+                    <p>Space to Free</p>
+                </div>
+            </div>
+            
+            {% if cleanup_plan['oldest_remaining'] %}
+            <div class="summary-card">
+                <div class="summary-icon">📅</div>
+                <div class="summary-content">
+                    <h3>{{ cleanup_plan['oldest_remaining'] }}</h3>
+                    <p>Oldest Remaining</p>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        
+        <!-- Before/After Storage Impact -->
+        <div class="impact-section">
+            <h2>📊 Storage Impact</h2>
+            <div class="impact-grid">
+                <div class="impact-card">
+                    <h3>Before Cleanup</h3>
+                    <div class="storage-stat">
+                        <span class="stat-label">Used:</span>
+                        <span class="stat-value">{{ impact['before']['used_gb'] }} GB ({{ "%.1f"|format(impact['before']['percent_used']) }}%)</span>
+                    </div>
+                    <div class="storage-stat">
+                        <span class="stat-label">Free:</span>
+                        <span class="stat-value">{{ impact['before']['free_gb'] }} GB</span>
+                    </div>
+                </div>
+                
+                <div class="impact-arrow">→</div>
+                
+                <div class="impact-card">
+                    <h3>After Cleanup</h3>
+                    <div class="storage-stat">
+                        <span class="stat-label">Used:</span>
+                        <span class="stat-value">{{ impact['after']['used_gb'] }} GB ({{ "%.1f"|format(impact['after']['percent_used']) }}%)</span>
+                    </div>
+                    <div class="storage-stat">
+                        <span class="stat-label">Free:</span>
+                        <span class="stat-value">{{ impact['after']['free_gb'] }} GB</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Folder Breakdown -->
+        <div class="breakdown-section">
+            <h2>📁 Files by Folder</h2>
+            {% for folder, data in cleanup_plan['breakdown_by_folder'].items() %}
+                {% if data['count'] > 0 %}
+                <div class="folder-breakdown">
+                    <div class="folder-breakdown-header">
+                        <h3>
+                            {% if folder == 'RecentClips' %}🚗{% elif folder == 'SavedClips' %}⭐{% else %}🚨{% endif %}
+                            {{ folder }}
+                        </h3>
+                        <span class="folder-stats">
+                            {{ data['count'] }} videos, {{ "%.2f"|format(data['size'] / 1024**3) }} GB
+                        </span>
+                    </div>
+                    
+                    <details class="file-list">
+                        <summary>Show file list ({{ data['count'] }} files)</summary>
+                        <ul>
+                            {% for video in data['videos'][:50] %}
+                            <li>
+                                <span class="file-name">{{ video['path'].split('/')[-1] }}</span>
+                                <span class="file-meta">
+                                    {{ "%.1f"|format(video['size'] / 1024**2) }} MB - 
+                                    {{ video['date'].strftime('%Y-%m-%d %H:%M') }}
+                                </span>
+                            </li>
+                            {% endfor %}
+                            {% if data['count'] > 50 %}
+                            <li class="more-files">... and {{ data['count'] - 50 }} more files</li>
+                            {% endif %}
+                        </ul>
+                    </details>
+                </div>
+                {% endif %}
+            {% endfor %}
+        </div>
+        
+        <!-- Warning and Actions -->
+        <div class="alert alert-critical">
+            <h3>⚠️ Warning: This Action Cannot Be Undone!</h3>
+            <p>Once files are deleted, they cannot be recovered. Please review the file list carefully.</p>
+        </div>
+        
+        <form method="POST" action="{{ url_for('cleanup.execute') }}" class="execute-form">
+            <div class="button-group">
+                <a href="{{ url_for('cleanup.settings') }}" class="btn btn-secondary">← Cancel</a>
+                <button type="submit" name="dry_run" value="true" class="btn btn-info">
+                    🧪 Test Run (No Deletion)
+                </button>
+                <button type="submit" name="dry_run" value="false" class="btn btn-danger" 
+                        onclick="return confirm('Are you sure you want to delete {{ cleanup_plan['total_count'] }} files? This cannot be undone!');">
+                    🗑️ Execute Cleanup
+                </button>
+            </div>
+        </form>
+    {% endif %}
+</div>
+{% endblock %}

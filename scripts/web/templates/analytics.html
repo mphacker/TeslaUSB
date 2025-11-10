@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/analytics.css') }}">
+
+<div class="container">
+    <h2>📊 Storage Analytics Dashboard</h2>
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    <!-- Storage Health Status -->
+    {% set health = analytics.storage_health %}
+    {% if health.status == 'critical' %}
+        <div class="alert alert-critical">
+            <strong>⚠️ Critical Storage Alert!</strong>
+            {% for alert in health.alerts %}
+                <div>{{ alert }}</div>
+            {% endfor %}
+        </div>
+    {% elif health.status == 'warning' %}
+        <div class="alert alert-warning">
+            <strong>⚠️ Storage Warning</strong>
+            {% for alert in health.alerts %}
+                <div>{{ alert }}</div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="alert alert-success">
+            <strong>✅ Storage Healthy</strong>
+        </div>
+    {% endif %}
+    
+    <!-- Storage Management Actions -->
+    <div class="management-actions">
+        <a href="{{ url_for('cleanup.settings') }}" class="action-card">
+            <div class="action-icon">🧹</div>
+            <div class="action-content">
+                <h3>Auto-Cleanup Settings</h3>
+                <p>Configure automatic deletion of old videos to free up space</p>
+            </div>
+            <div class="action-arrow">→</div>
+        </a>
+    </div>
+
+    
+    <!-- Partition Usage Cards -->
+    <div class="analytics-grid">
+        {% for partition_name, usage in analytics.partition_usage.items() %}
+        <div class="analytics-card">
+            <h3>{{ '📹 TeslaCam Partition' if partition_name == 'part1' else '💡 LightShow Partition' }}</h3>
+            
+            {% if 'error' in usage %}
+                <div class="error-message">{{ usage.error }}</div>
+            {% else %}
+                <div class="usage-stats">
+                    <div class="stat-row">
+                        <span class="stat-label">Total Space:</span>
+                        <span class="stat-value">{{ "%.2f"|format(usage.total_gb) }} GB</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Used:</span>
+                        <span class="stat-value">{{ "%.2f"|format(usage.used_gb) }} GB</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Free:</span>
+                        <span class="stat-value">{{ "%.2f"|format(usage.free_gb) }} GB</span>
+                    </div>
+                </div>
+                
+                <!-- Progress Bar -->
+                <div class="progress-container">
+                    <div class="progress-bar 
+                        {% if usage.percent_used >= 95 %}progress-critical
+                        {% elif usage.percent_used >= 90 %}progress-warning
+                        {% elif usage.percent_used >= 80 %}progress-caution
+                        {% else %}progress-normal{% endif %}"
+                         style="width: {{ usage.percent_used }}%">
+                    </div>
+                </div>
+                <div class="progress-label">{{ "%.1f"|format(usage.percent_used) }}% Used</div>
+                
+                <div class="partition-path">{{ usage.path }}</div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    
+    <!-- Recording Time Estimate -->
+    {% set estimate = analytics.recording_estimate %}
+    {% if estimate.teslacam_hours is not none %}
+    <div class="info-card">
+        <h3>⏱️ Estimated Recording Time Remaining</h3>
+        <div class="estimate-value">
+            {% if estimate.teslacam_hours >= 24 %}
+                {{ "%.1f"|format(estimate.teslacam_hours / 24) }} days
+            {% elif estimate.teslacam_hours >= 1 %}
+                {{ "%.1f"|format(estimate.teslacam_hours) }} hours
+            {% else %}
+                {{ "%.0f"|format(estimate.teslacam_hours * 60) }} minutes
+            {% endif %}
+        </div>
+        <div class="estimate-method">{{ estimate.method }}</div>
+        <div class="estimate-confidence">Confidence: {{ estimate.confidence }}</div>
+    </div>
+    {% endif %}
+    
+    <!-- Video Statistics -->
+    <div class="analytics-section">
+        <h3>📹 Video Statistics</h3>
+        
+        {% set video_stats = analytics.video_statistics %}
+        <div class="totals-row">
+            <div class="total-stat">
+                <div class="total-number">{{ video_stats.totals.total_videos }}</div>
+                <div class="total-label">Total Videos</div>
+            </div>
+            <div class="total-stat">
+                <div class="total-number">{{ "%.2f"|format(video_stats.totals.total_size_gb) }} GB</div>
+                <div class="total-label">Total Size</div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Folder Breakdown -->
+    {% if analytics.folder_breakdown %}
+    <div class="analytics-section">
+        <h3>📁 Folder Breakdown</h3>
+        
+        <div class="folder-table-container">
+            <table class="analytics-table">
+                <thead>
+                    <tr>
+                        <th>Folder</th>
+                        <th>Videos</th>
+                        <th>Size</th>
+                        <th>% of Total</th>
+                        <th>Oldest</th>
+                        <th>Newest</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for folder in analytics.folder_breakdown %}
+                    <tr class="priority-{{ folder.priority }}">
+                        <td>
+                            <span class="folder-icon">{{ folder.icon }}</span>
+                            <strong>{{ folder.name }}</strong>
+                            <div class="folder-description">{{ folder.description }}</div>
+                        </td>
+                        <td class="number-cell">{{ folder.count }}</td>
+                        <td class="number-cell">{{ "%.2f"|format(folder.size_gb) }} GB</td>
+                        <td class="number-cell">
+                            <div class="mini-progress-container">
+                                <div class="mini-progress-bar" style="width: {{ folder.size_percent }}%"></div>
+                            </div>
+                            {{ "%.1f"|format(folder.size_percent) }}%
+                        </td>
+                        <td class="date-cell">{{ folder.oldest or 'N/A' }}</td>
+                        <td class="date-cell">{{ folder.newest or 'N/A' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- Mobile Card Layout -->
+        <div class="folder-cards-mobile">
+            {% for folder in analytics.folder_breakdown %}
+            <div class="folder-card priority-{{ folder.priority }}">
+                <div class="folder-card-header">
+                    <span class="folder-icon-large">{{ folder.icon }}</span>
+                    <div>
+                        <strong>{{ folder.name }}</strong>
+                        <div class="folder-description">{{ folder.description }}</div>
+                    </div>
+                </div>
+                <div class="folder-card-stats">
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Videos:</span>
+                        <span class="folder-stat-value">{{ folder.count }}</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Size:</span>
+                        <span class="folder-stat-value">{{ "%.2f"|format(folder.size_gb) }} GB</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">% of Total:</span>
+                        <span class="folder-stat-value">{{ "%.1f"|format(folder.size_percent) }}%</span>
+                    </div>
+                </div>
+                <div class="mini-progress-container">
+                    <div class="mini-progress-bar" style="width: {{ folder.size_percent }}%"></div>
+                </div>
+                <div class="folder-card-dates">
+                    <div><small>Oldest: {{ folder.oldest or 'N/A' }}</small></div>
+                    <div><small>Newest: {{ folder.newest or 'N/A' }}</small></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    
+    <!-- Recommendations -->
+    {% if health.recommendations %}
+    <div class="recommendations-section">
+        <h3>💡 Recommendations</h3>
+        <ul class="recommendations-list">
+            {% for recommendation in health.recommendations %}
+            <li>{{ recommendation }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    
+    <!-- Last Updated -->
+    <div class="last-updated">
+        Last updated: {{ analytics.last_updated }}
+        <button onclick="location.reload()" class="btn-refresh">🔄 Refresh</button>
+    </div>
+</div>
+{% endblock %}

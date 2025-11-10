@@ -14,12 +14,21 @@ import time
 import signal
 from pathlib import Path
 
-# Configuration
-THUMBNAIL_CACHE_DIR = "__GADGET_DIR__/thumbnails"
-MNT_DIR = "__MNT_DIR__"
+# Add web directory to Python path to import config
+# This script is in scripts/, web app is in scripts/web/
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(SCRIPT_DIR, 'web'))
+
+from config import (
+    THUMBNAIL_CACHE_DIR,
+    MNT_DIR,
+    STATE_FILE,
+    VIDEO_EXTENSIONS,
+    GADGET_DIR
+)
+
+# Read-only mount directory for present mode
 RO_MNT_DIR = "/mnt/gadget"
-STATE_FILE = "__GADGET_DIR__/state.txt"
-VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 
 # Global flag for graceful shutdown
 shutdown_requested = False

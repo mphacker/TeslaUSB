@@ -1,18 +1,46 @@
 #!/bin/bash
 set -euo pipefail
 
-#!/bin/bash
-set -euo pipefail
-
 # present_usb.sh - Present USB gadget with dual-LUN configuration
 # This script unmounts local mounts, presents the USB gadget with optimized read-only settings on LUN 1
 
-# Configuration (will be updated by setup_usb.sh)
-IMG_CAM="__GADGET_DIR__/__IMG_CAM_NAME__"
-IMG_LIGHTSHOW="__GADGET_DIR__/__IMG_LIGHTSHOW_NAME__"
-MNT_DIR="__MNT_DIR__"
-TARGET_USER="__TARGET_USER__"
-STATE_FILE="__GADGET_DIR__/state.txt"
+# Load configuration
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
+
+# Check for active file operations before proceeding
+LOCK_FILE="$GADGET_DIR/.quick_edit_part2.lock"
+LOCK_TIMEOUT=30
+LOCK_CHECK_START=$(date +%s)
+
+if [ -f "$LOCK_FILE" ]; then
+  echo "⚠️  File operation in progress (lock file detected)"
+  echo "Waiting up to ${LOCK_TIMEOUT}s for operation to complete..."
+  
+  while [ -f "$LOCK_FILE" ]; do
+    LOCK_AGE=$(($(date +%s) - LOCK_CHECK_START))
+    
+    if [ $LOCK_AGE -ge $LOCK_TIMEOUT ]; then
+      # Check if lock is stale (older than 2 minutes)
+      if [ -f "$LOCK_FILE" ]; then
+        LOCK_FILE_AGE=$(($(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)))
+        if [ $LOCK_FILE_AGE -gt 120 ]; then
+          echo "⚠️  Removing stale lock file (age: ${LOCK_FILE_AGE}s)"
+          rm -f "$LOCK_FILE"
+          break
+        fi
+      fi
+      
+      echo "❌ ERROR: Cannot switch to present mode - file operation still in progress" >&2
+      echo "Please wait for current upload/download/scheduler operation to complete" >&2
+      exit 1
+    fi
+    
+    sleep 1
+  done
+  
+  echo "✓ File operation completed, proceeding with mode switch"
+fi
 
 EPHEMERAL_LOOP=0
 LOOP_DEV_FSCK=""
@@ -126,27 +154,34 @@ if [ -f "$IMG_CAM" ]; then
     # Detect filesystem type
     FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_DEV" 2>/dev/null || echo "unknown")
     
-    # Skip fsck for large exFAT partitions to avoid OOM issues
-    if [ "$FS_TYPE" = "exfat" ]; then
-      echo "  Skipping fsck for ${LOOP_DEV} (exFAT - would cause OOM on large partitions)"
-    elif [ "$FS_TYPE" = "vfat" ]; then
-      echo "  Checking ${LOOP_DEV} (TeslaCam)..."
-      echo "    Filesystem type: $FS_TYPE"
-      
+    echo "  Checking ${LOOP_DEV} (TeslaCam) - Type: $FS_TYPE"
+    
+    if [ "$FS_TYPE" = "exfat" ] || [ "$FS_TYPE" = "vfat" ]; then
+      # Use helper script with swap support for memory-safe checking
       set +e
-      sudo fsck.vfat -a "$LOOP_DEV" >"$LOG_FILE" 2>&1
+      sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" quick
       FSCK_STATUS=$?
       set -e
 
-      if [ $FSCK_STATUS -ge 4 ]; then
-        echo "  Critical filesystem errors detected on ${LOOP_DEV}. See $LOG_FILE" >&2
-        exit 1
-      fi
-
       if [ $FSCK_STATUS -eq 0 ]; then
-        rm -f "$LOG_FILE"
-      else
-        echo "  Filesystem repairs applied on ${LOOP_DEV}. Details saved to $LOG_FILE"
+        echo "    ✓ Filesystem healthy"
+      elif [ $FSCK_STATUS -eq 124 ]; then
+        # Timeout - likely very large partition, continue anyway
+        echo "    ⚠ Quick check timed out (large partition) - continuing"
+      elif [ $FSCK_STATUS -ge 4 ]; then
+        # Corruption detected, attempt repair
+        echo "    ⚠ Corruption detected, attempting auto-repair..."
+        set +e
+        sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" repair
+        REPAIR_STATUS=$?
+        set -e
+        
+        if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
+          echo "    ✓ Filesystem repaired successfully"
+        else
+          echo "    ✗ Repair failed (code: $REPAIR_STATUS) - see /var/log/teslausb/"
+          echo "    Continuing anyway to allow data recovery..."
+        fi
       fi
     else
       echo "    Warning: Unknown filesystem type '$FS_TYPE' for TeslaCam, skipping fsck"
@@ -179,26 +214,32 @@ if [ -f "$IMG_LIGHTSHOW" ]; then
     # Detect filesystem type
     FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_DEV" 2>/dev/null || echo "unknown")
     
-    if [ "$FS_TYPE" = "exfat" ]; then
-      echo "  Skipping fsck for ${LOOP_DEV} (exFAT - would cause OOM on large partitions)"
-    elif [ "$FS_TYPE" = "vfat" ]; then
-      echo "  Checking ${LOOP_DEV} (Lightshow)..."
-      echo "    Filesystem type: $FS_TYPE"
-      
+    echo "  Checking ${LOOP_DEV} (Lightshow) - Type: $FS_TYPE"
+    
+    if [ "$FS_TYPE" = "exfat" ] || [ "$FS_TYPE" = "vfat" ]; then
+      # Use helper script with swap support for memory-safe checking
       set +e
-      sudo fsck.vfat -a "$LOOP_DEV" >"$LOG_FILE" 2>&1
+      sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" quick
       FSCK_STATUS=$?
       set -e
 
-      if [ $FSCK_STATUS -ge 4 ]; then
-        echo "  Critical filesystem errors detected on ${LOOP_DEV}. See $LOG_FILE" >&2
-        exit 1
-      fi
-
       if [ $FSCK_STATUS -eq 0 ]; then
-        rm -f "$LOG_FILE"
-      else
-        echo "  Filesystem repairs applied on ${LOOP_DEV}. Details saved to $LOG_FILE"
+        echo "    ✓ Filesystem healthy"
+      elif [ $FSCK_STATUS -eq 124 ]; then
+        echo "    ⚠ Quick check timed out (large partition) - continuing"
+      elif [ $FSCK_STATUS -ge 4 ]; then
+        echo "    ⚠ Corruption detected, attempting auto-repair..."
+        set +e
+        sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" repair
+        REPAIR_STATUS=$?
+        set -e
+        
+        if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
+          echo "    ✓ Filesystem repaired successfully"
+        else
+          echo "    ✗ Repair failed (code: $REPAIR_STATUS) - see /var/log/teslausb/"
+          echo "    Continuing anyway to allow data recovery..."
+        fi
       fi
     else
       echo "    Warning: Unknown filesystem type '$FS_TYPE' for Lightshow, skipping fsck"

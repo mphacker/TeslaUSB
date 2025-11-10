@@ -6,11 +6,20 @@ Wants=network.target
 [Service]
 Type=simple
 User=__TARGET_USER__
-WorkingDirectory=__GADGET_DIR__
-ExecStart=/usr/bin/python3 __GADGET_DIR__/web_control.py
-Restart=always
-RestartSec=3
+WorkingDirectory=__GADGET_DIR__/scripts/web
+ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/web/web_control.py
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
 TimeoutStopSec=10
+
+# Memory limits for Flask app (prevent runaway memory usage)
+MemoryMax=250M
+MemoryHigh=200M
+
+# Protect from OOM killer (critical service)
+OOMScoreAdjust=-500
 
 # Security settings - relaxed for sudo operations
 # Note: Disabled mount namespace isolation so mounts are visible system-wide

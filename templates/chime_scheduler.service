@@ -1,0 +1,26 @@
+[Unit]
+Description=TeslaUSB Chime Scheduler Check
+After=present_usb_on_boot.service
+
+[Service]
+Type=oneshot
+User=__TARGET_USER__
+WorkingDirectory=__GADGET_DIR__
+ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/check_chime_schedule.py
+StandardOutput=journal
+StandardError=journal
+
+# Nice level for low priority
+Nice=10
+
+# Memory limits (lightweight service)
+MemoryMax=50M
+
+# Restart policy for oneshot service
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Install]
+WantedBy=multi-user.target

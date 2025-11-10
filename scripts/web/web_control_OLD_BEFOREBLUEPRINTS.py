@@ -7,7 +7,7 @@ Provides buttons to switch between "Present USB" and "Edit USB" modes.
 Includes a file browser for TeslaCam videos.
 """
 
-from flask import Flask, render_template_string, redirect, url_for, flash, request, send_file, jsonify
+from flask import Flask, render_template, render_template_string, redirect, url_for, flash, request, send_file, jsonify
 import subprocess
 import os
 import socket
@@ -19,40 +19,64 @@ import time
 import hashlib
 from datetime import datetime
 
+# Import configuration
+from config import (
+    SECRET_KEY,
+    WEB_PORT,
+    GADGET_DIR,
+    MNT_DIR,
+    RO_MNT_DIR,
+    STATE_FILE,
+    LOCK_CHIME_FILENAME,
+    CHIMES_FOLDER,
+    MAX_LOCK_CHIME_SIZE,
+    USB_PARTITIONS,
+    PART_LABEL_MAP,
+    THUMBNAIL_CACHE_DIR,
+    MODE_DISPLAY,
+    VIDEO_EXTENSIONS,
+    LIGHT_SHOW_EXTENSIONS,
+    get_script_path,
+)
+
+# Import utility functions
+from utils import (
+    format_file_size,
+    parse_session_from_filename,
+    generate_thumbnail_hash,
+)
+
+# Import service layer
+from services.mode_service import (
+    current_mode,
+    detect_mode,
+    mode_display,
+    lock_chime_ui_available,
+)
+from services.partition_service import (
+    iter_mounted_partitions,
+    iter_all_partitions,
+    get_mount_path,
+)
+from services.samba_service import (
+    close_samba_share,
+    restart_samba_services,
+)
+from services.video_service import (
+    get_teslacam_path,
+    get_video_files,
+    get_session_videos,
+    get_teslacam_folders,
+)
+from services.thumbnail_service import (
+    get_thumbnail_path,
+    generate_thumbnail,
+)
+
+# Flask app initialization
+# Templates and static files are in the same directory as this script (web/)
 app = Flask(__name__)
-# Configuration (will be updated by setup_usb.sh)
-app.secret_key = "__SECRET_KEY__"
-GADGET_DIR = "__GADGET_DIR__"
-MNT_DIR = "__MNT_DIR__"
-RO_MNT_DIR = "/mnt/gadget"  # Read-only mount directory for present mode
-STATE_FILE = os.path.join(GADGET_DIR, "state.txt")
-LOCK_CHIME_FILENAME = "LockChime.wav"
-CHIMES_FOLDER = "Chimes"  # Folder on part2 where custom chimes are stored
-MAX_LOCK_CHIME_SIZE = 1024 * 1024  # 1 MiB
-USB_PARTITIONS = ("part1", "part2")
-PART_LABEL_MAP = {"part1": "gadget_part1", "part2": "gadget_part2"}
-THUMBNAIL_CACHE_DIR = os.path.join(GADGET_DIR, "thumbnails")
-
-MODE_DISPLAY = {
-    "present": ("USB Gadget Mode", "present"),
-    "edit": ("Edit Mode", "edit"),
-    "unknown": ("Unknown", "unknown"),
-}
-
-
-def close_samba_share(partition_key):
-    """Ask Samba to close and reopen the relevant share so new files appear immediately."""
-    share_name = PART_LABEL_MAP.get(partition_key, f"gadget_{partition_key}")
-    commands = [
-    ["sudo", "-n", "smbcontrol", "all", "close-share", share_name],
-    ["sudo", "-n", "smbcontrol", "all", "reload-config"],
-    ["sudo", "-n", "smbcontrol", "all", "close-share", share_name],
-    ]
-    for cmd in commands:
-        try:
-            subprocess.run(cmd, check=False, timeout=5, cwd=GADGET_DIR)
-        except Exception:
-            pass
+app.secret_key = SECRET_KEY
 
 
 def remove_other_lock_chimes(exempt_part):
@@ -70,15 +94,6 @@ def remove_other_lock_chimes(exempt_part):
             except OSError:
                 pass
     return removed
-
-
-def restart_samba_services():
-    """Force Samba to reload so new files are visible to clients."""
-    for service in ("smbd", "nmbd"):
-        try:
-            subprocess.run(["sudo", "-n", "systemctl", "restart", service], check=False, timeout=10)
-        except Exception:
-            pass
 
 
 def detect_mode():
@@ -133,232 +148,6 @@ def mode_display():
 
     return token, label, css_class, share_paths
 
-
-def lock_chime_ui_available(mode_token):
-    """Determine if the lock chime UI should be active."""
-    if mode_token == "edit":
-        return True
-    return any(True for _ in iter_mounted_partitions())
-
-
-def iter_mounted_partitions():
-    """Yield mounted USB partitions and their paths."""
-    for part in USB_PARTITIONS:
-        mount_path = os.path.join(MNT_DIR, part)
-        if os.path.isdir(mount_path):
-            yield part, mount_path
-
-
-def iter_all_partitions():
-    """Yield all accessible USB partitions based on current mode."""
-    mode = current_mode()
-    
-    if mode == "present":
-        # Use read-only mounts in present mode
-        for part in USB_PARTITIONS:
-            ro_path = os.path.join(RO_MNT_DIR, f"{part}-ro")
-            if os.path.isdir(ro_path):
-                yield part, ro_path
-    else:
-        # Use read-write mounts in edit mode
-        for part in USB_PARTITIONS:
-            rw_path = os.path.join(MNT_DIR, part)
-            if os.path.isdir(rw_path):
-                yield part, rw_path
-
-
-def get_mount_path(partition):
-    """Get the mount path for a specific partition based on current mode."""
-    if partition not in USB_PARTITIONS:
-        return None
-    
-    mode = current_mode()
-    
-    if mode == "present":
-        # Use read-only mount in present mode
-        ro_path = os.path.join(RO_MNT_DIR, f"{partition}-ro")
-        if os.path.isdir(ro_path):
-            return ro_path
-    else:
-        # Use read-write mount in edit mode
-        rw_path = os.path.join(MNT_DIR, partition)
-        if os.path.isdir(rw_path):
-            return rw_path
-    
-    return None
-
-
-def format_file_size(size_bytes):
-    """Format file size in human-readable format."""
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.2f} TB"
-
-
-def get_teslacam_path():
-    """Get the TeslaCam path based on current mode."""
-    mode = current_mode()
-    
-    if mode == "present":
-        # Use read-only mount in present mode
-        ro_path = os.path.join(RO_MNT_DIR, "part1-ro", "TeslaCam")
-        if os.path.isdir(ro_path):
-            return ro_path
-    elif mode == "edit":
-        # Use read-write mount in edit mode
-        rw_path = os.path.join(MNT_DIR, "part1", "TeslaCam")
-        if os.path.isdir(rw_path):
-            return rw_path
-    
-    return None
-
-
-def get_video_files(folder_path):
-    """Get all video files from a folder with metadata."""
-    video_extensions = ('.mp4', '.avi', '.mov', '.mkv')
-    videos = []
-    
-    try:
-        for entry in os.scandir(folder_path):
-            if entry.is_file() and entry.name.lower().endswith(video_extensions):
-                try:
-                    stat_info = entry.stat()
-                    session_info = parse_session_from_filename(entry.name)
-                    videos.append({
-                        'name': entry.name,
-                        'path': entry.path,
-                        'size': stat_info.st_size,
-                        'size_mb': round(stat_info.st_size / (1024 * 1024), 2),
-                        'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %I:%M:%S %p'),
-                        'timestamp': stat_info.st_mtime,
-                        'session': session_info['session'] if session_info else None,
-                        'camera': session_info['camera'] if session_info else None
-                    })
-                except OSError:
-                    continue
-    except OSError:
-        pass
-    
-    # Sort by modification time, newest first
-    videos.sort(key=lambda x: x['timestamp'], reverse=True)
-    return videos
-
-
-def parse_session_from_filename(filename):
-    """
-    Parse Tesla video filename to extract session and camera info.
-    Format: 2025-10-29_10-39-36-right_pillar.mp4
-    Returns: {'session': '2025-10-29_10-39-36', 'camera': 'right_pillar'}
-    """
-    import re
-    # Match pattern: YYYY-MM-DD_HH-MM-SS-camera.ext
-    pattern = r'^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.\w+$'
-    match = re.match(pattern, filename)
-    if match:
-        return {
-            'session': match.group(1),
-            'camera': match.group(2)
-        }
-    return None
-
-
-def get_session_videos(folder_path, session_id):
-    """Get all videos from a specific session."""
-    all_videos = get_video_files(folder_path)
-    session_videos = [v for v in all_videos if v['session'] == session_id]
-    # Sort by camera name for consistent ordering
-    session_videos.sort(key=lambda x: x['camera'] or '')
-    return session_videos
-
-
-def get_teslacam_folders():
-    """Get available TeslaCam subfolders."""
-    teslacam_path = get_teslacam_path()
-    if not teslacam_path:
-        return []
-    
-    folders = []
-    try:
-        for entry in os.scandir(teslacam_path):
-            if entry.is_dir():
-                folders.append({
-                    'name': entry.name,
-                    'path': entry.path
-                })
-    except OSError:
-        pass
-    
-    folders.sort(key=lambda x: x['name'])
-    return folders
-
-
-def generate_thumbnail_hash(video_path):
-    """Generate a unique hash for a video file based on path and modification time."""
-    try:
-        stat_info = os.stat(video_path)
-        unique_string = f"{video_path}_{stat_info.st_mtime}_{stat_info.st_size}"
-        return hashlib.md5(unique_string.encode()).hexdigest()
-    except OSError:
-        return None
-
-
-def get_thumbnail_path(folder, filename):
-    """Get the cached thumbnail path for a video file."""
-    teslacam_path = get_teslacam_path()
-    if not teslacam_path:
-        return None
-    
-    video_path = os.path.join(teslacam_path, folder, filename)
-    if not os.path.isfile(video_path):
-        return None
-    
-    # Generate unique hash for this video
-    video_hash = generate_thumbnail_hash(video_path)
-    if not video_hash:
-        return None
-    
-    # Create thumbnail filename
-    thumbnail_filename = f"{video_hash}.jpg"
-    thumbnail_path = os.path.join(THUMBNAIL_CACHE_DIR, thumbnail_filename)
-    
-    return thumbnail_path, video_path
-
-
-def generate_thumbnail(video_path, thumbnail_path):
-    """Generate a thumbnail from a video file using ffmpeg."""
-    try:
-        # Ensure cache directory exists
-        os.makedirs(THUMBNAIL_CACHE_DIR, exist_ok=True)
-        
-        # Use ffmpeg to extract a frame at 1 second
-        # -ss 1: seek to 1 second
-        # -i: input file
-        # -vframes 1: extract 1 frame
-        # -vf scale=160:-1: resize to width 160px, keep aspect ratio
-        # -y: overwrite output file
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-ss", "1",
-                "-i", video_path,
-                "-vframes", "1",
-                "-vf", "scale=160:-1",
-                "-y",
-                thumbnail_path
-            ],
-            capture_output=True,
-            timeout=10,
-            check=False
-        )
-        
-        if result.returncode == 0 and os.path.isfile(thumbnail_path):
-            return True
-        
-        return False
-    except Exception:
-        return False
 
 
 def cleanup_orphaned_thumbnails():
@@ -3097,11 +2886,8 @@ def index():
     """Main page with control buttons."""
     token, label, css_class, share_paths = mode_display()
     
-    # Render using template inheritance
-    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_CONTROL_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
-    
-    return render_template_string(
-        combined_template,
+    return render_template(
+        'index.html',
         page='control',
         mode_label=label,
         mode_class=css_class,
@@ -3118,9 +2904,8 @@ def file_browser():
     teslacam_path = get_teslacam_path()
     
     if not teslacam_path:
-        combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_BROWSER_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
-        return render_template_string(
-            combined_template,
+        return render_template(
+            'videos.html',
             page='browser',
             mode_label=label,
             mode_class=css_class,
@@ -3147,10 +2932,8 @@ def file_browser():
             initial_videos = all_videos[:15]
             remaining_videos = all_videos[15:]
     
-    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_BROWSER_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
-    
-    return render_template_string(
-        combined_template,
+    return render_template(
+        'videos.html',
         page='browser',
         mode_label=label,
         mode_class=css_class,
@@ -3190,13 +2973,8 @@ def view_session(folder, session):
         flash(f"No videos found for session: {session}", "error")
         return redirect(url_for("file_browser", folder=folder))
     
-    # Render using template inheritance
-    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", 
-        HTML_SESSION_PAGE.replace("{% extends HTML_TEMPLATE %}", "")
-        .replace("{% block content %}", "").replace("{% endblock %}", ""))
-    
-    return render_template_string(
-        combined_template,
+    return render_template(
+        'session.html',
         page='session',
         mode_label=label,
         mode_class=css_class,
@@ -3378,7 +3156,7 @@ def delete_all_videos(folder):
 @app.route("/present_usb", methods=["POST"])
 def present_usb():
     """Switch to USB gadget presentation mode."""
-    script_path = os.path.join(GADGET_DIR, "present_usb.sh")
+    script_path = os.path.join(GADGET_DIR, "scripts", "present_usb.sh")
     log_path = os.path.join(GADGET_DIR, "present_usb_web.log")
     
     try:
@@ -3408,7 +3186,7 @@ def present_usb():
 @app.route("/edit_usb", methods=["POST"])
 def edit_usb():
     """Switch to edit mode with local mounts and Samba."""
-    script_path = os.path.join(GADGET_DIR, "edit_usb.sh")
+    script_path = os.path.join(GADGET_DIR, "scripts", "edit_usb.sh")
     log_path = os.path.join(GADGET_DIR, "edit_usb_web.log")
     
     try:
@@ -3503,10 +3281,8 @@ def lock_chimes():
     # Sort alphabetically
     chime_files.sort(key=lambda x: x["filename"].lower())
     
-    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_LOCK_CHIMES_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
-    
-    return render_template_string(
-        combined_template,
+    return render_template(
+        'lock_chimes.html',
         page='chimes',
         mode_label=label,
         mode_class=css_class,
@@ -3933,10 +3709,8 @@ def light_shows():
     show_groups = list(files_dict.values())
     show_groups.sort(key=lambda x: x["base_name"].lower())
     
-    combined_template = HTML_TEMPLATE.replace("{% block content %}{% endblock %}", HTML_LIGHT_SHOWS_PAGE.replace("{% extends HTML_TEMPLATE %}", "").replace("{% block content %}", "").replace("{% endblock %}", ""))
-    
-    return render_template_string(
-        combined_template,
+    return render_template(
+        'light_shows.html',
         page='shows',
         mode_label=label,
         mode_class=css_class,
@@ -4066,5 +3840,5 @@ def delete_light_show(partition, base_name):
 if __name__ == "__main__":
     print(f"Starting Tesla USB Gadget Web Control")
     print(f"Gadget directory: {GADGET_DIR}")
-    print(f"Access the interface at: http://0.0.0.0:__WEB_PORT__/")
-    app.run(host="0.0.0.0", port=__WEB_PORT__, debug=False, threaded=True)
+    print(f"Access the interface at: http://0.0.0.0:{WEB_PORT}/")
+    app.run(host="0.0.0.0", port=WEB_PORT, debug=False, threaded=True)

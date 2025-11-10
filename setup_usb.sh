@@ -63,6 +63,8 @@ REQUIRED_PACKAGES=(
   samba
   samba-common-bin
   ffmpeg
+  watchdog
+  wireless-tools
 )
 
 MISSING_PACKAGES=()
@@ -80,25 +82,37 @@ else
   echo "All required packages already installed; skipping apt install."
 fi
 
-# Ensure config.txt contains dtoverlay=dwc2 under [all]
+# Ensure config.txt contains dtoverlay=dwc2 and dtparam=watchdog=on under [all]
 # Note: We use dtoverlay=dwc2 WITHOUT dr_mode parameter to allow auto-detection
 CONFIG_CHANGED=0
 if [ -f "$CONFIG_FILE" ]; then
-  # Check if dtoverlay=dwc2 exists in [all] section (not in platform-specific sections)
+  # Check if [all] section exists
   if grep -q '^\[all\]' "$CONFIG_FILE"; then
-    # [all] section exists - check if dwc2 is already there
-    if ! awk '/^\[all\]/,/^\[/ {if (/^dtoverlay=dwc2$/) exit 0} END {exit 1}' "$CONFIG_FILE"; then
+    # [all] section exists - check and add entries if needed
+    
+    # Check and add dtoverlay=dwc2 (only if not already present)
+    if ! grep -q '^dtoverlay=dwc2$' "$CONFIG_FILE"; then
       # Add dtoverlay=dwc2 right after [all] line
       sed -i '/^\[all\]/a dtoverlay=dwc2' "$CONFIG_FILE"
       echo "Added dtoverlay=dwc2 under [all] section in $CONFIG_FILE"
       CONFIG_CHANGED=1
     else
-      echo "dtoverlay=dwc2 already present under [all] in $CONFIG_FILE"
+      echo "dtoverlay=dwc2 already present in $CONFIG_FILE"
+    fi
+    
+    # Check and add dtparam=watchdog=on (only if not already present)
+    if ! grep -q '^dtparam=watchdog=on$' "$CONFIG_FILE"; then
+      # Add dtparam=watchdog=on right after [all] line
+      sed -i '/^\[all\]/a dtparam=watchdog=on' "$CONFIG_FILE"
+      echo "Added dtparam=watchdog=on under [all] section in $CONFIG_FILE"
+      CONFIG_CHANGED=1
+    else
+      echo "dtparam=watchdog=on already present in $CONFIG_FILE"
     fi
   else
-    # No [all] section - append it with dwc2
-    printf '\n[all]\ndtoverlay=dwc2\n' | tee -a "$CONFIG_FILE" >/dev/null
-    echo "Appended [all] section with dtoverlay=dwc2 to $CONFIG_FILE"
+    # No [all] section - append it with both entries
+    printf '\n[all]\ndtoverlay=dwc2\ndtparam=watchdog=on\n' >> "$CONFIG_FILE"
+    echo "Appended [all] section with dtoverlay=dwc2 and dtparam=watchdog=on to $CONFIG_FILE"
     CONFIG_CHANGED=1
   fi
 else
@@ -322,46 +336,42 @@ EOF
 # Restart Samba
 systemctl restart smbd nmbd 2>/dev/null || systemctl restart smbd || true
 
-# ===== Install and configure scripts from templates =====
+# ===== Configure scripts (no copying - run in place) =====
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_DIR="$SCRIPT_DIR/templates"
 SCRIPTS_DIR="$SCRIPT_DIR/scripts"
 
-# Function to configure template files
-configure_template() {
-  local template_file="$1"
-  local output_file="$2"
-  
-  if [ ! -f "$template_file" ]; then
-    echo "Error: Template file not found: $template_file"
-    exit 1
-  fi
-  
-  echo "Configuring: $(basename "$output_file")"
-  
-  # Generate a random secret key for the web interface
-  SECRET_KEY=$(openssl rand -hex 32 2>/dev/null || date +%s | sha256sum | head -c 32)
-  
-  # Replace placeholders in template with actual values
-  sed -e "s|__GADGET_DIR__|$GADGET_DIR|g" \
-      -e "s|__IMG_CAM_NAME__|$IMG_CAM_NAME|g" \
-      -e "s|__IMG_LIGHTSHOW_NAME__|$IMG_LIGHTSHOW_NAME|g" \
-      -e "s|__MNT_DIR__|$MNT_DIR|g" \
-      -e "s|__TARGET_USER__|$TARGET_USER|g" \
-      -e "s|__WEB_PORT__|$WEB_PORT|g" \
-      -e "s|__SECRET_KEY__|$SECRET_KEY|g" \
-      "$template_file" > "$output_file"
-  
-  chmod +x "$output_file"
-  chown "$TARGET_USER:$TARGET_USER" "$output_file"
-}
+echo "Verifying scripts directory structure..."
+if [ ! -d "$SCRIPTS_DIR/web" ]; then
+  echo "ERROR: scripts/web directory not found at $SCRIPTS_DIR/web"
+  exit 1
+fi
 
-# Install script files from templates
-echo "Installing script files from templates..."
-configure_template "$SCRIPTS_DIR/present_usb.sh" "$GADGET_DIR/present_usb.sh"
-configure_template "$SCRIPTS_DIR/edit_usb.sh" "$GADGET_DIR/edit_usb.sh"
-configure_template "$SCRIPTS_DIR/web_control.py" "$GADGET_DIR/web_control.py"
-configure_template "$SCRIPTS_DIR/generate_thumbnails.py" "$GADGET_DIR/generate_thumbnails.py"
+# Ensure GADGET_DIR and SCRIPTS_DIR are the same (run-in-place)
+if [ "$GADGET_DIR" != "$SCRIPT_DIR" ]; then
+  echo "WARNING: GADGET_DIR ($GADGET_DIR) differs from SCRIPT_DIR ($SCRIPT_DIR)"
+  echo "This setup expects to run in-place at $GADGET_DIR"
+  echo "Please ensure this script is run from $GADGET_DIR"
+fi
+
+# Create runtime directories
+mkdir -p "$GADGET_DIR/thumbnails"
+chown -R "$TARGET_USER:$TARGET_USER" "$GADGET_DIR/thumbnails"
+
+# Set permissions on scripts
+chmod +x "$SCRIPTS_DIR"/*.sh "$SCRIPTS_DIR"/*.py 2>/dev/null || true
+chown -R "$TARGET_USER:$TARGET_USER" "$SCRIPTS_DIR"
+
+echo ""
+echo "============================================"
+echo "Scripts are running in-place from:"
+echo "  $SCRIPTS_DIR"
+echo ""
+echo "Edit configuration files:"
+echo "  - $SCRIPTS_DIR/config.sh (shell scripts)"
+echo "  - $SCRIPTS_DIR/web/config.py (web app)"
+echo "============================================"
+echo ""
 
 # ===== Configure passwordless sudo for gadget scripts =====
 SUDOERS_D_DIR="/etc/sudoers.d"
@@ -377,9 +387,9 @@ cat > "$SUDOERS_ENTRY" <<EOF
 # Allow $TARGET_USER to run gadget control scripts and all required system commands
 # without password for web interface automation
 
-# First, allow the main scripts to run with full sudo privileges
-$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/present_usb.sh
-$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/edit_usb.sh
+# First, allow the main scripts to run with full sudo privileges  
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/present_usb.sh
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/edit_usb.sh
 
 # Allow all system commands used within the scripts
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl
@@ -425,24 +435,54 @@ if [ ! -f "$STATE_FILE" ]; then
   chown "$TARGET_USER:$TARGET_USER" "$STATE_FILE"
 fi
 
-# ===== Systemd services from templates =====
-echo "Installing systemd services from templates..."
+# ===== Systemd services =====
+echo "Installing systemd services..."
+
+# Helper function to process systemd service templates
+configure_service() {
+  local template_file="$1"
+  local output_file="$2"
+  
+  sed -e "s|__GADGET_DIR__|$GADGET_DIR|g" \
+      -e "s|__MNT_DIR__|$MNT_DIR|g" \
+      -e "s|__TARGET_USER__|$TARGET_USER|g" \
+      "$template_file" > "$output_file"
+}
 
 # Web UI service
 SERVICE_FILE="/etc/systemd/system/gadget_web.service"
-configure_template "$TEMPLATES_DIR/gadget_web.service" "$SERVICE_FILE"
+configure_service "$TEMPLATES_DIR/gadget_web.service" "$SERVICE_FILE"
 
 # Auto-present service  
 AUTO_SERVICE="/etc/systemd/system/present_usb_on_boot.service"
-configure_template "$TEMPLATES_DIR/present_usb_on_boot.service" "$AUTO_SERVICE"
+configure_service "$TEMPLATES_DIR/present_usb_on_boot.service" "$AUTO_SERVICE"
 
 # Thumbnail generator service
 THUMBNAIL_SERVICE="/etc/systemd/system/thumbnail_generator.service"
-configure_template "$TEMPLATES_DIR/thumbnail_generator.service" "$THUMBNAIL_SERVICE"
+configure_service "$TEMPLATES_DIR/thumbnail_generator.service" "$THUMBNAIL_SERVICE"
 
 # Thumbnail generator timer
 THUMBNAIL_TIMER="/etc/systemd/system/thumbnail_generator.timer"
-configure_template "$TEMPLATES_DIR/thumbnail_generator.timer" "$THUMBNAIL_TIMER"
+configure_service "$TEMPLATES_DIR/thumbnail_generator.timer" "$THUMBNAIL_TIMER"
+
+# Chime scheduler service
+CHIME_SCHEDULER_SERVICE="/etc/systemd/system/chime_scheduler.service"
+configure_service "$TEMPLATES_DIR/chime_scheduler.service" "$CHIME_SCHEDULER_SERVICE"
+
+# Chime scheduler timer
+CHIME_SCHEDULER_TIMER="/etc/systemd/system/chime_scheduler.timer"
+configure_service "$TEMPLATES_DIR/chime_scheduler.timer" "$CHIME_SCHEDULER_TIMER"
+
+# WiFi power management disable service
+WIFI_POWERSAVE_SERVICE="/etc/systemd/system/wifi-powersave-off.service"
+configure_service "$TEMPLATES_DIR/wifi-powersave-off.service" "$WIFI_POWERSAVE_SERVICE"
+
+# WiFi monitor service
+WIFI_MONITOR_SERVICE="/etc/systemd/system/wifi-monitor.service"
+configure_service "$TEMPLATES_DIR/wifi-monitor.service" "$WIFI_MONITOR_SERVICE"
+
+# Ensure wifi-monitor.sh is executable (it's already in scripts/)
+chmod +x "$SCRIPT_DIR/scripts/wifi-monitor.sh"
 
 # Reload systemd and enable services
 systemctl daemon-reload
@@ -454,8 +494,130 @@ systemctl enable present_usb_on_boot.service || true
 # Enable and start thumbnail generator timer
 systemctl enable --now thumbnail_generator.timer || systemctl restart thumbnail_generator.timer
 
+# Enable and start chime scheduler timer
+systemctl enable --now chime_scheduler.timer || systemctl restart chime_scheduler.timer
+
+# Enable and start WiFi monitoring services
+systemctl enable --now wifi-powersave-off.service || systemctl restart wifi-powersave-off.service
+systemctl enable --now wifi-monitor.service || systemctl restart wifi-monitor.service
+
 # Ensure the web service picks up the latest code changes
 systemctl restart gadget_web.service || true
+
+# ===== Configure System Reliability Features =====
+echo
+echo "Configuring system reliability features..."
+
+# Configure sysctl for kernel panic auto-reboot
+SYSCTL_CONF="/etc/sysctl.d/99-teslausb.conf"
+if [ ! -f "$SYSCTL_CONF" ] || ! grep -q "kernel.panic" "$SYSCTL_CONF" 2>/dev/null; then
+  echo "Creating sysctl configuration for kernel panic auto-reboot..."
+  cat > "$SYSCTL_CONF" <<'EOF'
+# TeslaUSB System Reliability Configuration
+
+# Reboot 10 seconds after kernel panic
+kernel.panic = 10
+
+# Treat kernel oops as panic (triggers auto-reboot)
+kernel.panic_on_oops = 1
+
+# Don't panic on OOM - let OOM killer work instead
+vm.panic_on_oom = 0
+
+# Swappiness (how aggressively to use swap) - low value for SD card longevity
+vm.swappiness = 10
+EOF
+  chmod 644 "$SYSCTL_CONF"
+  echo "  Created $SYSCTL_CONF"
+  
+  # Apply sysctl settings immediately
+  sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
+  echo "  Applied sysctl settings"
+else
+  echo "Sysctl configuration already exists at $SYSCTL_CONF"
+fi
+
+# Configure hardware watchdog
+WATCHDOG_CONF="/etc/watchdog.conf"
+if [ ! -f "$WATCHDOG_CONF" ] || ! grep -q "watchdog-device" "$WATCHDOG_CONF" 2>/dev/null; then
+  echo "Configuring hardware watchdog..."
+  cat > "$WATCHDOG_CONF" <<'EOF'
+# TeslaUSB Hardware Watchdog Configuration
+# Tuned for Raspberry Pi Zero 2W (512MB RAM, 4 cores)
+
+# Watchdog device
+watchdog-device = /dev/watchdog
+
+# Watchdog timeout (hardware reset after 15 seconds of no response)
+watchdog-timeout = 15
+
+# Test /dev/watchdog every 10 seconds
+interval = 10
+
+# Reboot if 1-minute load average exceeds 24 (6x the 4 cores)
+max-load-1 = 24
+
+# Reboot if free memory drops below 50MB (about 10% of 512MB)
+min-memory = 50000
+
+# Realtime priority for watchdog daemon
+realtime = yes
+priority = 1
+
+# Log to syslog
+log-dir = /var/log/watchdog
+
+# Repair binary (try to fix issues before forcing reboot)
+repair-binary = /usr/lib/watchdog/repair
+repair-timeout = 60
+
+# Test network connectivity (optional - can be enabled if desired)
+# ping = 8.8.8.8
+# ping-count = 3
+
+# Verbose logging
+verbose = yes
+EOF
+  chmod 644 "$WATCHDOG_CONF"
+  echo "  Created $WATCHDOG_CONF"
+else
+  echo "Watchdog configuration already exists at $WATCHDOG_CONF"
+fi
+
+# Enable and start watchdog service
+echo "Enabling watchdog service..."
+systemctl enable watchdog.service || true
+systemctl restart watchdog.service 2>/dev/null || echo "  Note: Watchdog will start on next reboot (requires dtparam=watchdog=on)"
+
+echo "System reliability features configured."
+
+# ===== Create Persistent Swapfile for FSCK Operations =====
+echo
+echo "Creating persistent swapfile for filesystem checks..."
+SWAP_DIR="/var/swap"
+SWAP_FILE="$SWAP_DIR/fsck.swap"
+SWAP_SIZE_MB=1024  # 1GB swap
+
+if [ ! -f "$SWAP_FILE" ]; then
+  mkdir -p "$SWAP_DIR"
+  
+  # Create swapfile using fallocate (faster than dd)
+  echo "  Creating 1GB swapfile at $SWAP_FILE..."
+  fallocate -l ${SWAP_SIZE_MB}M "$SWAP_FILE" || {
+    # Fallback to dd if fallocate fails
+    echo "  fallocate failed, using dd instead..."
+    dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$SWAP_SIZE_MB status=progress
+  }
+  
+  # Secure permissions and format as swap
+  chmod 600 "$SWAP_FILE"
+  mkswap "$SWAP_FILE"
+  
+  echo "  ✓ Swapfile created successfully"
+  echo "  Note: Swap will only be enabled during filesystem checks (not continuous)"
+else
+  echo "  Swapfile already exists at $SWAP_FILE"
+fi
 
 # ===== Create TeslaCam folder on TeslaCam partition =====
 echo
@@ -535,11 +697,19 @@ echo "Chimes folder setup complete."
 
 echo
 echo "Installation complete."
-echo " - present script: $GADGET_DIR/present_usb.sh"
-echo " - edit script:    $GADGET_DIR/edit_usb.sh"
+echo " - present script: $GADGET_DIR/scripts/present_usb.sh"
+echo " - edit script:    $GADGET_DIR/scripts/edit_usb.sh"
 echo " - web UI:         http://<pi_ip>:$WEB_PORT/  (service: gadget_web.service)"
-echo " - gadget auto-present on boot: present_usb_on_boot.service (enabled)"
+echo " - gadget auto-present on boot: present_usb_on_boot.service (with optional cleanup)"
 echo "Samba shares: use user '$TARGET_USER' and the password set in SAMBA_PASS"
+echo
+echo "System Reliability Features Enabled:"
+echo " - Hardware watchdog: Auto-reboot on system hang (watchdog.service)"
+echo " - Service auto-restart: All services restart on failure"
+echo " - Memory limits: Services limited to prevent OOM crashes"
+echo " - Kernel panic auto-reboot: 10 second timeout"
+echo " - WiFi auto-reconnect: Active monitoring (wifi-monitor.service)"
+echo " - WiFi power-save disabled: Prevents sleep-related disconnects"
 echo
 
 # Load required kernel modules before presenting USB gadget
@@ -573,15 +743,16 @@ if [ ! -d /sys/class/udc ] || [ -z "$(ls -A /sys/class/udc 2>/dev/null)" ]; then
     echo "Next steps:"
     echo "  1. Reboot the Raspberry Pi:  sudo reboot"
     echo "  2. After reboot, the USB gadget will be automatically enabled"
-    echo "  3. Access the web interface at: http://$(hostname -I | awk '{print $1}'):$WEB_PORT/"
+    echo "  3. Hardware watchdog will activate for system protection"
+    echo "  4. Access the web interface at: http://$(hostname -I | awk '{print $1}'):$WEB_PORT/"
     echo ""
     echo "The system is configured and ready, but requires a reboot to activate"
-    echo "the USB gadget hardware support."
+    echo "the USB gadget hardware support and hardware watchdog."
     echo "============================================"
     exit 0
 fi
 
 echo "USB gadget hardware detected. Switching to present mode..."
-"$GADGET_DIR/present_usb.sh"
+"$GADGET_DIR/scripts/present_usb.sh"
 echo
 echo "Setup complete! The Pi is now in present mode."

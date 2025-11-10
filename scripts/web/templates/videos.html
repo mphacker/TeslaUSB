@@ -1,0 +1,448 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+    <h2>📹 TeslaCam Video Browser</h2>
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    {% if not teslacam_available %}
+    <div class="no-videos">
+        <p><strong>TeslaCam folder is not accessible.</strong></p>
+        <p>Make sure the system is in Present or Edit mode and the TeslaCam folder exists.</p>
+    </div>
+    {% elif folders %}
+    <div class="folder-controls">
+        <div class="folder-selector">
+            <label for="folderSelect"><strong>Select Folder:</strong></label>
+            <select id="folderSelect" onchange="loadFolder(this.value)">
+                {% for folder in folders %}
+                <option value="{{ folder.name }}" {% if folder.name == current_folder %}selected{% endif %}>
+                    {{ folder.name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        {% if mode_token == 'edit' and (videos or remaining_videos) %}
+        <div class="delete-all-container">
+            <form method="post" action="{{ url_for('videos.delete_all_videos', folder=current_folder) }}" 
+                  onsubmit="return confirm('Are you sure you want to delete ALL {{ total_video_count }} videos in {{ current_folder }}? This cannot be undone!');" 
+                  style="display: inline;">
+                <button type="submit" class="btn-delete-all">🗑️ Delete All Videos</button>
+            </form>
+        </div>
+        {% endif %}
+    </div>
+    
+    <video id="videoPlayer" controls></video>
+    
+    {% if videos %}
+    <div class="video-table-container">
+        <table class="video-table">
+            <thead>
+                <tr>
+                    <th class="thumbnail-cell">Preview</th>
+                    <th>Filename</th>
+                    <th>Size</th>
+                    <th>Modified</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for video in videos %}
+                <tr>
+                    <td class="thumbnail-cell">
+                        <img src="{{ url_for('videos.get_thumbnail', folder=current_folder, filename=video.name) }}" 
+                             alt="Thumbnail" 
+                             class="video-thumbnail"
+                             loading="lazy"
+                             onerror="this.style.display='none'">
+                    </td>
+                    <td>
+                        <a href="#" class="video-name" onclick="playVideo('{{ video.name }}'); return false;">
+                            {{ video.name }}
+                        </a>
+                        {% if video.session %}
+                        <br><small style="color: #6c757d;">Session: {{ video.session }} | Camera: {{ video.camera }}</small>
+                        {% endif %}
+                    </td>
+                    <td>{{ video.size_mb }} MB</td>
+                    <td>{{ video.modified }}</td>
+                    <td>
+                        {% if video.session %}
+                        <a href="{{ url_for('videos.view_session', folder=current_folder, session=video.session) }}" 
+                           class="btn-session" 
+                           title="View all cameras for this session">
+                            📹 Session
+                        </a>
+                        {% endif %}
+                        <a href="{{ url_for('videos.download_video', folder=current_folder, filename=video.name) }}" 
+                           class="btn-download" download>
+                            ⬇️ Download
+                        </a>
+                        {% if mode_token == 'edit' %}
+                        <form method="post" action="{{ url_for('videos.delete_video', folder=current_folder, filename=video.name) }}" 
+                              onsubmit="return confirm('Are you sure you want to delete {{ video.name }}?');" 
+                              style="display: inline;">
+                            <button type="submit" class="btn-delete">🗑️ Delete</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    
+    <!-- Mobile Card Layout -->
+    <div class="mobile-card-container">
+        {% for video in videos %}
+        <div class="mobile-card">
+            <div class="mobile-card-header">
+                <img src="{{ url_for('videos.get_thumbnail', folder=current_folder, filename=video.name) }}" 
+                     alt="Thumbnail" 
+                     class="mobile-card-thumbnail"
+                     loading="lazy"
+                     onerror="this.style.display='none'">
+                <div class="mobile-card-title">
+                    <a href="#" onclick="playVideo('{{ video.name }}'); return false;">
+                        {{ video.name }}
+                    </a>
+                    {% if video.session %}
+                    <div class="mobile-card-meta">Session: {{ video.session }} | Camera: {{ video.camera }}</div>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">{{ video.size_mb }} MB</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Modified:</span>
+                    <span class="mobile-card-info-value">{{ video.modified }}</span>
+                </div>
+            </div>
+            <div class="mobile-card-actions">
+                {% if video.session %}
+                <a href="{{ url_for('videos.view_session', folder=current_folder, session=video.session) }}" 
+                   class="btn-session" 
+                   title="View all cameras for this session">
+                    📹 Session
+                </a>
+                {% endif %}
+                <a href="{{ url_for('videos.download_video', folder=current_folder, filename=video.name) }}" 
+                   class="btn-download" download>
+                    ⬇️ Download
+                </a>
+                {% if mode_token == 'edit' %}
+                <form method="post" action="{{ url_for('videos.delete_video', folder=current_folder, filename=video.name) }}" 
+                      onsubmit="return confirm('Are you sure you want to delete {{ video.name }}?');" 
+                      style="display: inline;">
+                    <button type="submit" class="btn-delete">🗑️ Delete</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="no-videos">
+        <p>No videos found in this folder.</p>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="no-videos">
+        <p>No TeslaCam folders found.</p>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Loading indicator for infinite scroll -->
+<div id="loadingIndicator" style="display: none; text-align: center; padding: 30px; margin: 20px 0;">
+    <div style="display: inline-block;">
+        <div style="border: 4px solid #f3f3f3; border-top: 4px solid #007bff; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto;"></div>
+        <p style="margin-top: 15px; color: #666; font-size: 14px;">Loading more videos...</p>
+    </div>
+</div>
+
+<style>
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+</style>
+
+<script>
+// Remaining videos data for lazy loading
+window.remainingVideos = {{ remaining_videos|tojson|safe }};
+window.currentFolder = {{ current_folder|tojson|safe }};
+window.modeToken = {{ mode_token|tojson|safe }};
+window.videosLoaded = false;
+window.isLoading = false;
+window.currentBatchIndex = 0;
+const BATCH_SIZE = 15;
+
+function loadFolder(folderName) {
+    window.location.href = "{{ url_for('videos.file_browser') }}?folder=" + encodeURIComponent(folderName);
+}
+
+function playVideo(filename) {
+    const videoPlayer = document.getElementById('videoPlayer');
+    const folder = document.getElementById('folderSelect').value;
+    videoPlayer.src = "{{ url_for('videos.stream_video', folder='FOLDER_PLACEHOLDER', filename='FILE_PLACEHOLDER') }}"
+        .replace('FOLDER_PLACEHOLDER', encodeURIComponent(folder))
+        .replace('FILE_PLACEHOLDER', encodeURIComponent(filename));
+    videoPlayer.style.display = 'block';
+    videoPlayer.play();
+    videoPlayer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Infinite scroll: Load more videos as user scrolls
+function loadMoreVideos() {
+    if (window.isLoading || !window.remainingVideos || window.remainingVideos.length === 0) {
+        return;
+    }
+    
+    const startIndex = window.currentBatchIndex;
+    const endIndex = Math.min(startIndex + BATCH_SIZE, window.remainingVideos.length);
+    const batch = window.remainingVideos.slice(startIndex, endIndex);
+    
+    if (batch.length === 0) {
+        return;
+    }
+    
+    window.isLoading = true;
+    document.getElementById('loadingIndicator').style.display = 'block';
+    
+    // Small delay to show loading indicator (smoother UX)
+    setTimeout(function() {
+        // Render desktop table rows
+        const tableBody = document.querySelector('.video-table-container tbody');
+        if (tableBody) {
+            batch.forEach(function(video) {
+                const row = createTableRow(video);
+                tableBody.appendChild(row);
+            });
+        }
+        
+        // Render mobile cards
+        const mobileContainer = document.querySelector('.mobile-card-container');
+        if (mobileContainer) {
+            batch.forEach(function(video) {
+                const card = createMobileCard(video);
+                mobileContainer.appendChild(card);
+            });
+        }
+        
+        window.currentBatchIndex = endIndex;
+        window.isLoading = false;
+        document.getElementById('loadingIndicator').style.display = 'none';
+        
+        // If all videos loaded, mark as complete
+        if (window.currentBatchIndex >= window.remainingVideos.length) {
+            window.videosLoaded = true;
+        }
+    }, 100);
+}
+
+// Create table row for desktop view
+function createTableRow(video) {
+    const tr = document.createElement('tr');
+    
+    const sessionInfo = video.session ? 
+        `<br><small style="color: #6c757d;">Session: ${escapeHtml(video.session)} | Camera: ${escapeHtml(video.camera)}</small>` : '';
+    
+    const sessionBtn = video.session ? 
+        `<a href="/videos/session/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.session)}" 
+            class="btn-session" title="View all cameras for this session">📹 Session</a>` : '';
+    
+    const deleteBtn = window.modeToken === 'edit' ? 
+        `<form method="post" action="/videos/delete/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+              onsubmit="return confirm('Are you sure you want to delete ${escapeHtml(video.name)}?');" 
+              style="display: inline;">
+            <button type="submit" class="btn-delete">🗑️ Delete</button>
+        </form>` : '';
+    
+    tr.innerHTML = `
+        <td class="thumbnail-cell">
+            <img src="/videos/thumbnail/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+                 alt="Thumbnail" 
+                 class="video-thumbnail"
+                 loading="lazy"
+                 onerror="this.style.display='none'">
+        </td>
+        <td>
+            <a href="#" class="video-name" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
+                ${escapeHtml(video.name)}
+            </a>
+            ${sessionInfo}
+        </td>
+        <td>${video.size_mb} MB</td>
+        <td>${escapeHtml(video.modified)}</td>
+        <td>
+            ${sessionBtn}
+            <a href="/videos/download/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+               class="btn-download" download>⬇️ Download</a>
+            ${deleteBtn}
+        </td>
+    `;
+    
+    return tr;
+}
+
+// Create mobile card
+function createMobileCard(video) {
+    const div = document.createElement('div');
+    div.className = 'mobile-card';
+    
+    const sessionInfo = video.session ? 
+        `<div class="mobile-card-meta">Session: ${escapeHtml(video.session)} | Camera: ${escapeHtml(video.camera)}</div>` : '';
+    
+    const sessionBtn = video.session ? 
+        `<a href="/videos/session/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.session)}" 
+            class="btn-session" title="View all cameras for this session">📹 Session</a>` : '';
+    
+    const deleteBtn = window.modeToken === 'edit' ? 
+        `<form method="post" action="/videos/delete/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+              onsubmit="return confirm('Are you sure you want to delete ${escapeHtml(video.name)}?');" 
+              style="display: inline;">
+            <button type="submit" class="btn-delete">🗑️ Delete</button>
+        </form>` : '';
+    
+    div.innerHTML = `
+        <div class="mobile-card-header">
+            <img src="/videos/thumbnail/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+                 alt="Thumbnail" 
+                 class="mobile-card-thumbnail"
+                 loading="lazy"
+                 onerror="this.style.display='none'">
+            <div class="mobile-card-title">
+                <a href="#" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
+                    ${escapeHtml(video.name)}
+                </a>
+                ${sessionInfo}
+            </div>
+        </div>
+        <div class="mobile-card-info">
+            <div class="mobile-card-info-row">
+                <span class="mobile-card-info-label">Size:</span>
+                <span class="mobile-card-info-value">${video.size_mb} MB</span>
+            </div>
+            <div class="mobile-card-info-row">
+                <span class="mobile-card-info-label">Modified:</span>
+                <span class="mobile-card-info-value">${escapeHtml(video.modified)}</span>
+            </div>
+        </div>
+        <div class="mobile-card-actions">
+            ${sessionBtn}
+            <a href="/videos/download/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
+               class="btn-download" download>⬇️ Download</a>
+            ${deleteBtn}
+        </div>
+    `;
+    
+    return div;
+}
+
+// HTML escape helper
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Scroll event handler with 85% trigger (works for both desktop table and mobile)
+function handleScroll(element) {
+    if (window.videosLoaded) {
+        return;
+    }
+    
+    let scrollPosition, pageHeight, scrollPercentage;
+    
+    // Check if scrolling within desktop table container or window (mobile)
+    if (element && element.classList && element.classList.contains('video-table-container')) {
+        // Desktop: table container scroll
+        scrollPosition = element.scrollTop + element.clientHeight;
+        pageHeight = element.scrollHeight;
+        scrollPercentage = (scrollPosition / pageHeight) * 100;
+    } else {
+        // Mobile: window scroll
+        scrollPosition = window.scrollY + window.innerHeight;
+        pageHeight = document.documentElement.scrollHeight;
+        scrollPercentage = (scrollPosition / pageHeight) * 100;
+    }
+    
+    // Trigger at 85% scroll
+    if (scrollPercentage >= 85) {
+        loadMoreVideos();
+    }
+}
+
+// Debounce scroll events
+let scrollTimeout;
+
+// Auto-play video if 'play' parameter is in URL
+window.addEventListener('DOMContentLoaded', function() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const videoToPlay = urlParams.get('play');
+    if (videoToPlay) {
+        // Small delay to ensure page is fully loaded
+        setTimeout(function() {
+            playVideo(videoToPlay);
+        }, 300);
+    }
+    
+    // Only enable infinite scroll if we have remaining videos (Videos page only)
+    if (!window.remainingVideos || window.remainingVideos.length === 0) {
+        return;
+    }
+    
+    // Check if we're on mobile (using card view) or desktop (using table view)
+    const isMobile = function() {
+        return window.innerWidth <= 768;
+    };
+    
+    // Add scroll listener to desktop table container (desktop only)
+    const tableContainer = document.querySelector('.video-table-container');
+    if (tableContainer) {
+        tableContainer.addEventListener('scroll', function() {
+            // Only handle table scroll on desktop
+            if (!isMobile()) {
+                if (scrollTimeout) {
+                    clearTimeout(scrollTimeout);
+                }
+                scrollTimeout = setTimeout(function() {
+                    handleScroll(tableContainer);
+                }, 50);
+            }
+        });
+        
+        // Initial check for desktop table
+        if (!isMobile()) {
+            setTimeout(function() {
+                handleScroll(tableContainer);
+            }, 500);
+        }
+    }
+    
+    // Add scroll listener to window (mobile only)
+    window.addEventListener('scroll', function() {
+        // Only handle window scroll on mobile
+        if (isMobile()) {
+            if (scrollTimeout) {
+                clearTimeout(scrollTimeout);
+            }
+            scrollTimeout = setTimeout(function() {
+                handleScroll(null);
+            }, 50);
+        }
+    });
+    
+    // Initial check for mobile
+    if (isMobile()) {
+        setTimeout(function() {
+            handleScroll(null);
+        }, 500);
+    }
+});
+</script>
+{% endblock %}

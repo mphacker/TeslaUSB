@@ -4,12 +4,43 @@ set -euo pipefail
 # edit_usb.sh - Switch to edit mode with local mounts and Samba
 # This script removes the USB gadget, mounts partitions locally, and starts Samba
 
-# Configuration (will be updated by setup_usb.sh)
-IMG_CAM="__GADGET_DIR__/__IMG_CAM_NAME__"
-IMG_LIGHTSHOW="__GADGET_DIR__/__IMG_LIGHTSHOW_NAME__"
-MNT_DIR="__MNT_DIR__"
-TARGET_USER="__TARGET_USER__"
-STATE_FILE="__GADGET_DIR__/state.txt"
+# Load configuration
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
+
+# Check for active file operations before proceeding
+LOCK_FILE="$GADGET_DIR/.quick_edit_part2.lock"
+LOCK_TIMEOUT=30
+LOCK_CHECK_START=$(date +%s)
+
+if [ -f "$LOCK_FILE" ]; then
+  echo "⚠️  File operation in progress (lock file detected)"
+  echo "Waiting up to ${LOCK_TIMEOUT}s for operation to complete..."
+  
+  while [ -f "$LOCK_FILE" ]; do
+    LOCK_AGE=$(($(date +%s) - LOCK_CHECK_START))
+    
+    if [ $LOCK_AGE -ge $LOCK_TIMEOUT ]; then
+      # Check if lock is stale (older than 2 minutes)
+      if [ -f "$LOCK_FILE" ]; then
+        LOCK_FILE_AGE=$(($(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0)))
+        if [ $LOCK_FILE_AGE -gt 120 ]; then
+          echo "⚠️  Removing stale lock file (age: ${LOCK_FILE_AGE}s)"
+          rm -f "$LOCK_FILE"
+          break
+        fi
+      fi
+      
+      echo "❌ ERROR: Cannot switch to edit mode - file operation still in progress" >&2
+      echo "Please wait for current upload/download/scheduler operation to complete" >&2
+      exit 1
+    fi
+    
+    sleep 1
+  done
+  
+  echo "✓ File operation completed, proceeding with mode switch"
+fi
 
 echo "Switching to edit mode (local mount + Samba)..."
 
@@ -273,61 +304,90 @@ echo "Running filesystem checks..."
 # Check TeslaCam partition
 echo "  Checking $LOOP_CAM (TeslaCam)..."
 FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "unknown")
-echo "  Filesystem type: $FS_TYPE"
+echo "    Filesystem type: $FS_TYPE"
 
-LOG_FILE="/tmp/fsck_gadget_part1.log"
-set +e
-if [ "$FS_TYPE" = "vfat" ]; then
-  sudo fsck.vfat -a "$LOOP_CAM" >"$LOG_FILE" 2>&1
+if [ "$FS_TYPE" = "vfat" ] || [ "$FS_TYPE" = "exfat" ]; then
+  # Use helper script with swap support for memory-safe checking
+  set +e
+  sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_CAM" "$FS_TYPE" quick
   FSCK_STATUS=$?
-elif [ "$FS_TYPE" = "exfat" ]; then
-  sudo fsck.exfat -a "$LOOP_CAM" >"$LOG_FILE" 2>&1
-  FSCK_STATUS=$?
-else
-  echo "  Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
-  FSCK_STATUS=0
-fi
-set -e
+  set -e
 
-if [ $FSCK_STATUS -ge 4 ]; then
-  echo "  Critical filesystem errors detected on ${LOOP_CAM}. See $LOG_FILE" >&2
-  exit 1
-fi
-
-if [ $FSCK_STATUS -eq 0 ]; then
-  rm -f "$LOG_FILE"
+  if [ $FSCK_STATUS -eq 0 ]; then
+    echo "    ✓ Filesystem healthy"
+  elif [ $FSCK_STATUS -eq 124 ]; then
+    echo "    ⚠ Quick check timed out (large partition) - attempting repair..."
+    set +e
+    sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_CAM" "$FS_TYPE" repair
+    REPAIR_STATUS=$?
+    set -e
+    
+    if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
+      echo "    ✓ Filesystem repaired"
+    else
+      echo "    ✗ Repair failed - see /var/log/teslausb/ for details" >&2
+      exit 1
+    fi
+  elif [ $FSCK_STATUS -ge 4 ]; then
+    echo "    ⚠ Corruption detected, attempting auto-repair..."
+    set +e
+    sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_CAM" "$FS_TYPE" repair
+    REPAIR_STATUS=$?
+    set -e
+    
+    if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
+      echo "    ✓ Filesystem repaired successfully"
+    else
+      echo "    ✗ Critical errors - cannot mount safely" >&2
+      exit 1
+    fi
+  fi
 else
-  echo "  Filesystem repairs applied on ${LOOP_CAM}. Details saved to $LOG_FILE"
+  echo "    Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
 fi
 
 # Check Lightshow partition
 echo "  Checking $LOOP_LIGHTSHOW (Lightshow)..."
 FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "unknown")
-echo "  Filesystem type: $FS_TYPE"
+echo "    Filesystem type: $FS_TYPE"
 
-LOG_FILE="/tmp/fsck_gadget_part2.log"
-set +e
-if [ "$FS_TYPE" = "vfat" ]; then
-  sudo fsck.vfat -a "$LOOP_LIGHTSHOW" >"$LOG_FILE" 2>&1
+if [ "$FS_TYPE" = "vfat" ] || [ "$FS_TYPE" = "exfat" ]; then
+  set +e
+  sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_LIGHTSHOW" "$FS_TYPE" quick
   FSCK_STATUS=$?
-elif [ "$FS_TYPE" = "exfat" ]; then
-  sudo fsck.exfat -a "$LOOP_LIGHTSHOW" >"$LOG_FILE" 2>&1
-  FSCK_STATUS=$?
-else
-  echo "  Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
-  FSCK_STATUS=0
-fi
-set -e
+  set -e
 
-if [ $FSCK_STATUS -ge 4 ]; then
-  echo "  Critical filesystem errors detected on ${LOOP_LIGHTSHOW}. See $LOG_FILE" >&2
-  exit 1
-fi
-
-if [ $FSCK_STATUS -eq 0 ]; then
-  rm -f "$LOG_FILE"
+  if [ $FSCK_STATUS -eq 0 ]; then
+    echo "    ✓ Filesystem healthy"
+  elif [ $FSCK_STATUS -eq 124 ]; then
+    echo "    ⚠ Quick check timed out - attempting repair..."
+    set +e
+    sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_LIGHTSHOW" "$FS_TYPE" repair
+    REPAIR_STATUS=$?
+    set -e
+    
+    if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
+      echo "    ✓ Filesystem repaired"
+    else
+      echo "    ✗ Repair failed - see /var/log/teslausb/ for details" >&2
+      exit 1
+    fi
+  elif [ $FSCK_STATUS -ge 4 ]; then
+    echo "    ⚠ Corruption detected, attempting auto-repair..."
+    set +e
+    sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_LIGHTSHOW" "$FS_TYPE" repair
+    REPAIR_STATUS=$?
+    set -e
+    
+    if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
+      echo "    ✓ Filesystem repaired successfully"
+    else
+      echo "    ✗ Critical errors - cannot mount safely" >&2
+      exit 1
+    fi
+  fi
 else
-  echo "  Filesystem repairs applied on ${LOOP_LIGHTSHOW}. Details saved to $LOG_FILE"
+  echo "    Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
 fi
 
 # Mount partitions

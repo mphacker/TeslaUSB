@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}Cleanup Report - Tesla USB Gadget Control{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/cleanup.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="cleanup-container">
+    {% if dry_run %}
+        <h1>🧪 Test Run Complete</h1>
+        <div class="alert alert-info">
+            <h2>ℹ️ Dry Run Mode</h2>
+            <p>This was a test run - no files were actually deleted.</p>
+            <p>The results below show what <em>would have</em> been deleted in a real cleanup.</p>
+        </div>
+    {% else %}
+        <h1>✅ Cleanup Complete</h1>
+        <div class="alert alert-success">
+            <h2>🎉 Files Successfully Deleted</h2>
+            <p>Your cleanup operation completed successfully.</p>
+        </div>
+    {% endif %}
+    
+    <!-- Summary -->
+    <div class="report-summary">
+        <div class="summary-card">
+            <div class="summary-icon">🗑️</div>
+            <div class="summary-content">
+                <h3>{{ deleted_count }}</h3>
+                <p>Videos {% if dry_run %}Would Be {% endif %}Deleted</p>
+            </div>
+        </div>
+        
+        <div class="summary-card">
+            <div class="summary-icon">💾</div>
+            <div class="summary-content">
+                <h3>{{ deleted_size_gb }} GB</h3>
+                <p>Space {% if dry_run %}Would Be {% endif %}Freed</p>
+            </div>
+        </div>
+    </div>
+    
+    {% if not dry_run and partition_usage %}
+    <!-- Updated Storage Status -->
+    <div class="storage-update">
+        <h2>📊 Updated Storage Status</h2>
+        <div class="partition-card">
+            <h3>🚗 TeslaCam Partition</h3>
+            <div class="storage-stat">
+                <span class="stat-label">Total Space:</span>
+                <span class="stat-value">{{ partition_usage['total_gb'] }} GB</span>
+            </div>
+            <div class="storage-stat">
+                <span class="stat-label">Used:</span>
+                <span class="stat-value">{{ partition_usage['used_gb'] }} GB ({{ "%.1f"|format(partition_usage['percent_used']) }}%)</span>
+            </div>
+            <div class="storage-stat">
+                <span class="stat-label">Free:</span>
+                <span class="stat-value">{{ partition_usage['free_gb'] }} GB</span>
+            </div>
+            
+            <div class="progress-bar-container">
+                <div class="progress-bar progress-normal" 
+                     style="width: {{ partition_usage['percent_used'] }}%"></div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    
+    <!-- Action Buttons -->
+    <div class="button-group">
+        <a href="{{ url_for('analytics.dashboard') }}" class="btn btn-primary">
+            📊 View Analytics
+        </a>
+        <a href="{{ url_for('videos.file_browser') }}" class="btn btn-secondary">
+            🎥 Browse Videos
+        </a>
+        <a href="{{ url_for('cleanup.settings') }}" class="btn btn-secondary">
+            ⚙️ Cleanup Settings
+        </a>
+        {% if dry_run %}
+        <a href="{{ url_for('cleanup.preview') }}" class="btn btn-danger">
+            ▶️ Run Real Cleanup
+        </a>
+        {% endif %}
+    </div>
+    
+    {% if not dry_run %}
+    <div class="help-text">
+        <h3>ℹ️ What's Next?</h3>
+        <ul>
+            <li>Check the <strong>Analytics</strong> dashboard to see your updated storage usage</li>
+            <li>Browse your <strong>Videos</strong> to verify the correct files were removed</li>
+            <li>Adjust cleanup <strong>Settings</strong> if you want to fine-tune the rules</li>
+            <li>Consider enabling <strong>automatic scheduling</strong> to run cleanup regularly</li>
+        </ul>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

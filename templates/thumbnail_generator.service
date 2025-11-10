@@ -7,11 +7,22 @@ Type=oneshot
 User=__TARGET_USER__
 Nice=19
 IOSchedulingClass=idle
-ExecStart=/usr/bin/python3 __GADGET_DIR__/generate_thumbnails.py
+ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/generate_thumbnails.py
 StandardOutput=journal
 StandardError=journal
-MemoryMax=100M
-MemoryHigh=80M
+
+# Memory limits (FFmpeg can be memory-intensive)
+MemoryMax=150M
+MemoryHigh=100M
+
+# Sacrifice this service first if OOM (non-critical)
+OOMScoreAdjust=500
+
+# Restart policy (oneshot services don't auto-restart by default)
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=600
 
 [Install]
 WantedBy=multi-user.target

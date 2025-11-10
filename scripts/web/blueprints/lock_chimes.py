@@ -24,6 +24,14 @@ from services.chime_scheduler_service import get_scheduler, get_holidays_list, g
 
 lock_chimes_bp = Blueprint('lock_chimes', __name__, url_prefix='/lock_chimes')
 
+# Volume preset mapping (LUFS values to friendly names)
+VOLUME_PRESETS = {
+    -23: 'Broadcast',
+    -16: 'Streaming', 
+    -14: 'Loud',
+    -12: 'Maximum'
+}
+
 
 @lock_chimes_bp.route("/")
 def lock_chimes():
@@ -214,11 +222,22 @@ def upload_lock_chime():
     # Final filename will always be .wav
     filename = os.path.splitext(os.path.basename(file.filename))[0] + ".wav"
     
+    # Get normalization parameters
+    normalize = request.form.get('normalize', 'false').lower() == 'true'
+    target_lufs = float(request.form.get('target_lufs', -16))
+    
+    # Validate LUFS is one of our presets
+    if normalize and target_lufs not in VOLUME_PRESETS:
+        if is_ajax:
+            return jsonify({"success": False, "error": "Invalid volume preset"}), 400
+        flash("Invalid volume preset", "error")
+        return redirect(url_for("lock_chimes.lock_chimes"))
+    
     # Get part2 mount path (may be None in present mode, which is fine)
     part2_mount = get_mount_path("part2")
     
     # Use the service function (works in both modes)
-    success, message = upload_chime_file(file, filename, part2_mount)
+    success, message = upload_chime_file(file, filename, part2_mount, normalize, target_lufs)
     
     if success:
         # Force Samba to see the new file (only in Edit mode)

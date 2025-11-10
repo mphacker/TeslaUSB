@@ -929,3 +929,134 @@ button:disabled {
         text-align: center;
     }
 }
+
+/* Collapsible details styling */
+details summary {
+    transition: all 0.2s ease;
+}
+
+details summary:hover {
+    background: #d1e7fd !important;
+}
+
+details[open] summary span:first-of-type {
+    transform: rotate(90deg);
+    display: inline-block;
+    transition: transform 0.2s ease;
+}
+
+details summary span:first-of-type {
+    transition: transform 0.2s ease;
+}
+
+/* Volume Normalization Slider Styles */
+.volume-slider-container {
+    position: relative;
+    margin: 15px 0;
+}
+
+#target-lufs {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 8px;
+    background: linear-gradient(to right, #4CAF50, #FFC107, #FF9800, #F44336);
+    border-radius: 4px;
+    outline: none;
+    cursor: pointer;
+}
+
+#target-lufs::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 24px;
+    height: 24px;
+    background: white;
+    border: 3px solid #2196F3;
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+#target-lufs::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+    box-shadow: 0 3px 6px rgba(0,0,0,0.4);
+}
+
+#target-lufs::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+    background: white;
+    border: 3px solid #2196F3;
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+#target-lufs::-moz-range-thumb:hover {
+    transform: scale(1.1);
+    box-shadow: 0 3px 6px rgba(0,0,0,0.4);
+}
+
+.slider-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 8px;
+    font-size: 11px;
+    color: #666;
+    font-weight: 500;
+}
+
+.slider-labels span {
+    flex: 1;
+    text-align: center;
+}
+
+.slider-labels span:first-child {
+    text-align: left;
+}
+
+.slider-labels span:last-child {
+    text-align: right;
+}
+
+.selected-level {
+    margin-top: 12px;
+    padding: 10px;
+    background: white;
+    border-radius: 4px;
+    text-align: center;
+    border: 1px solid #e0e0e0;
+}
+
+.selected-level strong {
+    display: block;
+    font-size: 15px;
+    color: #2196F3;
+    margin-bottom: 4px;
+}
+
+.selected-level small {
+    color: #666;
+    font-style: italic;
+    font-size: 12px;
+}
+
+@media (max-width: 768px) {
+    .slider-labels {
+        font-size: 10px;
+    }
+    
+    #target-lufs::-webkit-slider-thumb {
+        width: 28px;
+        height: 28px;
+    }
+    
+    #target-lufs::-moz-range-thumb {
+        width: 28px;
+        height: 28px;
+    }
+}
+

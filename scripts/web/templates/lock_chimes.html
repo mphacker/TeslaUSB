@@ -10,38 +10,11 @@
         <p style="margin: 8px 0 0 0; font-size: 13px; color: #666;">Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
     </div>
     
-    <div class="folder-controls" id="chimeUploadControls">
-        <form method="post" action="{{ url_for('lock_chimes.upload_lock_chime') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="chimeUploadForm">
-            <label for="chime_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload New Chime to Library:</label>
-            <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
-                <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required 
-                       style="padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; flex: 1; min-width: 250px; max-width: 400px; font-size: 14px;">
-                <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0;">📤 Upload</button>
-            </div>
-            <p style="margin: 0 0 10px 0; font-size: 12px; color: #666;">
-                Tesla Requirements: PCM 16-bit, 44.1 kHz, mono/stereo, under 1MB<br>
-                Upload WAV or MP3 files - they will be automatically converted and trimmed if needed
-            </p>
-        </form>
-        <!-- Upload Progress Bar -->
-        <div id="chimeUploadProgress" style="display: none; margin-bottom: 20px;">
-            <div style="background: #f0f0f0; border-radius: 8px; padding: 15px; border: 2px solid #007bff;">
-                <h4 style="margin: 0 0 10px 0; color: #007bff;">📤 Uploading Chime...</h4>
-                <div style="background: #e0e0e0; border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
-                    <div id="chimeProgressBar" style="background: linear-gradient(90deg, #007bff, #0056b3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
-                        0%
-                    </div>
-                </div>
-                <p id="chimeUploadStatus" style="margin: 0; font-size: 13px; color: #666;">Preparing upload...</p>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Active Lock Chime -->
+    <!-- Active Lock Chime - Moved to top -->
     {% if active_chime %}
     <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #4caf50;">
         <h3 style="margin: 0 0 10px 0; color: #2e7d32;">🔊 Active Lock Chime</h3>
-        <div style="display: flex; align-items: center; gap: 15px;">
+        <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
             <div>
                 <strong>{{ active_chime.filename }}</strong><br>
                 <span style="color: #666; font-size: 13px;">{{ active_chime.size_str }}</span>
@@ -57,8 +30,68 @@
     </div>
     {% endif %}
     
+    <!-- Upload Controls - Collapsible -->
+    <details class="folder-controls" id="chimeUploadControls" style="margin-bottom: 20px;">
+        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: #e3f2fd; border-radius: 8px; border-left: 4px solid #2196f3; color: #1976d2; font-size: 18px; list-style: none; user-select: none;">
+            <span style="display: inline-block; margin-right: 5px;">▶</span> 📤 Upload New Chime
+        </summary>
+        
+        <div style="background: #f5f5f5; padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid #2196f3; border-right: 1px solid #2196f3; border-bottom: 1px solid #2196f3; margin-top: -8px;">
+            <form method="post" action="{{ url_for('lock_chimes.upload_lock_chime') }}" enctype="multipart/form-data" id="chimeUploadForm">
+                <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
+                    <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required 
+                           style="padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; flex: 1; min-width: 250px; max-width: 400px; font-size: 14px;">
+                    <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0;">📤 Upload</button>
+                </div>
+                <p style="margin: 0 0 15px 0; font-size: 12px; color: #666;">
+                    WAV or MP3 files - auto-converted to Tesla format (PCM 16-bit, 44.1 kHz, under 1MB)
+                </p>
+                
+                <!-- Volume Normalization Controls -->
+                <div style="background: white; padding: 12px; border-radius: 6px; border: 1px solid #ddd;">
+                    <label style="display: flex; align-items: center; margin-bottom: 10px; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="normalize-on-upload" name="normalize" value="true" checked style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;"> 
+                        <span style="font-weight: 600; font-size: 14px;">🔊 Normalize volume on upload</span>
+                    </label>
+                    
+                    <div id="normalization-settings">
+                        <div class="volume-slider-container" style="margin-bottom: 10px;">
+                            <input type="range" id="target-lufs" 
+                                   min="0" max="3" value="1" step="1">
+                            
+                            <div class="slider-labels">
+                                <span>Broadcast</span>
+                                <span>Streaming</span>
+                                <span>Loud</span>
+                                <span>Maximum</span>
+                            </div>
+                        </div>
+                        
+                        <div class="selected-level">
+                            <strong id="current-level">Streaming</strong>
+                            <small id="level-description">Recommended for balanced playback</small>
+                        </div>
+                    </div>
+                </div>
+            </form>
+            
+            <!-- Upload Progress Bar -->
+            <div id="chimeUploadProgress" style="display: none; margin-top: 15px;">
+                <div style="background: #f0f0f0; border-radius: 8px; padding: 15px; border: 2px solid #007bff;">
+                    <h4 style="margin: 0 0 10px 0; color: #007bff;">📤 Uploading Chime...</h4>
+                    <div style="background: #e0e0e0; border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                        <div id="chimeProgressBar" style="background: linear-gradient(90deg, #007bff, #0056b3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
+                            0%
+                        </div>
+                    </div>
+                    <p id="chimeUploadStatus" style="margin: 0; font-size: 13px; color: #666;">Preparing upload...</p>
+                </div>
+            </div>
+        </div>
+    </details>
+    
     <!-- Chime Scheduler -->
-    <details {% if schedules %}open{% endif %} style="margin-bottom: 20px;">
+    <details style="margin-bottom: 20px;">
         <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: #e3f2fd; border-radius: 8px; border-left: 4px solid #2196f3; color: #1976d2; font-size: 18px; list-style: none;">
             <span style="display: inline-block; margin-right: 5px;">▶</span> 📅 Chime Scheduler {% if schedules %}({{ schedules|length }} schedule{{ 's' if schedules|length != 1 else '' }}){% endif %}
         </summary>
@@ -85,6 +118,7 @@
                         <select id="chime-select" name="chime_filename" required
                                 style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
                             <option value="">-- Select a chime --</option>
+                            <option value="RANDOM">🎲 Random Chime</option>
                             {% for chime in chime_files %}
                                 {% if chime.is_valid %}
                                 <option value="{{ chime.filename }}">{{ chime.filename }}</option>
@@ -221,7 +255,7 @@
                             {% endif %}
                         </div>
                         <div style="font-size: 13px; color: #666;">
-                            <div>🔔 {{ schedule.chime_filename }}</div>
+                            <div>🔔 {% if schedule.chime_filename == 'RANDOM' %}🎲 Random Chime{% else %}{{ schedule.chime_filename }}{% endif %}</div>
                             <div>⏰ {{ format_schedule(schedule) }}</div>
                         </div>
                     </div>

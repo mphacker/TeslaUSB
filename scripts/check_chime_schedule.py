@@ -120,64 +120,92 @@ def main():
         # Load scheduler
         scheduler = get_scheduler()
         
-        # Get which chime should be active now
-        target_chime = scheduler.get_active_chime()
+        # Get all enabled schedules
+        enabled_schedules = scheduler.list_schedules(enabled_only=True)
         
-        if not target_chime:
-            logger.info("No schedule applies at this time, keeping current chime")
+        if not enabled_schedules:
+            logger.info("No enabled schedules found")
             return 0
         
-        logger.info(f"Schedule says chime should be: {target_chime}")
+        logger.info(f"Checking {len(enabled_schedules)} enabled schedule(s)")
+        
+        # Check each schedule to see if it should execute
+        # We want to find the MOST RECENT schedule that should have run but hasn't
+        eligible_schedules = []
+        
+        for schedule in enabled_schedules:
+            schedule_id = schedule['id']
+            should_run, chime_filename, reason = scheduler.should_execute_schedule(schedule_id)
+            
+            logger.info(f"Schedule {schedule_id} ({schedule.get('name', 'Unnamed')}): {reason}")
+            
+            if should_run:
+                eligible_schedules.append({
+                    'schedule': schedule,
+                    'chime_filename': chime_filename,
+                    'scheduled_time': schedule['time']
+                })
+        
+        if not eligible_schedules:
+            logger.info("No schedules need to be executed at this time")
+            return 0
+        
+        # If multiple schedules are eligible, pick the most recent one
+        # Example: Device offline until 3:15pm, schedules at 8am, 10am, 3pm should pick 3pm
+        # Sort by scheduled time (descending) to get the latest time first
+        eligible_schedules.sort(key=lambda x: x['scheduled_time'], reverse=True)
+        
+        # If there are ties (same time), apply precedence: Holiday > Date > Weekly
+        schedule_to_execute = None
+        chime_to_use = None
+        latest_time = eligible_schedules[0]['scheduled_time']
+        
+        # Get all schedules at the latest time
+        schedules_at_latest_time = [s for s in eligible_schedules if s['scheduled_time'] == latest_time]
+        
+        if len(schedules_at_latest_time) == 1:
+            schedule_to_execute = schedules_at_latest_time[0]['schedule']
+            chime_to_use = schedules_at_latest_time[0]['chime_filename']
+        else:
+            # Multiple schedules at same time - use precedence
+            type_priority = {'holiday': 3, 'date': 2, 'weekly': 1}
+            schedules_at_latest_time.sort(
+                key=lambda x: type_priority.get(x['schedule'].get('schedule_type', 'weekly'), 0),
+                reverse=True
+            )
+            schedule_to_execute = schedules_at_latest_time[0]['schedule']
+            chime_to_use = schedules_at_latest_time[0]['chime_filename']
+        
+        if len(eligible_schedules) > 1:
+            logger.info(f"Found {len(eligible_schedules)} eligible schedules, selected most recent at {latest_time}")
+        
+        logger.info(f"Schedule {schedule_to_execute['id']} ({schedule_to_execute.get('name', 'Unnamed')}) at {latest_time} should execute with chime: {chime_to_use}")
+        
+        # Handle random chime selection
+        if chime_to_use == 'RANDOM':
+            actual_chime = scheduler._select_random_chime()
+            if not actual_chime:
+                logger.error("Random chime requested but no valid chimes found")
+                return 1
+            logger.info(f"Random chime selected: {actual_chime}")
+            chime_to_use = actual_chime
         
         # Get current mode
         mode = current_mode()
         logger.info(f"Current mode: {mode}")
         
-        # In present mode, we don't need to validate file existence
-        # because quick_edit_part2() will handle mounting part2 RW temporarily
-        # In edit mode, validate the chime file exists before proceeding
-        if mode == 'edit':
-            part2_mount = get_mount_path('part2')
-            
-            if not part2_mount:
-                logger.error("Part2 not mounted, cannot apply schedule")
-                return 1
-            
-            # Verify target chime exists in library
-            chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
-            target_chime_path = os.path.join(chimes_dir, target_chime)
-            
-            if not os.path.isfile(target_chime_path):
-                logger.error(f"Scheduled chime not found in library: {target_chime}")
-                return 1
-            
-            # Check if current active chime is already the target
-            # Use MD5 hash comparison to definitively check if files are identical
-            active_chime_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
-            
-            if os.path.isfile(active_chime_path):
-                active_md5 = get_file_md5(active_chime_path)
-                target_md5 = get_file_md5(target_chime_path)
-                
-                if active_md5 and target_md5 and active_md5 == target_md5:
-                    # Files are identical - no need to replace
-                    logger.info(f"Active chime is already {target_chime} (MD5 match), skipping replacement")
-                    return 0
-                
-                logger.info(f"Active chime differs from {target_chime} (MD5 mismatch), will replace")
-        else:
-            # In present mode, we can't easily check MD5 without mounting
-            # Let set_active_chime handle it via quick_edit_part2
-            logger.info("Present mode: delegating file operations to set_active_chime")
-            part2_mount = None  # Will be handled by quick_edit_part2
+        # Get part2 mount path (will be None in present mode, handled by set_active_chime)
+        part2_mount = get_mount_path('part2') if mode == 'edit' else None
         
-        # Apply the schedule - set the target chime as active
-        logger.info(f"Applying schedule: setting {target_chime} as active chime")
+        # Apply the schedule - set the chime as active
+        logger.info(f"Applying schedule: setting {chime_to_use} as active chime")
         
         # set_active_chime is mode-aware and will use quick_edit_part2() in present mode
-        success, message = set_active_chime(target_chime, part2_mount)
+        success, message = set_active_chime(chime_to_use, part2_mount)
         
         if success:
+            # Record the execution
+            scheduler.record_execution(schedule_to_execute['id'])
             logger.info(f"✓ Schedule applied successfully: {message}")
             return 0
         else:

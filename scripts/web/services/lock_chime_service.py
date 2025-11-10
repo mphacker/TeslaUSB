@@ -198,6 +198,92 @@ def reencode_wav_for_tesla(input_path, output_path, progress_callback=None):
     return False, f"All re-encoding attempts failed. Last error: {last_error}", {}
 
 
+def normalize_audio(input_path, target_lufs=-16):
+    """
+    Two-pass loudness normalization using FFmpeg's loudnorm filter.
+    
+    This ensures consistent playback volume across all chime files by normalizing
+    to a target loudness level measured in LUFS (Loudness Units relative to Full Scale).
+    
+    Args:
+        input_path: Path to the input WAV file
+        target_lufs: Target loudness in LUFS (typically -23 to -12)
+                    -23 = Broadcast standard (quiet)
+                    -16 = Streaming services (recommended)
+                    -14 = Apple Music (loud)
+                    -12 = Maximum safe level
+    
+    Returns:
+        Path to normalized temporary file
+    
+    Raises:
+        Exception if normalization fails
+    """
+    import json
+    import tempfile
+    
+    # First pass: measure loudness
+    logger.info(f"Analyzing loudness for normalization (target: {target_lufs} LUFS)")
+    
+    result = subprocess.run([
+        'ffmpeg', '-i', input_path,
+        '-af', f'loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json',
+        '-f', 'null', '-'
+    ], capture_output=True, text=True, timeout=30)
+    
+    # Extract JSON from FFmpeg stderr output
+    stderr = result.stderr
+    json_start = stderr.rfind('{')
+    if json_start == -1:
+        raise ValueError("Could not find loudness analysis data in FFmpeg output")
+    
+    try:
+        stats = json.loads(stderr[json_start:])
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse FFmpeg loudness stats: {e}")
+        raise ValueError("Failed to analyze audio loudness")
+    
+    # Second pass: apply normalization with measured values
+    temp_fd, temp_output = tempfile.mkstemp(suffix='.wav')
+    os.close(temp_fd)  # Close the file descriptor, we just need the path
+    
+    try:
+        logger.info(f"Applying normalization (measured input: {stats.get('input_i', 'N/A')} LUFS)")
+        
+        subprocess.run([
+            'ffmpeg', '-i', input_path,
+            '-af', (f'loudnorm=I={target_lufs}:TP=-1.5:LRA=11:'
+                    f'measured_I={stats["input_i"]}:'
+                    f'measured_LRA={stats["input_lra"]}:'
+                    f'measured_TP={stats["input_tp"]}:'
+                    f'measured_thresh={stats["input_thresh"]}:'
+                    f'offset={stats["target_offset"]}'),
+            '-ar', '44100',  # Tesla requirement
+            '-y',  # Overwrite output
+            temp_output
+        ], check=True, capture_output=True, timeout=30)
+        
+        # Verify output was created
+        if not os.path.exists(temp_output) or os.path.getsize(temp_output) == 0:
+            raise ValueError("Normalization produced empty file")
+        
+        logger.info(f"Successfully normalized audio to {target_lufs} LUFS")
+        return temp_output
+        
+    except subprocess.CalledProcessError as e:
+        # Clean up temp file on error
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+        stderr_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ''
+        logger.error(f"FFmpeg normalization failed: {stderr_msg}")
+        raise ValueError(f"Audio normalization failed: {stderr_msg[:200]}")
+    except Exception as e:
+        # Clean up temp file on error
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+        raise
+
+
 def replace_lock_chime(source_path, destination_path):
     """Swap in the selected WAV using temporary file to invalidate all caches."""
     src_size = os.path.getsize(source_path)
@@ -342,7 +428,7 @@ def replace_lock_chime(source_path, destination_path):
         os.remove(backup_path)
 
 
-def upload_chime_file(uploaded_file, filename, part2_mount_path=None):
+def upload_chime_file(uploaded_file, filename, part2_mount_path=None, normalize=False, target_lufs=-16):
     """
     Upload a new chime file to the Chimes/ library.
     
@@ -350,7 +436,7 @@ def upload_chime_file(uploaded_file, filename, part2_mount_path=None):
     - In Edit mode: Uses normal file operations
     - In Present mode: Uses quick_edit_part2() to temporarily mount RW
     
-    Strategy: In Present mode, do ALL processing (MP3 conversion, validation, re-encoding)
+    Strategy: In Present mode, do ALL processing (MP3 conversion, validation, re-encoding, normalization)
     in /tmp FIRST, then use quick_edit just to copy the final file. This keeps the
     quick_edit operation short (< 1 second) to avoid timeouts and process kills.
     
@@ -358,6 +444,8 @@ def upload_chime_file(uploaded_file, filename, part2_mount_path=None):
         uploaded_file: FileStorage object from Flask request
         filename: Desired filename (must end in .wav)
         part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
+        normalize: Whether to apply volume normalization (default: False)
+        target_lufs: Target loudness in LUFS if normalizing (default: -16)
     
     Returns:
         (success: bool, message: str)
@@ -416,18 +504,41 @@ def upload_chime_file(uploaded_file, filename, part2_mount_path=None):
             
             if not is_valid:
                 logger.info(f"File needs re-encoding: {msg}")
-                temp_output = os.path.join(temp_dir, 'final.wav')
+                temp_output = os.path.join(temp_dir, 'reencoded.wav')
                 success, reencode_msg, _ = reencode_wav_for_tesla(temp_input, temp_output)
                 
                 if not success:
                     shutil.rmtree(temp_dir)
                     return False, f"Upload failed: {reencode_msg}"
                 
-                final_file = temp_output
+                temp_input = temp_output
                 reencoded = True
             else:
-                final_file = temp_input
                 reencoded = False
+            
+            # Apply volume normalization if requested
+            normalized = False
+            if normalize:
+                try:
+                    logger.info(f"Applying volume normalization (target: {target_lufs} LUFS)")
+                    temp_normalized = normalize_audio(temp_input, target_lufs)
+                    
+                    # Check if normalized file exceeds size limit
+                    normalized_size = os.path.getsize(temp_normalized)
+                    if normalized_size > MAX_LOCK_CHIME_SIZE:
+                        logger.warning(f"Normalized file too large ({normalized_size} bytes), using original")
+                        os.remove(temp_normalized)
+                        # Continue with un-normalized file
+                    else:
+                        # Replace input with normalized version
+                        os.remove(temp_input)
+                        temp_input = temp_normalized
+                        normalized = True
+                except Exception as e:
+                    logger.warning(f"Normalization failed: {e}, continuing without normalization")
+                    # Continue with un-normalized file
+            
+            final_file = temp_input
             
             # Now do a quick copy operation
             def _do_quick_copy():
@@ -459,10 +570,19 @@ def upload_chime_file(uploaded_file, filename, part2_mount_path=None):
             shutil.rmtree(temp_dir)
             
             if success:
+                msg_parts = [f"Successfully uploaded {filename}"]
                 if reencoded:
-                    return True, f"Successfully uploaded {filename} (re-encoded for Tesla compatibility)"
+                    msg_parts.append("re-encoded for Tesla")
+                if normalized:
+                    # Map LUFS to friendly names
+                    lufs_names = {-23: "Broadcast", -16: "Streaming", -14: "Loud", -12: "Maximum"}
+                    level_name = lufs_names.get(target_lufs, f"{target_lufs} LUFS")
+                    msg_parts.append(f"normalized to {level_name} level")
+                
+                if len(msg_parts) > 1:
+                    return True, f"{msg_parts[0]} ({', '.join(msg_parts[1:])})"
                 else:
-                    return True, f"Successfully uploaded {filename}"
+                    return True, msg_parts[0]
             else:
                 return False, copy_msg
                 
@@ -522,25 +642,65 @@ def upload_chime_file(uploaded_file, filename, part2_mount_path=None):
                 # Validate the file
                 is_valid, msg = validate_tesla_wav(temp_path)
                 
-                if is_valid:
-                    # File is valid, move to final location
-                    if os.path.exists(dest_path):
-                        os.remove(dest_path)
-                    os.rename(temp_path, dest_path)
-                    return True, f"Successfully uploaded {filename}"
-                else:
+                if not is_valid:
                     # File needs re-encoding
                     logger.info(f"File needs re-encoding: {msg}")
-                    success, reencode_msg, _ = reencode_wav_for_tesla(temp_path, dest_path)
+                    temp_reencoded = dest_path.replace('.wav', '_reencoded.wav')
+                    success, reencode_msg, _ = reencode_wav_for_tesla(temp_path, temp_reencoded)
                     
-                    # Clean up temp file
+                    # Clean up original temp file
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
                     
-                    if success:
-                        return True, f"Successfully uploaded {filename} (re-encoded for Tesla compatibility)"
-                    else:
+                    if not success:
                         return False, f"Upload failed: {reencode_msg}"
+                    
+                    temp_path = temp_reencoded
+                    reencoded = True
+                else:
+                    reencoded = False
+                
+                # Apply volume normalization if requested
+                normalized = False
+                if normalize:
+                    try:
+                        logger.info(f"Applying volume normalization (target: {target_lufs} LUFS)")
+                        temp_normalized = normalize_audio(temp_path, target_lufs)
+                        
+                        # Check if normalized file exceeds size limit
+                        normalized_size = os.path.getsize(temp_normalized)
+                        if normalized_size > MAX_LOCK_CHIME_SIZE:
+                            logger.warning(f"Normalized file too large ({normalized_size} bytes), using original")
+                            os.remove(temp_normalized)
+                            # Continue with un-normalized file
+                        else:
+                            # Replace temp with normalized version
+                            os.remove(temp_path)
+                            shutil.move(temp_normalized, temp_path)
+                            normalized = True
+                    except Exception as e:
+                        logger.warning(f"Normalization failed: {e}, continuing without normalization")
+                        # Continue with un-normalized file
+                
+                # Move to final location
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
+                os.rename(temp_path, dest_path)
+                
+                # Build success message
+                msg_parts = [f"Successfully uploaded {filename}"]
+                if reencoded:
+                    msg_parts.append("re-encoded for Tesla")
+                if normalized:
+                    # Map LUFS to friendly names
+                    lufs_names = {-23: "Broadcast", -16: "Streaming", -14: "Loud", -12: "Maximum"}
+                    level_name = lufs_names.get(target_lufs, f"{target_lufs} LUFS")
+                    msg_parts.append(f"normalized to {level_name} level")
+                
+                if len(msg_parts) > 1:
+                    return True, f"{msg_parts[0]} ({', '.join(msg_parts[1:])})"
+                else:
+                    return True, msg_parts[0]
                         
             except subprocess.TimeoutExpired:
                 return False, "File conversion timed out"

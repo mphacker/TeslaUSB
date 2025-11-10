@@ -660,9 +660,184 @@ class ChimeScheduler:
         chime_filename = most_recent['schedule']['chime_filename']
         day_label = "today" if most_recent['day_offset'] == 0 else "yesterday"
         
+        # Handle random chime selection
+        if chime_filename == 'RANDOM':
+            random_chime = self._select_random_chime()
+            if random_chime:
+                logger.info(f"Active chime at {check_time.strftime('%H:%M')}: {random_chime} "
+                           f"(randomly selected from {schedule_type_used} schedule {most_recent['schedule']['id']} from {day_label})")
+                return random_chime
+            else:
+                logger.warning(f"Random chime requested but no valid chimes found in library")
+                return None
+        
         logger.info(f"Active chime at {check_time.strftime('%H:%M')}: {chime_filename} "
                    f"({schedule_type_used} schedule {most_recent['schedule']['id']} from {day_label})")
         return chime_filename
+    
+    def _select_random_chime(self) -> Optional[str]:
+        """
+        Select a random chime from the Chimes library.
+        
+        Returns:
+            Random chime filename or None if no valid chimes found
+        """
+        import random
+        from config import CHIMES_FOLDER
+        from services.partition_service import get_mount_path
+        from services.lock_chime_service import validate_tesla_wav
+        
+        # Get part2 mount path
+        part2_mount = get_mount_path('part2')
+        if not part2_mount:
+            logger.error("Cannot select random chime: part2 not mounted")
+            return None
+        
+        chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
+        if not os.path.isdir(chimes_dir):
+            logger.error(f"Chimes directory not found: {chimes_dir}")
+            return None
+        
+        # Get all valid WAV files
+        valid_chimes = []
+        try:
+            for entry in os.listdir(chimes_dir):
+                if not entry.lower().endswith('.wav'):
+                    continue
+                
+                full_path = os.path.join(chimes_dir, entry)
+                if os.path.isfile(full_path):
+                    # Validate the chime
+                    is_valid, _ = validate_tesla_wav(full_path)
+                    if is_valid:
+                        valid_chimes.append(entry)
+        except OSError as e:
+            logger.error(f"Error reading chimes directory: {e}")
+            return None
+        
+        if not valid_chimes:
+            logger.warning("No valid chimes found in library")
+            return None
+        
+        # Select random chime
+        selected = random.choice(valid_chimes)
+        logger.info(f"Randomly selected chime: {selected} from {len(valid_chimes)} valid chimes")
+        return selected
+    
+    def should_execute_schedule(self, schedule_id: int, check_time: Optional[datetime] = None) -> Tuple[bool, Optional[str], Optional[str]]:
+        """
+        Determine if a schedule should be executed now.
+        
+        This checks if:
+        1. The schedule is currently active (time/day/date matches)
+        2. The schedule hasn't been run yet for this occurrence
+        
+        Args:
+            schedule_id: ID of the schedule to check
+            check_time: Time to check (default: now)
+        
+        Returns:
+            (should_execute, chime_filename, reason)
+            - should_execute: True if schedule should run now
+            - chime_filename: The chime to use (may be 'RANDOM')
+            - reason: Human-readable reason for the decision
+        """
+        if check_time is None:
+            check_time = datetime.now()
+        
+        # Find the schedule
+        schedule = next((s for s in self.schedules if s['id'] == schedule_id), None)
+        if not schedule:
+            return False, None, f"Schedule {schedule_id} not found"
+        
+        if not schedule.get('enabled', True):
+            return False, None, "Schedule is disabled"
+        
+        # Parse schedule time
+        try:
+            time_parts = schedule['time'].split(':')
+            schedule_time = datetime_time(int(time_parts[0]), int(time_parts[1]))
+        except (ValueError, IndexError, KeyError):
+            return False, None, f"Invalid time format: {schedule.get('time')}"
+        
+        current_time = check_time.time()
+        current_day_name = DAYS_OF_WEEK[check_time.weekday()]
+        current_month = check_time.month
+        current_day = check_time.day
+        
+        # Check if schedule matches current time/day
+        schedule_type = schedule.get('schedule_type', 'weekly')
+        matches_today = False
+        
+        if schedule_type == 'weekly':
+            if current_day_name in schedule.get('days', []):
+                matches_today = True
+        elif schedule_type == 'date':
+            if (schedule.get('month') == current_month and 
+                schedule.get('day') == current_day):
+                matches_today = True
+        elif schedule_type == 'holiday':
+            today_holidays = self._get_holidays_for_date(check_time.year, current_month, current_day)
+            if schedule.get('holiday') in today_holidays:
+                matches_today = True
+        
+        if not matches_today:
+            return False, None, "Schedule doesn't match today"
+        
+        # Check if we've already run this schedule today (check this BEFORE time comparison)
+        # This prevents re-running if device was offline during scheduled time
+        last_run = schedule.get('last_run')
+        if last_run:
+            try:
+                last_run_dt = datetime.fromisoformat(last_run)
+                
+                # If last run was today, don't run again regardless of time
+                # This is the key: if we already ran today, we're done
+                if last_run_dt.date() == check_time.date():
+                    return False, None, f"Already ran today at {last_run_dt.strftime('%H:%M:%S')}"
+            except ValueError:
+                logger.warning(f"Invalid last_run timestamp for schedule {schedule_id}: {last_run}")
+        
+        # Now check if the scheduled time has passed
+        # We allow execution at any time after the scheduled time (within the same day)
+        # as long as we haven't already run today (checked above)
+        if current_time < schedule_time:
+            return False, None, f"Scheduled time {schedule['time']} hasn't arrived yet (current: {current_time.strftime('%H:%M')})"
+        
+        # Should execute!
+        chime_filename = schedule['chime_filename']
+        return True, chime_filename, f"Schedule should run (time: {schedule['time']}, last run: {last_run or 'never'})"
+    
+    def record_execution(self, schedule_id: int, execution_time: Optional[datetime] = None) -> bool:
+        """
+        Record that a schedule was executed.
+        
+        Args:
+            schedule_id: ID of the schedule that was executed
+            execution_time: Time of execution (default: now)
+        
+        Returns:
+            True if successfully recorded, False otherwise
+        """
+        if execution_time is None:
+            execution_time = datetime.now()
+        
+        # Find and update the schedule
+        schedule = next((s for s in self.schedules if s['id'] == schedule_id), None)
+        if not schedule:
+            logger.error(f"Cannot record execution: schedule {schedule_id} not found")
+            return False
+        
+        # Update last_run timestamp
+        schedule['last_run'] = execution_time.isoformat()
+        
+        # Save schedules
+        if self._save_schedules():
+            logger.info(f"Recorded execution of schedule {schedule_id} at {execution_time.isoformat()}")
+            return True
+        else:
+            logger.error(f"Failed to save execution record for schedule {schedule_id}")
+            return False
     
     def _get_holidays_for_date(self, year: int, month: int, day: int) -> List[str]:
         """

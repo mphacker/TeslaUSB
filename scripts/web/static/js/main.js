@@ -105,3 +105,95 @@ function showMaxRetryMessage() {
         countdownEl.innerHTML = '<strong>Operation is taking longer than expected. Please manually refresh the page.</strong>';
     }
 }
+
+// Volume Normalization Slider - Lock Chimes Page
+document.addEventListener('DOMContentLoaded', function() {
+    // Only run on lock chimes page
+    const targetLufsSlider = document.getElementById('target-lufs');
+    if (!targetLufsSlider) return;
+    
+    const currentLevelName = document.getElementById('current-level');
+    const levelDescription = document.getElementById('level-description');
+    const normalizeCheckbox = document.getElementById('normalize-on-upload');
+    const normalizationSettings = document.getElementById('normalization-settings');
+    
+    // Volume presets configuration
+    const VOLUME_PRESETS = [
+        { index: 0, lufs: -23, name: 'Broadcast', description: 'Quietest - broadcast standard (EBU R128)' },
+        { index: 1, lufs: -16, name: 'Streaming', description: 'Recommended for balanced playback' },
+        { index: 2, lufs: -14, name: 'Loud', description: 'Louder streaming services (Apple Music)' },
+        { index: 3, lufs: -12, name: 'Maximum', description: 'Maximum safe volume - may be very loud' }
+    ];
+    
+    // Update display when slider changes
+    function updateVolumeDisplay(index) {
+        const preset = VOLUME_PRESETS[index];
+        currentLevelName.textContent = preset.name;
+        levelDescription.textContent = preset.description;
+        
+        // Change color based on level (green -> blue -> orange -> red)
+        const colors = ['#4CAF50', '#2196F3', '#FF9800', '#F44336'];
+        currentLevelName.style.color = colors[index];
+    }
+    
+    // Get actual LUFS value from slider index
+    function getLUFSValue() {
+        const index = parseInt(targetLufsSlider.value);
+        return VOLUME_PRESETS[index].lufs;
+    }
+    
+    // Slider input event
+    targetLufsSlider.addEventListener('input', function(e) {
+        updateVolumeDisplay(parseInt(e.target.value));
+    });
+    
+    // Show/hide settings based on checkbox
+    normalizeCheckbox.addEventListener('change', function(e) {
+        normalizationSettings.style.display = e.target.checked ? 'block' : 'none';
+    });
+    
+    // Save preference to localStorage on change
+    targetLufsSlider.addEventListener('change', function(e) {
+        localStorage.setItem('preferredVolumeLevel', e.target.value);
+    });
+    
+    // Save checkbox state to localStorage
+    normalizeCheckbox.addEventListener('change', function(e) {
+        localStorage.setItem('normalizeOnUpload', e.target.checked ? 'true' : 'false');
+    });
+    
+    // Load saved preferences on page load
+    const savedLevel = localStorage.getItem('preferredVolumeLevel');
+    const savedNormalize = localStorage.getItem('normalizeOnUpload');
+    
+    if (savedLevel !== null) {
+        targetLufsSlider.value = savedLevel;
+        updateVolumeDisplay(parseInt(savedLevel));
+    } else {
+        // Default to Streaming (index 1)
+        targetLufsSlider.value = 1;
+        updateVolumeDisplay(1);
+    }
+    
+    if (savedNormalize !== null) {
+        normalizeCheckbox.checked = savedNormalize === 'true';
+        normalizationSettings.style.display = normalizeCheckbox.checked ? 'block' : 'none';
+    }
+    
+    // Intercept form submission to add LUFS value
+    const uploadForm = document.getElementById('chimeUploadForm');
+    if (uploadForm) {
+        uploadForm.addEventListener('submit', function(e) {
+            // Add hidden input with actual LUFS value
+            let lufsInput = uploadForm.querySelector('input[name="target_lufs"]');
+            if (!lufsInput) {
+                lufsInput = document.createElement('input');
+                lufsInput.type = 'hidden';
+                lufsInput.name = 'target_lufs';
+                uploadForm.appendChild(lufsInput);
+            }
+            lufsInput.value = getLUFSValue();
+        });
+    }
+});
+

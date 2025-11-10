@@ -1,43 +1,5 @@
 # TeslaUSB Feature Ideas & TODO List
 
-## 🎯 High-Priority Features
-
-### 1. Video Search & Filtering
-- [ ] **Date/time range filtering** ("show me videos from last Tuesday")
-- [ ] **Event type filtering** (Recent/Saved/Sentry)
-- [ ] **Camera angle filtering** (show only front camera clips)
-- [ ] **Size/duration filtering** (find clips longer than X minutes)
-- [ ] **Full-text search** of filenames
-- [ ] **Saved search presets**
-
-**Impact:** Essential as video library grows  
-**Difficulty:** Medium
-
----
-
-### 2. Batch Video Operations
-- [ ] **Select multiple videos** with checkboxes
-- [ ] **Batch download as ZIP** archive
-- [ ] **Batch move** between folders (Recent → Saved)
-- [ ] **Batch export** with metadata (timestamps, GPS if available)
-- [ ] **Create video compilation** (merge selected clips)
-
-**Impact:** Huge time saver for managing many clips  
-**Difficulty:** Medium-High
-
----
-
-### 3. Video Metadata Viewer
-- [ ] **Extract & display video metadata** (resolution, framerate, codec, bitrate)
-- [ ] **Show recording duration** and file creation time
-- [ ] **Display GPS coordinates** if embedded (useful for sentry events)
-- [ ] **Event context** (was car in park/drive, charging status if available)
-
-**Impact:** High - provides valuable context for clips  
-**Difficulty:** Medium
-
----
-
 ### 4. Scheduled Mode Switching
 - [ ] **Automatic mode transitions** based on schedule
 - [ ] Example: Auto-switch to Edit mode at 2 AM for backups, return to Present mode at 4 AM
@@ -84,10 +46,9 @@
 
 ### 8. Advanced Lock Chime Features
 - [X] **Chime scheduler** (different chimes for different times/days)
-- [ ] **Random chime rotation** (picks random chime from library)
+- [X] **Random chime rotation** (picks random chime from library)
 - [X] **Seasonal chimes** (auto-switch holiday themes)
-- [ ] **Preview multiple chimes** in quick succession
-- [ ] **Volume normalization** (auto-adjust all chimes to consistent loudness)
+- [X] **Volume normalization** (auto-adjust all chimes to consistent loudness)
 
 **Impact:** Medium - enhanced customization  
 **Difficulty:** Low-Medium
@@ -188,32 +149,3 @@ For maximum user value, prioritize in this order:
 - Flask web framework allows easy API endpoints
 - Systemd integration provides reliable service management
 
----
-
-## 📅 Suggested Development Phases
-
-### Phase 1: Foundation (Quick Wins)
-- Disk usage meter
-- Video count badges
-- Dark mode toggle
-- Last recording timestamp
-
-### Phase 2: Core Features
-- Storage Analytics Dashboard
-- Video Search & Filtering
-- System Health Monitoring
-
-### Phase 3: Automation
-- Auto-Cleanup System
-- Scheduled Mode Switching
-- Backup & Restore
-
-### Phase 4: Advanced Features
-- Batch Video Operations
-- Video Annotation & Notes
-- Notification System
-- Advanced Lock Chime Features
-
----
-
-*Last Updated: November 8, 2025*

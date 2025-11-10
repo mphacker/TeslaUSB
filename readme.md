@@ -392,6 +392,13 @@ The web interface includes a complete lock chimes management system with organiz
   - **Automatic Trimming**: Files exceeding 1 MB are automatically trimmed to fit the limit
   - **Progress Indicators**: Real-time feedback during upload, conversion, and processing
   - All conversions happen server-side using FFmpeg - no manual editing required
+- **Volume Normalization**: Optional loudness normalization during upload with 4 presets:
+  - **Broadcast** (-23 LUFS): Professional broadcast standard, conservative volume
+  - **Streaming** (-16 LUFS): Recommended for balanced playback (default)
+  - **Loud** (-14 LUFS): Noticeably louder without distortion
+  - **Maximum** (-12 LUFS): Maximum safe volume
+  - Uses FFmpeg two-pass loudnorm filter for accurate loudness measurement
+  - Automatically validates file size stays under 1MB after normalization
 - **Play/Preview**: Built-in audio player for all chimes (active and library)
 - **Download**: Download any chime from the library to your computer
 - **Upload**: Add custom WAV or MP3 files to the Chimes library (Edit mode only)
@@ -470,10 +477,14 @@ The web interface includes an advanced scheduling system for automatically chang
   - **Weekly**: Set chimes for specific days of the week at a certain time (e.g., "Friday Night" at 5:00 PM)
   - **Date**: Set chimes for specific dates (e.g., "Birthday" on March 15 at 12:00 AM)
   - **Holiday**: Set chimes for US holidays (fixed and movable - e.g., "Christmas", "Thanksgiving")
+- **Random Chime Option**: Select "Random Chime" to automatically pick a different chime from your library each time the schedule runs
+- **Last Run Tracking**: UI displays when each schedule last executed (e.g., "Today at 3:00 PM", "Yesterday at 8:00 AM")
 - **Automatic Chime Switching**: Runs every 60 seconds via systemd timer to apply scheduled changes
 - **Smart Scheduling**: Only changes chime if it differs from currently active chime (avoids unnecessary writes)
 - **US Holiday Support**: Includes both fixed-date holidays (Christmas, Independence Day) and calculated holidays (Easter, Thanksgiving, Memorial Day)
-- **Priority System**: Date schedules override holiday schedules, which override weekly schedules
+- **Priority System**: Holiday schedules override date schedules, which override weekly schedules when multiple schedules match the same time
+- **Smart Catch-Up**: If device is offline and misses multiple schedules, only the most recent applicable schedule runs when device comes back online (e.g., schedules at 8 AM, 10 AM, 3 PM - if device comes online at 3:15 PM, only 3 PM executes)
+- **Automatic Reset**: Editing a schedule's time, days, date, or holiday clears the last run timestamp, allowing immediate execution if the new time has already passed
 - **Web Interface**: Full CRUD operations for schedules (Create, Read, Update, Delete)
 - **Race Condition Protection**: Scheduler respects lock files to prevent conflicts with manual chime changes
 
@@ -484,12 +495,12 @@ The web interface includes an advanced scheduling system for automatically chang
 **Usage:**
 1. In Edit mode, click "Add New Schedule" to create a scheduled chime change
 2. Select schedule type (Weekly, Date, or Holiday)
-3. Choose the chime file from your library
+3. Choose a specific chime file from your library, or select "Random Chime" for variety
 4. Set the time and day/date/holiday parameters
 5. Enable the schedule with the toggle switch
 6. The scheduler runs every 60 seconds and applies matching schedules automatically
-7. View all schedules in a sortable table with enable/disable toggles
-8. Edit or delete schedules as needed
+7. View all schedules with their last run timestamps (e.g., "Today at 3:00 PM")
+8. Edit or delete schedules as needed - editing timing clears last run for immediate re-execution
 
 **Technical Details:**
 - Schedules stored in `chime_schedules.json` in the installation directory

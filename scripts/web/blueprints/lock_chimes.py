@@ -20,7 +20,7 @@ from services.lock_chime_service import (
     upload_chime_file,
     delete_chime_file,
 )
-from services.chime_scheduler_service import get_scheduler, get_holidays_list, get_holidays_with_dates, format_schedule_display
+from services.chime_scheduler_service import get_scheduler, get_holidays_list, get_holidays_with_dates, format_schedule_display, format_last_run
 
 lock_chimes_bp = Blueprint('lock_chimes', __name__, url_prefix='/lock_chimes')
 
@@ -54,6 +54,7 @@ def lock_chimes():
             schedules=[],
             holidays=[],
             format_schedule=format_schedule_display,
+            format_last_run=format_last_run,
             auto_refresh=False,
             hostname=socket.gethostname(),
             operation_in_progress=True,
@@ -128,6 +129,7 @@ def lock_chimes():
         schedules=schedules,
         holidays=holidays,
         format_schedule=format_schedule_display,
+        format_last_run=format_last_run,
         auto_refresh=False,
         expandable=True,  # Allow page to expand beyond viewport for scheduler
         hostname=socket.gethostname(),

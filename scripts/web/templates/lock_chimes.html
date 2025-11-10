@@ -257,6 +257,11 @@
                         <div style="font-size: 13px; color: #666;">
                             <div>🔔 {% if schedule.chime_filename == 'RANDOM' %}🎲 Random Chime{% else %}{{ schedule.chime_filename }}{% endif %}</div>
                             <div>⏰ {{ format_schedule(schedule) }}</div>
+                            {% if schedule.last_run %}
+                            <div style="color: #999; font-size: 12px; margin-top: 2px;">
+                                📊 Last run: {{ format_last_run(schedule.last_run) }}
+                            </div>
+                            {% endif %}
                         </div>
                     </div>
                     <div style="display: flex; gap: 5px; flex-wrap: wrap;">

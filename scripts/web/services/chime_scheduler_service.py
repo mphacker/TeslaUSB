@@ -453,6 +453,12 @@ class ChimeScheduler:
             if key in valid_keys:
                 schedule[key] = value
         
+        # Clear last_run if schedule timing changed (time, days, date, or holiday)
+        # This allows the schedule to run again even if it already ran today
+        if any(k in kwargs for k in ['time', 'schedule_type', 'days', 'month', 'day', 'holiday']):
+            schedule.pop('last_run', None)
+            logger.info(f"Cleared last_run for schedule {schedule_id} due to timing change")
+        
         # If schedule type changed, remove old type-specific fields
         if 'schedule_type' in kwargs:
             if schedule_type == 'weekly':
@@ -983,3 +989,50 @@ def format_schedule_display(schedule: Dict) -> str:
         return f"{holiday} at {time_12h}"
     
     return "Unknown schedule type"
+
+
+def format_last_run(last_run_iso: str) -> str:
+    """
+    Format the last run timestamp for display.
+    
+    Args:
+        last_run_iso: ISO format timestamp string
+    
+    Returns:
+        Human-readable string like "Today at 3:00 PM" or "Nov 9 at 8:00 AM"
+    """
+    try:
+        from datetime import datetime
+        
+        last_run_dt = datetime.fromisoformat(last_run_iso)
+        now = datetime.now()
+        
+        # Format time as 12-hour
+        hour = last_run_dt.hour
+        minute = last_run_dt.minute
+        am_pm = 'AM' if hour < 12 else 'PM'
+        display_hour = hour % 12
+        if display_hour == 0:
+            display_hour = 12
+        time_str = f"{display_hour}:{minute:02d} {am_pm}"
+        
+        # Check if it's today
+        if last_run_dt.date() == now.date():
+            return f"Today at {time_str}"
+        
+        # Check if it's yesterday
+        from datetime import timedelta
+        yesterday = now.date() - timedelta(days=1)
+        if last_run_dt.date() == yesterday:
+            return f"Yesterday at {time_str}"
+        
+        # Otherwise show date
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        month_str = month_names[last_run_dt.month - 1]
+        return f"{month_str} {last_run_dt.day} at {time_str}"
+        
+    except (ValueError, AttributeError) as e:
+        return last_run_iso  # Fallback to raw value
+
+

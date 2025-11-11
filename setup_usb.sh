@@ -77,7 +77,15 @@ done
 if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
   echo "Installing missing packages: ${MISSING_PACKAGES[*]}"
   apt-get update
-  apt-get install -y "${MISSING_PACKAGES[@]}"
+  
+  # Install packages one at a time to avoid OOM on low-memory systems
+  for pkg in "${MISSING_PACKAGES[@]}"; do
+    echo "Installing $pkg..."
+    apt-get install -y "$pkg" || {
+      echo "Warning: Failed to install $pkg, trying with --no-install-recommends..."
+      apt-get install -y --no-install-recommends "$pkg"
+    }
+  done
 else
   echo "All required packages already installed; skipping apt install."
 fi
@@ -598,8 +606,17 @@ SWAP_DIR="/var/swap"
 SWAP_FILE="$SWAP_DIR/fsck.swap"
 SWAP_SIZE_MB=1024  # 1GB swap
 
+# Handle legacy /var/swap file (move it aside if it exists as a file)
+if [ -f "/var/swap" ] && [ ! -d "/var/swap" ]; then
+  echo "  Moving legacy /var/swap file to /var/swap.old..."
+  mv /var/swap /var/swap.old
+fi
+
 if [ ! -f "$SWAP_FILE" ]; then
-  mkdir -p "$SWAP_DIR"
+  # Create swap directory if it doesn't exist
+  if [ ! -d "$SWAP_DIR" ]; then
+    mkdir -p "$SWAP_DIR"
+  fi
   
   # Create swapfile using fallocate (faster than dd)
   echo "  Creating 1GB swapfile at $SWAP_FILE..."

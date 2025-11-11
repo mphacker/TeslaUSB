@@ -314,7 +314,8 @@ class ChimeScheduler:
                     day: Optional[int] = None, 
                     holiday: Optional[str] = None,
                     interval: Optional[str] = None,
-                    name: str = "", enabled: bool = True) -> Tuple[bool, str, Optional[int]]:
+                    name: str = "", enabled: bool = True,
+                    _skip_conflict_check: bool = False) -> Tuple[bool, str, Optional[int]]:
         """
         Add a new chime schedule.
         
@@ -329,12 +330,13 @@ class ChimeScheduler:
             interval: Interval value (for recurring schedules) - e.g., '15min', '1hour', 'on_boot'
             name: Optional friendly name for the schedule
             enabled: Whether schedule is active
+            _skip_conflict_check: Internal flag to skip mutual exclusivity checks
         
         Returns:
             (success, message, schedule_id)
         """
         # Check for mutual exclusivity between recurring and other schedules
-        if enabled:
+        if enabled and not _skip_conflict_check:
             has_recurring, existing_recurring = self.has_enabled_recurring_schedule()
             
             if schedule_type == 'recurring':
@@ -689,7 +691,8 @@ class ChimeScheduler:
             schedule_type='recurring',
             interval=interval,
             name=name,
-            enabled=enabled
+            enabled=enabled,
+            _skip_conflict_check=True  # Skip check since we already disabled others
         )
         
         return success, message, schedule_id, num_disabled

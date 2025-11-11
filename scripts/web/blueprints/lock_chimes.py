@@ -426,35 +426,35 @@ def add_schedule():
         
         # Handle recurring schedules specially if enabled
         if schedule_type == 'recurring' and enabled:
-            # First try adding normally to check for conflicts
-            success, message, schedule_id = scheduler.add_schedule(**params)
+            # Check if there are other enabled schedules that need disabling
+            other_enabled = [s for s in scheduler.get_enabled_schedules() if s.get('schedule_type') != 'recurring']
             
-            if not success and message == "CONFIRM_DISABLE_OTHERS":
+            if other_enabled and not confirm_disable:
                 # Need user confirmation to disable other schedules
-                if confirm_disable:
-                    # User confirmed - disable others and add
-                    success, message, schedule_id, num_disabled = scheduler.add_recurring_schedule_with_disable(
-                        chime_filename=params['chime_filename'],
-                        interval=params['interval'],
-                        name=params['name'],
-                        enabled=enabled
-                    )
-                    if success:
-                        flash(f"Recurring schedule '{schedule_name}' created and {num_disabled} other schedule(s) disabled", "success")
-                    else:
-                        flash(f"Failed to create schedule: {message}", "error")
+                return jsonify({
+                    "needs_confirmation": True,
+                    "message": f"Creating this recurring schedule will disable {len(other_enabled)} other active schedule(s). Continue?",
+                    "schedules_to_disable": [{"id": s['id'], "name": s['name']} for s in other_enabled]
+                })
+            elif other_enabled and confirm_disable:
+                # User confirmed - disable others and add
+                success, message, schedule_id, num_disabled = scheduler.add_recurring_schedule_with_disable(
+                    chime_filename=params['chime_filename'],
+                    interval=params['interval'],
+                    name=params['name'],
+                    enabled=enabled
+                )
+                if success:
+                    flash(f"Recurring schedule '{schedule_name}' created and {num_disabled} other schedule(s) disabled", "success")
                 else:
-                    # Ask for confirmation - return JSON for AJAX handling
-                    other_schedules = [s for s in scheduler.get_enabled_schedules() if s.get('schedule_type') != 'recurring']
-                    return jsonify({
-                        "needs_confirmation": True,
-                        "message": f"Creating this recurring schedule will disable {len(other_schedules)} other active schedule(s). Continue?",
-                        "schedules_to_disable": [{"id": s['id'], "name": s['name']} for s in other_schedules]
-                    })
-            elif success:
-                flash(f"Schedule '{schedule_name}' created successfully", "success")
+                    flash(f"Failed to create schedule: {message}", "error")
             else:
-                flash(f"Failed to create schedule: {message}", "error")
+                # No other schedules to disable - add normally
+                success, message, schedule_id = scheduler.add_schedule(**params)
+                if success:
+                    flash(f"Schedule '{schedule_name}' created successfully", "success")
+                else:
+                    flash(f"Failed to create schedule: {message}", "error")
         else:
             # Normal schedule addition
             success, message, schedule_id = scheduler.add_schedule(**params)

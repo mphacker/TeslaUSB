@@ -575,32 +575,36 @@ document.addEventListener('DOMContentLoaded', function() {
                     body: formData
                 });
                 
-                const data = await response.json();
-                
-                if (data.needs_confirmation) {
-                    // Show confirmation dialog
-                    const schedulesText = data.schedules_to_disable.map(s => `  • ${s.name}`).join('\n');
-                    const confirmed = confirm(
-                        `${data.message}\n\nSchedules that will be disabled:\n${schedulesText}`
-                    );
+                // Check if response is JSON (confirmation needed) or redirect (success)
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const data = await response.json();
                     
-                    if (confirmed) {
-                        // Add confirmation field and resubmit
-                        const input = document.createElement('input');
-                        input.type = 'hidden';
-                        input.name = 'confirm_disable_others';
-                        input.value = 'true';
-                        scheduleForm.appendChild(input);
-                        scheduleForm.submit();
+                    if (data.needs_confirmation) {
+                        // Show confirmation dialog
+                        const schedulesText = data.schedules_to_disable.map(s => `  • ${s.name}`).join('\n');
+                        const confirmed = confirm(
+                            `${data.message}\n\nSchedules that will be disabled:\n${schedulesText}`
+                        );
+                        
+                        if (confirmed) {
+                            // Add confirmation field and resubmit
+                            const input = document.createElement('input');
+                            input.type = 'hidden';
+                            input.name = 'confirm_disable_others';
+                            input.value = 'true';
+                            scheduleForm.appendChild(input);
+                            scheduleForm.submit();
+                        }
                     }
                 } else {
-                    // No confirmation needed, redirect handled by server
+                    // Server returned HTML (redirect), reload to show result
                     window.location.reload();
                 }
             } catch (error) {
                 console.error('Error:', error);
-                // Fall back to normal form submission
-                scheduleForm.submit();
+                // On error, reload to show any flash messages
+                window.location.reload();
             }
         }
     });

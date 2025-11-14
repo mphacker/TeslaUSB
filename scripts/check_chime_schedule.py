@@ -204,8 +204,20 @@ def main():
         success, message = set_active_chime(chime_to_use, part2_mount)
         
         if success:
-            # Record the execution
-            scheduler.record_execution(schedule_to_execute['id'])
+            # CRITICAL FIX: Mark ALL eligible schedules as executed, not just the one we ran
+            # This prevents earlier schedules from running on subsequent timer ticks
+            # and overwriting the correct (most recent) chime
+            #
+            # Example scenario: Device offline 7am-4pm, schedules at 8am and 3pm
+            # - At 4:01pm both are eligible, we execute 3pm (correct)
+            # - Without this fix, 8am is still marked as "not run today"
+            # - At 4:02pm the 8am schedule would execute and overwrite the 3pm chime (BUG!)
+            # - With this fix, both are marked as executed, preventing the overwrite
+            for elig_schedule in eligible_schedules:
+                scheduler.record_execution(elig_schedule['schedule']['id'])
+                if elig_schedule['schedule']['id'] != schedule_to_execute['id']:
+                    logger.info(f"  Marked schedule {elig_schedule['schedule']['id']} ({elig_schedule['schedule'].get('name', 'Unnamed')}) as executed (skipped, superseded by later schedule)")
+            
             logger.info(f"✓ Schedule applied successfully: {message}")
             return 0
         else:

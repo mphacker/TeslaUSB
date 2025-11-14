@@ -6,7 +6,7 @@ set -euo pipefail
 # Supports both git-cloned installations and manual installations
 
 REPO_URL="https://github.com/mphacker/TeslaUSB"
-RAW_URL="https://raw.githubusercontent.com/mphacker/TeslaUSB"
+ARCHIVE_BASE_URL="https://github.com/mphacker/TeslaUSB/archive/refs/heads"
 INSTALL_DIR="/home/pi/TeslaUSB"
 BRANCH="main"
 BACKUP_DIR=""
@@ -97,139 +97,33 @@ else
     
     echo ""
     echo "Downloading latest files from GitHub..."
-    
-    # Create temp directory for downloads
     TEMP_DIR=$(mktemp -d)
-    cd "$TEMP_DIR"
-    
-    # Download main scripts and setup files
-    echo "Downloading setup files..."
-    curl -fsSL "${RAW_URL}/${BRANCH}/setup_usb.sh" -o setup_usb.sh || { echo "Failed to download setup_usb.sh"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/cleanup.sh" -o cleanup.sh || { echo "Failed to download cleanup.sh"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/upgrade.sh" -o upgrade.sh || { echo "Failed to download upgrade.sh"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/readme.md" -o readme.md 2>/dev/null || echo "  (readme.md not found, skipping)"
-    curl -fsSL "${RAW_URL}/${BRANCH}/README_scripts.md" -o README_scripts.md 2>/dev/null || echo "  (README_scripts.md not found, skipping)"
-    
-    # Download scripts directory
-    echo "Downloading scripts..."
-    mkdir -p scripts scripts/web scripts/web/blueprints scripts/web/services scripts/web/templates scripts/web/static/css scripts/web/static/js
-    
-    # Download shell scripts and Python utilities (in scripts/)
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/config.sh" -o scripts/config.sh || { echo "Failed to download config.sh"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/present_usb.sh" -o scripts/present_usb.sh || { echo "Failed to download present_usb.sh"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/edit_usb.sh" -o scripts/edit_usb.sh || { echo "Failed to download edit_usb.sh"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/generate_thumbnails.py" -o scripts/generate_thumbnails.py || { echo "Failed to download generate_thumbnails.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/check_chime_schedule.py" -o scripts/check_chime_schedule.py || { echo "Failed to download check_chime_schedule.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/run_boot_cleanup.py" -o scripts/run_boot_cleanup.py || { echo "Failed to download run_boot_cleanup.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/wifi-monitor.sh" -o scripts/wifi-monitor.sh || { echo "Failed to download wifi-monitor.sh"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/boot_present_with_cleanup.sh" -o scripts/boot_present_with_cleanup.sh || { echo "Failed to download boot_present_with_cleanup.sh"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/fsck_with_swap.sh" -o scripts/fsck_with_swap.sh || { echo "Failed to download fsck_with_swap.sh"; exit 1; }
-    
-    # Download test scripts (in scripts/test/)
-    echo "Downloading test scripts..."
-    mkdir -p scripts/test
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/test/test_scheduler.py" -o scripts/test/test_scheduler.py 2>/dev/null || echo "  (test_scheduler.py not found, skipping)"
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/test/test_schedule_precedence.py" -o scripts/test/test_schedule_precedence.py 2>/dev/null || echo "  (test_schedule_precedence.py not found, skipping)"
-    
-    # Download web app files (in scripts/web/)
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/web_control.py" -o scripts/web/web_control.py || { echo "Failed to download web_control.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/config.py" -o scripts/web/config.py || { echo "Failed to download config.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/utils.py" -o scripts/web/utils.py || { echo "Failed to download utils.py"; exit 1; }
-    
-    # Download blueprint modules
-    echo "Downloading blueprint modules..."
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/blueprints/__init__.py" -o scripts/web/blueprints/__init__.py || { echo "Failed to download blueprints/__init__.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/blueprints/mode_control.py" -o scripts/web/blueprints/mode_control.py || { echo "Failed to download mode_control.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/blueprints/videos.py" -o scripts/web/blueprints/videos.py || { echo "Failed to download videos.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/blueprints/lock_chimes.py" -o scripts/web/blueprints/lock_chimes.py || { echo "Failed to download lock_chimes.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/blueprints/light_shows.py" -o scripts/web/blueprints/light_shows.py || { echo "Failed to download light_shows.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/blueprints/api.py" -o scripts/web/blueprints/api.py || { echo "Failed to download api.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/blueprints/analytics.py" -o scripts/web/blueprints/analytics.py || { echo "Failed to download analytics.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/blueprints/cleanup.py" -o scripts/web/blueprints/cleanup.py || { echo "Failed to download cleanup.py"; exit 1; }
-    
-    # Download service layer modules
-    echo "Downloading service layer modules..."
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/__init__.py" -o scripts/web/services/__init__.py || { echo "Failed to download services/__init__.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/video_service.py" -o scripts/web/services/video_service.py || { echo "Failed to download video_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/lock_chime_service.py" -o scripts/web/services/lock_chime_service.py || { echo "Failed to download lock_chime_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/chime_scheduler_service.py" -o scripts/web/services/chime_scheduler_service.py || { echo "Failed to download chime_scheduler_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/light_show_service.py" -o scripts/web/services/light_show_service.py || { echo "Failed to download light_show_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/partition_service.py" -o scripts/web/services/partition_service.py || { echo "Failed to download partition_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/partition_mount_service.py" -o scripts/web/services/partition_mount_service.py || { echo "Failed to download partition_mount_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/samba_service.py" -o scripts/web/services/samba_service.py || { echo "Failed to download samba_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/mode_service.py" -o scripts/web/services/mode_service.py || { echo "Failed to download mode_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/thumbnail_service.py" -o scripts/web/services/thumbnail_service.py || { echo "Failed to download thumbnail_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/cleanup_service.py" -o scripts/web/services/cleanup_service.py || { echo "Failed to download cleanup_service.py"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/services/analytics_service.py" -o scripts/web/services/analytics_service.py || { echo "Failed to download analytics_service.py"; exit 1; }
-    
-    # Download HTML templates
-    echo "Downloading HTML templates..."
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/base.html" -o scripts/web/templates/base.html || { echo "Failed to download base.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/index.html" -o scripts/web/templates/index.html || { echo "Failed to download index.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/videos.html" -o scripts/web/templates/videos.html || { echo "Failed to download videos.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/session.html" -o scripts/web/templates/session.html || { echo "Failed to download session.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/lock_chimes.html" -o scripts/web/templates/lock_chimes.html || { echo "Failed to download lock_chimes.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/light_shows.html" -o scripts/web/templates/light_shows.html || { echo "Failed to download light_shows.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/analytics.html" -o scripts/web/templates/analytics.html || { echo "Failed to download analytics.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/cleanup_preview.html" -o scripts/web/templates/cleanup_preview.html || { echo "Failed to download cleanup_preview.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/cleanup_report.html" -o scripts/web/templates/cleanup_report.html || { echo "Failed to download cleanup_report.html"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/templates/cleanup_settings.html" -o scripts/web/templates/cleanup_settings.html || { echo "Failed to download cleanup_settings.html"; exit 1; }
-    
-    # Download static assets (CSS and JavaScript)
-    echo "Downloading static assets..."
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/static/css/style.css" -o scripts/web/static/css/style.css || { echo "Failed to download style.css"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/static/css/analytics.css" -o scripts/web/static/css/analytics.css || { echo "Failed to download analytics.css"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/static/css/cleanup.css" -o scripts/web/static/css/cleanup.css || { echo "Failed to download cleanup.css"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/scripts/web/static/js/main.js" -o scripts/web/static/js/main.js || { echo "Failed to download main.js"; exit 1; }
-    
-    # Download systemd service templates
-    echo "Downloading systemd service templates..."
-    mkdir -p templates
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/gadget_web.service" -o templates/gadget_web.service || { echo "Failed to download gadget_web.service"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/present_usb_on_boot.service" -o templates/present_usb_on_boot.service || { echo "Failed to download present_usb_on_boot.service"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/thumbnail_generator.service" -o templates/thumbnail_generator.service || { echo "Failed to download thumbnail_generator.service"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/thumbnail_generator.timer" -o templates/thumbnail_generator.timer || { echo "Failed to download thumbnail_generator.timer"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/chime_scheduler.service" -o templates/chime_scheduler.service || { echo "Failed to download chime_scheduler.service"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/chime_scheduler.timer" -o templates/chime_scheduler.timer || { echo "Failed to download chime_scheduler.timer"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/wifi-monitor.service" -o templates/wifi-monitor.service || { echo "Failed to download wifi-monitor.service"; exit 1; }
-    curl -fsSL "${RAW_URL}/${BRANCH}/templates/wifi-powersave-off.service" -o templates/wifi-powersave-off.service || { echo "Failed to download wifi-powersave-off.service"; exit 1; }
-    
-    echo ""
+    ARCHIVE_FILE="$TEMP_DIR/repo.tar.gz"
+    EXTRACT_DIR="$TEMP_DIR/src"
+    mkdir -p "$EXTRACT_DIR"
+
+    ARCHIVE_DOWNLOAD_URL="${ARCHIVE_BASE_URL}/${BRANCH}.tar.gz"
+    echo "Downloading archive: $ARCHIVE_DOWNLOAD_URL"
+    curl -fsSL "$ARCHIVE_DOWNLOAD_URL" -o "$ARCHIVE_FILE" || { echo "Failed to download repository archive"; exit 1; }
+
+    echo "Extracting archive..."
+    tar -xzf "$ARCHIVE_FILE" -C "$EXTRACT_DIR" --strip-components=1 || { echo "Failed to extract repository archive"; exit 1; }
+
     echo "Copying files to $INSTALL_DIR..."
-    
-    # Ensure target directories exist
-    mkdir -p "$INSTALL_DIR/scripts/web/blueprints"
-    mkdir -p "$INSTALL_DIR/scripts/web/services"
-    mkdir -p "$INSTALL_DIR/scripts/web/templates"
-    mkdir -p "$INSTALL_DIR/scripts/web/static/css"
-    mkdir -p "$INSTALL_DIR/scripts/web/static/js"
-    mkdir -p "$INSTALL_DIR/templates"
-    
-    # Copy downloaded files to install directory
-    cp -f setup_usb.sh "$INSTALL_DIR/"
-    cp -f cleanup.sh "$INSTALL_DIR/"
-    cp -f upgrade.sh "$INSTALL_DIR/"
-    [ -f readme.md ] && cp -f readme.md "$INSTALL_DIR/"
-    [ -f README_scripts.md ] && cp -f README_scripts.md "$INSTALL_DIR/"
-    
-    # Copy scripts directory (preserves subdirectories)
-    cp -rf scripts/* "$INSTALL_DIR/scripts/"
-    
-    # Copy systemd service templates
-    cp -rf templates/* "$INSTALL_DIR/templates/"
-    
+    mkdir -p "$INSTALL_DIR"
+    cp -a "$EXTRACT_DIR/." "$INSTALL_DIR/" || { echo "Failed to copy files to install directory"; exit 1; }
+
     # Restore state file if it was backed up
     if [ -f "$BACKUP_DIR/state.txt" ]; then
         cp "$BACKUP_DIR/state.txt" "$INSTALL_DIR/"
     fi
-    
+
     # Clean up temp directory
-    cd "$INSTALL_DIR"
     rm -rf "$TEMP_DIR"
-    
+
     echo ""
     echo "Files updated successfully!"
-    
+
     # Delete backup if we got here successfully
     if [ -d "$BACKUP_DIR" ]; then
         echo "Removing backup (upgrade successful)..."

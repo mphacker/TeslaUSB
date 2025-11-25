@@ -1199,6 +1199,75 @@ class ChimeScheduler:
         return holidays
 
 
+def cleanup_expired_date_schedules(scheduler: ChimeScheduler, check_time: Optional[datetime] = None) -> int:
+    """
+    Delete date-specific schedules that have passed and already executed.
+    
+    Only removes schedules where:
+    1. schedule_type == 'date'
+    2. The date/time has passed (current time > scheduled date/time)
+    3. The schedule has been executed (has a last_run timestamp)
+    
+    Args:
+        scheduler: ChimeScheduler instance
+        check_time: Time to check against (default: now)
+    
+    Returns:
+        Number of schedules deleted
+    """
+    if check_time is None:
+        check_time = datetime.now()
+    
+    schedules_to_delete = []
+    
+    for schedule in scheduler.schedules:
+        # Only process date-specific schedules
+        if schedule.get('schedule_type') != 'date':
+            continue
+        
+        # Check if it has been executed
+        last_run = schedule.get('last_run')
+        if not last_run:
+            continue  # Not executed yet, keep it
+        
+        # Parse the scheduled date/time
+        try:
+            month = schedule.get('month')
+            day = schedule.get('day')
+            time_str = schedule.get('time', '00:00')
+            
+            if not month or not day:
+                continue
+            
+            time_parts = time_str.split(':')
+            hour = int(time_parts[0])
+            minute = int(time_parts[1])
+            
+            # Use current year for comparison
+            scheduled_dt = datetime(check_time.year, month, day, hour, minute)
+            
+            # If the scheduled time has passed, mark for deletion
+            if check_time > scheduled_dt:
+                schedules_to_delete.append(schedule['id'])
+                logger.info(f"Marking expired date schedule for deletion: {schedule.get('name', 'Unnamed')} "
+                           f"({month}/{day} at {time_str}, last run: {last_run})")
+        
+        except (ValueError, IndexError, KeyError) as e:
+            logger.warning(f"Error parsing schedule {schedule.get('id')}: {e}")
+            continue
+    
+    # Delete marked schedules
+    deleted_count = 0
+    for schedule_id in schedules_to_delete:
+        if scheduler.delete_schedule(schedule_id):
+            deleted_count += 1
+    
+    if deleted_count > 0:
+        logger.info(f"Cleaned up {deleted_count} expired date schedule(s)")
+    
+    return deleted_count
+
+
 def get_scheduler(schedule_file=None) -> ChimeScheduler:
     """Get a ChimeScheduler instance."""
     return ChimeScheduler(schedule_file)

@@ -25,7 +25,7 @@ sys.path.insert(0, str(WEB_DIR))
 
 # Import after adding to path
 from config import GADGET_DIR, LOCK_CHIME_FILENAME, CHIMES_FOLDER
-from services.chime_scheduler_service import get_scheduler
+from services.chime_scheduler_service import get_scheduler, cleanup_expired_date_schedules
 from services.lock_chime_service import set_active_chime
 from services.partition_service import get_mount_path
 from services.mode_service import current_mode
@@ -119,6 +119,9 @@ def main():
     try:
         # Load scheduler
         scheduler = get_scheduler()
+        
+        # Clean up expired date schedules that have already run
+        cleanup_expired_date_schedules(scheduler)
         
         # Get all enabled schedules
         enabled_schedules = scheduler.list_schedules(enabled_only=True)

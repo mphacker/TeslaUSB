@@ -1,5 +1,85 @@
 // TeslaUSB Web Interface JavaScript
 
+// Theme Toggle Functionality
+function initTheme() {
+    // Check for saved theme preference or default to system preference
+    const savedTheme = localStorage.getItem('theme');
+    const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    
+    let theme;
+    if (savedTheme) {
+        theme = savedTheme;
+    } else if (systemPrefersDark) {
+        theme = 'dark';
+    } else {
+        theme = 'light';
+    }
+    
+    applyTheme(theme);
+    
+    // Listen for system theme changes
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+        // Only auto-switch if user hasn't set a preference
+        if (!localStorage.getItem('theme')) {
+            applyTheme(e.matches ? 'dark' : 'light');
+        }
+    });
+}
+
+function applyTheme(theme) {
+    if (theme === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        updateThemeIcon('sun');
+    } else {
+        document.documentElement.removeAttribute('data-theme');
+        updateThemeIcon('moon');
+    }
+}
+
+function updateThemeIcon(iconType) {
+    const iconDesktop = document.getElementById('theme-icon');
+    const iconMobile = document.getElementById('theme-icon-mobile');
+    const label = document.getElementById('theme-label');
+    
+    if (iconType === 'sun') {
+        // Dark mode active - show sun icon
+        if (iconDesktop) {
+            iconDesktop.className = 'bi bi-sun-fill';
+        }
+        if (iconMobile) {
+            iconMobile.className = 'bi bi-sun-fill';
+        }
+        if (label) {
+            label.textContent = 'Light Mode';
+        }
+    } else {
+        // Light mode active - show moon icon
+        if (iconDesktop) {
+            iconDesktop.className = 'bi bi-moon-stars-fill';
+        }
+        if (iconMobile) {
+            iconMobile.className = 'bi bi-moon-stars-fill';
+        }
+        if (label) {
+            label.textContent = 'Dark Mode';
+        }
+    }
+}
+
+function toggleTheme() {
+    const currentTheme = document.documentElement.getAttribute('data-theme');
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    
+    // Save user preference
+    localStorage.setItem('theme', newTheme);
+    
+    // Apply new theme
+    applyTheme(newTheme);
+}
+
+// Initialize theme on page load
+initTheme();
+
 // Mobile menu toggle
 function toggleMobileMenu() {
     const mobileMenu = document.getElementById('mobileMenu');

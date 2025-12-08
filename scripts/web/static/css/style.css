@@ -1,5 +1,136 @@
 /* TeslaUSB Web Interface Styles */
 
+/* CSS Variables for Theme Support */
+:root {
+    /* Light theme colors */
+    --bg-primary: #f5f5f5;
+    --bg-secondary: #ffffff;
+    --bg-navbar: #2c3e50;
+    --bg-mobile-menu: #2c3e50;
+    --bg-container: #ffffff;
+    --bg-info: #e2e3e5;
+    --bg-hover: rgba(255, 255, 255, 0.1);
+    --bg-active: rgba(255, 255, 255, 0.2);
+    --bg-overlay: rgba(0, 0, 0, 0.5);
+    --bg-video-player: rgba(0, 0, 0, 0.05);
+    --bg-table-header: #f8f9fa;
+    --bg-table-hover: #f8f9fa;
+    --bg-session-container: #f8f9fa;
+    --bg-session-controls: #f8f9fa;
+    --bg-share: #f8f9fa;
+    --bg-lock-chime: #f8f9fa;
+    --bg-code: #eef0f3;
+    
+    --text-primary: #333333;
+    --text-secondary: #666666;
+    --text-navbar: #ffffff;
+    --text-info: #383d41;
+    --text-muted: #888888;
+    --text-table-header: #495057;
+    --text-link: #007bff;
+    --text-disabled: #6c757d;
+    
+    --border-color: #d6d8db;
+    --border-light: #e0e0e0;
+    --border-table: #dee2e6;
+    --border-input: #ced4da;
+    --shadow: rgba(0, 0, 0, 0.1);
+    --shadow-hover: rgba(0, 0, 0, 0.15);
+    
+    /* Status colors */
+    --status-present-bg: #d4edda;
+    --status-present-text: #155724;
+    --status-edit-bg: #d1ecf1;
+    --status-edit-text: #0c5460;
+    --status-unknown-bg: #fff3cd;
+    --status-unknown-text: #856404;
+    
+    /* Message colors */
+    --msg-success-bg: #d4edda;
+    --msg-success-text: #155724;
+    --msg-info-bg: #d1ecf1;
+    --msg-info-text: #0c5460;
+    --msg-error-bg: #f8d7da;
+    --msg-error-text: #721c24;
+    
+    /* Button colors */
+    --btn-primary-bg: #007bff;
+    --btn-primary-text: #ffffff;
+    --btn-success-bg: #28a745;
+    --btn-success-text: #ffffff;
+    --btn-purple-bg: #6f42c1;
+    --btn-purple-text: #ffffff;
+    --btn-info-bg: #17a2b8;
+    --btn-info-text: #ffffff;
+    --btn-danger-bg: #dc3545;
+    --btn-danger-text: #ffffff;
+}
+
+[data-theme="dark"] {
+    /* Dark theme colors */
+    --bg-primary: #1a1a1a;
+    --bg-secondary: #2d2d2d;
+    --bg-navbar: #1c1c1c;
+    --bg-mobile-menu: #1c1c1c;
+    --bg-container: #2d2d2d;
+    --bg-info: #3a3a3a;
+    --bg-hover: rgba(255, 255, 255, 0.15);
+    --bg-active: rgba(255, 255, 255, 0.25);
+    --bg-overlay: rgba(0, 0, 0, 0.7);
+    --bg-video-player: rgba(0, 0, 0, 0.3);
+    --bg-table-header: #3a3a3a;
+    --bg-table-hover: #3a3a3a;
+    --bg-session-container: #3a3a3a;
+    --bg-session-controls: #3a3a3a;
+    --bg-share: #3a3a3a;
+    --bg-lock-chime: #3a3a3a;
+    --bg-code: #2a2a2a;
+    
+    --text-primary: #e0e0e0;
+    --text-secondary: #b0b0b0;
+    --text-navbar: #ffffff;
+    --text-info: #d0d0d0;
+    --text-muted: #888888;
+    --text-table-header: #d0d0d0;
+    --text-link: #6eb4ff;
+    --text-disabled: #888888;
+    
+    --border-color: #444444;
+    --border-light: #555555;
+    --border-table: #444444;
+    --border-input: #555555;
+    --shadow: rgba(0, 0, 0, 0.3);
+    --shadow-hover: rgba(0, 0, 0, 0.5);
+    
+    /* Status colors (adjusted for dark mode) */
+    --status-present-bg: #1b4d2c;
+    --status-present-text: #8fdb9f;
+    --status-edit-bg: #1a4d5c;
+    --status-edit-text: #7dd3e8;
+    --status-unknown-bg: #5c4a1f;
+    --status-unknown-text: #f0d68f;
+    
+    /* Message colors (adjusted for dark mode) */
+    --msg-success-bg: #1b4d2c;
+    --msg-success-text: #8fdb9f;
+    --msg-info-bg: #1a4d5c;
+    --msg-info-text: #7dd3e8;
+    --msg-error-bg: #5c1f1f;
+    --msg-error-text: #f28b8b;
+    
+    /* Button colors remain vibrant in dark mode */
+    --btn-primary-bg: #0d6efd;
+    --btn-primary-text: #ffffff;
+    --btn-success-bg: #198754;
+    --btn-success-text: #ffffff;
+    --btn-purple-bg: #6f42c1;
+    --btn-purple-text: #ffffff;
+    --btn-info-bg: #0dcaf0;
+    --btn-info-text: #000000;
+    --btn-danger-bg: #dc3545;
+    --btn-danger-text: #ffffff;
+}
+
 * {
     box-sizing: border-box;
 }
@@ -8,14 +139,17 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     margin: 0;
     padding: 0;
-    background-color: #f5f5f5;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .navbar {
-    background-color: #2c3e50;
-    color: white;
+    background-color: var(--bg-navbar);
+    color: var(--text-navbar);
     padding: 15px 20px;
-    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 5px var(--shadow);
+    transition: background-color 0.3s ease, box-shadow 0.3s ease;
 }
 
 .navbar-content {
@@ -30,7 +164,7 @@ body {
 .navbar h1 {
     margin: 0;
     font-size: 20px;
-    color: white;
+    color: var(--text-navbar);
 }
 
 /* Hamburger menu - hidden on desktop */
@@ -44,7 +178,7 @@ body {
 .hamburger span {
     width: 25px;
     height: 3px;
-    background-color: white;
+    background-color: var(--text-navbar);
     margin: 3px 0;
     transition: 0.3s;
     border-radius: 3px;
@@ -58,8 +192,9 @@ body {
     left: 0;
     width: 100%;
     height: 100%;
-    background-color: rgba(0, 0, 0, 0.5);
+    background-color: var(--bg-overlay);
     z-index: 999;
+    transition: background-color 0.3s ease;
 }
 
 .mobile-menu {
@@ -69,10 +204,10 @@ body {
     left: -100%;
     width: 250px;
     height: 100%;
-    background-color: #2c3e50;
+    background-color: var(--bg-mobile-menu);
     z-index: 1000;
     padding: 20px;
-    transition: left 0.3s ease;
+    transition: left 0.3s ease, background-color 0.3s ease;
     overflow-y: auto;
 }
 
@@ -81,7 +216,7 @@ body {
 }
 
 .mobile-menu-close {
-    color: white;
+    color: var(--text-navbar);
     font-size: 30px;
     cursor: pointer;
     text-align: left;
@@ -90,20 +225,21 @@ body {
 
 .mobile-menu a {
     display: block;
-    color: white;
+    color: var(--text-navbar);
     text-decoration: none;
     padding: 15px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid var(--border-color);
     font-size: 16px;
+    transition: background-color 0.3s ease;
 }
 
 .mobile-menu a:hover,
 .mobile-menu a.active {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: var(--bg-hover);
 }
 
 .navbar h1 a {
-    color: white;
+    color: var(--text-navbar);
     text-decoration: none;
     cursor: pointer;
 }
@@ -114,19 +250,63 @@ body {
 }
 
 .nav-links a {
-    color: white;
+    color: var(--text-navbar);
     text-decoration: none;
     padding: 8px 16px;
     border-radius: 4px;
-    transition: background-color 0.2s;
+    transition: background-color 0.3s ease;
 }
 
 .nav-links a:hover {
-    background-color: rgba(255,255,255,0.1);
+    background-color: var(--bg-hover);
 }
 
 .nav-links a.active {
-    background-color: rgba(255,255,255,0.2);
+    background-color: var(--bg-active);
+}
+
+/* Theme Toggle Button */
+.theme-toggle {
+    background: none;
+    border: none;
+    color: var(--text-navbar);
+    font-size: 20px;
+    cursor: pointer;
+    padding: 8px 12px;
+    border-radius: 4px;
+    transition: background-color 0.3s ease, transform 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+}
+
+.theme-toggle:hover {
+    background-color: var(--bg-hover);
+    transform: scale(1.05);
+}
+
+.theme-toggle i {
+    transition: transform 0.3s ease;
+}
+
+/* Mobile theme toggle styling */
+.mobile-theme-toggle {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border-color);
+}
+
+.mobile-theme-toggle .theme-toggle {
+    width: 100%;
+    justify-content: center;
+    padding: 12px;
+    font-size: 16px;
+}
+
+.mobile-theme-toggle #theme-label {
+    color: var(--text-navbar);
+    font-weight: 500;
 }
 
 .main-content {
@@ -145,21 +325,23 @@ body {
 }
 
 .container {
-    background: white;
+    background: var(--bg-container);
     padding: 30px;
     border-radius: 8px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 10px var(--shadow);
     margin-bottom: 20px;
     display: flex;
     flex-direction: column;
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+    transition: background-color 0.3s ease, box-shadow 0.3s ease;
 }
 
 h1, h2 {
-    color: #333;
+    color: var(--text-primary);
     margin-top: 0;
+    transition: color 0.3s ease;
 }
 
 button {
@@ -173,18 +355,18 @@ button {
 }
 
 .present-btn {
-    background-color: #007bff;
-    color: white;
+    background-color: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
 }
 
 .edit-btn {
-    background-color: #28a745;
-    color: white;
+    background-color: var(--btn-success-bg);
+    color: var(--btn-success-text);
 }
 
 .set-chime-btn {
-    background-color: #6f42c1;
-    color: white;
+    background-color: var(--btn-purple-bg);
+    color: var(--btn-purple-text);
 }
 
 button:hover {
@@ -225,7 +407,7 @@ button:disabled {
 }
 
 .loading-text {
-    color: white;
+    color: var(--text-navbar);
     font-size: 18px;
     margin-top: 20px;
     font-weight: 500;
@@ -236,36 +418,40 @@ button:disabled {
 }
 
 .messages .success {
-    background-color: #d4edda;
-    color: #155724;
+    background-color: var(--msg-success-bg);
+    color: var(--msg-success-text);
     padding: 12px;
     border-radius: 5px;
     margin: 5px 0;
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .messages .info {
-    background-color: #d1ecf1;
-    color: #0c5460;
+    background-color: var(--msg-info-bg);
+    color: var(--msg-info-text);
     padding: 12px;
     border-radius: 5px;
     margin: 5px 0;
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .messages .error {
-    background-color: #f8d7da;
-    color: #721c24;
+    background-color: var(--msg-error-bg);
+    color: var(--msg-error-text);
     padding: 12px;
     border-radius: 5px;
     margin: 5px 0;
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .info-box {
-    background-color: #e2e3e5;
-    color: #383d41;
+    background-color: var(--bg-info);
+    color: var(--text-info);
     padding: 15px;
     border-radius: 5px;
     margin: 20px 0;
     font-size: 14px;
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .status-label {
@@ -278,27 +464,31 @@ button:disabled {
 }
 
 .status-label.present {
-    background-color: #d4edda;
-    color: #155724;
+    background-color: var(--status-present-bg);
+    color: var(--status-present-text);
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .status-label.edit {
-    background-color: #d1ecf1;
-    color: #0c5460;
+    background-color: var(--status-edit-bg);
+    color: var(--status-edit-text);
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .status-label.unknown {
-    background-color: #fff3cd;
-    color: #856404;
+    background-color: var(--status-unknown-bg);
+    color: var(--status-unknown-text);
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .shares {
-    background-color: #f8f9fa;
-    border: 1px solid #d6d8db;
+    background-color: var(--bg-share);
+    border: 1px solid var(--border-color);
     border-radius: 6px;
     padding: 12px;
     margin-top: 20px;
     font-size: 14px;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 
 .shares ul {
@@ -307,17 +497,19 @@ button:disabled {
 }
 
 .shares code {
-    background: #eef0f3;
+    background: var(--bg-code);
     padding: 2px 4px;
     border-radius: 4px;
+    transition: background-color 0.3s ease;
 }
 
 .lock-chime {
     margin-top: 30px;
     padding: 20px;
-    border: 1px solid #d6d8db;
+    border: 1px solid var(--border-color);
     border-radius: 6px;
-    background-color: #f8f9fa;
+    background-color: var(--bg-lock-chime);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 
 .lock-chime h2 {
@@ -330,8 +522,11 @@ button:disabled {
     padding: 10px;
     margin: 10px 0 15px;
     border-radius: 4px;
-    border: 1px solid #ced4da;
+    border: 1px solid var(--border-input);
     font-size: 15px;
+    background-color: var(--bg-container);
+    color: var(--text-primary);
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }
 
 .folder-selector {
@@ -342,18 +537,22 @@ button:disabled {
     width: 100%;
     padding: 12px;
     border-radius: 4px;
-    border: 1px solid #ced4da;
+    border: 1px solid var(--border-input);
     font-size: 15px;
+    background-color: var(--bg-container);
+    color: var(--text-primary);
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }
 
 .video-table-container {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    border: 1px solid #dee2e6;
+    border: 1px solid var(--border-table);
     border-radius: 4px;
     margin: 20px 0 0 0;
     min-height: 0;
+    transition: border-color 0.3s ease;
 }
 
 .video-table {
@@ -362,30 +561,34 @@ button:disabled {
 }
 
 .video-table th {
-    background-color: #f8f9fa;
-    color: #495057;
+    background-color: var(--bg-table-header);
+    color: var(--text-table-header);
     font-weight: 600;
     padding: 12px;
     text-align: left;
     position: sticky;
     top: 0;
     z-index: 10;
-    border-bottom: 2px solid #dee2e6;
+    border-bottom: 2px solid var(--border-table);
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }
 
 .video-table td {
     padding: 12px;
-    border-bottom: 1px solid #dee2e6;
+    border-bottom: 1px solid var(--border-table);
+    transition: border-color 0.3s ease;
 }
 
 .video-table tbody tr:hover {
-    background-color: #f8f9fa;
+    background-color: var(--bg-table-hover);
+    transition: background-color 0.3s ease;
 }
 
 .video-name {
-    color: #007bff;
+    color: var(--text-link);
     cursor: pointer;
     text-decoration: none;
+    transition: color 0.3s ease;
 }
 
 .video-name:hover {
@@ -393,38 +596,40 @@ button:disabled {
 }
 
 .btn-download {
-    background-color: #17a2b8;
-    color: white;
+    background-color: var(--btn-info-bg);
+    color: var(--btn-info-text);
     padding: 6px 12px;
     border-radius: 4px;
     text-decoration: none;
     font-size: 14px;
     display: inline-block;
     margin-right: 5px;
+    transition: opacity 0.3s ease;
 }
 
 .btn-download:hover {
-    background-color: #138496;
+    opacity: 0.85;
 }
 
 .btn-session {
-    background-color: #6f42c1;
-    color: white;
+    background-color: var(--btn-purple-bg);
+    color: var(--btn-purple-text);
     padding: 6px 12px;
     border-radius: 4px;
     text-decoration: none;
     font-size: 14px;
     display: inline-block;
     margin-right: 5px;
+    transition: opacity 0.3s ease;
 }
 
 .btn-session:hover {
-    background-color: #5a32a3;
+    opacity: 0.85;
 }
 
 .btn-delete {
-    background-color: #dc3545;
-    color: white;
+    background-color: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
     padding: 6px 12px;
     border-radius: 4px;
     text-decoration: none;
@@ -432,25 +637,27 @@ button:disabled {
     display: inline-block;
     border: none;
     cursor: pointer;
+    transition: opacity 0.3s ease;
 }
 
 .btn-delete:hover {
-    background-color: #c82333;
+    opacity: 0.85;
 }
 
 .btn-delete-all {
-    background-color: #dc3545;
-    color: white;
+    background-color: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
     padding: 10px 20px;
     border-radius: 4px;
     font-size: 14px;
     border: none;
     cursor: pointer;
     margin-bottom: 10px;
+    transition: opacity 0.3s ease;
 }
 
 .btn-delete-all:hover {
-    background-color: #c82333;
+    opacity: 0.85;
 }
 
 .folder-controls {
@@ -485,13 +692,16 @@ button:disabled {
     margin: 20px 0;
     display: none;
     border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 8px var(--shadow);
+    background-color: var(--bg-video-player);
+    transition: box-shadow 0.3s ease, background-color 0.3s ease;
 }
 
 .no-videos {
     text-align: center;
     padding: 40px;
-    color: #6c757d;
+    color: var(--text-disabled);
+    transition: color 0.3s ease;
 }
 
 .session-grid {
@@ -540,38 +750,42 @@ button:disabled {
 }
 
 .session-video-container {
-    background: #f8f9fa;
+    background: var(--bg-session-container);
     border-radius: 8px;
     padding: 10px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 4px var(--shadow);
+    transition: background-color 0.3s ease, box-shadow 0.3s ease;
 }
 
 .session-video-container video {
     width: 100%;
     max-height: 280px;
     border-radius: 4px;
-    background: #000;
+    background: var(--bg-video-player);
+    transition: background-color 0.3s ease;
 }
 
 .session-video-label {
     text-align: center;
     font-weight: 600;
     margin-top: 8px;
-    color: #495057;
+    color: var(--text-table-header);
     font-size: 14px;
     cursor: pointer;
+    transition: color 0.3s ease;
 }
 
 .session-video-label:hover {
-    color: #007bff;
+    color: var(--text-link);
 }
 
 .session-controls {
     text-align: center;
     margin: 20px 0;
     padding: 15px;
-    background: #f8f9fa;
+    background: var(--bg-session-controls);
     border-radius: 8px;
+    transition: background-color 0.3s ease;
 }
 
 .session-controls button {
@@ -698,7 +912,8 @@ button:disabled {
         height: 60px;
         object-fit: cover;
         border-radius: 4px;
-        background: #f0f0f0;
+        background: var(--bg-info);
+        transition: background-color 0.3s ease;
     }
     
     .mobile-card-title {
@@ -707,16 +922,18 @@ button:disabled {
     }
     
     .mobile-card-title a {
-        color: #007bff;
+        color: var(--text-link);
         text-decoration: none;
         font-weight: 500;
         word-break: break-word;
+        transition: color 0.3s ease;
     }
     
     .mobile-card-meta {
         font-size: 12px;
-        color: #6c757d;
+        color: var(--text-disabled);
         margin-top: 4px;
+        transition: color 0.3s ease;
     }
     
     .mobile-card-info {
@@ -730,21 +947,24 @@ button:disabled {
         display: flex;
         justify-content: space-between;
         padding: 6px 0;
-        border-bottom: 1px solid #f0f0f0;
+        border-bottom: 1px solid var(--border-light);
+        transition: border-color 0.3s ease;
     }
     
     .mobile-card-info-label {
         font-weight: 600;
-        color: #495057;
+        color: var(--text-table-header);
+        transition: color 0.3s ease;
     }
     
     .mobile-card-info-value {
-        color: #6c757d;
+        color: var(--text-disabled);
         text-align: right;
         overflow-wrap: break-word;
         word-wrap: break-word;
         word-break: break-word;
         max-width: 100%;
+        transition: color 0.3s ease;
     }
     
     .mobile-card-audio {
@@ -787,14 +1007,14 @@ button:disabled {
     }
     
     .mobile-card-actions .present-btn {
-        background-color: #007bff;
-        color: white;
+        background-color: var(--btn-primary-bg);
+        color: var(--btn-primary-text);
         border: none;
     }
     
     .mobile-card-actions .set-chime-btn {
-        background-color: #6f42c1;
-        color: white;
+        background-color: var(--btn-purple-bg);
+        color: var(--btn-purple-text);
         border: none;
     }
     
@@ -827,13 +1047,15 @@ button:disabled {
     }
     
     .mobile-card-status.valid {
-        background-color: #d4edda;
-        color: #155724;
+        background-color: var(--status-present-bg);
+        color: var(--status-present-text);
+        transition: background-color 0.3s ease, color 0.3s ease;
     }
     
     .mobile-card-status.invalid {
-        background-color: #f8d7da;
-        color: #721c24;
+        background-color: var(--msg-error-bg);
+        color: var(--msg-error-text);
+        transition: background-color 0.3s ease, color 0.3s ease;
     }
 }
 
@@ -936,7 +1158,8 @@ details summary {
 }
 
 details summary:hover {
-    background: #d1e7fd !important;
+    background: var(--bg-table-hover) !important;
+    transition: background-color 0.3s ease;
 }
 
 details[open] summary span:first-of-type {
@@ -1005,8 +1228,9 @@ details summary span:first-of-type {
     justify-content: space-between;
     margin-top: 8px;
     font-size: 11px;
-    color: #666;
+    color: var(--text-secondary);
     font-weight: 500;
+    transition: color 0.3s ease;
 }
 
 .slider-labels span {
@@ -1025,10 +1249,11 @@ details summary span:first-of-type {
 .selected-level {
     margin-top: 12px;
     padding: 10px;
-    background: white;
+    background: var(--bg-container);
     border-radius: 4px;
     text-align: center;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--border-light);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 
 .selected-level strong {
@@ -1039,9 +1264,10 @@ details summary span:first-of-type {
 }
 
 .selected-level small {
-    color: #666;
+    color: var(--text-secondary);
     font-style: italic;
     font-size: 12px;
+    transition: color 0.3s ease;
 }
 
 @media (max-width: 768px) {

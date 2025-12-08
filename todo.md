@@ -94,7 +94,7 @@
 
 These features provide immediate value with minimal implementation effort:
 
-1. [ ] **Dark mode toggle** - Easy CSS addition for night viewing
+1. [X] **Dark mode toggle** - Easy CSS addition for night viewing
 2. [ ] **Quick delete oldest** - One-click button to delete oldest 10 RecentClips
 3. [ ] **Thumbnail size slider** - User-adjustable thumbnail dimensions
 4. [ ] **Auto-refresh toggle** - Let users enable/disable auto-refresh on video page

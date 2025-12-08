@@ -668,3 +668,208 @@
         text-align: center;
     }
 }
+
+/* Dark Theme Overrides for Cleanup */
+[data-theme="dark"] .container .page-header h2 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .btn-back {
+    background: var(--bg-container);
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .btn-back:hover {
+    background: #66BB6A;
+    color: var(--text-navbar);
+    border-color: #66BB6A;
+}
+
+[data-theme="dark"] .alert-success {
+    background: #1b4d2c;
+    border-color: #4CAF50;
+    color: #8fdb9f;
+}
+
+[data-theme="dark"] .alert-warning {
+    background: #5c4a1f;
+    border-color: #FF9800;
+    color: #f0d68f;
+}
+
+[data-theme="dark"] .alert-critical {
+    background: #5c1f1f;
+    border-color: #F44336;
+    color: #f28b8b;
+}
+
+[data-theme="dark"] .alert-info {
+    background: #1a4d5c;
+    border-color: #2196F3;
+    color: #7dd3e8;
+}
+
+[data-theme="dark"] .cleanup-card {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .cleanup-card:hover {
+    border-color: var(--border-light);
+}
+
+[data-theme="dark"] .size-indicator {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .size-bar {
+    background-color: var(--bg-info);
+}
+
+[data-theme="dark"] .size-bar-inner {
+    background-color: var(--bg-container);
+}
+
+[data-theme="dark"] .estimate-note {
+    color: var(--text-muted);
+}
+
+[data-theme="dark"] .preview-section {
+    background: var(--bg-info);
+}
+
+[data-theme="dark"] .folder-list-item {
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .folder-list-item.disabled {
+    background-color: var(--bg-info);
+    color: var(--text-muted);
+}
+
+[data-theme="dark"] .folder-name {
+    color: var(--text-muted);
+}
+
+[data-theme="dark"] .btn-run-cleanup {
+    background: #66BB6A;
+    color: var(--text-navbar);
+}
+
+[data-theme="dark"] .btn-run-cleanup:hover {
+    background: #4CAF50;
+}
+
+[data-theme="dark"] .btn-run-cleanup:disabled {
+    background: var(--bg-info);
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .btn-cancel,
+[data-theme="dark"] .btn-cancel-gray {
+    background: var(--bg-info);
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .btn-cancel:hover,
+[data-theme="dark"] .btn-cancel-gray:hover {
+    background: var(--border-color);
+}
+
+[data-theme="dark"] .btn-danger {
+    background: #E57373;
+    color: var(--text-navbar);
+}
+
+[data-theme="dark"] .btn-danger:hover {
+    background: #F44336;
+}
+
+[data-theme="dark"] .btn-info {
+    background: #64B5F6;
+    color: var(--text-navbar);
+}
+
+[data-theme="dark"] .btn-info:hover {
+    background: #2196F3;
+}
+
+[data-theme="dark"] .info-message {
+    background: linear-gradient(135deg, #1a4d5c 0%, var(--bg-info) 100%);
+}
+
+[data-theme="dark"] .info-message h3 {
+    color: var(--text-link);
+}
+
+[data-theme="dark"] .info-message-icon {
+    color: #66BB6A;
+}
+
+[data-theme="dark"] .report-card {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .report-card h3 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .report-card p {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .summary-item {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .summary-item h4 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .folder-tree {
+    background: var(--bg-info);
+}
+
+[data-theme="dark"] .folder-group-header {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .folder-group-header:hover {
+    background: var(--border-color);
+}
+
+[data-theme="dark"] .file-item {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .file-name {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .folder-summary {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .detail-card {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .detail-card h4 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .detail-section {
+    background: var(--bg-info);
+}
+
+[data-theme="dark"] .detail-section h5 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .detail-section:hover {
+    background: var(--border-color);
+}

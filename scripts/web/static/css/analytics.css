@@ -456,3 +456,175 @@
         color: #666;
     }
 }
+
+/* Dark Theme Overrides for Analytics */
+[data-theme="dark"] .action-card {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .action-card:hover {
+    border-color: #66BB6A;
+    box-shadow: 0 4px 12px rgba(102, 187, 106, 0.3);
+}
+
+[data-theme="dark"] .action-content h3 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .action-content p {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .action-arrow {
+    color: #66BB6A;
+}
+
+[data-theme="dark"] .analytics-card {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .analytics-card h3 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .stat-row {
+    border-bottom-color: var(--border-light);
+}
+
+[data-theme="dark"] .stat-label {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .stat-value {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .progress-bar {
+    background: var(--bg-info);
+}
+
+[data-theme="dark"] .progress-text {
+    color: var(--text-navbar);
+}
+
+[data-theme="dark"] .total-size {
+    background: var(--bg-info);
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .health-indicator.healthy {
+    background: #1b4d2c;
+    border-color: #4CAF50;
+    color: #8fdb9f;
+}
+
+[data-theme="dark"] .health-indicator.warning {
+    background: #5c4a1f;
+    border-color: #FF9800;
+    color: #f0d68f;
+}
+
+[data-theme="dark"] .health-indicator.critical {
+    background: #5c1f1f;
+    border-color: #F44336;
+    color: #f28b8b;
+}
+
+[data-theme="dark"] .health-indicator.info {
+    background: #1a4d5c;
+    border-color: #2196F3;
+    color: #7dd3e8;
+}
+
+[data-theme="dark"] .health-title {
+    color: var(--text-link);
+}
+
+[data-theme="dark"] .health-detail {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .health-timestamp {
+    color: var(--text-muted);
+}
+
+[data-theme="dark"] .stats-header h2 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .partition-card {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .partition-header h3 {
+    color: var(--text-link);
+}
+
+[data-theme="dark"] .partition-header .partition-path {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .folder-stats {
+    background: var(--bg-container);
+}
+
+[data-theme="dark"] .folder-type-header {
+    background: var(--bg-info);
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .stat-item {
+    background: var(--bg-info);
+}
+
+[data-theme="dark"] .empty-message {
+    background: var(--bg-info);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .empty-message .empty-title {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .empty-message .empty-subtitle {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .recommendations {
+    background: var(--bg-info);
+}
+
+[data-theme="dark"] .recommendation-button {
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+[data-theme="dark"] .recommendation-button:hover {
+    background: #1976D2;
+}
+
+[data-theme="dark"] .recommendation-secondary {
+    color: var(--btn-danger-text);
+    background: var(--msg-error-bg);
+}
+
+[data-theme="dark"] .folder-card {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .folder-card-header h3 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .folder-card-stats {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .folder-card-dates {
+    border-top-color: var(--border-light);
+    color: var(--text-secondary);
+}

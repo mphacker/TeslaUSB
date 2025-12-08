@@ -2,6 +2,8 @@
 Description=USB Gadget Web Control Interface
 After=network.target
 Wants=network.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -10,8 +12,6 @@ WorkingDirectory=__GADGET_DIR__/scripts/web
 ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/web/web_control.py
 Restart=on-failure
 RestartSec=10
-StartLimitBurst=5
-StartLimitIntervalSec=300
 TimeoutStopSec=10
 
 # Memory limits for Flask app (prevent runaway memory usage)

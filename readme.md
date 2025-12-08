@@ -147,66 +147,6 @@ sudo ./setup_usb.sh
 
 ### 5. Upgrading to Latest Version
 
-**⚠️ IMPORTANT: The refactored branch has significant architectural changes. Follow these steps carefully.**
-
-#### Recommended Upgrade Process (Refactored Branch)
-
-**Step 1: Backup your data**
-```bash
-# Navigate to installation directory
-cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
-
-# Backup configuration files (these contain your settings)
-cp cleanup_config.json cleanup_config.json.backup 2>/dev/null || true
-cp chime_schedules.json chime_schedules.json.backup 2>/dev/null || true
-cp state.txt state.txt.backup 2>/dev/null || true
-```
-
-**Step 2: Switch to refactored branch**
-```bash
-# If using git (recommended)
-git fetch origin
-git checkout refactored
-git pull origin refactored
-
-# If not using git, clone fresh or download files manually
-cd ~
-git clone -b refactored https://github.com/mphacker/TeslaUSB.git TeslaUSB-refactored
-```
-
-**Step 3: Clean installation directory (PRESERVE .img FILES!)**
-```bash
-cd /home/pi/TeslaUSB
-
-# Remove all files EXCEPT .img files and backups
-find . -maxdepth 1 -type f ! -name '*.img' ! -name '*.backup' -delete
-find . -maxdepth 1 -type d ! -name '.' ! -name '..' ! -name '.git' ! -name 'thumbnails' -exec rm -rf {} + 2>/dev/null || true
-
-# If you cloned to a new directory, copy files from there instead:
-# cp -r ~/TeslaUSB-refactored/* /home/pi/TeslaUSB/
-```
-
-**Step 4: Run setup to configure new architecture**
-```bash
-cd /home/pi/TeslaUSB
-sudo ./setup_usb.sh
-```
-
-**Step 5: Restore configuration files**
-```bash
-# Restore your backup configuration files
-cp cleanup_config.json.backup cleanup_config.json 2>/dev/null || true
-cp chime_schedules.json.backup chime_schedules.json 2>/dev/null || true
-cp state.txt.backup state.txt 2>/dev/null || true
-
-# Restart web service to pick up restored settings
-sudo systemctl restart gadget_web.service
-```
-
-#### Alternative: Automated Upgrade Script (For Future Updates)
-
-Once you're on the refactored branch, you can use the upgrade script for future updates:
-
 ```bash
 # Navigate to the gadget directory and run upgrade script
 cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
@@ -214,11 +154,10 @@ cd /home/pi/TeslaUSB  # or your configured GADGET_DIR
 ```
 
 The upgrade script will:
-- Pull the latest code from GitHub (handles file permission conflicts automatically)
+- Pull the latest code from GitHub
 - Prompt you to run setup to apply changes
 - Optionally restore your previous mode (edit/present) after setup
-
-**Note**: The upgrade script preserves your `.img` files, `state.txt`, and `thumbnails/` directory automatically.
+- Preserve your `.img` files, `state.txt`, and configuration files
 
 ### 6. Removal (Optional)
 
@@ -236,12 +175,12 @@ Edit the configuration section at the top of `setup_usb.sh`:
 ```bash
 # ================= Configuration =================
 GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"     # Installation directory
-IMG_CAM="usb_cam.img"                      # TeslaCam image filename
-IMG_LIGHTSHOW="usb_lightshow.img"          # Lightshow image filename
-CAM_SIZE="400G"                            # TeslaCam partition size (large)
-LIGHTSHOW_SIZE="20G"                       # Lightshow partition size (smaller)
-LABEL_CAM="TeslaCam"                       # TeslaCam partition label
-LABEL_LIGHTSHOW="LightShow"                # Lightshow partition label
+IMG_CAM_NAME="usb_cam.img"                 # TeslaCam image filename
+IMG_LIGHTSHOW_NAME="usb_lightshow.img"     # Lightshow image filename
+PART1_SIZE="427G"                          # TeslaCam partition size
+PART2_SIZE="20G"                           # Lightshow partition size
+LABEL1="TeslaCam"                          # TeslaCam partition label
+LABEL2="Lightshow"                         # Lightshow partition label
 MNT_DIR="/mnt/gadget"                      # Mount point directory
 CONFIG_FILE="/boot/firmware/config.txt"    # Pi config file location
 WEB_PORT=5000                              # Web interface port
@@ -249,11 +188,11 @@ SAMBA_PASS="tesla"                         # Samba password
 ```
 
 **Architecture Notes:**
-- **Dual-LUN design**: Two separate disk images (not partitions) for complete filesystem isolation
-- **TeslaCam LUN (ro=0)**: Read-write access for Tesla to record dashcam footage continuously
-- **Lightshow LUN (ro=1)**: Read-only access provides 15-30% performance improvement when Tesla loads light shows or plays lock chimes
-- Both LUNs appear as independent USB drives to Tesla, preventing filesystem contention
-- **Chimes folder**: Setup automatically creates `/Chimes` directory on LightShow partition and migrates existing WAV files
+- **Dual-LUN design**: Two separate disk images for complete filesystem isolation
+- **TeslaCam LUN (ro=0)**: Read-write access for Tesla to record dashcam footage
+- **Lightshow LUN (ro=1)**: Read-only access provides 15-30% performance improvement
+- Both LUNs appear as independent USB drives to Tesla
+- **Chimes folder**: Setup creates `/Chimes` directory on LightShow partition and migrates existing WAV files
 
 ## Usage Modes
 
@@ -271,15 +210,8 @@ When in this mode:
   - **LUN 0 (TeslaCam)**: Read-write for dashcam recordings
   - **LUN 1 (LightShow)**: Read-only optimized for 15-30% performance improvement
 - Samba shares are stopped
-- Partitions are mounted locally in **read-only** mode for browsing
-  - `/mnt/gadget/part1-ro` - Read-only access to TeslaCam partition
-  - `/mnt/gadget/part2-ro` - Read-only access to LightShow partition
-- Tesla can record dashcam/sentry footage to LUN 0
-- Tesla can load light shows and play lock chimes from LUN 1 with optimized performance
-- You can browse/view files locally or via the web interface (e.g., watch videos, play audio)
+- Partitions mounted locally as read-only (`/mnt/gadget/part1-ro`, `/mnt/gadget/part2-ro`)
 - Web interface: View and play videos, lock chimes, and light shows (no editing)
-
-**Safety Note**: The read-only mounts allow you to access files while the gadget is active. This is generally safe for read-only access, but be aware that if the Tesla is actively writing to LUN 0 (TeslaCam), you may see stale cached data. Best practice is to browse files when the Tesla is not actively recording (e.g., after driving).
 
 **Activate via:**
 - Web interface: Click "Present USB Gadget"
@@ -288,13 +220,9 @@ When in this mode:
 
 ### Edit USB Mode  
 When in this mode:
-- USB gadget is disconnected
-- Read-only mounts are unmounted
-- Partitions are mounted locally on Pi in **read-write** mode
-  - `/mnt/gadget/part1` - Read-write access to partition 1 (TeslaCam)
-  - `/mnt/gadget/part2` - Read-write access to partition 2 (LightShow, Lock Chimes)
-- Samba shares are active for network access
-- You can manage files via network, web interface, or direct Pi access
+- USB gadget disconnected
+- Partitions mounted read-write (`/mnt/gadget/part1`, `/mnt/gadget/part2`)
+- Samba shares active for network access
 - Web interface: Full functionality including upload, delete, and file management
 
 **Activate via:**
@@ -728,8 +656,8 @@ The setup script copies and configures template files to the gadget directory:
 
 | File | Source Template | Purpose |
 |------|-----------------|---------|
-| `usb_cam.img` | *Generated* | TeslaCam disk image (large, exFAT) |
-| `usb_lightshow.img` | *Generated* | LightShow disk image (smaller, FAT32) |
+| `usb_cam.img` | *Generated* | TeslaCam disk image (427GB, exFAT) |
+| `usb_lightshow.img` | *Generated* | LightShow disk image (20GB, FAT32) |
 | `present_usb.sh` | `scripts/present_usb.sh` | Script to activate USB gadget mode |
 | `edit_usb.sh` | `scripts/edit_usb.sh` | Script to activate edit/mount mode |
 | `config.sh` | `scripts/config.sh` | Configuration variables for scripts |
@@ -877,17 +805,15 @@ sudo ./cleanup.sh
 Tesla USB Gadget Cleanup Script
 ===============================
 Gadget directory: /home/pi/TeslaUSB
-Image file: /home/pi/TeslaUSB/usb_dual.img
 
 This will remove all USB gadget configuration and files.
 The following will be cleaned up:
-  - Systemd services (gadget_web, present_usb_on_boot, thumbnail_generator)
+  - Systemd services (gadget_web, present_usb_on_boot, thumbnail_generator, chime_scheduler)
   - USB gadget module and loop devices
   - Samba share configuration
   - Mount directories (/mnt/gadget)
-  - Thumbnail cache directory
   - All files in /home/pi/TeslaUSB (except this script)
-  - Disk image: /home/pi/TeslaUSB/usb_dual.img
+  - Disk images: usb_cam.img, usb_lightshow.img
 
 Are you sure you want to proceed? (y/N): y
 
@@ -1082,16 +1008,15 @@ sudo systemctl stop gadget_web.service present_usb_on_boot.service
 ## Technical Details
 
 ### Disk Image Structure
-- **Total Size**: PART1_SIZE + PART2_SIZE + 2MB (for partition table)
-- **Partition Table**: MBR/MSDOS style
-- **File System**: FAT32 or exFAT for partitions based on size specified
-- **Sparse File**: Only uses space as needed
+- **Two separate disk images**: `usb_cam.img` (427GB exFAT) and `usb_lightshow.img` (20GB FAT32)
+- **Sparse files**: Only use space as needed
+- Presented as dual-LUN USB gadget to Tesla
 
 ### USB Gadget Implementation
-- Uses Linux `g_mass_storage` kernel module
-- Configured as removable storage (removable=1)
-- Write access enabled (ro=0)
-- No command stalling (stall=0)
+- Uses Linux `g_mass_storage` kernel module (via `libcomposite`)
+- LUN 0: Read-write (ro=0) for TeslaCam recordings
+- LUN 1: Read-only (ro=1) for LightShow/Chimes (15-30% performance boost)
+- Both LUNs configured as removable storage
 
 ### Error Handling Features
 - Comprehensive error checking for all operations

@@ -342,12 +342,6 @@ body {
     padding: 0 20px;
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 100px);
-}
-
-/* Allow specific pages to expand beyond viewport */
-.main-content.expandable {
-    height: auto;
     min-height: calc(100vh - 100px);
 }
 
@@ -360,9 +354,6 @@ body {
     margin-bottom: 20px;
     display: flex;
     flex-direction: column;
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
     transition: background-color 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
 }
 
@@ -603,13 +594,9 @@ button:disabled {
 }
 
 .video-table-container {
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
     border: 1px solid var(--border-table);
     border-radius: 4px;
-    margin: 20px 0 0 0;
-    min-height: 0;
+    margin: 20px 0;
     transition: border-color 0.3s ease;
 }
 

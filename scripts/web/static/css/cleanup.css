@@ -1,10 +1,5 @@
 /* Cleanup Pages Styling */
 
-/* Override container scrolling for cleanup settings page */
-body:has(.cleanup-form) .container {
-    overflow: visible;
-}
-
 /* Page header styling */
 .container .page-header {
     display: flex;
@@ -96,15 +91,6 @@ body:has(.cleanup-form) .container {
 
 .alert a:hover {
     opacity: 0.8;
-}
-
-/* Cleanup Form Scrolling */
-.cleanup-form {
-    max-height: 60vh;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding-right: 10px;
-    margin-bottom: 20px;
 }
 
 /* Cleanup Cards (similar to analytics cards) */

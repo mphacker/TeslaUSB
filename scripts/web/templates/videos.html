@@ -350,26 +350,16 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Scroll event handler with 85% trigger (works for both desktop table and mobile)
-function handleScroll(element) {
+// Scroll event handler with 85% trigger for page-level scrolling
+function handleScroll() {
     if (window.videosLoaded) {
         return;
     }
     
-    let scrollPosition, pageHeight, scrollPercentage;
-    
-    // Check if scrolling within desktop table container or window (mobile)
-    if (element && element.classList && element.classList.contains('video-table-container')) {
-        // Desktop: table container scroll
-        scrollPosition = element.scrollTop + element.clientHeight;
-        pageHeight = element.scrollHeight;
-        scrollPercentage = (scrollPosition / pageHeight) * 100;
-    } else {
-        // Mobile: window scroll
-        scrollPosition = window.scrollY + window.innerHeight;
-        pageHeight = document.documentElement.scrollHeight;
-        scrollPercentage = (scrollPosition / pageHeight) * 100;
-    }
+    // Always use window scroll (page-level scrolling for both desktop and mobile)
+    const scrollPosition = window.scrollY + window.innerHeight;
+    const pageHeight = document.documentElement.scrollHeight;
+    const scrollPercentage = (scrollPosition / pageHeight) * 100;
     
     // Trigger at 85% scroll
     if (scrollPercentage >= 85) {
@@ -396,53 +386,20 @@ window.addEventListener('DOMContentLoaded', function() {
         return;
     }
     
-    // Check if we're on mobile (using card view) or desktop (using table view)
-    const isMobile = function() {
-        return window.innerWidth <= 768;
-    };
-    
-    // Add scroll listener to desktop table container (desktop only)
-    const tableContainer = document.querySelector('.video-table-container');
-    if (tableContainer) {
-        tableContainer.addEventListener('scroll', function() {
-            // Only handle table scroll on desktop
-            if (!isMobile()) {
-                if (scrollTimeout) {
-                    clearTimeout(scrollTimeout);
-                }
-                scrollTimeout = setTimeout(function() {
-                    handleScroll(tableContainer);
-                }, 50);
-            }
-        });
-        
-        // Initial check for desktop table
-        if (!isMobile()) {
-            setTimeout(function() {
-                handleScroll(tableContainer);
-            }, 500);
-        }
-    }
-    
-    // Add scroll listener to window (mobile only)
+    // Add scroll listener to window for infinite scroll (page-level scrolling)
     window.addEventListener('scroll', function() {
-        // Only handle window scroll on mobile
-        if (isMobile()) {
-            if (scrollTimeout) {
-                clearTimeout(scrollTimeout);
-            }
-            scrollTimeout = setTimeout(function() {
-                handleScroll(null);
-            }, 50);
+        if (scrollTimeout) {
+            clearTimeout(scrollTimeout);
         }
+        scrollTimeout = setTimeout(function() {
+            handleScroll();
+        }, 50);
     });
     
-    // Initial check for mobile
-    if (isMobile()) {
-        setTimeout(function() {
-            handleScroll(null);
-        }, 500);
-    }
+    // Initial check to load more if needed (in case initial content doesn't fill viewport)
+    setTimeout(function() {
+        handleScroll();
+    }, 500);
 });
 </script>
 {% endblock %}

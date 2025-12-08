@@ -7,30 +7,30 @@
     <!-- iOS Safari Warning -->
     <div id="iosWarning" style="display: none; background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
         <p style="margin: 0; font-size: 14px;"><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
-        <p style="margin: 8px 0 0 0; font-size: 13px; color: #666;">Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+        <p style="margin: 8px 0 0 0; font-size: 13px; color: var(--text-secondary);">Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
     </div>
     
     <div class="folder-controls" id="showUploadControls">
         <form method="post" action="{{ url_for('light_shows.upload_light_show') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="showUploadForm">
             <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File or ZIP:</label>
-            <p style="margin: 0 0 10px 0; font-size: 13px; color: #666;">
+            <p style="margin: 0 0 10px 0; font-size: 13px; color: var(--text-secondary);">
                 Individual files: .fseq, .mp3, .wav<br>
                 ZIP files: Can contain multiple light show files in any folder structure
             </p>
             <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3,.wav,.zip" required 
-                   style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; width: 100%; max-width: 400px; font-size: 14px;">
+                   style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary);">
             <button type="submit" class="edit-btn" id="showUploadBtn">📤 Upload</button>
         </form>
         <!-- Upload Progress Bar -->
         <div id="showUploadProgress" style="display: none; margin-bottom: 20px;">
-            <div style="background: #f0f0f0; border-radius: 8px; padding: 15px; border: 2px solid #6f42c1;">
-                <h4 style="margin: 0 0 10px 0; color: #6f42c1;">📤 Uploading Light Show...</h4>
-                <div style="background: #e0e0e0; border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+            <div style="background: var(--upload-progress-bg); border-radius: 8px; padding: 15px; border: 2px solid var(--btn-purple-bg);">
+                <h4 style="margin: 0 0 10px 0; color: var(--btn-purple-bg);">📤 Uploading Light Show...</h4>
+                <div style="background: var(--upload-progress-bar-bg); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
                     <div id="showProgressBar" style="background: linear-gradient(90deg, #6f42c1, #5a32a3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
                         0%
                     </div>
                 </div>
-                <p id="showUploadStatus" style="margin: 0; font-size: 13px; color: #666;">Preparing upload...</p>
+                <p id="showUploadStatus" style="margin: 0; font-size: 13px; color: var(--text-secondary);">Preparing upload...</p>
             </div>
         </div>
     </div>

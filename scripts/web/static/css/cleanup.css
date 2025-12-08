@@ -1,5 +1,10 @@
 /* Cleanup Pages Styling */
 
+/* Override container scrolling for cleanup settings page */
+body:has(.cleanup-form) .container {
+    overflow: visible;
+}
+
 /* Page header styling */
 .container .page-header {
     display: flex;
@@ -10,7 +15,7 @@
 
 .container .page-header h2 {
     margin: 0;
-    color: #333;
+    color: var(--text-primary);
     font-size: 1.8em;
     display: flex;
     align-items: center;
@@ -23,15 +28,15 @@
     align-items: center;
     gap: 8px;
     padding: 10px 20px;
-    background: white;
-    color: #666;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
     text-decoration: none;
     border-radius: 8px;
     font-size: 0.95em;
     font-weight: 500;
     transition: all 0.3s ease;
-    border: 2px solid #e0e0e0;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    border: 2px solid var(--border-color);
+    box-shadow: 0 2px 4px var(--shadow);
 }
 
 .btn-back:hover {
@@ -83,20 +88,40 @@
     margin: 5px 0;
 }
 
+.alert a {
+    color: inherit;
+    text-decoration: underline;
+    font-weight: 600;
+}
+
+.alert a:hover {
+    opacity: 0.8;
+}
+
+/* Cleanup Form Scrolling */
+.cleanup-form {
+    max-height: 60vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 10px;
+    margin-bottom: 20px;
+}
+
 /* Cleanup Cards (similar to analytics cards) */
 .cleanup-card {
-    background: white;
-    border: 2px solid #e0e0e0;
+    background: var(--bg-container);
+    border: 2px solid var(--border-color);
     border-radius: 12px;
     padding: 25px;
     margin: 20px 0;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-    transition: all 0.3s ease;
+    box-shadow: 0 1px 3px var(--shadow);
+    transition: all 0.2s ease;
 }
 
 .cleanup-card:hover {
-    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
-    border-color: #c0c0c0;
+    box-shadow: 0 4px 12px var(--shadow-hover);
+    border-color: var(--border-light);
+    transform: translateY(-1px);
 }
 
 /* Folder cards - extra spacing between them */
@@ -114,12 +139,12 @@
     align-items: center;
     margin-bottom: 20px;
     padding-bottom: 15px;
-    border-bottom: 2px solid #f0f0f0;
+    border-bottom: 2px solid var(--border-light);
 }
 
 .folder-header h2 {
     margin: 0;
-    color: #333;
+    color: var(--text-primary);
     font-size: 1.3em;
 }
 
@@ -169,12 +194,12 @@
 
 .toggle-label {
     font-weight: 500;
-    color: #333;
+    color: var(--text-primary);
 }
 
 /* Disabled state for toggle switch */
 .toggle-switch input[type="checkbox"]:disabled + .toggle-slider {
-    background-color: #e0e0e0;
+    background-color: var(--border-color);
     opacity: 0.6;
     cursor: not-allowed;
 }
@@ -185,7 +210,7 @@
 }
 
 .toggle-switch input[type="checkbox"]:disabled ~ .toggle-label {
-    color: #999;
+    color: var(--text-muted);
     cursor: not-allowed;
 }
 
@@ -205,8 +230,9 @@
     align-items: center;
     gap: 10px;
     padding: 12px;
-    background: #f8f9fa;
+    background: var(--form-label-bg);
     border-radius: 6px;
+    border: 1px solid var(--border-input);
 }
 
 .checkbox-label {
@@ -226,15 +252,17 @@
 .number-input {
     width: 80px;
     padding: 6px 10px;
-    border: 1px solid #ddd;
+    border: 1px solid var(--border-input);
     border-radius: 4px;
     font-size: 14px;
     text-align: center;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
 }
 
 .number-input:disabled {
-    background-color: #f5f5f5;
-    color: #999;
+    background-color: var(--form-label-bg);
+    color: var(--text-muted);
     cursor: not-allowed;
     opacity: 0.6;
 }
@@ -246,7 +274,7 @@
 
 .checkbox-label:has(input:disabled) {
     cursor: not-allowed;
-    color: #999;
+    color: var(--text-muted);
 }
 
 .number-input:focus {
@@ -277,8 +305,9 @@
     justify-content: center;
     line-height: 1.5;
     min-height: 48px;
-    transition: all 0.3s;
+    transition: all 0.2s ease;
     box-sizing: border-box;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
 }
 
 .btn-primary {
@@ -289,7 +318,12 @@
 .btn-primary:hover {
     background: #45a049;
     transform: translateY(-2px);
-    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3);
+}
+
+.btn-primary:active {
+    transform: translateY(0);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.12);
 }
 
 .btn-primary:disabled,
@@ -713,10 +747,13 @@
 [data-theme="dark"] .cleanup-card {
     background: var(--bg-container);
     border-color: var(--border-color);
+    box-shadow: 0 1px 3px var(--shadow);
 }
 
 [data-theme="dark"] .cleanup-card:hover {
     border-color: var(--border-light);
+    box-shadow: 0 4px 12px var(--shadow-hover);
+    transform: translateY(-1px);
 }
 
 [data-theme="dark"] .size-indicator {
@@ -753,12 +790,14 @@
 }
 
 [data-theme="dark"] .btn-run-cleanup {
-    background: #66BB6A;
+    background: #238636;
     color: var(--text-navbar);
+    box-shadow: 0 1px 3px var(--shadow);
 }
 
 [data-theme="dark"] .btn-run-cleanup:hover {
-    background: #4CAF50;
+    background: #2ea043;
+    box-shadow: 0 4px 12px rgba(35, 134, 54, 0.4);
 }
 
 [data-theme="dark"] .btn-run-cleanup:disabled {
@@ -778,21 +817,25 @@
 }
 
 [data-theme="dark"] .btn-danger {
-    background: #E57373;
+    background: #da3633;
     color: var(--text-navbar);
+    box-shadow: 0 1px 3px var(--shadow);
 }
 
 [data-theme="dark"] .btn-danger:hover {
-    background: #F44336;
+    background: #f85149;
+    box-shadow: 0 4px 12px rgba(218, 54, 51, 0.4);
 }
 
 [data-theme="dark"] .btn-info {
-    background: #64B5F6;
+    background: #1f6feb;
     color: var(--text-navbar);
+    box-shadow: 0 1px 3px var(--shadow);
 }
 
 [data-theme="dark"] .btn-info:hover {
-    background: #2196F3;
+    background: #58a6ff;
+    box-shadow: 0 4px 12px rgba(31, 111, 235, 0.4);
 }
 
 [data-theme="dark"] .info-message {

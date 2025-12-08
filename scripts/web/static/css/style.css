@@ -21,6 +21,19 @@
     --bg-lock-chime: #f8f9fa;
     --bg-code: #eef0f3;
     
+    /* Lock Chime specific colors */
+    --active-chime-bg: #e8f5e9;
+    --active-chime-border: #4caf50;
+    --active-chime-heading: #2e7d32;
+    --collapsible-section-bg: #e3f2fd;
+    --collapsible-section-border: #2196f3;
+    --collapsible-section-text: #1976d2;
+    --collapsible-content-bg: #f5f5f5;
+    --form-input-bg: #ffffff;
+    --form-label-bg: #f5f5f5;
+    --upload-progress-bg: #f0f0f0;
+    --upload-progress-bar-bg: #e0e0e0;
+    
     --text-primary: #333333;
     --text-secondary: #666666;
     --text-navbar: #ffffff;
@@ -67,67 +80,80 @@
 }
 
 [data-theme="dark"] {
-    /* Dark theme colors */
-    --bg-primary: #1a1a1a;
-    --bg-secondary: #2d2d2d;
-    --bg-navbar: #1c1c1c;
-    --bg-mobile-menu: #1c1c1c;
-    --bg-container: #2d2d2d;
-    --bg-info: #3a3a3a;
-    --bg-hover: rgba(255, 255, 255, 0.15);
-    --bg-active: rgba(255, 255, 255, 0.25);
-    --bg-overlay: rgba(0, 0, 0, 0.7);
-    --bg-video-player: rgba(0, 0, 0, 0.3);
-    --bg-table-header: #3a3a3a;
-    --bg-table-hover: #3a3a3a;
-    --bg-session-container: #3a3a3a;
-    --bg-session-controls: #3a3a3a;
-    --bg-share: #3a3a3a;
-    --bg-lock-chime: #3a3a3a;
-    --bg-code: #2a2a2a;
+    /* Dark theme colors - Discord/GitHub inspired */
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-navbar: #010409;
+    --bg-mobile-menu: #161b22;
+    --bg-container: #161b22;
+    --bg-info: #1c2128;
+    --bg-hover: rgba(177, 186, 196, 0.12);
+    --bg-active: rgba(177, 186, 196, 0.2);
+    --bg-overlay: rgba(1, 4, 9, 0.8);
+    --bg-video-player: rgba(0, 0, 0, 0.4);
+    --bg-table-header: #1c2128;
+    --bg-table-hover: #21262d;
+    --bg-session-container: #1c2128;
+    --bg-session-controls: #1c2128;
+    --bg-share: #1c2128;
+    --bg-lock-chime: #1c2128;
+    --bg-code: #0d1117;
     
-    --text-primary: #e0e0e0;
-    --text-secondary: #b0b0b0;
-    --text-navbar: #ffffff;
-    --text-info: #d0d0d0;
-    --text-muted: #888888;
-    --text-table-header: #d0d0d0;
-    --text-link: #6eb4ff;
-    --text-disabled: #888888;
+    /* Lock Chime specific colors - dark mode */
+    --active-chime-bg: #1a4d2e;
+    --active-chime-border: #3fb950;
+    --active-chime-heading: #3fb950;
+    --collapsible-section-bg: #1a3c5a;
+    --collapsible-section-border: #58a6ff;
+    --collapsible-section-text: #58a6ff;
+    --collapsible-content-bg: #1c2128;
+    --form-input-bg: #0d1117;
+    --form-label-bg: #21262d;
+    --upload-progress-bg: #1c2128;
+    --upload-progress-bar-bg: #0d1117;
     
-    --border-color: #444444;
-    --border-light: #555555;
-    --border-table: #444444;
-    --border-input: #555555;
-    --shadow: rgba(0, 0, 0, 0.3);
-    --shadow-hover: rgba(0, 0, 0, 0.5);
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-navbar: #f0f6fc;
+    --text-info: #b1bac4;
+    --text-muted: #7d8590;
+    --text-table-header: #e6edf3;
+    --text-link: #58a6ff;
+    --text-disabled: #6e7681;
     
-    /* Status colors (adjusted for dark mode) */
-    --status-present-bg: #1b4d2c;
-    --status-present-text: #8fdb9f;
-    --status-edit-bg: #1a4d5c;
-    --status-edit-text: #7dd3e8;
-    --status-unknown-bg: #5c4a1f;
-    --status-unknown-text: #f0d68f;
+    --border-color: #30363d;
+    --border-light: #21262d;
+    --border-table: #30363d;
+    --border-input: #30363d;
+    --shadow: rgba(1, 4, 9, 0.5);
+    --shadow-hover: rgba(1, 4, 9, 0.7);
     
-    /* Message colors (adjusted for dark mode) */
-    --msg-success-bg: #1b4d2c;
-    --msg-success-text: #8fdb9f;
-    --msg-info-bg: #1a4d5c;
-    --msg-info-text: #7dd3e8;
-    --msg-error-bg: #5c1f1f;
-    --msg-error-text: #f28b8b;
+    /* Status colors (Discord/GitHub inspired) */
+    --status-present-bg: #1a4d2e;
+    --status-present-text: #3fb950;
+    --status-edit-bg: #1a3c5a;
+    --status-edit-text: #58a6ff;
+    --status-unknown-bg: #5a4a1f;
+    --status-unknown-text: #d29922;
     
-    /* Button colors remain vibrant in dark mode */
-    --btn-primary-bg: #0d6efd;
+    /* Message colors */
+    --msg-success-bg: #1a4d2e;
+    --msg-success-text: #3fb950;
+    --msg-info-bg: #1a3c5a;
+    --msg-info-text: #58a6ff;
+    --msg-error-bg: #4c1f1f;
+    --msg-error-text: #f85149;
+    
+    /* Button colors - vibrant and accessible */
+    --btn-primary-bg: #1f6feb;
     --btn-primary-text: #ffffff;
-    --btn-success-bg: #198754;
+    --btn-success-bg: #238636;
     --btn-success-text: #ffffff;
-    --btn-purple-bg: #6f42c1;
+    --btn-purple-bg: #8957e5;
     --btn-purple-text: #ffffff;
-    --btn-info-bg: #0dcaf0;
-    --btn-info-text: #000000;
-    --btn-danger-bg: #dc3545;
+    --btn-info-bg: #0969da;
+    --btn-info-text: #ffffff;
+    --btn-danger-bg: #da3633;
     --btn-danger-text: #ffffff;
 }
 
@@ -141,6 +167,7 @@ body {
     padding: 0;
     background-color: var(--bg-primary);
     color: var(--text-primary);
+    line-height: 1.6;
     transition: background-color 0.3s ease, color 0.3s ease;
 }
 
@@ -329,13 +356,14 @@ body {
     padding: 30px;
     border-radius: 8px;
     box-shadow: 0 2px 10px var(--shadow);
+    border: 1px solid var(--border-color);
     margin-bottom: 20px;
     display: flex;
     flex-direction: column;
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    transition: background-color 0.3s ease, box-shadow 0.3s ease;
+    transition: background-color 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
 }
 
 h1, h2 {
@@ -348,10 +376,12 @@ button {
     padding: 12px 25px;
     margin: 10px 5px;
     border: none;
-    border-radius: 5px;
+    border-radius: 6px;
     font-size: 16px;
     cursor: pointer;
-    transition: opacity 0.2s;
+    transition: all 0.2s ease;
+    font-weight: 500;
+    box-shadow: 0 1px 3px var(--shadow);
 }
 
 .present-btn {
@@ -370,12 +400,20 @@ button {
 }
 
 button:hover {
-    opacity: 0.9;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px var(--shadow-hover);
+}
+
+button:active {
+    transform: translateY(0);
+    box-shadow: 0 1px 2px var(--shadow);
 }
 
 button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
 }
 
 .loading-overlay {
@@ -521,12 +559,22 @@ button:disabled {
     width: 100%;
     padding: 10px;
     margin: 10px 0 15px;
-    border-radius: 4px;
+    border-radius: 6px;
     border: 1px solid var(--border-input);
     font-size: 15px;
     background-color: var(--bg-container);
     color: var(--text-primary);
-    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+    transition: all 0.3s ease;
+    outline: none;
+}
+
+.lock-chime select:hover {
+    border-color: var(--text-link);
+}
+
+.lock-chime select:focus {
+    border-color: var(--btn-primary-bg);
+    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.1);
 }
 
 .folder-selector {
@@ -536,12 +584,22 @@ button:disabled {
 .folder-selector select {
     width: 100%;
     padding: 12px;
-    border-radius: 4px;
+    border-radius: 6px;
     border: 1px solid var(--border-input);
     font-size: 15px;
     background-color: var(--bg-container);
     color: var(--text-primary);
-    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+    transition: all 0.3s ease;
+    outline: none;
+}
+
+.folder-selector select:hover {
+    border-color: var(--text-link);
+}
+
+.folder-selector select:focus {
+    border-color: var(--btn-primary-bg);
+    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.1);
 }
 
 .video-table-container {
@@ -581,7 +639,8 @@ button:disabled {
 
 .video-table tbody tr:hover {
     background-color: var(--bg-table-hover);
-    transition: background-color 0.3s ease;
+    transition: background-color 0.15s ease;
+    cursor: pointer;
 }
 
 .video-name {
@@ -893,10 +952,16 @@ button:disabled {
         border-radius: 8px;
         padding: 15px;
         margin-bottom: 15px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         overflow-wrap: break-word;
         word-wrap: break-word;
         word-break: break-word;
+        transition: all 0.2s ease;
+    }
+    
+    .mobile-card:hover {
+        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        transform: translateY(-1px);
     }
     
     .mobile-card-header {
@@ -1286,3 +1351,86 @@ details summary span:first-of-type {
     }
 }
 
+/* Dark mode mobile card styling */
+[data-theme="dark"] .mobile-card {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+    box-shadow: 0 1px 3px var(--shadow);
+}
+
+[data-theme="dark"] .mobile-card:hover {
+    box-shadow: 0 4px 8px var(--shadow-hover);
+    border-color: var(--border-light);
+}
+
+/* Dark mode better form controls */
+[data-theme="dark"] input[type="text"],
+[data-theme="dark"] input[type="number"],
+[data-theme="dark"] input[type="email"],
+[data-theme="dark"] textarea {
+    background: var(--bg-container);
+    color: var(--text-primary);
+    border: 1px solid var(--border-input);
+    border-radius: 6px;
+    padding: 10px;
+    transition: all 0.2s ease;
+}
+
+[data-theme="dark"] input[type="text"]:hover,
+[data-theme="dark"] input[type="number"]:hover,
+[data-theme="dark"] input[type="email"]:hover,
+[data-theme="dark"] textarea:hover {
+    border-color: var(--text-link);
+}
+
+[data-theme="dark"] input[type="text"]:focus,
+[data-theme="dark"] input[type="number"]:focus,
+[data-theme="dark"] input[type="email"]:focus,
+[data-theme="dark"] textarea:focus {
+    border-color: var(--btn-primary-bg);
+    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.15);
+    outline: none;
+}
+
+/* Dark mode navbar shadow */
+[data-theme="dark"] .navbar {
+    box-shadow: 0 2px 8px var(--shadow);
+}
+
+/* Dark mode video player background */
+[data-theme="dark"] #videoPlayer {
+    background-color: #000;
+    box-shadow: 0 4px 16px var(--shadow-hover);
+}
+
+/* Dark mode session video containers */
+[data-theme="dark"] .session-video-container {
+    background: var(--bg-info);
+    box-shadow: 0 1px 3px var(--shadow);
+    border: 1px solid var(--border-color);
+}
+
+[data-theme="dark"] .session-video-container:hover {
+    border-color: var(--border-light);
+    box-shadow: 0 2px 6px var(--shadow-hover);
+}
+
+/* Improve scrollbar styling in dark mode */
+[data-theme="dark"] *::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+
+[data-theme="dark"] *::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+}
+
+[data-theme="dark"] *::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 6px;
+    border: 2px solid var(--bg-primary);
+}
+
+[data-theme="dark"] *::-webkit-scrollbar-thumb:hover {
+    background: var(--border-light);
+}

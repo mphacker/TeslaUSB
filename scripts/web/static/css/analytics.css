@@ -15,13 +15,14 @@
     padding: 20px;
     text-decoration: none;
     color: inherit;
-    transition: all 0.3s ease;
+    transition: all 0.2s ease;
     cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
 .action-card:hover {
     border-color: #4CAF50;
-    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.2);
+    box-shadow: 0 6px 16px rgba(76, 175, 80, 0.25);
     transform: translateY(-2px);
 }
 
@@ -70,7 +71,12 @@
     border: 1px solid #ddd;
     border-radius: 8px;
     padding: 20px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    transition: all 0.2s ease;
+}
+
+.analytics-card:hover {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
 }
 
 .analytics-card h3 {
@@ -152,6 +158,22 @@
     font-family: monospace;
     font-size: 12px;
     color: #666;
+    transition: all 0.3s ease;
+}
+
+/* Dark mode progress bars and partition paths */
+[data-theme="dark"] .progress-container {
+    background: #21262d;
+}
+
+[data-theme="dark"] .progress-label {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .partition-path {
+    background: #0d1117;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
 }
 
 .alert {
@@ -179,6 +201,25 @@
     color: #C62828;
 }
 
+/* Dark mode alert boxes */
+[data-theme="dark"] .alert-success {
+    background: #1a4d2e;
+    border-color: #3fb950;
+    color: #7ee787;
+}
+
+[data-theme="dark"] .alert-warning {
+    background: #4a3a1f;
+    border-color: #d29922;
+    color: #f0b72f;
+}
+
+[data-theme="dark"] .alert-critical {
+    background: #4c1f1f;
+    border-color: #f85149;
+    color: #ff7b72;
+}
+
 .info-card {
     background: #E3F2FD;
     border: 1px solid #2196F3;
@@ -186,6 +227,7 @@
     padding: 20px;
     margin: 20px 0;
     text-align: center;
+    transition: all 0.3s ease;
 }
 
 .info-card h3 {
@@ -212,6 +254,28 @@
     font-style: italic;
 }
 
+/* Dark mode info card */
+[data-theme="dark"] .info-card {
+    background: var(--bg-info);
+    border-color: #58a6ff;
+}
+
+[data-theme="dark"] .info-card h3 {
+    color: #58a6ff;
+}
+
+[data-theme="dark"] .estimate-value {
+    color: #79c0ff;
+}
+
+[data-theme="dark"] .estimate-method {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .estimate-confidence {
+    color: var(--text-muted);
+}
+
 .analytics-section {
     margin: 30px 0;
 }
@@ -221,6 +285,13 @@
     border-bottom: 2px solid #2196F3;
     padding-bottom: 10px;
     margin-bottom: 20px;
+    transition: all 0.3s ease;
+}
+
+/* Dark mode section headers */
+[data-theme="dark"] .analytics-section h3 {
+    color: var(--text-primary);
+    border-bottom-color: #58a6ff;
 }
 
 .totals-row {
@@ -237,6 +308,7 @@
     padding: 20px;
     text-align: center;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    transition: all 0.3s ease;
 }
 
 .total-number {
@@ -251,6 +323,21 @@
     font-size: 14px;
 }
 
+/* Dark mode total stats */
+[data-theme="dark"] .total-stat {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+    box-shadow: 0 1px 3px var(--shadow);
+}
+
+[data-theme="dark"] .total-number {
+    color: #58a6ff;
+}
+
+[data-theme="dark"] .total-label {
+    color: var(--text-secondary);
+}
+
 .analytics-table {
     width: 100%;
     border-collapse: collapse;
@@ -258,6 +345,7 @@
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    transition: all 0.3s ease;
 }
 
 .analytics-table thead {
@@ -278,6 +366,26 @@
 
 .analytics-table tbody tr:hover {
     background: #f5f5f5;
+}
+
+/* Dark mode analytics table */
+[data-theme="dark"] .analytics-table {
+    background: var(--bg-container);
+    border: 1px solid var(--border-color);
+    box-shadow: 0 1px 3px var(--shadow);
+}
+
+[data-theme="dark"] .analytics-table thead {
+    background: #1f6feb;
+}
+
+[data-theme="dark"] .analytics-table td {
+    border-bottom-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .analytics-table tbody tr:hover {
+    background: var(--bg-table-hover);
 }
 
 .folder-icon {
@@ -318,11 +426,20 @@
 }
 
 .priority-high {
-    background: #FFF3E0 !important;
+    /* Removed background color - keeping rows consistent */
 }
 
 .priority-low {
-    opacity: 0.8;
+    opacity: 1;
+}
+
+/* Dark mode priority rows */
+[data-theme="dark"] .priority-high {
+    /* No special background in dark mode */
+}
+
+[data-theme="dark"] .priority-low {
+    opacity: 1;
 }
 
 .recommendations-section {
@@ -357,6 +474,13 @@
     padding: 15px;
     background: #f5f5f5;
     border-radius: 8px;
+    transition: all 0.3s ease;
+}
+
+/* Dark mode last updated section */
+[data-theme="dark"] .last-updated {
+    background: var(--bg-info);
+    color: var(--text-secondary);
 }
 
 .btn-refresh {
@@ -461,11 +585,12 @@
 [data-theme="dark"] .action-card {
     background: var(--bg-container);
     border-color: var(--border-color);
+    box-shadow: 0 1px 3px var(--shadow);
 }
 
 [data-theme="dark"] .action-card:hover {
-    border-color: #66BB6A;
-    box-shadow: 0 4px 12px rgba(102, 187, 106, 0.3);
+    border-color: #3fb950;
+    box-shadow: 0 6px 16px rgba(63, 185, 80, 0.25);
 }
 
 [data-theme="dark"] .action-content h3 {
@@ -477,12 +602,18 @@
 }
 
 [data-theme="dark"] .action-arrow {
-    color: #66BB6A;
+    color: #3fb950;
 }
 
 [data-theme="dark"] .analytics-card {
     background: var(--bg-container);
     border-color: var(--border-color);
+    box-shadow: 0 1px 3px var(--shadow);
+}
+
+[data-theme="dark"] .analytics-card:hover {
+    box-shadow: 0 4px 8px var(--shadow-hover);
+    border-color: var(--border-light);
 }
 
 [data-theme="dark"] .analytics-card h3 {

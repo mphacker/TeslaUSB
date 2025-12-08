@@ -7,17 +7,17 @@
     <!-- iOS Safari Warning -->
     <div id="iosWarning" style="display: none; background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
         <p style="margin: 0; font-size: 14px;"><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
-        <p style="margin: 8px 0 0 0; font-size: 13px; color: #666;">Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+        <p style="margin: 8px 0 0 0; font-size: 13px; color: var(--text-secondary);">Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
     </div>
     
     <!-- Active Lock Chime - Moved to top -->
     {% if active_chime %}
-    <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #4caf50;">
-        <h3 style="margin: 0 0 10px 0; color: #2e7d32;">🔊 Active Lock Chime</h3>
+    <div style="background: var(--active-chime-bg); padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid var(--active-chime-border);">
+        <h3 style="margin: 0 0 10px 0; color: var(--active-chime-heading);">🔊 Active Lock Chime</h3>
         <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
             <div>
                 <strong>{{ active_chime.filename }}</strong><br>
-                <span style="color: #666; font-size: 13px;">{{ active_chime.size_str }}</span>
+                <span style="color: var(--text-secondary); font-size: 13px;">{{ active_chime.size_str }}</span>
             </div>
             <audio controls preload="none" style="flex: 1; max-width: 300px; height: 30px;">
                 <source src="{{ url_for('lock_chimes.play_active_chime') }}?v={{ active_chime.mtime }}" type="audio/wav">
@@ -32,23 +32,23 @@
     
     <!-- Upload Controls - Collapsible -->
     <details class="folder-controls" id="chimeUploadControls" style="margin-bottom: 20px;">
-        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: #e3f2fd; border-radius: 8px; border-left: 4px solid #2196f3; color: #1976d2; font-size: 18px; list-style: none; user-select: none;">
+        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: var(--collapsible-section-bg); border-radius: 8px; border-left: 4px solid var(--collapsible-section-border); color: var(--collapsible-section-text); font-size: 18px; list-style: none; user-select: none;">
             <span style="display: inline-block; margin-right: 5px;">▶</span> 📤 Upload New Chime
         </summary>
         
-        <div style="background: #f5f5f5; padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid #2196f3; border-right: 1px solid #2196f3; border-bottom: 1px solid #2196f3; margin-top: -8px;">
+        <div style="background: var(--collapsible-content-bg); padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid var(--collapsible-section-border); border-right: 1px solid var(--collapsible-section-border); border-bottom: 1px solid var(--collapsible-section-border); margin-top: -8px;">
             <form method="post" action="{{ url_for('lock_chimes.upload_lock_chime') }}" enctype="multipart/form-data" id="chimeUploadForm">
                 <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
                     <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required 
-                           style="padding: 10px; border: 2px solid #ddd; border-radius: 4px; background: white; flex: 1; min-width: 250px; max-width: 400px; font-size: 14px;">
+                           style="padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); flex: 1; min-width: 250px; max-width: 400px; font-size: 14px; color: var(--text-primary);">
                     <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0;">📤 Upload</button>
                 </div>
-                <p style="margin: 0 0 15px 0; font-size: 12px; color: #666;">
+                <p style="margin: 0 0 15px 0; font-size: 12px; color: var(--text-secondary);">
                     WAV or MP3 files - auto-converted to Tesla format (PCM 16-bit, 44.1 kHz, under 1MB)
                 </p>
                 
                 <!-- Volume Normalization Controls -->
-                <div style="background: white; padding: 12px; border-radius: 6px; border: 1px solid #ddd;">
+                <div style="background: var(--form-input-bg); padding: 12px; border-radius: 6px; border: 1px solid var(--border-input);">
                     <label style="display: flex; align-items: center; margin-bottom: 10px; cursor: pointer; user-select: none;">
                         <input type="checkbox" id="normalize-on-upload" name="normalize" value="true" checked style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;"> 
                         <span style="font-weight: 600; font-size: 14px;">🔊 Normalize volume on upload</span>
@@ -77,14 +77,14 @@
             
             <!-- Upload Progress Bar -->
             <div id="chimeUploadProgress" style="display: none; margin-top: 15px;">
-                <div style="background: #f0f0f0; border-radius: 8px; padding: 15px; border: 2px solid #007bff;">
-                    <h4 style="margin: 0 0 10px 0; color: #007bff;">📤 Uploading Chime...</h4>
-                    <div style="background: #e0e0e0; border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                <div style="background: var(--upload-progress-bg); border-radius: 8px; padding: 15px; border: 2px solid var(--btn-primary-bg);">
+                    <h4 style="margin: 0 0 10px 0; color: var(--btn-primary-bg);">📤 Uploading Chime...</h4>
+                    <div style="background: var(--upload-progress-bar-bg); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
                         <div id="chimeProgressBar" style="background: linear-gradient(90deg, #007bff, #0056b3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
                             0%
                         </div>
                     </div>
-                    <p id="chimeUploadStatus" style="margin: 0; font-size: 13px; color: #666;">Preparing upload...</p>
+                    <p id="chimeUploadStatus" style="margin: 0; font-size: 13px; color: var(--text-secondary);">Preparing upload...</p>
                 </div>
             </div>
         </div>
@@ -92,31 +92,31 @@
     
     <!-- Chime Scheduler -->
     <details id="scheduler-section" style="margin-bottom: 20px;">
-        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: #e3f2fd; border-radius: 8px; border-left: 4px solid #2196f3; color: #1976d2; font-size: 18px; list-style: none;">
+        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: var(--collapsible-section-bg); border-radius: 8px; border-left: 4px solid var(--collapsible-section-border); color: var(--collapsible-section-text); font-size: 18px; list-style: none;">
             <span style="display: inline-block; margin-right: 5px;">▶</span> 📅 Chime Scheduler {% if schedules %}({{ schedules|length }} schedule{{ 's' if schedules|length != 1 else '' }}){% endif %}
         </summary>
         
-        <div style="background: #e3f2fd; padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid #2196f3; border-right: 1px solid #2196f3; border-bottom: 1px solid #2196f3; margin-top: -8px;">
+        <div style="background: var(--collapsible-content-bg); padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid var(--collapsible-section-border); border-right: 1px solid var(--collapsible-section-border); border-bottom: 1px solid var(--collapsible-section-border); margin-top: -8px;">
             <!-- Add New Schedule Form -->
             <details {% if not schedules %}open{% endif %} style="margin-bottom: 15px;" id="schedule-form-details">
-                <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 4px; list-style: none;">
+                <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: var(--form-input-bg); border-radius: 4px; list-style: none; border: 1px solid var(--border-input);">
                     <span style="display: inline-block; margin-right: 5px;">▶</span> <span id="form-title">➕ Add New Schedule</span>
                 </summary>
             
-            <form id="schedule-form" method="post" action="{{ url_for('lock_chimes.add_schedule') }}" style="background: white; padding: 15px; border-radius: 4px; margin-top: 10px;">
+            <form id="schedule-form" method="post" action="{{ url_for('lock_chimes.add_schedule') }}" style="background: var(--form-input-bg); padding: 15px; border-radius: 4px; margin-top: 10px; border: 1px solid var(--border-input);">
                 <div style="display: grid; gap: 15px;">
                     <!-- Schedule Name -->
                     <div>
                         <label style="display: block; margin-bottom: 5px; font-weight: 600;">Schedule Name:</label>
                         <input type="text" id="schedule-name" name="schedule_name" placeholder="e.g., Morning Chime" required
-                               style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px; box-sizing: border-box;">
+                               style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; box-sizing: border-box; background: var(--bg-secondary); color: var(--text-primary);">
                     </div>
                     
                     <!-- Chime Selection -->
                     <div>
                         <label style="display: block; margin-bottom: 5px; font-weight: 600;">Chime:</label>
                         <select id="chime-select" name="chime_filename" required
-                                style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                                style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                             <option value="">-- Select a chime --</option>
                             <option value="RANDOM">🎲 Random Chime</option>
                             {% for chime in chime_files %}
@@ -131,19 +131,19 @@
                     <div>
                         <label style="display: block; margin-bottom: 8px; font-weight: 600;">Schedule Type:</label>
                         <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="radio" name="schedule_type" value="weekly" class="schedule-type-radio" checked style="margin-right: 6px;">
                                 <span>📅 Days of Week</span>
                             </label>
-                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="radio" name="schedule_type" value="date" class="schedule-type-radio" style="margin-right: 6px;">
                                 <span>📆 Specific Date</span>
                             </label>
-                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="radio" name="schedule_type" value="holiday" class="schedule-type-radio" style="margin-right: 6px;">
                                 <span>🎉 US Holiday</span>
                             </label>
-                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="radio" name="schedule_type" value="recurring" class="schedule-type-radio" style="margin-right: 6px;">
                                 <span>🔄 Recurring Rotation</span>
                             </label>
@@ -153,13 +153,13 @@
                     <!-- Interval Selection (for recurring schedules) -->
                     <div id="interval-selection" class="schedule-type-field" style="display: none;">
                         <label style="display: block; margin-bottom: 8px; font-weight: 600;">Rotation Frequency:</label>
-                        <select id="interval-select" name="interval" style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                        <select id="interval-select" name="interval" style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                             <option value="">-- Select frequency --</option>
                             {% for interval_value, interval_name in recurring_intervals.items() %}
                             <option value="{{ interval_value }}">{{ interval_name }}</option>
                             {% endfor %}
                         </select>
-                        <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">
                             ℹ️ Recurring schedules always use <strong>Random Chime</strong> and automatically avoid repeating the currently active chime
                         </p>
                     </div>
@@ -169,20 +169,20 @@
                         <label style="display: block; margin-bottom: 8px; font-weight: 600;">Days:</label>
                         <div style="display: flex; flex-wrap: wrap; gap: 10px;">
                             {% for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] %}
-                            <label style="display: flex; align-items: center; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer; user-select: none;">
+                            <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="checkbox" name="days" value="{{ day }}" class="day-checkbox" id="day-{{ day }}" style="margin-right: 6px;">
                                 <span>{{ day[:3] }}</span>
                             </label>
                             {% endfor %}
                         </div>
-                        <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Select at least one day</p>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">Select at least one day</p>
                     </div>
                     
                     <!-- Date Selection (for date schedules) -->
                     <div id="date-selection" class="schedule-type-field" style="display: none;">
                         <label style="display: block; margin-bottom: 8px; font-weight: 600;">Date (Month/Day):</label>
                         <div style="display: flex; gap: 10px; align-items: center;">
-                            <select id="month-select" name="month" style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                            <select id="month-select" name="month" style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                                 <option value="">Month</option>
                                 <option value="1">January</option>
                                 <option value="2">February</option>
@@ -197,44 +197,44 @@
                                 <option value="11">November</option>
                                 <option value="12">December</option>
                             </select>
-                            <select id="day-select" name="day" style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                            <select id="day-select" name="day" style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                                 <option value="">Day</option>
                                 {% for d in range(1, 32) %}
                                 <option value="{{ d }}">{{ d }}</option>
                                 {% endfor %}
                             </select>
                         </div>
-                        <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Chime will play every year on this date</p>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">Chime will play every year on this date</p>
                     </div>
                     
                     <!-- Holiday Selection (for holiday schedules) -->
                     <div id="holiday-selection" class="schedule-type-field" style="display: none;">
                         <label style="display: block; margin-bottom: 8px; font-weight: 600;">Holiday:</label>
-                        <select id="holiday-select" name="holiday" style="width: 100%; padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                        <select id="holiday-select" name="holiday" style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                             <option value="">-- Select a holiday --</option>
                             {% for holiday in holidays %}
                             <option value="{{ holiday.name }}">{{ holiday.name }} ({{ holiday.month }}/{{ holiday.day }})</option>
                             {% endfor %}
                         </select>
-                        <p style="margin: 5px 0 0 0; font-size: 12px; color: #666;">Chime will play at 12:00 AM on the holiday</p>
+                        <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">Chime will play at 12:00 AM on the holiday</p>
                     </div>
                     
                     <!-- Time Selection (12-hour format) - hidden for holidays -->
                     <div id="time-selection">
                         <label style="display: block; margin-bottom: 5px; font-weight: 600;">Time:</label>
                         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                            <select id="hour-select" name="hour" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                            <select id="hour-select" name="hour" required style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                                 {% for h in range(1, 13) %}
                                 <option value="{{ h }}" {% if h == 12 %}selected{% endif %}>{{ h }}</option>
                                 {% endfor %}
                             </select>
                             <span style="font-weight: bold;">:</span>
-                            <select id="minute-select" name="minute" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                            <select id="minute-select" name="minute" required style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                                 {% for m in range(0, 60, 5) %}
                                 <option value="{{ '%02d'|format(m) }}" {% if m == 0 %}selected{% endif %}>{{ '%02d'|format(m) }}</option>
                                 {% endfor %}
                             </select>
-                            <select id="ampm-select" name="am_pm" required style="padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 14px;">
+                            <select id="ampm-select" name="am_pm" required style="padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                                 <option value="AM" id="ampm-am-option" selected>AM</option>
                                 <option value="PM" id="ampm-pm-option">PM</option>
                             </select>
@@ -263,20 +263,20 @@
         <div style="margin-top: 15px;">
             <h4 style="margin: 0 0 10px 0;">Active Schedules:</h4>
             {% for schedule in schedules %}
-            <div style="background: white; padding: 12px; border-radius: 4px; margin-bottom: 10px; border-left: 4px solid {% if schedule.enabled %}#4caf50{% else %}#999{% endif %};">
+            <div style="background: var(--form-input-bg); padding: 12px; border-radius: 4px; margin-bottom: 10px; border-left: 4px solid {% if schedule.enabled %}var(--active-chime-border){% else %}var(--text-muted){% endif %}; border: 1px solid var(--border-input);">
                 <div style="display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: 10px;">
                     <div style="flex: 1; min-width: 200px;">
                         <div style="font-weight: 600; margin-bottom: 4px;">
                             {{ schedule.name }}
                             {% if not schedule.enabled %}
-                            <span style="background: #ffc107; color: #000; padding: 2px 6px; border-radius: 3px; font-size: 11px; margin-left: 6px;">DISABLED</span>
+                            <span style="background: var(--status-unknown-bg); color: var(--status-unknown-text); padding: 2px 6px; border-radius: 3px; font-size: 11px; margin-left: 6px;">DISABLED</span>
                             {% endif %}
                         </div>
-                        <div style="font-size: 13px; color: #666;">
+                        <div style="font-size: 13px; color: var(--text-secondary);">
                             <div>🔔 {% if schedule.chime_filename == 'RANDOM' %}🎲 Random Chime{% else %}{{ schedule.chime_filename }}{% endif %}</div>
                             <div>⏰ {{ format_schedule(schedule) }}</div>
                             {% if schedule.last_run %}
-                            <div style="color: #999; font-size: 12px; margin-top: 2px;">
+                            <div style="color: var(--text-muted); font-size: 12px; margin-top: 2px;">
                                 📊 Last run: {{ format_last_run(schedule.last_run) }}
                             </div>
                             {% endif %}
@@ -299,10 +299,10 @@
             {% endfor %}
         </div>
         {% else %}
-        <p style="margin: 10px 0 0 0; color: #666; font-size: 14px;">No schedules configured. Add one above to automatically change chimes at specific times.</p>
+        <p style="margin: 10px 0 0 0; color: var(--text-secondary); font-size: 14px;">No schedules configured. Add one above to automatically change chimes at specific times.</p>
         {% endif %}
         
-        <div style="background: #fff8e1; padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px;">
+        <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--collapsible-section-border); color: var(--msg-info-text);">
             <strong>ℹ️ How it works:</strong> Schedules run automatically every minute. The most recent schedule for each day will be active. Chimes change without interrupting Tesla recording!
         </div>
         </div>

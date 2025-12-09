@@ -10,6 +10,8 @@ Restart=always
 RestartSec=10
 StartLimitBurst=5
 StartLimitIntervalSec=300
+TimeoutStopSec=5
+KillMode=mixed
 
 # Memory limit (lightweight script)
 MemoryMax=50M

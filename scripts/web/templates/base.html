@@ -32,7 +32,7 @@
             </div>
             <h1><a href="{{ url_for('mode_control.index') }}">🚗 Tesla USB Gadget Control - {{ hostname }}</a></h1>
             <div class="nav-links">
-                <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
+                <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Settings</a>
                 <a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>
                 <a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
                 <a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
@@ -50,7 +50,7 @@
     <!-- Mobile Menu -->
     <div class="mobile-menu" id="mobileMenu">
         <div class="mobile-menu-close" onclick="toggleMobileMenu()">&times;</div>
-        <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Control</a>
+        <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Settings</a>
         <a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>
         <a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
         <a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>

@@ -8,6 +8,11 @@
         <div class="loading-text">Switching modes, please wait...</div>
     </div>
     
+    <div id="apLoadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Updating AP settings, please wait...</div>
+    </div>
+    
     <form method="post" action="{{url_for('mode_control.present_usb')}}" id="presentForm" style="display: inline;">
         <button type="submit" class="present-btn" id="presentBtn">📱 Present USB Gadget</button>
     </form>
@@ -31,15 +36,84 @@
         </ul>
     </div>
     {% endif %}
+
+    <div class="info-box" style="margin-top: 20px;">
+        <strong>Fallback Access Point:</strong><br>
+        {% if ap_status.error %}
+            <div style="color: #c00;">AP status unavailable ({{ ap_status.error }})</div>
+        {% else %}
+            <div>Status: {{ 'Active' if ap_status.ap_active else 'Inactive' }} | Mode: {{ 'AP On' if ap_status.force_mode == 'force_on' else 'Auto' }}</div>
+            <div>SSID: <code>{{ ap_status.ssid }}</code> | IP: <code>{{ ap_status.static_ip }}</code> | DHCP: <code>{{ ap_status.dhcp_range_start }} - {{ ap_status.dhcp_range_end }}</code></div>
+            {% if ap_status.allow_concurrent %}
+                <div style="font-size: 0.9em; color: var(--text-secondary); margin-top: 4px;">The AP runs on a virtual interface, allowing simultaneous WiFi and AP access.</div>
+            {% endif %}
+            
+            <div style="margin-top: 12px; padding: 10px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: 4px;">
+                <strong style="color: var(--text-primary);">AP Configuration:</strong>
+                <form method="post" action="{{ url_for('mode_control.configure_ap') }}" id="apConfigForm" style="margin-top: 8px;">
+                    <div style="margin-bottom: 8px;">
+                        <label for="ap_ssid" style="display: inline-block; width: 100px; color: var(--text-primary);">SSID:</label>
+                        <input type="text" id="ap_ssid" name="ssid" value="{{ ap_config.ssid }}" maxlength="32" required 
+                               style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                        <span style="font-size: 0.85em; color: var(--text-secondary);">(1-32 chars)</span>
+                    </div>
+                    <div style="margin-bottom: 8px;">
+                        <label for="ap_passphrase" style="display: inline-block; width: 100px; color: var(--text-primary);">Password:</label>
+                        <input type="password" id="ap_passphrase" name="passphrase" value="{{ ap_config.passphrase }}" minlength="8" maxlength="63" 
+                               style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                        <button type="button" onclick="togglePassword()" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                        <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
+                    </div>
+                    <button type="submit" class="edit-btn" id="updateApBtn" onclick="return confirm('Changing AP credentials will disconnect all connected clients. Continue?')">Update AP Credentials</button>
+                </form>
+            </div>
+            
+            <div style="margin-top: 12px; display:flex; gap:8px; flex-wrap:wrap;">
+                <form method="post" action="{{ url_for('mode_control.force_ap') }}" id="startApForm" style="margin: 0;">
+                    <input type="hidden" name="mode" value="on">
+                    <button type="submit" class="edit-btn" id="startApBtn">Start AP Now</button>
+                </form>
+                <form method="post" action="{{ url_for('mode_control.force_ap') }}" id="stopApForm" style="margin: 0;">
+                    <input type="hidden" name="mode" value="off">
+                    <button type="submit" class="present-btn" id="stopApBtn">Stop AP</button>
+                </form>
+            </div>
+            <div style="margin-top:6px; font-size: 0.95em; color: var(--text-secondary);">
+                <strong>Auto mode:</strong> AP automatically starts when WiFi is unavailable and stops when WiFi is restored.<br>
+                <strong>AP On mode:</strong> AP stays on continuously regardless of WiFi status (activated by "Start AP Now" button).
+            </div>
+        {% endif %}
+    </div>
 </div>
 
 <script>
+function togglePassword() {
+    const passField = document.getElementById('ap_passphrase');
+    const btn = event.target;
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
 // Prevent multiple mode switch submissions
 const presentForm = document.getElementById('presentForm');
 const editForm = document.getElementById('editForm');
 const presentBtn = document.getElementById('presentBtn');
 const editBtn = document.getElementById('editBtn');
 const loadingOverlay = document.getElementById('loadingOverlay');
+
+// AP form elements
+const apConfigForm = document.getElementById('apConfigForm');
+const startApForm = document.getElementById('startApForm');
+const stopApForm = document.getElementById('stopApForm');
+const updateApBtn = document.getElementById('updateApBtn');
+const startApBtn = document.getElementById('startApBtn');
+const stopApBtn = document.getElementById('stopApBtn');
+const apLoadingOverlay = document.getElementById('apLoadingOverlay');
 
 function disableButtons() {
     presentBtn.disabled = true;
@@ -49,6 +123,19 @@ function disableButtons() {
     presentBtn.style.cursor = 'not-allowed';
     editBtn.style.cursor = 'not-allowed';
     loadingOverlay.style.display = 'flex';
+}
+
+function disableApButtons() {
+    updateApBtn.disabled = true;
+    startApBtn.disabled = true;
+    stopApBtn.disabled = true;
+    updateApBtn.style.opacity = '0.5';
+    startApBtn.style.opacity = '0.5';
+    stopApBtn.style.opacity = '0.5';
+    updateApBtn.style.cursor = 'not-allowed';
+    startApBtn.style.cursor = 'not-allowed';
+    stopApBtn.style.cursor = 'not-allowed';
+    apLoadingOverlay.style.display = 'flex';
 }
 
 presentForm.addEventListener('submit', function(e) {
@@ -65,6 +152,30 @@ editForm.addEventListener('submit', function(e) {
         return false;
     }
     disableButtons();
+});
+
+apConfigForm.addEventListener('submit', function(e) {
+    if (updateApBtn.disabled) {
+        e.preventDefault();
+        return false;
+    }
+    disableApButtons();
+});
+
+startApForm.addEventListener('submit', function(e) {
+    if (startApBtn.disabled) {
+        e.preventDefault();
+        return false;
+    }
+    disableApButtons();
+});
+
+stopApForm.addEventListener('submit', function(e) {
+    if (stopApBtn.disabled) {
+        e.preventDefault();
+        return false;
+    }
+    disableApButtons();
 });
 </script>
 {% endblock %}

@@ -65,7 +65,103 @@ REQUIRED_PACKAGES=(
   ffmpeg
   watchdog
   wireless-tools
+  iw
+  hostapd
+  dnsmasq
 )
+
+# Lightweight apt helpers (reduce OOM risk on Pi Zero/2W)
+apt_update_safe() {
+  local attempt=1
+  local max_attempts=3
+  while [ $attempt -le $max_attempts ]; do
+    echo "Running apt-get update (attempt $attempt/$max_attempts)..."
+    if apt-get update \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::No-Cache=true \
+      -o Acquire::Languages=none \
+      -o APT::Update::Reduce-Download-Size=true \
+      -o Acquire::PDiffs=true \
+      -o Acquire::http::Pipeline-Depth=0; then
+      return 0
+    fi
+    echo "apt-get update failed (attempt $attempt). Cleaning lists and retrying..."
+    rm -rf /var/lib/apt/lists/*
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+  echo "apt-get update failed after $max_attempts attempts" >&2
+  return 1
+}
+
+install_pkg_safe() {
+  local pkg="$1"
+  echo "Installing $pkg (no-recommends)..."
+  if apt-get install -y --no-install-recommends "$pkg"; then
+    return 0
+  fi
+  echo "Retrying $pkg with default recommends..."
+  apt-get install -y "$pkg"
+}
+
+enable_install_swap() {
+  INSTALL_SWAP="/tmp/teslausb_pkg.swap"
+  if swapon --show | grep -q "$INSTALL_SWAP" 2>/dev/null; then
+    echo "Temporary swap already active"
+    return
+  fi
+  echo "Enabling temporary swap for package installs (1GB)..."
+  # Use existing swap if available, otherwise create temporary
+  if [ -f "/var/swap/fsck.swap" ] && ! swapon --show | grep -q "fsck.swap" 2>/dev/null; then
+    echo "  Using existing fsck swap file"
+    swapon /var/swap/fsck.swap 2>/dev/null && return
+  fi
+  # Create temporary 1GB swap
+  if fallocate -l 1G "$INSTALL_SWAP" 2>/dev/null || dd if=/dev/zero of="$INSTALL_SWAP" bs=1M count=1024 status=none; then
+    chmod 600 "$INSTALL_SWAP"
+    mkswap "$INSTALL_SWAP" >/dev/null 2>&1 || { echo "mkswap failed"; return 1; }
+    swapon "$INSTALL_SWAP" 2>/dev/null || { echo "swapon failed"; return 1; }
+    echo "  Swap enabled: $(swapon --show | grep -E 'teslausb|fsck' || echo 'NONE - FAILED')"
+  else
+    echo "ERROR: could not create temporary swap"
+    return 1
+  fi
+}
+
+disable_install_swap() {
+  if [ -n "${INSTALL_SWAP-}" ] && [ -f "$INSTALL_SWAP" ]; then
+    swapoff "$INSTALL_SWAP" 2>/dev/null || true
+    rm -f "$INSTALL_SWAP"
+  fi
+}
+
+stop_nonessential_services() {
+  # Stop heavy memory users during package install (keep WiFi up)
+  echo "Stopping memory-intensive services..."
+  systemctl stop gadget_web.service 2>/dev/null || true
+  systemctl stop thumbnail_generator.service 2>/dev/null || true
+  systemctl stop thumbnail_generator.timer 2>/dev/null || true
+  systemctl stop chime_scheduler.service 2>/dev/null || true
+  systemctl stop chime_scheduler.timer 2>/dev/null || true
+  systemctl stop smbd nmbd 2>/dev/null || true
+  systemctl stop cups.service cups-browsed.service 2>/dev/null || true
+  systemctl stop ModemManager.service 2>/dev/null || true
+  systemctl stop packagekit.service 2>/dev/null || true
+  systemctl stop lightdm.service 2>/dev/null || true
+  echo "  Stopped services to free memory"
+}
+
+start_nonessential_services() {
+  echo "Restarting services..."
+  systemctl start smbd nmbd 2>/dev/null || true
+  systemctl start thumbnail_generator.timer 2>/dev/null || true
+  systemctl start chime_scheduler.timer 2>/dev/null || true
+  systemctl start gadget_web.service 2>/dev/null || true
+  # lightdm, cups, ModemManager will auto-restart if enabled
+  systemctl start lightdm.service 2>/dev/null || true
+  systemctl start cups.service 2>/dev/null || true
+  echo "  Services restarted"
+}
 
 MISSING_PACKAGES=()
 for pkg in "${REQUIRED_PACKAGES[@]}"; do
@@ -76,18 +172,47 @@ done
 
 if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
   echo "Installing missing packages: ${MISSING_PACKAGES[*]}"
-  apt-get update
+  
+  # Prepare for low-memory install
+  stop_nonessential_services
+  enable_install_swap || { echo "ERROR: Failed to enable swap. Cannot proceed."; exit 1; }
+  
+  # Run apt-get update
+  apt_update_safe
   
   # Install packages one at a time to avoid OOM on low-memory systems
   for pkg in "${MISSING_PACKAGES[@]}"; do
-    echo "Installing $pkg..."
-    apt-get install -y "$pkg" || {
-      echo "Warning: Failed to install $pkg, trying with --no-install-recommends..."
-      apt-get install -y --no-install-recommends "$pkg"
-    }
+    install_pkg_safe "$pkg" || echo "Warning: install of $pkg reported an error"
   done
+  
+  # Cleanup
+  disable_install_swap
+  start_nonessential_services
 else
   echo "All required packages already installed; skipping apt install."
+fi
+
+# Ensure hostapd/dnsmasq don't auto-start outside our controller
+systemctl disable hostapd 2>/dev/null || true
+systemctl stop hostapd 2>/dev/null || true
+systemctl disable dnsmasq 2>/dev/null || true
+systemctl stop dnsmasq 2>/dev/null || true
+
+# Configure NetworkManager to ignore virtual AP interface (uap0)
+NM_CONF_DIR="/etc/NetworkManager/conf.d"
+NM_UNMANAGED_CONF="$NM_CONF_DIR/unmanaged-uap0.conf"
+if [ ! -f "$NM_UNMANAGED_CONF" ]; then
+  mkdir -p "$NM_CONF_DIR"
+  cat > "$NM_UNMANAGED_CONF" <<EOF
+[keyfile]
+unmanaged-devices=interface-name:uap0
+EOF
+  echo "Created NetworkManager config to ignore uap0 interface"
+  if systemctl is-active --quiet NetworkManager; then
+    systemctl reload NetworkManager 2>/dev/null || true
+  fi
+else
+  echo "NetworkManager already configured to ignore uap0"
 fi
 
 # Ensure config.txt contains dtoverlay=dwc2 and dtparam=watchdog=on under [all]
@@ -398,6 +523,7 @@ cat > "$SUDOERS_ENTRY" <<EOF
 # First, allow the main scripts to run with full sudo privileges  
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/present_usb.sh
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/edit_usb.sh
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/ap_control.sh
 
 # Allow all system commands used within the scripts
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl
@@ -420,6 +546,8 @@ $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/kill
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sync
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/timeout
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/nsenter
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sed
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill
 
 # Allow cache dropping for exFAT filesystem sync (required for web lock chime updates)
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sh -c echo 3 > /proc/sys/vm/drop_caches

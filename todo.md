@@ -1,151 +1,36 @@
-# TeslaUSB Feature Ideas & TODO List
+# Future Enhancements
 
-### 4. Scheduled Mode Switching
-- [ ] **Automatic mode transitions** based on schedule
-- [ ] Example: Auto-switch to Edit mode at 2 AM for backups, return to Present mode at 4 AM
-- [ ] **Day-of-week schedules** (Edit mode on weekends only)
-- [ ] **Integration with external triggers** (switch when home WiFi detected)
+## User Experience
+- [ ] Tighten small-screen ergonomics on Videos/Chimes/Light Shows (stack session grid to 1x6 on narrow viewports, sticky controls at bottom, avoid horizontal scroll in tables, and keep the hamburger/theme toggles reachable during playback/long lists).
+- [ ] Show clearer mode-switch progress (unbind, unmount, remount, Samba restart) with success/error toasts and retry guidance.
+- [ ] Provide filtering/search in Videos, Chimes, and Light Shows to quickly find items in large libraries.
+- [ ] Add per-item status badges (read-only, pending conversion, invalid format) and inline remediation tips.
 
-**Impact:** Medium - automation and convenience  
-**Difficulty:** Medium
+## New Functionality
+- [X] Offline fallback access point: start hostapd/dnsmasq with static 192.168.4.1 when STA join fails (with RSSI/dwell hysteresis to avoid flaps) so a phone can reach the web UI in the car.
+- [ ] Optional cloud/off-Pi backup target (S3/Backblaze/SMB) with bandwidth caps and scheduled sync windows.
+- [ ] Scheduling UI to auto-switch between Present/Edit based on time-of-day or WiFi presence to avoid manual toggles.
+- [ ] Web UI control to regenerate/resize the USB images safely (with pre-flight free-space checks and fsck).
+- [ ] Event log UI (connect/disconnect, mode switches, uploads/deletes, errors) with export to CSV/JSON.
+- [ ] Support for OTA/lightweight upgrades that download and stage new releases, then prompt for a controlled restart.
 
----
+## Security
+- [ ] Add authentication for the web UI (per-user credentials or OAuth device flow) with session timeouts and CSRF protection.
+- [ ] Serve the UI over HTTPS (self-signed by default with option to upload a certificate) and HSTS when enabled.
+- [ ] Validate and limit upload types/sizes server-side for all endpoints; quarantine and log rejected files.
+- [ ] Harden sudo/system command usage by tightening allowed commands in sudoers and auditing subprocess calls.
+- [ ] Add security audit checks (open ports, Samba share settings, world-writable paths) with remediation guidance.
 
-### 5. Mobile-Optimized Interface
-- [ ] **Responsive design improvements** for phone/tablet viewing
-- [ ] **Touch-friendly controls** for video playback
-- [ ] **Progressive Web App (PWA)** support for home screen installation
-- [ ] **Mobile video player** optimizations (lower bandwidth streaming)
+## Reliability
+- [ ] Systemd watchdog/healthcheck for `gadget_web.service` and thumbnail generator to auto-restart on hangs.
+- [ ] Automated pre/post mode-switch diagnostics: verify nsenter mounts, loop devices, Samba state, and bail out with clear errors.
+- [ ] Periodic fsck of both images while in Edit mode with snapshot/loop isolation and alert on corruption trends.
+- [ ] Metrics endpoint (Prometheus/text) exposing mode durations, mount failures, thumbnail latency, and Samba reload counts.
+- [ ] Integration tests for mode switching and file operations (Videos/Chimes/Light Shows) running in CI to catch regressions.
 
-**Impact:** High - better mobile experience  
-**Difficulty:** Medium
-
----
-
-### 6. Notification System
-- [ ] **Email/push notifications** when Sentry clips are recorded
-- [ ] **Storage warnings** when space is low
-- [ ] **Health alerts** (filesystem errors, mode switch failures)
-- [ ] **Weekly summary reports** (X clips recorded, Y GB used)
-
-**Impact:** High - proactive awareness  
-**Difficulty:** Medium-High
-
----
-
-### 7. Video Annotation & Notes
-- [ ] **Add text notes** to specific videos ("This is the hit-and-run incident")
-- [ ] **Star/favorite** important clips
-- [ ] **Tag videos** with categories (parking lot dent, road trip, etc.)
-- [ ] **Search by tags/notes**
-
-**Impact:** High - organization and finding important clips  
-**Difficulty:** Medium
-
----
-
-### 8. Advanced Lock Chime Features
-- [X] **Chime scheduler** (different chimes for different times/days)
-- [X] **Random chime rotation** (picks random chime from library)
-- [X] **Seasonal chimes** (auto-switch holiday themes)
-- [X] **Volume normalization** (auto-adjust all chimes to consistent loudness)
-
-**Impact:** Medium - enhanced customization  
-**Difficulty:** Low-Medium
-
----
-
-### 9. System Health Monitoring
-- [ ] **Pi temperature monitoring** with alerts
-- [ ] **Filesystem health checks** with proactive fsck scheduling
-- [ ] **USB connection status** (is Tesla currently connected?)
-- [ ] **Write cycle tracking** for SD card health
-- [ ] **Service status dashboard** (all systemd services at a glance)
-
-**Impact:** High - prevents problems before they occur  
-**Difficulty:** Medium
-
----
-
-### 10. Backup & Restore
-- [ ] **One-click full backup** of all TeslaCam videos to network share
-- [ ] **Incremental backup** (only new videos since last backup)
-- [ ] **Restore from backup** functionality
-- [ ] **Cloud backup integration** (Google Drive, Dropbox, S3)
-- [ ] **Automatic backup scheduling**
-
-**Impact:** High - data protection  
-**Difficulty:** Medium-High
-
----
-
-### 11 Video Clip Exporter
-- [ ] **Create shareable clips** with specific start/end times
-- [ ] **Add watermarks/timestamps** to exported videos
-- [ ] **Format conversion** (Tesla MP4 → other formats)
-- [ ] **Social media optimization** (Instagram/YouTube ready exports)
-
-**Impact:** Medium - sharing and social media  
-**Difficulty:** Medium
-
----
-
-## 🌟 Quick Wins (Easy to Implement)
-
-These features provide immediate value with minimal implementation effort:
-
-1. [X] **Dark mode toggle** - Easy CSS addition for night viewing
-2. [ ] **Quick delete oldest** - One-click button to delete oldest 10 RecentClips
-3. [ ] **Thumbnail size slider** - User-adjustable thumbnail dimensions
-4. [ ] **Auto-refresh toggle** - Let users enable/disable auto-refresh on video page
-
----
-
-## 💡 Most Impactful Features (Recommended Priority Order)
-
-For maximum user value, prioritize in this order:
-
-1. **Storage Analytics Dashboard** - Critical for managing limited SD card space
-2. **Auto-Cleanup System** - Prevents "disk full" problems automatically
-3. **Batch Video Operations** - Huge time saver for managing many clips
-4. **Video Search & Filtering** - Essential as video library grows
-5. **System Health Monitoring** - Prevents problems before they occur
-
----
-
-## 📝 Implementation Notes
-
-### Technical Considerations
-
-- **Storage Analytics**: Can leverage existing `get_mount_path()` and partition iteration logic
-- **Auto-Cleanup**: Should respect current mode (only run in Edit mode)
-- **Batch Operations**: Requires frontend checkbox UI + backend ZIP creation with `zipfile` module
-- **Notifications**: Could use `smtplib` for email, webhook for push notifications
-- **PWA Support**: Add manifest.json and service worker for offline capability
-
-### Dependencies to Consider
-
-- **FFmpeg**: Already used for thumbnails, can be extended for video metadata extraction
-- **Python Libraries**: 
-  - `zipfile` for batch downloads
-  - `schedule` for cron-like functionality
-  - `psutil` for system monitoring
-  - `gpxpy` for GPS data parsing (if available in video metadata)
-
-### UI/UX Improvements
-
-- Maintain mobile-first responsive design
-- Add loading states for all async operations
-- Progressive enhancement (features degrade gracefully)
-- Accessibility (ARIA labels, keyboard navigation)
-
----
-
-## 🔧 Current System Strengths to Build Upon
-
-- Dual-mode architecture (Present/Edit) is solid foundation
-- Template-based configuration system is flexible
-- Existing thumbnail generation can be extended for previews
-- Flask web framework allows easy API endpoints
-- Systemd integration provides reliable service management
-
+## Just for Fun
+- [ ] Optional Tesla-themed dashboard skin with live car silhouette animations during mode switches.
+- [ ] Light show/chime “marketplace” section to browse curated community packs with one-click download to part2.
+- [ ] Animated thumbnail scrubbing (GIF-style previews) for recent dashcam clips.
+- [ ] Fun ambient “charging” sound or LED blink pattern on the Pi while thumbnails are generating or during long syncs.
+- [ ] Easter-egg Konami code in the UI to trigger a celebratory light show demo.

@@ -7,6 +7,7 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash
 
 from config import GADGET_DIR
 from services.mode_service import mode_display
+from services.ap_service import ap_status, ap_force, get_ap_config, update_ap_config
 
 mode_control_bp = Blueprint('mode_control', __name__)
 
@@ -15,6 +16,8 @@ mode_control_bp = Blueprint('mode_control', __name__)
 def index():
     """Main page with control buttons."""
     token, label, css_class, share_paths = mode_display()
+    ap = ap_status()
+    ap_config = get_ap_config()
     
     return render_template(
         'index.html',
@@ -23,6 +26,8 @@ def index():
         mode_class=css_class,
         share_paths=share_paths,
         mode_token=token,
+        ap_status=ap,
+        ap_config=ap_config,
         auto_refresh=False,
         hostname=socket.gethostname(),
     )
@@ -112,6 +117,7 @@ def edit_usb():
 def status():
     """Simple status endpoint for health checks."""
     token, label, css_class, share_paths = mode_display()
+    ap = ap_status()
     return {
         "status": "running",
         "gadget_dir": GADGET_DIR,
@@ -119,4 +125,51 @@ def status():
         "mode_label": label,
         "mode_class": css_class,
         "share_paths": share_paths,
+        "ap": ap,
     }
+
+
+@mode_control_bp.route("/ap/force", methods=["POST"])
+def force_ap():
+    """Force the fallback AP on/off/auto via web UI."""
+    action = request.form.get("mode", "auto")
+    allowed = {
+        "on": "force-on",
+        "off": "force-auto",  # Stop AP and return to auto mode
+    }
+    if action not in allowed:
+        flash("Invalid AP action", "error")
+        return redirect(url_for("mode_control.index"))
+
+    try:
+        ap_force(allowed[action])
+        if action == "on":
+            flash("Fallback AP forced on", "success")
+        elif action == "off":
+            flash("AP stopped. Auto mode enabled - AP will restart if WiFi is unavailable.", "info")
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Failed to update AP state: {exc}", "error")
+
+    return redirect(url_for("mode_control.index"))
+
+
+@mode_control_bp.route("/ap/configure", methods=["POST"])
+def configure_ap():
+    """Update AP SSID and password."""
+    ssid = request.form.get("ssid", "").strip()
+    passphrase = request.form.get("passphrase", "").strip()
+    
+    if not ssid:
+        flash("SSID cannot be empty", "error")
+        return redirect(url_for("mode_control.index"))
+    
+    try:
+        update_ap_config(ssid, passphrase)
+        flash(f"AP credentials updated. New SSID: {ssid}. Please reconnect if currently connected to the AP.", "success")
+    except ValueError as exc:
+        flash(f"Validation error: {exc}", "error")
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Failed to update AP credentials: {exc}", "error")
+    
+    return redirect(url_for("mode_control.index"))
+

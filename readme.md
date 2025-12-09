@@ -144,6 +144,7 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Access web interface: `http://192.168.4.1:5000`
 - Control from web UI: Force start/stop AP or leave in auto mode
 - Change credentials in `scripts/config.sh` before first use
+- **Note**: After clicking "Start AP Now" or "Stop AP" buttons, the status may not update immediately. Wait 10-20 seconds and refresh the page to see the current state.
 
 ### Web Features
 

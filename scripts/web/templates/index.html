@@ -84,6 +84,46 @@
             </div>
         {% endif %}
     </div>
+    
+    <div class="info-box" style="margin-top: 20px;">
+        <strong>WiFi Client Configuration:</strong><br>
+        <div style="margin-bottom: 8px;">
+            {% if wifi_status.connected %}
+                <span style="color: var(--success-color);">✓ Connected to: <code>{{ wifi_status.current_ssid }}</code></span>
+                {% if wifi_status.signal and wifi_status.signal != 'Unknown' %}
+                    <span style="margin-left: 8px; font-size: 0.9em; color: var(--text-secondary);">(Signal: {{ wifi_status.signal }}%)</span>
+                {% endif %}
+            {% else %}
+                <span style="color: var(--warning-color);">⚠ Not connected to WiFi</span>
+            {% endif %}
+        </div>
+        
+        <div style="margin-top: 12px; padding: 10px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: 4px;">
+            <strong style="color: var(--text-primary);">Update WiFi Credentials:</strong>
+            <form method="post" action="{{ url_for('mode_control.configure_wifi') }}" id="wifiConfigForm" style="margin-top: 8px;">
+                <div style="margin-bottom: 8px;">
+                    <label for="wifi_ssid" style="display: inline-block; width: 120px; color: var(--text-primary);">Network Name:</label>
+                    <input type="text" id="wifi_ssid" name="wifi_ssid" maxlength="32" required 
+                           placeholder="Enter WiFi SSID"
+                           style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                    <span style="font-size: 0.85em; color: var(--text-secondary);">(1-32 chars)</span>
+                </div>
+                <div style="margin-bottom: 8px;">
+                    <label for="wifi_password" style="display: inline-block; width: 120px; color: var(--text-primary);">Password:</label>
+                    <input type="password" id="wifi_password" name="wifi_password" minlength="8" maxlength="63"
+                           placeholder="Enter WiFi password"
+                           style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                    <button type="button" onclick="toggleWifiPassword()" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                    <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
+                </div>
+                <button type="submit" class="edit-btn" id="updateWifiBtn" onclick="return confirmWifiUpdate()">Update WiFi Credentials</button>
+            </form>
+        </div>
+        
+        <div style="margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);">
+            <strong>ℹ️ How it works:</strong> The Pi will attempt to connect to the new network. Thanks to concurrent AP mode, you can remain connected to the fallback AP during the transition. If the new WiFi network is unreachable or credentials are incorrect, you'll maintain access via the AP.
+        </div>
+    </div>
 </div>
 
 <script>
@@ -97,6 +137,54 @@ function togglePassword() {
         passField.type = 'password';
         btn.textContent = 'Show';
     }
+}
+
+function toggleWifiPassword() {
+    const passField = document.getElementById('wifi_password');
+    const btn = event.target;
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+function confirmWifiUpdate() {
+    // Check if user is currently connected via WiFi (not AP)
+    const connectedViaWifi = {{ 'true' if wifi_status.connected else 'false' }};
+    const currentSSID = {{ ('\"' + wifi_status.current_ssid + '\"') if wifi_status.get('current_ssid') else 'null' }};
+    const apActive = {{ 'true' if ap_status.ap_active else 'false' }};
+    const apIP = {{ ('\"' + ap_status.static_ip + '\"') if ap_status.get('static_ip') else 'null' }};
+    
+    // Detect if user is accessing via AP IP
+    const accessingViaAP = apIP && (window.location.hostname === apIP || window.location.hostname === apIP.split('/')[0]);
+    
+    let message = '';
+    
+    if (connectedViaWifi && !accessingViaAP && currentSSID) {
+        // User is connected via WiFi directly (not through AP)
+        message = '⚠️ WARNING: You are currently connected via WiFi (network: ' + currentSSID + ').\n\n';
+        message += 'If you change the WiFi credentials and they are incorrect, you will lose this connection.\n\n';
+        message += 'HOWEVER: The fallback AP is ' + (apActive ? 'already running' : 'available') + '.\n';
+        message += 'If the new WiFi fails, you can reconnect to the AP to fix it.\n\n';
+        message += 'Recommended: Connect to the AP first for safer credential updates.\n\n';
+        message += 'Continue anyway?';
+    } else if (accessingViaAP || apActive) {
+        // User is accessing via AP - safe!
+        message = '✓ You are connected via the fallback AP.\n\n';
+        message += 'The Pi will attempt to connect to the new WiFi network.\n';
+        message += 'Your AP connection will remain active during the process.\n\n';
+        message += 'Continue?';
+    } else {
+        // Not sure how they're connected - generic warning
+        message = 'The Pi will attempt to connect to the new WiFi network.\n';
+        message += 'The fallback AP will remain available if connection fails.\n\n';
+        message += 'Continue?';
+    }
+    
+    return confirm(message);
 }
 
 // Prevent multiple mode switch submissions
@@ -114,6 +202,10 @@ const updateApBtn = document.getElementById('updateApBtn');
 const startApBtn = document.getElementById('startApBtn');
 const stopApBtn = document.getElementById('stopApBtn');
 const apLoadingOverlay = document.getElementById('apLoadingOverlay');
+
+// WiFi form elements
+const wifiConfigForm = document.getElementById('wifiConfigForm');
+const updateWifiBtn = document.getElementById('updateWifiBtn');
 
 function disableButtons() {
     presentBtn.disabled = true;
@@ -176,6 +268,17 @@ stopApForm.addEventListener('submit', function(e) {
         return false;
     }
     disableApButtons();
+});
+
+wifiConfigForm.addEventListener('submit', function(e) {
+    if (updateWifiBtn.disabled) {
+        e.preventDefault();
+        return false;
+    }
+    updateWifiBtn.disabled = true;
+    updateWifiBtn.style.opacity = '0.5';
+    updateWifiBtn.style.cursor = 'not-allowed';
+    updateWifiBtn.textContent = 'Connecting...';
 });
 </script>
 {% endblock %}

@@ -13,7 +13,6 @@ AP_STATE_FILE="$RUNTIME_DIR/ap.state"
 FORCE_MODE_FILE="$RUNTIME_DIR/force.mode"
 HOSTAPD_PID="$RUNTIME_DIR/hostapd.pid"
 DNSMASQ_PID="$RUNTIME_DIR/dnsmasq.pid"
-AP_ALLOW_CONCURRENT="${OFFLINE_AP_ALLOW_CONCURRENT:-false}"
 AP_VIRTUAL_IF="${OFFLINE_AP_VIRTUAL_IF:-uap0}"
 WIFI_IF="${OFFLINE_AP_INTERFACE:-wlan0}"
 AP_SSID="${OFFLINE_AP_SSID:-TeslaUSB}"
@@ -27,11 +26,7 @@ ensure_runtime_dir() {
 }
 
 ap_iface() {
-  if [ "$AP_ALLOW_CONCURRENT" = "true" ]; then
-    echo "$AP_VIRTUAL_IF"
-  else
-    echo "$WIFI_IF"
-  fi
+  echo "$AP_VIRTUAL_IF"
 }
 
 get_force_mode() {
@@ -84,7 +79,7 @@ status_json() {
 {
   "ap_active": $active,
   "force_mode": "$force",
-  "allow_concurrent": $( [ "$AP_ALLOW_CONCURRENT" = "true" ] && echo true || echo false ),
+  "allow_concurrent": true,
   "ap_interface": "$iface",
   "static_ip": "$gateway",
   "dhcp_range_start": "$AP_DHCP_START",
@@ -109,15 +104,15 @@ EOF
 }
 
 reload_ap() {
-  # Kill hostapd and dnsmasq to force wifi-monitor to restart them with new config
-  # wifi-monitor will detect they're dead and restart them in its main loop
-  pkill -9 hostapd 2>/dev/null || true
-  pkill -9 dnsmasq 2>/dev/null || true
-  # Clean up state and config files so fresh ones are generated
-  rm -f "$AP_STATE_FILE" /run/teslausb-ap/hostapd.conf /run/teslausb-ap/dnsmasq.conf
-  rm -f "$HOSTAPD_PID" "$DNSMASQ_PID"
-  # Signal wifi-monitor to wake up and check immediately
-  systemctl kill -s SIGUSR1 wifi-monitor.service 2>/dev/null || true
+  # Use force mode to cleanly stop AP, avoiding race conditions
+  set_force_mode "force_off"
+  sleep 2
+  
+  # Clean up state and config files so fresh ones are generated with new config
+  rm -f /run/teslausb-ap/hostapd.conf /run/teslausb-ap/dnsmasq.conf
+  
+  # Return to auto mode - wifi-monitor will restart AP if needed
+  set_force_mode "auto"
 }
 
 case "${1-}" in

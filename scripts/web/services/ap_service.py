@@ -110,9 +110,6 @@ def update_ap_config(ssid: str, passphrase: str):
     if result.returncode != 0:
         raise RuntimeError(f"Failed to update passphrase in config: {result.stderr}")
     
-    # Check if AP is currently active
-    status = ap_status()
-    
     # Restart wifi-monitor to reload config.sh with new values
     result = subprocess.run(
         ["sudo", "-n", "systemctl", "restart", "wifi-monitor.service"],
@@ -124,11 +121,14 @@ def update_ap_config(ssid: str, passphrase: str):
     if result.returncode != 0:
         raise RuntimeError(f"Failed to restart wifi-monitor: {result.stderr}")
     
-    # If AP was active, trigger immediate reload to apply new config
+    # Wait for wifi-monitor to stabilize
+    subprocess.run(["sleep", "3"], check=False)
+    
+    # Check if AP is active NOW (after restart)
+    status = ap_status()
+    
+    # If AP is active, reload it to apply new credentials
     if status.get("ap_active"):
-        # Wait for wifi-monitor to start
-        subprocess.run(["sleep", "2"], check=False)
-        # Trigger AP reload
         path = _script_path()
         result = subprocess.run(
             ["sudo", "-n", path, "reload"],
@@ -138,7 +138,7 @@ def update_ap_config(ssid: str, passphrase: str):
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to reload AP: {result.stderr}")
-        # Give it time to restart
-        subprocess.run(["sleep", "3"], check=False)
+        # Give it time to restart with new credentials
+        subprocess.run(["sleep", "2"], check=False)
     
     return True

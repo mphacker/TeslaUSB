@@ -8,6 +8,7 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash
 from config import GADGET_DIR
 from services.mode_service import mode_display
 from services.ap_service import ap_status, ap_force, get_ap_config, update_ap_config
+from services.wifi_service import get_current_wifi_connection, update_wifi_credentials
 
 mode_control_bp = Blueprint('mode_control', __name__)
 
@@ -18,6 +19,7 @@ def index():
     token, label, css_class, share_paths = mode_display()
     ap = ap_status()
     ap_config = get_ap_config()
+    wifi_status = get_current_wifi_connection()
     
     return render_template(
         'index.html',
@@ -28,6 +30,7 @@ def index():
         mode_token=token,
         ap_status=ap,
         ap_config=ap_config,
+        wifi_status=wifi_status,
         auto_refresh=False,
         hostname=socket.gethostname(),
     )
@@ -172,4 +175,31 @@ def configure_ap():
         flash(f"Failed to update AP credentials: {exc}", "error")
     
     return redirect(url_for("mode_control.index"))
+
+
+@mode_control_bp.route("/wifi/configure", methods=["POST"])
+def configure_wifi():
+    """Update WiFi client credentials."""
+    ssid = request.form.get("wifi_ssid", "").strip()
+    password = request.form.get("wifi_password", "").strip()
+    
+    if not ssid:
+        flash("WiFi SSID cannot be empty", "error")
+        return redirect(url_for("mode_control.index"))
+    
+    try:
+        result = update_wifi_credentials(ssid, password)
+        
+        if result.get("success"):
+            flash(f"✓ {result.get('message', 'WiFi updated successfully')}", "success")
+        else:
+            flash(f"⚠ {result.get('message', 'Failed to connect to WiFi network')}", "warning")
+            
+    except ValueError as exc:
+        flash(f"Validation error: {exc}", "error")
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Error updating WiFi: {exc}", "error")
+    
+    return redirect(url_for("mode_control.index"))
+
 

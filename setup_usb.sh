@@ -548,6 +548,7 @@ $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/timeout
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/nsenter
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sed
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/nmcli
 
 # Allow cache dropping for exFAT filesystem sync (required for web lock chime updates)
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sh -c echo 3 > /proc/sys/vm/drop_caches

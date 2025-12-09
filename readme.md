@@ -203,7 +203,7 @@ OFFLINE_AP_SSID="TeslaUSB"             # AP network name (change this!)
 OFFLINE_AP_PASSPHRASE="teslausb1234"   # AP password (change this!)
 OFFLINE_AP_IPV4_CIDR="192.168.4.1/24"  # AP IP address
 OFFLINE_AP_DISCONNECT_GRACE="30"       # Seconds offline before AP starts
-OFFLINE_AP_ALLOW_CONCURRENT="true"     # Run AP while maintaining WiFi connection
+# Note: AP always runs concurrently with WiFi client on a virtual interface
 ```
 
 Restart WiFi monitor after changes: `sudo systemctl restart wifi-monitor.service`

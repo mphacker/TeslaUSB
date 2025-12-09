@@ -34,8 +34,7 @@ OFFLINE_AP_MIN_RSSI="-70"            # Minimum RSSI (dBm) to tear down AP
 OFFLINE_AP_STABLE_SECONDS="20"       # Seconds of good link before stopping AP
 OFFLINE_AP_PING_TARGET="8.8.8.8"     # Ping target to confirm WAN reachability
 OFFLINE_AP_RETRY_SECONDS="300"       # While AP is active, retry STA join every N seconds
-OFFLINE_AP_ALLOW_CONCURRENT="true"   # If "true", run AP on virtual iface while keeping STA connected
-OFFLINE_AP_VIRTUAL_IF="uap0"         # Virtual AP interface name when concurrent mode is allowed
+OFFLINE_AP_VIRTUAL_IF="uap0"         # Virtual AP interface name (concurrent mode always enabled)
 
 # ============================================================================
 # Computed paths (don't modify these)

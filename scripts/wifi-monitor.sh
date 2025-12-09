@@ -81,7 +81,14 @@ ap_active() {
 
 ap_started_at() {
     if ap_active; then
-        cat "$AP_STATE_FILE"
+        local ts
+        ts=$(cat "$AP_STATE_FILE" 2>/dev/null)
+        # Validate it's a number, default to 0 if not
+        if [[ "$ts" =~ ^[0-9]+$ ]]; then
+            echo "$ts"
+        else
+            echo 0
+        fi
     else
         echo 0
     fi
@@ -342,7 +349,7 @@ maybe_retry_sta_from_ap() {
     local rssi
     if link_up && ip_ready; then
         rssi=$(current_rssi)
-        if [ "$rssi" -ge "$MIN_RSSI" ]; then
+        if [ -n "$rssi" ] && [ "$rssi" -ge "$MIN_RSSI" ]; then
             log "STA link restored (RSSI ${rssi}dBm); keeping AP down"
             FAILURE_COUNT=0
             LAST_GOOD_TS=$(date +%s)
@@ -351,7 +358,11 @@ maybe_retry_sta_from_ap() {
     fi
 
     log "STA retry failed or weak; re-enabling fallback AP"
-    start_ap || log "Retry to start AP failed"
+    if ! start_ap; then
+        log "Retry to start AP failed"
+        # Update timestamp even on failure to prevent immediate retry loop
+        record_ap_start
+    fi
 }
 
 log "WiFi monitor started (interval ${CHECK_INTERVAL}s, AP fallback ${AP_ENABLED})"
@@ -369,10 +380,17 @@ while true; do
         continue
     fi
 
-    if [ "$force_mode" = "force_off" ] && ap_active; then
-        log "Force-off requested; stopping fallback AP"
-        stop_ap
-        start_sta_stack
+    if [ "$force_mode" = "force_off" ]; then
+        if ap_active; then
+            log "Force-off requested; stopping fallback AP"
+            stop_ap
+        fi
+        # Ensure STA stack is running in non-concurrent mode
+        if [ "$AP_ALLOW_CONCURRENT" != "true" ]; then
+            start_sta_stack
+        fi
+        sleep_interval
+        continue
     fi
 
     if ap_active; then
@@ -424,9 +442,16 @@ while true; do
             now=$(date +%s)
             if [ $(( now - LAST_GOOD_TS )) -ge "$DISCONNECT_GRACE" ]; then
                 log "Offline for ${DISCONNECT_GRACE}s; starting fallback AP"
-                start_ap || log "Failed to start fallback AP"
-                FAILURE_COUNT=0
-                LAST_GOOD_TS=$now
+                if start_ap; then
+                    # AP started successfully
+                    FAILURE_COUNT=0
+                    LAST_GOOD_TS=$now
+                else
+                    log "Failed to start fallback AP"
+                    # Don't reset LAST_GOOD_TS on failure - allow faster retry
+                    # Reset failure count to start grace period over
+                    FAILURE_COUNT=0
+                fi
             fi
         fi
     fi

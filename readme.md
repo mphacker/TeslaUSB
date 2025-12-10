@@ -16,6 +16,15 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Scheduled chime changes for holidays, events, or automatic rotation
 - Offline access point for in-car web access when WiFi is unavailable
 
+> **⚠️ Personal Project Notice**
+> 
+> This is a personal project built for my own use. You are welcome to fork the code and make your own changes or updates. Please be aware:
+> - The Git repository may update frequently with new features and changes
+> - Bugs may be introduced into the main branch without extensive testing
+> - Bug fixes will be worked on as time permits, but **no timelines or guarantees** are provided
+> - You have access to the source code - if something breaks, you can attempt to fix it yourself
+> - This project is provided as-is with no warranty or support obligations
+
 ## Features
 
 ### Core Functionality

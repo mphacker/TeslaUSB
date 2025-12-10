@@ -34,6 +34,11 @@
     --upload-progress-bg: #f0f0f0;
     --upload-progress-bar-bg: #e0e0e0;
     
+    /* iOS Warning colors */
+    --ios-warning-bg: #fff3cd;
+    --ios-warning-border: #ffc107;
+    --ios-warning-text: #856404;
+    
     --text-primary: #333333;
     --text-secondary: #666666;
     --text-navbar: #ffffff;
@@ -111,6 +116,11 @@
     --form-label-bg: #21262d;
     --upload-progress-bg: #1c2128;
     --upload-progress-bar-bg: #0d1117;
+    
+    /* iOS Warning colors - dark mode */
+    --ios-warning-bg: #5a4a1f;
+    --ios-warning-border: #d29922;
+    --ios-warning-text: #f0c36d;
     
     --text-primary: #e6edf3;
     --text-secondary: #8b949e;
@@ -471,6 +481,28 @@ button:disabled {
     border-radius: 5px;
     margin: 5px 0;
     transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+.ios-warning {
+    display: none;
+    background-color: var(--ios-warning-bg);
+    border-left: 4px solid var(--ios-warning-border);
+    padding: 15px;
+    border-radius: 5px;
+    margin: 20px 0;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.ios-warning p {
+    margin: 0;
+    font-size: 14px;
+    color: var(--ios-warning-text);
+}
+
+.ios-warning p:not(:first-child) {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
 }
 
 .info-box {

@@ -97,7 +97,7 @@ The setup script will:
 
 ### 3. Access Web Interface
 
-Open `http://<pi-ip-address>:5000` or `http://cybertruckusb.local:5000` in your browser.
+Open `http://<pi-ip-address>:5000` or `http://<hostname>.local:5000` in your browser.
 
 ### 4. Connect to Tesla
 

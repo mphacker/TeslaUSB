@@ -82,7 +82,7 @@
 ## Mobile Experience (Priority: Low)
 - [X] **Improved Mobile UI**: Increase touch target sizes and improve spacing for better in-car usage on mobile viewports (DONE: Mobile-optimized cards, large buttons, responsive layout)
 - [X] **Mobile Video Playback Optimization**: Add lower-quality streaming option or adaptive bitrate for smoother in-car video review (DONE: Low bandwidth mode with preload="none" streaming)
-- [ ] **Offline PWA Support**: Make app a Progressive Web App with service worker caching to work when WiFi temporarily disconnects
+
 
 ## Just for Fun (Priority: Low)
 - [ ] Optional Tesla-themed dashboard skin with live car silhouette animations during mode switches

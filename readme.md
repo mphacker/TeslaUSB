@@ -164,7 +164,11 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Upload WAV/MP3 files (auto-converted to Tesla format)
 - Preview all chimes with in-browser audio player
 - Set any chime as active `LockChime.wav`
-- Volume normalization presets
+- Built-in audio editor with waveform visualization:
+  - Trim audio with visual waveform display
+  - Volume normalization presets (Broadcast, Streaming, Loud, Maximum)
+  - Real-time duration and file size preview
+  - Save as new file or replace existing
 - Schedule automatic chime changes (weekly, date, holiday, recurring)
 
 **Light Shows Tab**:
@@ -336,5 +340,6 @@ All screenshots shown in dark mode.
 <img src="examples/videos-browser.png" alt="Video Browser" width="400">
 <img src="examples/session-view.png" alt="Multi-Camera Session View" width="400">
 <img src="examples/lock-chimes.png" alt="Lock Chimes Management" width="400">
+<img src="examples/lock-chime-editor-waveform.png" alt="Lock Chime Audio Editor with Waveform" width="400">
 <img src="examples/light-shows.png" alt="Light Shows Management" width="400">
 

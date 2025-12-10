@@ -228,6 +228,10 @@ def check_and_recover_gadget_state():
         
         if proc.returncode == 0:
             current_backing = proc.stdout.strip()
+            # Normalize paths for comparison (resolve symlinks, relative paths)
+            expected_path = os.path.realpath(img_path)
+            current_path = os.path.realpath(current_backing) if current_backing else ""
+            
             if not current_backing:
                 result['healthy'] = False
                 result['issues_found'].append("LUN1 backing file is empty")
@@ -236,17 +240,19 @@ def check_and_recover_gadget_state():
                 logger.info("Attempting to restore LUN1 backing file...")
                 if _restore_lun_backing(img_path):
                     result['fixes_applied'].append("Restored LUN1 backing file")
+                    result['healthy'] = True  # Mark as healthy after successful fix
                 else:
                     result['errors'].append("Failed to restore LUN1 backing file")
                     
-            elif current_backing != img_path:
+            elif current_path != expected_path:
                 result['healthy'] = False
-                result['issues_found'].append(f"LUN1 backing incorrect: {current_backing}")
+                result['issues_found'].append(f"LUN1 backing incorrect: {current_backing} (expected: {img_path})")
                 
                 # Attempt to correct
-                logger.info("Correcting LUN1 backing file...")
+                logger.info(f"Correcting LUN1 backing file from '{current_backing}' to '{img_path}'...")
                 if _restore_lun_backing(img_path):
                     result['fixes_applied'].append("Corrected LUN1 backing file")
+                    result['healthy'] = True  # Mark as healthy after successful fix
                 else:
                     result['errors'].append("Failed to correct LUN1 backing file")
         else:
@@ -620,6 +626,143 @@ def quick_edit_part2(operation_callback, timeout=10):
         # Try emergency LUN restore
         _restore_lun_backing(img_path, max_retries=3)
         return False, f"Unexpected error: {str(e)}"
+
+
+def rebind_usb_gadget(delay_seconds=2):
+    """
+    Unbind and rebind the USB gadget to force Tesla to re-enumerate the device.
+    
+    This simulates unplugging/replugging the USB drive, which forces Tesla to:
+    - Clear its file cache
+    - Re-scan the directory structure
+    - Notice file changes (like updated LockChime.wav)
+    
+    Critical for lock chime changes to be recognized by the vehicle.
+    
+    Args:
+        delay_seconds: Seconds to wait between unbind and rebind (default 2)
+        
+    Returns:
+        (success: bool, message: str)
+    """
+    logger.info("Rebinding USB gadget to force Tesla re-enumeration...")
+    
+    try:
+        # Get the image path for LUN restoration
+        img_path = os.path.join(GADGET_DIR, 'usb_lightshow.img')
+        
+        # Find the UDC device
+        result = subprocess.run(
+            ['sh', '-c', 'ls /sys/class/udc 2>/dev/null | head -n1'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode != 0 or not result.stdout.strip():
+            return False, "Could not find UDC device"
+        
+        udc_device = result.stdout.strip()
+        logger.info(f"Found UDC device: {udc_device}")
+        
+        # Find gadget UDC file path
+        result = subprocess.run(
+            ['sh', '-c', 'ls /sys/kernel/config/usb_gadget/*/UDC 2>/dev/null | head -n1'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode != 0 or not result.stdout.strip():
+            return False, "Could not find gadget UDC file"
+        
+        udc_file = result.stdout.strip()
+        logger.info(f"Found gadget UDC file: {udc_file}")
+        
+        # Step 1: Unbind UDC (disconnect from Tesla)
+        logger.info("Unbinding UDC...")
+        result = subprocess.run(
+            ['sudo', 'sh', '-c', f'echo "" > {udc_file}'],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5
+        )
+        
+        if result.returncode != 0:
+            logger.warning(f"Unbind returned non-zero: {result.stderr}")
+            # Continue anyway - may already be unbound
+        
+        # Step 2: Wait for disconnect to settle
+        logger.info(f"Waiting {delay_seconds}s for disconnect to settle...")
+        time.sleep(delay_seconds)
+        
+        # Step 3: Ensure LUN1 backing file is set before rebinding
+        # This is critical - unbinding may have cleared it
+        logger.info("Ensuring LUN1 backing file is set before rebind...")
+        if not _restore_lun_backing(img_path, max_retries=3):
+            logger.error("Failed to restore LUN backing before rebind")
+            # Try to rebind anyway, but log the issue
+        
+        # Step 4: Rebind UDC (reconnect to Tesla)
+        logger.info(f"Rebinding UDC: {udc_device}")
+        result = subprocess.run(
+            ['sudo', 'sh', '-c', f'echo "{udc_device}" > {udc_file}'],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5
+        )
+        
+        if result.returncode != 0:
+            stderr = result.stderr if result.stderr else "No error output"
+            logger.error(f"Failed to rebind UDC: {stderr}")
+            # Ensure LUN is restored even if rebind failed
+            _restore_lun_backing(img_path, max_retries=3)
+            return False, f"Failed to rebind UDC: {stderr}"
+        
+        # Step 5: Verify rebind was successful
+        result = subprocess.run(
+            ['cat', udc_file],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode == 0:
+            current_udc = result.stdout.strip()
+            if current_udc == udc_device:
+                logger.info(f"✓ USB gadget successfully rebound: {current_udc}")
+                
+                # Step 6: Final verification that LUN backing is still correct
+                logger.info("Verifying LUN1 backing file after rebind...")
+                if not _restore_lun_backing(img_path, max_retries=3):
+                    logger.warning("LUN backing verification/restoration failed after rebind")
+                    return True, "USB gadget rebound (LUN may need attention)"
+                
+                return True, "USB gadget rebound successfully"
+            else:
+                logger.error(f"UDC verification failed: expected '{udc_device}', got '{current_udc}'")
+                # Attempt to restore LUN even on verification failure
+                _restore_lun_backing(img_path, max_retries=3)
+                return False, f"UDC verification failed"
+        
+        # Attempt to restore LUN on any other failure path
+        _restore_lun_backing(img_path, max_retries=3)
+        return False, "Could not verify UDC rebind"
+        
+    except subprocess.TimeoutExpired:
+        logger.error("Timeout during USB gadget rebind")
+        # Ensure LUN is restored even on timeout
+        img_path = os.path.join(GADGET_DIR, 'usb_lightshow.img')
+        _restore_lun_backing(img_path, max_retries=3)
+        return False, "Operation timed out"
+    except Exception as e:
+        logger.error(f"Exception during USB gadget rebind: {e}", exc_info=True)
+        # Ensure LUN is restored even on exception
+        img_path = os.path.join(GADGET_DIR, 'usb_lightshow.img')
+        _restore_lun_backing(img_path, max_retries=3)
+        return False, f"Error rebinding gadget: {str(e)}"
 
 
 def check_operation_in_progress():

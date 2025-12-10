@@ -1043,6 +1043,9 @@ def set_active_chime(chime_filename, part2_mount_path):
     - In Edit mode: Uses normal file operations
     - In Present mode: Uses quick_edit_part2() to temporarily mount RW
     
+    After replacing the chime file, the USB gadget is rebound to force Tesla
+    to re-enumerate the device and clear its file cache.
+    
     Args:
         chime_filename: Name of the chime file in Chimes/ folder
         part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
@@ -1051,7 +1054,7 @@ def set_active_chime(chime_filename, part2_mount_path):
         (success: bool, message: str)
     """
     from services.mode_service import current_mode
-    from services.partition_mount_service import quick_edit_part2
+    from services.partition_mount_service import quick_edit_part2, rebind_usb_gadget
     from config import LOCK_CHIME_FILENAME, CHIMES_FOLDER
     
     mode = current_mode()
@@ -1112,10 +1115,31 @@ def set_active_chime(chime_filename, part2_mount_path):
     if mode == 'present':
         # Use quick edit to temporarily mount RW
         logger.info("Using quick edit part2 for chime replacement")
-        return quick_edit_part2(_do_chime_replacement, timeout=30)
+        success, message = quick_edit_part2(_do_chime_replacement, timeout=30)
+        
+        if success:
+            # Rebind USB gadget to force Tesla to re-enumerate and clear cache
+            logger.info("Rebinding USB gadget to force Tesla cache refresh...")
+            rebind_success, rebind_msg = rebind_usb_gadget(delay_seconds=2)
+            
+            if rebind_success:
+                logger.info("✓ USB gadget rebound - Tesla should detect the new chime")
+                return True, message + " (USB re-enumerated)"
+            else:
+                logger.warning(f"Chime replaced but USB rebind failed: {rebind_msg}")
+                return True, message + " (Note: Manual USB reconnect may be needed)"
+        
+        return success, message
     else:
         # Normal edit mode operation
-        return _do_chime_replacement()
+        success, message = _do_chime_replacement()
+        
+        if success:
+            # In edit mode, gadget is not active, so no rebind needed
+            # User will need to switch to present mode which will rebind automatically
+            logger.info("Chime replaced in edit mode - will take effect when switched to present mode")
+        
+        return success, message
 
 
 def rename_chime_file(old_filename, new_filename):

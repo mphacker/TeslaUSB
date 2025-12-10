@@ -35,7 +35,13 @@ def ap_status():
 
 
 def ap_force(mode: str):
-    """Set force mode: force-on, force-off, force-auto."""
+    """Set force mode: force-on, force-off, force-auto.
+    
+    This setting persists across reboots:
+    - force-on: AP always on (even with good WiFi)
+    - force-off: AP blocked (never starts, even with bad WiFi)
+    - force-auto: AP starts/stops based on WiFi health (default)
+    """
     if mode not in {"force-on", "force-off", "force-auto"}:
         raise ValueError("Invalid mode")
 

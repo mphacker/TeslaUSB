@@ -134,7 +134,11 @@ def status():
 
 @mode_control_bp.route("/ap/force", methods=["POST"])
 def force_ap():
-    """Force the fallback AP on/off/auto via web UI."""
+    """Force the fallback AP on/off/auto via web UI.
+    
+    - Start AP Now: Sets force-on mode (persists across reboot)
+    - Stop AP: Returns to auto mode (persists, AP only starts if WiFi fails)
+    """
     action = request.form.get("mode", "auto")
     allowed = {
         "on": "force-on",
@@ -147,9 +151,9 @@ def force_ap():
     try:
         ap_force(allowed[action])
         if action == "on":
-            flash("Fallback AP forced on", "success")
+            flash("AP forced on - will remain on even after reboot", "success")
         elif action == "off":
-            flash("AP stopped. Auto mode enabled - AP will restart if WiFi is unavailable.", "info")
+            flash("AP stopped and auto mode restored - AP will only start if WiFi becomes unavailable", "info")
     except Exception as exc:  # noqa: BLE001
         flash(f"Failed to update AP state: {exc}", "error")
 

@@ -91,6 +91,7 @@ ap_iface() {
 }
 
 get_force_mode() {
+    # First check runtime file (takes precedence)
     if [ -f "$AP_FORCE_MODE_FILE" ]; then
         local mode
         mode=$(cat "$AP_FORCE_MODE_FILE" 2>/dev/null || echo "auto")
@@ -98,6 +99,9 @@ get_force_mode() {
             force_on|force_off|auto) echo "$mode" ;;
             *) echo "auto" ;;
         esac
+    # Fall back to persistent config
+    elif [ -n "${OFFLINE_AP_FORCE_MODE:-}" ]; then
+        echo "${OFFLINE_AP_FORCE_MODE}"
     else
         echo "auto"
     fi
@@ -312,6 +316,13 @@ start_ap() {
 
 # Cleanup any stale virtual interface from previous crash/unclean shutdown
 iw dev "$AP_VIRTUAL_IF" del 2>/dev/null || true
+
+# Initialize runtime force mode from persistent config if not already set
+ensure_runtime_dir
+if [ ! -f "$AP_FORCE_MODE_FILE" ] && [ -n "${OFFLINE_AP_FORCE_MODE:-}" ]; then
+    log "Initializing force mode from config: ${OFFLINE_AP_FORCE_MODE}"
+    echo "${OFFLINE_AP_FORCE_MODE}" >"$AP_FORCE_MODE_FILE"
+fi
 
 # Verify physical WiFi interface exists
 if ! iw dev "$WIFI_IF" info >/dev/null 2>&1; then

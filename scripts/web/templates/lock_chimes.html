@@ -42,24 +42,85 @@
     {% endif %}
     
     <!-- Upload Controls - Collapsible -->
-    <details class="folder-controls" id="chimeUploadControls" style="margin-bottom: 20px;">
+    <details class="folder-controls" id="chimeUploadControls" style="margin-bottom: 20px;" open>
         <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: var(--collapsible-section-bg); border-radius: 8px; border-left: 4px solid var(--collapsible-section-border); color: var(--collapsible-section-text); font-size: 18px; list-style: none; user-select: none;">
             <span style="display: inline-block; margin-right: 5px;">▶</span> 📤 Upload New Chime
         </summary>
         
         <div style="background: var(--collapsible-content-bg); padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid var(--collapsible-section-border); border-right: 1px solid var(--collapsible-section-border); border-bottom: 1px solid var(--collapsible-section-border); margin-top: -8px;">
-            <form method="post" action="{{ url_for('lock_chimes.upload_lock_chime') }}" enctype="multipart/form-data" id="chimeUploadForm">
-                <input type="hidden" name="pre_trimmed" id="preTrimmedFlag" value="false">
-                <input type="hidden" name="original_filename" id="originalFilename" value="">
-                <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
-                    <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required 
-                           style="padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); flex: 1; min-width: 250px; max-width: 400px; font-size: 14px; color: var(--text-primary);">
-                    <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0; display: none;">📤 Upload</button>
+            
+            <!-- Upload Mode Toggle -->
+            <div style="margin-bottom: 20px;">
+                <label class="toggle-switch">
+                    <input type="checkbox" id="bulkUploadToggle">
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Bulk Upload</span>
+                </label>
+            </div>
+            
+            <!-- Single File Upload Mode (with trim editor) -->
+            <div id="singleUploadMode">
+                <form method="post" action="{{ url_for('lock_chimes.upload_lock_chime') }}" enctype="multipart/form-data" id="chimeUploadForm">
+                    <input type="hidden" name="pre_trimmed" id="preTrimmedFlag" value="false">
+                    <input type="hidden" name="original_filename" id="originalFilename" value="">
+                    <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
+                        <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required 
+                               style="padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); flex: 1; min-width: 250px; max-width: 400px; font-size: 14px; color: var(--text-primary);">
+                        <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0; display: none;">📤 Upload</button>
+                    </div>
+                    <p style="margin: 0 0 15px 0; font-size: 12px; color: var(--text-secondary);">
+                        WAV or MP3 files - auto-converted to Tesla format (PCM 16-bit, 44.1 kHz, under 1MB)
+                    </p>
+                </form>
+            </div>
+            
+            <!-- Bulk Upload Mode (validation only, no processing) -->
+            <div id="bulkUploadMode" style="display: none;">
+                <div class="bulk-upload-info" style="background: var(--ios-warning-bg); border: 2px solid var(--ios-warning-border); border-radius: 8px; padding: 12px; margin-bottom: 15px;">
+                    <p style="margin: 0 0 8px 0; font-weight: 600; color: var(--text-primary);">⚠️ Bulk Upload Requirements:</p>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-secondary);">
+                        <li>Only WAV files accepted (no MP3)</li>
+                        <li>Files must already meet Tesla requirements:</li>
+                        <li style="list-style: none; padding-left: 15px;">• PCM 16-bit, 44.1 or 48 kHz, mono or stereo</li>
+                        <li style="list-style: none; padding-left: 15px;">• Under 1 MB file size</li>
+                        <li>No audio processing or conversion will be performed</li>
+                        <li>Invalid files will be rejected with detailed reasons</li>
+                    </ul>
                 </div>
-                <p style="margin: 0 0 15px 0; font-size: 12px; color: var(--text-secondary);">
-                    WAV or MP3 files - auto-converted to Tesla format (PCM 16-bit, 44.1 kHz, under 1MB)
-                </p>
-            </form>
+                
+                <!-- Desktop Drag & Drop Interface -->
+                <div id="desktopBulkUpload" style="display: none;">
+                    <div class="drag-drop-zone" id="chimeDragDropZone" style="border: 3px dashed var(--border-input); border-radius: 8px; padding: 40px; text-align: center; background: var(--form-input-bg); cursor: pointer; transition: all 0.3s; margin-bottom: 20px;">
+                        <div style="pointer-events: none;">
+                            <i class="bi bi-cloud-upload" style="font-size: 48px; color: var(--btn-primary-bg); display: block; margin-bottom: 15px;"></i>
+                            <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Drag & drop WAV files here or click to browse</p>
+                            <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">
+                                Tesla-ready WAV files only (multiple selection supported)
+                            </p>
+                        </div>
+                    </div>
+                    
+                    <input type="file" id="chime_files_multi" accept=".wav" multiple style="display: none;">
+                    
+                    <!-- Selected Files Preview -->
+                    <div id="selectedChimesPreview" style="display: none; margin-bottom: 20px;">
+                        <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">📋 Selected Files:</h4>
+                        <div id="chimeFilesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 200px; overflow-y: auto;"></div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <button type="button" class="edit-btn" id="uploadSelectedChimesBtn">📤 Upload All Files</button>
+                            <button type="button" class="btn-delete" id="clearSelectedChimesBtn">✖ Clear All</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Mobile/Fallback Simple Bulk Upload -->
+                <div id="mobileBulkUpload">
+                    <label for="chime_file_bulk" style="display: block; margin-bottom: 8px; font-weight: 600;">Select Tesla-ready WAV files:</label>
+                    <input type="file" id="chime_file_bulk" accept=".wav" multiple 
+                           style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary);">
+                    <button type="button" class="edit-btn" id="uploadBulkBtn" style="display: none;">📤 Upload Files</button>
+                </div>
+            </div>
             
             <!-- Upload Progress Bar -->
             <div id="chimeUploadProgress" style="display: none; margin-top: 15px;">
@@ -71,6 +132,7 @@
                         </div>
                     </div>
                     <p id="chimeUploadStatus" style="margin: 0; font-size: 13px; color: var(--text-secondary);">Preparing upload...</p>
+                    <div id="chimeUploadResults" style="display: none; margin-top: 15px;"></div>
                 </div>
             </div>
         </div>
@@ -548,6 +610,63 @@
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
 }
+
+/* Toggle Switch Styles */
+.toggle-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggle-switch input[type="checkbox"] {
+    display: none;
+}
+
+.toggle-slider {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    background-color: #ccc;
+    border-radius: 12px;
+    transition: background-color 0.3s;
+    cursor: pointer;
+}
+
+.toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background-color: white;
+    top: 3px;
+    left: 3px;
+    transition: transform 0.3s;
+}
+
+.toggle-switch input[type="checkbox"]:checked + .toggle-slider {
+    background-color: #4CAF50;
+}
+
+.toggle-switch input[type="checkbox"]:checked + .toggle-slider::before {
+    transform: translateX(20px);
+}
+
+.toggle-switch:hover .toggle-slider {
+    opacity: 0.8;
+}
+
+.toggle-switch input[type="checkbox"]:disabled + .toggle-slider {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.toggle-label {
+    font-weight: 500;
+    color: var(--text-primary, #333);
+}
 </style>
 
 <script>
@@ -755,6 +874,16 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         
         const file = fileInput.files[0];
+        
+        // Validate file size before upload
+        const maxSize = {{ MAX_LOCK_CHIME_SIZE }};
+        if (file.size > maxSize) {
+            const fileSizeMB = (file.size / 1024 / 1024).toFixed(2);
+            const maxSizeMB = (maxSize / 1024 / 1024).toFixed(2);
+            alert(`File is too large: ${fileSizeMB} MB\n\nTesla requires lock chimes to be under ${maxSizeMB} MB.\nPlease use the audio trimmer or compress your file.`);
+            return;
+        }
+        
         const formData = new FormData(form);
         
         // Disable upload button and show progress
@@ -1715,7 +1844,411 @@ details > summary::-webkit-details-marker {
 // Check gadget state on page load
 document.addEventListener('DOMContentLoaded', function() {
     checkGadgetState();
+    initializeUploadModeToggle();
 });
+
+// Upload mode management
+let currentUploadMode = 'single';
+let selectedChimeFiles = [];
+
+function initializeUploadModeToggle() {
+    const bulkToggle = document.getElementById('bulkUploadToggle');
+    const singleUploadMode = document.getElementById('singleUploadMode');
+    const bulkUploadMode = document.getElementById('bulkUploadMode');
+    
+    if (!bulkToggle) return;
+    
+    // Mode switching
+    bulkToggle.addEventListener('change', function() {
+        if (this.checked) {
+            switchUploadMode('bulk');
+        } else {
+            switchUploadMode('single');
+        }
+    });
+    
+    // Initialize bulk upload UI based on device
+    if (!isMobileDevice() && supportsMultipleUpload()) {
+        initializeDesktopBulkUpload();
+    } else {
+        initializeMobileBulkUpload();
+    }
+}
+
+function switchUploadMode(mode) {
+    currentUploadMode = mode;
+    const singleUploadMode = document.getElementById('singleUploadMode');
+    const bulkUploadMode = document.getElementById('bulkUploadMode');
+    
+    if (mode === 'single') {
+        singleUploadMode.style.display = 'block';
+        bulkUploadMode.style.display = 'none';
+    } else {
+        singleUploadMode.style.display = 'none';
+        bulkUploadMode.style.display = 'block';
+    }
+}
+
+function isMobileDevice() {
+    return /(iPad|iPhone|iPod|Android|Mobile)/i.test(navigator.userAgent) || 
+           window.matchMedia("(max-width: 768px)").matches;
+}
+
+function supportsMultipleUpload() {
+    const input = document.createElement('input');
+    return 'multiple' in input && !/(iPad|iPhone|iPod)/i.test(navigator.userAgent);
+}
+
+function initializeDesktopBulkUpload() {
+    const desktopUpload = document.getElementById('desktopBulkUpload');
+    const mobileUpload = document.getElementById('mobileBulkUpload');
+    
+    if (desktopUpload) desktopUpload.style.display = 'block';
+    if (mobileUpload) mobileUpload.style.display = 'none';
+    
+    const dropZone = document.getElementById('chimeDragDropZone');
+    const fileInput = document.getElementById('chime_files_multi');
+    const uploadBtn = document.getElementById('uploadSelectedChimesBtn');
+    const clearBtn = document.getElementById('clearSelectedChimesBtn');
+    
+    if (!dropZone || !fileInput) return;
+    
+    // Click to browse
+    dropZone.addEventListener('click', function() {
+        fileInput.click();
+    });
+    
+    // File input change
+    fileInput.addEventListener('change', function(e) {
+        handleChimeFiles(Array.from(e.target.files));
+    });
+    
+    // Drag and drop events
+    dropZone.addEventListener('dragenter', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--btn-primary-bg)';
+        dropZone.style.background = 'var(--hover-bg, rgba(0, 123, 255, 0.1))';
+    });
+    
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+    
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+    });
+    
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+        
+        const files = Array.from(e.dataTransfer.files);
+        handleChimeFiles(files);
+    });
+    
+    // Upload button
+    if (uploadBtn) {
+        uploadBtn.addEventListener('click', function() {
+            uploadBulkChimes();
+        });
+    }
+    
+    // Clear button
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            selectedChimeFiles = [];
+            updateChimeFilesList();
+        });
+    }
+}
+
+function initializeMobileBulkUpload() {
+    const desktopUpload = document.getElementById('desktopBulkUpload');
+    const mobileUpload = document.getElementById('mobileBulkUpload');
+    
+    if (desktopUpload) desktopUpload.style.display = 'none';
+    if (mobileUpload) mobileUpload.style.display = 'block';
+    
+    const fileInput = document.getElementById('chime_file_bulk');
+    const uploadBtn = document.getElementById('uploadBulkBtn');
+    
+    if (!fileInput || !uploadBtn) return;
+    
+    fileInput.addEventListener('change', function(e) {
+        if (e.target.files.length > 0) {
+            uploadBtn.style.display = 'inline-block';
+        } else {
+            uploadBtn.style.display = 'none';
+        }
+    });
+    
+    uploadBtn.addEventListener('click', function() {
+        const files = Array.from(fileInput.files);
+        uploadBulkChimesFromArray(files);
+    });
+}
+
+function handleChimeFiles(files) {
+    // Filter for WAV files only
+    const validFiles = files.filter(file => file.name.toLowerCase().endsWith('.wav'));
+    
+    if (validFiles.length === 0) {
+        alert('Please select valid WAV files that meet Tesla requirements');
+        return;
+    }
+    
+    if (validFiles.length < files.length) {
+        alert('Note: Only WAV files are accepted in bulk upload mode. MP3 files were filtered out.');
+    }
+    
+    // Check for files that are too large
+    const maxSize = {{ MAX_LOCK_CHIME_SIZE }};
+    const oversizedFiles = validFiles.filter(file => file.size > maxSize);
+    
+    if (oversizedFiles.length > 0) {
+        const fileList = oversizedFiles.map(f => {
+            const sizeMB = (f.size / 1024 / 1024).toFixed(2);
+            return `  • ${f.name} (${sizeMB} MB)`;
+        }).join('\n');
+        const maxSizeMB = (maxSize / 1024 / 1024).toFixed(2);
+        alert(`The following files are too large (max ${maxSizeMB} MB):\n\n${fileList}\n\nBulk upload requires files to already meet Tesla requirements. To upload these files, use the Single Upload mode and the Audio Trimmer tool to reduce their size.`);
+        return;
+    }
+    
+    // Add to selected files (avoid duplicates)
+    validFiles.forEach(file => {
+        const exists = selectedChimeFiles.some(f => f.name === file.name && f.size === file.size);
+        if (!exists) {
+            selectedChimeFiles.push(file);
+        }
+    });
+    
+    updateChimeFilesList();
+}
+
+function updateChimeFilesList() {
+    const preview = document.getElementById('selectedChimesPreview');
+    const filesList = document.getElementById('chimeFilesList');
+    
+    if (!preview || !filesList) return;
+    
+    if (selectedChimeFiles.length === 0) {
+        preview.style.display = 'none';
+        return;
+    }
+    
+    preview.style.display = 'block';
+    
+    let html = '';
+    selectedChimeFiles.forEach((file, index) => {
+        const sizeKB = (file.size / 1024).toFixed(1);
+        const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+        const sizeStr = file.size > 1024 * 1024 ? `${sizeMB} MB` : `${sizeKB} KB`;
+        
+        // Highlight files that are too large
+        const maxSize = {{ MAX_LOCK_CHIME_SIZE }};
+        const sizeWarning = file.size > maxSize ? ' style="color: var(--error-text, #dc3545); font-weight: bold;"' : '';
+        
+        html += `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--border-input); color: var(--text-primary);">
+                <div style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    <strong>${escapeHtml(file.name)}</strong>
+                    <span${sizeWarning} style="font-size: 12px; margin-left: 8px;">${sizeStr}</span>
+                </div>
+                <button type="button" onclick="removeChimeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px;" title="Remove">✖</button>
+            </div>
+        `;
+    });
+    
+    filesList.innerHTML = html;
+}
+
+function removeChimeFile(index) {
+    selectedChimeFiles.splice(index, 1);
+    updateChimeFilesList();
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function uploadBulkChimes() {
+    if (selectedChimeFiles.length === 0) {
+        alert('Please select files to upload');
+        return;
+    }
+    
+    uploadBulkChimesFromArray(selectedChimeFiles);
+}
+
+async function uploadBulkChimesFromArray(files) {
+    const uploadBtn = document.getElementById('uploadSelectedChimesBtn') || document.getElementById('uploadBulkBtn');
+    const clearBtn = document.getElementById('clearSelectedChimesBtn');
+    const progressDiv = document.getElementById('chimeUploadProgress');
+    const progressBar = document.getElementById('chimeProgressBar');
+    const statusText = document.getElementById('chimeUploadStatus');
+    
+    // Disable buttons
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (clearBtn) clearBtn.disabled = true;
+    
+    // Show progress
+    if (progressDiv) {
+        progressDiv.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        statusText.textContent = 'Preparing upload...';
+    }
+    
+    const formData = new FormData();
+    files.forEach(file => {
+        formData.append('chime_files', file);
+    });
+    
+    try {
+        const xhr = new XMLHttpRequest();
+        
+        // Track progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percentComplete + '%';
+                progressBar.textContent = percentComplete + '%';
+                
+                const loadedMB = (e.loaded / 1024 / 1024).toFixed(2);
+                const totalMB = (e.total / 1024 / 1024).toFixed(2);
+                statusText.textContent = `Uploading ${files.length} file(s)... (${loadedMB} MB / ${totalMB} MB)`;
+            }
+        });
+        
+        // Handle completion
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200) {
+                try {
+                    const response = JSON.parse(xhr.responseText);
+                    
+                    progressBar.style.width = '100%';
+                    progressBar.textContent = '100%';
+                    
+                    if (response.success) {
+                        progressBar.style.background = '#28a745';
+                        statusText.textContent = response.summary || 'Upload complete!';
+                        statusText.style.color = '#28a745';
+                    } else {
+                        progressBar.style.background = '#ffc107';
+                        statusText.textContent = 'Upload completed with some errors';
+                        statusText.style.color = '#ffc107';
+                    }
+                    
+                    // Show detailed results
+                    showChimeUploadResults(response.results, response.success);
+                    
+                    // Clear file selection and re-enable buttons
+                    selectedChimeFiles = [];
+                    updateChimeFilesList();
+                    if (uploadBtn) uploadBtn.disabled = false;
+                    if (clearBtn) clearBtn.disabled = false;
+                    
+                } catch (e) {
+                    progressBar.style.background = '#28a745';
+                    statusText.textContent = 'Upload complete!';
+                    statusText.style.color = '#28a745';
+                    
+                    // Re-enable buttons
+                    if (uploadBtn) uploadBtn.disabled = false;
+                    if (clearBtn) clearBtn.disabled = false;
+                    
+                    // Reload to show new files
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 2000);
+                }
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                if (uploadBtn) uploadBtn.disabled = false;
+                if (clearBtn) clearBtn.disabled = false;
+            }
+        });
+        
+        // Handle errors
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            if (uploadBtn) uploadBtn.disabled = false;
+            if (clearBtn) clearBtn.disabled = false;
+        });
+        
+        // Send request
+        xhr.open('POST', '{{ url_for("lock_chimes.upload_bulk_chimes") }}');
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.send(formData);
+        
+    } catch (error) {
+        console.error('Upload error:', error);
+        alert('Upload failed: ' + error.message);
+        if (uploadBtn) uploadBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+    }
+}
+
+function showChimeUploadResults(results, overallSuccess) {
+    const resultsDiv = document.getElementById('chimeUploadResults');
+    if (!resultsDiv || !results || results.length === 0) return;
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    let html = '<div style="margin-top: 15px; padding: 15px; background: var(--bg-info); border: 2px solid var(--border-color); border-radius: 8px; max-height: 400px; overflow-y: auto;">';
+    html += '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">';
+    html += '<h4 style="margin: 0; color: var(--text-primary);">📋 Upload Results</h4>';
+    html += '<button type="button" onclick="document.getElementById(\'chimeUploadResults\').style.display=\'none\';document.getElementById(\'chimeUploadProgress\').style.display=\'none\'" style="background: var(--btn-secondary-bg); color: var(--btn-secondary-text); border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer;">Close</button>';
+    html += '</div>';
+    html += '<ul style="margin: 10px 0 0 0; padding: 0; list-style: none;">';
+    
+    results.forEach(result => {
+        if (result.success) {
+            successCount++;
+            html += `<li style="padding: 8px; margin: 5px 0; background: var(--msg-success-bg); border-left: 4px solid var(--success-border); border-radius: 4px; color: var(--text-primary);">
+                <strong style="color: var(--success-text);">✓ ${escapeHtml(result.filename)}</strong><br>
+                <span style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(result.message)}</span>
+            </li>`;
+        } else {
+            failCount++;
+            html += `<li style="padding: 8px; margin: 5px 0; background: var(--msg-error-bg); border-left: 4px solid var(--error-text); border-radius: 4px; color: var(--text-primary);">
+                <strong style="color: var(--error-text);">✗ ${escapeHtml(result.filename)}</strong><br>
+                <span style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(result.message)}</span>
+            </li>`;
+        }
+    });
+    
+    html += '</ul>';
+    html += `<div style="margin-top: 15px; padding: 10px; background: var(--form-input-bg); border-radius: 4px; color: var(--text-primary);">`;
+    html += `<strong>Summary:</strong> ${successCount} succeeded, ${failCount} failed out of ${results.length} total file(s)`;
+    html += '</div>';
+    
+    if (successCount > 0) {
+        html += '<div style="margin-top: 10px; text-align: center;">';
+        html += '<button type="button" onclick="window.location.reload()" style="background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">🔄 Refresh to See New Files</button>';
+        html += '</div>';
+    }
+    
+    html += '</div>';
+    
+    resultsDiv.innerHTML = html;
+    resultsDiv.style.display = 'block';
+}
 
 async function checkGadgetState() {
     try {

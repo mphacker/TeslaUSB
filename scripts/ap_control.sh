@@ -30,6 +30,7 @@ ap_iface() {
 }
 
 get_force_mode() {
+  # First check runtime file (takes precedence)
   if [ -f "$FORCE_MODE_FILE" ]; then
     local mode
     mode=$(cat "$FORCE_MODE_FILE" 2>/dev/null || echo "auto")
@@ -37,14 +38,27 @@ get_force_mode() {
       force_on|force_off|auto) echo "$mode" ;;
       *) echo "auto" ;;
     esac
+  # Fall back to persistent config
+  elif [ -n "${OFFLINE_AP_FORCE_MODE:-}" ]; then
+    echo "${OFFLINE_AP_FORCE_MODE}"
   else
     echo "auto"
   fi
 }
 
 set_force_mode() {
+  local mode="$1"
   ensure_runtime_dir
-  echo "$1" >"$FORCE_MODE_FILE"
+  
+  # Write to runtime file (for immediate effect)
+  echo "$mode" >"$FORCE_MODE_FILE"
+  
+  # Persist to config.sh (survives reboot)
+  if [ -f "$CONFIG_FILE" ]; then
+    # Use sed to update the config file
+    sed -i "s|^OFFLINE_AP_FORCE_MODE=.*|OFFLINE_AP_FORCE_MODE=\"$mode\"|" "$CONFIG_FILE"
+  fi
+  
   # Nudge monitor to wake sooner (best-effort)
   systemctl kill -s SIGUSR1 wifi-monitor.service 2>/dev/null || true
 }

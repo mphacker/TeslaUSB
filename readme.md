@@ -152,6 +152,8 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - IP: `192.168.4.1`
 - Access web interface: `http://192.168.4.1:5000`
 - Control from web UI: Force start/stop AP or leave in auto mode
+  - **Start AP Now**: Forces AP on, persists across reboots (AP always on)
+  - **Stop AP**: Returns to auto mode, persists across reboots (AP only starts if WiFi fails)
 - Change credentials in `scripts/config.sh` before first use
 - **Note**: After clicking "Start AP Now" or "Stop AP" buttons, the status may not update immediately. Wait 10-20 seconds and refresh the page to see the current state.
 
@@ -216,6 +218,7 @@ OFFLINE_AP_SSID="TeslaUSB"             # AP network name (change this!)
 OFFLINE_AP_PASSPHRASE="teslausb1234"   # AP password (change this!)
 OFFLINE_AP_IPV4_CIDR="192.168.4.1/24"  # AP IP address
 OFFLINE_AP_DISCONNECT_GRACE="30"       # Seconds offline before AP starts
+OFFLINE_AP_FORCE_MODE="auto"           # Persistent AP mode: auto, force_on, force_off
 # Note: AP always runs concurrently with WiFi client on a virtual interface
 ```
 

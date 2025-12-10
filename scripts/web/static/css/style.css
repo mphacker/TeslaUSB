@@ -128,9 +128,9 @@
     --upload-progress-bar-bg: #0d1117;
     
     /* iOS Warning colors - dark mode */
-    --ios-warning-bg: #5a4a1f;
-    --ios-warning-border: #d29922;
-    --ios-warning-text: #f0c36d;
+    --ios-warning-bg: #2d2a1e;
+    --ios-warning-border: #9e6a03;
+    --ios-warning-text: #e3b341;
     
     --text-primary: #e6edf3;
     --text-secondary: #8b949e;
@@ -153,8 +153,8 @@
     --status-present-text: #3fb950;
     --status-edit-bg: #1a3c5a;
     --status-edit-text: #58a6ff;
-    --status-unknown-bg: #5a4a1f;
-    --status-unknown-text: #d29922;
+    --status-unknown-bg: #2d2a1e;
+    --status-unknown-text: #e3b341;
     
     /* Message colors */
     --msg-success-bg: #1a4d2e;
@@ -163,12 +163,12 @@
     --msg-info-text: #58a6ff;
     --msg-error-bg: #4c1f1f;
     --msg-error-text: #f85149;
-    --msg-warning-bg: #5a4a1f;
-    --msg-warning-text: #d29922;
+    --msg-warning-bg: #2d2a1e;
+    --msg-warning-text: #e3b341;
     
     /* Notification colors */
-    --warning-bg: #5a4a1f;
-    --warning-border: #d29922;
+    --warning-bg: #2d2a1e;
+    --warning-border: #9e6a03;
     --success-bg: #1a4d2e;
     --success-border: #3fb950;
     --success-text: #3fb950;

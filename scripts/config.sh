@@ -35,6 +35,7 @@ OFFLINE_AP_STABLE_SECONDS="20"       # Seconds of good link before stopping AP
 OFFLINE_AP_PING_TARGET="8.8.8.8"     # Ping target to confirm WAN reachability
 OFFLINE_AP_RETRY_SECONDS="300"       # While AP is active, retry STA join every N seconds
 OFFLINE_AP_VIRTUAL_IF="uap0"         # Virtual AP interface name (concurrent mode always enabled)
+OFFLINE_AP_FORCE_MODE="auto"         # Persistent force mode: auto, force_on, force_off
 
 # ============================================================================
 # Computed paths (don't modify these)

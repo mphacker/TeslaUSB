@@ -291,6 +291,129 @@ def upload_lock_chime():
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
+@lock_chimes_bp.route("/upload_bulk", methods=["POST"])
+def upload_bulk_chimes():
+    """Bulk upload lock chimes - validation only, no processing."""
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    
+    # Get all uploaded files
+    files = request.files.getlist('chime_files')
+    
+    if not files or len(files) == 0:
+        if is_ajax:
+            return jsonify({"success": False, "error": "No files selected"}), 400
+        flash("No files selected", "error")
+        return redirect(url_for("lock_chimes.lock_chimes"))
+    
+    # Get part2 mount path (may be None in present mode, which is fine)
+    part2_mount = get_mount_path("part2")
+    
+    results = []
+    total_uploaded = 0
+    
+    for file in files:
+        if file.filename == "":
+            continue
+        
+        filename = os.path.basename(file.filename)
+        
+        # Only accept WAV files
+        if not filename.lower().endswith(".wav"):
+            results.append({
+                'filename': filename,
+                'success': False,
+                'message': 'Only WAV files are accepted in bulk upload mode'
+            })
+            continue
+        
+        # Save to temp location for validation
+        import tempfile
+        temp_dir = tempfile.mkdtemp(prefix='chime_bulk_')
+        temp_path = os.path.join(temp_dir, filename)
+        
+        try:
+            file.save(temp_path)
+            
+            # Validate file meets Tesla requirements (no processing)
+            is_valid, error_msg = validate_tesla_wav(temp_path)
+            
+            if not is_valid:
+                results.append({
+                    'filename': filename,
+                    'success': False,
+                    'message': f'Rejected: {error_msg}'
+                })
+                os.remove(temp_path)
+                os.rmdir(temp_dir)
+                continue
+            
+            # File is valid - upload it directly (no re-encoding)
+            from services.lock_chime_service import upload_validated_chime
+            success, message = upload_validated_chime(temp_path, filename, part2_mount)
+            
+            results.append({
+                'filename': filename,
+                'success': success,
+                'message': message
+            })
+            
+            if success:
+                total_uploaded += 1
+            
+            # Cleanup temp file
+            try:
+                os.remove(temp_path)
+                os.rmdir(temp_dir)
+            except:
+                pass
+                
+        except Exception as e:
+            results.append({
+                'filename': filename,
+                'success': False,
+                'message': f'Upload error: {str(e)}'
+            })
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                os.rmdir(temp_dir)
+            except:
+                pass
+    
+    # Refresh Samba shares only if in edit mode and files were uploaded
+    if current_mode() == "edit" and total_uploaded > 0:
+        try:
+            close_samba_share('part2')
+            restart_samba_services()
+        except Exception as e:
+            logger.error(f"Samba refresh failed: {e}")
+    
+    # Delay for filesystem settling
+    if total_uploaded > 0:
+        time.sleep(0.5)
+    
+    if is_ajax:
+        success_count = sum(1 for r in results if r['success'])
+        return jsonify({
+            'success': success_count > 0,
+            'results': results,
+            'total_uploaded': total_uploaded,
+            'summary': f"Successfully uploaded {total_uploaded} of {len(results)} file(s)"
+        }), 200
+    
+    # Non-AJAX fallback
+    success_count = sum(1 for r in results if r['success'])
+    if success_count > 0:
+        flash(f"Successfully uploaded {total_uploaded} chime(s)", "success")
+        if success_count < len(results):
+            failed = [r['filename'] for r in results if not r['success']]
+            flash(f"Failed: {', '.join(failed[:3])}" + (" and more" if len(failed) > 3 else ""), "warning")
+    else:
+        flash("All files were rejected. Check file requirements.", "error")
+    
+    return redirect(url_for("lock_chimes.lock_chimes"))
+
+
 @lock_chimes_bp.route("/set/<filename>", methods=["POST"])
 def set_as_chime(filename):
     """Set a WAV file from Chimes folder as the active lock chime."""

@@ -1142,6 +1142,130 @@ def set_active_chime(chime_filename, part2_mount_path):
         return success, message
 
 
+def upload_validated_chime(temp_file_path, filename, part2_mount_path=None):
+    """
+    Upload a pre-validated chime file directly without processing.
+    Used for bulk upload mode where files are already validated.
+    
+    Args:
+        temp_file_path: Path to temporary validated WAV file
+        filename: Desired filename (must end in .wav)
+        part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    from services.mode_service import current_mode
+    from services.partition_mount_service import quick_edit_part2
+    from config import LOCK_CHIME_FILENAME, CHIMES_FOLDER, MNT_DIR
+    
+    mode = current_mode()
+    logger.info(f"Uploading validated chime file {filename} (mode: {mode})")
+    
+    # Validate filename
+    if not filename.lower().endswith('.wav'):
+        return False, "Filename must end with .wav"
+    
+    if filename.lower() == LOCK_CHIME_FILENAME.lower():
+        return False, "Cannot upload a file named LockChime.wav. Please rename your file."
+    
+    if mode == 'present':
+        # Present mode - use quick_edit_part2() for temporary RW access
+        def _do_quick_copy():
+            """Quick file copy - should take < 1 second."""
+            try:
+                rw_mount = os.path.join(MNT_DIR, 'part2')
+                chimes_dir = os.path.join(rw_mount, CHIMES_FOLDER)
+                
+                # Create Chimes directory if needed
+                if not os.path.isdir(chimes_dir):
+                    os.makedirs(chimes_dir, exist_ok=True)
+                
+                dest_path = os.path.join(chimes_dir, filename)
+                src_md5 = _file_md5(temp_file_path)
+                src_size = os.path.getsize(temp_file_path)
+
+                shutil.copy2(temp_file_path, dest_path)
+
+                with open(dest_path, "r+b") as dst_f:
+                    dst_f.flush()
+                    os.fsync(dst_f.fileno())
+                
+                # Sync directory entry
+                dir_fd = os.open(chimes_dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+
+                if not os.path.exists(dest_path):
+                    return False, "Destination file missing after copy"
+
+                dest_size = os.path.getsize(dest_path)
+                if dest_size != src_size:
+                    return False, f"Size mismatch after copy (expected {src_size}, got {dest_size})"
+
+                dest_md5 = _file_md5(dest_path)
+                if dest_md5 != src_md5:
+                    return False, "MD5 mismatch after copy"
+
+                return True, f"Uploaded {filename}"
+            except Exception as e:
+                logger.error(f"Error copying file: {e}", exc_info=True)
+                return False, f"Error copying file: {str(e)}"
+        
+        # Execute quick copy with short timeout
+        logger.info("Using quick edit part2 for validated chime upload")
+        return quick_edit_part2(_do_quick_copy, timeout=30)
+    
+    else:
+        # Edit mode - normal operation
+        try:
+            if not part2_mount_path:
+                return False, "Part2 mount path required in edit mode"
+            
+            rw_mount = part2_mount_path
+            chimes_dir = os.path.join(rw_mount, CHIMES_FOLDER)
+            
+            # Create Chimes directory if needed
+            if not os.path.isdir(chimes_dir):
+                os.makedirs(chimes_dir, exist_ok=True)
+            
+            dest_path = os.path.join(chimes_dir, filename)
+            src_md5 = _file_md5(temp_file_path)
+            src_size = os.path.getsize(temp_file_path)
+            
+            shutil.copy2(temp_file_path, dest_path)
+            
+            with open(dest_path, "r+b") as dst_f:
+                dst_f.flush()
+                os.fsync(dst_f.fileno())
+            
+            # Sync directory entry
+            dir_fd = os.open(chimes_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+            
+            if not os.path.exists(dest_path):
+                return False, "Destination file missing after copy"
+            
+            dest_size = os.path.getsize(dest_path)
+            if dest_size != src_size:
+                return False, f"Size mismatch after copy (expected {src_size}, got {dest_size})"
+            
+            dest_md5 = _file_md5(dest_path)
+            if dest_md5 != src_md5:
+                return False, "MD5 mismatch after copy"
+            
+            return True, f"Uploaded {filename}"
+                
+        except Exception as e:
+            logger.error(f"Error uploading validated chime: {e}", exc_info=True)
+            return False, f"Error uploading file: {str(e)}"
+
+
 def rename_chime_file(old_filename, new_filename):
     """
     Rename a lock chime file without re-encoding.

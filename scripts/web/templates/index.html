@@ -61,7 +61,7 @@
                         <label for="ap_passphrase" style="display: inline-block; width: 100px; color: var(--text-primary);">Password:</label>
                         <input type="password" id="ap_passphrase" name="passphrase" value="{{ ap_config.passphrase }}" minlength="8" maxlength="63" 
                                style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                        <button type="button" onclick="togglePassword()" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                        <button type="button" onclick="togglePassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
                         <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
                     </div>
                     <button type="submit" class="edit-btn" id="updateApBtn" onclick="return confirm('Changing AP credentials will disconnect all connected clients. Continue?')">Update AP Credentials</button>
@@ -113,7 +113,7 @@
                     <input type="password" id="wifi_password" name="wifi_password" minlength="8" maxlength="63"
                            placeholder="Enter WiFi password"
                            style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                    <button type="button" onclick="toggleWifiPassword()" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                    <button type="button" onclick="toggleWifiPassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
                     <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
                 </div>
                 <button type="submit" class="edit-btn" id="updateWifiBtn" onclick="return confirmWifiUpdate()">Update WiFi Credentials</button>
@@ -127,9 +127,8 @@
 </div>
 
 <script>
-function togglePassword() {
+function togglePassword(btn) {
     const passField = document.getElementById('ap_passphrase');
-    const btn = event.target;
     if (passField.type === 'password') {
         passField.type = 'text';
         btn.textContent = 'Hide';
@@ -139,9 +138,8 @@ function togglePassword() {
     }
 }
 
-function toggleWifiPassword() {
+function toggleWifiPassword(btn) {
     const passField = document.getElementById('wifi_password');
-    const btn = event.target;
     if (passField.type === 'password') {
         passField.type = 'text';
         btn.textContent = 'Hide';
@@ -154,9 +152,9 @@ function toggleWifiPassword() {
 function confirmWifiUpdate() {
     // Check if user is currently connected via WiFi (not AP)
     const connectedViaWifi = {{ 'true' if wifi_status.connected else 'false' }};
-    const currentSSID = {{ ('\"' + wifi_status.current_ssid + '\"') if wifi_status.get('current_ssid') else 'null' }};
+    const currentSSID = {{ wifi_status.current_ssid | tojson if wifi_status.get('current_ssid') else 'null' }};
     const apActive = {{ 'true' if ap_status.ap_active else 'false' }};
-    const apIP = {{ ('\"' + ap_status.static_ip + '\"') if ap_status.get('static_ip') else 'null' }};
+    const apIP = {{ ap_status.static_ip | tojson if ap_status.get('static_ip') else 'null' }};
     
     // Detect if user is accessing via AP IP
     const accessingViaAP = apIP && (window.location.hostname === apIP || window.location.hostname === apIP.split('/')[0]);

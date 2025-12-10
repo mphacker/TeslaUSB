@@ -18,6 +18,15 @@ from config import MAX_LOCK_CHIME_SIZE
 logger = logging.getLogger(__name__)
 
 
+def _file_md5(file_path):
+    """Compute MD5 hash of a file."""
+    digest = hashlib.md5()
+    with open(file_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def validate_tesla_wav(file_path):
     """
     Validate WAV file meets Tesla's lock chime requirements:
@@ -284,19 +293,28 @@ def normalize_audio(input_path, target_lufs=-16):
         raise
 
 
-def replace_lock_chime(source_path, destination_path):
-    """Swap in the selected WAV using temporary file to invalidate all caches."""
+def replace_lock_chime(source_path, destination_path, source_md5=None):
+    """Swap in the selected WAV using temporary file to invalidate all caches.
+    
+    Args:
+        source_path: Path to the source WAV file
+        destination_path: Path to the destination LockChime.wav
+        source_md5: Optional pre-computed MD5 hash of source file (optimization)
+    """
     src_size = os.path.getsize(source_path)
 
     if src_size == 0:
         raise ValueError("Selected WAV file is empty.")
 
-    # Calculate MD5 hash of source file
-    source_md5 = hashlib.md5()
-    with open(source_path, "rb") as src_f:
-        for chunk in iter(lambda: src_f.read(8192), b""):
-            source_md5.update(chunk)
-    source_hash = source_md5.hexdigest()
+    # Use pre-computed hash if provided, otherwise calculate it
+    if source_md5 is None:
+        source_md5_obj = hashlib.md5()
+        with open(source_path, "rb") as src_f:
+            for chunk in iter(lambda: src_f.read(65536), b""):
+                source_md5_obj.update(chunk)
+        source_hash = source_md5_obj.hexdigest()
+    else:
+        source_hash = source_md5
 
     dest_dir = os.path.dirname(destination_path)
     backup_path = os.path.join(dest_dir, "oldLockChime.wav")
@@ -312,16 +330,6 @@ def replace_lock_chime(source_path, destination_path):
             except Exception as e:
                 logger.error(f"Failed to remove orphaned file {orphan_file}: {e}")
 
-    # Drop any cached data BEFORE we start
-    try:
-        subprocess.run(
-            ["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
-            check=False,
-            timeout=5
-        )
-    except Exception:
-        pass
-
     # Backup existing file if present
     if os.path.isfile(destination_path):
         if os.path.isfile(backup_path):
@@ -331,11 +339,9 @@ def replace_lock_chime(source_path, destination_path):
         # DELETE the old LockChime.wav completely
         os.remove(destination_path)
         
-        # Sync the deletion multiple times to ensure it propagates
+        # Single sync after deletion with minimal delay
         subprocess.run(["sync"], check=False, timeout=5)
-        time.sleep(0.5)
-        subprocess.run(["sync"], check=False, timeout=5)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     try:
         # Write to a temporary file first with a different name
@@ -347,13 +353,10 @@ def replace_lock_chime(source_path, destination_path):
                 f"Temp file size mismatch (expected {src_size} bytes, got {temp_size} bytes)."
             )
         
-        # Sync the temp file completely
+        # Sync the temp file data to disk
         with open(temp_path, "r+b") as temp_file:
             temp_file.flush()
             os.fsync(temp_file.fileno())
-        
-        subprocess.run(["sync"], check=False, timeout=10)
-        time.sleep(0.5)
         
         # Now rename temp to final name - this creates a NEW directory entry
         # while the temp file data is already fully written
@@ -367,42 +370,24 @@ def replace_lock_chime(source_path, destination_path):
         except Exception:
             pass
         
-        # Force sync of the destination file itself
-        with open(destination_path, "r+b") as dest_file:
-            dest_file.flush()
-            os.fsync(dest_file.fileno())
-        
-        # Final full sync - critical for exFAT
-        subprocess.run(["sync"], check=False, timeout=10)
-        time.sleep(1.0)
-        
-        # Drop ALL caches again
-        try:
-            subprocess.run(
-                ["sudo", "-n", "sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"],
-                check=False,
-                timeout=5
-            )
-        except Exception:
-            pass
-        
         # Update file access/modification times to force inode metadata change
         # This helps Tesla detect the file has changed even if size is the same
         try:
             current_time = time.time()
             os.utime(destination_path, (current_time, current_time))
-            # Sync the metadata change
-            subprocess.run(["sync"], check=False, timeout=5)
         except Exception:
             pass
         
-        # Extra time for exFAT to settle and ensure all buffers are flushed
-        time.sleep(0.5)
+        # Final full sync - critical for exFAT durability
+        subprocess.run(["sync"], check=False, timeout=10)
+        
+        # Minimal delay for filesystem to settle
+        time.sleep(0.1)
         
         # Verify the file contents match by comparing MD5 hashes
         dest_md5 = hashlib.md5()
         with open(destination_path, "rb") as dst_f:
-            for chunk in iter(lambda: dst_f.read(8192), b""):
+            for chunk in iter(lambda: dst_f.read(65536), b""):
                 dest_md5.update(chunk)
         dest_hash = dest_md5.hexdigest()
         
@@ -553,11 +538,33 @@ def upload_chime_file(uploaded_file, filename, part2_mount_path=None, normalize=
                         os.makedirs(chimes_dir, exist_ok=True)
                     
                     dest_path = os.path.join(chimes_dir, filename)
-                    
-                    # Copy the prepared file
+                    src_md5 = _file_md5(final_file)
+                    src_size = os.path.getsize(final_file)
+
                     shutil.copy2(final_file, dest_path)
-                    
-                    return True, "File copied successfully"
+
+                    with open(dest_path, "r+b") as dst_f:
+                        dst_f.flush()
+                        os.fsync(dst_f.fileno())
+                    # Sync directory entry
+                    dir_fd = os.open(chimes_dir, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+
+                    if not os.path.exists(dest_path):
+                        return False, "Destination file missing after copy"
+
+                    dest_size = os.path.getsize(dest_path)
+                    if dest_size != src_size:
+                        return False, f"Size mismatch after copy (expected {src_size}, got {dest_size})"
+
+                    dest_md5 = _file_md5(dest_path)
+                    if dest_md5 != src_md5:
+                        return False, "MD5 mismatch after copy"
+
+                    return True, "File copied and verified"
                 except Exception as e:
                     logger.error(f"Error copying file: {e}", exc_info=True)
                     return False, f"Error copying file: {str(e)}"
@@ -686,6 +693,19 @@ def upload_chime_file(uploaded_file, filename, part2_mount_path=None, normalize=
                 if os.path.exists(dest_path):
                     os.remove(dest_path)
                 os.rename(temp_path, dest_path)
+
+                # Verify integrity after move
+                src_md5 = _file_md5(dest_path)
+                dest_size = os.path.getsize(dest_path)
+
+                with open(dest_path, "r+b") as dst_f:
+                    dst_f.flush()
+                    os.fsync(dst_f.fileno())
+                dir_fd = os.open(chimes_dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
                 
                 # Build success message
                 msg_parts = [f"Successfully uploaded {filename}"]
@@ -853,8 +873,11 @@ def set_active_chime(chime_filename, part2_mount_path):
                 source = os.path.join(part2_mount_path, CHIMES_FOLDER, chime_filename)
                 dest = os.path.join(part2_mount_path, LOCK_CHIME_FILENAME)
             
+            # Pre-compute MD5 to optimize replace_lock_chime
+            source_hash = _file_md5(source)
+            
             # Perform the replacement
-            replace_lock_chime(source, dest)
+            replace_lock_chime(source, dest, source_md5=source_hash)
             
             return True, f"Successfully set {chime_filename} as active lock chime"
             
@@ -866,7 +889,7 @@ def set_active_chime(chime_filename, part2_mount_path):
     if mode == 'present':
         # Use quick edit to temporarily mount RW
         logger.info("Using quick edit part2 for chime replacement")
-        return quick_edit_part2(_do_chime_replacement)
+        return quick_edit_part2(_do_chime_replacement, timeout=30)
     else:
         # Normal edit mode operation
         return _do_chime_replacement()

@@ -142,7 +142,7 @@ def quick_edit_part2(operation_callback, timeout=10):
                             subprocess.run(
                                 ['sudo', 'nsenter', '--mount=/proc/1/ns/mnt', 'umount', mount_point],
                                 capture_output=True,
-                                timeout=5
+                                timeout=15  # Increased timeout for busy filesystems
                             )
                     
                     # Detach the loop device

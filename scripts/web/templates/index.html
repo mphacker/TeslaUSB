@@ -13,17 +13,18 @@
         <div class="loading-text">Updating AP settings, please wait...</div>
     </div>
     
-    <form method="post" action="{{url_for('mode_control.present_usb')}}" id="presentForm" style="display: inline;">
-        <button type="submit" class="present-btn" id="presentBtn">📱 Present USB Gadget</button>
-    </form>
-    
-    <form method="post" action="{{url_for('mode_control.edit_usb')}}" id="editForm" style="display: inline;">
-        <button type="submit" class="edit-btn" id="editBtn">📁 Edit USB (mount + Samba)</button>
+    <form method="post" id="modeToggleForm" style="display: flex; justify-content: center; align-items: center; gap: 15px; margin: 20px 0;">
+        <span class="mode-toggle-label" id="editLabel" style="font-weight: 500; color: var(--text-primary); transition: opacity 0.3s;">📁 Edit Mode</span>
+        <label class="toggle-switch" style="margin: 0;">
+            <input type="checkbox" id="modeToggle" {{ 'checked' if mode_token == 'present' else '' }}>
+            <span class="toggle-slider"></span>
+        </label>
+        <span class="mode-toggle-label" id="presentLabel" style="font-weight: 500; color: var(--text-primary); transition: opacity 0.3s;">📱 Present Mode</span>
     </form>
     
     <div class="info-box">
-        <strong>Present USB Mode:</strong> Pi appears as USB storage to Tesla. Files are accessible in read-only mode locally.<br>
-        <strong>Edit USB Mode:</strong> Partitions mounted locally with Samba access for full read-write access.
+        <strong>Present Mode:</strong> Pi appears as USB storage to Tesla. Files are accessible in read-only mode locally.<br>
+        <strong>Edit Mode:</strong> Partitions mounted locally with Samba access for full read-write access.
     </div>
 
     {% if share_paths %}
@@ -186,10 +187,11 @@ function confirmWifiUpdate() {
 }
 
 // Prevent multiple mode switch submissions
-const presentForm = document.getElementById('presentForm');
-const editForm = document.getElementById('editForm');
-const presentBtn = document.getElementById('presentBtn');
-const editBtn = document.getElementById('editBtn');
+// Mode toggle elements
+const modeToggleForm = document.getElementById('modeToggleForm');
+const modeToggle = document.getElementById('modeToggle');
+const editLabel = document.getElementById('editLabel');
+const presentLabel = document.getElementById('presentLabel');
 const loadingOverlay = document.getElementById('loadingOverlay');
 
 // AP form elements
@@ -205,15 +207,69 @@ const apLoadingOverlay = document.getElementById('apLoadingOverlay');
 const wifiConfigForm = document.getElementById('wifiConfigForm');
 const updateWifiBtn = document.getElementById('updateWifiBtn');
 
-function disableButtons() {
-    presentBtn.disabled = true;
-    editBtn.disabled = true;
-    presentBtn.style.opacity = '0.5';
-    editBtn.style.opacity = '0.5';
-    presentBtn.style.cursor = 'not-allowed';
-    editBtn.style.cursor = 'not-allowed';
-    loadingOverlay.style.display = 'flex';
+// Update label opacity based on current mode
+function updateLabelOpacity() {
+    if (modeToggle.checked) {
+        // Present mode is active
+        editLabel.style.opacity = '0.5';
+        presentLabel.style.opacity = '1';
+        presentLabel.style.fontWeight = '600';
+        editLabel.style.fontWeight = '500';
+    } else {
+        // Edit mode is active
+        editLabel.style.opacity = '1';
+        presentLabel.style.opacity = '0.5';
+        editLabel.style.fontWeight = '600';
+        presentLabel.style.fontWeight = '500';
+    }
 }
+
+// Initialize label opacity on page load
+updateLabelOpacity();
+
+// Handle toggle switch changes
+modeToggle.addEventListener('change', function() {
+    if (modeToggle.disabled) {
+        return;
+    }
+    
+    // Disable toggle and show loading
+    modeToggle.disabled = true;
+    loadingOverlay.style.display = 'flex';
+    
+    // Determine which mode to switch to
+    const targetMode = modeToggle.checked ? 'present' : 'edit';
+    const actionUrl = targetMode === 'present' 
+        ? '{{ url_for("mode_control.present_usb") }}'
+        : '{{ url_for("mode_control.edit_usb") }}';
+    
+    // Update label opacity immediately for responsiveness
+    updateLabelOpacity();
+    
+    // Submit the form
+    fetch(actionUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+    })
+    .then(response => {
+        if (response.redirected) {
+            window.location.href = response.url;
+        } else {
+            return response.text();
+        }
+    })
+    .catch(error => {
+        console.error('Error switching modes:', error);
+        // Revert toggle on error
+        modeToggle.checked = !modeToggle.checked;
+        updateLabelOpacity();
+        modeToggle.disabled = false;
+        loadingOverlay.style.display = 'none';
+        alert('Error switching modes. Please try again.');
+    });
+});
 
 function disableApButtons() {
     updateApBtn.disabled = true;
@@ -227,22 +283,6 @@ function disableApButtons() {
     stopApBtn.style.cursor = 'not-allowed';
     apLoadingOverlay.style.display = 'flex';
 }
-
-presentForm.addEventListener('submit', function(e) {
-    if (presentBtn.disabled) {
-        e.preventDefault();
-        return false;
-    }
-    disableButtons();
-});
-
-editForm.addEventListener('submit', function(e) {
-    if (editBtn.disabled) {
-        e.preventDefault();
-        return false;
-    }
-    disableButtons();
-});
 
 apConfigForm.addEventListener('submit', function(e) {
     if (updateApBtn.disabled) {

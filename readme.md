@@ -52,9 +52,9 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
   - Recurring rotation (every 15min to 12 hours, or on boot)
 
 ### Light Show Management  
-- Upload FSEQ and MP3 files
+- Upload FSEQ and MP3/WAV files
 - Grouped display (pairs sequence + audio files)
-- Preview MP3 tracks in browser
+- Preview MP3/WAV tracks in browser
 - Delete complete light show sets
 
 ### Automatic Maintenance
@@ -183,9 +183,9 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Schedule automatic chime changes (weekly, date, holiday, recurring)
 
 **Light Shows Tab**:
-- Upload and manage FSEQ + MP3 light show files
+- Upload and manage FSEQ + MP3/WAV light show files
 - Grouped display for matching files
-- Preview MP3 audio in browser
+- Preview MP3/WAV audio in browser
 - Delete complete light show sets
 
 **Analytics Tab**:

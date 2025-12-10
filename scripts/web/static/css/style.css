@@ -70,6 +70,16 @@
     --msg-info-text: #0c5460;
     --msg-error-bg: #f8d7da;
     --msg-error-text: #721c24;
+    --msg-warning-bg: #fff3cd;
+    --msg-warning-text: #856404;
+    
+    /* Notification colors */
+    --warning-bg: #fff3cd;
+    --warning-border: #ffc107;
+    --success-bg: #d4edda;
+    --success-border: #28a745;
+    --success-text: #28a745;
+    --error-text: #dc3545;
     
     /* Button colors */
     --btn-primary-bg: #007bff;
@@ -153,6 +163,16 @@
     --msg-info-text: #58a6ff;
     --msg-error-bg: #4c1f1f;
     --msg-error-text: #f85149;
+    --msg-warning-bg: #5a4a1f;
+    --msg-warning-text: #d29922;
+    
+    /* Notification colors */
+    --warning-bg: #5a4a1f;
+    --warning-border: #d29922;
+    --success-bg: #1a4d2e;
+    --success-border: #3fb950;
+    --success-text: #3fb950;
+    --error-text: #f85149;
     
     /* Button colors - vibrant and accessible */
     --btn-primary-bg: #1f6feb;

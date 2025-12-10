@@ -34,6 +34,7 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 ## Lock Chimes & Light Shows
 - Lock chime rules: WAV <1 MiB, 16-bit PCM, 44.1/48 kHz, mono/stereo. `lock_chime_service` validates, can reencode via ffmpeg, and replaces `LockChime.wav` with temp+fsync+MD5.
 - Present-mode uploads and set-active use `quick_edit_part2` to minimize RW time; honor the lock and timeouts. Keep copies/renames atomic and verified.
+- **Tesla cache invalidation**: Tesla caches USB file contents and won't detect changes unless the USB device is re-enumerated. After replacing `LockChime.wav`, MUST unbind/rebind the USB gadget (see `partition_mount_service.rebind_usb_gadget()`). This simulates unplug/replug and forces Tesla to clear cache and re-scan the drive. The `set_active_chime()` function handles this automatically in present mode.
 
 ## Key Workflows
 - Switch modes: `sudo /home/pi/TeslaUSB/present_usb.sh` or `edit_usb.sh`; check `state.txt`.

@@ -49,6 +49,13 @@ LOCK_CHIME_FILENAME = "LockChime.wav"
 CHIMES_FOLDER = "Chimes"  # Folder on part2 where custom chimes are stored
 MAX_LOCK_CHIME_SIZE = 1024 * 1024  # 1 MiB
 
+# Audio trimmer configuration (Tesla lock chime limits)
+MAX_LOCK_CHIME_DURATION = 10.0  # 10 seconds (configurable per Tesla model)
+MIN_LOCK_CHIME_DURATION = 0.3   # 300ms minimum
+SPEED_RANGE_MIN = 0.5            # Half speed
+SPEED_RANGE_MAX = 2.0            # Double speed
+SPEED_STEP = 0.05                # Fine-grained control
+
 # Light show configuration
 LIGHT_SHOW_FOLDER = "LightShow"  # Folder on part2 where light shows are stored
 

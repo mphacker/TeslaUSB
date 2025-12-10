@@ -1,0 +1,519 @@
+/* Audio Trimmer Styles
+ * Matches TeslaUSB app design system with responsive behavior
+ */
+
+/* Trim Editor Container */
+.trim-editor-section {
+    background: var(--collapsible-content-bg);
+    padding: 20px;
+    border-radius: 8px;
+    border: 2px solid var(--collapsible-section-border);
+    margin-top: 20px;
+    margin-bottom: 20px;
+}
+
+.trim-editor-section.edit-mode {
+    border-color: var(--btn-success-bg);
+}
+
+.trim-editor-header {
+    margin: 0 0 15px 0;
+    color: var(--collapsible-section-text);
+    font-size: 18px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.trim-editor-badge {
+    background: var(--btn-success-bg);
+    color: var(--btn-success-text);
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+/* Loading State */
+.trim-editor-loading {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-secondary);
+}
+
+.trim-editor-spinner {
+    display: inline-block;
+    width: 40px;
+    height: 40px;
+    border: 4px solid var(--border-light);
+    border-top-color: var(--btn-primary-bg);
+    border-radius: 50%;
+    animation: trimmer-spin 0.8s linear infinite;
+}
+
+@keyframes trimmer-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Waveform Canvas */
+.waveform-container {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-input);
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 20px;
+    overflow: hidden;
+}
+
+.waveform-canvas {
+    display: block;
+    width: 100%;
+    height: 120px;
+    cursor: crosshair;
+    border-radius: 4px;
+}
+
+/* Trim Controls */
+.trim-controls {
+    display: grid;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.trim-control-row {
+    display: flex;
+    gap: 15px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+}
+
+.trim-control-group {
+    flex: 1;
+    min-width: 200px;
+}
+
+.trim-control-label {
+    display: block;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-primary);
+    margin-bottom: 5px;
+}
+
+.trim-control-sublabel {
+    display: block;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+/* Range Sliders */
+.trim-slider {
+    width: 100%;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--border-light);
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+    cursor: pointer;
+}
+
+.trim-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--btn-primary-bg);
+    cursor: pointer;
+    border: 2px solid var(--bg-secondary);
+    box-shadow: 0 2px 4px var(--shadow);
+}
+
+.trim-slider::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--btn-primary-bg);
+    cursor: pointer;
+    border: 2px solid var(--bg-secondary);
+    box-shadow: 0 2px 4px var(--shadow);
+}
+
+.trim-slider:focus::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.3);
+}
+
+.trim-slider:focus::-moz-range-thumb {
+    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.3);
+}
+
+/* Speed slider styling */
+.speed-slider {
+    width: 100%;
+    height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(to right, 
+        var(--btn-info-bg) 0%, 
+        var(--btn-success-bg) 50%, 
+        var(--btn-danger-bg) 100%);
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+    cursor: pointer;
+}
+
+.speed-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    border: 3px solid var(--btn-purple-bg);
+    box-shadow: 0 2px 6px var(--shadow);
+}
+
+.speed-slider::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    border: 3px solid var(--btn-purple-bg);
+    box-shadow: 0 2px 6px var(--shadow);
+}
+
+/* Time Display */
+.time-display {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    font-size: 14px;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    margin-top: 5px;
+}
+
+.time-value {
+    font-weight: 600;
+    color: var(--btn-primary-bg);
+}
+
+/* Stats Display */
+.trim-stats {
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: 6px;
+    padding: 15px;
+    margin-bottom: 20px;
+}
+
+.trim-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 15px;
+}
+
+.trim-stat {
+    display: flex;
+    flex-direction: column;
+}
+
+.trim-stat-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.trim-stat-value {
+    font-size: 16px;
+    color: var(--text-primary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.trim-stat-value.warning {
+    color: #ffc107;
+}
+
+.trim-stat-value.error {
+    color: var(--btn-danger-bg);
+}
+
+.trim-stat-value.success {
+    color: var(--btn-success-bg);
+}
+
+/* Speed Badge */
+.speed-badge {
+    display: inline-block;
+    background: var(--btn-purple-bg);
+    color: var(--btn-purple-text);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 5px;
+}
+
+/* Action Buttons */
+.trim-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 20px;
+}
+
+.trim-btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px; /* Touch-friendly */
+    min-width: 44px;
+}
+
+.trim-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px var(--shadow-hover);
+}
+
+.trim-btn:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+.trim-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.trim-btn-primary {
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+.trim-btn-success {
+    background: var(--btn-success-bg);
+    color: var(--btn-success-text);
+}
+
+.trim-btn-purple {
+    background: var(--btn-purple-bg);
+    color: var(--btn-purple-text);
+}
+
+.trim-btn-danger {
+    background: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
+.trim-btn-secondary {
+    background: var(--bg-info);
+    color: var(--text-primary);
+    border: 1px solid var(--border-input);
+}
+
+/* Info/Warning Messages */
+.trim-message {
+    padding: 12px 15px;
+    border-radius: 6px;
+    margin-bottom: 15px;
+    font-size: 13px;
+    line-height: 1.5;
+    border-left: 4px solid;
+}
+
+.trim-message.info {
+    background: var(--msg-info-bg);
+    color: var(--msg-info-text);
+    border-color: var(--btn-info-bg);
+}
+
+.trim-message.success {
+    background: var(--msg-success-bg);
+    color: var(--msg-success-text);
+    border-color: var(--btn-success-bg);
+}
+
+.trim-message.warning {
+    background: #fff3cd;
+    color: #856404;
+    border-color: #ffc107;
+}
+
+.trim-message.error {
+    background: var(--msg-error-bg);
+    color: var(--msg-error-text);
+    border-color: var(--btn-danger-bg);
+}
+
+[data-theme="dark"] .trim-message.warning {
+    background: #5a4a1f;
+    color: #d29922;
+}
+
+/* Playback Controls */
+.playback-controls {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.play-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: none;
+    background: var(--btn-success-bg);
+    color: var(--btn-success-text);
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 4px var(--shadow);
+}
+
+.play-btn:hover {
+    transform: scale(1.1);
+    box-shadow: 0 4px 8px var(--shadow-hover);
+}
+
+.play-btn:active {
+    transform: scale(1.05);
+}
+
+.play-btn.playing {
+    background: var(--btn-danger-bg);
+}
+
+/* Responsive Design */
+
+/* Tablet and below */
+@media (max-width: 768px) {
+    .trim-editor-section {
+        padding: 15px;
+    }
+    
+    .waveform-canvas {
+        height: 100px;
+    }
+    
+    .trim-control-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .trim-control-group {
+        min-width: 100%;
+    }
+    
+    .trim-stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    
+    .trim-actions {
+        flex-direction: column;
+    }
+    
+    .trim-btn {
+        width: 100%;
+        justify-content: center;
+    }
+    
+    .playback-controls {
+        flex-wrap: wrap;
+    }
+}
+
+/* Phone screens */
+@media (max-width: 480px) {
+    .trim-editor-section {
+        padding: 10px;
+        margin-left: -10px;
+        margin-right: -10px;
+        border-radius: 0;
+    }
+    
+    .waveform-canvas {
+        height: 80px;
+    }
+    
+    .trim-stats-grid {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+    
+    .time-display {
+        flex-wrap: wrap;
+        font-size: 12px;
+    }
+    
+    /* Larger touch targets on mobile */
+    .trim-slider::-webkit-slider-thumb {
+        width: 24px;
+        height: 24px;
+    }
+    
+    .trim-slider::-moz-range-thumb {
+        width: 24px;
+        height: 24px;
+    }
+    
+    .speed-slider::-webkit-slider-thumb {
+        width: 26px;
+        height: 26px;
+    }
+    
+    .speed-slider::-moz-range-thumb {
+        width: 26px;
+        height: 26px;
+    }
+}
+
+/* Desktop - larger canvas */
+@media (min-width: 1024px) {
+    .waveform-canvas {
+        height: 150px;
+    }
+    
+    .trim-control-row {
+        flex-wrap: nowrap;
+    }
+}
+
+/* Accessibility */
+.trim-slider:focus,
+.speed-slider:focus {
+    outline: 2px solid var(--btn-primary-bg);
+    outline-offset: 2px;
+}
+
+.trim-btn:focus {
+    outline: 2px solid var(--btn-primary-bg);
+    outline-offset: 2px;
+}
+
+/* Print - hide trimmer */
+@media print {
+    .trim-editor-section {
+        display: none;
+    }
+}

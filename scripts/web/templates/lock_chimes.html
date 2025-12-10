@@ -1,8 +1,19 @@
 {% extends "base.html" %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/audio_trimmer.css') }}">
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+<script src="{{ url_for('static', filename='js/audio_trimmer.js') }}"></script>
+{% endblock %}
 {% block content %}
 <div class="container">
     <h2>🔔 Lock Chimes</h2>
     <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    
+    <!-- Gadget State Indicator -->
+    <div id="gadgetStateIndicator" style="display: none; margin: 15px 0; padding: 12px; border-radius: 8px; font-size: 14px;">
+        <strong id="gadgetStateTitle"></strong>
+        <div id="gadgetStateDetails" style="margin-top: 5px; font-size: 13px;"></div>
+    </div>
     
     <!-- iOS Safari Warning -->
     <div id="iosWarning" style="display: none; background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
@@ -38,41 +49,16 @@
         
         <div style="background: var(--collapsible-content-bg); padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid var(--collapsible-section-border); border-right: 1px solid var(--collapsible-section-border); border-bottom: 1px solid var(--collapsible-section-border); margin-top: -8px;">
             <form method="post" action="{{ url_for('lock_chimes.upload_lock_chime') }}" enctype="multipart/form-data" id="chimeUploadForm">
+                <input type="hidden" name="pre_trimmed" id="preTrimmedFlag" value="false">
+                <input type="hidden" name="original_filename" id="originalFilename" value="">
                 <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
                     <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required 
                            style="padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); flex: 1; min-width: 250px; max-width: 400px; font-size: 14px; color: var(--text-primary);">
-                    <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0;">📤 Upload</button>
+                    <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0; display: none;">📤 Upload</button>
                 </div>
                 <p style="margin: 0 0 15px 0; font-size: 12px; color: var(--text-secondary);">
                     WAV or MP3 files - auto-converted to Tesla format (PCM 16-bit, 44.1 kHz, under 1MB)
                 </p>
-                
-                <!-- Volume Normalization Controls -->
-                <div style="background: var(--form-input-bg); padding: 12px; border-radius: 6px; border: 1px solid var(--border-input);">
-                    <label style="display: flex; align-items: center; margin-bottom: 10px; cursor: pointer; user-select: none;">
-                        <input type="checkbox" id="normalize-on-upload" name="normalize" value="true" checked style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;"> 
-                        <span style="font-weight: 600; font-size: 14px;">🔊 Normalize volume on upload</span>
-                    </label>
-                    
-                    <div id="normalization-settings">
-                        <div class="volume-slider-container" style="margin-bottom: 10px;">
-                            <input type="range" id="target-lufs" 
-                                   min="0" max="3" value="1" step="1">
-                            
-                            <div class="slider-labels">
-                                <span>Broadcast</span>
-                                <span>Streaming</span>
-                                <span>Loud</span>
-                                <span>Maximum</span>
-                            </div>
-                        </div>
-                        
-                        <div class="selected-level">
-                            <strong id="current-level">Streaming</strong>
-                            <small id="level-description">Recommended for balanced playback</small>
-                        </div>
-                    </div>
-                </div>
             </form>
             
             <!-- Upload Progress Bar -->
@@ -89,6 +75,143 @@
             </div>
         </div>
     </details>
+    
+    <!-- Audio Trim Editor -->
+    <div id="trimEditorSection" class="trim-editor-section" style="display: none;">
+        <div class="trim-editor-header">
+            <span id="trimEditorTitle">✂️ Trim & Adjust Audio</span>
+            <span id="trimEditorBadge" class="trim-editor-badge" style="display: none;">Editing</span>
+        </div>
+        
+        <!-- Loading State -->
+        <div id="trimEditorLoading" class="trim-editor-loading" style="display: none;">
+            <div class="trim-editor-spinner"></div>
+            <p style="margin-top: 15px;">Decoding audio...</p>
+        </div>
+        
+        <!-- Editor Content -->
+        <div id="trimEditorContent" style="display: none;">
+            <!-- Warning Message -->
+            <div id="trimMessage" class="trim-message" style="display: none;"></div>
+            
+            <!-- Waveform -->
+            <div class="waveform-container">
+                <canvas id="waveformCanvas" class="waveform-canvas"></canvas>
+            </div>
+            
+            <!-- Trim Controls -->
+            <div class="trim-controls">
+                <!-- Start/End Time -->
+                <div class="trim-control-row">
+                    <div class="trim-control-group">
+                        <label class="trim-control-label">
+                            Start Time
+                            <span class="trim-control-sublabel" id="startTimeDisplay">0.00s</span>
+                        </label>
+                        <input type="range" id="startTimeSlider" class="trim-slider" min="0" max="100" value="0" step="0.1">
+                    </div>
+                    <div class="trim-control-group">
+                        <label class="trim-control-label">
+                            End Time
+                            <span class="trim-control-sublabel" id="endTimeDisplay">0.00s</span>
+                        </label>
+                        <input type="range" id="endTimeSlider" class="trim-slider" min="0" max="100" value="100" step="0.1">
+                    </div>
+                </div>
+                
+                <!-- Playback Speed - HIDDEN FOR NOW (pitch preservation needs improvement) -->
+                <div class="trim-control-group" style="display: none;">
+                    <label class="trim-control-label">
+                        Playback Speed
+                        <span class="trim-control-sublabel" id="speedDisplay">1.00x</span>
+                    </label>
+                    <input type="range" id="speedSlider" class="speed-slider" min="0.5" max="2.0" value="1.0" step="0.05">
+                </div>
+                
+                <!-- Volume Normalization -->
+                <div class="trim-control-group" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border-input);">
+                    <label class="trim-control-label" style="display: flex; align-items: center; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="trimNormalizeVolume" checked style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;">
+                        <span>🔊 Normalize Volume</span>
+                    </label>
+                    <div id="trimNormalizationSettings" style="margin-top: 12px;">
+                        <div style="margin-bottom: 8px;">
+                            <input type="range" id="trimTargetLufs" class="speed-slider" min="0" max="3" value="1" step="1">
+                        </div>
+                        <div class="slider-labels" style="display: grid; grid-template-columns: repeat(4, 1fr); font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                            <span style="text-align: left;">Broadcast</span>
+                            <span style="text-align: center;">Streaming</span>
+                            <span style="text-align: center;">Loud</span>
+                            <span style="text-align: right;">Maximum</span>
+                        </div>
+                        <div style="margin-top: 10px; padding: 8px; background: var(--form-input-bg); border-radius: 4px; border: 1px solid var(--border-input);">
+                            <strong id="trimCurrentLevel" style="display: block; margin-bottom: 4px; font-size: 13px;">Streaming</strong>
+                            <small id="trimLevelDescription" style="color: var(--text-secondary); font-size: 11px;">Recommended for balanced playback</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Stats Display -->
+            <div class="trim-stats">
+                <div class="trim-stats-grid">
+                    <div class="trim-stat">
+                        <span class="trim-stat-label">Duration</span>
+                        <span class="trim-stat-value" id="statDuration">0.0s</span>
+                    </div>
+                    <div class="trim-stat">
+                        <span class="trim-stat-label">Effective Duration</span>
+                        <span class="trim-stat-value" id="statEffective">0.0s</span>
+                    </div>
+                    <div class="trim-stat">
+                        <span class="trim-stat-label">File Size</span>
+                        <span class="trim-stat-value" id="statFileSize">0 KB</span>
+                    </div>
+                    <div class="trim-stat">
+                        <span class="trim-stat-label">Status</span>
+                        <span class="trim-stat-value success" id="statStatus">✓ Ready</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Filename Editor -->
+            <div style="margin: 15px 0; padding: 15px; background: var(--form-input-bg); border-radius: 8px; border: 2px solid var(--border-input);">
+                <label for="trimFilename" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">
+                    📝 Output Filename:
+                </label>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <input type="text" id="trimFilename" 
+                           style="flex: 1; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);"
+                           placeholder="Enter filename (without extension)">
+                    <span style="color: var(--text-secondary); font-weight: 600;">.wav</span>
+                </div>
+                <div id="filenameValidation" style="margin-top: 8px; font-size: 13px; display: none;"></div>
+            </div>
+            
+            <!-- Playback Controls -->
+            <div class="playback-controls">
+                <button id="playBtn" class="play-btn" title="Play preview">
+                    <i class="bi bi-play-fill"></i>
+                </button>
+                <button id="autoFitBtn" class="trim-btn trim-btn-purple">
+                    🎯 Auto-Fit to Limits
+                </button>
+                <button id="resetBtn" class="trim-btn trim-btn-secondary">
+                    ↺ Reset
+                </button>
+            </div>
+            
+            <!-- Action Buttons -->
+            <div class="trim-actions">
+                <button id="uploadTrimmedBtn" class="trim-btn trim-btn-success">
+                    📤 Upload Trimmed Audio
+                </button>
+                <button id="cancelTrimBtn" class="trim-btn trim-btn-secondary">
+                    ✖ Cancel
+                </button>
+            </div>
+        </div>
+    </div>
     
     <!-- Chime Scheduler -->
     <details id="scheduler-section" style="margin-bottom: 20px;">
@@ -290,7 +413,7 @@
                             </button>
                         </form>
                         <form method="post" action="{{ url_for('lock_chimes.delete_schedule', schedule_id=schedule.id) }}" 
-                              style="display: inline;" onsubmit="return confirm('Delete schedule {{ schedule.name }}?');">
+                              style="display: inline;" onsubmit="return confirm('Delete schedule \'{{ schedule.name | replace("'", "\\'") }}\'?');">
                             <button type="submit" class="btn-delete" style="padding: 6px 10px; font-size: 13px; margin: 0;">🗑️</button>
                         </form>
                     </div>
@@ -340,13 +463,14 @@
                             </audio>
                             <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center;">
                                 <a href="{{ url_for('lock_chimes.download_lock_chime', filename=chime.filename) }}" class="present-btn" style="text-decoration: none; padding: 6px 12px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; line-height: 1.5; height: 34px; box-sizing: border-box;">⬇️ Download</a>
+                                <button type="button" class="edit-btn" onclick='editChime({{ chime.filename|tojson }})' style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">✏️ Edit</button>
                                 {% if chime.is_valid %}
                                 <form method="post" action="{{ url_for('lock_chimes.set_as_chime', filename=chime.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
                                     <button type="submit" class="set-chime-btn" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🔔 Set as Active</button>
                                 </form>
                                 {% endif %}
                                 <form method="post" action="{{ url_for('lock_chimes.delete_lock_chime', filename=chime.filename) }}" style="display: inline;" 
-                                      onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
+                                      onsubmit="return confirm('Are you sure you want to delete \'{{ chime.filename | replace("'", "\\'") }}\'?');">
                                     <button type="submit" class="btn-delete" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🗑️ Delete</button>
                                 </form>
                             </div>
@@ -388,13 +512,14 @@
             </div>
             <div class="mobile-card-actions">
                 <a href="{{ url_for('lock_chimes.download_lock_chime', filename=chime.filename) }}" class="present-btn">⬇️ Download</a>
+                <button type="button" class="edit-btn" onclick='editChime({{ chime.filename|tojson }})'>✏️ Edit</button>
                 {% if chime.is_valid %}
                 <form method="post" action="{{ url_for('lock_chimes.set_as_chime', filename=chime.filename) }}" onsubmit="return handleSetChime(this);">
                     <button type="submit" class="set-chime-btn">🔔 Set as Active</button>
                 </form>
                 {% endif %}
                 <form method="post" action="{{ url_for('lock_chimes.delete_lock_chime', filename=chime.filename) }}" 
-                      onsubmit="return confirm('Are you sure you want to delete {{ chime.filename }}?');">
+                      onsubmit="return confirm('Are you sure you want to delete \'{{ chime.filename | replace("'", "\\'") }}\'?');">
                     <button type="submit" class="btn-delete">🗑️ Delete</button>
                 </form>
             </div>
@@ -839,6 +964,729 @@ function cancelEdit() {
     // Close the form
     document.getElementById('schedule-form-details').open = false;
 }
+
+// Audio Trimmer Integration
+let audioTrimmer = null;
+let currentTrimFile = null;
+let isEditingExistingChime = false;
+let existingChimeFilenames = []; // Cache of existing filenames on server
+
+// Fetch existing chime filenames from server
+async function fetchExistingFilenames() {
+    try {
+        const response = await fetch('{{ url_for("api.chime_filenames") }}');
+        if (response.ok) {
+            const data = await response.json();
+            existingChimeFilenames = data.filenames || [];
+        }
+    } catch (error) {
+        console.warn('Failed to fetch existing filenames:', error);
+        existingChimeFilenames = [];
+    }
+}
+
+// Generate unique filename that doesn't conflict with existing files
+function generateUniqueFilename(baseName, extension, isEditing) {
+    if (!isEditing) {
+        // New upload - just use the base name
+        let fileName = baseName + extension;
+        // If it already exists, add a number
+        if (existingChimeFilenames.includes(fileName)) {
+            let counter = 2;
+            while (existingChimeFilenames.includes(baseName + counter + extension)) {
+                counter++;
+            }
+            fileName = baseName + counter + extension;
+        }
+        return fileName;
+    } else {
+        // Editing existing file - add or increment _edited suffix
+        const editedMatch = baseName.match(/^(.+?)_edited(\d*)$/);
+        let prefix, startNum;
+        
+        if (editedMatch) {
+            // Already has _edited suffix
+            prefix = editedMatch[1];
+            startNum = editedMatch[2] ? parseInt(editedMatch[2]) + 1 : 2;
+        } else {
+            // First time editing
+            prefix = baseName;
+            startNum = null; // Will try _edited first, then _edited2
+        }
+        
+        // Find next available _editedN
+        if (startNum === null) {
+            let fileName = prefix + '_edited' + extension;
+            if (!existingChimeFilenames.includes(fileName)) {
+                return fileName;
+            }
+            startNum = 2;
+        }
+        
+        let counter = startNum;
+        let fileName;
+        do {
+            fileName = prefix + '_edited' + counter + extension;
+            counter++;
+        } while (existingChimeFilenames.includes(fileName));
+        
+        return fileName;
+    }
+}
+
+// Check for Web Audio API support
+if (!AudioTrimmer.isSupported()) {
+    console.warn('Web Audio API not supported - trimmer disabled');
+    // Fallback: show upload button, hide trim editor
+    document.getElementById('chimeUploadBtn').style.display = 'inline-block';
+} else {
+    // Initialize trimmer
+    audioTrimmer = new AudioTrimmer({
+        maxFileSize: {{ MAX_LOCK_CHIME_SIZE }},
+        maxDuration: {{ MAX_LOCK_CHIME_DURATION }},
+        minDuration: {{ MIN_LOCK_CHIME_DURATION }},
+        speedMin: {{ SPEED_RANGE_MIN }},
+        speedMax: {{ SPEED_RANGE_MAX }},
+        speedStep: {{ SPEED_STEP }}
+    });
+    
+    // Fetch existing filenames on page load
+    fetchExistingFilenames();
+    
+    // File input handler - intercept file selection
+    document.getElementById('chime_file').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            isEditingExistingChime = false;
+            loadAudioForTrimming(file);
+        }
+    });
+    
+    // Setup trim editor UI handlers
+    setupTrimEditorUI();
+}
+
+function setupTrimEditorUI() {
+    const canvas = document.getElementById('waveformCanvas');
+    const startSlider = document.getElementById('startTimeSlider');
+    const endSlider = document.getElementById('endTimeSlider');
+    const speedSlider = document.getElementById('speedSlider');
+    const playBtn = document.getElementById('playBtn');
+    const autoFitBtn = document.getElementById('autoFitBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const uploadBtn = document.getElementById('uploadTrimmedBtn');
+    const cancelBtn = document.getElementById('cancelTrimBtn');
+    const normalizeCheckbox = document.getElementById('trimNormalizeVolume');
+    const normalizationSettings = document.getElementById('trimNormalizationSettings');
+    const targetLufsSlider = document.getElementById('trimTargetLufs');
+    const currentLevelEl = document.getElementById('trimCurrentLevel');
+    const levelDescriptionEl = document.getElementById('trimLevelDescription');
+    
+    // Volume normalization level definitions
+    const volumeLevels = [
+        { name: 'Broadcast', lufs: -23, description: 'Broadcast standard (quieter, more headroom)' },
+        { name: 'Streaming', lufs: -16, description: 'Recommended for balanced playback' },
+        { name: 'Loud', lufs: -14, description: 'Louder output (less dynamic range)' },
+        { name: 'Maximum', lufs: -12, description: 'Maximum loudness (may clip on some systems)' }
+    ];
+    
+    // Set canvas size based on container
+    function resizeCanvas() {
+        const container = canvas.parentElement;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = container.clientWidth * dpr;
+        canvas.height = canvas.offsetHeight * dpr;
+        canvas.style.width = container.clientWidth + 'px';
+        
+        if (audioTrimmer && audioTrimmer.audioBuffer) {
+            audioTrimmer.renderWaveform(canvas);
+        }
+    }
+    
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    
+    // Slider handlers
+    startSlider.addEventListener('input', function() {
+        if (!audioTrimmer || !audioTrimmer.audioBuffer) return;
+        const duration = audioTrimmer.audioBuffer.duration;
+        const startTime = (parseFloat(this.value) / 100) * duration;
+        audioTrimmer.setTrimRegion(startTime, audioTrimmer.endTime);
+        updateTrimUI();
+    });
+    
+    endSlider.addEventListener('input', function() {
+        if (!audioTrimmer || !audioTrimmer.audioBuffer) return;
+        const duration = audioTrimmer.audioBuffer.duration;
+        const endTime = (parseFloat(this.value) / 100) * duration;
+        audioTrimmer.setTrimRegion(audioTrimmer.startTime, endTime);
+        updateTrimUI();
+    });
+    
+    speedSlider.addEventListener('input', function() {
+        if (!audioTrimmer) return;
+        audioTrimmer.setPlaybackSpeed(parseFloat(this.value));
+        updateTrimUI();
+    });
+    
+    // Volume normalization checkbox
+    normalizeCheckbox.addEventListener('change', async function() {
+        normalizationSettings.style.display = this.checked ? 'block' : 'none';
+        
+        if (!audioTrimmer) return;
+        
+        // Update trimmer normalization settings
+        if (this.checked) {
+            const sliderIndex = parseInt(targetLufsSlider.value);
+            const targetLufs = volumeLevels[sliderIndex].lufs;
+            audioTrimmer.setNormalization(true, targetLufs);
+            
+            // Calculate and display gain
+            await audioTrimmer.calculateNormalizationGain();
+            updateTrimUI();
+        } else {
+            audioTrimmer.setNormalization(false);
+            updateTrimUI();
+        }
+    });
+    
+    // Volume normalization slider
+    targetLufsSlider.addEventListener('input', async function() {
+        const level = volumeLevels[parseInt(this.value)];
+        currentLevelEl.textContent = level.name;
+        levelDescriptionEl.textContent = level.description;
+        
+        // Update trimmer with new target LUFS
+        if (audioTrimmer && normalizeCheckbox.checked) {
+            audioTrimmer.setNormalization(true, level.lufs);
+            await audioTrimmer.calculateNormalizationGain();
+            updateTrimUI();
+        }
+    });
+    
+    // Filename validation
+    const trimFilenameInput = document.getElementById('trimFilename');
+    const filenameValidation = document.getElementById('filenameValidation');
+    
+    function validateFilename() {
+        if (!trimFilenameInput || !filenameValidation) return true;
+        
+        const value = trimFilenameInput.value.trim();
+        if (!value) {
+            filenameValidation.style.display = 'none';
+            return true;
+        }
+        
+        // Add .wav if not present
+        const fileName = value.endsWith('.wav') ? value : value + '.wav';
+        const lowerFileName = fileName.toLowerCase();
+        
+        // Check for invalid characters
+        const invalidChars = /[<>:"|?*\/\\]/;
+        if (invalidChars.test(value)) {
+            filenameValidation.textContent = '❌ Filename contains invalid characters';
+            filenameValidation.style.color = '#f44336';
+            filenameValidation.style.display = 'block';
+            return false;
+        }
+        
+        // Check if it already exists
+        if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
+            filenameValidation.textContent = '❌ This filename already exists';
+            filenameValidation.style.color = '#f44336';
+            filenameValidation.style.display = 'block';
+            return false;
+        }
+        
+        filenameValidation.textContent = '✅ Filename available';
+        filenameValidation.style.color = '#4CAF50';
+        filenameValidation.style.display = 'block';
+        return true;
+    }
+    
+    if (trimFilenameInput) {
+        trimFilenameInput.addEventListener('input', validateFilename);
+        trimFilenameInput.addEventListener('blur', validateFilename);
+    }
+    
+    // Play button
+    playBtn.addEventListener('click', function() {
+        if (!audioTrimmer) return;
+        if (audioTrimmer.isPlaying) {
+            audioTrimmer.stopPreview();
+            playBtn.innerHTML = '<i class="bi bi-play-fill"></i>';
+            playBtn.classList.remove('playing');
+        } else {
+            audioTrimmer.playPreview();
+            playBtn.innerHTML = '<i class="bi bi-stop-fill"></i>';
+            playBtn.classList.add('playing');
+            // Auto-reset after playback
+            setTimeout(() => {
+                if (!audioTrimmer.isPlaying) {
+                    playBtn.innerHTML = '<i class="bi bi-play-fill"></i>';
+                    playBtn.classList.remove('playing');
+                }
+            }, (audioTrimmer.endTime - audioTrimmer.startTime) / audioTrimmer.playbackSpeed * 1000 + 100);
+        }
+    });
+    
+    // Auto-fit button
+    autoFitBtn.addEventListener('click', function() {
+        if (!audioTrimmer) return;
+        const result = audioTrimmer.autoFit();
+        if (result) {
+            updateTrimUI();
+            showTrimMessage(result.message, result.trimmed ? 'warning' : 'success');
+        }
+    });
+    
+    // Reset button
+    resetBtn.addEventListener('click', function() {
+        if (!audioTrimmer || !audioTrimmer.audioBuffer) return;
+        const duration = audioTrimmer.audioBuffer.duration;
+        audioTrimmer.setTrimRegion(0, Math.min(duration, audioTrimmer.maxDuration));
+        audioTrimmer.setPlaybackSpeed(1.0);
+        updateTrimUI();
+        showTrimMessage('Reset to original settings', 'info');
+    });
+    
+    // Upload button
+    uploadBtn.addEventListener('click', async function() {
+        if (!audioTrimmer) return;
+        
+        try {
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '⏳ Processing...';
+            
+            // Refresh filename list to check for collisions
+            await fetchExistingFilenames();
+            
+            // Get filename input (declare once at the top)
+            const customFilenameInput = document.getElementById('trimFilename');
+            const hasCustomFilename = customFilenameInput && customFilenameInput.value.trim();
+            
+            // Check if this is edit mode with only filename change (no audio modifications)
+            if (isEditingExistingChime && hasCustomFilename && !audioTrimmer.hasAudioBeenModified()) {
+                // Rename only - no need to re-encode
+                const customName = customFilenameInput.value.trim();
+                const newFilename = customName.endsWith('.wav') ? customName : customName + '.wav';
+                
+                // Validate filename
+                const invalidChars = /[<>:"|?*\/\\]/;
+                if (invalidChars.test(customName)) {
+                    showTrimMessage('Filename contains invalid characters. Please use only letters, numbers, spaces, hyphens, and underscores.', 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
+                    return;
+                }
+                
+                // Check for collisions
+                const lowerFileName = newFilename.toLowerCase();
+                if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
+                    showTrimMessage(`Filename "${newFilename}" already exists. Please choose a different name.`, 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
+                    return;
+                }
+                
+                // Perform rename via API
+                uploadBtn.textContent = '📝 Renaming...';
+                const response = await fetch(`/api/rename_chime/${encodeURIComponent(audioTrimmer.originalFileName)}/${encodeURIComponent(newFilename)}`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showTrimMessage('File renamed successfully!', 'success');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                } else {
+                    showTrimMessage('Rename failed: ' + (result.error || 'Unknown error'), 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
+                }
+                return;
+            }
+            
+            // Full upload with audio processing
+            // Export as WAV (Tesla requirement)
+            const wavBlob = await audioTrimmer.exportWAV();
+            
+            // Check actual file size
+            if (wavBlob.size > {{ MAX_LOCK_CHIME_SIZE }}) {
+                const actualSizeMB = (wavBlob.size / 1024 / 1024).toFixed(2);
+                showTrimMessage(`Pre-trimmed file validation failed: File is ${actualSizeMB} MB. Tesla requires lock chimes to be under 1 MB. ['success':false]`, 'error');
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '📤 Upload Trimmed Audio';
+                return;
+            }
+            
+            // Create FormData and submit
+            const formData = new FormData();
+            
+            // Determine final filename
+            let fileName;
+            
+            if (hasCustomFilename) {
+                // Use custom filename (add .wav extension)
+                const customName = customFilenameInput.value.trim();
+                
+                // Check for invalid characters
+                const invalidChars = /[<>:"|?*\/\\]/;
+                if (invalidChars.test(customName)) {
+                    showTrimMessage('Filename contains invalid characters. Please use only letters, numbers, spaces, hyphens, and underscores.', 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
+                    return;
+                }
+                
+                fileName = customName.endsWith('.wav') ? customName : customName + '.wav';
+                
+                // Validate it doesn't already exist (case-insensitive)
+                const lowerFileName = fileName.toLowerCase();
+                if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
+                    showTrimMessage(`Filename "${fileName}" already exists. Please choose a different name.`, 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
+                    return;
+                }
+            } else {
+                // Generate filename based on whether this is a new upload or editing existing
+                let baseName = audioTrimmer.originalFileName.replace(/\.[^.]+$/, '');
+                fileName = generateUniqueFilename(baseName, '.wav', isEditingExistingChime);
+            }
+            
+            console.log('Original filename:', audioTrimmer.originalFileName);
+            console.log('Editing existing:', isEditingExistingChime);
+            console.log('Final filename:', fileName);
+            formData.append('chime_file', wavBlob, fileName);
+            formData.append('pre_trimmed', 'true'); // WAV already in correct format and normalized in browser
+            formData.append('original_filename', audioTrimmer.originalFileName);
+            
+            // Note: Normalization is now done client-side in the browser
+            // The uploaded WAV blob already has normalization applied if enabled
+            
+            // Submit via fetch
+            const response = await fetch('{{ url_for("lock_chimes.upload_lock_chime") }}', {
+                method: 'POST',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: formData
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                if (result.success) {
+                    // Reload page to show new chime
+                    window.location.reload();
+                } else {
+                    showTrimMessage('Upload failed: ' + (result.error || 'Unknown error'), 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
+                }
+            } else {
+                const text = await response.text();
+                showTrimMessage('Upload failed: ' + text, 'error');
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '📤 Upload Trimmed Audio';
+            }
+        } catch (error) {
+            console.error('Upload error:', error);
+            showTrimMessage('Upload failed: ' + error.message, 'error');
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = '📤 Upload Trimmed Audio';
+        }
+    });
+    
+    // Cancel button
+    cancelBtn.addEventListener('click', function() {
+        closeTrimEditor();
+    });
+}
+
+function loadAudioForTrimming(file) {
+    if (!audioTrimmer) return;
+    
+    // Show editor section
+    document.getElementById('trimEditorSection').style.display = 'block';
+    document.getElementById('trimEditorLoading').style.display = 'block';
+    document.getElementById('trimEditorContent').style.display = 'none';
+    document.getElementById('chimeUploadControls').open = false;
+    
+    // Load audio
+    audioTrimmer.loadFile(file).then(async result => {
+        if (result.success) {
+            currentTrimFile = file.name;
+            document.getElementById('trimEditorLoading').style.display = 'none';
+            document.getElementById('trimEditorContent').style.display = 'block';
+            
+            // Pre-populate filename field with base name (no extension)
+            const trimFilenameInput = document.getElementById('trimFilename');
+            if (trimFilenameInput) {
+                const baseName = file.name.replace(/\.[^.]+$/, '');
+                trimFilenameInput.value = baseName;
+                // Clear validation message
+                const filenameValidation = document.getElementById('filenameValidation');
+                if (filenameValidation) {
+                    filenameValidation.style.display = 'none';
+                }
+            }
+            
+            // Apply normalization settings if checkbox is checked
+            const normalizeCheckbox = document.getElementById('trimNormalizeVolume');
+            const targetLufsSlider = document.getElementById('trimTargetLufs');
+            if (normalizeCheckbox && normalizeCheckbox.checked && targetLufsSlider) {
+                const sliderIndex = parseInt(targetLufsSlider.value);
+                const volumeLevels = [
+                    { name: "Very Quiet", lufs: -23, description: "Barely audible" },
+                    { name: "Quiet", lufs: -18, description: "Soft and subtle" },
+                    { name: "Normal", lufs: -14, description: "Standard loudness" },
+                    { name: "Loud", lufs: -11, description: "Attention-grabbing" },
+                    { name: "Very Loud", lufs: -9, description: "Maximum volume" }
+                ];
+                audioTrimmer.setNormalization(true, volumeLevels[sliderIndex].lufs);
+                await audioTrimmer.calculateNormalizationGain();
+            }
+            
+            // Wait for layout to update, then resize and render canvas
+            setTimeout(() => {
+                const canvas = document.getElementById('waveformCanvas');
+                const container = canvas.parentElement;
+                const dpr = window.devicePixelRatio || 1;
+                canvas.width = container.clientWidth * dpr;
+                canvas.height = canvas.offsetHeight * dpr;
+                canvas.style.width = container.clientWidth + 'px';
+                
+                audioTrimmer.renderWaveform(canvas);
+                updateTrimUI();
+            }, 100);
+            
+            // Scroll to editor
+            document.getElementById('trimEditorSection').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+            showTrimMessage('Failed to decode audio: ' + result.error, 'error');
+            closeTrimEditor();
+        }
+    });
+}
+
+function editChime(filename) {
+    if (!audioTrimmer) {
+        alert('Audio trimmer not available');
+        return;
+    }
+    
+    isEditingExistingChime = true;
+    currentTrimFile = filename;
+    
+    // Show editor section
+    document.getElementById('trimEditorSection').style.display = 'block';
+    document.getElementById('trimEditorSection').classList.add('edit-mode');
+    document.getElementById('trimEditorLoading').style.display = 'block';
+    document.getElementById('trimEditorContent').style.display = 'none';
+    document.getElementById('trimEditorBadge').style.display = 'inline-block';
+    document.getElementById('trimEditorBadge').textContent = 'Editing: ' + filename;
+    
+    // Pre-populate filename field with _edited suffix suggestion
+    const trimFilenameInput = document.getElementById('trimFilename');
+    if (trimFilenameInput) {
+        const baseName = filename.replace(/\.[^.]+$/, '');
+        const suggestedName = generateUniqueFilename(baseName, '.wav', true).replace('.wav', '');
+        trimFilenameInput.value = suggestedName;
+        // Clear validation message
+        const filenameValidation = document.getElementById('filenameValidation');
+        if (filenameValidation) {
+            filenameValidation.style.display = 'none';
+        }
+    }
+    
+    // Load audio from server
+    const url = '{{ url_for("lock_chimes.play_lock_chime", filename="PLACEHOLDER") }}'.replace('PLACEHOLDER', filename);
+    
+    audioTrimmer.loadFile(url, filename).then(async result => {
+        if (result.success) {
+            document.getElementById('trimEditorLoading').style.display = 'none';
+            document.getElementById('trimEditorContent').style.display = 'block';
+            
+            // Apply normalization settings if checkbox is checked
+            const normalizeCheckbox = document.getElementById('trimNormalizeVolume');
+            const targetLufsSlider = document.getElementById('trimTargetLufs');
+            if (normalizeCheckbox && normalizeCheckbox.checked && targetLufsSlider) {
+                const sliderIndex = parseInt(targetLufsSlider.value);
+                const volumeLevels = [
+                    { name: "Very Quiet", lufs: -23, description: "Barely audible" },
+                    { name: "Quiet", lufs: -18, description: "Soft and subtle" },
+                    { name: "Normal", lufs: -14, description: "Standard loudness" },
+                    { name: "Loud", lufs: -11, description: "Attention-grabbing" },
+                    { name: "Very Loud", lufs: -9, description: "Maximum volume" }
+                ];
+                audioTrimmer.setNormalization(true, volumeLevels[sliderIndex].lufs);
+                await audioTrimmer.calculateNormalizationGain();
+            }
+            
+            // Wait for layout to update, then resize and render canvas
+            setTimeout(() => {
+                const canvas = document.getElementById('waveformCanvas');
+                const container = canvas.parentElement;
+                const dpr = window.devicePixelRatio || 1;
+                canvas.width = container.clientWidth * dpr;
+                canvas.height = canvas.offsetHeight * dpr;
+                canvas.style.width = container.clientWidth + 'px';
+                
+                audioTrimmer.renderWaveform(canvas);
+                updateTrimUI();
+            }, 100);
+            
+            // Scroll to editor
+            updateTrimUI();
+            
+            // Scroll to editor
+            document.getElementById('trimEditorSection').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+            showTrimMessage('Failed to load audio: ' + result.error, 'error');
+            closeTrimEditor();
+        }
+    });
+}
+
+function updateTrimUI() {
+    if (!audioTrimmer || !audioTrimmer.audioBuffer) return;
+    
+    const stats = audioTrimmer.getStats();
+    const duration = audioTrimmer.audioBuffer.duration;
+    
+    // Update sliders
+    document.getElementById('startTimeSlider').value = (stats.startTime / duration) * 100;
+    document.getElementById('endTimeSlider').value = (stats.endTime / duration) * 100;
+    document.getElementById('speedSlider').value = stats.playbackSpeed;
+    
+    // Update displays to show OUTPUT timeline (speed-adjusted time values)
+    // The trim markers stay at same visual position, but the time labels update
+    const outputStartTime = stats.startTime / stats.playbackSpeed;
+    const outputEndTime = stats.endTime / stats.playbackSpeed;
+    document.getElementById('startTimeDisplay').textContent = outputStartTime.toFixed(2) + 's';
+    document.getElementById('endTimeDisplay').textContent = outputEndTime.toFixed(2) + 's';
+    document.getElementById('speedDisplay').innerHTML = stats.playbackSpeed !== 1.0 
+        ? '<span class="speed-badge">' + stats.playbackSpeed.toFixed(2) + 'x</span>' 
+        : stats.playbackSpeed.toFixed(2) + 'x';
+    
+    // Update stats
+    document.getElementById('statDuration').textContent = stats.trimDuration.toFixed(2) + 's';
+    document.getElementById('statEffective').textContent = stats.effectiveDuration.toFixed(2) + 's';
+    
+    // Use actual file size if available, otherwise use estimate
+    const fileSize = stats.actualFileSize || stats.estimatedFileSize;
+    const fileSizeKB = (fileSize / 1024).toFixed(1);
+    const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+    const sizeText = fileSize < 1024 * 100 ? fileSizeKB + ' KB' : fileSizeMB + ' MB';
+    document.getElementById('statFileSize').textContent = stats.actualFileSize ? sizeText : '~' + sizeText;
+    
+    // Update status
+    const statusEl = document.getElementById('statFileSize');
+    const statusTextEl = document.getElementById('statStatus');
+    
+    statusEl.classList.remove('success', 'warning', 'error');
+    statusTextEl.classList.remove('success', 'warning', 'error');
+    
+    const withinLimit = fileSize <= {{ MAX_LOCK_CHIME_SIZE }};
+    
+    if (!withinLimit) {
+        statusEl.classList.add('error');
+        statusTextEl.classList.add('error');
+        statusTextEl.textContent = '✗ Too Large';
+    } else if (fileSize > {{ MAX_LOCK_CHIME_SIZE }} * 0.9) {
+        statusEl.classList.add('warning');
+        statusTextEl.classList.add('warning');
+        statusTextEl.textContent = '⚠ Close to Limit';
+    } else {
+        statusEl.classList.add('success');
+        statusTextEl.classList.add('success');
+        statusTextEl.textContent = '✓ Ready';
+    }
+    
+    // Recalculate actual size periodically to update UI (debounced)
+    clearTimeout(window.trimUIUpdateTimeout);
+    window.trimUIUpdateTimeout = setTimeout(async () => {
+        try {
+            const accurateStats = await audioTrimmer.getStatsWithActualSize();
+            if (accurateStats) {
+                // Update file size display with actual value
+                const actualFileSize = accurateStats.actualFileSize;
+                const actualFileSizeKB = (actualFileSize / 1024).toFixed(1);
+                const actualFileSizeMB = (actualFileSize / 1024 / 1024).toFixed(2);
+                const actualSizeText = actualFileSize < 1024 * 100 ? actualFileSizeKB + ' KB' : actualFileSizeMB + ' MB';
+                document.getElementById('statFileSize').textContent = actualSizeText;
+                
+                // Update status based on actual size
+                const withinActualLimit = actualFileSize <= {{ MAX_LOCK_CHIME_SIZE }};
+                
+                statusEl.classList.remove('success', 'warning', 'error');
+                statusTextEl.classList.remove('success', 'warning', 'error');
+                
+                if (!withinActualLimit) {
+                    statusEl.classList.add('error');
+                    statusTextEl.classList.add('error');
+                    statusTextEl.textContent = '✗ Too Large';
+                } else if (actualFileSize > {{ MAX_LOCK_CHIME_SIZE }} * 0.9) {
+                    statusEl.classList.add('warning');
+                    statusTextEl.classList.add('warning');
+                    statusTextEl.textContent = '⚠ Close to Limit';
+                } else {
+                    statusEl.classList.add('success');
+                    statusTextEl.classList.add('success');
+                    statusTextEl.textContent = '✓ Ready';
+                }
+            }
+        } catch (error) {
+            console.error('Error updating actual file size:', error);
+        }
+    }, 500); // Wait 500ms after user stops adjusting
+}
+
+function showTrimMessage(message, type) {
+    const messageEl = document.getElementById('trimMessage');
+    messageEl.textContent = message;
+    messageEl.className = 'trim-message ' + type;
+    messageEl.style.display = 'block';
+    
+    // Auto-hide success/info messages
+    if (type === 'success' || type === 'info') {
+        setTimeout(() => {
+            messageEl.style.display = 'none';
+        }, 5000);
+    }
+}
+
+function closeTrimEditor() {
+    // Stop playback
+    if (audioTrimmer && audioTrimmer.isPlaying) {
+        audioTrimmer.stopPreview();
+    }
+    
+    // Hide editor
+    document.getElementById('trimEditorSection').style.display = 'none';
+    document.getElementById('trimEditorSection').classList.remove('edit-mode');
+    document.getElementById('trimEditorBadge').style.display = 'none';
+    document.getElementById('trimMessage').style.display = 'none';
+    
+    // Reset file input
+    document.getElementById('chime_file').value = '';
+    
+    // Reset state
+    isEditingExistingChime = false;
+    currentTrimFile = null;
+    
+    // Reset play button
+    const playBtn = document.getElementById('playBtn');
+    playBtn.innerHTML = '<i class="bi bi-play-fill"></i>';
+    playBtn.classList.remove('playing');
+}
 </script>
 
 <style>
@@ -862,4 +1710,69 @@ details > summary::-webkit-details-marker {
     display: none;
 }
 </style>
+
+<script>
+// Check gadget state on page load
+document.addEventListener('DOMContentLoaded', function() {
+    checkGadgetState();
+});
+
+async function checkGadgetState() {
+    try {
+        const response = await fetch('/api/gadget_state');
+        const state = await response.json();
+        
+        const indicator = document.getElementById('gadgetStateIndicator');
+        const title = document.getElementById('gadgetStateTitle');
+        const details = document.getElementById('gadgetStateDetails');
+        
+        if (!state.healthy) {
+            // Show warning state
+            indicator.style.display = 'block';
+            indicator.style.background = 'var(--warning-bg, #fff3cd)';
+            indicator.style.borderLeft = '4px solid var(--warning-border, #ffc107)';
+            indicator.style.color = 'var(--text-primary)';
+            
+            title.textContent = '⚠️ Gadget State Issues Detected';
+            title.style.color = 'var(--text-primary)';
+            
+            let detailsHtml = '<ul style="margin: 5px 0 0 20px; padding: 0; color: var(--text-primary);">';
+            state.issues_found.forEach(issue => {
+                detailsHtml += `<li>${issue}</li>`;
+            });
+            detailsHtml += '</ul>';
+            
+            if (state.fixes_applied.length > 0) {
+                detailsHtml += '<div style="margin-top: 5px; color: var(--success-text, #28a745); font-weight: 600;">✓ Auto-fixed: ' + state.fixes_applied.join(', ') + '</div>';
+            }
+            
+            if (state.errors.length > 0) {
+                detailsHtml += '<div style="margin-top: 5px; color: var(--error-text, #dc3545); font-weight: 600;">✗ Errors: ' + state.errors.join(', ') + '</div>';
+                detailsHtml += '<div style="margin-top: 5px; font-size: 12px; color: var(--text-secondary);">Tip: Switch to Edit mode and back to Present mode to reset gadget state.</div>';
+            }
+            
+            details.innerHTML = detailsHtml;
+            
+        } else if (state.fixes_applied.length > 0) {
+            // Show success state (issues were found and fixed)
+            indicator.style.display = 'block';
+            indicator.style.background = 'var(--success-bg, #d4edda)';
+            indicator.style.borderLeft = '4px solid var(--success-border, #28a745)';
+            indicator.style.color = 'var(--text-primary)';
+            
+            title.textContent = '✓ Gadget State Recovered';
+            details.innerHTML = '<div style="color: var(--success-text, #28a745);">Fixed: ' + state.fixes_applied.join(', ') + '</div>';
+            
+            // Auto-hide after 10 seconds
+            setTimeout(() => {
+                indicator.style.display = 'none';
+            }, 10000);
+        }
+        // If healthy and no fixes, don't show indicator
+        
+    } catch (error) {
+        console.error('Error checking gadget state:', error);
+    }
+}
+</script>
 {% endblock %}

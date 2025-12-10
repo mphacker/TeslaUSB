@@ -11,6 +11,32 @@
     </div>
     
     <div class="folder-controls" id="showUploadControls">
+        <!-- Desktop Drag & Drop Interface -->
+        <div id="desktopUploadInterface" style="display: none;">
+            <div class="drag-drop-zone" id="dragDropZone" style="border: 3px dashed var(--border-input); border-radius: 8px; padding: 40px; text-align: center; background: var(--form-input-bg); cursor: pointer; transition: all 0.3s; margin-bottom: 20px;">
+                <div style="pointer-events: none;">
+                    <i class="bi bi-cloud-upload" style="font-size: 48px; color: var(--btn-purple-bg); display: block; margin-bottom: 15px;"></i>
+                    <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Drag & drop files here or click to browse</p>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">
+                        Supports: .fseq, .mp3, .wav, .zip (can select multiple files)
+                    </p>
+                </div>
+            </div>
+            
+            <input type="file" id="show_files_multi" accept=".fseq,.mp3,.wav,.zip" multiple style="display: none;">
+            
+            <!-- Selected Files Preview -->
+            <div id="selectedFilesPreview" style="display: none; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">📋 Selected Files:</h4>
+                <div id="filesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 200px; overflow-y: auto;"></div>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button type="button" class="edit-btn" id="uploadSelectedBtn">📤 Upload All Files</button>
+                    <button type="button" class="btn-delete" id="clearSelectedBtn">✖ Clear All</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Mobile/Fallback Simple Upload Interface -->
         <form method="post" action="{{ url_for('light_shows.upload_light_show') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="showUploadForm">
             <label for="show_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Light Show File or ZIP:</label>
             <p style="margin: 0 0 10px 0; font-size: 13px; color: var(--text-secondary);">
@@ -150,8 +176,330 @@
 </div>
 
 <script>
-// Handle light show upload with progress bar
+// Device and capability detection
+function isMobileDevice() {
+    return /(iPad|iPhone|iPod|Android|Mobile)/i.test(navigator.userAgent) || 
+           window.matchMedia("(max-width: 768px)").matches;
+}
+
+function isIOS() {
+    return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
+}
+
+function isSafari() {
+    var ua = navigator.userAgent;
+    return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
+}
+
+function supportsMultipleUpload() {
+    const input = document.createElement('input');
+    return 'multiple' in input && !isIOS();
+}
+
+// Initialize upload interface based on device capabilities
 document.addEventListener('DOMContentLoaded', function() {
+    const isMobile = isMobileDevice();
+    const supportsMulti = supportsMultipleUpload();
+    
+    const desktopInterface = document.getElementById('desktopUploadInterface');
+    const mobileForm = document.getElementById('showUploadForm');
+    const iosWarning = document.getElementById('iosWarning');
+    const uploadControls = document.getElementById('showUploadControls');
+    
+    // Show iOS warning if needed
+    if (isIOS() && !isSafari()) {
+        if (iosWarning) iosWarning.style.display = 'block';
+        if (uploadControls) uploadControls.style.display = 'none';
+        return;
+    }
+    
+    // Show appropriate interface
+    if (!isMobile && supportsMulti) {
+        // Desktop: show drag-drop interface
+        if (desktopInterface) desktopInterface.style.display = 'block';
+        if (mobileForm) mobileForm.style.display = 'none';
+        initializeDragDrop();
+    } else {
+        // Mobile/iOS: show simple form (already visible by default)
+        if (desktopInterface) desktopInterface.style.display = 'none';
+        if (mobileForm) mobileForm.style.display = 'block';
+        initializeSimpleUpload();
+    }
+});
+
+// Multi-file upload state
+let selectedFiles = [];
+
+function initializeDragDrop() {
+    const dropZone = document.getElementById('dragDropZone');
+    const fileInput = document.getElementById('show_files_multi');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+    
+    if (!dropZone || !fileInput) return;
+    
+    // Click to browse
+    dropZone.addEventListener('click', function() {
+        fileInput.click();
+    });
+    
+    // File input change
+    fileInput.addEventListener('change', function(e) {
+        handleFiles(Array.from(e.target.files));
+    });
+    
+    // Drag and drop events
+    dropZone.addEventListener('dragenter', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--btn-purple-bg)';
+        dropZone.style.background = 'var(--hover-bg, rgba(111, 66, 193, 0.1))';
+    });
+    
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+    
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+    });
+    
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+        
+        const files = Array.from(e.dataTransfer.files);
+        handleFiles(files);
+    });
+    
+    // Upload button
+    if (uploadBtn) {
+        uploadBtn.addEventListener('click', function() {
+            uploadMultipleFiles();
+        });
+    }
+    
+    // Clear button
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            selectedFiles = [];
+            updateFilesList();
+        });
+    }
+}
+
+function handleFiles(files) {
+    // Filter for valid file types
+    const validExtensions = ['.fseq', '.mp3', '.wav', '.zip'];
+    const validFiles = files.filter(file => {
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        return validExtensions.includes(ext);
+    });
+    
+    if (validFiles.length === 0) {
+        alert('Please select valid light show files (.fseq, .mp3, .wav, .zip)');
+        return;
+    }
+    
+    // Add to selected files (avoid duplicates by name)
+    validFiles.forEach(file => {
+        const exists = selectedFiles.some(f => f.name === file.name && f.size === file.size);
+        if (!exists) {
+            selectedFiles.push(file);
+        }
+    });
+    
+    updateFilesList();
+}
+
+function updateFilesList() {
+    const preview = document.getElementById('selectedFilesPreview');
+    const filesList = document.getElementById('filesList');
+    
+    if (!preview || !filesList) return;
+    
+    if (selectedFiles.length === 0) {
+        preview.style.display = 'none';
+        return;
+    }
+    
+    preview.style.display = 'block';
+    
+    let html = '';
+    selectedFiles.forEach((file, index) => {
+        const sizeKB = (file.size / 1024).toFixed(1);
+        const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+        const sizeStr = file.size > 1024 * 1024 ? `${sizeMB} MB` : `${sizeKB} KB`;
+        
+        html += `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--border-input); color: var(--text-primary);">
+                <div style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    <strong>${escapeHtml(file.name)}</strong>
+                    <span style="color: var(--text-secondary); font-size: 12px; margin-left: 8px;">${sizeStr}</span>
+                </div>
+                <button type="button" onclick="removeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px;" title="Remove">✖</button>
+            </div>
+        `;
+    });
+    
+    filesList.innerHTML = html;
+}
+
+function removeFile(index) {
+    selectedFiles.splice(index, 1);
+    updateFilesList();
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function uploadMultipleFiles() {
+    if (selectedFiles.length === 0) {
+        alert('Please select files to upload');
+        return;
+    }
+    
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+    const progressDiv = document.getElementById('showUploadProgress');
+    const progressBar = document.getElementById('showProgressBar');
+    const statusText = document.getElementById('showUploadStatus');
+    
+    // Disable buttons
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (clearBtn) clearBtn.disabled = true;
+    
+    // Show progress
+    if (progressDiv) {
+        progressDiv.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        statusText.textContent = 'Preparing upload...';
+    }
+    
+    const formData = new FormData();
+    selectedFiles.forEach(file => {
+        formData.append('show_files', file);
+    });
+    
+    try {
+        const xhr = new XMLHttpRequest();
+        
+        // Track progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percentComplete + '%';
+                progressBar.textContent = percentComplete + '%';
+                
+                const loadedMB = (e.loaded / 1024 / 1024).toFixed(2);
+                const totalMB = (e.total / 1024 / 1024).toFixed(2);
+                statusText.textContent = `Uploading ${selectedFiles.length} file(s)... (${loadedMB} MB / ${totalMB} MB)`;
+            }
+        });
+        
+        // Handle completion
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200) {
+                try {
+                    const response = JSON.parse(xhr.responseText);
+                    
+                    progressBar.style.width = '100%';
+                    progressBar.textContent = '100%';
+                    progressBar.style.background = '#28a745';
+                    
+                    if (response.success) {
+                        statusText.textContent = response.summary || 'Upload complete!';
+                        statusText.style.color = '#28a745';
+                        
+                        // Show detailed results
+                        showUploadResults(response.results);
+                        
+                        // Clear selections and reload after delay
+                        setTimeout(function() {
+                            selectedFiles = [];
+                            window.location.reload();
+                        }, 2000);
+                    } else {
+                        statusText.textContent = 'Upload completed with errors';
+                        statusText.style.color = '#ffc107';
+                        showUploadResults(response.results);
+                        
+                        // Re-enable buttons
+                        if (uploadBtn) uploadBtn.disabled = false;
+                        if (clearBtn) clearBtn.disabled = false;
+                    }
+                } catch (e) {
+                    progressBar.style.background = '#dc3545';
+                    statusText.textContent = 'Upload complete! Redirecting...';
+                    statusText.style.color = '#28a745';
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 1000);
+                }
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                if (uploadBtn) uploadBtn.disabled = false;
+                if (clearBtn) clearBtn.disabled = false;
+            }
+        });
+        
+        // Handle errors
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            if (uploadBtn) uploadBtn.disabled = false;
+            if (clearBtn) clearBtn.disabled = false;
+        });
+        
+        // Send request
+        xhr.open('POST', '{{ url_for("light_shows.upload_multiple_light_shows") }}');
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.send(formData);
+        
+    } catch (error) {
+        console.error('Upload error:', error);
+        alert('Upload failed: ' + error.message);
+        if (uploadBtn) uploadBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+    }
+}
+
+function showUploadResults(results) {
+    if (!results || results.length === 0) return;
+    
+    let html = '<div style="margin-top: 15px; padding: 10px; background: var(--form-input-bg); border-radius: 4px;"><strong>Upload Results:</strong><ul style="margin: 10px 0 0 20px; padding: 0;">';
+    
+    results.forEach(result => {
+        const icon = result.success ? '✓' : '✗';
+        const color = result.success ? '#28a745' : '#dc3545';
+        const fileInfo = result.file_count > 1 ? ` (${result.file_count} files)` : '';
+        html += `<li style="color: ${color}; margin: 5px 0;">${icon} ${escapeHtml(result.filename)}${fileInfo}: ${escapeHtml(result.message)}</li>`;
+    });
+    
+    html += '</ul></div>';
+    
+    const statusText = document.getElementById('showUploadStatus');
+    if (statusText && statusText.parentNode) {
+        const resultsDiv = document.createElement('div');
+        resultsDiv.innerHTML = html;
+        statusText.parentNode.appendChild(resultsDiv);
+    }
+}
+
+function initializeSimpleUpload() {
     const form = document.getElementById('showUploadForm');
     if (!form) return;
     
@@ -236,22 +584,10 @@ document.addEventListener('DOMContentLoaded', function() {
         xhr.open('POST', form.action);
         xhr.send(formData);
     });
-});
+}
 
 // iOS Browser Detection and Warning Display
 (function() {
-    // Detect iOS device
-    function isIOS() {
-        return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
-    }
-    
-    // Detect Safari (true Safari, not other browsers using WebKit on iOS)
-    function isSafari() {
-        var ua = navigator.userAgent;
-        // Safari should have "Safari" but NOT Chrome, CriOS, EdgiOS, FxiOS, OPiOS
-        return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
-    }
-    
     // Show warning and hide controls if iOS + not Safari
     if (isIOS() && !isSafari()) {
         var warning = document.getElementById('iosWarning');

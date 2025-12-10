@@ -4,7 +4,7 @@ import os
 import socket
 import time
 import logging
-from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file
+from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +168,88 @@ def download_light_show(partition, base_name):
                 os.remove(zip_path)
         except Exception as e:
             logger.error(f"Failed to clean up temporary ZIP file: {e}")
+
+
+@light_shows_bp.route("/upload_multiple", methods=["POST"])
+def upload_multiple_light_shows():
+    """Upload multiple light show files at once."""
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    mode = current_mode()
+    
+    # Get all uploaded files
+    files = request.files.getlist('show_files')
+    
+    if not files or len(files) == 0:
+        if is_ajax:
+            return jsonify({"success": False, "error": "No files selected"}), 400
+        flash("No files selected", "error")
+        return redirect(url_for("light_shows.light_shows"))
+    
+    # Get part2 mount path (only needed in edit mode, None is fine for present mode)
+    part2_mount_path = get_mount_path("part2") if mode == "edit" else None
+    
+    results = []
+    total_uploaded = 0
+    
+    for file in files:
+        if file.filename == "":
+            continue
+            
+        filename = file.filename
+        
+        # Check if this is a ZIP file
+        if filename.lower().endswith('.zip'):
+            # Handle ZIP file upload
+            success, message, file_count = upload_zip_file(file, part2_mount_path)
+            results.append({
+                'filename': filename,
+                'success': success,
+                'message': message,
+                'file_count': file_count
+            })
+            if success:
+                total_uploaded += file_count
+        else:
+            # Handle individual file upload
+            success, message = upload_light_show_file(file, filename, part2_mount_path)
+            results.append({
+                'filename': filename,
+                'success': success,
+                'message': message,
+                'file_count': 1 if success else 0
+            })
+            if success:
+                total_uploaded += 1
+    
+    # Refresh Samba shares only if in edit mode
+    if mode == "edit" and total_uploaded > 0:
+        try:
+            close_samba_share('gadget_part2')
+            restart_samba_services()
+        except Exception as e:
+            logger.error(f"Samba refresh failed: {e}")
+    
+    # Delay for filesystem settling
+    if total_uploaded > 0:
+        time.sleep(1.0)
+    
+    if is_ajax:
+        success_count = sum(1 for r in results if r['success'])
+        return jsonify({
+            'success': success_count > 0,
+            'results': results,
+            'total_uploaded': total_uploaded,
+            'summary': f"Successfully uploaded {total_uploaded} file(s) from {success_count}/{len(results)} submission(s)"
+        }), 200
+    
+    # Non-AJAX fallback
+    success_count = sum(1 for r in results if r['success'])
+    if success_count > 0:
+        flash(f"Successfully uploaded {total_uploaded} file(s)", "success")
+    else:
+        flash("Failed to upload files", "error")
+    
+    return redirect(url_for("light_shows.light_shows", _=int(time.time())))
 
 
 @light_shows_bp.route("/upload", methods=["POST"])

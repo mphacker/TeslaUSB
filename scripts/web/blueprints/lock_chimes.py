@@ -4,9 +4,12 @@ import os
 import socket
 import subprocess
 import time
+import logging
 from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify
 
-from config import GADGET_DIR, LOCK_CHIME_FILENAME, CHIMES_FOLDER, MAX_LOCK_CHIME_SIZE
+from config import (GADGET_DIR, LOCK_CHIME_FILENAME, CHIMES_FOLDER, MAX_LOCK_CHIME_SIZE,
+                    MAX_LOCK_CHIME_DURATION, MIN_LOCK_CHIME_DURATION, 
+                    SPEED_RANGE_MIN, SPEED_RANGE_MAX, SPEED_STEP)
 from utils import format_file_size
 from services.mode_service import mode_display, current_mode
 from services.partition_service import get_mount_path
@@ -18,11 +21,13 @@ from services.lock_chime_service import (
     replace_lock_chime,
     set_active_chime,
     upload_chime_file,
+    save_pretrimmed_wav,
     delete_chime_file,
 )
 from services.chime_scheduler_service import get_scheduler, get_holidays_list, get_holidays_with_dates, get_recurring_intervals, format_schedule_display, format_last_run
 
 lock_chimes_bp = Blueprint('lock_chimes', __name__, url_prefix='/lock_chimes')
+logger = logging.getLogger(__name__)
 
 # Volume preset mapping (LUFS values to friendly names)
 VOLUME_PRESETS = {
@@ -139,6 +144,13 @@ def lock_chimes():
         expandable=True,  # Allow page to expand beyond viewport for scheduler
         hostname=socket.gethostname(),
         operation_in_progress=False,
+        # Trimmer configuration
+        MAX_LOCK_CHIME_SIZE=MAX_LOCK_CHIME_SIZE,
+        MAX_LOCK_CHIME_DURATION=MAX_LOCK_CHIME_DURATION,
+        MIN_LOCK_CHIME_DURATION=MIN_LOCK_CHIME_DURATION,
+        SPEED_RANGE_MIN=SPEED_RANGE_MIN,
+        SPEED_RANGE_MAX=SPEED_RANGE_MAX,
+        SPEED_STEP=SPEED_STEP,
     )
 
 
@@ -218,6 +230,9 @@ def upload_lock_chime():
         flash("No file selected", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
     
+    # Check if this is a pre-trimmed file from the audio trimmer
+    pre_trimmed = request.form.get('pre_trimmed', 'false').lower() == 'true'
+    
     # Check file extension - allow WAV and MP3
     file_ext = os.path.splitext(file.filename.lower())[1]
     if file_ext not in [".wav", ".mp3"]:
@@ -228,6 +243,7 @@ def upload_lock_chime():
     
     # Final filename will always be .wav
     filename = os.path.splitext(os.path.basename(file.filename))[0] + ".wav"
+    logger.info(f"Upload: Received filename from client: {file.filename}, processed as: {filename}")
     
     # Get normalization parameters
     normalize = request.form.get('normalize', 'false').lower() == 'true'
@@ -243,8 +259,14 @@ def upload_lock_chime():
     # Get part2 mount path (may be None in present mode, which is fine)
     part2_mount = get_mount_path("part2")
     
-    # Use the service function (works in both modes)
-    success, message = upload_chime_file(file, filename, part2_mount, normalize, target_lufs)
+    # Use the appropriate service function based on whether file is pre-trimmed
+    if pre_trimmed:
+        # Import the save_pretrimmed_wav function
+        from services.lock_chime_service import save_pretrimmed_wav
+        success, message = save_pretrimmed_wav(file, filename, part2_mount, normalize, target_lufs)
+    else:
+        # Use standard upload (converts and re-encodes)
+        success, message = upload_chime_file(file, filename, part2_mount, normalize, target_lufs)
     
     if success:
         # Force Samba to see the new file (only in Edit mode)

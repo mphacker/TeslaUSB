@@ -731,6 +731,229 @@ def upload_chime_file(uploaded_file, filename, part2_mount_path=None, normalize=
         return _do_upload()
 
 
+def save_pretrimmed_wav(uploaded_file, filename, part2_mount_path=None, normalize=False, target_lufs=-16):
+    """
+    Save a pre-trimmed WAV file that has already been processed by the browser-side audio trimmer.
+    
+    This function is optimized for files that are already:
+    - PCM 16-bit WAV format
+    - 44.1 kHz sample rate
+    - Under 1MB file size
+    - Properly trimmed and speed-adjusted
+    
+    Processing is minimal:
+    - Optionally applies volume normalization (if requested)
+    - Otherwise just validates and saves directly (no re-encoding needed)
+    
+    Args:
+        uploaded_file: FileStorage object from Flask request (pre-trimmed WAV)
+        filename: Desired filename (must end in .wav)
+        part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
+        normalize: Whether to apply volume normalization (default: False)
+        target_lufs: Target loudness in LUFS if normalizing (default: -16)
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    from services.mode_service import current_mode
+    from services.partition_mount_service import quick_edit_part2
+    from config import LOCK_CHIME_FILENAME, CHIMES_FOLDER
+    import tempfile
+    
+    mode = current_mode()
+    logger.info(f"Saving pre-trimmed chime file {filename} (mode: {mode}, normalize: {normalize})")
+    
+    # Validate filename
+    if not filename.lower().endswith('.wav'):
+        return False, "Filename must end with .wav"
+    
+    if filename.lower() == LOCK_CHIME_FILENAME.lower():
+        return False, "Cannot upload a file named LockChime.wav. Please rename your file."
+    
+    # In Present mode, process in /tmp first
+    if mode == 'present':
+        temp_dir = tempfile.mkdtemp(prefix='pretrimmed_chime_')
+        try:
+            # Save uploaded file to temp
+            temp_input = os.path.join(temp_dir, 'pretrimmed.wav')
+            uploaded_file.seek(0)
+            uploaded_file.save(temp_input)
+            
+            # Quick validation
+            is_valid, msg = validate_tesla_wav(temp_input)
+            if not is_valid:
+                shutil.rmtree(temp_dir)
+                return False, f"Pre-trimmed file validation failed: {msg}"
+            
+            # Apply volume normalization if requested
+            normalized = False
+            if normalize:
+                try:
+                    logger.info(f"Applying volume normalization (target: {target_lufs} LUFS)")
+                    temp_normalized = normalize_audio(temp_input, target_lufs)
+                    
+                    # Check if normalized file exceeds size limit
+                    normalized_size = os.path.getsize(temp_normalized)
+                    if normalized_size > MAX_LOCK_CHIME_SIZE:
+                        logger.warning(f"Normalized file too large ({normalized_size} bytes), using original")
+                        os.remove(temp_normalized)
+                    else:
+                        os.remove(temp_input)
+                        temp_input = temp_normalized
+                        normalized = True
+                except Exception as e:
+                    logger.warning(f"Normalization failed: {e}, continuing without normalization")
+            
+            final_file = temp_input
+            
+            # Quick copy operation
+            def _do_quick_copy():
+                """Quick file copy - should take < 1 second."""
+                try:
+                    from config import MNT_DIR
+                    rw_mount = os.path.join(MNT_DIR, 'part2')
+                    chimes_dir = os.path.join(rw_mount, CHIMES_FOLDER)
+                    
+                    # Create Chimes directory if needed
+                    if not os.path.isdir(chimes_dir):
+                        os.makedirs(chimes_dir, exist_ok=True)
+                    
+                    dest_path = os.path.join(chimes_dir, filename)
+                    src_md5 = _file_md5(final_file)
+                    src_size = os.path.getsize(final_file)
+
+                    shutil.copy2(final_file, dest_path)
+
+                    with open(dest_path, "r+b") as dst_f:
+                        dst_f.flush()
+                        os.fsync(dst_f.fileno())
+                    
+                    # Sync directory entry
+                    dir_fd = os.open(chimes_dir, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+
+                    if not os.path.exists(dest_path):
+                        return False, "Destination file missing after copy"
+
+                    dest_size = os.path.getsize(dest_path)
+                    if dest_size != src_size:
+                        return False, f"Size mismatch after copy (expected {src_size}, got {dest_size})"
+
+                    dest_md5 = _file_md5(dest_path)
+                    if dest_md5 != src_md5:
+                        return False, "MD5 mismatch after copy"
+
+                    return True, "File copied and verified"
+                except Exception as e:
+                    logger.error(f"Error copying file: {e}", exc_info=True)
+                    return False, f"Error copying file: {str(e)}"
+            
+            # Execute quick copy
+            logger.info("Using quick edit part2 for final file copy")
+            success, copy_msg = quick_edit_part2(_do_quick_copy, timeout=30)
+            
+            # Clean up temp directory
+            shutil.rmtree(temp_dir)
+            
+            if success:
+                msg_parts = [f"Successfully uploaded {filename}"]
+                if normalized:
+                    lufs_names = {-23: "Broadcast", -16: "Streaming", -14: "Loud", -12: "Maximum"}
+                    level_name = lufs_names.get(target_lufs, f"{target_lufs} LUFS")
+                    msg_parts.append(f"normalized to {level_name} level")
+                
+                if len(msg_parts) > 1:
+                    return True, f"{msg_parts[0]} ({', '.join(msg_parts[1:])})"
+                else:
+                    return True, msg_parts[0]
+            else:
+                return False, copy_msg
+                
+        except Exception as e:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            logger.error(f"Error saving pre-trimmed chime: {e}", exc_info=True)
+            return False, f"Error saving file: {str(e)}"
+    
+    else:
+        # Edit mode - direct save
+        try:
+            if not part2_mount_path:
+                return False, "Part2 mount path required in edit mode"
+            
+            rw_mount = part2_mount_path
+            
+            # Create Chimes directory if needed
+            chimes_dir = os.path.join(rw_mount, CHIMES_FOLDER)
+            if not os.path.isdir(chimes_dir):
+                os.makedirs(chimes_dir, exist_ok=True)
+            
+            dest_path = os.path.join(chimes_dir, filename)
+            
+            # Save to temporary location first
+            temp_path = dest_path.replace('.wav', '_upload.wav')
+            uploaded_file.seek(0)
+            uploaded_file.save(temp_path)
+            
+            # Quick validation
+            is_valid, msg = validate_tesla_wav(temp_path)
+            if not is_valid:
+                os.remove(temp_path)
+                return False, f"Pre-trimmed file validation failed: {msg}"
+            
+            # Apply volume normalization if requested
+            normalized = False
+            if normalize:
+                try:
+                    logger.info(f"Applying volume normalization (target: {target_lufs} LUFS)")
+                    temp_normalized = normalize_audio(temp_path, target_lufs)
+                    
+                    # Check if normalized file exceeds size limit
+                    normalized_size = os.path.getsize(temp_normalized)
+                    if normalized_size > MAX_LOCK_CHIME_SIZE:
+                        logger.warning(f"Normalized file too large ({normalized_size} bytes), using original")
+                        os.remove(temp_normalized)
+                    else:
+                        os.remove(temp_path)
+                        shutil.move(temp_normalized, temp_path)
+                        normalized = True
+                except Exception as e:
+                    logger.warning(f"Normalization failed: {e}, continuing without normalization")
+            
+            # Move to final location
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+            os.rename(temp_path, dest_path)
+
+            # Sync
+            with open(dest_path, "r+b") as dst_f:
+                dst_f.flush()
+                os.fsync(dst_f.fileno())
+            dir_fd = os.open(chimes_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+            
+            # Build success message
+            msg_parts = [f"Successfully uploaded {filename}"]
+            if normalized:
+                lufs_names = {-23: "Broadcast", -16: "Streaming", -14: "Loud", -12: "Maximum"}
+                level_name = lufs_names.get(target_lufs, f"{target_lufs} LUFS")
+                msg_parts.append(f"normalized to {level_name} level")
+            
+            if len(msg_parts) > 1:
+                return True, f"{msg_parts[0]} ({', '.join(msg_parts[1:])})"
+            else:
+                return True, msg_parts[0]
+                    
+        except Exception as e:
+            logger.error(f"Error saving pre-trimmed chime: {e}", exc_info=True)
+            return False, f"Error saving file: {str(e)}"
+
+
 def delete_chime_file(filename, part2_mount_path=None):
     """
     Delete a chime file from the Chimes/ library.
@@ -806,7 +1029,7 @@ def delete_chime_file(filename, part2_mount_path=None):
     if mode == 'present':
         # Use quick edit to temporarily mount RW
         logger.info("Using quick edit part2 for chime deletion")
-        return quick_edit_part2(_do_delete)
+        return quick_edit_part2(_do_delete, timeout=30)
     else:
         # Normal edit mode operation
         return _do_delete()
@@ -820,6 +1043,9 @@ def set_active_chime(chime_filename, part2_mount_path):
     - In Edit mode: Uses normal file operations
     - In Present mode: Uses quick_edit_part2() to temporarily mount RW
     
+    After replacing the chime file, the USB gadget is rebound to force Tesla
+    to re-enumerate the device and clear its file cache.
+    
     Args:
         chime_filename: Name of the chime file in Chimes/ folder
         part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
@@ -828,7 +1054,7 @@ def set_active_chime(chime_filename, part2_mount_path):
         (success: bool, message: str)
     """
     from services.mode_service import current_mode
-    from services.partition_mount_service import quick_edit_part2
+    from services.partition_mount_service import quick_edit_part2, rebind_usb_gadget
     from config import LOCK_CHIME_FILENAME, CHIMES_FOLDER
     
     mode = current_mode()
@@ -889,7 +1115,109 @@ def set_active_chime(chime_filename, part2_mount_path):
     if mode == 'present':
         # Use quick edit to temporarily mount RW
         logger.info("Using quick edit part2 for chime replacement")
-        return quick_edit_part2(_do_chime_replacement, timeout=30)
+        success, message = quick_edit_part2(_do_chime_replacement, timeout=30)
+        
+        if success:
+            # Rebind USB gadget to force Tesla to re-enumerate and clear cache
+            logger.info("Rebinding USB gadget to force Tesla cache refresh...")
+            rebind_success, rebind_msg = rebind_usb_gadget(delay_seconds=2)
+            
+            if rebind_success:
+                logger.info("✓ USB gadget rebound - Tesla should detect the new chime")
+                return True, message + " (USB re-enumerated)"
+            else:
+                logger.warning(f"Chime replaced but USB rebind failed: {rebind_msg}")
+                return True, message + " (Note: Manual USB reconnect may be needed)"
+        
+        return success, message
     else:
         # Normal edit mode operation
-        return _do_chime_replacement()
+        success, message = _do_chime_replacement()
+        
+        if success:
+            # In edit mode, gadget is not active, so no rebind needed
+            # User will need to switch to present mode which will rebind automatically
+            logger.info("Chime replaced in edit mode - will take effect when switched to present mode")
+        
+        return success, message
+
+
+def rename_chime_file(old_filename, new_filename):
+    """
+    Rename a lock chime file without re-encoding.
+    
+    This is used when the user only changes the filename in the trim editor
+    without modifying the audio content. Uses mode-aware operations.
+    
+    Args:
+        old_filename: Current filename (e.g., "chime.wav")
+        new_filename: New filename (e.g., "my_chime.wav")
+        
+    Returns:
+        dict: {"success": True/False, "message": str}
+    """
+    from services.partition_service import get_mount_path
+    from services.mode_service import current_mode
+    from services.partition_mount_service import quick_edit_part2
+    from config import CHIMES_FOLDER
+    
+    # Validate filenames
+    if not old_filename or not new_filename:
+        return {"success": False, "error": "Both old and new filenames are required"}
+    
+    # Ensure .wav extension
+    if not new_filename.lower().endswith('.wav'):
+        new_filename += '.wav'
+    
+    # Check for invalid characters
+    import re
+    if re.search(r'[<>:"|?*\\/]', new_filename):
+        return {"success": False, "error": "Filename contains invalid characters"}
+    
+    mode = current_mode()
+    part2_mount_path = get_mount_path("part2")
+    
+    if not part2_mount_path:
+        return {"success": False, "error": "Part2 not mounted"}
+    
+    def _do_rename():
+        """Internal function to perform the actual rename."""
+        try:
+            # In quick edit mode (present), use RW mount path
+            if mode == 'present':
+                from config import MNT_DIR
+                rw_mount = os.path.join(MNT_DIR, 'part2')
+                chimes_dir = os.path.join(rw_mount, CHIMES_FOLDER)
+            else:
+                chimes_dir = os.path.join(part2_mount_path, CHIMES_FOLDER)
+            
+            old_path = os.path.join(chimes_dir, old_filename)
+            new_path = os.path.join(chimes_dir, new_filename)
+            
+            # Validate old file exists
+            if not os.path.isfile(old_path):
+                return {"success": False, "error": f"File not found: {old_filename}"}
+            
+            # Validate new filename doesn't already exist
+            if os.path.exists(new_path):
+                return {"success": False, "error": f"File already exists: {new_filename}"}
+            
+            # Perform the rename
+            os.rename(old_path, new_path)
+            
+            # Sync to ensure write completes
+            os.sync()
+            
+            logger.info(f"Renamed chime: {old_filename} -> {new_filename}")
+            return {"success": True, "message": f"Renamed to {new_filename}"}
+            
+        except Exception as e:
+            logger.error(f"Error renaming chime: {e}", exc_info=True)
+            return {"success": False, "error": f"Error renaming file: {str(e)}"}
+    
+    # Execute based on current mode
+    if mode == 'present':
+        logger.info("Using quick edit part2 for chime rename")
+        return quick_edit_part2(_do_rename, timeout=20)
+    else:
+        return _do_rename()

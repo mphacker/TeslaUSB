@@ -149,12 +149,18 @@ def download_video(folder, filename):
 @videos_bp.route("/thumbnail/<folder>/<filename>")
 def get_thumbnail(folder, filename):
     """Get or generate a thumbnail for a video file."""
+    from services.thumbnail_service import generate_thumbnail_sync, queue_thumbnail_generation
+    from flask import Response
+    import base64
+    import logging
+    
     # Sanitize inputs
     folder = os.path.basename(folder)
     filename = os.path.basename(filename)
     
     result = get_thumbnail_path(folder, filename)
     if not result:
+        logging.warning(f"Video not found: {folder}/{filename}")
         return "Video not found", 404
     
     thumbnail_path, video_path = result
@@ -167,19 +173,97 @@ def get_thumbnail(folder, filename):
         response.headers['Expires'] = '604800'
         return response
     
-    # Thumbnail doesn't exist - return 404 so browser doesn't keep trying
-    # The background process will generate it eventually
-    return "Thumbnail not yet generated", 404
+    # Try instant generation (PyAV is fast enough for real-time: 1-3s target)
+    instant_mode = request.args.get('instant') == '1'
+    
+    if instant_mode:
+        logging.info(f"Instant generation for {folder}/{filename}")
+        generated_path = generate_thumbnail_sync(folder, filename)
+        if generated_path:
+            response = send_file(generated_path, mimetype='image/jpeg')
+            response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
+            response.headers['Expires'] = '604800'
+            return response
+        else:
+            logging.warning(f"Instant generation failed for {folder}/{filename}")
+    
+    # Queue for background generation
+    queue_thumbnail_generation(folder, filename)
+    
+    # Return a 1x1 transparent placeholder PNG (prevents broken image icon)
+    # This is a tiny base64-encoded transparent PNG
+    placeholder_png = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    )
+    response = Response(placeholder_png, mimetype='image/png')
+    # NEVER cache placeholder - force browser to retry
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
+@videos_bp.route("/api/generate_thumbnail", methods=["POST"])
+def generate_single_thumbnail():
+    """Generate a single thumbnail (called via AJAX for queue processing)."""
+    from services.thumbnail_service import generate_thumbnail_sync
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "error": "No data provided"}), 400
+    
+    folder = os.path.basename(data.get('folder', ''))
+    filename = os.path.basename(data.get('filename', ''))
+    
+    if not folder or not filename:
+        return jsonify({"success": False, "error": "Missing folder or filename"}), 400
+    
+    # Generate thumbnail synchronously
+    success = generate_thumbnail_sync(folder, filename)
+    
+    return jsonify({
+        "success": success,
+        "folder": folder,
+        "filename": filename
+    })
 
 
-# TODO: Re-enable this route after moving cleanup_orphaned_thumbnails to thumbnail_service
-# @videos_bp.route("/cleanup_thumbnails", methods=["POST"])
-# def cleanup_thumbnails():
-#     """Cleanup orphaned thumbnails."""
-#     removed = cleanup_orphaned_thumbnails()
-#     return jsonify({"success": True, "removed": removed})
+@videos_bp.route("/api/batch_thumbnails", methods=["POST"])
+def batch_thumbnails():
+    """Generate thumbnails for a batch of videos (called via AJAX)."""
+    from services.thumbnail_service import batch_generate_thumbnails
+    
+    data = request.get_json()
+    if not data or 'videos' not in data:
+        return jsonify({"success": False, "error": "No videos provided"}), 400
+    
+    video_list = []
+    for video in data['videos']:
+        folder = os.path.basename(video.get('folder', ''))
+        filename = os.path.basename(video.get('filename', ''))
+        if folder and filename:
+            video_list.append((folder, filename))
+    
+    # Generate up to 10 thumbnails per request
+    generated = batch_generate_thumbnails(video_list, max_count=10)
+    
+    return jsonify({
+        "success": True,
+        "generated": generated,
+        "requested": len(video_list)
+    })
+
+
+@videos_bp.route("/api/cleanup_thumbnails", methods=["POST"])
+def cleanup_thumbnails():
+    """Cleanup orphaned thumbnails for videos that no longer exist."""
+    from services.thumbnail_service import cleanup_orphaned_thumbnails
+    
+    removed = cleanup_orphaned_thumbnails()
+    return jsonify({
+        "success": True,
+        "removed": removed
+    })
 
 
 @videos_bp.route("/delete/<folder>/<filename>", methods=["POST"])

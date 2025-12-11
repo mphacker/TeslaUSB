@@ -31,6 +31,20 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - Mode-aware file ops: lock chimes/light shows/videos must go through services that choose RO/RW paths; avoid direct filesystem writes in view code.
 - Samba cache: after edits in edit mode, call `close_samba_share()` and `restart_samba_services()` (see lock chime routes).
 
+## Thumbnail System
+- **On-demand generation**: Thumbnails generated via PyAV when requested (80x45px, 1-3s generation time).
+- **Queue-based loading**: Client-side queue with max 3 concurrent checks, 1-at-a-time generation to prevent memory exhaustion.
+- **7-day browser cache**: `Cache-Control: public, max-age=604800, immutable` for generated thumbnails.
+- **Placeholder handling**: `Cache-Control: no-store` prevents caching of transparent PNG placeholders.
+- **Memory optimization**: Tuned for Pi Zero 2 W (512MB RAM) - small thumbnails, concurrency limits, request abort on navigation.
+
+## Memory Management (Pi Zero 2 W)
+- **Desktop services disabled**: pipewire, wireplumber, colord masked (saves ~30MB RAM).
+- **Persistent swap**: 1GB swap file at `/var/swap/fsck.swap` in /etc/fstab.
+- **Setup optimization**: `optimize_memory_for_setup()` disables lightdm, enables swap before package install.
+- **Watchdog**: Hardware watchdog configured (15s timeout, monitors load/memory).
+- **Kernel panic**: Auto-reboot after 10 seconds (sysctl kernel.panic=10).
+
 ## Lock Chimes & Light Shows
 - Lock chime rules: WAV <1 MiB, 16-bit PCM, 44.1/48 kHz, mono/stereo. `lock_chime_service` validates, can reencode via ffmpeg, and replaces `LockChime.wav` with temp+fsync+MD5.
 - Present-mode uploads and set-active use `quick_edit_part2` to minimize RW time; honor the lock and timeouts. Keep copies/renames atomic and verified.
@@ -42,7 +56,7 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - Manual web run: `cd /home/pi/TeslaUSB && python3 web_control.py` (use configured paths after setup).
 
 ## Services & Timers
-- `gadget_web.service` (Flask UI), `present_usb_on_boot.service` (enable gadget on boot), `thumbnail_generator.timer`, `chime_scheduler.timer`, `wifi-monitor.service`.
+- `gadget_web.service` (Flask UI), `present_usb_on_boot.service` (enable gadget on boot), `chime_scheduler.timer`, `wifi-monitor.service`, `watchdog.service` (hardware watchdog).
 
 ## Offline Access Point
 - Three force modes: `auto` (default, AP starts when WiFi fails), `force_on` (AP always on), `force_off` (AP blocked, never starts).

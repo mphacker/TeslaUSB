@@ -50,11 +50,11 @@
                 {% for video in videos %}
                 <tr>
                     <td class="thumbnail-cell">
-                        <img src="{{ url_for('videos.get_thumbnail', folder=current_folder, filename=video.name) }}" 
-                             alt="Thumbnail" 
-                             class="video-thumbnail"
-                             loading="lazy"
-                             onerror="this.style.display='none'">
+                        <div class="thumbnail-container" 
+                             data-folder="{{ current_folder }}" 
+                             data-filename="{{ video.name }}">
+                            <div class="thumbnail-spinner"></div>
+                        </div>
                     </td>
                     <td>
                         <a href="#" class="video-name" onclick="playVideo('{{ video.name }}'); return false;">
@@ -97,11 +97,11 @@
         {% for video in videos %}
         <div class="mobile-card">
             <div class="mobile-card-header">
-                <img src="{{ url_for('videos.get_thumbnail', folder=current_folder, filename=video.name) }}" 
-                     alt="Thumbnail" 
-                     class="mobile-card-thumbnail"
-                     loading="lazy"
-                     onerror="this.style.display='none'">
+                <div class="thumbnail-container mobile" 
+                     data-folder="{{ current_folder }}" 
+                     data-filename="{{ video.name }}">
+                    <div class="thumbnail-spinner"></div>
+                </div>
                 <div class="mobile-card-title">
                     <a href="#" onclick="playVideo('{{ video.name }}'); return false;">
                         {{ video.name }}
@@ -169,6 +169,52 @@
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
 }
+
+/* Thumbnail container styles */
+.thumbnail-container {
+    width: 80px;
+    height: 45px;
+    background: #f0f0f0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+[data-theme="dark"] .thumbnail-container {
+    background: #2a2a2a;
+}
+
+.thumbnail-container.mobile {
+    width: 100px;
+    height: 56px;
+}
+
+.thumbnail-container img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.thumbnail-spinner {
+    border: 3px solid rgba(0, 0, 0, 0.1);
+    border-top: 3px solid #007bff;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    animation: spin 1s linear infinite;
+}
+
+[data-theme="dark"] .thumbnail-spinner {
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-top: 3px solid #007bff;
+}
+
+.thumbnail-container.loaded .thumbnail-spinner {
+    display: none;
+}
 </style>
 
 <script>
@@ -180,6 +226,221 @@ window.videosLoaded = false;
 window.isLoading = false;
 window.currentBatchIndex = 0;
 const BATCH_SIZE = 15;
+
+// Thumbnail loading queue management
+const thumbnailQueue = [];
+let isProcessingQueue = false;
+let thumbnailsPaused = false; // Pause thumbnails during video playback
+
+// Check queue - prevents too many simultaneous checks
+const checkQueue = [];
+let activeChecks = 0;
+const MAX_CONCURRENT_CHECKS = 3; // Only check 3 thumbnails at a time
+
+// Fetch abort controllers for cleanup
+const abortControllers = [];
+
+// Track all observers for cleanup
+const intersectionObservers = [];
+
+// Cleanup function for page unload
+function cleanupThumbnailSystem() {
+    console.log('🧹 Cleaning up thumbnail system...');
+    
+    // Abort all in-flight requests
+    abortControllers.forEach(controller => {
+        try {
+            controller.abort();
+        } catch (e) {}
+    });
+    abortControllers.length = 0;
+    
+    // Disconnect all observers
+    intersectionObservers.forEach(observer => {
+        try {
+            observer.disconnect();
+        } catch (e) {}
+    });
+    intersectionObservers.length = 0;
+    
+    // Clear queues
+    checkQueue.length = 0;
+    thumbnailQueue.length = 0;
+    
+    // Reset flags
+    isProcessingQueue = false;
+    activeChecks = 0;
+    
+    console.log('✓ Cleanup complete');
+}
+
+// Queue a thumbnail check to prevent overwhelming the server
+function queueThumbnailCheck(container) {
+    // Don't queue if thumbnails are paused (video playing)
+    if (thumbnailsPaused) {
+        return;
+    }
+    checkQueue.push(container);
+    processNextCheck();
+}
+
+// Process thumbnail checks with concurrency limit
+async function processNextCheck() {
+    // Pause processing if video is playing
+    if (thumbnailsPaused || activeChecks >= MAX_CONCURRENT_CHECKS || checkQueue.length === 0) {
+        return;
+    }
+    
+    activeChecks++;
+    const container = checkQueue.shift();
+    
+    await loadThumbnail(container);
+    
+    activeChecks--;
+    
+    // Process next check
+    if (checkQueue.length > 0 && !thumbnailsPaused) {
+        setTimeout(processNextCheck, 50);
+    }
+}
+
+// Check if thumbnail exists and load it
+async function loadThumbnail(container) {
+    const folder = container.dataset.folder;
+    const filename = container.dataset.filename;
+    const thumbnailUrl = `/videos/thumbnail/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}?instant=1`;
+    
+    // Create abort controller for this request
+    const abortController = new AbortController();
+    abortControllers.push(abortController);
+    
+    try {
+        // Check if thumbnail exists (browser caches this GET request)
+        const response = await fetch(thumbnailUrl, { 
+            signal: abortController.signal 
+        });
+        
+        if (response.ok) {
+            // Thumbnail exists - use regular img src (browser serves from cache on next visit)
+            console.log(`✓ Loading cached thumbnail: ${filename}`);
+            const img = document.createElement('img');
+            img.src = thumbnailUrl;
+            img.alt = 'Thumbnail';
+            img.style.display = 'none'; // Hide until loaded to prevent broken image flash
+            img.onload = () => {
+                img.style.display = 'block';
+                container.innerHTML = '';
+                container.appendChild(img);
+                container.classList.add('loaded');
+            };
+            img.onerror = () => {
+                console.warn(`✗ Failed to load thumbnail: ${filename}`);
+                // Keep spinner showing on error
+            };
+        } else if (response.status === 404) {
+            // Thumbnail doesn't exist - add to generation queue
+            console.log(`⏳ Queueing thumbnail generation: ${filename} (queue size: ${thumbnailQueue.length + 1})`);
+            thumbnailQueue.push({ container, folder, filename, thumbnailUrl });
+            processNextThumbnail();
+        }
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.log(`⏹️ Aborted check for ${filename}`);
+        } else {
+            console.error(`✗ Error checking thumbnail for ${filename}:`, error);
+            // On error, try to add to queue
+            thumbnailQueue.push({ container, folder, filename, thumbnailUrl });
+            processNextThumbnail();
+        }
+    } finally {
+        // Remove from abort controllers
+        const index = abortControllers.indexOf(abortController);
+        if (index > -1) {
+            abortControllers.splice(index, 1);
+        }
+    }
+}
+
+// Process thumbnail generation queue one at a time
+async function processNextThumbnail() {
+    // Pause processing if video is playing
+    if (thumbnailsPaused || isProcessingQueue || thumbnailQueue.length === 0) {
+        return;
+    }
+    
+    isProcessingQueue = true;
+    const item = thumbnailQueue.shift();
+    
+    console.log(`🔧 Generating thumbnail: ${item.filename} (${thumbnailQueue.length} remaining in queue)`);
+    
+    try {
+        // Request thumbnail generation
+        const response = await fetch('/videos/api/generate_thumbnail', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                folder: item.folder,
+                filename: item.filename
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            console.log(`✓ Generated thumbnail: ${item.filename}`);
+            // Thumbnail generated - display it (browser caches automatically)
+            const img = document.createElement('img');
+            img.src = item.thumbnailUrl;
+            img.alt = 'Thumbnail';
+            img.style.display = 'none'; // Hide until loaded
+            img.onload = () => {
+                img.style.display = 'block';
+                item.container.innerHTML = '';
+                item.container.appendChild(img);
+                item.container.classList.add('loaded');
+            };
+            img.onerror = () => {
+                console.warn(`✗ Failed to display generated thumbnail: ${item.filename}`);
+            };
+        } else {
+            console.warn(`✗ Generation failed: ${item.filename}`);
+        }
+    } catch (error) {
+        console.error(`✗ Error generating thumbnail for ${item.filename}:`, error);
+    }
+    
+    isProcessingQueue = false;
+    
+    // Process next item in queue (only if not paused)
+    if (thumbnailQueue.length > 0 && !thumbnailsPaused) {
+        setTimeout(processNextThumbnail, 100);
+    } else if (thumbnailQueue.length === 0) {
+        console.log('✓ Thumbnail queue complete');
+    }
+}
+
+// Initialize thumbnail loading for all visible containers
+function initThumbnailLoading() {
+    const containers = document.querySelectorAll('.thumbnail-container:not(.loaded)');
+    console.log(`📸 Initializing thumbnail loading for ${containers.length} videos`);
+    
+    containers.forEach(container => {
+        // Use Intersection Observer to only load visible thumbnails
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting && !container.classList.contains('loaded')) {
+                    // Queue the check instead of calling loadThumbnail directly
+                    queueThumbnailCheck(container);
+                    observer.unobserve(container);
+                }
+            });
+        }, { rootMargin: '200px' });
+        
+        // Track observer for cleanup
+        intersectionObservers.push(observer);
+        observer.observe(container);
+    });
+}
 
 function loadFolder(folderName) {
     window.location.href = "{{ url_for('videos.file_browser') }}?folder=" + encodeURIComponent(folderName);
@@ -194,6 +455,29 @@ function playVideo(filename) {
     videoPlayer.style.display = 'block';
     videoPlayer.play();
     videoPlayer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Pause thumbnail generation when video is playing
+function pauseThumbnailGeneration() {
+    if (!thumbnailsPaused) {
+        console.log('⏸️ Pausing thumbnail generation (video playing)');
+        thumbnailsPaused = true;
+    }
+}
+
+// Resume thumbnail generation when video stops
+function resumeThumbnailGeneration() {
+    if (thumbnailsPaused) {
+        console.log('▶️ Resuming thumbnail generation (video stopped)');
+        thumbnailsPaused = false;
+        // Kick off processing if there are items waiting
+        if (checkQueue.length > 0) {
+            processNextCheck();
+        }
+        if (thumbnailQueue.length > 0) {
+            processNextThumbnail();
+        }
+    }
 }
 
 // Infinite scroll: Load more videos as user scrolls
@@ -237,6 +521,9 @@ function loadMoreVideos() {
         window.isLoading = false;
         document.getElementById('loadingIndicator').style.display = 'none';
         
+        // Initialize thumbnail loading for newly added containers
+        initThumbnailLoading();
+        
         // If all videos loaded, mark as complete
         if (window.currentBatchIndex >= window.remainingVideos.length) {
             window.videosLoaded = true;
@@ -264,11 +551,11 @@ function createTableRow(video) {
     
     tr.innerHTML = `
         <td class="thumbnail-cell">
-            <img src="/videos/thumbnail/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
-                 alt="Thumbnail" 
-                 class="video-thumbnail"
-                 loading="lazy"
-                 onerror="this.style.display='none'">
+            <div class="thumbnail-container" 
+                 data-folder="${escapeHtml(window.currentFolder)}" 
+                 data-filename="${escapeHtml(video.name)}">
+                <div class="thumbnail-spinner"></div>
+            </div>
         </td>
         <td>
             <a href="#" class="video-name" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
@@ -310,11 +597,11 @@ function createMobileCard(video) {
     
     div.innerHTML = `
         <div class="mobile-card-header">
-            <img src="/videos/thumbnail/${encodeURIComponent(window.currentFolder)}/${encodeURIComponent(video.name)}" 
-                 alt="Thumbnail" 
-                 class="mobile-card-thumbnail"
-                 loading="lazy"
-                 onerror="this.style.display='none'">
+            <div class="thumbnail-container mobile" 
+                 data-folder="${escapeHtml(window.currentFolder)}" 
+                 data-filename="${escapeHtml(video.name)}">
+                <div class="thumbnail-spinner"></div>
+            </div>
             <div class="mobile-card-title">
                 <a href="#" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
                     ${escapeHtml(video.name)}
@@ -381,6 +668,23 @@ window.addEventListener('DOMContentLoaded', function() {
         }, 300);
     }
     
+    // Initialize thumbnail loading for initial page load
+    initThumbnailLoading();
+    
+    // Add video player event listeners to pause/resume thumbnail generation
+    const videoPlayer = document.getElementById('videoPlayer');
+    if (videoPlayer) {
+        // Pause thumbnails when video starts playing
+        videoPlayer.addEventListener('play', pauseThumbnailGeneration);
+        videoPlayer.addEventListener('playing', pauseThumbnailGeneration);
+        
+        // Resume thumbnails when video stops
+        videoPlayer.addEventListener('pause', resumeThumbnailGeneration);
+        videoPlayer.addEventListener('ended', resumeThumbnailGeneration);
+        
+        console.log('🎬 Video player event listeners registered');
+    }
+    
     // Only enable infinite scroll if we have remaining videos (Videos page only)
     if (!window.remainingVideos || window.remainingVideos.length === 0) {
         return;
@@ -400,6 +704,16 @@ window.addEventListener('DOMContentLoaded', function() {
     setTimeout(function() {
         handleScroll();
     }, 500);
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', function() {
+    cleanupThumbnailSystem();
+});
+
+// Cleanup on navigation (for single-page apps)
+window.addEventListener('pagehide', function() {
+    cleanupThumbnailSystem();
 });
 </script>
 {% endblock %}

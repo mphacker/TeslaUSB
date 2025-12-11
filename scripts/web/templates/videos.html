@@ -32,7 +32,7 @@
         {% endif %}
     </div>
     
-    <video id="videoPlayer" controls></video>
+    <video id="videoPlayer" controls preload="none" playsinline></video>
     
     {% if videos %}
     <div class="video-table-container">
@@ -222,6 +222,7 @@
 window.remainingVideos = {{ remaining_videos|tojson|safe }};
 window.currentFolder = {{ current_folder|tojson|safe }};
 window.modeToken = {{ mode_token|tojson|safe }};
+const STREAM_URL_TEMPLATE = "{{ url_for('videos.stream_video', folder='__F__', filename='__V__') }}";
 window.videosLoaded = false;
 window.isLoading = false;
 window.currentBatchIndex = 0;
@@ -446,13 +447,18 @@ function loadFolder(folderName) {
     window.location.href = "{{ url_for('videos.file_browser') }}?folder=" + encodeURIComponent(folderName);
 }
 
+function buildStreamUrl(folder, filename) {
+    return STREAM_URL_TEMPLATE
+        .replace('__F__', encodeURIComponent(folder))
+        .replace('__V__', encodeURIComponent(filename));
+}
+
 function playVideo(filename) {
     const videoPlayer = document.getElementById('videoPlayer');
     const folder = document.getElementById('folderSelect').value;
-    videoPlayer.src = "{{ url_for('videos.stream_video', folder='FOLDER_PLACEHOLDER', filename='FILE_PLACEHOLDER') }}"
-        .replace('FOLDER_PLACEHOLDER', encodeURIComponent(folder))
-        .replace('FILE_PLACEHOLDER', encodeURIComponent(filename));
+    videoPlayer.src = buildStreamUrl(folder, filename);
     videoPlayer.style.display = 'block';
+    videoPlayer.load();
     videoPlayer.play();
     videoPlayer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
@@ -558,7 +564,7 @@ function createTableRow(video) {
             </div>
         </td>
         <td>
-            <a href="#" class="video-name" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
+            <a href="#" class="video-name" data-stream-url="${buildStreamUrl(window.currentFolder, video.name)}" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
                 ${escapeHtml(video.name)}
             </a>
             ${sessionInfo}
@@ -603,7 +609,7 @@ function createMobileCard(video) {
                 <div class="thumbnail-spinner"></div>
             </div>
             <div class="mobile-card-title">
-                <a href="#" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
+                <a href="#" data-stream-url="${buildStreamUrl(window.currentFolder, video.name)}" onclick="playVideo('${escapeHtml(video.name)}'); return false;">
                     ${escapeHtml(video.name)}
                 </a>
                 ${sessionInfo}

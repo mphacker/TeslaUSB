@@ -108,9 +108,24 @@ def view_session(folder, session):
     )
 
 
+def _iter_file_range(path, start, end, chunk_size=256 * 1024):
+    """Yield chunks for the requested byte range (inclusive)."""
+    with open(path, 'rb') as f:
+        f.seek(start)
+        bytes_left = end - start + 1
+        while bytes_left > 0:
+            chunk = f.read(min(chunk_size, bytes_left))
+            if not chunk:
+                break
+            bytes_left -= len(chunk)
+            yield chunk
+
+
 @videos_bp.route("/stream/<folder>/<filename>")
 def stream_video(folder, filename):
-    """Stream a video file."""
+    """Stream a video file with HTTP Range/206 support."""
+    from flask import Response
+
     teslacam_path = get_teslacam_path()
     if not teslacam_path:
         return "TeslaCam not accessible", 404
@@ -123,8 +138,53 @@ def stream_video(folder, filename):
     
     if not os.path.isfile(video_path):
         return "Video not found", 404
-    
-    return send_file(video_path, mimetype='video/mp4')
+
+    file_size = os.path.getsize(video_path)
+    range_header = request.headers.get('Range')
+    if not range_header:
+        # No range; fall back to full file
+        response = send_file(video_path, mimetype='video/mp4')
+        response.headers['Accept-Ranges'] = 'bytes'
+        return response
+
+    # Parse simple single-range headers: bytes=start-end
+    try:
+        units, rng = range_header.strip().split('=')
+        if units != 'bytes':
+            raise ValueError
+        start_str, end_str = rng.split('-')
+        if start_str == '':
+            # suffix range
+            suffix = int(end_str)
+            if suffix <= 0:
+                raise ValueError
+            start = max(file_size - suffix, 0)
+            end = file_size - 1
+        else:
+            start = int(start_str)
+            end = int(end_str) if end_str else file_size - 1
+        if start < 0 or end < start or end >= file_size:
+            raise ValueError
+    except (ValueError, IndexError):
+        return Response(status=416)
+
+    length = end - start + 1
+    resp = Response(
+        _iter_file_range(video_path, start, end),
+        status=206,
+        mimetype='video/mp4',
+        direct_passthrough=True,
+    )
+    resp.headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+    resp.headers['Accept-Ranges'] = 'bytes'
+    resp.headers['Content-Length'] = str(length)
+
+    # HEAD requests should not stream body
+    if request.method == 'HEAD':
+        resp.response = []
+        resp.headers['Content-Length'] = str(length)
+
+    return resp
 
 
 @videos_bp.route("/download/<folder>/<filename>")

@@ -39,20 +39,24 @@ trap cleanup EXIT
 
 # Run appropriate fsck based on filesystem type and mode
 FSCK_STATUS=0
+# Larger images (427G) need longer than 60s; allow 300s for quick, 600s for repair
+QUICK_TIMEOUT=300
+REPAIR_TIMEOUT=600
+
 case "$FS_TYPE" in
   vfat)
     if [ "$MODE" = "repair" ]; then
-      timeout 300 fsck.vfat -a "$DEVICE" >"$LOG_FILE" 2>&1 || FSCK_STATUS=$?
+      timeout "$REPAIR_TIMEOUT" fsck.vfat -a "$DEVICE" >"$LOG_FILE" 2>&1 || FSCK_STATUS=$?
     else
-      timeout 60 fsck.vfat -n "$DEVICE" >"$LOG_FILE" 2>&1 || FSCK_STATUS=$?
+      timeout "$QUICK_TIMEOUT" fsck.vfat -n "$DEVICE" >"$LOG_FILE" 2>&1 || FSCK_STATUS=$?
     fi
     ;;
   exfat)
     if [ "$MODE" = "repair" ]; then
-      timeout 300 fsck.exfat -p "$DEVICE" >"$LOG_FILE" 2>&1 || FSCK_STATUS=$?
+      timeout "$REPAIR_TIMEOUT" fsck.exfat -p "$DEVICE" >"$LOG_FILE" 2>&1 || FSCK_STATUS=$?
     else
       # Quick read-only check
-      timeout 60 fsck.exfat -n "$DEVICE" >"$LOG_FILE" 2>&1 || FSCK_STATUS=$?
+      timeout "$QUICK_TIMEOUT" fsck.exfat -n "$DEVICE" >"$LOG_FILE" 2>&1 || FSCK_STATUS=$?
     fi
     ;;
   *)

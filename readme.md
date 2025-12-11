@@ -45,6 +45,8 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Upload WAV or MP3 files (automatically converted to Tesla-compatible format)
 - Organized chime library with preview and download
 - Volume normalization presets (Broadcast, Streaming, Loud, Maximum)
+- **Chime Groups**: Organize chimes by theme (Holidays, Funny, Seasonal, etc.)
+- **Random Selection on Boot**: Automatically pick a different chime from your selected group each time the device boots
 - Scheduled chime changes:
   - Weekly schedules (specific days/times)
   - Date-based schedules

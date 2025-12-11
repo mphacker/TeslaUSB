@@ -25,6 +25,7 @@ from services.lock_chime_service import (
     delete_chime_file,
 )
 from services.chime_scheduler_service import get_scheduler, get_holidays_list, get_holidays_with_dates, get_recurring_intervals, format_schedule_display, format_last_run
+from services.chime_group_service import get_group_manager
 
 lock_chimes_bp = Blueprint('lock_chimes', __name__, url_prefix='/lock_chimes')
 logger = logging.getLogger(__name__)
@@ -48,6 +49,21 @@ def lock_chimes():
     
     # If operation in progress, show limited page with operation banner
     if op_status['in_progress']:
+        # Still load groups for UI - handle gracefully if files aren't accessible
+        try:
+            group_manager = get_group_manager()
+            groups = group_manager.list_groups()
+            random_config = group_manager.get_random_config()
+        except Exception as e:
+            logger.warning(f"Could not load groups during operation: {e}")
+            groups = []
+            random_config = {
+                'enabled': False,
+                'group_id': None,
+                'last_selected': None,
+                'updated_at': None
+            }
+        
         return render_template(
             'lock_chimes.html',
             page='chimes',
@@ -59,6 +75,8 @@ def lock_chimes():
             schedules=[],
             holidays=[],
             recurring_intervals={},
+            groups=groups,
+            random_config=random_config,
             format_schedule=format_schedule_display,
             format_last_run=format_last_run,
             auto_refresh=False,
@@ -127,6 +145,21 @@ def lock_chimes():
     # Get recurring intervals for the dropdown
     recurring_intervals = get_recurring_intervals()
     
+    # Load chime groups - handle gracefully if files aren't accessible
+    try:
+        group_manager = get_group_manager()
+        groups = group_manager.list_groups()
+        random_config = group_manager.get_random_config()
+    except Exception as e:
+        logger.warning(f"Could not load groups (may be during restart): {e}")
+        groups = []
+        random_config = {
+            'enabled': False,
+            'group_id': None,
+            'last_selected': None,
+            'updated_at': None
+        }
+    
     return render_template(
         'lock_chimes.html',
         page='chimes',
@@ -138,6 +171,8 @@ def lock_chimes():
         schedules=schedules,
         holidays=holidays,
         recurring_intervals=recurring_intervals,
+        groups=groups,
+        random_config=random_config,
         format_schedule=format_schedule_display,
         format_last_run=format_last_run,
         auto_refresh=False,
@@ -822,4 +857,172 @@ def edit_schedule(schedule_id):
         flash(f"Error updating schedule: {str(e)}", "error")
     
     return redirect(url_for("lock_chimes.lock_chimes"))
+
+
+# ============================================================================
+# Chime Groups Routes
+# ============================================================================
+
+@lock_chimes_bp.route("/groups/list", methods=["GET"])
+def list_groups():
+    """Get all chime groups (AJAX endpoint)."""
+    try:
+        manager = get_group_manager()
+        groups = manager.list_groups()
+        random_config = manager.get_random_config()
+        
+        return jsonify({
+            "success": True,
+            "groups": groups,
+            "random_config": random_config
+        })
+    except Exception as e:
+        logger.error(f"Error listing groups: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@lock_chimes_bp.route("/groups/create", methods=["POST"])
+def create_group():
+    """Create a new chime group."""
+    try:
+        data = request.get_json() if request.is_json else request.form
+        
+        name = data.get('name', '').strip()
+        description = data.get('description', '').strip()
+        
+        if not name:
+            return jsonify({"success": False, "error": "Group name is required"}), 400
+        
+        manager = get_group_manager()
+        success, message, group_id = manager.create_group(name, description)
+        
+        if success:
+            return jsonify({
+                "success": True,
+                "message": message,
+                "group_id": group_id
+            })
+        else:
+            return jsonify({"success": False, "error": message}), 400
+    
+    except Exception as e:
+        logger.error(f"Error creating group: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@lock_chimes_bp.route("/groups/<group_id>/update", methods=["POST"])
+def update_group(group_id):
+    """Update a chime group."""
+    try:
+        data = request.get_json() if request.is_json else request.form
+        
+        manager = get_group_manager()
+        
+        # Collect fields to update
+        updates = {}
+        if 'name' in data:
+            updates['name'] = data['name'].strip()
+        if 'description' in data:
+            updates['description'] = data['description'].strip()
+        
+        success, message = manager.update_group(group_id, **updates)
+        
+        if success:
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"success": False, "error": message}), 400
+    
+    except Exception as e:
+        logger.error(f"Error updating group: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@lock_chimes_bp.route("/groups/<group_id>/delete", methods=["POST"])
+def delete_group(group_id):
+    """Delete a chime group."""
+    try:
+        manager = get_group_manager()
+        success, message = manager.delete_group(group_id)
+        
+        if success:
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"success": False, "error": message}), 400
+    
+    except Exception as e:
+        logger.error(f"Error deleting group: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@lock_chimes_bp.route("/groups/<group_id>/add_chime", methods=["POST"])
+def add_chime_to_group(group_id):
+    """Add a chime to a group."""
+    try:
+        data = request.get_json() if request.is_json else request.form
+        chime_filename = data.get('chime_filename', '').strip()
+        
+        if not chime_filename:
+            return jsonify({"success": False, "error": "Chime filename is required"}), 400
+        
+        manager = get_group_manager()
+        success, message = manager.add_chime_to_group(group_id, chime_filename)
+        
+        if success:
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"success": False, "error": message}), 400
+    
+    except Exception as e:
+        logger.error(f"Error adding chime to group: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@lock_chimes_bp.route("/groups/<group_id>/remove_chime", methods=["POST"])
+def remove_chime_from_group(group_id):
+    """Remove a chime from a group."""
+    try:
+        data = request.get_json() if request.is_json else request.form
+        chime_filename = data.get('chime_filename', '').strip()
+        
+        if not chime_filename:
+            return jsonify({"success": False, "error": "Chime filename is required"}), 400
+        
+        manager = get_group_manager()
+        success, message = manager.remove_chime_from_group(group_id, chime_filename)
+        
+        if success:
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"success": False, "error": message}), 400
+    
+    except Exception as e:
+        logger.error(f"Error removing chime from group: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@lock_chimes_bp.route("/groups/random_mode", methods=["POST"])
+def set_random_mode():
+    """Enable or disable random chime mode."""
+    try:
+        data = request.get_json() if request.is_json else request.form
+        enabled_value = data.get('enabled', False)
+        # Handle both boolean (from JSON) and string (from form) inputs
+        if isinstance(enabled_value, bool):
+            enabled = enabled_value
+        else:
+            enabled = str(enabled_value).lower() == 'true'
+        group_id = data.get('group_id', '').strip() if enabled else None
+        
+        manager = get_group_manager()
+        success, message = manager.set_random_mode(enabled, group_id)
+        
+        if success:
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"success": False, "error": message}), 400
+    
+    except Exception as e:
+        logger.error(f"Error setting random mode: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 

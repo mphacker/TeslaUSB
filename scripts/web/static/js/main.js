@@ -277,3 +277,293 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// ============================================================================
+// Chime Groups Management
+// ============================================================================
+
+document.addEventListener('DOMContentLoaded', function() {
+    const groupModal = document.getElementById('groupModal');
+    const createGroupBtn = document.getElementById('createGroupBtn');
+    const groupModalClose = document.getElementById('groupModalClose');
+    const cancelGroupBtn = document.getElementById('cancelGroupBtn');
+    const groupForm = document.getElementById('groupForm');
+    const randomGroupSelect = document.getElementById('randomGroupSelect');
+    const toggleRandomMode = document.getElementById('toggleRandomMode');
+    
+    if (!groupModal) return; // Not on lock chimes page
+    
+    // Open modal for creating new group
+    if (createGroupBtn) {
+        createGroupBtn.addEventListener('click', function() {
+            const modalTitle = document.getElementById('groupModalTitle');
+            const groupFormId = document.getElementById('groupFormId');
+            const groupName = document.getElementById('groupName');
+            const groupDescription = document.getElementById('groupDescription');
+            
+            if (modalTitle) modalTitle.textContent = 'Create New Group';
+            if (groupFormId) groupFormId.value = '';
+            if (groupName) groupName.value = '';
+            if (groupDescription) groupDescription.value = '';
+            
+            // Uncheck all chimes
+            document.querySelectorAll('#chimeCheckboxes input[type="checkbox"]').forEach(cb => {
+                cb.checked = false;
+            });
+            
+            groupModal.classList.add('show');
+        });
+    }
+    
+    // Close modal
+    function closeGroupModal() {
+        groupModal.classList.remove('show');
+    }
+    
+    if (groupModalClose) {
+        groupModalClose.addEventListener('click', closeGroupModal);
+    }
+    
+    if (cancelGroupBtn) {
+        cancelGroupBtn.addEventListener('click', closeGroupModal);
+    }
+    
+    // Close modal when clicking outside
+    groupModal.addEventListener('click', function(e) {
+        if (e.target === groupModal) {
+            closeGroupModal();
+        }
+    });
+    
+    // Handle group form submission
+    if (groupForm) {
+        groupForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const groupId = document.getElementById('groupFormId').value;
+            const groupName = document.getElementById('groupName').value.trim();
+            const groupDescription = document.getElementById('groupDescription').value.trim();
+            
+            // Collect selected chimes
+            const selectedChimes = [];
+            document.querySelectorAll('#chimeCheckboxes input[type="checkbox"]:checked').forEach(cb => {
+                selectedChimes.push(cb.value);
+            });
+            
+            if (!groupName) {
+                alert('Please enter a group name');
+                return;
+            }
+            
+            try {
+                let url, method, data;
+                
+                if (groupId) {
+                    // Update existing group
+                    url = `/lock_chimes/groups/${groupId}/update`;
+                    method = 'POST';
+                    data = {
+                        name: groupName,
+                        description: groupDescription
+                    };
+                    
+                    // Note: For simplicity, we'll handle chime updates separately
+                    // in the edit functionality. This just updates name/description.
+                } else {
+                    // Create new group
+                    url = '/lock_chimes/groups/create';
+                    method = 'POST';
+                    data = {
+                        name: groupName,
+                        description: groupDescription
+                    };
+                }
+                
+                const response = await fetch(url, {
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // If creating a new group, add chimes to it
+                    if (!groupId && selectedChimes.length > 0) {
+                        const newGroupId = result.group_id;
+                        for (const chime of selectedChimes) {
+                            await fetch(`/lock_chimes/groups/${newGroupId}/add_chime`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({ chime_filename: chime })
+                            });
+                        }
+                    }
+                    
+                    alert(result.message || 'Group saved successfully');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error saving group:', error);
+                alert('Failed to save group: ' + error.message);
+            }
+        });
+    }
+    
+    // Handle edit group buttons
+    document.querySelectorAll('.edit-group-btn').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const groupId = this.dataset.groupId;
+            
+            try {
+                const response = await fetch(`/lock_chimes/groups/list`);
+                const result = await response.json();
+                
+                if (result.success) {
+                    const group = result.groups.find(g => g.id === groupId);
+                    if (group) {
+                        document.getElementById('groupModalTitle').textContent = 'Edit Group';
+                        document.getElementById('groupFormId').value = groupId;
+                        document.getElementById('groupName').value = group.name;
+                        document.getElementById('groupDescription').value = group.description || '';
+                        
+                        // Check chimes that are in this group
+                        document.querySelectorAll('#chimeCheckboxes input[type="checkbox"]').forEach(cb => {
+                            cb.checked = group.chimes.includes(cb.value);
+                        });
+                        
+                        groupModal.classList.add('show');
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading group:', error);
+                alert('Failed to load group details');
+            }
+        });
+    });
+    
+    // Handle delete group buttons
+    document.querySelectorAll('.delete-group-btn').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const groupId = this.dataset.groupId;
+            const groupCard = this.closest('.group-card');
+            const groupName = groupCard.querySelector('.group-name').textContent.trim();
+            
+            if (!confirm(`Are you sure you want to delete the group "${groupName}"?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/lock_chimes/groups/${groupId}/delete`, {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert(result.message || 'Group deleted successfully');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error deleting group:', error);
+                alert('Failed to delete group: ' + error.message);
+            }
+        });
+    });
+    
+    // Handle remove chime from group
+    document.querySelectorAll('.chime-tag-remove').forEach(btn => {
+        btn.addEventListener('click', async function(e) {
+            e.stopPropagation();
+            const groupId = this.dataset.groupId;
+            const chime = this.dataset.chime;
+            
+            if (!confirm(`Remove "${chime}" from this group?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/lock_chimes/groups/${groupId}/remove_chime`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ chime_filename: chime })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Remove the tag from UI
+                    this.closest('.chime-tag').remove();
+                } else {
+                    alert('Error: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error removing chime:', error);
+                alert('Failed to remove chime: ' + error.message);
+            }
+        });
+    });
+    
+    // Handle random mode toggle
+    if (toggleRandomMode) {
+        toggleRandomMode.addEventListener('click', async function() {
+            const isCurrentlyEnabled = this.textContent.includes('✓ Enabled');
+            const selectedGroupId = randomGroupSelect.value;
+            
+            if (!isCurrentlyEnabled && !selectedGroupId) {
+                alert('Please select a group first');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/lock_chimes/groups/random_mode', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        enabled: !isCurrentlyEnabled,
+                        group_id: selectedGroupId
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert(result.message || 'Random mode updated');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error toggling random mode:', error);
+                alert('Failed to update random mode: ' + error.message);
+            }
+        });
+    }
+    
+    // Update random mode button when group selection changes
+    if (randomGroupSelect) {
+        randomGroupSelect.addEventListener('change', function() {
+            if (toggleRandomMode) {
+                const isEnabled = toggleRandomMode.textContent.includes('✓ Enabled');
+                if (isEnabled) {
+                    toggleRandomMode.textContent = 'Update';
+                } else {
+                    toggleRandomMode.textContent = 'Enable';
+                }
+            }
+        });
+    }
+});
+
+

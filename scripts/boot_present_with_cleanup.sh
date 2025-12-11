@@ -98,12 +98,40 @@ run_cleanup() {
     return $CLEANUP_RESULT
 }
 
+# Function to select random chime if random mode is enabled
+select_random_chime() {
+    echo "Checking if random chime mode is enabled..."
+    
+    RANDOM_CHIME_SCRIPT="$GADGET_DIR/scripts/select_random_chime.py"
+    
+    if [ ! -f "$RANDOM_CHIME_SCRIPT" ]; then
+        echo "Random chime script not found, skipping"
+        return 0
+    fi
+    
+    # Run random chime selector
+    /usr/bin/python3 "$RANDOM_CHIME_SCRIPT"
+    RESULT=$?
+    
+    if [ $RESULT -eq 0 ]; then
+        echo "Random chime selection completed successfully"
+    else
+        echo "Random chime selection skipped or failed (code $RESULT)"
+    fi
+    
+    return 0  # Don't fail boot if random chime has issues
+}
+
 # Main logic
 if needs_cleanup; then
     run_cleanup || echo "Cleanup encountered errors but continuing with USB presentation..."
 else
     echo "Skipping cleanup (not enabled)"
 fi
+
+# Select random chime if random mode is enabled
+echo ""
+select_random_chime
 
 # Now run the normal present script
 echo ""

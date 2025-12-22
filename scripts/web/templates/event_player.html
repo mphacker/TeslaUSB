@@ -971,14 +971,14 @@
         const button = document.getElementById('downloadButton');
         const icon = document.getElementById('downloadIcon');
         const label = document.getElementById('downloadLabel');
-        
+
         // Show preparing state
         icon.className = 'bi bi-hourglass-split camera-icon';
         label.textContent = 'Preparing...';
-        
+
         // Build download URL
         const downloadUrl = "{{ url_for('videos.download_event', folder=folder, event_name=event.name) }}";
-        
+
         // Trigger download with anchor tag
         const a = document.createElement('a');
         a.href = downloadUrl;
@@ -986,13 +986,13 @@
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        
+
         // Show downloading state after 1 second
         setTimeout(() => {
             icon.className = 'bi bi-cloud-download camera-icon';
             label.textContent = 'Downloading...';
         }, 1000);
-        
+
         // Reset to ready state after 5 seconds
         setTimeout(() => {
             icon.className = 'bi bi-download camera-icon';

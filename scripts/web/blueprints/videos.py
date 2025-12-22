@@ -350,7 +350,7 @@ def download_video(filepath):
 @videos_bp.route("/download_event/<folder>/<event_name>")
 def download_event(folder, event_name):
     """Download all camera videos for an event as a zip file.
-    
+
     Works with both event-based (SavedClips/SentryClips) and flat (RecentClips) structures.
     """
     teslacam_path = get_teslacam_path()
@@ -371,7 +371,7 @@ def download_event(folder, event_name):
 
     # Collect video files
     video_files = []
-    
+
     if folder_structure == 'flat':
         # RecentClips: Get session videos
         session_videos = get_session_videos(folder_path, event_name)
@@ -398,14 +398,14 @@ def download_event(folder, event_name):
     # Use /home/pi for temp storage to avoid filling tmpfs
     temp_dir = '/home/pi/.cache/teslausb/zip_temp'
     os.makedirs(temp_dir, exist_ok=True)
-    
+
     temp_fd, temp_path = tempfile.mkstemp(suffix='.zip', dir=temp_dir)
     os.close(temp_fd)
-    
+
     with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for video_path, filename in video_files:
             zipf.write(video_path, filename)
-    
+
     # Register cleanup callback to delete temp file after response is sent
     @after_this_request
     def cleanup(response):
@@ -414,7 +414,7 @@ def download_event(folder, event_name):
         except Exception as e:
             logger.error(f"Failed to cleanup temp zip: {e}")
         return response
-    
+
     # Send the zip file
     return send_file(
         temp_path,

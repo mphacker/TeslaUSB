@@ -41,6 +41,18 @@
         object-fit: contain;
     }
 
+    /* iOS-specific fixes to prevent native video controls from hiding overlays */
+    .main-video::-webkit-media-controls-panel {
+        display: flex !important;
+        opacity: 1 !important;
+    }
+
+    /* Ensure video stays within container on iOS */
+    .main-video {
+        -webkit-transform: translateZ(0);
+        transform: translateZ(0);
+    }
+
     /* Top overlay header with location and info */
     .event-header {
         position: absolute;
@@ -54,6 +66,15 @@
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
+        pointer-events: none; /* Allow clicks to pass through to video controls */
+        -webkit-transform: translateZ(1px); /* Force iOS to render on top */
+        transform: translateZ(1px);
+    }
+
+    /* Re-enable pointer events for interactive elements within header */
+    .event-header a,
+    .event-header button {
+        pointer-events: auto;
     }
 
     .event-info {
@@ -79,7 +100,8 @@
         position: absolute;
         top: 12px;
         left: 50%;
-        transform: translateX(-50%);
+        transform: translateX(-50%) translateZ(3px);
+        -webkit-transform: translateX(-50%) translateZ(3px);
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -282,6 +304,8 @@
         font-size: 0.9em;
         transition: all 0.2s;
         backdrop-filter: blur(10px);
+        -webkit-transform: translateZ(2px); /* Force iOS to render on top */
+        transform: translateZ(2px);
     }
 
     .back-link:hover {
@@ -301,6 +325,8 @@
         flex-wrap: wrap;
         flex-shrink: 0;
         border-top: 1px solid rgba(255,255,255,0.1);
+        -webkit-transform: translateZ(1px); /* Force iOS to render on top */
+        transform: translateZ(1px);
     }
 
     .camera-option {
@@ -431,28 +457,6 @@
         }
     }
 
-    /* Jump to Event button like Tesla */
-    .jump-to-event {
-        position: absolute;
-        bottom: 150px;
-        left: 20px;
-        z-index: 10;
-        padding: 10px 20px;
-        background: rgba(255, 50, 50, 0.9);
-        color: #fff;
-        border: none;
-        border-radius: 4px;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.2s;
-        backdrop-filter: blur(10px);
-    }
-
-    .jump-to-event:hover {
-        background: rgba(255, 50, 50, 1);
-        transform: scale(1.05);
-    }
-
     /* Hide default controls on fullscreen */
     .main-video::-webkit-media-controls {
         opacity: 0.7;
@@ -474,7 +478,7 @@
 
     <!-- Main video -->
     <div class="main-video-container">
-        <video id="mainVideo" class="main-video" controls>
+        <video id="mainVideo" class="main-video" controls playsinline webkit-playsinline>
             Your browser does not support the video tag.
         </video>
     </div>
@@ -482,7 +486,7 @@
     <!-- Top overlay with location and info -->
     <div class="event-header" id="topOverlay">
         <div class="event-info">
-            <h2 class="event-location">{% if event.city %}{{ event.city }}{% else %}Unknown Location{% endif %}</h2>
+            {% if event.city %}<h2 class="event-location">{{ event.city }}</h2>{% endif %}
             <div class="event-datetime">{{ event.datetime }}</div>
         </div>
 
@@ -543,10 +547,12 @@
             <div class="hud-autopilot" id="autopilotIndicator">Self-Driving</div>
         </div>
 
+        {% if event.reason or event.size_mb %}
         <div class="event-meta-right">
-            {% if event.reason %}{{ event.reason.replace('_', ' ').title() }}{% endif %}
-            <div>{{ event.size_mb }} MB</div>
+            {% if event.reason %}<div>{{ event.reason.replace('_', ' ').title() }}</div>{% endif %}
+            {% if event.size_mb %}<div>{{ event.size_mb }} MB</div>{% endif %}
         </div>
+        {% endif %}
     </div>
 
     <!-- Bottom camera selector with Tesla-style layout -->
@@ -680,6 +686,13 @@
     async function loadSEIData(videoUrl) {
         // Skip if blob URL (already processed) or same source or no proto loaded
         if (!seiType || videoUrl.startsWith('blob:') || currentVideoSrc === videoUrl) return;
+        
+        // Remove any existing loading indicator first
+        const existingLoader = document.getElementById('seiLoading');
+        if (existingLoader) {
+            existingLoader.remove();
+        }
+        
         currentVideoSrc = videoUrl;
         seiFrames = [];
         seiLoading = true;
@@ -782,19 +795,18 @@
             loadingDiv.remove();
             seiLoading = false;
         } catch (err) {
-            console.error('Failed to load SEI data:', err);
+            console.error('Failed to download video:', err);
             seiFrames = [];
             seiLoading = false;
 
             // Show error and remove loading indicator
             const loadingDiv = document.getElementById('seiLoading');
             if (loadingDiv) {
-                loadingDiv.innerHTML = '<div style="color:#ff5555;">❌ Failed to load SEI data</div><div style="font-size:14px;margin-top:10px;">' + err.message + '</div><div style="margin-top:15px;font-size:14px;opacity:0.7;">Video will play without telemetry overlay</div>';
+                loadingDiv.innerHTML = '<div style="color:#ff5555;">❌ Video download failed</div><div style="font-size:14px;margin-top:10px;">' + err.message + '</div><div style="margin-top:15px;font-size:14px;opacity:0.7;">Please check your connection and try again</div>';
                 setTimeout(() => loadingDiv.remove(), 3000);
             }
 
-            // Allow video to play even if SEI fails
-            video.play().catch(err => console.log('Autoplay prevented:', err));
+            // Don't try to play if download failed
         }
     }
 
@@ -896,8 +908,15 @@
             return;
         }
 
-        // Save playback state
-        wasPlaying = !video.paused;
+        // Remove any stuck loading indicators from previous switches
+        const existingLoader = document.getElementById('seiLoading');
+        if (existingLoader) {
+            existingLoader.remove();
+        }
+
+        // Stop video playback when switching cameras
+        video.pause();
+        wasPlaying = false;
         currentTime = video.currentTime;
 
         // Update active state
@@ -906,9 +925,16 @@
         });
         element.classList.add('active');
 
+        // Reset SEI loading state to allow new SEI data to load
+        seiLoading = false;
+        currentVideoSrc = null;
+
         // Switch video source (videoUrl is now the full URL)
         video.src = videoUrl;
         video.load();
+
+        // Trigger SEI loading for new video
+        loadSEIData(videoUrl);
 
         // Restore playback position and state
         video.addEventListener('loadedmetadata', function onLoaded() {

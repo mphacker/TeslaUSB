@@ -210,6 +210,10 @@ def check_and_recover_gadget_state():
     
     img_path = os.path.join(GADGET_DIR, 'usb_lightshow.img')
     
+    # Get current mode to determine which checks are appropriate
+    from services.mode_service import current_mode
+    mode = current_mode()
+    
     # Check 1: Verify image file exists
     if not os.path.exists(img_path):
         result['healthy'] = False
@@ -217,69 +221,73 @@ def check_and_recover_gadget_state():
         result['errors'].append("Cannot proceed without image file")
         return result
     
-    # Check 2: Verify LUN1 backing file state
-    try:
-        proc = subprocess.run(
-            ['sh', '-c', 'cat /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file 2>/dev/null'],
-            capture_output=True,
-            text=True,
-            check=False
-        )
-        
-        if proc.returncode == 0:
-            current_backing = proc.stdout.strip()
-            # Normalize paths for comparison (resolve symlinks, relative paths)
-            expected_path = os.path.realpath(img_path)
-            current_path = os.path.realpath(current_backing) if current_backing else ""
+    # Check 2: Verify LUN1 backing file state (only in present mode)
+    # In edit mode, the gadget is not active so LUN backing file won't exist
+    if mode == 'present':
+        try:
+            proc = subprocess.run(
+                ['sh', '-c', 'cat /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file 2>/dev/null'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
             
-            if not current_backing:
-                result['healthy'] = False
-                result['issues_found'].append("LUN1 backing file is empty")
+            if proc.returncode == 0:
+                current_backing = proc.stdout.strip()
+                # Normalize paths for comparison (resolve symlinks, relative paths)
+                expected_path = os.path.realpath(img_path)
+                current_path = os.path.realpath(current_backing) if current_backing else ""
                 
-                # Attempt to restore
-                logger.info("Attempting to restore LUN1 backing file...")
-                if _restore_lun_backing(img_path):
-                    result['fixes_applied'].append("Restored LUN1 backing file")
-                    result['healthy'] = True  # Mark as healthy after successful fix
-                else:
-                    result['errors'].append("Failed to restore LUN1 backing file")
-                    
-            elif current_path != expected_path:
-                result['healthy'] = False
-                result['issues_found'].append(f"LUN1 backing incorrect: {current_backing} (expected: {img_path})")
-                
-                # Attempt to correct
-                logger.info(f"Correcting LUN1 backing file from '{current_backing}' to '{img_path}'...")
-                if _restore_lun_backing(img_path):
-                    result['fixes_applied'].append("Corrected LUN1 backing file")
-                    result['healthy'] = True  # Mark as healthy after successful fix
-                else:
-                    result['errors'].append("Failed to correct LUN1 backing file")
-        else:
-            result['issues_found'].append("Could not read LUN1 backing file")
-            
-    except Exception as e:
-        result['errors'].append(f"Error checking LUN backing: {e}")
-    
-    # Check 3: Look for orphaned RW mounts that should be RO
-    try:
-        mount_rw = os.path.join(MNT_DIR, 'part2')
-        proc = subprocess.run(
-            ['mount'],
-            capture_output=True,
-            text=True,
-            check=False
-        )
-        
-        if proc.returncode == 0:
-            for line in proc.stdout.splitlines():
-                if mount_rw in line and 'rw' in line and 'loop' in line:
+                if not current_backing:
                     result['healthy'] = False
-                    result['issues_found'].append(f"Unexpected RW mount found: {mount_rw}")
-                    # Don't auto-fix this as it could be a legitimate operation in progress
+                    result['issues_found'].append("LUN1 backing file is empty")
                     
-    except Exception as e:
-        logger.warning(f"Error checking mount state: {e}")
+                    # Attempt to restore
+                    logger.info("Attempting to restore LUN1 backing file...")
+                    if _restore_lun_backing(img_path):
+                        result['fixes_applied'].append("Restored LUN1 backing file")
+                        result['healthy'] = True  # Mark as healthy after successful fix
+                    else:
+                        result['errors'].append("Failed to restore LUN1 backing file")
+                        
+                elif current_path != expected_path:
+                    result['healthy'] = False
+                    result['issues_found'].append(f"LUN1 backing incorrect: {current_backing} (expected: {img_path})")
+                    
+                    # Attempt to correct
+                    logger.info(f"Correcting LUN1 backing file from '{current_backing}' to '{img_path}'...")
+                    if _restore_lun_backing(img_path):
+                        result['fixes_applied'].append("Corrected LUN1 backing file")
+                        result['healthy'] = True  # Mark as healthy after successful fix
+                    else:
+                        result['errors'].append("Failed to correct LUN1 backing file")
+            else:
+                result['issues_found'].append("Could not read LUN1 backing file")
+                
+        except Exception as e:
+            result['errors'].append(f"Error checking LUN backing: {e}")
+    
+    # Check 3: Look for orphaned RW mounts that should be RO (only in present mode)
+    # In edit mode, RW mounts are expected and normal
+    if mode == 'present':
+        try:
+            mount_rw = os.path.join(MNT_DIR, 'part2')
+            proc = subprocess.run(
+                ['mount'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    if mount_rw in line and 'rw' in line and 'loop' in line:
+                        result['healthy'] = False
+                        result['issues_found'].append(f"Unexpected RW mount found: {mount_rw}")
+                        # Don't auto-fix this as it could be a legitimate operation in progress
+                        
+        except Exception as e:
+            logger.warning(f"Error checking mount state: {e}")
     
     if result['healthy'] and not result['issues_found']:
         logger.info("✓ Gadget state is healthy")

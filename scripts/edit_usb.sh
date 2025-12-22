@@ -16,10 +16,10 @@ LOCK_CHECK_START=$(date +%s)
 if [ -f "$LOCK_FILE" ]; then
   echo "⚠️  File operation in progress (lock file detected)"
   echo "Waiting up to ${LOCK_TIMEOUT}s for operation to complete..."
-  
+
   while [ -f "$LOCK_FILE" ]; do
     LOCK_AGE=$(($(date +%s) - LOCK_CHECK_START))
-    
+
     if [ $LOCK_AGE -ge $LOCK_TIMEOUT ]; then
       # Check if lock is stale (older than 2 minutes)
       if [ -f "$LOCK_FILE" ]; then
@@ -30,32 +30,28 @@ if [ -f "$LOCK_FILE" ]; then
           break
         fi
       fi
-      
+
       echo "❌ ERROR: Cannot switch to edit mode - file operation still in progress" >&2
       echo "Please wait for current upload/download/scheduler operation to complete" >&2
       exit 1
     fi
-    
+
     sleep 1
   done
-  
+
   echo "✓ File operation completed, proceeding with mode switch"
 fi
 
 echo "Switching to edit mode (local mount + Samba)..."
 
-# Stop thumbnail generator to prevent file access during mode switch
-echo "Stopping thumbnail generator..."
-sudo systemctl stop thumbnail_generator.service 2>/dev/null || true
-
 # Get user IDs for mounting
-UID_VAL=$(id -u "$TARGET_USER")
-GID_VAL=$(id -g "$TARGET_USER")
+UID_VAL=$(id -u \"$TARGET_USER\")
+GID_VAL=$(id -g \"$TARGET_USER\")
 
 safe_unmount_dir() {
   local target="$1"
   local attempt
-  
+
   # Check if actually mounted in the system mount namespace
   if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$target" 2>/dev/null; then
     return 0
@@ -64,7 +60,7 @@ safe_unmount_dir() {
   # Try normal unmount in the system mount namespace
   for attempt in 1 2 3; do
     echo "  Unmounting $target (attempt $attempt)..."
-    
+
     if sudo nsenter --mount=/proc/1/ns/mnt umount "$target" 2>/dev/null; then
       sleep 1
       # Verify it's actually gone
@@ -75,7 +71,7 @@ safe_unmount_dir() {
         echo "  WARNING: umount succeeded but mount still exists (multiple mounts?)"
       fi
     fi
-    
+
     # Still mounted, wait before retry
     if [ $attempt -lt 3 ]; then
       sleep 2
@@ -96,37 +92,37 @@ if [ -d "$CONFIGFS_GADGET" ]; then
   # Sync all pending writes first
   sync
   sleep 1
-  
+
   # Unbind UDC FIRST - this disconnects the gadget from USB before touching mounts
   if [ -f "$CONFIGFS_GADGET/UDC" ]; then
     echo "  Unbinding UDC..."
     echo "" | sudo tee "$CONFIGFS_GADGET/UDC" > /dev/null 2>&1 || true
     sleep 2
   fi
-  
+
   # Remove function links
   echo "  Removing function links..."
   sudo rm -f "$CONFIGFS_GADGET"/configs/*/mass_storage.* 2>/dev/null || true
-  
+
   # Remove configurations
   sudo rmdir "$CONFIGFS_GADGET"/configs/*/strings/* 2>/dev/null || true
   sudo rmdir "$CONFIGFS_GADGET"/configs/* 2>/dev/null || true
-  
+
   # Remove LUNs from functions
   sudo rmdir "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.* 2>/dev/null || true
-  
+
   # Remove functions
   sudo rmdir "$CONFIGFS_GADGET"/functions/* 2>/dev/null || true
-  
+
   # Remove strings
   sudo rmdir "$CONFIGFS_GADGET"/strings/* 2>/dev/null || true
-  
+
   # Remove gadget
   sudo rmdir "$CONFIGFS_GADGET" 2>/dev/null || true
-  
+
   echo "  Configfs gadget removed successfully"
   sleep 2
-  
+
   # NOW unmount read-only mounts after gadget is fully disconnected
   echo "Unmounting read-only mounts from present mode..."
   RO_MNT_DIR="/mnt/gadget"
@@ -139,14 +135,14 @@ if [ -d "$CONFIGFS_GADGET" ]; then
       fi
     fi
   done
-  
+
 # Check for legacy g_mass_storage module
 elif lsmod | grep -q '^g_mass_storage'; then
   echo "Removing legacy g_mass_storage module..."
   # Sync all pending writes first
   sync
   sleep 1
-  
+
   # Unmount any read-only mounts from present mode first
   echo "Unmounting read-only mounts from present mode..."
   RO_MNT_DIR="/mnt/gadget"
@@ -158,7 +154,7 @@ elif lsmod | grep -q '^g_mass_storage'; then
       fi
     fi
   done
-  
+
   # Try to unbind the UDC (USB Device Controller) first to cleanly disconnect
   UDC_DIR="/sys/class/udc"
   if [ -d "$UDC_DIR" ]; then
@@ -171,7 +167,7 @@ elif lsmod | grep -q '^g_mass_storage'; then
     done
     sleep 1
   fi
-  
+
   # Now try to remove the module
   echo "  Removing g_mass_storage module..."
   if sudo timeout 5 rmmod g_mass_storage 2>/dev/null; then
@@ -321,7 +317,7 @@ if [ "$FS_TYPE" = "vfat" ] || [ "$FS_TYPE" = "exfat" ]; then
     sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_CAM" "$FS_TYPE" repair
     REPAIR_STATUS=$?
     set -e
-    
+
     if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
       echo "    ✓ Filesystem repaired"
     else
@@ -334,7 +330,7 @@ if [ "$FS_TYPE" = "vfat" ] || [ "$FS_TYPE" = "exfat" ]; then
     sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_CAM" "$FS_TYPE" repair
     REPAIR_STATUS=$?
     set -e
-    
+
     if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
       echo "    ✓ Filesystem repaired successfully"
     else
@@ -365,7 +361,7 @@ if [ "$FS_TYPE" = "vfat" ] || [ "$FS_TYPE" = "exfat" ]; then
     sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_LIGHTSHOW" "$FS_TYPE" repair
     REPAIR_STATUS=$?
     set -e
-    
+
     if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
       echo "    ✓ Filesystem repaired"
     else
@@ -378,7 +374,7 @@ if [ "$FS_TYPE" = "vfat" ] || [ "$FS_TYPE" = "exfat" ]; then
     sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_LIGHTSHOW" "$FS_TYPE" repair
     REPAIR_STATUS=$?
     set -e
-    
+
     if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
       echo "    ✓ Filesystem repaired successfully"
     else

@@ -17,7 +17,7 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Offline access point for in-car web access when WiFi is unavailable
 
 > **⚠️ Personal Project Notice**
-> 
+>
 > This is a personal project built for my own use. You are welcome to fork the code and make your own changes or updates. Please be aware:
 > - The Git repository may update frequently with new features and changes
 > - Bugs may be introduced into the main branch without extensive testing
@@ -29,7 +29,7 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 
 ### Core Functionality
 - **Dual-Drive USB Gadget**: Two independent filesystems (TeslaCam + LightShow) with optimized performance
-- **Two Operating Modes**: 
+- **Two Operating Modes**:
   - **Present Mode**: Active USB gadget for Tesla recording
   - **Edit Mode**: Network access via Samba shares for file management
 - **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>:5000`
@@ -53,7 +53,7 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
   - Holiday schedules (Christmas, Easter, Thanksgiving, etc.)
   - Recurring rotation (every 15min to 12 hours, or on boot)
 
-### Light Show Management  
+### Light Show Management
 - Upload FSEQ and MP3/WAV files
 - Grouped display (pairs sequence + audio files)
 - Preview MP3/WAV tracks in browser
@@ -72,6 +72,7 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 
 ## Requirements
 
+- **Tesla Software**: Version **2025.44.25.1 or later** (2025 Holiday Update) required for event thumbnails, SEI telemetry data, and multi-camera event structure
 - Raspberry Pi with USB OTG capability (Pi Zero 2 W recommended, Pi 4, Pi 5)
 - 128GB+ microSD card (for OS, dashcam storage, and light shows)
 - Raspberry Pi OS (64-bit) Desktop - Debian "Trixie"
@@ -117,7 +118,7 @@ Open `http://<pi-ip-address>:5000` or `http://<hostname>.local:5000` in your bro
 ### 4. Connect to Tesla
 
 Connect the Pi to your Tesla's USB port:
-- **Pi Zero 2 W**: Use USB port labeled "USB" (not "PWR")  
+- **Pi Zero 2 W**: Use USB port labeled "USB" (not "PWR")
 - **Pi 4/5**: Use USB-C port
 
 Tesla will detect two separate USB drives automatically.
@@ -253,7 +254,7 @@ Removes all files, services, and system configuration.
 ## Systemd Services
 
 | Service/Timer | Purpose |
-|---------------|---------|  
+|---------------|---------|
 | `gadget_web.service` | Web interface (port 5000) |
 | `present_usb_on_boot.service` | Auto-present USB on boot with optional cleanup |
 | `chime_scheduler.timer` | Check scheduled chime changes every 60 seconds |

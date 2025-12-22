@@ -676,6 +676,35 @@ if [ ! -f "$STATE_FILE" ]; then
   chown "$TARGET_USER:$TARGET_USER" "$STATE_FILE"
 fi
 
+# ===== Clean up deprecated thumbnail system =====
+echo "Cleaning up deprecated thumbnail generation system..."
+
+# Stop and disable old thumbnail services
+if systemctl is-enabled thumbnail_generator.service 2>/dev/null; then
+  systemctl stop thumbnail_generator.service 2>/dev/null || true
+  systemctl disable thumbnail_generator.service 2>/dev/null || true
+fi
+
+if systemctl is-enabled thumbnail_generator.timer 2>/dev/null; then
+  systemctl stop thumbnail_generator.timer 2>/dev/null || true
+  systemctl disable thumbnail_generator.timer 2>/dev/null || true
+fi
+
+# Remove systemd service files
+rm -f /etc/systemd/system/thumbnail_generator.service 2>/dev/null || true
+rm -f /etc/systemd/system/thumbnail_generator.timer 2>/dev/null || true
+
+# Remove thumbnail service Python file
+rm -f "$GADGET_DIR/scripts/web/services/thumbnail_service.py" 2>/dev/null || true
+
+# Remove thumbnail cache directory
+if [ -d "$GADGET_DIR/thumbnails" ]; then
+  echo "  Removing thumbnail cache directory..."
+  rm -rf "$GADGET_DIR/thumbnails" 2>/dev/null || true
+fi
+
+echo "Deprecated thumbnail system cleanup complete."
+
 # ===== Systemd services =====
 echo "Installing systemd services..."
 

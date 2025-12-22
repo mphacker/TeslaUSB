@@ -126,20 +126,20 @@
     font-size: 12px;
 }
 
-.progress-normal { 
-    background: linear-gradient(90deg, #4CAF50, #66BB6A); 
+.progress-normal {
+    background: linear-gradient(90deg, #4CAF50, #66BB6A);
 }
 
-.progress-caution { 
-    background: linear-gradient(90deg, #FFC107, #FFD54F); 
+.progress-caution {
+    background: linear-gradient(90deg, #FFC107, #FFD54F);
 }
 
-.progress-warning { 
-    background: linear-gradient(90deg, #FF9800, #FFB74D); 
+.progress-warning {
+    background: linear-gradient(90deg, #FF9800, #FFB74D);
 }
 
-.progress-critical { 
-    background: linear-gradient(90deg, #F44336, #E57373); 
+.progress-critical {
+    background: linear-gradient(90deg, #F44336, #E57373);
 }
 
 .progress-label {
@@ -519,11 +519,11 @@
     .folder-table-container {
         display: none;
     }
-    
+
     .folder-cards-mobile {
         display: block;
     }
-    
+
     .folder-card {
         background: white;
         border: 1px solid #ddd;
@@ -532,46 +532,46 @@
         margin-bottom: 15px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    
+
     .folder-card.priority-high {
         border-left: 4px solid #FF9800;
     }
-    
+
     .folder-card-header {
         display: flex;
         align-items: center;
         margin-bottom: 15px;
     }
-    
+
     .folder-icon-large {
         font-size: 32px;
         margin-right: 12px;
     }
-    
+
     .folder-card-stats {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         gap: 10px;
         margin: 15px 0;
     }
-    
+
     .folder-stat {
         text-align: center;
     }
-    
+
     .folder-stat-label {
         display: block;
         font-size: 11px;
         color: #666;
         margin-bottom: 4px;
     }
-    
+
     .folder-stat-value {
         display: block;
         font-weight: bold;
         color: #333;
     }
-    
+
     .folder-card-dates {
         margin-top: 10px;
         padding-top: 10px;
@@ -758,4 +758,287 @@
 [data-theme="dark"] .folder-card-dates {
     border-top-color: var(--border-light);
     color: var(--text-secondary);
+}
+
+/* Filesystem Check Section */
+.fsck-section {
+    margin-top: 30px;
+    padding: 25px;
+    background: white;
+    border-radius: 12px;
+    border: 2px solid #e0e0e0;
+}
+
+.fsck-section h3 {
+    margin-top: 0;
+    color: #333;
+}
+
+.section-description {
+    color: #666;
+    margin-bottom: 20px;
+}
+
+.fsck-status-container {
+    margin: 15px 0;
+    padding: 15px;
+    border-radius: 8px;
+    font-size: 0.95em;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 15px;
+}
+
+.fsck-status-info {
+    background: var(--msg-info-bg);
+    border-left: 4px solid #2196F3;
+    color: var(--text-primary);
+}
+
+.fsck-status-success {
+    background: var(--msg-success-bg);
+    border-left: 4px solid #4CAF50;
+    color: var(--text-primary);
+}
+
+.fsck-status-warning {
+    background: var(--msg-warning-bg);
+    border-left: 4px solid #FF9800;
+    color: var(--text-primary);
+}
+
+.fsck-status-error {
+    background: var(--msg-error-bg);
+    border-left: 4px solid #F44336;
+    color: var(--text-primary);
+}
+
+.fsck-status-message {
+    font-weight: 500;
+    line-height: 1.5;
+    word-break: break-word;
+    flex: 1;
+}
+
+.btn-cancel-fsck {
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 4px;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.9em;
+    white-space: nowrap;
+    transition: background 0.2s ease;
+    flex-shrink: 0;
+}
+
+.btn-cancel-fsck:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+[data-theme="dark"] .btn-cancel-fsck {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+[data-theme="dark"] .btn-cancel-fsck:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.fsck-partitions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+    margin: 20px 0;
+}
+
+.fsck-partition-card {
+    background: #f9f9f9;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 20px;
+}
+
+.fsck-partition-card h4 {
+    margin-top: 0;
+    color: #333;
+}
+
+.last-check-info {
+    margin: 15px 0;
+    padding: 10px;
+    background: white;
+    border-radius: 6px;
+    min-height: 50px;
+}
+
+.last-check-result {
+    color: #333;
+    line-height: 1.6;
+}
+
+.last-check-never {
+    color: #999;
+    font-style: italic;
+}
+
+.fsck-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.fsck-actions button {
+    flex: 1;
+    min-width: 120px;
+    white-space: nowrap;
+}
+
+/* Mobile responsiveness for fsck section */
+@media (max-width: 768px) {
+    .fsck-partitions {
+        grid-template-columns: 1fr;
+    }
+
+    .fsck-actions {
+        flex-direction: column;
+    }
+
+    .fsck-actions button {
+        width: 100%;
+        min-width: unset;
+    }
+
+    .fsck-status-container {
+        font-size: 0.9em;
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .btn-cancel-fsck {
+        width: 100%;
+    }
+
+    .fsck-history-table {
+        font-size: 0.85em;
+    }
+
+    .fsck-history-table th,
+    .fsck-history-table td {
+        padding: 8px 6px;
+    }
+
+    .fsck-history-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .fsck-history-table {
+        min-width: 600px;
+    }
+}
+
+.fsck-history-container {
+    margin-top: 30px;
+    padding: 20px;
+    background: var(--bg-info, #f9f9f9);
+    border-radius: 8px;
+}
+
+.fsck-history-container h4 {
+    margin-top: 0;
+    color: var(--text-primary, #333);
+}
+
+.fsck-history-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-container, white);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.fsck-history-table thead {
+    background: var(--bg-info, #f0f0f0);
+}
+
+.fsck-history-table th,
+.fsck-history-table td {
+    padding: 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color, #e0e0e0);
+}
+
+.fsck-history-table th {
+    font-weight: 600;
+    color: var(--text-primary, #333);
+}
+
+.fsck-history-table td {
+    color: var(--text-secondary, #666);
+}
+
+.fsck-history-table tr:last-child td {
+    border-bottom: none;
+}
+
+.no-history {
+    padding: 20px;
+    text-align: center;
+    color: #999;
+    font-style: italic;
+}
+
+/* Dark mode support for fsck section */
+[data-theme="dark"] .fsck-section {
+    background: var(--bg-container);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .fsck-section h3 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .section-description {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .fsck-partition-card {
+    background: var(--bg-info);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .fsck-partition-card h4 {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .last-check-info {
+    background: var(--bg-container);
+}
+
+[data-theme="dark"] .last-check-result {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .fsck-history-container {
+    background: var(--bg-info);
+}
+
+[data-theme="dark"] .fsck-history-table {
+    background: var(--bg-container);
+}
+
+[data-theme="dark"] .fsck-history-table thead {
+    background: var(--bg-info);
+}
+
+[data-theme="dark"] .fsck-history-table th {
+    color: var(--text-primary);
+}
+
+[data-theme="dark"] .fsck-history-table td {
+    color: var(--text-secondary);
+    border-bottom-color: var(--border-color);
 }

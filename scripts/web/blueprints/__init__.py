@@ -7,13 +7,15 @@ from .light_shows import light_shows_bp
 from .analytics import analytics_bp
 from .cleanup import cleanup_bp
 from .api import api_bp
+from .fsck import fsck_bp
 
 __all__ = [
-    'mode_control_bp', 
-    'videos_bp', 
-    'lock_chimes_bp', 
-    'light_shows_bp', 
-    'analytics_bp', 
+    'mode_control_bp',
+    'videos_bp',
+    'lock_chimes_bp',
+    'light_shows_bp',
+    'analytics_bp',
     'cleanup_bp',
-    'api_bp'
+    'api_bp',
+    'fsck_bp'
 ]

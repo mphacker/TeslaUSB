@@ -6,7 +6,7 @@
 <div class="container">
     <h2>📊 Storage Analytics Dashboard</h2>
     <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
-    
+
     <!-- Storage Health Status -->
     {% set health = analytics.storage_health %}
     {% if health.status == 'critical' %}
@@ -28,7 +28,7 @@
             <strong>✅ Storage Healthy</strong>
         </div>
     {% endif %}
-    
+
     <!-- Storage Management Actions -->
     <div class="management-actions">
         <a href="{{ url_for('cleanup.settings') }}" class="action-card">
@@ -41,13 +41,60 @@
         </a>
     </div>
 
-    
+    <!-- Filesystem Health Check Section -->
+    <div class="analytics-section fsck-section">
+        <h3>🔍 Filesystem Health Check</h3>
+        <p class="section-description">
+            Run filesystem checks to detect and repair corruption.<br>
+            <small><strong>Quick Check:</strong> Can run in any mode (read-only, 30min timeout) | <strong>Repair:</strong> Requires Edit Mode (fixes errors, 2hr timeout)</small>
+        </p>
+
+        <div class="fsck-status-container" id="fsck-status-container">
+            <!-- Dynamic status will be loaded here -->
+        </div>
+
+        <div class="fsck-partitions">
+            <div class="fsck-partition-card">
+                <h4>📹 TeslaCam Partition</h4>
+                <div id="part1-last-check" class="last-check-info">Loading...</div>
+                <div class="fsck-actions">
+                    <button onclick="startFsck(1, 'quick')" class="btn btn-secondary" id="btn-fsck-part1-quick">
+                        Quick Check
+                    </button>
+                    <button onclick="startFsck(1, 'repair')" class="btn btn-warning" id="btn-fsck-part1-repair">
+                        Check & Repair
+                    </button>
+                </div>
+            </div>
+
+            <div class="fsck-partition-card">
+                <h4>💡 LightShow Partition</h4>
+                <div id="part2-last-check" class="last-check-info">Loading...</div>
+                <div class="fsck-actions">
+                    <button onclick="startFsck(2, 'quick')" class="btn btn-secondary" id="btn-fsck-part2-quick">
+                        Quick Check
+                    </button>
+                    <button onclick="startFsck(2, 'repair')" class="btn btn-warning" id="btn-fsck-part2-repair">
+                        Check & Repair
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="fsck-history-container" class="fsck-history-container">
+            <h4>Recent Checks</h4>
+            <div class="fsck-history-scroll">
+                <div id="fsck-history-list">Loading...</div>
+            </div>
+        </div>
+    </div>
+
     <!-- Partition Usage Cards -->
     <div class="analytics-grid">
         {% for partition_name, usage in analytics.partition_usage.items() %}
         <div class="analytics-card">
             <h3>{{ '📹 TeslaCam Partition' if partition_name == 'part1' else '💡 LightShow Partition' }}</h3>
-            
+
             {% if 'error' in usage %}
                 <div class="error-message">{{ usage.error }}</div>
             {% else %}
@@ -65,10 +112,10 @@
                         <span class="stat-value">{{ "%.2f"|format(usage.free_gb) }} GB</span>
                     </div>
                 </div>
-                
+
                 <!-- Progress Bar -->
                 <div class="progress-container">
-                    <div class="progress-bar 
+                    <div class="progress-bar
                         {% if usage.percent_used >= 95 %}progress-critical
                         {% elif usage.percent_used >= 90 %}progress-warning
                         {% elif usage.percent_used >= 80 %}progress-caution
@@ -77,13 +124,13 @@
                     </div>
                 </div>
                 <div class="progress-label">{{ "%.1f"|format(usage.percent_used) }}% Used</div>
-                
+
                 <div class="partition-path">{{ usage.path }}</div>
             {% endif %}
         </div>
         {% endfor %}
     </div>
-    
+
     <!-- Recording Time Estimate -->
     {% set estimate = analytics.recording_estimate %}
     {% if estimate.teslacam_hours is not none %}
@@ -102,11 +149,11 @@
         <div class="estimate-confidence">Confidence: {{ estimate.confidence }}</div>
     </div>
     {% endif %}
-    
+
     <!-- Video Statistics -->
     <div class="analytics-section">
         <h3>📹 Video Statistics</h3>
-        
+
         {% set video_stats = analytics.video_statistics %}
         <div class="totals-row">
             <div class="total-stat">
@@ -119,12 +166,12 @@
             </div>
         </div>
     </div>
-    
+
     <!-- Folder Breakdown -->
     {% if analytics.folder_breakdown %}
     <div class="analytics-section">
         <h3>📁 Folder Breakdown</h3>
-        
+
         <div class="folder-table-container">
             <table class="analytics-table">
                 <thead>
@@ -160,7 +207,7 @@
                 </tbody>
             </table>
         </div>
-        
+
         <!-- Mobile Card Layout -->
         <div class="folder-cards-mobile">
             {% for folder in analytics.folder_breakdown %}
@@ -198,7 +245,7 @@
         </div>
     </div>
     {% endif %}
-    
+
     <!-- Recommendations -->
     {% if health.recommendations %}
     <div class="recommendations-section">
@@ -210,11 +257,389 @@
         </ul>
     </div>
     {% endif %}
-    
+
     <!-- Last Updated -->
     <div class="last-updated">
         Last updated: {{ analytics.last_updated }}
         <button onclick="location.reload()" class="btn-refresh">🔄 Refresh</button>
     </div>
 </div>
+
+<script>
+// Filesystem check functionality
+let fsckCheckInterval = null;
+let currentMode = '{{ mode_token }}';
+
+function startFsck(partition, mode) {
+    // Repair requires edit mode, quick check can run in any mode
+    if (mode === 'repair' && currentMode !== 'edit') {
+        if (confirm('Check & Repair requires Edit Mode.\n\nWould you like to switch to Edit Mode, run the repair, and then switch back?')) {
+            startFsckWithModeSwitch(partition, mode);
+        }
+        return;
+    }
+
+    // Start fsck directly
+    executeFsck(partition, mode);
+}
+
+function executeFsck(partition, mode) {
+    // Disable all buttons
+    disableFsckButtons(true);
+
+    fetch('/fsck/api/start', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            partition: partition,
+            mode: mode
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showFsckStatus('Filesystem check started...', 'info');
+            // Start polling for status
+            startFsckStatusPolling();
+        } else {
+            showFsckStatus(data.message, 'error');
+            disableFsckButtons(false);
+        }
+    })
+    .catch(error => {
+        showFsckStatus('Error starting filesystem check: ' + error, 'error');
+        disableFsckButtons(false);
+    });
+}
+
+function startFsckWithModeSwitch(partition, mode) {
+    const originalMode = currentMode;
+    const partitionName = partition === 1 ? 'TeslaCam' : 'LightShow';
+
+    disableFsckButtons(true);
+    showFsckStatus('Switching to Edit Mode...', 'info');
+
+    // Step 1: Switch to edit mode
+    fetch('/edit_usb', {
+        method: 'POST'
+    })
+    .then(response => {
+        if (!response.ok) throw new Error('Failed to switch to Edit Mode');
+        currentMode = 'edit';
+        showFsckStatus(`Edit Mode active - Starting ${partitionName} repair...`, 'info');
+
+        // Step 2: Start fsck
+        return fetch('/fsck/api/start', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                partition: partition,
+                mode: mode
+            })
+        });
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showFsckStatus(`${partitionName} repair in progress...`, 'info');
+            // Poll for completion, then restore mode
+            startFsckStatusPollingWithRestore(originalMode);
+        } else {
+            throw new Error(data.message);
+        }
+    })
+    .catch(error => {
+        showFsckStatus('Error: ' + error.message, 'error');
+        disableFsckButtons(false);
+        // Try to restore original mode on error
+        if (currentMode !== originalMode) {
+            restoreMode(originalMode);
+        }
+    });
+}
+
+function startFsckStatusPollingWithRestore(originalMode) {
+    if (fsckCheckInterval) {
+        clearInterval(fsckCheckInterval);
+    }
+
+    const checkStatusAndRestore = () => {
+        fetch('/fsck/api/status')
+            .then(response => response.json())
+            .then(status => {
+                if (status.running) {
+                    // Still running, update status
+                    const progress = status.progress || 'Running...';
+                    const elapsed = status.start_time ?
+                        Math.round((new Date() - new Date(status.start_time)) / 1000) : 0;
+                    const friendlyName = getFriendlyPartitionName(status.partition);
+                    showFsckStatus(
+                        `${friendlyName} - ${progress} (${elapsed}s elapsed)`,
+                        'info'
+                    );
+                } else {
+                    // Fsck completed, restore mode
+                    clearInterval(fsckCheckInterval);
+                    fsckCheckInterval = null;
+
+                    if (status.result) {
+                        const resultClass = status.result === 'healthy' || status.result === 'repaired'
+                            ? 'success' : 'warning';
+                        const friendlyName = getFriendlyPartitionName(status.partition);
+                        showFsckStatus(
+                            `${friendlyName} - ${status.result}: ${status.details} (${status.duration}s) - Restoring mode...`,
+                            resultClass
+                        );
+                    }
+
+                    // Restore original mode
+                    restoreMode(originalMode);
+                    updateLastChecks();
+                    updateFsckHistory();
+                }
+            })
+            .catch(error => {
+                console.error('Error checking fsck status:', error);
+            });
+    };
+
+    checkStatusAndRestore();
+    fsckCheckInterval = setInterval(checkStatusAndRestore, 2000);
+}
+
+function restoreMode(targetMode) {
+    if (currentMode === targetMode) {
+        disableFsckButtons(false);
+        return;
+    }
+
+    const endpoint = targetMode === 'present' ? '/present_usb' : '/edit_usb';
+    const modeName = targetMode === 'present' ? 'Present Mode' : 'Edit Mode';
+
+    fetch(endpoint, {
+        method: 'POST'
+    })
+    .then(response => {
+        if (response.ok) {
+            currentMode = targetMode;
+            showFsckStatus(`Restored to ${modeName}`, 'success');
+            setTimeout(() => {
+                document.getElementById('fsck-status-container').style.display = 'none';
+                disableFsckButtons(false);
+            }, 3000);
+        } else {
+            throw new Error(`Failed to restore ${modeName}`);
+        }
+    })
+    .catch(error => {
+        showFsckStatus('Error restoring mode: ' + error.message + ' - Please switch modes manually', 'error');
+        disableFsckButtons(false);
+    });
+}
+
+function startFsckStatusPolling() {
+    // Poll every 2 seconds
+    if (fsckCheckInterval) {
+        clearInterval(fsckCheckInterval);
+    }
+
+    updateFsckStatus(); // Update immediately
+    fsckCheckInterval = setInterval(updateFsckStatus, 2000);
+}
+
+function getFriendlyPartitionName(partition) {
+    if (partition === 'part1') return 'TeslaCam';
+    if (partition === 'part2') return 'LightShow';
+    return partition;
+}
+
+function updateFsckStatus() {
+    fetch('/fsck/api/status')
+        .then(response => response.json())
+        .then(status => {
+            if (status.running) {
+                // Disable buttons while check is running
+                disableFsckButtons(true);
+
+                const progress = status.progress || 'Running...';
+                const elapsed = status.start_time ?
+                    Math.round((new Date() - new Date(status.start_time)) / 1000) : 0;
+                const friendlyName = getFriendlyPartitionName(status.partition);
+                showFsckStatus(
+                    `${friendlyName} - ${progress} (${elapsed}s elapsed)`,
+                    'info'
+                );
+
+                // Ensure polling is active if not already
+                if (!fsckCheckInterval) {
+                    fsckCheckInterval = setInterval(updateFsckStatus, 2000);
+                }
+            } else {
+                // Check completed or not running
+                if (fsckCheckInterval) {
+                    clearInterval(fsckCheckInterval);
+                    fsckCheckInterval = null;
+                }
+
+                if (status.result) {
+                    const resultClass = status.result === 'healthy' || status.result === 'repaired'
+                        ? 'success' : 'warning';
+                    const friendlyName = getFriendlyPartitionName(status.partition);
+                    showFsckStatus(
+                        `${friendlyName} - ${status.result}: ${status.details} (${status.duration}s)`,
+                        resultClass
+                    );
+                    // Auto-hide completed status after 30 seconds
+                    setTimeout(() => {
+                        const container = document.getElementById('fsck-status-container');
+                        if (container && !status.running) {
+                            container.style.display = 'none';
+                        }
+                    }, 30000);
+                } else {
+                    // Hide status if no recent result
+                    document.getElementById('fsck-status-container').style.display = 'none';
+                }
+
+                disableFsckButtons(false);
+                updateLastChecks();
+                updateFsckHistory();
+            }
+        })
+        .catch(error => {
+            console.error('Error checking fsck status:', error);
+        });
+}
+
+function showFsckStatus(message, type) {
+    const container = document.getElementById('fsck-status-container');
+    container.style.display = 'block';
+    container.className = 'fsck-status-container fsck-status-' + type;
+
+    // Add cancel button if status is info (running)
+    let cancelButton = '';
+    if (type === 'info') {
+        cancelButton = '<button onclick="cancelFsck()" class="btn-cancel-fsck">Cancel</button>';
+    }
+
+    container.innerHTML = `
+        <div class="fsck-status-message">${message}</div>
+        ${cancelButton}
+    `;
+}
+
+function cancelFsck() {
+    if (!confirm('Are you sure you want to cancel the filesystem check?')) {
+        return;
+    }
+
+    fetch('/fsck/api/cancel', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showFsckStatus('Cancelling filesystem check...', 'warning');
+        } else {
+            showFsckStatus('Failed to cancel: ' + data.message, 'error');
+        }
+    })
+    .catch(error => {
+        showFsckStatus('Error cancelling check: ' + error, 'error');
+    });
+}
+
+function disableFsckButtons(disabled) {
+    document.querySelectorAll('.fsck-actions button').forEach(btn => {
+        btn.disabled = disabled;
+    });
+}
+
+function updateLastChecks() {
+    [1, 2].forEach(partition => {
+        fetch(`/fsck/api/last-check/${partition}`)
+            .then(response => response.json())
+            .then(data => {
+                const container = document.getElementById(`part${partition}-last-check`);
+                if (data.timestamp) {
+                    const date = new Date(data.timestamp);
+                    const ageHours = data.age_hours || 0;
+                    const ageStr = ageHours < 1 ? 'Less than 1 hour ago' :
+                                   ageHours < 24 ? `${Math.round(ageHours)} hours ago` :
+                                   `${Math.round(ageHours / 24)} days ago`;
+
+                    const icon = data.result === 'healthy' ? '✅' :
+                                data.result === 'repaired' ? '🔧' : '❓';
+
+                    container.innerHTML = `
+                        <div class="last-check-result">
+                            ${icon} Last checked: ${ageStr}
+                            <br><small>${data.details}</small>
+                        </div>
+                    `;
+                } else {
+                    container.innerHTML = '<div class="last-check-never">Never checked</div>';
+                }
+            })
+            .catch(error => {
+                console.error(`Error loading last check for partition ${partition}:`, error);
+            });
+    });
+}
+
+function updateFsckHistory() {
+    fetch('/fsck/api/history')
+        .then(response => response.json())
+        .then(history => {
+            const container = document.getElementById('fsck-history-list');
+            if (history.length === 0) {
+                container.innerHTML = '<div class="no-history">No filesystem checks recorded yet</div>';
+                return;
+            }
+
+            // Show last 5 entries
+            const recent = history.slice(-5).reverse();
+            let html = '<table class="fsck-history-table"><thead><tr>' +
+                       '<th>Time</th><th>Partition</th><th>Mode</th><th>Result</th><th>Details</th>' +
+                       '</tr></thead><tbody>';
+
+            recent.forEach(entry => {
+                const date = new Date(entry.timestamp);
+                const icon = entry.result === 'healthy' ? '✅' :
+                            entry.result === 'repaired' ? '🔧' :
+                            entry.result === 'timeout' ? '⏱️' :
+                            entry.result === 'failed' ? '❌' : '❓';
+                const friendlyPartition = getFriendlyPartitionName(entry.partition);
+
+                html += `<tr>
+                    <td>${date.toLocaleString()}</td>
+                    <td>${friendlyPartition}</td>
+                    <td>${entry.mode}</td>
+                    <td>${icon} ${entry.result}</td>
+                    <td><small>${entry.details}</small></td>
+                </tr>`;
+            });
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        })
+        .catch(error => {
+            console.error('Error loading fsck history:', error);
+        });
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    updateLastChecks();
+    updateFsckHistory();
+    updateFsckStatus(); // Check if any check is currently running
+});
+</script>
 {% endblock %}

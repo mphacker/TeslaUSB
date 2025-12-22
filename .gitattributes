@@ -1,0 +1,14 @@
+# Ensure shell scripts always use LF line endings (Unix style)
+*.sh text eol=lf
+*.py text eol=lf
+
+# Ensure config files use LF line endings
+*.json text eol=lf
+*.conf text eol=lf
+
+# Binary files
+*.img binary
+*.wav binary
+*.mp3 binary
+*.jpg binary
+*.png binary

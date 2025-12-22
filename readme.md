@@ -38,6 +38,7 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips)
 - Auto-generated video thumbnails
 - In-browser playback with multi-camera session view (6 cameras synchronized)
+- **Real-time telemetry overlay**: Videos display driving data including speed (mph/km/h), gear selection (P/R/N/D), steering wheel angle, accelerator/brake pedal position, turn signals, and Autopilot status (Self-Driving, Autosteer, or TACC)
 - Download or delete videos individually or in bulk
 - Storage analytics with folder-by-folder breakdown
 

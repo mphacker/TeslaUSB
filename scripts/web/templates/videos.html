@@ -29,7 +29,14 @@
         <div class="event-card" onclick="window.location.href='{{ url_for('videos.view_event', folder=current_folder, event_name=event.name) }}'">
             <div class="event-thumbnail">
                 {% if event.has_thumbnail %}
-                <img src="{{ url_for('videos.get_event_thumbnail', folder=current_folder, event_name=event.name) }}" alt="Event thumbnail">
+                    {% if folder_structure == 'flat' %}
+                    <img src="{{ url_for('videos.get_session_thumbnail', folder=current_folder, session_name=event.name) }}"
+                         alt="Session thumbnail"
+                         loading="lazy"
+                         onerror="this.parentElement.innerHTML='<div class=\'event-thumbnail-placeholder\'><i class=\'bi bi-camera-video\' style=\'font-size: 3em;\'></i></div>';">
+                    {% else %}
+                    <img src="{{ url_for('videos.get_event_thumbnail', folder=current_folder, event_name=event.name) }}" alt="Event thumbnail">
+                    {% endif %}
                 {% else %}
                 <div class="event-thumbnail-placeholder">
                     <i class="bi bi-camera-video" style="font-size: 3em;"></i>
@@ -48,7 +55,6 @@
                     {% endif %}
                 </div>
                 <div class="event-cameras">
-                    {% if event.camera_videos.event %}<span class="camera-badge">Grid</span>{% endif %}
                     {% if event.camera_videos.front %}<span class="camera-badge">Front</span>{% endif %}
                     {% if event.camera_videos.back %}<span class="camera-badge">Back</span>{% endif %}
                     {% if event.camera_videos.left_repeater %}<span class="camera-badge">Left</span>{% endif %}

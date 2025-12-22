@@ -2,8 +2,11 @@
 
 import os
 import socket
-from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify
+import logging
+from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify, Response
 
+from config import THUMBNAIL_CACHE_DIR
+from utils import generate_thumbnail_hash
 from services.mode_service import mode_display, current_mode
 from services.video_service import (
     get_teslacam_path,
@@ -12,7 +15,11 @@ from services.video_service import (
     get_teslacam_folders,
     get_events,
     get_event_details,
+    group_videos_by_session,
+    generate_video_thumbnail,
 )
+
+logger = logging.getLogger(__name__)
 
 videos_bp = Blueprint('videos', __name__, url_prefix='/videos')
 
@@ -40,11 +47,22 @@ def file_browser():
     folders = get_teslacam_folders()
     current_folder = request.args.get('folder', folders[0]['name'] if folders else None)
     events = []
+    folder_structure = 'events'  # Default to event-based structure
 
     if current_folder:
         folder_path = os.path.join(teslacam_path, current_folder)
         if os.path.isdir(folder_path):
-            events = get_events(folder_path)
+            # Determine folder structure type
+            folder_info = next((f for f in folders if f['name'] == current_folder), None)
+            folder_structure = folder_info['structure'] if folder_info else 'events'
+
+            # Get events/sessions based on folder structure
+            if folder_structure == 'flat':
+                # RecentClips: Group flat files by session
+                events = group_videos_by_session(folder_path)
+            else:
+                # SavedClips/SentryClips: Get event subfolders
+                events = get_events(folder_path)
 
     return render_template(
         'videos.html',
@@ -56,6 +74,7 @@ def file_browser():
         folders=folders,
         events=events,
         current_folder=current_folder,
+        folder_structure=folder_structure,
         hostname=socket.gethostname(),
     )
 
@@ -78,7 +97,55 @@ def view_event(folder, event_name):
         flash(f"Folder not found: {folder}", "error")
         return redirect(url_for("videos.file_browser"))
 
-    # Get event details
+    # Check folder structure type
+    folders = get_teslacam_folders()
+    folder_info = next((f for f in folders if f['name'] == folder), None)
+    folder_structure = folder_info['structure'] if folder_info else 'events'
+
+    if folder_structure == 'flat':
+        # For flat structure (RecentClips), build event-like object from session videos
+        session_videos = get_session_videos(folder_path, event_name)
+
+        if not session_videos:
+            flash(f"Session not found: {event_name}", "error")
+            return redirect(url_for("videos.file_browser", folder=folder))
+
+        # Build event object matching event structure
+        event = {
+            'name': event_name,
+            'datetime': session_videos[0]['modified'] if session_videos else event_name,
+            'city': '',  # Flat structure doesn't have location metadata
+            'reason': '',
+            'camera_videos': {
+                'front': None,
+                'back': None,
+                'left_repeater': None,
+                'right_repeater': None,
+                'left_pillar': None,
+                'right_pillar': None,
+            },
+            'has_thumbnail': False,
+        }
+
+        # Map videos to camera angles
+        for video in session_videos:
+            camera = video.get('camera', '').lower()
+            if camera in event['camera_videos']:
+                event['camera_videos'][camera] = video['name']
+
+        return render_template(
+            'event_player.html',
+            page='event',
+            mode_label=label,
+            mode_class=css_class,
+            mode_token=token,
+            folder=folder,
+            event=event,
+            folder_structure=folder_structure,  # Pass structure type to template
+            hostname=socket.gethostname(),
+        )
+
+    # Get event details (for event-based structure)
     event = get_event_details(folder_path, event_name)
 
     if not event:
@@ -93,6 +160,7 @@ def view_event(folder, event_name):
         mode_token=token,
         folder=folder,
         event=event,
+        folder_structure=folder_structure,  # Pass structure type to template
         hostname=socket.gethostname(),
     )
 
@@ -218,6 +286,41 @@ def stream_video(filepath):
     return resp
 
 
+@videos_bp.route("/sei/<path:filepath>")
+def fetch_video_for_sei(filepath):
+    """Fetch complete video file for SEI parsing (no range requests).
+
+    This endpoint serves the entire video file at once for client-side SEI extraction.
+    Unlike /stream/, this does not support HTTP Range requests.
+
+    filepath can be:
+    - folder/filename (legacy)
+    - folder/event_name/filename (new event structure)
+    """
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return "TeslaCam not accessible", 404
+
+    # Sanitize and build path
+    parts = filepath.split('/')
+    sanitized_parts = [os.path.basename(p) for p in parts]
+    video_path = os.path.join(teslacam_path, *sanitized_parts)
+
+    if not os.path.isfile(video_path):
+        return "Video not found", 404
+
+    # Send complete file with proper headers for in-browser processing
+    response = send_file(
+        video_path,
+        mimetype='video/mp4',
+        as_attachment=False,
+        conditional=False  # Disable conditional requests
+    )
+    # Allow caching since videos don't change
+    response.headers['Cache-Control'] = 'public, max-age=3600'
+    return response
+
+
 @videos_bp.route("/download/<path:filepath>")
 def download_video(filepath):
     """Download a video file.
@@ -244,7 +347,7 @@ def download_video(filepath):
 
 @videos_bp.route("/event_thumbnail/<folder>/<event_name>")
 def get_event_thumbnail(folder, event_name):
-    """Get the Tesla-generated thumbnail for an event."""
+    """Get the Tesla-generated thumbnail for an event (SavedClips/SentryClips)."""
     teslacam_path = get_teslacam_path()
     if not teslacam_path:
         return "TeslaCam not accessible", 404
@@ -260,6 +363,56 @@ def get_event_thumbnail(folder, event_name):
         return "Thumbnail not found", 404
 
     return send_file(thumb_path, mimetype='image/png')
+
+
+@videos_bp.route("/session_thumbnail/<folder>/<session_name>")
+def get_session_thumbnail(folder, session_name):
+    """Generate/retrieve thumbnail for a session (RecentClips) from front camera video."""
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return "TeslaCam not accessible", 404
+
+    # Sanitize inputs
+    folder = os.path.basename(folder)
+    session_name = os.path.basename(session_name)
+
+    # Find front camera video for this session
+    folder_path = os.path.join(teslacam_path, folder)
+    front_video = None
+
+    try:
+        for entry in os.scandir(folder_path):
+            if (entry.is_file() and
+                entry.name.startswith(session_name) and
+                'front' in entry.name.lower() and
+                entry.name.lower().endswith(('.mp4', '.avi', '.mov'))):
+                front_video = entry.path
+                break
+    except OSError:
+        return "Video not found", 404
+
+    if not front_video:
+        return "Front camera video not found", 404
+
+    # Generate cache key based on video path and modification time
+    cache_key = generate_thumbnail_hash(front_video)
+    if not cache_key:
+        return "Failed to generate cache key", 500
+
+    # Check cache
+    cache_path = os.path.join(THUMBNAIL_CACHE_DIR, f"{cache_key}.png")
+
+    if os.path.isfile(cache_path):
+        # Return cached thumbnail with 7-day cache header
+        return send_file(cache_path, mimetype='image/png',
+                        max_age=604800, conditional=True)
+
+    # Generate thumbnail (1-3 seconds on Pi Zero 2 W)
+    if generate_video_thumbnail(front_video, cache_path):
+        return send_file(cache_path, mimetype='image/png',
+                        max_age=604800, conditional=True)
+    else:
+        return "Failed to generate thumbnail", 500
 
 
 @videos_bp.route("/delete/<folder>/<filename>", methods=["POST"])

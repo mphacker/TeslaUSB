@@ -45,8 +45,8 @@ fi
 echo "Switching to edit mode (local mount + Samba)..."
 
 # Get user IDs for mounting
-UID_VAL=$(id -u \"$TARGET_USER\")
-GID_VAL=$(id -g \"$TARGET_USER\")
+UID_VAL=$(id -u "$TARGET_USER")
+GID_VAL=$(id -g "$TARGET_USER")
 
 safe_unmount_dir() {
   local target="$1"
@@ -294,97 +294,8 @@ cleanup_loops_on_failure() {
 }
 trap cleanup_loops_on_failure EXIT
 
-# Run filesystem checks before mounting to auto-repair filesystem issues
-echo "Running filesystem checks..."
-
-# Check TeslaCam partition
-echo "  Checking $LOOP_CAM (TeslaCam)..."
-FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "unknown")
-echo "    Filesystem type: $FS_TYPE"
-
-if [ "$FS_TYPE" = "vfat" ] || [ "$FS_TYPE" = "exfat" ]; then
-  # Use helper script with swap support for memory-safe checking
-  set +e
-  sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_CAM" "$FS_TYPE" quick
-  FSCK_STATUS=$?
-  set -e
-
-  if [ $FSCK_STATUS -eq 0 ]; then
-    echo "    ✓ Filesystem healthy"
-  elif [ $FSCK_STATUS -eq 124 ]; then
-    echo "    ⚠ Quick check timed out (large partition) - attempting repair..."
-    set +e
-    sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_CAM" "$FS_TYPE" repair
-    REPAIR_STATUS=$?
-    set -e
-
-    if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
-      echo "    ✓ Filesystem repaired"
-    else
-      echo "    ✗ Repair failed - see /var/log/teslausb/ for details" >&2
-      exit 1
-    fi
-  elif [ $FSCK_STATUS -ge 4 ]; then
-    echo "    ⚠ Corruption detected, attempting auto-repair..."
-    set +e
-    sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_CAM" "$FS_TYPE" repair
-    REPAIR_STATUS=$?
-    set -e
-
-    if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
-      echo "    ✓ Filesystem repaired successfully"
-    else
-      echo "    ✗ Critical errors - cannot mount safely" >&2
-      exit 1
-    fi
-  fi
-else
-  echo "    Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
-fi
-
-# Check Lightshow partition
-echo "  Checking $LOOP_LIGHTSHOW (Lightshow)..."
-FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "unknown")
-echo "    Filesystem type: $FS_TYPE"
-
-if [ "$FS_TYPE" = "vfat" ] || [ "$FS_TYPE" = "exfat" ]; then
-  set +e
-  sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_LIGHTSHOW" "$FS_TYPE" quick
-  FSCK_STATUS=$?
-  set -e
-
-  if [ $FSCK_STATUS -eq 0 ]; then
-    echo "    ✓ Filesystem healthy"
-  elif [ $FSCK_STATUS -eq 124 ]; then
-    echo "    ⚠ Quick check timed out - attempting repair..."
-    set +e
-    sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_LIGHTSHOW" "$FS_TYPE" repair
-    REPAIR_STATUS=$?
-    set -e
-
-    if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
-      echo "    ✓ Filesystem repaired"
-    else
-      echo "    ✗ Repair failed - see /var/log/teslausb/ for details" >&2
-      exit 1
-    fi
-  elif [ $FSCK_STATUS -ge 4 ]; then
-    echo "    ⚠ Corruption detected, attempting auto-repair..."
-    set +e
-    sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_LIGHTSHOW" "$FS_TYPE" repair
-    REPAIR_STATUS=$?
-    set -e
-
-    if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
-      echo "    ✓ Filesystem repaired successfully"
-    else
-      echo "    ✗ Critical errors - cannot mount safely" >&2
-      exit 1
-    fi
-  fi
-else
-  echo "    Warning: Unknown filesystem type '$FS_TYPE', skipping fsck"
-fi
+# Filesystem checks removed from mode switching for faster operation
+# Use the web interface Analytics page to run manual filesystem checks
 
 # Mount partitions
 echo "Mounting partitions..."

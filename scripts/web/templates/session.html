@@ -3,13 +3,13 @@
 <div class="container">
     <h2>📹 Multi-Camera Session View</h2>
     <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
-    
+
     <div class="info-box">
         <strong>Session:</strong> {{ session_id }}<br>
         <strong>Folder:</strong> {{ folder }}<br>
         <strong>Cameras:</strong> {{ videos|length }} view(s)
     </div>
-    
+
     <style>
     .focus-layout { display: flex; flex-direction: column; gap: 16px; }
     .focus-player { flex: 2; }
@@ -26,7 +26,7 @@
         .filmstrip { max-width: 360px; grid-template-columns: 1fr; }
     }
     </style>
-    
+
 <div class="focus-layout">
             <div class="focus-player">
                 <div class="session-video-container">
@@ -51,7 +51,7 @@
                 {% for video in videos if 'front' in video.camera|lower %}
                 <button class="filmstrip-item" data-name="{{ video.name }}">
                     <div class="film-thumb">
-                        <video class="thumb-video" muted playsinline preload="metadata" src="{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}#t=0.1"></video>
+                        <video class="thumb-video" muted playsinline preload="metadata" src="{{ url_for('videos.stream_video', filepath=folder + '/' + video.name) }}#t=0.1"></video>
                     </div>
                     <div class="thumb-label">{{ video.camera|replace('_', ' ')|title }}</div>
                     <div class="thumb-meta">{{ video.name }}</div>
@@ -60,7 +60,7 @@
                 {% for video in videos if 'front' not in video.camera|lower %}
                 <button class="filmstrip-item" data-name="{{ video.name }}">
                     <div class="film-thumb">
-                        <video class="thumb-video" muted playsinline preload="metadata" src="{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}#t=0.1"></video>
+                        <video class="thumb-video" muted playsinline preload="metadata" src="{{ url_for('videos.stream_video', filepath=folder + '/' + video.name) }}#t=0.1"></video>
                     </div>
                     <div class="thumb-label">{{ video.camera|replace('_', ' ')|title }}</div>
                     <div class="thumb-meta">{{ video.name }}</div>
@@ -68,7 +68,7 @@
                 {% endfor %}
             </div>
         </div>
-    
+
         <div style="text-align: center; margin-top: 20px;">
             <a href="{{ url_for('videos.file_browser', folder=folder) }}" class="btn-download">
                 ← Back to Video List
@@ -84,14 +84,14 @@
     {{ comma() }}{
         "name": "{{ video.name }}",
         "camera": "{{ video.camera|replace('_', ' ')|title }}",
-        "src": "{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}"
+        "src": "{{ url_for('videos.stream_video', filepath=folder + '/' + video.name) }}"
     }
     {% endfor %}
     {% for video in videos if 'front' not in video.camera|lower %}
     {{ comma() }}{
         "name": "{{ video.name }}",
         "camera": "{{ video.camera|replace('_', ' ')|title }}",
-        "src": "{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}"
+        "src": "{{ url_for('videos.stream_video', filepath=folder + '/' + video.name) }}"
     }
     {% endfor %}
     ]

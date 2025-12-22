@@ -328,7 +328,13 @@ function startFsckWithModeSwitch(partition, mode) {
     .then(response => {
         if (!response.ok) throw new Error('Failed to switch to Edit Mode');
         currentMode = 'edit';
-        showFsckStatus(`Edit Mode active - Starting ${partitionName} repair...`, 'info');
+        showFsckStatus(`Edit Mode active - waiting for mode switch to complete...`, 'info');
+
+        // Wait for mode switch to fully complete (unmount gadget, remount RW)
+        return new Promise(resolve => setTimeout(resolve, 3000));
+    })
+    .then(() => {
+        showFsckStatus(`Starting ${partitionName} repair...`, 'info');
 
         // Step 2: Start fsck
         return fetch('/fsck/api/start', {

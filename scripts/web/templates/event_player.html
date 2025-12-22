@@ -686,13 +686,13 @@
     async function loadSEIData(videoUrl) {
         // Skip if blob URL (already processed) or same source or no proto loaded
         if (!seiType || videoUrl.startsWith('blob:') || currentVideoSrc === videoUrl) return;
-        
+
         // Remove any existing loading indicator first
         const existingLoader = document.getElementById('seiLoading');
         if (existingLoader) {
             existingLoader.remove();
         }
-        
+
         currentVideoSrc = videoUrl;
         seiFrames = [];
         seiLoading = true;

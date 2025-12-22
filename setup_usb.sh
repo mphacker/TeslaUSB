@@ -5,7 +5,7 @@ set -euo pipefail
 GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"
 IMG_CAM_NAME="usb_cam.img"        # TeslaCam partition (read-write)
 IMG_LIGHTSHOW_NAME="usb_lightshow.img"  # Lightshow partition (read-only)
-PART1_SIZE="427G"  
+PART1_SIZE="427G"
 PART2_SIZE="20G"
 LABEL1="TeslaCam"
 LABEL2="Lightshow"
@@ -112,7 +112,7 @@ install_pkg_safe() {
 }
 
 enable_install_swap() {
-  INSTALL_SWAP="/tmp/teslausb_pkg.swap"
+  INSTALL_SWAP="/var/swap/teslausb_pkg.swap"
   if swapon --show | grep -q "$INSTALL_SWAP" 2>/dev/null; then
     echo "Temporary swap already active"
     return
@@ -124,6 +124,7 @@ enable_install_swap() {
     swapon /var/swap/fsck.swap 2>/dev/null && return
   fi
   # Create temporary 1GB swap
+  mkdir -p /var/swap
   if fallocate -l 1G "$INSTALL_SWAP" 2>/dev/null || dd if=/dev/zero of="$INSTALL_SWAP" bs=1M count=1024 status=none; then
     chmod 600 "$INSTALL_SWAP"
     mkswap "$INSTALL_SWAP" >/dev/null 2>&1 || { echo "mkswap failed"; return 1; }
@@ -173,7 +174,7 @@ start_nonessential_services() {
 # ===== Clean up old/unused services from previous installations =====
 cleanup_old_services() {
   echo "Checking for old/unused services from previous installations..."
-  
+
   # Stop and disable old thumbnail generator service (replaced by on-demand generation)
   if systemctl list-unit-files | grep -q 'thumbnail_generator'; then
     echo "  Removing old thumbnail_generator service..."
@@ -188,7 +189,7 @@ cleanup_old_services() {
     systemctl daemon-reload
     echo "    ✓ Removed thumbnail_generator service and timer"
   fi
-  
+
   # Remove old template files if they exist
   if [ -f "$GADGET_DIR/templates/thumbnail_generator.service" ] || [ -f "$GADGET_DIR/templates/thumbnail_generator.timer" ]; then
     echo "  Removing old thumbnail generator templates..."
@@ -196,21 +197,21 @@ cleanup_old_services() {
     rm -f "$GADGET_DIR/templates/thumbnail_generator.timer"
     echo "    ✓ Removed old template files"
   fi
-  
+
   # Remove old background thumbnail generation script
   if [ -f "$GADGET_DIR/scripts/generate_thumbnails.py" ]; then
     echo "  Removing old background thumbnail generator script..."
     rm -f "$GADGET_DIR/scripts/generate_thumbnails.py"
     echo "    ✓ Removed generate_thumbnails.py"
   fi
-  
+
   echo "Old service cleanup complete."
 }
 
 # ===== Optimize memory for setup (disable unnecessary services) =====
 optimize_memory_for_setup() {
   echo "Optimizing memory for setup..."
-  
+
   # Disable graphical desktop services if present (saves 50-60MB on Pi Zero 2W)
   if systemctl is-enabled lightdm.service >/dev/null 2>&1; then
     echo "  Disabling graphical desktop (lightdm)..."
@@ -221,23 +222,23 @@ optimize_memory_for_setup() {
   else
     echo "  Graphical desktop not installed or already disabled"
   fi
-  
+
   # Ensure swap is available early (critical for low-memory systems)
   if ! swapon --show 2>/dev/null | grep -q '/'; then
     echo "  No active swap detected, enabling swap for setup..."
-    
+
     # Try to use existing fsck swap if available
     if [ -f "/var/swap/fsck.swap" ]; then
       echo "    Using existing fsck.swap file"
       swapon /var/swap/fsck.swap 2>/dev/null && echo "    ✓ Swap enabled (fsck.swap)" && return
     fi
-    
+
     # Try to use any existing swapfile
     if [ -f "/swapfile" ]; then
       echo "    Using existing /swapfile"
       swapon /swapfile 2>/dev/null && echo "    ✓ Swap enabled (/swapfile)" && return
     fi
-    
+
     # Create temporary swap for setup
     echo "    Creating temporary 512MB swap..."
     if dd if=/dev/zero of=/swapfile bs=1M count=512 status=none 2>/dev/null; then
@@ -250,7 +251,7 @@ optimize_memory_for_setup() {
   else
     echo "  Swap already active: $(swapon --show 2>/dev/null | tail -n +2 | awk '{print $1, $3}')"
   fi
-  
+
   echo "Memory optimization complete."
   echo ""
 }
@@ -270,22 +271,27 @@ done
 
 if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
   echo "Installing missing packages: ${MISSING_PACKAGES[*]}"
-  
+
   # Prepare for low-memory install
   stop_nonessential_services
   enable_install_swap || { echo "ERROR: Failed to enable swap. Cannot proceed."; exit 1; }
-  
+
   # Run apt-get update
   apt_update_safe
-  
+
   # Install packages one at a time to avoid OOM on low-memory systems
   for pkg in "${MISSING_PACKAGES[@]}"; do
     install_pkg_safe "$pkg" || echo "Warning: install of $pkg reported an error"
   done
-  
+
   # Cleanup
   disable_install_swap
   start_nonessential_services
+
+  # Remove orphaned packages to save disk space
+  echo "Removing orphaned packages..."
+  apt-get autoremove -y >/dev/null 2>&1 || true
+  echo "  ✓ Orphaned packages removed"
 else
   echo "All required packages already installed; skipping apt install."
 fi
@@ -320,7 +326,7 @@ if [ -f "$CONFIG_FILE" ]; then
   # Check if [all] section exists
   if grep -q '^\[all\]' "$CONFIG_FILE"; then
     # [all] section exists - check and add entries if needed
-    
+
     # Check and add dtoverlay=dwc2 (only if not already present)
     if ! grep -q '^dtoverlay=dwc2$' "$CONFIG_FILE"; then
       # Add dtoverlay=dwc2 right after [all] line
@@ -330,7 +336,7 @@ if [ -f "$CONFIG_FILE" ]; then
     else
       echo "dtoverlay=dwc2 already present in $CONFIG_FILE"
     fi
-    
+
     # Check and add dtparam=watchdog=on (only if not already present)
     if ! grep -q '^dtparam=watchdog=on$' "$CONFIG_FILE"; then
       # Add dtparam=watchdog=on right after [all] line
@@ -388,27 +394,27 @@ if [ -f "$IMG_CAM_PATH" ]; then
 else
   # Set trap to cleanup on exit/error
   trap cleanup_loop_devices EXIT INT TERM
-  
+
   echo "Creating TeslaCam image $IMG_CAM_PATH (${P1_MB}M)..."
   # Create sparse file (thin provisioned) - only allocates space as needed
   truncate -s "${P1_MB}M" "$IMG_CAM_PATH" || {
     echo "Error: Failed to create TeslaCam image file"
     exit 1
   }
-  
+
   LOOP_CAM=$(losetup --find --show "$IMG_CAM_PATH") || {
     echo "Error: Failed to create loop device for TeslaCam"
     exit 1
   }
-  
+
   # Validate loop device was created
   if [ -z "$LOOP_CAM" ] || [ ! -e "$LOOP_CAM" ]; then
     echo "Error: Loop device creation failed or device not accessible"
     exit 1
   fi
-  
+
   echo "Using loop device: $LOOP_CAM"
-  
+
   # Format as single filesystem - use exFAT for large partitions (>32GB), FAT32 for smaller
   echo "Formatting TeslaCam partition (${LABEL1})..."
   if [ "$P1_MB" -gt 32768 ]; then
@@ -424,11 +430,11 @@ else
       exit 1
     }
   fi
-  
+
   # Clean up loop device
   losetup -d "$LOOP_CAM" 2>/dev/null || true
   LOOP_CAM=""
-  
+
   echo "TeslaCam image created and formatted."
 fi
 
@@ -438,25 +444,25 @@ if [ -f "$IMG_LIGHTSHOW_PATH" ]; then
 else
   # Set trap to cleanup on exit/error (if not already set)
   trap cleanup_loop_devices EXIT INT TERM
-  
+
   echo "Creating Lightshow image $IMG_LIGHTSHOW_PATH (${P2_MB}M)..."
   truncate -s "${P2_MB}M" "$IMG_LIGHTSHOW_PATH" || {
     echo "Error: Failed to create Lightshow image file"
     exit 1
   }
-  
+
   LOOP_LIGHTSHOW=$(losetup --find --show "$IMG_LIGHTSHOW_PATH") || {
     echo "Error: Failed to create loop device for Lightshow"
     exit 1
   }
-  
+
   if [ -z "$LOOP_LIGHTSHOW" ] || [ ! -e "$LOOP_LIGHTSHOW" ]; then
     echo "Error: Loop device creation failed or device not accessible"
     exit 1
   fi
-  
+
   echo "Using loop device: $LOOP_LIGHTSHOW"
-  
+
   # Format Lightshow partition
   echo "Formatting Lightshow partition (${LABEL2})..."
   if [ "$P2_MB" -gt 32768 ]; then
@@ -472,11 +478,11 @@ else
       exit 1
     }
   fi
-  
+
   # Clean up loop device
   losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
   LOOP_LIGHTSHOW=""
-  
+
   echo "Lightshow image created and formatted."
 fi
 
@@ -618,7 +624,7 @@ cat > "$SUDOERS_ENTRY" <<EOF
 # Allow $TARGET_USER to run gadget control scripts and all required system commands
 # without password for web interface automation
 
-# First, allow the main scripts to run with full sudo privileges  
+# First, allow the main scripts to run with full sudo privileges
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/present_usb.sh
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/edit_usb.sh
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/ap_control.sh
@@ -677,7 +683,7 @@ echo "Installing systemd services..."
 configure_service() {
   local template_file="$1"
   local output_file="$2"
-  
+
   sed -e "s|__GADGET_DIR__|$GADGET_DIR|g" \
       -e "s|__MNT_DIR__|$MNT_DIR|g" \
       -e "s|__TARGET_USER__|$TARGET_USER|g" \
@@ -688,7 +694,7 @@ configure_service() {
 SERVICE_FILE="/etc/systemd/system/gadget_web.service"
 configure_service "$TEMPLATES_DIR/gadget_web.service" "$SERVICE_FILE"
 
-# Auto-present service  
+# Auto-present service
 AUTO_SERVICE="/etc/systemd/system/present_usb_on_boot.service"
 configure_service "$TEMPLATES_DIR/present_usb_on_boot.service" "$AUTO_SERVICE"
 
@@ -753,7 +759,7 @@ vm.swappiness = 10
 EOF
   chmod 644 "$SYSCTL_CONF"
   echo "  Created $SYSCTL_CONF"
-  
+
   # Apply sysctl settings immediately
   sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
   echo "  Applied sysctl settings"
@@ -833,7 +839,7 @@ if [ ! -f "$SWAP_FILE" ]; then
   if [ ! -d "$SWAP_DIR" ]; then
     mkdir -p "$SWAP_DIR"
   fi
-  
+
   # Create swapfile using fallocate (faster than dd)
   echo "  Creating 1GB swapfile at $SWAP_FILE..."
   fallocate -l ${SWAP_SIZE_MB}M "$SWAP_FILE" || {
@@ -841,33 +847,51 @@ if [ ! -f "$SWAP_FILE" ]; then
     echo "  fallocate failed, using dd instead..."
     dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$SWAP_SIZE_MB status=progress
   }
-  
+
   # Secure permissions and format as swap
   chmod 600 "$SWAP_FILE"
   mkswap "$SWAP_FILE"
-  
+
   echo "  ✓ Swapfile created successfully"
-  
+
   # Add to /etc/fstab for automatic mounting on boot
   if ! grep -q "$SWAP_FILE" /etc/fstab 2>/dev/null; then
     echo "  Adding swap to /etc/fstab for persistent mounting..."
     echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+    systemctl daemon-reload
     echo "  ✓ Swap will be enabled automatically on boot"
   fi
-  
+
   # Enable swap now
   swapon "$SWAP_FILE" 2>/dev/null || echo "  Note: Swap enabled, will activate on reboot"
-  
+
+  # Clean up temporary swapfile from optimize_memory_for_setup if it exists
+  if [ -f "/swapfile" ] && [ "$SWAP_FILE" != "/swapfile" ]; then
+    echo "  Cleaning up temporary /swapfile..."
+    swapoff /swapfile 2>/dev/null || true
+    rm -f /swapfile
+    echo "  ✓ Temporary swapfile removed"
+  fi
+
 else
   echo "  Swapfile already exists at $SWAP_FILE"
-  
+
   # Ensure it's in fstab even if file exists
   if ! grep -q "$SWAP_FILE" /etc/fstab 2>/dev/null; then
     echo "  Adding existing swap to /etc/fstab..."
     echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+    systemctl daemon-reload
     echo "  ✓ Swap will be enabled automatically on boot"
   fi
-  
+
+  # Clean up temporary swapfile from optimize_memory_for_setup if it exists
+  if [ -f "/swapfile" ] && [ "$SWAP_FILE" != "/swapfile" ]; then
+    echo "  Cleaning up temporary /swapfile..."
+    swapoff /swapfile 2>/dev/null || true
+    rm -f /swapfile
+    echo "  ✓ Temporary swapfile removed"
+  fi
+
   # Enable swap if not already active
   if ! swapon --show 2>/dev/null | grep -q "$SWAP_FILE"; then
     echo "  Enabling swap..."

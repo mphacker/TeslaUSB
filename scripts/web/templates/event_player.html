@@ -967,11 +967,23 @@
         });
     }
 
+    let downloadInProgress = false;
+
     function downloadEvent() {
+        // Prevent multiple simultaneous downloads
+        if (downloadInProgress) {
+            return;
+        }
+        downloadInProgress = true;
+
         const button = document.getElementById('downloadButton');
         const icon = document.getElementById('downloadIcon');
         const label = document.getElementById('downloadLabel');
 
+        // Disable button
+        button.style.pointerEvents = 'none';
+        button.style.opacity = '0.5';
+        
         // Show preparing state
         icon.className = 'bi bi-hourglass-split camera-icon';
         label.textContent = 'Preparing...';
@@ -993,11 +1005,14 @@
             label.textContent = 'Downloading...';
         }, 1000);
 
-        // Reset to ready state after 5 seconds
+        // Reset to ready state after 8 seconds
         setTimeout(() => {
             icon.className = 'bi bi-download camera-icon';
             label.textContent = 'Download All';
-        }, 5000);
+            button.style.pointerEvents = '';
+            button.style.opacity = '';
+            downloadInProgress = false;
+        }, 8000);
     }
 
     // Keyboard controls

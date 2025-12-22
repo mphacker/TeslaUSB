@@ -394,6 +394,21 @@
         backdrop-filter: blur(4px);
     }
 
+    .download-option {
+        border-color: rgba(52, 199, 89, 0.6);
+        background: rgba(20, 80, 40, 0.8);
+    }
+
+    .download-option:hover {
+        border-color: rgba(52, 199, 89, 1);
+        background: rgba(30, 100, 50, 0.9);
+        transform: translateY(-4px);
+    }
+
+    .download-option .camera-icon {
+        color: rgba(52, 199, 89, 1);
+    }
+
     /* Mobile responsive */
     @media (max-width: 768px) {
         .event-header {
@@ -628,6 +643,12 @@
             <div class="camera-label">Right Pillar</div>
         </div>
         {% endif %}
+
+        <!-- Download Event Button -->
+        <div class="camera-option download-option" id="downloadButton" onclick="downloadEvent()">
+            <i class="bi bi-download camera-icon" id="downloadIcon"></i>
+            <div class="camera-label" id="downloadLabel">Download All</div>
+        </div>
     </div>
 </div>
 
@@ -944,6 +965,39 @@
             }
             video.removeEventListener('loadedmetadata', onLoaded);
         });
+    }
+
+    function downloadEvent() {
+        const button = document.getElementById('downloadButton');
+        const icon = document.getElementById('downloadIcon');
+        const label = document.getElementById('downloadLabel');
+        
+        // Show preparing state
+        icon.className = 'bi bi-hourglass-split camera-icon';
+        label.textContent = 'Preparing...';
+        
+        // Build download URL
+        const downloadUrl = "{{ url_for('videos.download_event', folder=folder, event_name=event.name) }}";
+        
+        // Trigger download with anchor tag
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = '{{ event.name }}.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        
+        // Show downloading state after 1 second
+        setTimeout(() => {
+            icon.className = 'bi bi-cloud-download camera-icon';
+            label.textContent = 'Downloading...';
+        }, 1000);
+        
+        // Reset to ready state after 5 seconds
+        setTimeout(() => {
+            icon.className = 'bi bi-download camera-icon';
+            label.textContent = 'Download All';
+        }, 5000);
     }
 
     // Keyboard controls

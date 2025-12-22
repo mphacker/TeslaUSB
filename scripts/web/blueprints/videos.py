@@ -3,7 +3,9 @@
 import os
 import socket
 import logging
-from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify, Response
+import tempfile
+import zipfile
+from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify, Response, after_this_request
 
 from config import THUMBNAIL_CACHE_DIR
 from utils import generate_thumbnail_hash
@@ -343,6 +345,83 @@ def download_video(filepath):
         return "Video not found", 404
 
     return send_file(video_path, as_attachment=True, download_name=filename)
+
+
+@videos_bp.route("/download_event/<folder>/<event_name>")
+def download_event(folder, event_name):
+    """Download all camera videos for an event as a zip file.
+    
+    Works with both event-based (SavedClips/SentryClips) and flat (RecentClips) structures.
+    """
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return "TeslaCam not accessible", 404
+
+    # Sanitize inputs
+    folder = os.path.basename(folder)
+    folder_path = os.path.join(teslacam_path, folder)
+
+    if not os.path.isdir(folder_path):
+        return "Folder not found", 404
+
+    # Determine folder structure
+    folders = get_teslacam_folders()
+    folder_info = next((f for f in folders if f['name'] == folder), None)
+    folder_structure = folder_info['structure'] if folder_info else 'events'
+
+    # Collect video files
+    video_files = []
+    
+    if folder_structure == 'flat':
+        # RecentClips: Get session videos
+        session_videos = get_session_videos(folder_path, event_name)
+        for video in session_videos:
+            video_path = os.path.join(folder_path, video['name'])
+            if os.path.isfile(video_path):
+                video_files.append((video_path, video['name']))
+    else:
+        # SavedClips/SentryClips: Get event folder videos
+        event_path = os.path.join(folder_path, os.path.basename(event_name))
+        if os.path.isdir(event_path):
+            event = get_event_details(folder_path, event_name)
+            if event:
+                for camera_key, filename in event['camera_videos'].items():
+                    if filename:
+                        video_path = os.path.join(event_path, filename)
+                        if os.path.isfile(video_path):
+                            video_files.append((video_path, filename))
+
+    if not video_files:
+        return "No videos found for this event", 404
+
+    # Create zip file on disk (not in /tmp which is RAM-based and too small)
+    # Use /home/pi for temp storage to avoid filling tmpfs
+    temp_dir = '/home/pi/.cache/teslausb/zip_temp'
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.zip', dir=temp_dir)
+    os.close(temp_fd)
+    
+    with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for video_path, filename in video_files:
+            zipf.write(video_path, filename)
+    
+    # Register cleanup callback to delete temp file after response is sent
+    @after_this_request
+    def cleanup(response):
+        try:
+            os.unlink(temp_path)
+        except Exception as e:
+            logger.error(f"Failed to cleanup temp zip: {e}")
+        return response
+    
+    # Send the zip file
+    return send_file(
+        temp_path,
+        as_attachment=True,
+        download_name=f"{event_name}.zip",
+        mimetype='application/zip'
+    )
 
 
 @videos_bp.route("/event_thumbnail/<folder>/<event_name>")

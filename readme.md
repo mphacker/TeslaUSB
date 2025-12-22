@@ -45,6 +45,8 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Upload WAV or MP3 files (automatically converted to Tesla-compatible format)
 - Organized chime library with preview and download
 - Volume normalization presets (Broadcast, Streaming, Loud, Maximum)
+- **Chime Groups**: Organize chimes by theme (Holidays, Funny, Seasonal, etc.)
+- **Random Selection on Boot**: Automatically pick a different chime from your selected group each time the device boots
 - Scheduled chime changes:
   - Weekly schedules (specific days/times)
   - Date-based schedules
@@ -60,8 +62,9 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 ### Automatic Maintenance
 - **Storage Cleanup**: Age, size, or count-based policies per folder
 - **Boot Cleanup**: Optional automatic cleanup before presenting to Tesla
-- **Thumbnail Generation**: Background service every 15 minutes
+- **On-Demand Thumbnails**: Instant generation via PyAV as you browse (cached for 7 days)
 - **Chime Scheduler**: Checks every 60 seconds for scheduled changes
+- **Hardware Watchdog**: Automatic system recovery on hangs or crashes
 
 ### Network Features
 - **Samba Shares**: Windows/Mac/Linux file access in Edit mode
@@ -69,10 +72,12 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 
 ## Requirements
 
-- Raspberry Pi with USB OTG capability (Pi Zero 2 W, Pi 4, Pi 5)
+- Raspberry Pi with USB OTG capability (Pi Zero 2 W recommended, Pi 4, Pi 5)
 - 128GB+ microSD card (for OS, dashcam storage, and light shows)
 - Raspberry Pi OS (64-bit) Desktop - Debian "Trixie"
 - Internet connection for initial setup
+
+**Note for Pi Zero 2 W users**: Setup automatically optimizes memory by disabling unnecessary desktop services and enabling 1GB swap. This ensures stable operation on the 512MB RAM platform.
 
 ## Installation
 
@@ -97,11 +102,12 @@ sudo ./setup_usb.sh
 ```
 
 The setup script will:
-- Install required packages (parted, dosfstools, python3-flask, samba, hostapd, dnsmasq, ffmpeg)
-- Configure USB gadget kernel modules
+- Install required packages (parted, dosfstools, python3-flask, python3-av, samba, hostapd, dnsmasq, ffmpeg)
+- Optimize memory for low-RAM systems (disable desktop services, enable swap)
+- Configure USB gadget kernel modules and hardware watchdog
 - Create dual disk images (427GB TeslaCam + 20GB LightShow)
-- Set up Samba shares and web interface
-- Configure systemd services for auto-start
+- Set up Samba shares and web interface with on-demand thumbnail generation
+- Configure systemd services with auto-restart on failure
 - Create `/Chimes` library and migrate existing lock chimes
 
 ### 3. Access Web Interface
@@ -250,9 +256,9 @@ Removes all files, services, and system configuration.
 |---------------|---------|  
 | `gadget_web.service` | Web interface (port 5000) |
 | `present_usb_on_boot.service` | Auto-present USB on boot with optional cleanup |
-| `thumbnail_generator.timer` | Generate video thumbnails every 15 minutes |
 | `chime_scheduler.timer` | Check scheduled chime changes every 60 seconds |
 | `wifi-monitor.service` | Manage offline access point |
+| `watchdog.service` | Hardware watchdog for system reliability |
 
 **Common Commands:**
 ```bash

@@ -1,0 +1,29 @@
+{
+  // Force LF line endings for all files (Unix/Linux style)
+  "files.eol": "\n",
+
+  // Show line ending in status bar for visibility
+  "files.encoding": "utf8",
+
+  // Trim trailing whitespace on save
+  "files.trimTrailingWhitespace": true,
+
+  // Insert final newline at end of files
+  "files.insertFinalNewline": true,
+
+  // Ensure consistent formatting for shell scripts
+  "[shellscript]": {
+    "files.eol": "\n"
+  },
+
+  // Ensure consistent formatting for Python files
+  "[python]": {
+    "files.eol": "\n"
+  },
+
+  // Show whitespace characters to detect issues
+  "editor.renderWhitespace": "boundary",
+
+  // Highlight trailing spaces
+  "editor.renderFinalNewline": "on"
+}

@@ -16,10 +16,10 @@ LOCK_CHECK_START=$(date +%s)
 if [ -f "$LOCK_FILE" ]; then
   echo "⚠️  File operation in progress (lock file detected)"
   echo "Waiting up to ${LOCK_TIMEOUT}s for operation to complete..."
-  
+
   while [ -f "$LOCK_FILE" ]; do
     LOCK_AGE=$(($(date +%s) - LOCK_CHECK_START))
-    
+
     if [ $LOCK_AGE -ge $LOCK_TIMEOUT ]; then
       # Check if lock is stale (older than 2 minutes)
       if [ -f "$LOCK_FILE" ]; then
@@ -30,15 +30,15 @@ if [ -f "$LOCK_FILE" ]; then
           break
         fi
       fi
-      
+
       echo "❌ ERROR: Cannot switch to present mode - file operation still in progress" >&2
       echo "Please wait for current upload/download/scheduler operation to complete" >&2
       exit 1
     fi
-    
+
     sleep 1
   done
-  
+
   echo "✓ File operation completed, proceeding with mode switch"
 fi
 
@@ -134,126 +134,8 @@ done
 # One final sync after all unmounts
 sync
 
-# Run filesystem checks to ensure clean FAT volumes before presenting to the host
-echo "Running filesystem checks..."
-
-# Check TeslaCam image (part1)
-if [ -f "$IMG_CAM" ]; then
-  LOOP_DEV=$(losetup -j "$IMG_CAM" 2>/dev/null | head -n1 | cut -d: -f1)
-  if [ -z "$LOOP_DEV" ]; then
-    LOOP_DEV=$(sudo losetup --show -f "$IMG_CAM")
-    EPHEMERAL_LOOP=1
-    LOOP_DEV_FSCK="$LOOP_DEV"
-  else
-    LOOP_DEV_FSCK="$LOOP_DEV"
-  fi
-
-  if [ -n "$LOOP_DEV" ] && [ -e "$LOOP_DEV" ]; then
-    LOG_FILE="/tmp/fsck_gadget_part1.log"
-    
-    # Detect filesystem type
-    FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_DEV" 2>/dev/null || echo "unknown")
-    
-    echo "  Checking ${LOOP_DEV} (TeslaCam) - Type: $FS_TYPE"
-    
-    if [ "$FS_TYPE" = "exfat" ] || [ "$FS_TYPE" = "vfat" ]; then
-      # Use helper script with swap support for memory-safe checking
-      set +e
-      sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" quick
-      FSCK_STATUS=$?
-      set -e
-
-      if [ $FSCK_STATUS -eq 0 ]; then
-        echo "    ✓ Filesystem healthy"
-      elif [ $FSCK_STATUS -eq 124 ]; then
-        # Timeout - likely very large partition, continue anyway
-        echo "    ⚠ Quick check timed out (large partition) - continuing"
-      elif [ $FSCK_STATUS -ge 4 ]; then
-        # Corruption detected, attempt repair
-        echo "    ⚠ Corruption detected, attempting auto-repair..."
-        set +e
-        sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" repair
-        REPAIR_STATUS=$?
-        set -e
-        
-        if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
-          echo "    ✓ Filesystem repaired successfully"
-        else
-          echo "    ✗ Repair failed (code: $REPAIR_STATUS) - see /var/log/teslausb/"
-          echo "    Continuing anyway to allow data recovery..."
-        fi
-      fi
-    else
-      echo "    Warning: Unknown filesystem type '$FS_TYPE' for TeslaCam, skipping fsck"
-    fi
-    
-    # Detach ephemeral loop if we created it
-    if [ "${EPHEMERAL_LOOP:-0}" -eq 1 ]; then
-      sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
-      EPHEMERAL_LOOP=0
-    fi
-  fi
-else
-  echo "  Warning: TeslaCam image not found at $IMG_CAM" >&2
-fi
-
-# Check Lightshow image (part2)
-if [ -f "$IMG_LIGHTSHOW" ]; then
-  LOOP_DEV=$(losetup -j "$IMG_LIGHTSHOW" 2>/dev/null | head -n1 | cut -d: -f1)
-  if [ -z "$LOOP_DEV" ]; then
-    LOOP_DEV=$(sudo losetup --show -f "$IMG_LIGHTSHOW")
-    EPHEMERAL_LOOP=1
-    LOOP_DEV_FSCK="$LOOP_DEV"
-  else
-    LOOP_DEV_FSCK="$LOOP_DEV"
-  fi
-
-  if [ -n "$LOOP_DEV" ] && [ -e "$LOOP_DEV" ]; then
-    LOG_FILE="/tmp/fsck_gadget_part2.log"
-    
-    # Detect filesystem type
-    FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_DEV" 2>/dev/null || echo "unknown")
-    
-    echo "  Checking ${LOOP_DEV} (Lightshow) - Type: $FS_TYPE"
-    
-    if [ "$FS_TYPE" = "exfat" ] || [ "$FS_TYPE" = "vfat" ]; then
-      # Use helper script with swap support for memory-safe checking
-      set +e
-      sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" quick
-      FSCK_STATUS=$?
-      set -e
-
-      if [ $FSCK_STATUS -eq 0 ]; then
-        echo "    ✓ Filesystem healthy"
-      elif [ $FSCK_STATUS -eq 124 ]; then
-        echo "    ⚠ Quick check timed out (large partition) - continuing"
-      elif [ $FSCK_STATUS -ge 4 ]; then
-        echo "    ⚠ Corruption detected, attempting auto-repair..."
-        set +e
-        sudo "$GADGET_DIR/scripts/fsck_with_swap.sh" "$LOOP_DEV" "$FS_TYPE" repair
-        REPAIR_STATUS=$?
-        set -e
-        
-        if [ $REPAIR_STATUS -eq 0 ] || [ $REPAIR_STATUS -eq 1 ] || [ $REPAIR_STATUS -eq 2 ]; then
-          echo "    ✓ Filesystem repaired successfully"
-        else
-          echo "    ✗ Repair failed (code: $REPAIR_STATUS) - see /var/log/teslausb/"
-          echo "    Continuing anyway to allow data recovery..."
-        fi
-      fi
-    else
-      echo "    Warning: Unknown filesystem type '$FS_TYPE' for Lightshow, skipping fsck"
-    fi
-    
-    # Detach ephemeral loop if we created it
-    if [ "${EPHEMERAL_LOOP:-0}" -eq 1 ]; then
-      sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
-      EPHEMERAL_LOOP=0
-    fi
-  fi
-else
-  echo "  Warning: Lightshow image not found at $IMG_LIGHTSHOW" >&2
-fi
+# Filesystem checks removed from mode switching for faster operation
+# Use the web interface Analytics page to run manual filesystem checks
 
 # Remove mount directories to avoid accidental access when unmounted
 echo "Removing mount directories..."
@@ -299,29 +181,29 @@ fi
 CONFIGFS_GADGET="/sys/kernel/config/usb_gadget/teslausb"
 if [ -d "$CONFIGFS_GADGET" ]; then
   echo "Removing existing gadget configuration..."
-  
+
   # Unbind UDC first
   if [ -f "$CONFIGFS_GADGET/UDC" ]; then
     echo "" | sudo tee "$CONFIGFS_GADGET/UDC" > /dev/null 2>&1 || true
     sleep 1
   fi
-  
+
   # Remove function links
   sudo rm -f "$CONFIGFS_GADGET"/configs/*/mass_storage.* 2>/dev/null || true
-  
+
   # Remove configurations
   sudo rmdir "$CONFIGFS_GADGET"/configs/*/strings/* 2>/dev/null || true
   sudo rmdir "$CONFIGFS_GADGET"/configs/* 2>/dev/null || true
-  
+
   # Remove LUNs from functions
   sudo rmdir "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.* 2>/dev/null || true
-  
+
   # Remove functions
   sudo rmdir "$CONFIGFS_GADGET"/functions/* 2>/dev/null || true
-  
+
   # Remove strings
   sudo rmdir "$CONFIGFS_GADGET"/strings/* 2>/dev/null || true
-  
+
   # Remove gadget
   sudo rmdir "$CONFIGFS_GADGET" 2>/dev/null || true
 fi
@@ -413,9 +295,9 @@ fi
 if [ -n "$LOOP_CAM" ] && [ -e "$LOOP_CAM" ]; then
   # Detect filesystem type
   FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "vfat")
-  
+
   echo "  Mounting ${LOOP_CAM} (TeslaCam) at $RO_MNT_DIR/part1-ro (read-only)..."
-  
+
   if [ "$FS_TYPE" = "vfat" ]; then
     sudo mount -t vfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_CAM" "$RO_MNT_DIR/part1-ro"
   elif [ "$FS_TYPE" = "exfat" ]; then
@@ -423,7 +305,7 @@ if [ -n "$LOOP_CAM" ] && [ -e "$LOOP_CAM" ]; then
   else
     sudo mount -o ro "$LOOP_CAM" "$RO_MNT_DIR/part1-ro"
   fi
-  
+
   echo "  Mounted successfully at $RO_MNT_DIR/part1-ro"
 else
   echo "  Warning: Unable to attach loop device for TeslaCam read-only mounting"
@@ -438,9 +320,9 @@ fi
 if [ -n "$LOOP_LIGHTSHOW" ] && [ -e "$LOOP_LIGHTSHOW" ]; then
   # Detect filesystem type
   FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "vfat")
-  
+
   echo "  Mounting ${LOOP_LIGHTSHOW} (Lightshow) at $RO_MNT_DIR/part2-ro (read-only)..."
-  
+
   if [ "$FS_TYPE" = "vfat" ]; then
     sudo mount -t vfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_LIGHTSHOW" "$RO_MNT_DIR/part2-ro"
   elif [ "$FS_TYPE" = "exfat" ]; then
@@ -448,7 +330,7 @@ if [ -n "$LOOP_LIGHTSHOW" ] && [ -e "$LOOP_LIGHTSHOW" ]; then
   else
     sudo mount -o ro "$LOOP_LIGHTSHOW" "$RO_MNT_DIR/part2-ro"
   fi
-  
+
   echo "  Mounted successfully at $RO_MNT_DIR/part2-ro"
 else
   echo "  Warning: Unable to attach loop device for Lightshow read-only mounting"

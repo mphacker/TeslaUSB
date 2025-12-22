@@ -12,6 +12,7 @@ UI logic. The system can be in one of three modes:
 import os
 import socket
 import subprocess
+import glob
 
 # Import configuration
 from config import (
@@ -22,8 +23,29 @@ from config import (
 )
 
 
+def _configfs_gadget_present():
+    """Check if the configfs mass_storage gadget is active (present mode)."""
+    try:
+        # Look for any mass_storage.usb0 LUN0 file path and confirm it is set
+        for lun_file in glob.glob('/sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.0/file'):
+            try:
+                with open(lun_file, 'r', encoding='utf-8') as fh:
+                    backing = fh.read().strip()
+                if backing:
+                    return True
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 def detect_mode():
     """Attempt to infer the current mode when the state file is missing."""
+    # Prefer configfs gadget detection (current path) over legacy g_mass_storage
+    if _configfs_gadget_present():
+        return "present"
+
     try:
         result = subprocess.run(
             ["lsmod"], capture_output=True, text=True, check=False, timeout=5

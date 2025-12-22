@@ -5,7 +5,7 @@ set -euo pipefail
 GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"
 IMG_CAM_NAME="usb_cam.img"        # TeslaCam partition (read-write)
 IMG_LIGHTSHOW_NAME="usb_lightshow.img"  # Lightshow partition (read-only)
-PART1_SIZE="427G"  
+PART1_SIZE="427G"
 PART2_SIZE="20G"
 LABEL1="TeslaCam"
 LABEL2="Lightshow"
@@ -60,6 +60,8 @@ REQUIRED_PACKAGES=(
   util-linux
   psmisc
   python3-flask
+  python3-av
+  python3-pil
   samba
   samba-common-bin
   ffmpeg
@@ -69,6 +71,11 @@ REQUIRED_PACKAGES=(
   hostapd
   dnsmasq
 )
+
+# Note on packages:
+# - python3-av: PyAV for instant thumbnail generation
+# - python3-pil: PIL/Pillow for image resizing
+# - ffmpeg: Used by lock chime service for audio validation and re-encoding
 
 # Lightweight apt helpers (reduce OOM risk on Pi Zero/2W)
 apt_update_safe() {
@@ -105,7 +112,7 @@ install_pkg_safe() {
 }
 
 enable_install_swap() {
-  INSTALL_SWAP="/tmp/teslausb_pkg.swap"
+  INSTALL_SWAP="/var/swap/teslausb_pkg.swap"
   if swapon --show | grep -q "$INSTALL_SWAP" 2>/dev/null; then
     echo "Temporary swap already active"
     return
@@ -117,6 +124,7 @@ enable_install_swap() {
     swapon /var/swap/fsck.swap 2>/dev/null && return
   fi
   # Create temporary 1GB swap
+  mkdir -p /var/swap
   if fallocate -l 1G "$INSTALL_SWAP" 2>/dev/null || dd if=/dev/zero of="$INSTALL_SWAP" bs=1M count=1024 status=none; then
     chmod 600 "$INSTALL_SWAP"
     mkswap "$INSTALL_SWAP" >/dev/null 2>&1 || { echo "mkswap failed"; return 1; }
@@ -138,30 +146,121 @@ disable_install_swap() {
 stop_nonessential_services() {
   # Stop heavy memory users during package install (keep WiFi up)
   echo "Stopping memory-intensive services..."
-  systemctl stop gadget_web.service 2>/dev/null || true
-  systemctl stop thumbnail_generator.service 2>/dev/null || true
-  systemctl stop thumbnail_generator.timer 2>/dev/null || true
-  systemctl stop chime_scheduler.service 2>/dev/null || true
-  systemctl stop chime_scheduler.timer 2>/dev/null || true
-  systemctl stop smbd nmbd 2>/dev/null || true
-  systemctl stop cups.service cups-browsed.service 2>/dev/null || true
-  systemctl stop ModemManager.service 2>/dev/null || true
-  systemctl stop packagekit.service 2>/dev/null || true
-  systemctl stop lightdm.service 2>/dev/null || true
-  echo "  Stopped services to free memory"
+  systemctl is-active gadget_web.service >/dev/null 2>&1 && systemctl stop gadget_web.service 2>/dev/null || true
+  systemctl is-active chime_scheduler.service >/dev/null 2>&1 && systemctl stop chime_scheduler.service 2>/dev/null || true
+  systemctl is-active chime_scheduler.timer >/dev/null 2>&1 && systemctl stop chime_scheduler.timer 2>/dev/null || true
+  systemctl is-active smbd >/dev/null 2>&1 && systemctl stop smbd 2>/dev/null || true
+  systemctl is-active nmbd >/dev/null 2>&1 && systemctl stop nmbd 2>/dev/null || true
+  systemctl is-active cups.service >/dev/null 2>&1 && systemctl stop cups.service 2>/dev/null || true
+  systemctl is-active cups-browsed.service >/dev/null 2>&1 && systemctl stop cups-browsed.service 2>/dev/null || true
+  systemctl is-active ModemManager.service >/dev/null 2>&1 && systemctl stop ModemManager.service 2>/dev/null || true
+  systemctl is-active packagekit.service >/dev/null 2>&1 && systemctl stop packagekit.service 2>/dev/null || true
+  systemctl is-active lightdm.service >/dev/null 2>&1 && systemctl stop lightdm.service 2>/dev/null || true
+  echo "  Stopped active services to free memory"
 }
 
 start_nonessential_services() {
   echo "Restarting services..."
-  systemctl start smbd nmbd 2>/dev/null || true
-  systemctl start thumbnail_generator.timer 2>/dev/null || true
-  systemctl start chime_scheduler.timer 2>/dev/null || true
-  systemctl start gadget_web.service 2>/dev/null || true
-  # lightdm, cups, ModemManager will auto-restart if enabled
-  systemctl start lightdm.service 2>/dev/null || true
-  systemctl start cups.service 2>/dev/null || true
+  systemctl is-enabled smbd >/dev/null 2>&1 && systemctl start smbd 2>/dev/null || true
+  systemctl is-enabled nmbd >/dev/null 2>&1 && systemctl start nmbd 2>/dev/null || true
+  systemctl is-enabled chime_scheduler.timer >/dev/null 2>&1 && systemctl start chime_scheduler.timer 2>/dev/null || true
+  systemctl is-enabled gadget_web.service >/dev/null 2>&1 && systemctl start gadget_web.service 2>/dev/null || true
+  # Only restart if enabled (don't re-enable lightdm if we just disabled it)
+  systemctl is-enabled lightdm.service >/dev/null 2>&1 && systemctl start lightdm.service 2>/dev/null || true
+  systemctl is-enabled cups.service >/dev/null 2>&1 && systemctl start cups.service 2>/dev/null || true
   echo "  Services restarted"
 }
+
+# ===== Clean up old/unused services from previous installations =====
+cleanup_old_services() {
+  echo "Checking for old/unused services from previous installations..."
+
+  # Stop and disable old thumbnail generator service (replaced by on-demand generation)
+  if systemctl list-unit-files | grep -q 'thumbnail_generator'; then
+    echo "  Removing old thumbnail_generator service..."
+    systemctl stop thumbnail_generator.service 2>/dev/null || true
+    systemctl stop thumbnail_generator.timer 2>/dev/null || true
+    systemctl disable thumbnail_generator.service 2>/dev/null || true
+    systemctl disable thumbnail_generator.timer 2>/dev/null || true
+    systemctl unmask thumbnail_generator.service 2>/dev/null || true
+    systemctl unmask thumbnail_generator.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/thumbnail_generator.service
+    rm -f /etc/systemd/system/thumbnail_generator.timer
+    systemctl daemon-reload
+    echo "    ✓ Removed thumbnail_generator service and timer"
+  fi
+
+  # Remove old template files if they exist
+  if [ -f "$GADGET_DIR/templates/thumbnail_generator.service" ] || [ -f "$GADGET_DIR/templates/thumbnail_generator.timer" ]; then
+    echo "  Removing old thumbnail generator templates..."
+    rm -f "$GADGET_DIR/templates/thumbnail_generator.service"
+    rm -f "$GADGET_DIR/templates/thumbnail_generator.timer"
+    echo "    ✓ Removed old template files"
+  fi
+
+  # Remove old background thumbnail generation script
+  if [ -f "$GADGET_DIR/scripts/generate_thumbnails.py" ]; then
+    echo "  Removing old background thumbnail generator script..."
+    rm -f "$GADGET_DIR/scripts/generate_thumbnails.py"
+    echo "    ✓ Removed generate_thumbnails.py"
+  fi
+
+  echo "Old service cleanup complete."
+}
+
+# ===== Optimize memory for setup (disable unnecessary services) =====
+optimize_memory_for_setup() {
+  echo "Optimizing memory for setup..."
+
+  # Disable graphical desktop services if present (saves 50-60MB on Pi Zero 2W)
+  if systemctl is-enabled lightdm.service >/dev/null 2>&1; then
+    echo "  Disabling graphical desktop (lightdm)..."
+    systemctl stop lightdm graphical.target 2>/dev/null || true
+    systemctl disable lightdm 2>/dev/null || true
+    systemctl set-default multi-user.target 2>/dev/null || true
+    echo "    ✓ Graphical desktop disabled (saves ~50-60MB RAM)"
+  else
+    echo "  Graphical desktop not installed or already disabled"
+  fi
+
+  # Ensure swap is available early (critical for low-memory systems)
+  if ! swapon --show 2>/dev/null | grep -q '/'; then
+    echo "  No active swap detected, enabling swap for setup..."
+
+    # Try to use existing fsck swap if available
+    if [ -f "/var/swap/fsck.swap" ]; then
+      echo "    Using existing fsck.swap file"
+      swapon /var/swap/fsck.swap 2>/dev/null && echo "    ✓ Swap enabled (fsck.swap)" && return
+    fi
+
+    # Try to use any existing swapfile
+    if [ -f "/swapfile" ]; then
+      echo "    Using existing /swapfile"
+      swapon /swapfile 2>/dev/null && echo "    ✓ Swap enabled (/swapfile)" && return
+    fi
+
+    # Create temporary swap for setup
+    echo "    Creating temporary 512MB swap..."
+    if dd if=/dev/zero of=/swapfile bs=1M count=512 status=none 2>/dev/null; then
+      chmod 600 /swapfile
+      mkswap /swapfile >/dev/null 2>&1
+      swapon /swapfile 2>/dev/null && echo "    ✓ Temporary swap created and enabled (512MB)"
+    else
+      echo "    Warning: Could not create swap (may cause OOM on low-memory systems)"
+    fi
+  else
+    echo "  Swap already active: $(swapon --show 2>/dev/null | tail -n +2 | awk '{print $1, $3}')"
+  fi
+
+  echo "Memory optimization complete."
+  echo ""
+}
+
+# Run cleanup before package installation
+cleanup_old_services
+
+# Optimize memory before package installation (critical for Pi Zero/2W)
+optimize_memory_for_setup
 
 MISSING_PACKAGES=()
 for pkg in "${REQUIRED_PACKAGES[@]}"; do
@@ -172,22 +271,27 @@ done
 
 if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
   echo "Installing missing packages: ${MISSING_PACKAGES[*]}"
-  
+
   # Prepare for low-memory install
   stop_nonessential_services
   enable_install_swap || { echo "ERROR: Failed to enable swap. Cannot proceed."; exit 1; }
-  
+
   # Run apt-get update
   apt_update_safe
-  
+
   # Install packages one at a time to avoid OOM on low-memory systems
   for pkg in "${MISSING_PACKAGES[@]}"; do
     install_pkg_safe "$pkg" || echo "Warning: install of $pkg reported an error"
   done
-  
+
   # Cleanup
   disable_install_swap
   start_nonessential_services
+
+  # Remove orphaned packages to save disk space
+  echo "Removing orphaned packages..."
+  apt-get autoremove -y >/dev/null 2>&1 || true
+  echo "  ✓ Orphaned packages removed"
 else
   echo "All required packages already installed; skipping apt install."
 fi
@@ -222,7 +326,7 @@ if [ -f "$CONFIG_FILE" ]; then
   # Check if [all] section exists
   if grep -q '^\[all\]' "$CONFIG_FILE"; then
     # [all] section exists - check and add entries if needed
-    
+
     # Check and add dtoverlay=dwc2 (only if not already present)
     if ! grep -q '^dtoverlay=dwc2$' "$CONFIG_FILE"; then
       # Add dtoverlay=dwc2 right after [all] line
@@ -232,7 +336,7 @@ if [ -f "$CONFIG_FILE" ]; then
     else
       echo "dtoverlay=dwc2 already present in $CONFIG_FILE"
     fi
-    
+
     # Check and add dtparam=watchdog=on (only if not already present)
     if ! grep -q '^dtparam=watchdog=on$' "$CONFIG_FILE"; then
       # Add dtparam=watchdog=on right after [all] line
@@ -290,27 +394,27 @@ if [ -f "$IMG_CAM_PATH" ]; then
 else
   # Set trap to cleanup on exit/error
   trap cleanup_loop_devices EXIT INT TERM
-  
+
   echo "Creating TeslaCam image $IMG_CAM_PATH (${P1_MB}M)..."
   # Create sparse file (thin provisioned) - only allocates space as needed
   truncate -s "${P1_MB}M" "$IMG_CAM_PATH" || {
     echo "Error: Failed to create TeslaCam image file"
     exit 1
   }
-  
+
   LOOP_CAM=$(losetup --find --show "$IMG_CAM_PATH") || {
     echo "Error: Failed to create loop device for TeslaCam"
     exit 1
   }
-  
+
   # Validate loop device was created
   if [ -z "$LOOP_CAM" ] || [ ! -e "$LOOP_CAM" ]; then
     echo "Error: Loop device creation failed or device not accessible"
     exit 1
   fi
-  
+
   echo "Using loop device: $LOOP_CAM"
-  
+
   # Format as single filesystem - use exFAT for large partitions (>32GB), FAT32 for smaller
   echo "Formatting TeslaCam partition (${LABEL1})..."
   if [ "$P1_MB" -gt 32768 ]; then
@@ -326,11 +430,11 @@ else
       exit 1
     }
   fi
-  
+
   # Clean up loop device
   losetup -d "$LOOP_CAM" 2>/dev/null || true
   LOOP_CAM=""
-  
+
   echo "TeslaCam image created and formatted."
 fi
 
@@ -340,25 +444,25 @@ if [ -f "$IMG_LIGHTSHOW_PATH" ]; then
 else
   # Set trap to cleanup on exit/error (if not already set)
   trap cleanup_loop_devices EXIT INT TERM
-  
+
   echo "Creating Lightshow image $IMG_LIGHTSHOW_PATH (${P2_MB}M)..."
   truncate -s "${P2_MB}M" "$IMG_LIGHTSHOW_PATH" || {
     echo "Error: Failed to create Lightshow image file"
     exit 1
   }
-  
+
   LOOP_LIGHTSHOW=$(losetup --find --show "$IMG_LIGHTSHOW_PATH") || {
     echo "Error: Failed to create loop device for Lightshow"
     exit 1
   }
-  
+
   if [ -z "$LOOP_LIGHTSHOW" ] || [ ! -e "$LOOP_LIGHTSHOW" ]; then
     echo "Error: Loop device creation failed or device not accessible"
     exit 1
   fi
-  
+
   echo "Using loop device: $LOOP_LIGHTSHOW"
-  
+
   # Format Lightshow partition
   echo "Formatting Lightshow partition (${LABEL2})..."
   if [ "$P2_MB" -gt 32768 ]; then
@@ -374,11 +478,11 @@ else
       exit 1
     }
   fi
-  
+
   # Clean up loop device
   losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
   LOOP_LIGHTSHOW=""
-  
+
   echo "Lightshow image created and formatted."
 fi
 
@@ -520,7 +624,7 @@ cat > "$SUDOERS_ENTRY" <<EOF
 # Allow $TARGET_USER to run gadget control scripts and all required system commands
 # without password for web interface automation
 
-# First, allow the main scripts to run with full sudo privileges  
+# First, allow the main scripts to run with full sudo privileges
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/present_usb.sh
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/edit_usb.sh
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/ap_control.sh
@@ -579,7 +683,7 @@ echo "Installing systemd services..."
 configure_service() {
   local template_file="$1"
   local output_file="$2"
-  
+
   sed -e "s|__GADGET_DIR__|$GADGET_DIR|g" \
       -e "s|__MNT_DIR__|$MNT_DIR|g" \
       -e "s|__TARGET_USER__|$TARGET_USER|g" \
@@ -590,17 +694,9 @@ configure_service() {
 SERVICE_FILE="/etc/systemd/system/gadget_web.service"
 configure_service "$TEMPLATES_DIR/gadget_web.service" "$SERVICE_FILE"
 
-# Auto-present service  
+# Auto-present service
 AUTO_SERVICE="/etc/systemd/system/present_usb_on_boot.service"
 configure_service "$TEMPLATES_DIR/present_usb_on_boot.service" "$AUTO_SERVICE"
-
-# Thumbnail generator service
-THUMBNAIL_SERVICE="/etc/systemd/system/thumbnail_generator.service"
-configure_service "$TEMPLATES_DIR/thumbnail_generator.service" "$THUMBNAIL_SERVICE"
-
-# Thumbnail generator timer
-THUMBNAIL_TIMER="/etc/systemd/system/thumbnail_generator.timer"
-configure_service "$TEMPLATES_DIR/thumbnail_generator.timer" "$THUMBNAIL_TIMER"
 
 # Chime scheduler service
 CHIME_SCHEDULER_SERVICE="/etc/systemd/system/chime_scheduler.service"
@@ -627,9 +723,6 @@ systemctl enable --now gadget_web.service || systemctl restart gadget_web.servic
 
 systemctl daemon-reload
 systemctl enable present_usb_on_boot.service || true
-
-# Enable and start thumbnail generator timer
-systemctl enable --now thumbnail_generator.timer || systemctl restart thumbnail_generator.timer
 
 # Enable and start chime scheduler timer
 systemctl enable --now chime_scheduler.timer || systemctl restart chime_scheduler.timer
@@ -666,7 +759,7 @@ vm.swappiness = 10
 EOF
   chmod 644 "$SYSCTL_CONF"
   echo "  Created $SYSCTL_CONF"
-  
+
   # Apply sysctl settings immediately
   sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
   echo "  Applied sysctl settings"
@@ -746,7 +839,7 @@ if [ ! -f "$SWAP_FILE" ]; then
   if [ ! -d "$SWAP_DIR" ]; then
     mkdir -p "$SWAP_DIR"
   fi
-  
+
   # Create swapfile using fallocate (faster than dd)
   echo "  Creating 1GB swapfile at $SWAP_FILE..."
   fallocate -l ${SWAP_SIZE_MB}M "$SWAP_FILE" || {
@@ -754,16 +847,73 @@ if [ ! -f "$SWAP_FILE" ]; then
     echo "  fallocate failed, using dd instead..."
     dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$SWAP_SIZE_MB status=progress
   }
-  
+
   # Secure permissions and format as swap
   chmod 600 "$SWAP_FILE"
   mkswap "$SWAP_FILE"
-  
+
   echo "  ✓ Swapfile created successfully"
-  echo "  Note: Swap will only be enabled during filesystem checks (not continuous)"
+
+  # Add to /etc/fstab for automatic mounting on boot
+  if ! grep -q "$SWAP_FILE" /etc/fstab 2>/dev/null; then
+    echo "  Adding swap to /etc/fstab for persistent mounting..."
+    echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+    systemctl daemon-reload
+    echo "  ✓ Swap will be enabled automatically on boot"
+  fi
+
+  # Enable swap now
+  swapon "$SWAP_FILE" 2>/dev/null || echo "  Note: Swap enabled, will activate on reboot"
+
+  # Clean up temporary swapfile from optimize_memory_for_setup if it exists
+  if [ -f "/swapfile" ] && [ "$SWAP_FILE" != "/swapfile" ]; then
+    echo "  Cleaning up temporary /swapfile..."
+    swapoff /swapfile 2>/dev/null || true
+    rm -f /swapfile
+    echo "  ✓ Temporary swapfile removed"
+  fi
+
 else
   echo "  Swapfile already exists at $SWAP_FILE"
+
+  # Ensure it's in fstab even if file exists
+  if ! grep -q "$SWAP_FILE" /etc/fstab 2>/dev/null; then
+    echo "  Adding existing swap to /etc/fstab..."
+    echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+    systemctl daemon-reload
+    echo "  ✓ Swap will be enabled automatically on boot"
+  fi
+
+  # Clean up temporary swapfile from optimize_memory_for_setup if it exists
+  if [ -f "/swapfile" ] && [ "$SWAP_FILE" != "/swapfile" ]; then
+    echo "  Cleaning up temporary /swapfile..."
+    swapoff /swapfile 2>/dev/null || true
+    rm -f /swapfile
+    echo "  ✓ Temporary swapfile removed"
+  fi
+
+  # Enable swap if not already active
+  if ! swapon --show 2>/dev/null | grep -q "$SWAP_FILE"; then
+    echo "  Enabling swap..."
+    swapon "$SWAP_FILE" 2>/dev/null || true
+  fi
 fi
+
+# ===== Disable Unnecessary Desktop Services (Save ~30MB RAM) =====
+echo
+echo "Disabling unnecessary desktop services to save memory..."
+
+# Stop and mask audio/color management services (not needed for headless USB gadget)
+DESKTOP_SERVICES=("pipewire" "wireplumber" "pipewire-pulse" "colord")
+for service in "${DESKTOP_SERVICES[@]}"; do
+  if systemctl is-active "$service" >/dev/null 2>&1 || systemctl is-enabled "$service" >/dev/null 2>&1; then
+    echo "  Stopping and masking $service..."
+    systemctl stop "$service" 2>/dev/null || true
+    systemctl mask "$service" 2>/dev/null || true
+  fi
+done
+
+echo "  ✓ Desktop services disabled (saves ~30MB RAM)"
 
 # ===== Create TeslaCam folder on TeslaCam partition =====
 echo

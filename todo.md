@@ -17,6 +17,13 @@
 - [ ] **Cache Partition Mount Paths**: Cache `get_mount_path()` results in memory for 30 seconds to reduce I/O operations
 - [ ] **Optimize Video Statistics**: Cache `get_video_statistics()` results for 5 minutes instead of scanning entire tree on every analytics page load
 - [X] **Background Task Queue**: Use Python threading or lightweight task queue for long operations (thumbnail generation, bulk deletes) to avoid blocking web requests (DONE: systemd timer runs thumbnail generator every 15 min, thumbnails generated async)
+- [ ] Cache analytics responses (partition/video stats) with a short TTL and background refresh to avoid full rescans on every dashboard/API request
+- [ ] Add server-side pagination/indexed listings so video pages don’t scan entire folders before returning the first page
+- [ ] Cache per-folder session indexes for multi-camera view to avoid re-parsing entire folders per session request
+- [ ] Limit PyAV decode threads to 1 and cap concurrent thumbnail jobs to prevent CPU spikes on Pi Zero/low-power boards
+- [ ] Add thumbnail request backoff/batching (client + server) to reduce repeated placeholder fetches and network churn
+- [ ] Enable gzip/deflate (or precompressed) static assets with far-future cache headers to cut bandwidth and page load time
+- [ ] Short-lived cache for mode tokens and mount state (with invalidation on mode switch) to reduce repeated sysfs/state lookups
 
 ## User Experience (Priority: High)
 - [X] Tighten small-screen ergonomics on Videos/Chimes/Light Shows (DONE: Responsive mobile cards, collapsible sections, mobile-optimized layout)
@@ -35,6 +42,7 @@
 - [X] **Empty State Messages**: Add helpful first-run messages like "Your Tesla hasn't recorded any videos yet. Try honking to save a clip!" (DONE: "No videos found", "No chimes found" messages)
 - [X] **Loading Skeletons**: Add CSS skeleton loaders instead of blank pages while data loads (DONE: Spinner animations for infinite scroll, upload progress)
 - [ ] **Favicon & App Icons**: Add Tesla/USB themed favicon and touch icons for browser tabs and mobile home screen
+- [ ] Support HTTP range/chunked video streaming so seeks/previews don’t force full-file downloads
 
 ## Configuration & Maintenance (Priority: Medium)
 - [X] **Web-Based Configuration Editor**: Add settings page to edit `config.sh` and `config.py` (AP credentials, cleanup policies, port) without SSH (DONE: Settings page has AP config, WiFi config, mode control, cleanup settings)
@@ -44,6 +52,7 @@
 - [ ] **One-Click Updates**: Add "Check for Updates" button that runs `git pull` and restart script (with warnings about personal project nature)
 - [ ] Web UI control to regenerate/resize the USB images safely (with pre-flight free-space checks and fsck)
 - [ ] Event log UI (connect/disconnect, mode switches, uploads/deletes, errors) with export to CSV/JSON
+- [ ] Schedule orphan thumbnail cleanup (nightly or on boot) and track last scan to avoid on-demand full-tree walks during browsing
 
 ## New Functionality (Priority: Medium)
 - [X] **Offline fallback access point**: start hostapd/dnsmasq with static 192.168.4.1 when STA join fails (with RSSI/dwell hysteresis to avoid flaps) so a phone can reach the web UI in the car (DONE: Full AP implementation with auto/force_on/force_off modes, concurrent with WiFi client)
@@ -63,6 +72,7 @@
 - [ ] **Graceful Degradation**: Show informative messages and allow partial functionality when partitions unmounted instead of complete failure (PARTIAL: Error messages shown, but functionality limited)
 - [ ] **Retry Logic**: Add exponential backoff retry for transient failures in mount operations and subprocess calls
 - [X] **Lock File Monitoring UI**: Add lock file status to operations banner with "Force Clear" button (with warnings about stuck operations) (DONE: Operation-in-progress banner with countdown and lock age)
+- [ ] Offload FFmpeg chime re-encode/normalize to background task with progress polling to keep web workers responsive and avoid watchdog resets
 
 ## Reliability (Priority: Medium)
 - [ ] Systemd watchdog/healthcheck for `gadget_web.service` and thumbnail generator to auto-restart on hangs

@@ -17,13 +17,14 @@ app.secret_key = SECRET_KEY
 
 # Register blueprints
 from blueprints import (
-    mode_control_bp, 
-    videos_bp, 
-    lock_chimes_bp, 
-    light_shows_bp, 
-    analytics_bp, 
+    mode_control_bp,
+    videos_bp,
+    lock_chimes_bp,
+    light_shows_bp,
+    analytics_bp,
     cleanup_bp,
-    api_bp
+    api_bp,
+    fsck_bp
 )
 
 app.register_blueprint(mode_control_bp)
@@ -33,6 +34,7 @@ app.register_blueprint(light_shows_bp)
 app.register_blueprint(analytics_bp)
 app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)
+app.register_blueprint(fsck_bp)
 
 
 if __name__ == "__main__":

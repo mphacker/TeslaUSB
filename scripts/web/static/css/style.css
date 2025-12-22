@@ -778,6 +778,25 @@ button:disabled {
     object-fit: cover;
     border-radius: 4px;
     display: block;
+    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+    background-size: 200% 100%;
+}
+
+.video-thumbnail[src*=".jpg"],
+.video-thumbnail[src*=".jpeg"],
+.video-thumbnail[src*=".png"] {
+    animation: none;
+}
+
+.video-thumbnail:not([src]),
+.video-thumbnail[src=""],
+.video-thumbnail[src*="data:image/png;base64"] {
+    animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
 }
 
 .thumbnail-cell {
@@ -1544,4 +1563,425 @@ details summary span:first-of-type {
 .toggle-switch:has(input:disabled) {
     cursor: not-allowed;
 }
+
+/* ============================================================================
+   Chime Groups Styles
+   ============================================================================ */
+
+.chime-groups-section {
+    margin-bottom: 20px;
+}
+
+.groups-container {
+    display: grid;
+    gap: 15px;
+    margin-top: 15px;
+}
+
+.group-card {
+    background: var(--form-input-bg);
+    border: 2px solid var(--border-input);
+    border-radius: 8px;
+    padding: 15px;
+    transition: all 0.3s ease;
+}
+
+.group-card:hover {
+    border-color: var(--collapsible-section-border);
+    box-shadow: 0 2px 8px var(--shadow);
+}
+
+.group-card.active-random-group {
+    border-color: var(--active-chime-border);
+    background: var(--active-chime-bg);
+}
+
+.group-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 15px;
+    margin-bottom: 10px;
+}
+
+.group-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.group-name {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 5px 0;
+    word-wrap: break-word;
+}
+
+.group-description {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin: 0 0 8px 0;
+    line-height: 1.4;
+}
+
+.group-meta {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.group-meta-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.group-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.group-btn {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.group-btn-edit {
+    background: var(--btn-info-bg);
+    color: var(--btn-info-text);
+}
+
+.group-btn-edit:hover {
+    opacity: 0.8;
+}
+
+.group-btn-delete {
+    background: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
+.group-btn-delete:hover {
+    opacity: 0.8;
+}
+
+.group-chimes-list {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-light);
+}
+
+.group-chimes-list h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 8px 0;
+}
+
+.group-chimes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.chime-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    background: var(--form-label-bg);
+    border: 1px solid var(--border-input);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-primary);
+    transition: all 0.2s ease;
+}
+
+.chime-tag:hover {
+    background: var(--bg-hover);
+}
+
+.chime-tag-remove {
+    cursor: pointer;
+    color: var(--error-text);
+    font-weight: bold;
+    margin-left: 2px;
+}
+
+.chime-tag-remove:hover {
+    transform: scale(1.2);
+}
+
+.group-empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-secondary);
+}
+
+.group-empty-state i {
+    font-size: 48px;
+    margin-bottom: 15px;
+    opacity: 0.5;
+}
+
+.random-mode-section {
+    background: var(--collapsible-content-bg);
+    border: 2px solid var(--collapsible-section-border);
+    border-radius: 8px;
+    padding: 15px;
+    margin-top: 15px;
+}
+
+.random-mode-section.active {
+    background: var(--active-chime-bg);
+    border-color: var(--active-chime-border);
+}
+
+.random-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 15px;
+    margin-bottom: 10px;
+}
+
+.random-mode-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.random-mode-info h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.random-mode-status {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.random-mode-status.enabled {
+    background: var(--status-present-bg);
+    color: var(--status-present-text);
+}
+
+.random-mode-status.disabled {
+    background: var(--status-unknown-bg);
+    color: var(--status-unknown-text);
+}
+
+.random-mode-controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.random-group-select {
+    padding: 8px 12px;
+    border: 2px solid var(--border-input);
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 14px;
+    min-width: 200px;
+}
+
+.random-mode-description {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-top: 10px;
+}
+
+/* Group Form Modal Styles */
+.group-modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: var(--bg-overlay);
+}
+
+.group-modal.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.group-modal-content {
+    background: var(--bg-container);
+    border-radius: 8px;
+    padding: 25px;
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 4px 20px var(--shadow);
+}
+
+.group-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    padding-bottom: 15px;
+    border-bottom: 2px solid var(--border-light);
+}
+
+.group-modal-header h3 {
+    margin: 0;
+    font-size: 20px;
+    color: var(--text-primary);
+}
+
+.group-modal-close {
+    cursor: pointer;
+    font-size: 28px;
+    font-weight: bold;
+    color: var(--text-secondary);
+    line-height: 1;
+    transition: color 0.2s ease;
+}
+
+.group-modal-close:hover {
+    color: var(--error-text);
+}
+
+.group-form-field {
+    margin-bottom: 20px;
+}
+
+.group-form-field label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.group-form-field input,
+.group-form-field textarea {
+    width: 100%;
+    padding: 10px;
+    border: 2px solid var(--border-input);
+    border-radius: 4px;
+    background: var(--form-input-bg);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: inherit;
+}
+
+.group-form-field textarea {
+    resize: vertical;
+    min-height: 80px;
+}
+
+.group-form-field input:focus,
+.group-form-field textarea:focus {
+    outline: none;
+    border-color: var(--collapsible-section-border);
+}
+
+.group-form-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 25px;
+}
+
+.chime-selector-section {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 2px solid var(--border-light);
+}
+
+.chime-selector-section h4 {
+    margin: 0 0 12px 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.chime-checkboxes {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border-input);
+    border-radius: 4px;
+    padding: 10px;
+    background: var(--form-input-bg);
+}
+
+.chime-checkbox-item {
+    display: flex;
+    align-items: center;
+    padding: 8px;
+    border-radius: 4px;
+    transition: background 0.2s ease;
+}
+
+.chime-checkbox-item:hover {
+    background: var(--bg-hover);
+}
+
+.chime-checkbox-item input[type="checkbox"] {
+    margin-right: 10px;
+    cursor: pointer;
+}
+
+.chime-checkbox-item label {
+    cursor: pointer;
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+/* Responsive Design for Groups */
+@media (max-width: 768px) {
+    .group-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .group-actions {
+        justify-content: flex-end;
+    }
+    
+    .random-mode-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .random-mode-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .random-group-select {
+        width: 100%;
+    }
+    
+    .group-modal-content {
+        width: 95%;
+        padding: 20px;
+    }
+}
+
 

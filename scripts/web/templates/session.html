@@ -10,292 +10,239 @@
         <strong>Cameras:</strong> {{ videos|length }} view(s)
     </div>
     
-    <div class="session-controls">
-        <button onclick="playAll()" class="present-btn">▶️ Play All</button>
-        <button onclick="pauseAll()" class="edit-btn">⏸️ Pause All</button>
-        <button onclick="seekAll(0)" class="set-chime-btn">⏮️ Restart</button>
-        <button onclick="syncAll()" class="present-btn">🔄 Sync Playback</button>
-        <button onclick="toggleAutoSync()" id="autoSyncBtn" class="edit-btn">🔄 Auto-Sync: ON</button>
-        <button onclick="toggleLowBandwidth()" id="lowBandwidthBtn" class="edit-btn">📶 Low Bandwidth: ON</button>
-    </div>
+    <style>
+    .focus-layout { display: flex; flex-direction: column; gap: 16px; }
+    .focus-player { flex: 2; }
+    .filmstrip { flex: 1; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; padding-right: 4px; overflow: visible; }
+    .filmstrip-item { width: 100%; text-align: left; padding: 10px; border-radius: 8px; border: 1px solid #2f3a45; background: #1d2630; color: #eee; cursor: pointer; }
+    .filmstrip-item:hover { border-color: #3ba3ff; background: #223040; }
+    .film-thumb { height: 90px; border-radius: 6px; background: #0f161d; overflow: hidden; }
+    .thumb-video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .thumb-label { font-weight: 600; font-size: 14px; margin-top: 6px; }
+    .thumb-meta { font-size: 12px; color: #9db3c7; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .active-thumb { border-color: #4caf50; box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.2); }
+    @media (min-width: 980px) {
+        .focus-layout { flex-direction: row; align-items: flex-start; }
+        .filmstrip { max-width: 360px; grid-template-columns: 1fr; }
+    }
+    </style>
     
-    <div class="info-box" style="margin: 10px 0;">
-        <p style="margin: 0; font-size: 13px;">
-            <strong>💡 Performance Tips:</strong><br>
-            • <strong>Low Bandwidth Mode</strong>: Enabled by default - streams videos on-demand (recommended for Pi Zero 2 W)<br>
-            • <strong>Auto-Sync</strong>: Keeps cameras synchronized during playback<br>
-            • Videos use HTTP streaming - browser buffers only what's needed
-        </p>
-    </div>
-    
-    <div class="session-grid tesla-layout" id="sessionGrid">
-        {% for video in videos %}
-        <div class="session-video-container tesla-{{ video.camera|replace('_', '_')|lower }}" data-camera-index="{{ loop.index0 }}">
-            <video id="video-{{ loop.index0 }}" controls preload="none"
-                   src="{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}">
-                Your browser does not support the video tag.
-            </video>
-            <div class="session-video-label" onclick="openFullVideo('{{ video.name }}')">
-                📹 {{ video.camera|replace('_', ' ')|title }}
-                <span id="status-{{ loop.index0 }}" style="font-size: 11px; color: #666;"></span>
+<div class="focus-layout">
+            <div class="focus-player">
+                <div class="session-video-container">
+                    <video id="mainVideo" controls preload="auto" poster="" playsinline>
+                        Your browser does not support the video tag.
+                    </video>
+                    <div class="session-video-label" id="mainLabel">
+                        📹 Loading…
+                        <span id="mainStatus" style="font-size: 11px; color: #666;"></span>
+                    </div>
+                </div>
+                <div class="session-controls">
+                    <button onclick="playMain()" class="present-btn">▶️ Play</button>
+                    <button onclick="pauseMain()" class="edit-btn">⏸️ Pause</button>
+                    <button onclick="seekMain(0)" class="set-chime-btn">⏮️ Restart</button>
+                    <button onclick="openFullVideo(currentVideo()?.name)" class="present-btn">↗️ Open in list</button>
+                </div>
+            </div>
+
+            <div class="filmstrip" id="filmstrip">
+                {# Front camera first, then the rest #}
+                {% for video in videos if 'front' in video.camera|lower %}
+                <button class="filmstrip-item" data-name="{{ video.name }}">
+                    <div class="film-thumb">
+                        <video class="thumb-video" muted playsinline preload="metadata" src="{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}#t=0.1"></video>
+                    </div>
+                    <div class="thumb-label">{{ video.camera|replace('_', ' ')|title }}</div>
+                    <div class="thumb-meta">{{ video.name }}</div>
+                </button>
+                {% endfor %}
+                {% for video in videos if 'front' not in video.camera|lower %}
+                <button class="filmstrip-item" data-name="{{ video.name }}">
+                    <div class="film-thumb">
+                        <video class="thumb-video" muted playsinline preload="metadata" src="{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}#t=0.1"></video>
+                    </div>
+                    <div class="thumb-label">{{ video.camera|replace('_', ' ')|title }}</div>
+                    <div class="thumb-meta">{{ video.name }}</div>
+                </button>
+                {% endfor %}
             </div>
         </div>
-        {% endfor %}
+    
+        <div style="text-align: center; margin-top: 20px;">
+            <a href="{{ url_for('videos.file_browser', folder=folder) }}" class="btn-download">
+                ← Back to Video List
+            </a>
+        </div>
     </div>
-    
-    <div style="text-align: center; margin-top: 20px;">
-        <a href="{{ url_for('videos.file_browser', folder=folder) }}" class="btn-download">
-            ← Back to Video List
-        </a>
-    </div>
-</div>
 
-<script>
-// Get all video elements
-const videos = document.querySelectorAll('.session-video-container video');
-let autoSyncEnabled = true;
-let lowBandwidthMode = true; // Start with low bandwidth mode enabled by default (optimal for Pi Zero 2 W)
-let syncInterval = null;
-const SYNC_THRESHOLD = 0.2; // Sync if drift is more than 0.2 seconds
-const SYNC_CHECK_INTERVAL = 500; // Check every 500ms for tighter sync
-
-// Toggle low bandwidth mode
-function toggleLowBandwidth() {
-    lowBandwidthMode = !lowBandwidthMode;
-    const btn = document.getElementById('lowBandwidthBtn');
-    
-    if (lowBandwidthMode) {
-        btn.textContent = '📶 Low Bandwidth: ON';
-        btn.className = 'edit-btn';
-        // Change all videos to preload=none (streaming only)
-        videos.forEach((video, index) => {
-            video.preload = 'none';
-            const statusElem = document.getElementById(`status-${index}`);
-            if (statusElem) {
-                statusElem.textContent = ' (Stream mode)';
-                statusElem.style.color = '#2196f3';
-            }
-        });
-        console.log('Low bandwidth mode: Videos will stream on-demand only');
-    } else {
-        btn.textContent = '📶 Low Bandwidth: OFF';
-        btn.className = 'present-btn';
-        // Change to preload=metadata (light buffering)
-        videos.forEach((video, index) => {
-            video.preload = 'metadata';
-            const statusElem = document.getElementById(`status-${index}`);
-            if (statusElem) {
-                statusElem.textContent = ' (Buffer mode)';
-                statusElem.style.color = '#4caf50';
-            }
-        });
-        console.log('Normal mode: Videos will buffer metadata');
+    <script id="videoListData" type="application/json">
+    [
+    {# Front first #}
+    {% set comma = joiner() %}
+    {% for video in videos if 'front' in video.camera|lower %}
+    {{ comma() }}{
+        "name": "{{ video.name }}",
+        "camera": "{{ video.camera|replace('_', ' ')|title }}",
+        "src": "{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}"
     }
-}
-
-// Toggle auto-sync on/off
-function toggleAutoSync() {
-    autoSyncEnabled = !autoSyncEnabled;
-    const btn = document.getElementById('autoSyncBtn');
-    btn.textContent = autoSyncEnabled ? '🔄 Auto-Sync: ON' : '🔄 Auto-Sync: OFF';
-    btn.className = autoSyncEnabled ? 'edit-btn' : 'btn-delete';
-    
-    if (!autoSyncEnabled && syncInterval) {
-        clearInterval(syncInterval);
-        syncInterval = null;
-    } else if (autoSyncEnabled && !videos[0].paused) {
-        startAutoSync();
+    {% endfor %}
+    {% for video in videos if 'front' not in video.camera|lower %}
+    {{ comma() }}{
+        "name": "{{ video.name }}",
+        "camera": "{{ video.camera|replace('_', ' ')|title }}",
+        "src": "{{ url_for('videos.stream_video', folder=folder, filename=video.name) }}"
     }
-}
+    {% endfor %}
+    ]
+    </script>
 
-// Show loading/buffering status for each video
-videos.forEach((video, index) => {
-    // Buffer progress monitoring
-    video.addEventListener('progress', () => {
-        if (lowBandwidthMode) return; // Don't show buffer in low bandwidth mode
-        
-        if (video.buffered.length > 0) {
-            const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-            const duration = video.duration;
-            if (duration > 0) {
-                const bufferedSeconds = Math.round(bufferedEnd);
-                const statusElem = document.getElementById(`status-${index}`);
-                if (statusElem && !video.paused) {
-                    statusElem.textContent = ` (${bufferedSeconds}s buffered)`;
-                    statusElem.style.color = '#ff9800';
-                }
-            }
-        }
-    });
-    
-    // Video is ready to play
-    video.addEventListener('canplay', () => {
-        const statusElem = document.getElementById(`status-${index}`);
-        if (statusElem && !lowBandwidthMode) {
-            statusElem.textContent = ' (Ready)';
-            statusElem.style.color = '#4caf50';
-        }
-    });
-    
-    // Video is playing
-    video.addEventListener('playing', () => {
-        const statusElem = document.getElementById(`status-${index}`);
-        if (statusElem) {
-            statusElem.textContent = lowBandwidthMode ? ' (Streaming...)' : ' (Playing)';
-            statusElem.style.color = '#4caf50';
-        }
-    });
-    
-    // Video is waiting for data
-    video.addEventListener('waiting', () => {
-        const statusElem = document.getElementById(`status-${index}`);
-        if (statusElem) {
-            statusElem.textContent = ' (Buffering...)';
-            statusElem.style.color = '#ff9800';
-        }
-    });
-    
-    // Video stalled (network issue)
-    video.addEventListener('stalled', () => {
-        const statusElem = document.getElementById(`status-${index}`);
-        if (statusElem) {
-            statusElem.textContent = ' (Stalled)';
-            statusElem.style.color = '#f44336';
-        }
-    });
-});
+    <script>
+    // Focus + filmstrip: only one stream active; thumbs are lightweight buttons
+    const videoList = JSON.parse(document.getElementById('videoListData').textContent);
 
-// Open individual video in full view
-function openFullVideo(filename) {
-    window.location.href = "{{ url_for('videos.file_browser', folder=folder) }}&play=" + encodeURIComponent(filename);
-}
+    const mainVideo = document.getElementById('mainVideo');
+    const mainLabel = document.getElementById('mainLabel');
+    const mainStatus = document.getElementById('mainStatus');
+    const filmstrip = document.getElementById('filmstrip');
+    let currentIndex = 0;
+    let userPaused = false;
+    let retryHandle = null;
 
-// Sync all videos to the first video's time
-function syncAll() {
-    if (videos.length === 0) return;
-    const masterTime = videos[0].currentTime;
-    videos.forEach((video, index) => {
-        if (index !== 0) {
-            video.currentTime = masterTime;
-        }
-    });
-}
-
-// Start automatic sync monitoring
-function startAutoSync() {
-    if (!autoSyncEnabled || syncInterval) return;
-    
-    syncInterval = setInterval(() => {
-        if (!autoSyncEnabled || videos[0].paused) {
-            clearInterval(syncInterval);
-            syncInterval = null;
-            return;
-        }
-        
-        const masterTime = videos[0].currentTime;
-        videos.forEach((video, index) => {
-            if (index !== 0 && !video.paused) {
-                const diff = Math.abs(video.currentTime - masterTime);
-                // Re-sync if drift exceeds threshold
-                if (diff > SYNC_THRESHOLD) {
-                    console.log(`Syncing video ${index}: drift ${diff.toFixed(2)}s`);
-                    video.currentTime = masterTime;
-                }
-            }
-        });
-    }, SYNC_CHECK_INTERVAL);
-}
-
-// Play all videos with sync
-function playAll() {
-    syncAll(); // Sync before playing
-    
-    // Start playing all videos
-    const playPromises = Array.from(videos).map(video => 
-        video.play().catch(e => {
-            console.log('Play failed:', e);
-            return null;
-        })
-    );
-    
-    // Once all start playing, enable auto-sync
-    Promise.all(playPromises).then(() => {
-        if (autoSyncEnabled) {
-            startAutoSync();
-        }
-    });
-}
-
-// Pause all videos
-function pauseAll() {
-    videos.forEach(video => video.pause());
-    if (syncInterval) {
-        clearInterval(syncInterval);
-        syncInterval = null;
+    function currentVideo() {
+        return videoList[currentIndex];
     }
-}
 
-// Seek all videos to a specific time
-function seekAll(time) {
-    videos.forEach(video => {
-        video.currentTime = time;
-    });
-}
+    function setStatus(text, color) {
+        if (!mainStatus) return;
+        mainStatus.textContent = text ? ` (${text})` : '';
+        mainStatus.style.color = color || '#666';
+    }
 
-// Master video (first one) controls all others
-if (videos.length > 0) {
-    // When master plays, play all others
-    videos[0].addEventListener('play', () => {
-        const masterTime = videos[0].currentTime;
-        videos.forEach((video, index) => {
-            if (index !== 0 && video.paused) {
-                video.currentTime = masterTime;
-                video.play().catch(e => console.log('Auto-play failed:', e));
+    function loadVideo(index, autoplay = false) {
+        if (!videoList.length) return;
+        currentIndex = index;
+        const item = videoList[index];
+        mainVideo.pause();
+        mainVideo.src = item.src;
+        mainVideo.currentTime = 0;
+        mainLabel.innerHTML = `📹 ${item.camera} <span style="font-size: 11px; color: #666;">${item.name}</span>`;
+        setStatus('Loading…', '#2196f3');
+        highlightActiveThumb(index);
+        if (autoplay) {
+            mainVideo.play().catch(() => {});
+        }
+    }
+
+    function highlightActiveThumb(index) {
+        const buttons = filmstrip.querySelectorAll('.filmstrip-item');
+        buttons.forEach((btn, i) => {
+            if (i === index) {
+                btn.classList.add('active-thumb');
+            } else {
+                btn.classList.remove('active-thumb');
             }
         });
-        
-        if (autoSyncEnabled) {
-            startAutoSync();
-        }
-    });
-    
-    // When master pauses, pause all others
-    videos[0].addEventListener('pause', () => {
-        videos.forEach((video, index) => {
-            if (index !== 0) {
-                video.pause();
-            }
-        });
-        
-        if (syncInterval) {
-            clearInterval(syncInterval);
-            syncInterval = null;
-        }
-    });
-    
-    // When master seeks, seek all others
-    videos[0].addEventListener('seeked', () => {
-        const masterTime = videos[0].currentTime;
-        videos.forEach((video, index) => {
-            if (index !== 0) {
-                video.currentTime = masterTime;
-            }
-        });
-    });
-}
+    }
 
-// Initialize status indicators
-window.addEventListener('load', () => {
-    console.log('Multi-camera session view loaded. Using HTTP range requests for streaming.');
-    console.log(`Videos: ${videos.length}, Low Bandwidth: ${lowBandwidthMode ? 'ON' : 'OFF'}`);
-    
-    videos.forEach((video, index) => {
-        const statusElem = document.getElementById(`status-${index}`);
-        if (statusElem) {
-            statusElem.textContent = lowBandwidthMode ? ' (Stream mode)' : ' (Loading...)';
-            statusElem.style.color = lowBandwidthMode ? '#2196f3' : '#ff9800';
+    function playMain() {
+        userPaused = false;
+        mainVideo.play().catch(() => {});
+    }
+
+    function pauseMain() {
+        userPaused = true;
+        mainVideo.pause();
+    }
+
+    function seekMain(time) {
+        mainVideo.currentTime = time;
+    }
+
+    function openFullVideo(filename) {
+        if (!filename) return;
+        window.location.href = "{{ url_for('videos.file_browser', folder=folder) }}&play=" + encodeURIComponent(filename);
+    }
+
+    function hasBufferedAhead(video, secondsAhead = 1.0) {
+        if (!video.buffered || video.buffered.length === 0) return false;
+        const t = video.currentTime;
+        for (let i = 0; i < video.buffered.length; i++) {
+            const start = video.buffered.start(i);
+            const end = video.buffered.end(i);
+            if (t >= start && t + secondsAhead <= end) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function resumeIfBuffered() {
+        if (userPaused || mainVideo.ended) return;
+        if (hasBufferedAhead(mainVideo, 1.0)) {
+            mainVideo.play().catch(() => {});
+        }
+    }
+
+    // Wire filmstrip clicks (find index by name)
+    filmstrip.addEventListener('click', (e) => {
+        const btn = e.target.closest('.filmstrip-item');
+        if (!btn) return;
+        const name = btn.dataset.name;
+        const idx = videoList.findIndex(v => v.name === name);
+        if (idx >= 0) {
+            loadVideo(idx, true);
         }
     });
-});
-</script>
-{% endblock %}
+
+    function clearRetry() {
+        if (retryHandle) {
+            clearTimeout(retryHandle);
+            retryHandle = null;
+        }
+    }
+
+    function nudgeCurrentTime(video) {
+        // Small seek forward to poke the decoder when buffered data exists
+        try {
+            video.currentTime = Math.min(video.currentTime + 0.05, (video.duration || video.currentTime) - 0.01);
+        } catch (_) {}
+    }
+
+    function ensurePlaying(delay = 250) {
+        clearRetry();
+        retryHandle = setTimeout(() => {
+            if (userPaused || mainVideo.ended) return;
+            if (hasBufferedAhead(mainVideo, 0.5)) {
+                mainVideo.play().catch(() => {});
+                nudgeCurrentTime(mainVideo);
+            } else {
+                // If nothing buffered yet, try again soon
+                ensurePlaying(400);
+            }
+        }, delay);
+    }
+
+    // Status events
+    mainVideo.addEventListener('playing', () => setStatus('Streaming…', '#4caf50'));
+    mainVideo.addEventListener('waiting', () => {
+        setStatus('Buffering…', '#ff9800');
+        ensurePlaying(200);
+    });
+    mainVideo.addEventListener('stalled', () => {
+        setStatus('Stalled, retrying…', '#f44336');
+        ensurePlaying(200);
+    });
+    mainVideo.addEventListener('pause', () => {
+        if (!userPaused && !mainVideo.ended) {
+            ensurePlaying(150);
+        }
+    });
+    mainVideo.addEventListener('canplay', () => setStatus('Ready', '#4caf50'));
+
+    // Initialize first video
+    if (videoList.length) {
+        loadVideo(0, false);
+    }
+    </script>
+    {% endblock %}

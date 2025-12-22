@@ -108,9 +108,24 @@ def view_session(folder, session):
     )
 
 
+def _iter_file_range(path, start, end, chunk_size=256 * 1024):
+    """Yield chunks for the requested byte range (inclusive)."""
+    with open(path, 'rb') as f:
+        f.seek(start)
+        bytes_left = end - start + 1
+        while bytes_left > 0:
+            chunk = f.read(min(chunk_size, bytes_left))
+            if not chunk:
+                break
+            bytes_left -= len(chunk)
+            yield chunk
+
+
 @videos_bp.route("/stream/<folder>/<filename>")
 def stream_video(folder, filename):
-    """Stream a video file."""
+    """Stream a video file with HTTP Range/206 support."""
+    from flask import Response
+
     teslacam_path = get_teslacam_path()
     if not teslacam_path:
         return "TeslaCam not accessible", 404
@@ -123,8 +138,53 @@ def stream_video(folder, filename):
     
     if not os.path.isfile(video_path):
         return "Video not found", 404
-    
-    return send_file(video_path, mimetype='video/mp4')
+
+    file_size = os.path.getsize(video_path)
+    range_header = request.headers.get('Range')
+    if not range_header:
+        # No range; fall back to full file
+        response = send_file(video_path, mimetype='video/mp4')
+        response.headers['Accept-Ranges'] = 'bytes'
+        return response
+
+    # Parse simple single-range headers: bytes=start-end
+    try:
+        units, rng = range_header.strip().split('=')
+        if units != 'bytes':
+            raise ValueError
+        start_str, end_str = rng.split('-')
+        if start_str == '':
+            # suffix range
+            suffix = int(end_str)
+            if suffix <= 0:
+                raise ValueError
+            start = max(file_size - suffix, 0)
+            end = file_size - 1
+        else:
+            start = int(start_str)
+            end = int(end_str) if end_str else file_size - 1
+        if start < 0 or end < start or end >= file_size:
+            raise ValueError
+    except (ValueError, IndexError):
+        return Response(status=416)
+
+    length = end - start + 1
+    resp = Response(
+        _iter_file_range(video_path, start, end),
+        status=206,
+        mimetype='video/mp4',
+        direct_passthrough=True,
+    )
+    resp.headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+    resp.headers['Accept-Ranges'] = 'bytes'
+    resp.headers['Content-Length'] = str(length)
+
+    # HEAD requests should not stream body
+    if request.method == 'HEAD':
+        resp.response = []
+        resp.headers['Content-Length'] = str(length)
+
+    return resp
 
 
 @videos_bp.route("/download/<folder>/<filename>")
@@ -149,12 +209,18 @@ def download_video(folder, filename):
 @videos_bp.route("/thumbnail/<folder>/<filename>")
 def get_thumbnail(folder, filename):
     """Get or generate a thumbnail for a video file."""
+    from services.thumbnail_service import generate_thumbnail_sync, queue_thumbnail_generation
+    from flask import Response
+    import base64
+    import logging
+    
     # Sanitize inputs
     folder = os.path.basename(folder)
     filename = os.path.basename(filename)
     
     result = get_thumbnail_path(folder, filename)
     if not result:
+        logging.warning(f"Video not found: {folder}/{filename}")
         return "Video not found", 404
     
     thumbnail_path, video_path = result
@@ -167,19 +233,97 @@ def get_thumbnail(folder, filename):
         response.headers['Expires'] = '604800'
         return response
     
-    # Thumbnail doesn't exist - return 404 so browser doesn't keep trying
-    # The background process will generate it eventually
-    return "Thumbnail not yet generated", 404
+    # Try instant generation (PyAV is fast enough for real-time: 1-3s target)
+    instant_mode = request.args.get('instant') == '1'
+    
+    if instant_mode:
+        logging.info(f"Instant generation for {folder}/{filename}")
+        generated_path = generate_thumbnail_sync(folder, filename)
+        if generated_path:
+            response = send_file(generated_path, mimetype='image/jpeg')
+            response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
+            response.headers['Expires'] = '604800'
+            return response
+        else:
+            logging.warning(f"Instant generation failed for {folder}/{filename}")
+    
+    # Queue for background generation
+    queue_thumbnail_generation(folder, filename)
+    
+    # Return a 1x1 transparent placeholder PNG (prevents broken image icon)
+    # This is a tiny base64-encoded transparent PNG
+    placeholder_png = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    )
+    response = Response(placeholder_png, mimetype='image/png')
+    # NEVER cache placeholder - force browser to retry
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
+@videos_bp.route("/api/generate_thumbnail", methods=["POST"])
+def generate_single_thumbnail():
+    """Generate a single thumbnail (called via AJAX for queue processing)."""
+    from services.thumbnail_service import generate_thumbnail_sync
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "error": "No data provided"}), 400
+    
+    folder = os.path.basename(data.get('folder', ''))
+    filename = os.path.basename(data.get('filename', ''))
+    
+    if not folder or not filename:
+        return jsonify({"success": False, "error": "Missing folder or filename"}), 400
+    
+    # Generate thumbnail synchronously
+    success = generate_thumbnail_sync(folder, filename)
+    
+    return jsonify({
+        "success": success,
+        "folder": folder,
+        "filename": filename
+    })
 
 
-# TODO: Re-enable this route after moving cleanup_orphaned_thumbnails to thumbnail_service
-# @videos_bp.route("/cleanup_thumbnails", methods=["POST"])
-# def cleanup_thumbnails():
-#     """Cleanup orphaned thumbnails."""
-#     removed = cleanup_orphaned_thumbnails()
-#     return jsonify({"success": True, "removed": removed})
+@videos_bp.route("/api/batch_thumbnails", methods=["POST"])
+def batch_thumbnails():
+    """Generate thumbnails for a batch of videos (called via AJAX)."""
+    from services.thumbnail_service import batch_generate_thumbnails
+    
+    data = request.get_json()
+    if not data or 'videos' not in data:
+        return jsonify({"success": False, "error": "No videos provided"}), 400
+    
+    video_list = []
+    for video in data['videos']:
+        folder = os.path.basename(video.get('folder', ''))
+        filename = os.path.basename(video.get('filename', ''))
+        if folder and filename:
+            video_list.append((folder, filename))
+    
+    # Generate up to 10 thumbnails per request
+    generated = batch_generate_thumbnails(video_list, max_count=10)
+    
+    return jsonify({
+        "success": True,
+        "generated": generated,
+        "requested": len(video_list)
+    })
+
+
+@videos_bp.route("/api/cleanup_thumbnails", methods=["POST"])
+def cleanup_thumbnails():
+    """Cleanup orphaned thumbnails for videos that no longer exist."""
+    from services.thumbnail_service import cleanup_orphaned_thumbnails
+    
+    removed = cleanup_orphaned_thumbnails()
+    return jsonify({
+        "success": True,
+        "removed": removed
+    })
 
 
 @videos_bp.route("/delete/<folder>/<filename>", methods=["POST"])

@@ -5,8 +5,8 @@ set -euo pipefail
 GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"
 IMG_CAM_NAME="usb_cam.img"        # TeslaCam partition (read-write)
 IMG_LIGHTSHOW_NAME="usb_lightshow.img"  # Lightshow partition (read-only)
-PART1_SIZE="427G"
-PART2_SIZE="20G"
+PART1_SIZE=""
+PART2_SIZE=""
 LABEL1="TeslaCam"
 LABEL2="Lightshow"
 MNT_DIR="/mnt/gadget"

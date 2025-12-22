@@ -7,6 +7,7 @@ IMG_CAM_NAME="usb_cam.img"        # TeslaCam partition (read-write)
 IMG_LIGHTSHOW_NAME="usb_lightshow.img"  # Lightshow partition (read-only)
 PART1_SIZE=""
 PART2_SIZE=""
+RESERVE_SIZE=""   # headroom to leave free on the Pi filesystem (default suggested: 5G)
 LABEL1="TeslaCam"
 LABEL2="Lightshow"
 MNT_DIR="/mnt/gadget"
@@ -52,6 +53,18 @@ fs_avail_bytes_for_path() {
   df -B1 --output=avail "$path" | tail -n 1 | tr -d ' '
 }
 
+size_to_bytes() {
+  local s="$1"
+  if [[ "$s" =~ ^([0-9]+)([Mm])$ ]]; then
+    echo $(( ${BASH_REMATCH[1]} * 1024 * 1024 ))
+  elif [[ "$s" =~ ^([0-9]+)([Gg])$ ]]; then
+    echo $(( ${BASH_REMATCH[1]} * 1024 * 1024 * 1024 ))
+  else
+    echo "Invalid size format: $s (use 512M or 5G)" >&2
+    exit 2
+  fi
+}
+
 # If sizes are not configured, suggest safe defaults based on free space
 # on the filesystem that will store the image files (GADGET_DIR_DEFAULT).
 NEED_SIZE_VALIDATION=0
@@ -60,19 +73,20 @@ USABLE_MIB=0
 if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
   FS_AVAIL_BYTES="$(fs_avail_bytes_for_path "$GADGET_DIR_DEFAULT")"
 
-  # Headroom: max(1GiB, 10% of current free space)
-  RESERVE_BYTES_MIN=$(( 1024 * 1024 * 1024 ))
-  RESERVE_BYTES_PCT=$(( FS_AVAIL_BYTES / 10 ))
-  if [ "$RESERVE_BYTES_PCT" -gt "$RESERVE_BYTES_MIN" ]; then
-    RESERVE_BYTES="$RESERVE_BYTES_PCT"
-  else
-    RESERVE_BYTES="$RESERVE_BYTES_MIN"
+  # Headroom: default 5G, user-adjustable
+  DEFAULT_RESERVE_STR="5G"
+
+  if [ -z "${RESERVE_SIZE}" ]; then
+    read -r -p "Filesystem headroom to leave free (default ${DEFAULT_RESERVE_STR}): " RESERVE_INPUT
+    RESERVE_SIZE="${RESERVE_INPUT:-$DEFAULT_RESERVE_STR}"
   fi
+
+  RESERVE_BYTES="$(size_to_bytes "$RESERVE_SIZE")"
 
   if [ "$FS_AVAIL_BYTES" -le "$RESERVE_BYTES" ]; then
     echo "ERROR: Not enough free space to safely create image files under $GADGET_DIR_DEFAULT."
     echo "Free:    $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
-    echo "Reserve: $((RESERVE_BYTES / 1024 / 1024)) MiB"
+    echo "Safety Reserve: $RESERVE_SIZE ($((RESERVE_BYTES / 1024 / 1024)) MiB"
     echo "Free up space or move GADGET_DIR to a larger filesystem."
     exit 1
   fi
@@ -177,14 +191,32 @@ echo "Images are stored under: $GADGET_DIR_DEFAULT"
 echo "If these sizes are too large, the Pi can run out of disk and behave badly."
 echo ""
 read -r -p "Proceed with these sizes? [y/N]: " PROCEED
-case "${PROCEED,,}" in
+PROCEED_LC="$(printf '%s' "$PROCEED" | tr '[:upper:]' '[:lower:]')"
+case "$PROCEED_LC" in
   y|yes) echo "Proceeding..." ;;
   *) echo "Aborted by user."; exit 0 ;;
 esac
 echo ""
 
-# Install prerequisites (only fetch/install if something is missing) REQUIRED_PACKAGES=(
-  parted dosfstools exfatprogs util-linux psmisc python3-flask python3-av python3-pil samba samba-common-bin ffmpeg watchdog wireless-tools iw hostapd dnsmasq
+# Install prerequisites (only fetch/install if something is missing) 
+
+REQUIRED_PACKAGES=(
+  parted
+  dosfstools
+  exfatprogs
+  util-linux
+  psmisc
+  python3-flask
+  python3-av
+  python3-pil
+  samba
+  samba-common-bin
+  ffmpeg
+  watchdog
+  wireless-tools
+  iw
+  hostapd
+  dnsmasq
 )
 
 # Note on packages:

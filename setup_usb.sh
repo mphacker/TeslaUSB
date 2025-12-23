@@ -26,6 +26,38 @@ fi
 IMG_CAM_PATH="$GADGET_DIR_DEFAULT/$IMG_CAM_NAME"
 IMG_LIGHTSHOW_PATH="$GADGET_DIR_DEFAULT/$IMG_LIGHTSHOW_NAME"
 
+# ===== Check if image files already exist =====
+# Skip sizing and creation if both images already exist
+if [ -f "$IMG_CAM_PATH" ] && [ -f "$IMG_LIGHTSHOW_PATH" ]; then
+  echo "Both image files already exist:"
+  echo "  - TeslaCam:  $IMG_CAM_PATH"
+  echo "  - Lightshow: $IMG_LIGHTSHOW_PATH"
+  echo "Skipping size configuration and image creation."
+  echo ""
+  SKIP_IMAGE_CREATION=1
+else
+  SKIP_IMAGE_CREATION=0
+
+  # Determine which images need to be created
+  NEED_CAM_IMAGE=0
+  NEED_LIGHTSHOW_IMAGE=0
+
+  if [ ! -f "$IMG_CAM_PATH" ]; then
+    NEED_CAM_IMAGE=1
+    echo "TeslaCam image not found at $IMG_CAM_PATH - will create"
+  else
+    echo "TeslaCam image already exists at $IMG_CAM_PATH"
+  fi
+
+  if [ ! -f "$IMG_LIGHTSHOW_PATH" ]; then
+    NEED_LIGHTSHOW_IMAGE=1
+    echo "Lightshow image not found at $IMG_LIGHTSHOW_PATH - will create"
+  else
+    echo "Lightshow image already exists at $IMG_LIGHTSHOW_PATH"
+  fi
+  echo ""
+fi
+
 # ===== Friendly image sizing (safe defaults; avoid filling rootfs) =====
 
 mib_to_gib_str() {
@@ -64,12 +96,12 @@ size_to_bytes() {
   fi
 }
 
-# If sizes are not configured, suggest safe defaults based on free space
+# If sizes are not configured and we need to create images, suggest safe defaults based on free space
 # on the filesystem that will store the image files (GADGET_DIR_DEFAULT).
 NEED_SIZE_VALIDATION=0
 USABLE_MIB=0
 
-if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
+if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; }; then
   # Ensure parent directory exists for df check
   mkdir -p "$GADGET_DIR_DEFAULT" 2>/dev/null || true
   FS_AVAIL_BYTES="$(fs_avail_bytes_for_path "$GADGET_DIR_DEFAULT")"
@@ -124,7 +156,8 @@ if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
   echo "  TeslaCam  (PART1_SIZE): $SUG_P1_STR (uses remaining usable space)"
   echo ""
 
-  if [ -z "${PART2_SIZE}" ]; then
+  # Only prompt for sizes needed for missing images
+  if [ "$NEED_LIGHTSHOW_IMAGE" = "1" ] && [ -z "${PART2_SIZE}" ]; then
     read -r -p "Enter Lightshow size (default ${SUG_P2_STR}): " PART2_SIZE_INPUT
     PART2_SIZE="${PART2_SIZE_INPUT:-$SUG_P2_STR}"
     # Validate format immediately
@@ -133,9 +166,12 @@ if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
       echo "Use format like 512M or 5G (whole numbers only)"
       exit 2
     fi
+  elif [ "$NEED_LIGHTSHOW_IMAGE" = "0" ]; then
+    # Image exists, set dummy size to satisfy validation
+    PART2_SIZE="${PART2_SIZE:-1G}"
   fi
 
-  if [ -z "${PART1_SIZE}" ]; then
+  if [ "$NEED_CAM_IMAGE" = "1" ] && [ -z "${PART1_SIZE}" ]; then
     read -r -p "Enter TeslaCam size (default ${SUG_P1_STR}): " PART1_SIZE_INPUT
     PART1_SIZE="${PART1_SIZE_INPUT:-$SUG_P1_STR}"
     # Validate format immediately
@@ -144,6 +180,9 @@ if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
       echo "Use format like 512M or 5G (whole numbers only)"
       exit 2
     fi
+  elif [ "$NEED_CAM_IMAGE" = "0" ]; then
+    # Image exists, set dummy size to satisfy validation
+    PART1_SIZE="${PART1_SIZE:-1G}"
   fi
 
   echo ""
@@ -153,6 +192,12 @@ if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
   echo ""
 
   NEED_SIZE_VALIDATION=1
+fi
+
+# Set default sizes if images already exist and sizes not configured
+if [ "$SKIP_IMAGE_CREATION" = "1" ]; then
+  PART1_SIZE="${PART1_SIZE:-1G}"  # Dummy value - image already exists
+  PART2_SIZE="${PART2_SIZE:-1G}"  # Dummy value - image already exists
 fi
 
 # Validate user exists
@@ -181,8 +226,8 @@ P2_MB=$(to_mib "$PART2_SIZE")
 
 # Note: We no longer need TOTAL_MB since we're creating separate images
 
-# Validate selected sizes against usable space (if computed)
-if [ "${NEED_SIZE_VALIDATION:-0}" = "1" ]; then
+# Validate selected sizes against usable space (if computed and images need creation)
+if [ "${NEED_SIZE_VALIDATION:-0}" = "1" ] && [ "$SKIP_IMAGE_CREATION" = "0" ]; then
   TOTAL_MIB=$(( P1_MB + P2_MB ))
   if [ "$TOTAL_MIB" -gt "$USABLE_MIB" ]; then
     echo "ERROR: Selected sizes exceed safe usable space under $GADGET_DIR_DEFAULT."
@@ -193,23 +238,38 @@ if [ "${NEED_SIZE_VALIDATION:-0}" = "1" ]; then
   fi
 fi
 
-echo "============================================"
-echo "Preview"
-echo "============================================"
-echo "This will create (or keep, if already present) the following image files:"
-echo "  1) TeslaCam  : $IMG_CAM_PATH  size=$PART1_SIZE  label=$LABEL1  (read-write)"
-echo "  2) Lightshow : $IMG_LIGHTSHOW_PATH  size=$PART2_SIZE  label=$LABEL2  (read-only)"
-echo ""
-echo "Images are stored under: $GADGET_DIR_DEFAULT"
-echo "If these sizes are too large, the Pi can run out of disk and behave badly."
-echo ""
-read -r -p "Proceed with these sizes? [y/N]: " PROCEED
-PROCEED_LC="$(printf '%s' "$PROCEED" | tr '[:upper:]' '[:lower:]')"
-case "$PROCEED_LC" in
-  y|yes) echo "Proceeding..." ;;
-  *) echo "Aborted by user."; exit 0 ;;
-esac
-echo ""
+# Skip preview if both images already exist
+if [ "$SKIP_IMAGE_CREATION" = "0" ]; then
+  echo "============================================"
+  echo "Preview"
+  echo "============================================"
+  if [ "$NEED_CAM_IMAGE" = "1" ] && [ "$NEED_LIGHTSHOW_IMAGE" = "1" ]; then
+    echo "This will create the following image files:"
+    echo "  1) TeslaCam  : $IMG_CAM_PATH  size=$PART1_SIZE  label=$LABEL1  (read-write)"
+    echo "  2) Lightshow : $IMG_LIGHTSHOW_PATH  size=$PART2_SIZE  label=$LABEL2  (read-only)"
+  elif [ "$NEED_CAM_IMAGE" = "1" ]; then
+    echo "This will create the TeslaCam image file:"
+    echo "  - TeslaCam  : $IMG_CAM_PATH  size=$PART1_SIZE  label=$LABEL1  (read-write)"
+    echo ""
+    echo "Lightshow image already exists at: $IMG_LIGHTSHOW_PATH"
+  elif [ "$NEED_LIGHTSHOW_IMAGE" = "1" ]; then
+    echo "This will create the Lightshow image file:"
+    echo "  - Lightshow : $IMG_LIGHTSHOW_PATH  size=$PART2_SIZE  label=$LABEL2  (read-only)"
+    echo ""
+    echo "TeslaCam image already exists at: $IMG_CAM_PATH"
+  fi
+  echo ""
+  echo "Images are stored under: $GADGET_DIR_DEFAULT"
+  echo "If these sizes are too large, the Pi can run out of disk and behave badly."
+  echo ""
+  read -r -p "Proceed with these sizes? [y/N]: " PROCEED
+  PROCEED_LC="$(printf '%s' "$PROCEED" | tr '[:upper:]' '[:lower:]')"
+  case "$PROCEED_LC" in
+    y|yes) echo "Proceeding..." ;;
+    *) echo "Aborted by user."; exit 0 ;;
+  esac
+  echo ""
+fi
 
 # Install prerequisites (only fetch/install if something is missing)
 
@@ -551,9 +611,7 @@ cleanup_loop_devices() {
 }
 
 # Create TeslaCam image (if missing)
-if [ -f "$IMG_CAM_PATH" ]; then
-  echo "TeslaCam image already exists at $IMG_CAM_PATH — skipping creation."
-else
+if [ "$SKIP_IMAGE_CREATION" = "0" ] && [ "$NEED_CAM_IMAGE" = "1" ]; then
   # Set trap to cleanup on exit/error
   trap cleanup_loop_devices EXIT INT TERM
 
@@ -601,9 +659,7 @@ else
 fi
 
 # Create Lightshow image (if missing)
-if [ -f "$IMG_LIGHTSHOW_PATH" ]; then
-  echo "Lightshow image already exists at $IMG_LIGHTSHOW_PATH — skipping creation."
-else
+if [ "$SKIP_IMAGE_CREATION" = "0" ] && [ "$NEED_LIGHTSHOW_IMAGE" = "1" ]; then
   # Set trap to cleanup on exit/error (if not already set)
   trap cleanup_loop_devices EXIT INT TERM
 

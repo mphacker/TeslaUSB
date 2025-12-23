@@ -20,7 +20,7 @@
     --bg-share: #f8f9fa;
     --bg-lock-chime: #f8f9fa;
     --bg-code: #eef0f3;
-    
+
     /* Lock Chime specific colors */
     --active-chime-bg: #e8f5e9;
     --active-chime-border: #4caf50;
@@ -33,12 +33,12 @@
     --form-label-bg: #f5f5f5;
     --upload-progress-bg: #f0f0f0;
     --upload-progress-bar-bg: #e0e0e0;
-    
+
     /* iOS Warning colors */
     --ios-warning-bg: #fff3cd;
     --ios-warning-border: #ffc107;
     --ios-warning-text: #856404;
-    
+
     --text-primary: #333333;
     --text-secondary: #666666;
     --text-navbar: #ffffff;
@@ -47,14 +47,14 @@
     --text-table-header: #495057;
     --text-link: #007bff;
     --text-disabled: #6c757d;
-    
+
     --border-color: #d6d8db;
     --border-light: #e0e0e0;
     --border-table: #dee2e6;
     --border-input: #ced4da;
     --shadow: rgba(0, 0, 0, 0.1);
     --shadow-hover: rgba(0, 0, 0, 0.15);
-    
+
     /* Status colors */
     --status-present-bg: #d4edda;
     --status-present-text: #155724;
@@ -62,7 +62,7 @@
     --status-edit-text: #0c5460;
     --status-unknown-bg: #fff3cd;
     --status-unknown-text: #856404;
-    
+
     /* Message colors */
     --msg-success-bg: #d4edda;
     --msg-success-text: #155724;
@@ -72,7 +72,7 @@
     --msg-error-text: #721c24;
     --msg-warning-bg: #fff3cd;
     --msg-warning-text: #856404;
-    
+
     /* Notification colors */
     --warning-bg: #fff3cd;
     --warning-border: #ffc107;
@@ -80,7 +80,7 @@
     --success-border: #28a745;
     --success-text: #28a745;
     --error-text: #dc3545;
-    
+
     /* Button colors */
     --btn-primary-bg: #007bff;
     --btn-primary-text: #ffffff;
@@ -113,7 +113,7 @@
     --bg-share: #1c2128;
     --bg-lock-chime: #1c2128;
     --bg-code: #0d1117;
-    
+
     /* Lock Chime specific colors - dark mode */
     --active-chime-bg: #1a4d2e;
     --active-chime-border: #3fb950;
@@ -126,12 +126,12 @@
     --form-label-bg: #21262d;
     --upload-progress-bg: #1c2128;
     --upload-progress-bar-bg: #0d1117;
-    
+
     /* iOS Warning colors - dark mode */
     --ios-warning-bg: #2d2a1e;
     --ios-warning-border: #9e6a03;
     --ios-warning-text: #e3b341;
-    
+
     --text-primary: #e6edf3;
     --text-secondary: #8b949e;
     --text-navbar: #f0f6fc;
@@ -140,14 +140,14 @@
     --text-table-header: #e6edf3;
     --text-link: #58a6ff;
     --text-disabled: #6e7681;
-    
+
     --border-color: #30363d;
     --border-light: #21262d;
     --border-table: #30363d;
     --border-input: #30363d;
     --shadow: rgba(1, 4, 9, 0.5);
     --shadow-hover: rgba(1, 4, 9, 0.7);
-    
+
     /* Status colors (Discord/GitHub inspired) */
     --status-present-bg: #1a4d2e;
     --status-present-text: #3fb950;
@@ -155,7 +155,7 @@
     --status-edit-text: #58a6ff;
     --status-unknown-bg: #2d2a1e;
     --status-unknown-text: #e3b341;
-    
+
     /* Message colors */
     --msg-success-bg: #1a4d2e;
     --msg-success-text: #3fb950;
@@ -165,7 +165,7 @@
     --msg-error-text: #f85149;
     --msg-warning-bg: #2d2a1e;
     --msg-warning-text: #e3b341;
-    
+
     /* Notification colors */
     --warning-bg: #2d2a1e;
     --warning-border: #9e6a03;
@@ -173,7 +173,7 @@
     --success-border: #3fb950;
     --success-text: #3fb950;
     --error-text: #f85149;
-    
+
     /* Button colors - vibrant and accessible */
     --btn-primary-bg: #1f6feb;
     --btn-primary-text: #ffffff;
@@ -352,6 +352,11 @@ body {
     margin-top: 20px;
     padding-top: 20px;
     border-top: 1px solid var(--border-color);
+}
+
+/* Remove duplicate border between last menu item and theme toggle */
+.mobile-menu a:last-of-type {
+    border-bottom: none;
 }
 
 .mobile-theme-toggle .theme-toggle {
@@ -923,88 +928,88 @@ button:disabled {
     .hamburger {
         display: flex;
     }
-    
+
     /* Hide desktop navigation on mobile */
     .nav-links {
         display: none;
     }
-    
+
     /* Show mobile menu when active */
     .mobile-menu-overlay.active {
         display: block;
     }
-    
+
     .mobile-menu {
         display: block;
     }
-    
+
     /* Navbar adjustments */
     .navbar-content {
         flex-direction: row;
         justify-content: flex-start;
         gap: 15px;
     }
-    
+
     .navbar h1 {
         font-size: 16px;
     }
-    
+
     /* Reset main-content and container for mobile */
     .main-content {
         height: auto;
         margin: 10px auto;
         padding: 0 10px;
     }
-    
+
     .container {
         padding: 15px;
         margin-bottom: 10px;
         flex: initial;
         overflow: visible;
     }
-    
+
     /* Session grid adjustments */
     .session-grid.grid-2,
     .session-grid.grid-3,
     .session-grid.grid-4 {
         grid-template-columns: 1fr;
     }
-    
+
     /* Keep Tesla layout on mobile but make it narrower */
     .session-grid.tesla-layout {
         grid-template-columns: repeat(3, 1fr);
         gap: 5px;
     }
-    
+
     .session-video-container {
         padding: 5px;
     }
-    
+
     .session-video-container video {
         max-height: 150px;
     }
-    
+
     .session-video-label {
         font-size: 11px;
         margin-top: 4px;
     }
-    
+
     /* Hide desktop tables on mobile */
     .video-table {
         display: none;
     }
-    
+
     .video-table-container {
         display: none;
     }
-    
+
     /* Mobile card layout */
     .mobile-card-container {
         display: block;
         max-width: 100%;
         overflow-x: hidden;
     }
-    
+
     .mobile-card {
         background: white;
         border: 1px solid #ddd;
@@ -1017,19 +1022,19 @@ button:disabled {
         word-break: break-word;
         transition: all 0.2s ease;
     }
-    
+
     .mobile-card:hover {
         box-shadow: 0 4px 8px rgba(0,0,0,0.15);
         transform: translateY(-1px);
     }
-    
+
     .mobile-card-header {
         display: flex;
         align-items: flex-start;
         margin-bottom: 12px;
         gap: 12px;
     }
-    
+
     .mobile-card-thumbnail {
         flex-shrink: 0;
         width: 80px;
@@ -1039,12 +1044,12 @@ button:disabled {
         background: var(--bg-info);
         transition: background-color 0.3s ease;
     }
-    
+
     .mobile-card-title {
         flex: 1;
         min-width: 0;
     }
-    
+
     .mobile-card-title a {
         color: var(--text-link);
         text-decoration: none;
@@ -1052,21 +1057,21 @@ button:disabled {
         word-break: break-word;
         transition: color 0.3s ease;
     }
-    
+
     .mobile-card-meta {
         font-size: 12px;
         color: var(--text-disabled);
         margin-top: 4px;
         transition: color 0.3s ease;
     }
-    
+
     .mobile-card-info {
         display: grid;
         gap: 8px;
         margin-bottom: 12px;
         font-size: 14px;
     }
-    
+
     .mobile-card-info-row {
         display: flex;
         justify-content: space-between;
@@ -1074,13 +1079,13 @@ button:disabled {
         border-bottom: 1px solid var(--border-light);
         transition: border-color 0.3s ease;
     }
-    
+
     .mobile-card-info-label {
         font-weight: 600;
         color: var(--text-table-header);
         transition: color 0.3s ease;
     }
-    
+
     .mobile-card-info-value {
         color: var(--text-disabled);
         text-align: right;
@@ -1090,16 +1095,16 @@ button:disabled {
         max-width: 100%;
         transition: color 0.3s ease;
     }
-    
+
     .mobile-card-audio {
         margin: 12px 0;
     }
-    
+
     .mobile-card-audio audio {
         width: 100%;
         height: 35px;
     }
-    
+
     .mobile-card-actions {
         display: flex;
         flex-wrap: wrap;
@@ -1107,7 +1112,7 @@ button:disabled {
         margin-top: 12px;
         align-items: center;
     }
-    
+
     .mobile-card-actions .btn-session,
     .mobile-card-actions .btn-download,
     .mobile-card-actions .present-btn,
@@ -1129,25 +1134,25 @@ button:disabled {
         min-height: 44px !important;
         max-height: 44px !important;
     }
-    
+
     .mobile-card-actions .present-btn {
         background-color: var(--btn-primary-bg);
         color: var(--btn-primary-text);
         border: none;
     }
-    
+
     .mobile-card-actions .set-chime-btn {
         background-color: var(--btn-purple-bg);
         color: var(--btn-purple-text);
         border: none;
     }
-    
+
     .mobile-card-actions form {
         flex: 1;
         min-width: 100px;
         display: flex;
     }
-    
+
     .mobile-card-actions form button {
         width: 100% !important;
         padding: 10px 8px !important;
@@ -1161,7 +1166,7 @@ button:disabled {
         align-items: center !important;
         justify-content: center !important;
     }
-    
+
     .mobile-card-status {
         display: inline-block;
         padding: 4px 8px;
@@ -1169,13 +1174,13 @@ button:disabled {
         font-size: 12px;
         font-weight: 500;
     }
-    
+
     .mobile-card-status.valid {
         background-color: var(--status-present-bg);
         color: var(--status-present-text);
         transition: background-color 0.3s ease, color 0.3s ease;
     }
-    
+
     .mobile-card-status.invalid {
         background-color: var(--msg-error-bg);
         color: var(--msg-error-text);
@@ -1269,7 +1274,7 @@ button:disabled {
         position: relative;
         top: auto;
     }
-    
+
     .operation-content {
         flex-direction: column;
         text-align: center;
@@ -1398,12 +1403,12 @@ details summary span:first-of-type {
     .slider-labels {
         font-size: 10px;
     }
-    
+
     #target-lufs::-webkit-slider-thumb {
         width: 28px;
         height: 28px;
     }
-    
+
     #target-lufs::-moz-range-thumb {
         width: 28px;
         height: 28px;
@@ -1959,25 +1964,25 @@ details summary span:first-of-type {
         flex-direction: column;
         align-items: stretch;
     }
-    
+
     .group-actions {
         justify-content: flex-end;
     }
-    
+
     .random-mode-header {
         flex-direction: column;
         align-items: stretch;
     }
-    
+
     .random-mode-controls {
         flex-direction: column;
         align-items: stretch;
     }
-    
+
     .random-group-select {
         width: 100%;
     }
-    
+
     .group-modal-content {
         width: 95%;
         padding: 20px;

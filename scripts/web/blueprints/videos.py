@@ -441,7 +441,9 @@ def get_event_thumbnail(folder, event_name):
         # Return a placeholder or 404
         return "Thumbnail not found", 404
 
-    return send_file(thumb_path, mimetype='image/png')
+    # Return with 7-day cache header for better performance
+    return send_file(thumb_path, mimetype='image/png',
+                    max_age=604800, conditional=True)
 
 
 @videos_bp.route("/session_thumbnail/<folder>/<session_name>")

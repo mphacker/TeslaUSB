@@ -35,7 +35,10 @@
                          loading="lazy"
                          onerror="this.parentElement.innerHTML='<div class=\'event-thumbnail-placeholder\'><i class=\'bi bi-camera-video\' style=\'font-size: 3em;\'></i></div>';">
                     {% else %}
-                    <img src="{{ url_for('videos.get_event_thumbnail', folder=current_folder, event_name=event.name) }}" alt="Event thumbnail">
+                    <img src="{{ url_for('videos.get_event_thumbnail', folder=current_folder, event_name=event.name) }}"
+                         alt="Event thumbnail"
+                         loading="lazy"
+                         onerror="this.parentElement.innerHTML='<div class=\'event-thumbnail-placeholder\'><i class=\'bi bi-camera-video\' style=\'font-size: 3em;\'></i></div>';">
                     {% endif %}
                 {% else %}
                 <div class="event-thumbnail-placeholder">
@@ -109,12 +112,34 @@
     align-items: center;
     justify-content: center;
     overflow: hidden;
+    position: relative;
 }
 
 .event-thumbnail img {
     width: 100%;
     height: 100%;
     object-fit: cover;
+    opacity: 0;
+    transition: opacity 0.3s ease-in;
+}
+
+.event-thumbnail img.loaded {
+    opacity: 1;
+}
+
+.event-thumbnail.loading::before {
+    content: '';
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(255, 255, 255, 0.3);
+    border-top-color: rgba(255, 255, 255, 0.8);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }
 
 .event-thumbnail-placeholder {
@@ -246,5 +271,102 @@
 function loadFolder(folderName) {
     window.location.href = '{{ url_for("videos.file_browser") }}?folder=' + encodeURIComponent(folderName);
 }
+
+// Progressive thumbnail loading with IntersectionObserver
+// Optimized for Pi Zero 2 W performance
+document.addEventListener('DOMContentLoaded', function() {
+    const thumbnails = document.querySelectorAll('.event-thumbnail img[loading="lazy"]');
+    
+    if (thumbnails.length === 0) return;
+    
+    // Track loaded thumbnails to prevent duplicate loads
+    const loadedThumbnails = new Set();
+    
+    // Queue management: limit concurrent thumbnail loads to prevent overwhelming the Pi
+    let concurrentLoads = 0;
+    const MAX_CONCURRENT = 3; // Max 3 thumbnails loading at once
+    const loadQueue = [];
+    
+    function processQueue() {
+        while (concurrentLoads < MAX_CONCURRENT && loadQueue.length > 0) {
+            const img = loadQueue.shift();
+            if (loadedThumbnails.has(img)) continue;
+            
+            loadedThumbnails.add(img);
+            concurrentLoads++;
+            
+            const originalSrc = img.dataset.src || img.src;
+            const thumbnailContainer = img.closest('.event-thumbnail');
+            
+            // Add loading state
+            if (thumbnailContainer) {
+                thumbnailContainer.classList.add('loading');
+            }
+            
+            // Create a new image to load in background
+            const loader = new Image();
+            
+            loader.onload = function() {
+                img.src = originalSrc;
+                img.classList.add('loaded');
+                if (thumbnailContainer) {
+                    thumbnailContainer.classList.remove('loading');
+                }
+                concurrentLoads--;
+                processQueue();
+            };
+            
+            loader.onerror = function() {
+                // Trigger the onerror handler on the actual img element
+                if (img.onerror) {
+                    img.onerror.call(img);
+                }
+                if (thumbnailContainer) {
+                    thumbnailContainer.classList.remove('loading');
+                }
+                concurrentLoads--;
+                processQueue();
+            };
+            
+            loader.src = originalSrc;
+        }
+    }
+    
+    // Use IntersectionObserver for viewport-based loading
+    // Only load thumbnails when they're about to enter the viewport
+    const observerOptions = {
+        root: null, // viewport
+        rootMargin: '50px', // Start loading 50px before entering viewport
+        threshold: 0.01 // Trigger when even 1% is visible
+    };
+    
+    const observer = new IntersectionObserver(function(entries) {
+        entries.forEach(function(entry) {
+            if (entry.isIntersecting) {
+                const img = entry.target;
+                
+                // Add to queue if not already loaded
+                if (!loadedThumbnails.has(img)) {
+                    loadQueue.push(img);
+                    processQueue();
+                }
+                
+                // Stop observing once queued
+                observer.unobserve(img);
+            }
+        });
+    }, observerOptions);
+    
+    // Observe all lazy-loaded thumbnails
+    thumbnails.forEach(function(img) {
+        observer.observe(img);
+    });
+    
+    // Cleanup on page unload to cancel pending requests
+    window.addEventListener('beforeunload', function() {
+        observer.disconnect();
+        loadQueue.length = 0;
+    });
+});
 </script>
 {% endblock %}

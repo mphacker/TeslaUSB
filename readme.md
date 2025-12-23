@@ -2,7 +2,9 @@
 
 Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings with remote access, web-based file management, and automated maintenance.
 
-> **🚨 IMPORTANT - PORT CHANGE FOR EXISTING USERS 🚨**
+> **🚨 IMPORTANT - CHANGES FOR EXISTING USERS 🚨**
+>
+> Significant changes have been made to the application. All configruration is now centralized in a single `config.yaml` file. Please read the [Configuration](#configuration) section for details on updating your setup.  You may want to restart from a clean Raspberry PI OS image and follow the [Installation](#installation) steps again to ensure everything is set up correctly. If you do not want to do that, ensure that the config.yaml file is created and updated with your desired settings and then run the `setup_usb.sh` script again to apply the new configuration structure.
 >
 > **The web interface now runs on PORT 80 (standard HTTP) instead of port 5000.**
 >

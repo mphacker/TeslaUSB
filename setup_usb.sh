@@ -23,9 +23,8 @@ else
   TARGET_USER="pi"
 fi
 
-GADGET_DIR="$GADGET_DIR_DEFAULT"
-IMG_CAM_PATH="$GADGET_DIR/$IMG_CAM_NAME"
-IMG_LIGHTSHOW_PATH="$GADGET_DIR/$IMG_LIGHTSHOW_NAME"
+IMG_CAM_PATH="$GADGET_DIR_DEFAULT/$IMG_CAM_NAME"
+IMG_LIGHTSHOW_PATH="$GADGET_DIR_DEFAULT/$IMG_LIGHTSHOW_NAME"
 
 # ===== Friendly image sizing (safe defaults; avoid filling rootfs) =====
 
@@ -89,7 +88,7 @@ if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
     echo "ERROR: Not enough free space to safely create image files under $GADGET_DIR_DEFAULT."
     echo "Free:    $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
     echo "Safety Reserve: $RESERVE_SIZE ($((RESERVE_BYTES / 1024 / 1024)) MiB)"
-    echo "Free up space or move GADGET_DIR to a larger filesystem."
+    echo "Free up space or move GADGET_DIR_DEFAULT to a larger filesystem."
     exit 1
   fi
 
@@ -354,17 +353,17 @@ cleanup_old_services() {
   fi
 
   # Remove old template files if they exist
-  if [ -f "$GADGET_DIR/templates/thumbnail_generator.service" ] || [ -f "$GADGET_DIR/templates/thumbnail_generator.timer" ]; then
+  if [ -f "$GADGET_DIR_DEFAULT/templates/thumbnail_generator.service" ] || [ -f "$GADGET_DIR_DEFAULT/templates/thumbnail_generator.timer" ]; then
     echo "  Removing old thumbnail generator templates..."
-    rm -f "$GADGET_DIR/templates/thumbnail_generator.service"
-    rm -f "$GADGET_DIR/templates/thumbnail_generator.timer"
+    rm -f "$GADGET_DIR_DEFAULT/templates/thumbnail_generator.service"
+    rm -f "$GADGET_DIR_DEFAULT/templates/thumbnail_generator.timer"
     echo "    ✓ Removed old template files"
   fi
 
   # Remove old background thumbnail generation script
-  if [ -f "$GADGET_DIR/scripts/generate_thumbnails.py" ]; then
+  if [ -f "$GADGET_DIR_DEFAULT/scripts/generate_thumbnails.py" ]; then
     echo "  Removing old background thumbnail generator script..."
-    rm -f "$GADGET_DIR/scripts/generate_thumbnails.py"
+    rm -f "$GADGET_DIR_DEFAULT/scripts/generate_thumbnails.py"
     echo "    ✓ Removed generate_thumbnails.py"
   fi
 
@@ -534,8 +533,8 @@ else
 fi
 
 # Create gadget folder
-mkdir -p "$GADGET_DIR"
-chown "$TARGET_USER:$TARGET_USER" "$GADGET_DIR"
+mkdir -p "$GADGET_DIR_DEFAULT"
+chown "$TARGET_USER:$TARGET_USER" "$GADGET_DIR_DEFAULT"
 
 # Cleanup function for loop devices
 cleanup_loop_devices() {
@@ -659,7 +658,7 @@ chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
 chmod 775 "$MNT_DIR/part1" "$MNT_DIR/part2"
 
 # Create thumbnail cache directory in persistent location
-THUMBNAIL_CACHE_DIR="$GADGET_DIR/thumbnails"
+THUMBNAIL_CACHE_DIR="$GADGET_DIR_DEFAULT/thumbnails"
 mkdir -p "$THUMBNAIL_CACHE_DIR"
 chown "$TARGET_USER:$TARGET_USER" "$THUMBNAIL_CACHE_DIR"
 chmod 775 "$THUMBNAIL_CACHE_DIR"
@@ -747,16 +746,16 @@ if [ ! -d "$SCRIPTS_DIR/web" ]; then
   exit 1
 fi
 
-# Ensure GADGET_DIR and SCRIPTS_DIR are the same (run-in-place)
-if [ "$GADGET_DIR" != "$SCRIPT_DIR" ]; then
-  echo "WARNING: GADGET_DIR ($GADGET_DIR) differs from SCRIPT_DIR ($SCRIPT_DIR)"
-  echo "This setup expects to run in-place at $GADGET_DIR"
-  echo "Please ensure this script is run from $GADGET_DIR"
+# Ensure GADGET_DIR_DEFAULT and SCRIPTS_DIR are the same (run-in-place)
+if [ "$GADGET_DIR_DEFAULT" != "$SCRIPT_DIR" ]; then
+  echo "WARNING: GADGET_DIR_DEFAULT ($GADGET_DIR_DEFAULT) differs from SCRIPT_DIR ($SCRIPT_DIR)"
+  echo "This setup expects to run in-place at $GADGET_DIR_DEFAULT"
+  echo "Please ensure this script is run from $GADGET_DIR_DEFAULT"
 fi
 
 # Create runtime directories
-mkdir -p "$GADGET_DIR/thumbnails"
-chown -R "$TARGET_USER:$TARGET_USER" "$GADGET_DIR/thumbnails"
+mkdir -p "$GADGET_DIR_DEFAULT/thumbnails"
+chown -R "$TARGET_USER:$TARGET_USER" "$GADGET_DIR_DEFAULT/thumbnails"
 
 # Set permissions on scripts
 chmod +x "$SCRIPTS_DIR"/*.sh "$SCRIPTS_DIR"/*.py 2>/dev/null || true
@@ -788,9 +787,9 @@ cat > "$SUDOERS_ENTRY" <<EOF
 # without password for web interface automation
 
 # First, allow the main scripts to run with full sudo privileges
-$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/present_usb.sh
-$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/edit_usb.sh
-$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/ap_control.sh
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR_DEFAULT/scripts/present_usb.sh
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR_DEFAULT/scripts/edit_usb.sh
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR_DEFAULT/scripts/ap_control.sh
 
 # Allow all system commands used within the scripts
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl
@@ -832,7 +831,7 @@ fi
 
 echo "Sudoers configuration completed successfully."
 
-STATE_FILE="$GADGET_DIR/state.txt"
+STATE_FILE="$GADGET_DIR_DEFAULT/state.txt"
 if [ ! -f "$STATE_FILE" ]; then
   echo "Initializing mode state file..."
   echo "unknown" > "$STATE_FILE"
@@ -858,12 +857,12 @@ rm -f /etc/systemd/system/thumbnail_generator.service 2>/dev/null || true
 rm -f /etc/systemd/system/thumbnail_generator.timer 2>/dev/null || true
 
 # Remove thumbnail service Python file
-rm -f "$GADGET_DIR/scripts/web/services/thumbnail_service.py" 2>/dev/null || true
+rm -f "$GADGET_DIR_DEFAULT/scripts/web/services/thumbnail_service.py" 2>/dev/null || true
 
 # Remove thumbnail cache directory
-if [ -d "$GADGET_DIR/thumbnails" ]; then
+if [ -d "$GADGET_DIR_DEFAULT/thumbnails" ]; then
   echo "  Removing thumbnail cache directory..."
-  rm -rf "$GADGET_DIR/thumbnails" 2>/dev/null || true
+  rm -rf "$GADGET_DIR_DEFAULT/thumbnails" 2>/dev/null || true
 fi
 
 echo "Deprecated thumbnail system cleanup complete."
@@ -876,7 +875,7 @@ configure_service() {
   local template_file="$1"
   local output_file="$2"
 
-  sed -e "s|__GADGET_DIR__|$GADGET_DIR|g" \
+  sed -e "s|__GADGET_DIR__|$GADGET_DIR_DEFAULT|g" \
       -e "s|__MNT_DIR__|$MNT_DIR|g" \
       -e "s|__TARGET_USER__|$TARGET_USER|g" \
       "$template_file" > "$output_file"
@@ -1226,8 +1225,8 @@ echo "Chimes folder setup complete."
 
 echo
 echo "Installation complete."
-echo " - present script: $GADGET_DIR/scripts/present_usb.sh"
-echo " - edit script:    $GADGET_DIR/scripts/edit_usb.sh"
+echo " - present script: $GADGET_DIR_DEFAULT/scripts/present_usb.sh"
+echo " - edit script:    $GADGET_DIR_DEFAULT/scripts/edit_usb.sh"
 echo " - web UI:         http://<pi_ip>:$WEB_PORT/  (service: gadget_web.service)"
 echo " - gadget auto-present on boot: present_usb_on_boot.service (with optional cleanup)"
 echo "Samba shares: use user '$TARGET_USER' and the password set in SAMBA_PASS"
@@ -1282,6 +1281,6 @@ if [ ! -d /sys/class/udc ] || [ -z "$(ls -A /sys/class/udc 2>/dev/null)" ]; then
 fi
 
 echo "USB gadget hardware detected. Switching to present mode..."
-"$GADGET_DIR/scripts/present_usb.sh"
+"$GADGET_DIR_DEFAULT/scripts/present_usb.sh"
 echo
 echo "Setup complete! The Pi is now in present mode."

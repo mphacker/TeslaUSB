@@ -5,8 +5,9 @@ set -euo pipefail
 GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"
 IMG_CAM_NAME="usb_cam.img"        # TeslaCam partition (read-write)
 IMG_LIGHTSHOW_NAME="usb_lightshow.img"  # Lightshow partition (read-only)
-PART1_SIZE="427G"
-PART2_SIZE="20G"
+PART1_SIZE=""
+PART2_SIZE=""
+RESERVE_SIZE=""   # headroom to leave free on the Pi filesystem (default suggested: 5G)
 LABEL1="TeslaCam"
 LABEL2="Lightshow"
 MNT_DIR="/mnt/gadget"
@@ -25,6 +26,135 @@ fi
 GADGET_DIR="$GADGET_DIR_DEFAULT"
 IMG_CAM_PATH="$GADGET_DIR/$IMG_CAM_NAME"
 IMG_LIGHTSHOW_PATH="$GADGET_DIR/$IMG_LIGHTSHOW_NAME"
+
+# ===== Friendly image sizing (safe defaults; avoid filling rootfs) =====
+
+mib_to_gib_str() {
+  local mib="$1"
+  local gib=$(( mib / 1024 ))
+  if [ "$gib" -lt 1 ]; then
+    echo "${mib}M"
+  else
+    echo "${gib}G"
+  fi
+}
+
+round_down_gib_mib() {
+  local mib="$1"
+  local rounded=$(( (mib / 1024) * 1024 ))
+  if [ "$rounded" -lt 512 ]; then
+    rounded=512
+  fi
+  echo "$rounded"
+}
+
+fs_avail_bytes_for_path() {
+  local path="$1"
+  df -B1 --output=avail "$path" | tail -n 1 | tr -d ' '
+}
+
+size_to_bytes() {
+  local s="$1"
+  if [[ "$s" =~ ^([0-9]+)([Mm])$ ]]; then
+    echo $(( ${BASH_REMATCH[1]} * 1024 * 1024 ))
+  elif [[ "$s" =~ ^([0-9]+)([Gg])$ ]]; then
+    echo $(( ${BASH_REMATCH[1]} * 1024 * 1024 * 1024 ))
+  else
+    echo "Invalid size format: $s (use 512M or 5G)" >&2
+    exit 2
+  fi
+}
+
+# If sizes are not configured, suggest safe defaults based on free space
+# on the filesystem that will store the image files (GADGET_DIR_DEFAULT).
+NEED_SIZE_VALIDATION=0
+USABLE_MIB=0
+
+if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
+  # Ensure parent directory exists for df check
+  mkdir -p "$GADGET_DIR_DEFAULT" 2>/dev/null || true
+  FS_AVAIL_BYTES="$(fs_avail_bytes_for_path "$GADGET_DIR_DEFAULT")"
+
+  # Headroom: default 5G, user-adjustable
+  DEFAULT_RESERVE_STR="5G"
+
+  if [ -z "${RESERVE_SIZE}" ]; then
+    read -r -p "Filesystem headroom to leave free (default ${DEFAULT_RESERVE_STR}): " RESERVE_INPUT
+    RESERVE_SIZE="${RESERVE_INPUT:-$DEFAULT_RESERVE_STR}"
+  fi
+
+  RESERVE_BYTES="$(size_to_bytes "$RESERVE_SIZE")"
+
+  if [ "$FS_AVAIL_BYTES" -le "$RESERVE_BYTES" ]; then
+    echo "ERROR: Not enough free space to safely create image files under $GADGET_DIR_DEFAULT."
+    echo "Free:    $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
+    echo "Safety Reserve: $RESERVE_SIZE ($((RESERVE_BYTES / 1024 / 1024)) MiB)"
+    echo "Free up space or move GADGET_DIR to a larger filesystem."
+    exit 1
+  fi
+
+  USABLE_BYTES=$(( FS_AVAIL_BYTES - RESERVE_BYTES ))
+  USABLE_MIB=$(( USABLE_BYTES / 1024 / 1024 ))
+
+  # Default Lightshow to 10G
+  DEFAULT_P2_MIB=10240
+  DEFAULT_P2_STR="10G"
+
+  if [ "$USABLE_MIB" -le "$DEFAULT_P2_MIB" ]; then
+    echo "ERROR: Not enough usable space for Lightshow default (${DEFAULT_P2_STR}) after safety reserve."
+    echo "Usable: ${USABLE_MIB} MiB, Lightshow: ${DEFAULT_P2_MIB} MiB"
+    echo "Free up space or reduce Lightshow size."
+    exit 1
+  fi
+
+  SUG_P2_STR="$DEFAULT_P2_STR"
+  SUG_P1_MIB="$(round_down_gib_mib $(( USABLE_MIB - DEFAULT_P2_MIB )))"
+  SUG_P1_STR="$(mib_to_gib_str "$SUG_P1_MIB")"
+
+  echo ""
+  echo "============================================"
+  echo "TeslaUSB image sizing"
+  echo "============================================"
+  echo "Images will be created under: $GADGET_DIR_DEFAULT"
+  echo "Filesystem free space: $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
+  echo "Safety reserve:        $((RESERVE_BYTES / 1024 / 1024)) MiB"
+  echo "Usable for images:     ${USABLE_MIB} MiB"
+  echo ""
+  echo "Recommended sizes (safe, leaves headroom for Raspberry Pi OS):"
+  echo "  Lightshow (PART2_SIZE): $SUG_P2_STR (default)"
+  echo "  TeslaCam  (PART1_SIZE): $SUG_P1_STR (uses remaining usable space)"
+  echo ""
+
+  if [ -z "${PART2_SIZE}" ]; then
+    read -r -p "Enter Lightshow size (default ${SUG_P2_STR}): " PART2_SIZE_INPUT
+    PART2_SIZE="${PART2_SIZE_INPUT:-$SUG_P2_STR}"
+    # Validate format immediately
+    if ! size_to_bytes "$PART2_SIZE" >/dev/null 2>&1; then
+      echo "ERROR: Invalid size format for Lightshow: $PART2_SIZE"
+      echo "Use format like 512M or 5G (whole numbers only)"
+      exit 2
+    fi
+  fi
+
+  if [ -z "${PART1_SIZE}" ]; then
+    read -r -p "Enter TeslaCam size (default ${SUG_P1_STR}): " PART1_SIZE_INPUT
+    PART1_SIZE="${PART1_SIZE_INPUT:-$SUG_P1_STR}"
+    # Validate format immediately
+    if ! size_to_bytes "$PART1_SIZE" >/dev/null 2>&1; then
+      echo "ERROR: Invalid size format for TeslaCam: $PART1_SIZE"
+      echo "Use format like 512M or 5G (whole numbers only)"
+      exit 2
+    fi
+  fi
+
+  echo ""
+  echo "Selected sizes:"
+  echo "  PART1_SIZE=$PART1_SIZE"
+  echo "  PART2_SIZE=$PART2_SIZE"
+  echo ""
+
+  NEED_SIZE_VALIDATION=1
+fi
 
 # Validate user exists
 if ! id "$TARGET_USER" >/dev/null 2>&1; then
@@ -52,7 +182,38 @@ P2_MB=$(to_mib "$PART2_SIZE")
 
 # Note: We no longer need TOTAL_MB since we're creating separate images
 
+# Validate selected sizes against usable space (if computed)
+if [ "${NEED_SIZE_VALIDATION:-0}" = "1" ]; then
+  TOTAL_MIB=$(( P1_MB + P2_MB ))
+  if [ "$TOTAL_MIB" -gt "$USABLE_MIB" ]; then
+    echo "ERROR: Selected sizes exceed safe usable space under $GADGET_DIR_DEFAULT."
+    echo "Usable:  ${USABLE_MIB} MiB (after safety reserve)"
+    echo "Chosen:  ${TOTAL_MIB} MiB (PART1=${P1_MB} MiB, PART2=${P2_MB} MiB)"
+    echo "Reduce TeslaCam and/or Lightshow sizes."
+    exit 1
+  fi
+fi
+
+echo "============================================"
+echo "Preview"
+echo "============================================"
+echo "This will create (or keep, if already present) the following image files:"
+echo "  1) TeslaCam  : $IMG_CAM_PATH  size=$PART1_SIZE  label=$LABEL1  (read-write)"
+echo "  2) Lightshow : $IMG_LIGHTSHOW_PATH  size=$PART2_SIZE  label=$LABEL2  (read-only)"
+echo ""
+echo "Images are stored under: $GADGET_DIR_DEFAULT"
+echo "If these sizes are too large, the Pi can run out of disk and behave badly."
+echo ""
+read -r -p "Proceed with these sizes? [y/N]: " PROCEED
+PROCEED_LC="$(printf '%s' "$PROCEED" | tr '[:upper:]' '[:lower:]')"
+case "$PROCEED_LC" in
+  y|yes) echo "Proceeding..." ;;
+  *) echo "Aborted by user."; exit 0 ;;
+esac
+echo ""
+
 # Install prerequisites (only fetch/install if something is missing)
+
 REQUIRED_PACKAGES=(
   parted
   dosfstools

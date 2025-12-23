@@ -404,14 +404,14 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 ## Technical Details
 
 **Dual-Drive Architecture:**
-- Two separate disk images (`usb_cam.img` 427GB exFAT, `usb_lightshow.img` 20GB FAT32)
+- Two separate disk images (`usb_cam.img` exFAT, `usb_lightshow.img` FAT32)
 - Sparse files (only use space as needed)
 - Presented as dual-LUN USB gadget to Tesla
 
 **USB Gadget Implementation:**
 - Linux `g_mass_storage` kernel module via `libcomposite`
 - LUN 0: Read-write (ro=0) for TeslaCam recordings
-- LUN 1: Read-only (ro=1) for LightShow/Chimes (15-30% performance boost)
+- LUN 1: Read-only (ro=1) for LightShow/Chimes
 
 **Concurrency Protection:**
 - `.quick_edit_part2.lock` file prevents race conditions

@@ -276,36 +276,36 @@ function loadFolder(folderName) {
 // Optimized for Pi Zero 2 W performance
 document.addEventListener('DOMContentLoaded', function() {
     const thumbnails = document.querySelectorAll('.event-thumbnail img[loading="lazy"]');
-    
+
     if (thumbnails.length === 0) return;
-    
+
     // Track loaded thumbnails to prevent duplicate loads
     const loadedThumbnails = new Set();
-    
+
     // Queue management: limit concurrent thumbnail loads to prevent overwhelming the Pi
     let concurrentLoads = 0;
     const MAX_CONCURRENT = 3; // Max 3 thumbnails loading at once
     const loadQueue = [];
-    
+
     function processQueue() {
         while (concurrentLoads < MAX_CONCURRENT && loadQueue.length > 0) {
             const img = loadQueue.shift();
             if (loadedThumbnails.has(img)) continue;
-            
+
             loadedThumbnails.add(img);
             concurrentLoads++;
-            
+
             const originalSrc = img.dataset.src || img.src;
             const thumbnailContainer = img.closest('.event-thumbnail');
-            
+
             // Add loading state
             if (thumbnailContainer) {
                 thumbnailContainer.classList.add('loading');
             }
-            
+
             // Create a new image to load in background
             const loader = new Image();
-            
+
             loader.onload = function() {
                 img.src = originalSrc;
                 img.classList.add('loaded');
@@ -315,7 +315,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 concurrentLoads--;
                 processQueue();
             };
-            
+
             loader.onerror = function() {
                 // Trigger the onerror handler on the actual img element
                 if (img.onerror) {
@@ -327,11 +327,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 concurrentLoads--;
                 processQueue();
             };
-            
+
             loader.src = originalSrc;
         }
     }
-    
+
     // Use IntersectionObserver for viewport-based loading
     // Only load thumbnails when they're about to enter the viewport
     const observerOptions = {
@@ -339,29 +339,29 @@ document.addEventListener('DOMContentLoaded', function() {
         rootMargin: '50px', // Start loading 50px before entering viewport
         threshold: 0.01 // Trigger when even 1% is visible
     };
-    
+
     const observer = new IntersectionObserver(function(entries) {
         entries.forEach(function(entry) {
             if (entry.isIntersecting) {
                 const img = entry.target;
-                
+
                 // Add to queue if not already loaded
                 if (!loadedThumbnails.has(img)) {
                     loadQueue.push(img);
                     processQueue();
                 }
-                
+
                 // Stop observing once queued
                 observer.unobserve(img);
             }
         });
     }, observerOptions);
-    
+
     // Observe all lazy-loaded thumbnails
     thumbnails.forEach(function(img) {
         observer.observe(img);
     });
-    
+
     // Cleanup on page unload to cancel pending requests
     window.addEventListener('beforeunload', function() {
         observer.disconnect();

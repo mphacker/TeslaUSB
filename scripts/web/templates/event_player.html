@@ -124,11 +124,12 @@
     .hud-grid {
         display: grid;
         grid-template-columns: auto 1fr 32px 3ch 32px 1fr auto;
-        grid-template-rows: 1fr 1fr;
+        grid-template-rows: auto auto;
         grid-template-areas:
             "gear . left speed right . wheel"
-            "brake . . . . . throttle";
+            "brake . autopilot autopilot autopilot . throttle";
         column-gap: 8px;
+        row-gap: 8px;
         align-items: center;
     }
 
@@ -211,6 +212,9 @@
         border: 2px solid rgba(255, 255, 255, 0.25);
         overflow: hidden;
         justify-self: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
 
     .hud-pedal.brake {
@@ -248,10 +252,12 @@
     }
 
     .hud-pedal svg {
-        position: absolute;
+        position: relative;
         z-index: 2;
         stroke: rgba(136, 136, 136, 0.9);
         fill: none;
+        width: 24px;
+        height: 24px;
     }
 
     /* Gear indicator */
@@ -267,21 +273,23 @@
 
     /* Autopilot status label */
     .hud-autopilot {
+        grid-area: autopilot;
         text-align: center;
-        font-size: 13px;
+        font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.3px;
-        color: rgb(90, 160, 255);
+        color: rgba(52, 199, 89, 1);
         opacity: 0;
         max-height: 0;
-        transform: translateY(-4px);
-        transition: opacity 0.25s ease, transform 0.25s ease, max-height 0.25s ease;
+        line-height: 1;
+        align-self: center;
+        transform: translateY(8px);
+        transition: opacity 0.25s ease, max-height 0.25s ease;
     }
 
     .hud-autopilot.active {
         opacity: 1;
-        max-height: 24px;
-        transform: translateY(0);
+        max-height: 16px;
     }
 
     .event-meta-right {
@@ -555,11 +563,11 @@
                             <rect x="9" y="2" width="6" height="2" rx="1" stroke-width="2"/>
                         </svg>
                     </div>
+
+                    <!-- Autopilot status label -->
+                    <div class="hud-autopilot" id="autopilotIndicator">Self-Driving</div>
                 </div>
             </div>
-
-            <!-- Autopilot status label -->
-            <div class="hud-autopilot" id="autopilotIndicator">Self-Driving</div>
         </div>
 
         {% if event.reason or event.size_mb %}
@@ -850,9 +858,9 @@
 
         const sei = frame.sei;
 
-        // Speed (convert m/s to mph)
+        // Speed (convert m/s to mph, always show positive value)
         if (sei.vehicleSpeedMps !== undefined) {
-            const mph = Math.round(sei.vehicleSpeedMps * 2.23694);
+            const mph = Math.round(Math.abs(sei.vehicleSpeedMps) * 2.23694);
             document.getElementById('hudSpeed').textContent = mph;
         } else {
             document.getElementById('hudSpeed').textContent = '0';

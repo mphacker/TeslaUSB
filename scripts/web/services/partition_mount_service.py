@@ -137,7 +137,8 @@ def _restore_lun_backing(img_path, max_retries=3):
                 ['sh', '-c', 'ls -d /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file 2>/dev/null | head -n1'],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=5
             )
 
             if result.returncode != 0 or not result.stdout.strip():
@@ -152,7 +153,8 @@ def _restore_lun_backing(img_path, max_retries=3):
                 ['sudo', 'sh', '-c', f'echo "{img_path}" > {lun_file_path}'],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=5
             )
 
             if result.returncode != 0:
@@ -165,7 +167,8 @@ def _restore_lun_backing(img_path, max_retries=3):
                 ['cat', lun_file_path],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=5
             )
 
             if result.returncode == 0:
@@ -229,7 +232,8 @@ def check_and_recover_gadget_state():
                 ['sh', '-c', 'cat /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file 2>/dev/null'],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=5
             )
 
             if proc.returncode == 0:
@@ -276,7 +280,8 @@ def check_and_recover_gadget_state():
                 ['mount'],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=5
             )
 
             if proc.returncode == 0:
@@ -370,7 +375,8 @@ def quick_edit_part2(operation_callback, timeout=10):
                 subprocess.run(
                     ['sudo', 'sh', '-c', 'echo "" > /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file'],
                     capture_output=True,
-                    check=False
+                    check=False,
+                    timeout=5
                 )
                 cleanup_state['lun_cleared'] = True
             except Exception as e:
@@ -383,7 +389,8 @@ def quick_edit_part2(operation_callback, timeout=10):
                     ['sudo', '/usr/sbin/losetup', '-j', img_path],
                     capture_output=True,
                     text=True,
-                    check=False
+                    check=False,
+                    timeout=10
                 )
 
                 # Unmount and detach ALL existing loop devices for this image
@@ -397,7 +404,8 @@ def quick_edit_part2(operation_callback, timeout=10):
                             ['mount'],
                             capture_output=True,
                             text=True,
-                            check=False
+                            check=False,
+                            timeout=5
                         )
 
                         for mount_line in mount_result.stdout.splitlines():
@@ -408,7 +416,8 @@ def quick_edit_part2(operation_callback, timeout=10):
                                 subprocess.run(
                                     ['sudo', 'nsenter', '--mount=/proc/1/ns/mnt', 'umount', mount_point],
                                     capture_output=True,
-                                    check=False
+                                    check=False,
+                                    timeout=10
                                 )
                                 if mount_point == mount_ro:
                                     cleanup_state['ro_unmounted'] = True
@@ -418,7 +427,8 @@ def quick_edit_part2(operation_callback, timeout=10):
                         subprocess.run(
                             ['sudo', '/usr/sbin/losetup', '-d', old_loop_dev],
                             capture_output=True,
-                            check=False
+                            check=False,
+                            timeout=10
                         )
             except Exception as e:
                 logger.warning(f"Error during unmount/detach (non-fatal): {e}")
@@ -430,7 +440,8 @@ def quick_edit_part2(operation_callback, timeout=10):
                     ['sudo', '/usr/sbin/losetup', '--show', '-f', img_path],
                     capture_output=True,
                     text=True,
-                    check=True
+                    check=True,
+                    timeout=10
                 )
                 loop_dev = result.stdout.strip()
                 cleanup_state['loop_dev'] = loop_dev
@@ -445,7 +456,8 @@ def quick_edit_part2(operation_callback, timeout=10):
                     ['sudo', '/usr/sbin/blkid', '-o', 'value', '-s', 'TYPE', loop_dev],
                     capture_output=True,
                     text=True,
-                    check=False
+                    check=False,
+                    timeout=10
                 )
                 fs_type = result.stdout.strip() if result.returncode == 0 else 'vfat'
                 logger.info(f"Filesystem type: {fs_type}")

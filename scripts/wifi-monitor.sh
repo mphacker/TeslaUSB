@@ -7,9 +7,23 @@ set -uo pipefail
 # - Spins up a local AP (hostapd + dnsmasq) after sustained disconnects
 # - Periodically retries STA while AP is running to avoid getting stuck
 
+# ===== BOOT PERFORMANCE TIMING =====
+WIFI_MONITOR_START_MS=$(date +%s%3N)
+log_timing() {
+    local checkpoint="$1"
+    local now_ms=$(date +%s%3N)
+    local elapsed=$((now_ms - WIFI_MONITOR_START_MS))
+    echo "[WIFI-MONITOR TIMING] +${elapsed}ms: $checkpoint"
+}
+log_timing "WiFi monitor starting"
+# ====================================
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+log_timing "Script dir resolved"
+
 CONFIG_FILE="$SCRIPT_DIR/config.sh"
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+log_timing "Config loaded"
 
 LOCK_FILE="/var/run/wifi-monitor.lock"
 LOG_TAG="wifi-monitor"
@@ -208,12 +222,12 @@ bind-interfaces
 dhcp-range=$AP_DHCP_START,$AP_DHCP_END,12h
 dhcp-option=3,$gateway
 dhcp-option=6,$gateway
+# Captive Portal - redirect all DNS queries to our gateway
+# This forces devices to see our web portal regardless of what domain they try to access
+address=/#/$gateway
 # Local DNS - resolve hostname to AP gateway
 address=/$hostname/$gateway
 address=/$hostname.local/$gateway
-# Also provide upstream DNS
-server=8.8.8.8
-server=8.8.4.4
 log-queries
 log-dhcp
 EOF
@@ -222,7 +236,7 @@ EOF
 stop_ap() {
     local iface
     iface=$(ap_iface)
-    
+
     # Kill hostapd (non-blocking)
     if [ -f "$HOSTAPD_PID" ]; then
         kill "$(cat "$HOSTAPD_PID")" 2>/dev/null || true
@@ -230,7 +244,7 @@ stop_ap() {
         rm -f "$HOSTAPD_PID"
     fi
     pkill -9 hostapd 2>/dev/null || true
-    
+
     # Kill dnsmasq (non-blocking)
     if [ -f "$DNSMASQ_PID" ]; then
         kill "$(cat "$DNSMASQ_PID")" 2>/dev/null || true
@@ -238,7 +252,7 @@ stop_ap() {
         rm -f "$DNSMASQ_PID"
     fi
     pkill -9 dnsmasq 2>/dev/null || true
-    
+
     # Clean up virtual interface (non-blocking)
     ip addr flush dev "$iface" 2>/dev/null || true
     iw dev "$iface" del 2>/dev/null || true
@@ -266,14 +280,14 @@ start_ap() {
         return 1
     fi
     log "Created virtual AP interface $iface"
-    
+
     # Bring up the virtual interface (required for hostapd)
     if ! ip link set "$iface" up; then
         log "Failed to bring up interface $iface"
         iw dev "$iface" del 2>/dev/null || true
         return 1
     fi
-    
+
     # Tell NetworkManager to ignore this interface
     nmcli device set "$iface" managed no 2>/dev/null || true
 
@@ -296,7 +310,7 @@ start_ap() {
         log "Failed to start dnsmasq for fallback AP"
         return 1
     fi
-    
+
     # Start hostapd (capture errors)
     local hostapd_out
     hostapd_out=$(hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF" 2>&1)
@@ -315,20 +329,25 @@ start_ap() {
 # In concurrent mode, STA and AP run simultaneously without interference
 
 # Cleanup any stale virtual interface from previous crash/unclean shutdown
+log_timing "Cleaning up stale interfaces"
 iw dev "$AP_VIRTUAL_IF" del 2>/dev/null || true
 
 # Initialize runtime force mode from persistent config if not already set
+log_timing "Initializing runtime directory"
 ensure_runtime_dir
 if [ ! -f "$AP_FORCE_MODE_FILE" ] && [ -n "${OFFLINE_AP_FORCE_MODE:-}" ]; then
     log "Initializing force mode from config: ${OFFLINE_AP_FORCE_MODE}"
     echo "${OFFLINE_AP_FORCE_MODE}" >"$AP_FORCE_MODE_FILE"
 fi
+log_timing "Force mode initialized"
 
 # Verify physical WiFi interface exists
 if ! iw dev "$WIFI_IF" info >/dev/null 2>&1; then
     log "WARNING: Physical WiFi interface $WIFI_IF not found - AP feature will not work"
 fi
+log_timing "WiFi interface verified"
 
+log_timing "WiFi monitor initialization complete (total: $(($(date +%s%3N) - WIFI_MONITOR_START_MS))ms)"
 log "WiFi monitor started (interval ${CHECK_INTERVAL}s, AP fallback ${AP_ENABLED})"
 
 while true; do

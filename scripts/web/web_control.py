@@ -28,7 +28,9 @@ from blueprints import (
     analytics_bp,
     cleanup_bp,
     api_bp,
-    fsck_bp
+    fsck_bp,
+    captive_portal_bp,
+    catch_all_redirect
 )
 
 app.register_blueprint(mode_control_bp)
@@ -39,6 +41,18 @@ app.register_blueprint(analytics_bp)
 app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)
 app.register_blueprint(fsck_bp)
+# Register captive portal blueprint LAST to avoid conflicting with other routes
+app.register_blueprint(captive_portal_bp)
+
+# Add catch-all route for captive portal (must be last)
+@app.route('/<path:path>')
+def wildcard_redirect(path):
+    result = catch_all_redirect(path)
+    if result:
+        return result
+    # If catch_all_redirect returns None, let Flask handle it normally (404)
+    from flask import abort
+    abort(404)
 
 
 if __name__ == "__main__":

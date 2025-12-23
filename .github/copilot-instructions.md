@@ -1,8 +1,17 @@
 # TeslaUSB AI Coding Guide
 
-Focused tips to make safe changes quickly. This is a Raspberry Pi USB gadget project (dual-LUN mass storage) with strict mount/namespace rules and template-based configuration.
+Focused tips to make safe changes quickly. This is a Raspberry Pi USB gadget project (dual-LUN mass storage) with strict mount/namespace rules and YAML-based configuration.
 
 These devices run in a vehicle; power can drop at any time. Prioritize atomic writes, fsyncs, and recovery paths to avoid corruption.
+
+## Configuration System
+- **Single source of truth**: `config.yaml` at repository root contains ALL configuration (paths, credentials, network settings, limits).
+- **Bash scripts**: Read YAML via `yq` using `scripts/config.sh` wrapper (auto-sources config.yaml).
+  - **Optimized loading**: Single yq call with eval statement (properly quoted for security) - saves ~1.2s per invocation.
+  - **Security**: All values double-quoted in eval to prevent command injection from special characters.
+- **Python scripts**: Read YAML via `PyYAML` using `scripts/web/config.py` wrapper (auto-loads config.yaml).
+- **Never hardcode values**: Always read from config via the wrappers. Both `config.sh` and `config.py` are thin wrappers around `config.yaml`.
+- After editing `config.yaml`, restart affected services: `gadget_web.service` (web/Python changes), `wifi-monitor.service` (AP changes).
 
 ## Architecture & Modes
 - Two disk images: `usb_cam.img` (part1 TeslaCam) and `usb_lightshow.img` (part2 LightShow/Chimes).
@@ -30,6 +39,7 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - Flask app under `scripts/web/`; blueprints in `scripts/web/blueprints/`; services in `scripts/web/services/` encapsulate logic (mount handling, chimes, thumbnails, Samba, mode).
 - Mode-aware file ops: lock chimes/light shows/videos must go through services that choose RO/RW paths; avoid direct filesystem writes in view code.
 - Samba cache: after edits in edit mode, call `close_samba_share()` and `restart_samba_services()` (see lock chime routes).
+- **Web service runs on port 80** (not 5000) to enable captive portal functionality. The service runs as root (via systemd) to bind to privileged port 80.
 
 ## Thumbnail System
 - **On-demand generation**: Thumbnails generated via PyAV when requested (80x45px, 1-3s generation time).
@@ -48,6 +58,7 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 ## Lock Chimes & Light Shows
 - Lock chime rules: WAV <1 MiB, 16-bit PCM, 44.1/48 kHz, mono/stereo. `lock_chime_service` validates, can reencode via ffmpeg, and replaces `LockChime.wav` with temp+fsync+MD5.
 - Present-mode uploads and set-active use `quick_edit_part2` to minimize RW time; honor the lock and timeouts. Keep copies/renames atomic and verified.
+- **Boot optimization**: `select_random_chime.py` detects boot RW mount at `/mnt/gadget/part2` and passes `skip_quick_edit=True` to `set_active_chime()` to avoid unnecessary mount/unmount cycles (reduces boot time by ~6s).
 - **Tesla cache invalidation**: Tesla caches USB file contents and won't detect changes unless the USB device is re-enumerated. After replacing `LockChime.wav`, MUST unbind/rebind the USB gadget (see `partition_mount_service.rebind_usb_gadget()`). This simulates unplug/replug and forces Tesla to clear cache and re-scan the drive. The `set_active_chime()` function handles this automatically in present mode.
 
 ## Key Workflows
@@ -65,6 +76,13 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - Web UI "Start AP Now" sets `force_on` (persistent); "Stop AP" sets `force-auto` (persistent, returns to auto behavior).
 - AP runs concurrently with WiFi client on virtual interface `uap0`; WiFi client stays active on `wlan0`.
 - `ap_control.sh set_force_mode()` writes both runtime file and persists to config.sh using `sed`.
+
+## Captive Portal
+- **DNS spoofing**: dnsmasq configured with `address=/#/<gateway-ip>` to redirect all DNS queries to the AP gateway.
+- **Captive portal detection**: Flask blueprint (`scripts/web/blueprints/captive_portal.py`) intercepts OS-specific connectivity check URLs (Apple `/hotspot-detect.html`, Android `/generate_204`, Windows `/connecttest.txt`, etc.).
+- **Splash screen**: Custom branded HTML template (`scripts/web/templates/captive_portal.html`) displays Tesla USB Gadget features with "Access Web Interface" button.
+- **Port 80 requirement**: Web service must run on port 80 (standard HTTP) for automatic captive portal detection on all devices. No iptables redirects needed.
+- **Automatic trigger**: When devices connect to TeslaUSB WiFi, they detect the captive portal and automatically open the splash screen without user typing any URL.
 
 ## Pitfalls to avoid
 - Skipping `nsenter` for mounts (mounts vanish after subprocess exit).

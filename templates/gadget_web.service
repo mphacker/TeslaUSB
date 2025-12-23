@@ -7,7 +7,9 @@ StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-User=__TARGET_USER__
+# Run as root to bind to port 80 (captive portal) and execute sudo commands
+User=root
+Group=__TARGET_USER__
 WorkingDirectory=__GADGET_DIR__/scripts/web
 ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/web/web_control.py
 Restart=on-failure

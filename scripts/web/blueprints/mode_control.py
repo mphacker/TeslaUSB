@@ -3,6 +3,8 @@
 import os
 import socket
 import subprocess
+import time
+import logging
 from flask import Blueprint, render_template, request, redirect, url_for, flash
 
 from config import GADGET_DIR
@@ -12,15 +14,45 @@ from services.wifi_service import get_current_wifi_connection, update_wifi_crede
 
 mode_control_bp = Blueprint('mode_control', __name__)
 
+logger = logging.getLogger(__name__)
+
 
 @mode_control_bp.route("/")
 def index():
     """Main page with control buttons."""
+    start_time = time.time()
+    timings = {}
+
+    # Measure mode_display
+    t0 = time.time()
     token, label, css_class, share_paths = mode_display()
+    timings['mode_display'] = time.time() - t0
+
+    # Measure ap_status
+    t0 = time.time()
     ap = ap_status()
+    timings['ap_status'] = time.time() - t0
+
+    # Measure get_ap_config
+    t0 = time.time()
     ap_config = get_ap_config()
+    timings['get_ap_config'] = time.time() - t0
+
+    # Measure get_current_wifi_connection
+    t0 = time.time()
     wifi_status = get_current_wifi_connection()
-    
+    timings['wifi_status'] = time.time() - t0
+
+    total_time = time.time() - start_time
+    timings['total'] = total_time
+
+    # Log performance metrics
+    logger.info(f"Settings page load times: mode={timings['mode_display']:.3f}s, "
+                f"ap_status={timings['ap_status']:.3f}s, "
+                f"ap_config={timings['get_ap_config']:.3f}s, "
+                f"wifi={timings['wifi_status']:.3f}s, "
+                f"total={total_time:.3f}s")
+
     return render_template(
         'index.html',
         page='control',
@@ -41,7 +73,7 @@ def present_usb():
     """Switch to USB gadget presentation mode."""
     script_path = os.path.join(GADGET_DIR, "scripts", "present_usb.sh")
     log_path = os.path.join(GADGET_DIR, "present_usb_web.log")
-    
+
     try:
         # Run the script directly with sudo (script has #!/bin/bash shebang)
         with open(log_path, "w") as log:
@@ -52,7 +84,7 @@ def present_usb():
                 cwd=GADGET_DIR,
                 timeout=120,  # Increased to 120s - large drives can take time for fsck and mounting
             )
-        
+
         # Check for lock-related errors in the log
         try:
             with open(log_path, "r") as log:
@@ -62,17 +94,17 @@ def present_usb():
                     return redirect(url_for("mode_control.index"))
         except Exception:
             pass  # If we can't read the log, continue with normal error handling
-            
+
         if result.returncode == 0:
             flash("Successfully switched to Present Mode", "success")
         else:
             flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
-            
+
     except subprocess.TimeoutExpired:
         flash("Error: Script timed out after 120 seconds", "error")
     except Exception as e:
         flash(f"Error: {str(e)}", "error")
-    
+
     return redirect(url_for("mode_control.index"))
 
 
@@ -81,7 +113,7 @@ def edit_usb():
     """Switch to edit mode with local mounts and Samba."""
     script_path = os.path.join(GADGET_DIR, "scripts", "edit_usb.sh")
     log_path = os.path.join(GADGET_DIR, "edit_usb_web.log")
-    
+
     try:
         # Run the script directly with sudo (script has #!/bin/bash shebang)
         with open(log_path, "w") as log:
@@ -92,7 +124,7 @@ def edit_usb():
                 cwd=GADGET_DIR,
                 timeout=120,  # Increased to 120s - unmount retries and gadget removal can take time
             )
-        
+
         # Check for lock-related errors in the log
         try:
             with open(log_path, "r") as log:
@@ -102,17 +134,17 @@ def edit_usb():
                     return redirect(url_for("mode_control.index"))
         except Exception:
             pass  # If we can't read the log, continue with normal error handling
-            
+
         if result.returncode == 0:
             flash("Successfully switched to Edit Mode", "success")
         else:
             flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
-            
+
     except subprocess.TimeoutExpired:
         flash("Error: Script timed out after 120 seconds", "error")
     except Exception as e:
         flash(f"Error: {str(e)}", "error")
-    
+
     return redirect(url_for("mode_control.index"))
 
 
@@ -135,7 +167,7 @@ def status():
 @mode_control_bp.route("/ap/force", methods=["POST"])
 def force_ap():
     """Force the fallback AP on/off/auto via web UI.
-    
+
     - Start AP Now: Sets force-on mode (persists across reboot)
     - Stop AP: Returns to auto mode (persists, AP only starts if WiFi fails)
     """
@@ -165,11 +197,11 @@ def configure_ap():
     """Update AP SSID and password."""
     ssid = request.form.get("ssid", "").strip()
     passphrase = request.form.get("passphrase", "").strip()
-    
+
     if not ssid:
         flash("SSID cannot be empty", "error")
         return redirect(url_for("mode_control.index"))
-    
+
     try:
         update_ap_config(ssid, passphrase)
         flash(f"AP credentials updated. New SSID: {ssid}. Please reconnect if currently connected to the AP.", "success")
@@ -177,7 +209,7 @@ def configure_ap():
         flash(f"Validation error: {exc}", "error")
     except Exception as exc:  # noqa: BLE001
         flash(f"Failed to update AP credentials: {exc}", "error")
-    
+
     return redirect(url_for("mode_control.index"))
 
 
@@ -186,24 +218,24 @@ def configure_wifi():
     """Update WiFi client credentials."""
     ssid = request.form.get("wifi_ssid", "").strip()
     password = request.form.get("wifi_password", "").strip()
-    
+
     if not ssid:
         flash("WiFi SSID cannot be empty", "error")
         return redirect(url_for("mode_control.index"))
-    
+
     try:
         result = update_wifi_credentials(ssid, password)
-        
+
         if result.get("success"):
             flash(f"✓ {result.get('message', 'WiFi updated successfully')}", "success")
         else:
             flash(f"⚠ {result.get('message', 'Failed to connect to WiFi network')}", "warning")
-            
+
     except ValueError as exc:
         flash(f"Validation error: {exc}", "error")
     except Exception as exc:  # noqa: BLE001
         flash(f"Error updating WiFi: {exc}", "error")
-    
+
     return redirect(url_for("mode_control.index"))
 
 

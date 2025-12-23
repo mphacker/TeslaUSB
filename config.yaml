@@ -1,0 +1,84 @@
+# TeslaUSB Configuration File
+#
+# EDIT THIS FILE to match your installation.
+# This file is used by both bash scripts and Python web application.
+#
+# All paths, settings, and credentials are defined here as a single source of truth.
+
+# ============================================================================
+# Installation & Paths
+# ============================================================================
+installation:
+  gadget_dir: /home/pi/TeslaUSB    # Installation directory where TeslaUSB is installed
+  target_user: pi                   # Linux user running the TeslaUSB services
+  mount_dir: /mnt/gadget           # Mount directory for USB partitions
+
+# ============================================================================
+# Disk Images
+# ============================================================================
+disk_images:
+  cam_name: usb_cam.img            # TeslaCam disk image filename
+  lightshow_name: usb_lightshow.img # LightShow disk image filename
+  cam_label: TeslaCam              # Filesystem label for TeslaCam partition
+  lightshow_label: Lightshow       # Filesystem label for LightShow partition
+
+# ============================================================================
+# Setup Configuration (used only by setup_usb.sh)
+# ============================================================================
+# These values are specific to the setup process and can be configured here
+# or left empty ("") for interactive prompts during setup.
+setup:
+  part1_size: ""                   # TeslaCam partition size (e.g., "50G" or leave empty for interactive)
+  part2_size: ""                   # LightShow partition size (e.g., "10G" or leave empty for interactive)
+  reserve_size: ""                 # Headroom to leave free on Pi filesystem (default: 5G)
+
+# ============================================================================
+# Network & Security
+# ============================================================================
+network:
+  samba_password: tesla            # Samba password for authenticated user (CHANGE THIS!)
+  web_port: 80                     # Web interface port (80 required for captive portal - do not change)
+
+# ============================================================================
+# Offline Access Point Configuration
+# ============================================================================
+# Fallback WiFi access point for in-car/mobile access when STA WiFi is unavailable
+offline_ap:
+  enabled: true                    # Set to false to disable fallback AP
+  interface: wlan0                 # WiFi interface used for AP/STA
+  ssid: TeslaUSB                   # SSID broadcast when AP is active (CHANGE THIS!)
+  passphrase: teslausb1234         # WPA2 passphrase 8-63 chars (CHANGE THIS!)
+  channel: 6                       # 2.4GHz channel (1-11)
+  ipv4_cidr: 192.168.4.1/24        # Static IP for AP interface
+  dhcp_start: 192.168.4.10         # DHCP range start
+  dhcp_end: 192.168.4.50           # DHCP range end
+  check_interval: 20               # Seconds between health checks
+  disconnect_grace: 30             # Seconds offline before starting AP
+  min_rssi: -70                    # Minimum RSSI (dBm) to tear down AP
+  stable_seconds: 20               # Seconds of good link before stopping AP
+  ping_target: 8.8.8.8             # Ping target to confirm WAN reachability
+  retry_seconds: 300               # While AP is active, retry STA join every N seconds
+  virtual_interface: uap0          # Virtual AP interface name (concurrent mode always enabled)
+  force_mode: auto                 # Persistent force mode: auto, force_on, force_off
+
+# ============================================================================
+# System Configuration File Paths
+# ============================================================================
+system:
+  config_file: /boot/firmware/config.txt  # Raspberry Pi boot configuration
+  samba_conf: /etc/samba/smb.conf         # Samba configuration file
+
+# ============================================================================
+# Web Application Configuration
+# ============================================================================
+web:
+  secret_key: CHANGE-THIS-TO-A-RANDOM-SECRET-KEY-ON-FIRST-INSTALL  # Flask secret key (auto-generated if default)
+  max_lock_chime_size: 1048576     # 1 MiB (1024 * 1024 bytes)
+  max_lock_chime_duration: 10.0    # 10 seconds (configurable per Tesla model)
+  min_lock_chime_duration: 0.3     # 300ms minimum
+  speed_range_min: 0.5             # Half speed (audio trimmer)
+  speed_range_max: 2.0             # Double speed (audio trimmer)
+  speed_step: 0.05                 # Fine-grained control (audio trimmer)
+  lock_chime_filename: LockChime.wav  # Active lock chime filename
+  chimes_folder: Chimes            # Folder on part2 where custom chimes are stored
+  lightshow_folder: LightShow      # Folder on part2 where light shows are stored

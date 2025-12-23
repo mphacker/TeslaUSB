@@ -2,6 +2,15 @@
 
 Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings with remote access, web-based file management, and automated maintenance.
 
+> **🚨 IMPORTANT - PORT CHANGE FOR EXISTING USERS 🚨**
+>
+> **The web interface now runs on PORT 80 (standard HTTP) instead of port 5000.**
+>
+> - **Old URL**: `http://<pi-ip>:5000` ❌
+> - **New URL**: `http://<pi-ip>` ✅ (no port needed!)
+>
+> This change enables the **captive portal feature** - when you connect to the TeslaUSB WiFi network, your device will automatically open the web interface without typing any URL.
+
 ## Overview
 
 TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB drives** to your Tesla:
@@ -32,7 +41,8 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - **Two Operating Modes**:
   - **Present Mode**: Active USB gadget for Tesla recording
   - **Edit Mode**: Network access via Samba shares for file management
-- **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>:5000`
+- **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>` (port 80)
+- **Captive Portal**: Automatic splash screen when connecting to TeslaUSB WiFi network
 
 ### Video Management
 - Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips)
@@ -114,7 +124,9 @@ The setup script will:
 
 ### 3. Access Web Interface
 
-Open `http://<pi-ip-address>:5000` or `http://<hostname>.local:5000` in your browser.
+Open `http://<pi-ip-address>` or `http://<hostname>.local` in your browser (port 80 - no port number needed).
+
+Alternatively, connect to the TeslaUSB WiFi network and the captive portal will automatically open.
 
 ### 4. Connect to Tesla
 
@@ -153,12 +165,13 @@ sudo /home/pi/TeslaUSB/edit_usb.sh     # Activate Edit mode
 - `\\<pi-ip-address>\gadget_part2` - LightShow partition
 - Default credentials: username = `pi`, password = `tesla`
 
-**Offline Access Point**:
+**Offline Access Point with Captive Portal**:
 When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - SSID: `TeslaUSB` (configurable in `scripts/config.sh`)
 - Password: `teslausb1234` (change this!)
 - IP: `192.168.4.1`
-- Access web interface: `http://192.168.4.1:5000`
+- **Captive Portal**: Automatically opens web interface when you connect (no URL needed!)
+- Manual access: `http://192.168.4.1` or `http://teslausb` (port 80)
 - Control from web UI: Force start/stop AP or leave in auto mode
   - **Start AP Now**: Forces AP on, persists across reboots (AP always on)
   - **Stop AP**: Returns to auto mode, persists across reboots (AP only starts if WiFi fails)
@@ -204,33 +217,87 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 
 ## Configuration
 
-### Basic Settings
+All configuration is centralized in a single **`config.yaml`** file - edit this file **before** running setup.
 
-Edit `setup_usb.sh` before running initial setup:
+Both bash scripts and the Python web application read from this YAML file, ensuring consistency across the entire system.
 
-```bash
-GADGET_DIR_DEFAULT="/home/pi/TeslaUSB"  # Installation directory
-PART1_SIZE="427G"                        # TeslaCam partition size
-PART2_SIZE="20G"                         # LightShow partition size
-WEB_PORT=5000                            # Web interface port
-SAMBA_PASS="tesla"                       # Samba password (change this!)
+### Configuration File: `config.yaml`
+
+```yaml
+# TeslaUSB Configuration File
+#
+# All paths, settings, and credentials are defined here.
+# Both bash scripts and Python web application use this file.
+
+# ============================================================================
+# Installation & Paths
+# ============================================================================
+installation:
+  gadget_dir: /home/pi/TeslaUSB    # Installation directory
+  target_user: pi                   # Linux user running services
+  mount_dir: /mnt/gadget           # Mount directory for USB partitions
+
+# ============================================================================
+# Disk Images
+# ============================================================================
+disk_images:
+  cam_name: usb_cam.img            # TeslaCam disk image filename
+  lightshow_name: usb_lightshow.img # LightShow disk image filename
+  cam_label: TeslaCam              # Filesystem label for TeslaCam
+  lightshow_label: Lightshow       # Filesystem label for LightShow
+
+# ============================================================================
+# Setup Configuration (used only by setup_usb.sh)
+# ============================================================================
+# Leave empty ("") for interactive prompts during setup
+setup:
+  part1_size: ""                   # TeslaCam size (e.g., "50G")
+  part2_size: ""                   # LightShow size (e.g., "10G")
+  reserve_size: ""                 # Free space headroom (default: 5G)
+
+# ============================================================================
+# Network & Security
+# ============================================================================
+network:
+  samba_password: tesla            # Samba password (CHANGE THIS!)
+  web_port: 80                     # Web port (80 required for captive portal)
+
+# ============================================================================
+# Offline Access Point Configuration
+# ============================================================================
+offline_ap:
+  enabled: true                    # Enable/disable fallback AP
+  ssid: TeslaUSB                   # AP network name (CHANGE THIS!)
+  passphrase: teslausb1234         # WPA2 passphrase 8-63 chars (CHANGE THIS!)
+  channel: 6                       # 2.4GHz channel (1-11)
+  force_mode: auto                 # auto, force_on, or force_off
+
+# ============================================================================
+# Web Application Configuration
+# ============================================================================
+web:
+  secret_key: CHANGE-THIS-TO-A-RANDOM-SECRET-KEY-ON-FIRST-INSTALL
+  max_lock_chime_size: 1048576     # 1 MiB
+  max_lock_chime_duration: 10.0    # 10 seconds
 ```
 
-### Advanced Settings
+**Important settings to change before first use:**
+- `network.samba_password` - Default is `tesla` (change this!)
+- `offline_ap.ssid` - Default is `TeslaUSB` (customize for your vehicle)
+- `offline_ap.passphrase` - Default is `teslausb1234` (change this!)
+- `web.secret_key` - Auto-generated on first run, but can be set manually
 
-Edit `scripts/config.sh` after installation for offline access point:
-
+**After making changes:** Restart affected services
 ```bash
-OFFLINE_AP_ENABLED="true"              # Enable/disable fallback AP
-OFFLINE_AP_SSID="TeslaUSB"             # AP network name (change this!)
-OFFLINE_AP_PASSPHRASE="teslausb1234"   # AP password (change this!)
-OFFLINE_AP_IPV4_CIDR="192.168.4.1/24"  # AP IP address
-OFFLINE_AP_DISCONNECT_GRACE="30"       # Seconds offline before AP starts
-OFFLINE_AP_FORCE_MODE="auto"           # Persistent AP mode: auto, force_on, force_off
-# Note: AP always runs concurrently with WiFi client on a virtual interface
+sudo systemctl restart gadget_web.service    # For web application changes
+sudo systemctl restart wifi-monitor.service  # For offline AP changes
 ```
 
-Restart WiFi monitor after changes: `sudo systemctl restart wifi-monitor.service`
+**How it works:**
+- Bash scripts use `yq` to read YAML values
+- Python web app uses `PyYAML` to load configuration
+- Single source of truth for all settings
+- Comments and structure make configuration clear
 
 ## Maintenance
 
@@ -256,7 +323,7 @@ Removes all files, services, and system configuration.
 
 | Service/Timer | Purpose |
 |---------------|---------|
-| `gadget_web.service` | Web interface (port 5000) |
+| `gadget_web.service` | Web interface (port 80) with captive portal |
 | `present_usb_on_boot.service` | Auto-present USB on boot with optional cleanup |
 | `chime_scheduler.timer` | Check scheduled chime changes every 60 seconds |
 | `wifi-monitor.service` | Manage offline access point |
@@ -348,6 +415,12 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 - `.quick_edit_part2.lock` file prevents race conditions
 - 10-second timeout, 120-second stale lock detection
 - All services and scripts respect lock state
+
+**Performance Optimizations:**
+- **Boot time**: ~14 seconds on Pi Zero 2 W (detects existing RW mount at boot to skip unnecessary remount operations)
+- **Configuration loading**: Single YAML parse with secure eval (properly quoted values prevent command injection)
+- **Web UI responsiveness**: Settings page loads in ~0.4s (optimized from 133s through batched configuration reads)
+- **Memory efficiency**: Desktop services disabled, 1GB swap enabled for stable operation on 512MB RAM
 
 ---
 

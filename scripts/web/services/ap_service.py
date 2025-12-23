@@ -1,12 +1,13 @@
 import json
 import os
 import subprocess
+import yaml
 
 from config import GADGET_DIR
 
 
 SCRIPT_NAME = "ap_control.sh"
-CONFIG_FILE = os.path.join(GADGET_DIR, "scripts", "config.sh")
+CONFIG_YAML = os.path.join(GADGET_DIR, "config.yaml")
 
 
 def _script_path():
@@ -23,6 +24,7 @@ def ap_status():
         capture_output=True,
         text=True,
         check=False,
+        timeout=5,  # 5 second timeout to prevent hangs
     )
 
     if result.returncode != 0:
@@ -36,7 +38,7 @@ def ap_status():
 
 def ap_force(mode: str):
     """Set force mode: force-on, force-off, force-auto.
-    
+
     This setting persists across reboots:
     - force-on: AP always on (even with good WiFi)
     - force-off: AP blocked (never starts, even with bad WiFi)
@@ -51,6 +53,7 @@ def ap_force(mode: str):
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,  # 10 second timeout for mode changes
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr or "ap_control failed")
@@ -58,81 +61,88 @@ def ap_force(mode: str):
 
 
 def get_ap_config():
-    """Read current AP SSID and password from config.sh."""
-    if not os.path.isfile(CONFIG_FILE):
+    """Read current AP SSID and password from config.yaml."""
+    if not os.path.isfile(CONFIG_YAML):
         return {"ssid": "TeslaUSB", "passphrase": ""}
-    
-    ssid = "TeslaUSB"
-    passphrase = ""
-    
+
     try:
-        with open(CONFIG_FILE, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("OFFLINE_AP_SSID="):
-                    # Extract value before any comment
-                    value = line.split("=", 1)[1].split("#")[0].strip().strip('"')
-                    ssid = value
-                elif line.startswith("OFFLINE_AP_PASSPHRASE="):
-                    # Extract value before any comment
-                    value = line.split("=", 1)[1].split("#")[0].strip().strip('"')
-                    passphrase = value
+        with open(CONFIG_YAML, "r") as f:
+            config = yaml.safe_load(f)
+
+        ssid = config.get("offline_ap", {}).get("ssid", "TeslaUSB")
+        passphrase = config.get("offline_ap", {}).get("passphrase", "")
+
+        return {"ssid": ssid, "passphrase": passphrase}
     except Exception:
-        pass
-    
-    return {"ssid": ssid, "passphrase": passphrase}
+        return {"ssid": "TeslaUSB", "passphrase": ""}
 
 
 def update_ap_config(ssid: str, passphrase: str):
-    """Update AP SSID and passphrase in config.sh and reload AP to apply changes."""
+    """Update AP SSID and passphrase in config.yaml and reload AP to apply changes."""
     # Validate inputs
     if not ssid or len(ssid) > 32:
         raise ValueError("SSID must be 1-32 characters")
     if passphrase and (len(passphrase) < 8 or len(passphrase) > 63):
         raise ValueError("Passphrase must be 8-63 characters (or empty for open network)")
-    
-    # Use sudo and sed to update config file
-    result = subprocess.run(
-        ["sudo", "-n", "sed", "-i", 
-         f"s|^OFFLINE_AP_SSID=.*|OFFLINE_AP_SSID=\"{ssid}\"|",
-         CONFIG_FILE],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to update SSID in config: {result.stderr}")
-    
-    result = subprocess.run(
-        ["sudo", "-n", "sed", "-i", 
-         f"s|^OFFLINE_AP_PASSPHRASE=.*|OFFLINE_AP_PASSPHRASE=\"{passphrase}\"|",
-         CONFIG_FILE],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to update passphrase in config: {result.stderr}")
-    
-    # Restart wifi-monitor to reload config.sh with new values
+
+    # Read current config
+    try:
+        with open(CONFIG_YAML, "r") as f:
+            config = yaml.safe_load(f)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read config.yaml: {e}")
+
+    # Update offline_ap section
+    if "offline_ap" not in config:
+        config["offline_ap"] = {}
+
+    config["offline_ap"]["ssid"] = ssid
+    config["offline_ap"]["passphrase"] = passphrase
+
+    # Write config to temporary file first (atomic write)
+    temp_file = CONFIG_YAML + ".tmp"
+    try:
+        with open(temp_file, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+        # Use sudo to move temp file to final location
+        result = subprocess.run(
+            ["sudo", "-n", "mv", temp_file, CONFIG_YAML],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to write config.yaml: {result.stderr}")
+    except Exception as e:
+        # Clean up temp file if it exists
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        raise RuntimeError(f"Failed to update config.yaml: {e}")
+    finally:
+        # Ensure temp file is removed
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+
+    # Restart wifi-monitor to reload config.yaml with new values
     result = subprocess.run(
         ["sudo", "-n", "systemctl", "restart", "wifi-monitor.service"],
         capture_output=True,
         text=True,
         check=False,
+        timeout=15,  # 15 second timeout for service restart
     )
-    
+
     if result.returncode != 0:
         raise RuntimeError(f"Failed to restart wifi-monitor: {result.stderr}")
-    
+
     # Wait for wifi-monitor to stabilize
     subprocess.run(["sleep", "3"], check=False)
-    
+
     # Check if AP is active NOW (after restart)
     status = ap_status()
-    
+
     # If AP is active, reload it to apply new credentials
     if status.get("ap_active"):
         path = _script_path()
@@ -141,10 +151,11 @@ def update_ap_config(ssid: str, passphrase: str):
             capture_output=True,
             text=True,
             check=False,
+            timeout=10,  # 10 second timeout for AP reload
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to reload AP: {result.stderr}")
         # Give it time to restart with new credentials
         subprocess.run(["sleep", "2"], check=False)
-    
+
     return True

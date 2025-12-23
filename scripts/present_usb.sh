@@ -4,9 +4,20 @@ set -euo pipefail
 # present_usb.sh - Present USB gadget with dual-LUN configuration
 # This script unmounts local mounts, presents the USB gadget with optimized read-only settings on LUN 1
 
+# Performance tracking
+SCRIPT_START=$(date +%s%3N)
+log_timing() {
+  local label="$1"
+  local now=$(date +%s%3N)
+  local elapsed=$((now - SCRIPT_START))
+  echo "[TIMING] ${label}: ${elapsed}ms ($(date '+%H:%M:%S.%3N'))"
+}
+
 # Load configuration
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+log_timing "Script start"
 source "$SCRIPT_DIR/config.sh"
+log_timing "Config loaded"
 
 # Check for active file operations before proceeding
 LOCK_FILE="$GADGET_DIR/.quick_edit_part2.lock"
@@ -41,6 +52,8 @@ if [ -f "$LOCK_FILE" ]; then
 
   echo "✓ File operation completed, proceeding with mode switch"
 fi
+
+log_timing "Lock check completed"
 
 EPHEMERAL_LOOP=0
 LOOP_DEV_FSCK=""
@@ -108,6 +121,7 @@ unmount_with_retry() {
 }
 
 # Unmount partitions if mounted
+log_timing "Starting unmount sequence"
 echo "Unmounting partitions..."
 for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   # Sync each partition before unmounting
@@ -121,6 +135,8 @@ for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   fi
 done
 
+log_timing "Partitions unmounted"
+
 # Also unmount any existing read-only mounts from previous present mode
 echo "Unmounting any existing read-only mounts..."
 RO_MNT_DIR="/mnt/gadget"
@@ -133,6 +149,7 @@ done
 
 # One final sync after all unmounts
 sync
+log_timing "Final sync completed"
 
 # Filesystem checks removed from mode switching for faster operation
 # Use the web interface Analytics page to run manual filesystem checks
@@ -207,6 +224,8 @@ if [ -d "$CONFIGFS_GADGET" ]; then
   # Remove gadget
   sudo rmdir "$CONFIGFS_GADGET" 2>/dev/null || true
 fi
+
+log_timing "Gadget removed/cleared"
 
 # Mount configfs if not already mounted
 if ! mountpoint -q /sys/kernel/config 2>/dev/null; then
@@ -335,7 +354,7 @@ if [ -n "$LOOP_LIGHTSHOW" ] && [ -e "$LOOP_LIGHTSHOW" ]; then
 else
   echo "  Warning: Unable to attach loop device for Lightshow read-only mounting"
 fi
-
+log_timing "USB gadget fully configured and mounted"
 # Restart thumbnail generator timer now that we're in present mode with read-only mounts
 echo "Restarting thumbnail generator timer..."
 sudo systemctl start thumbnail_generator.timer 2>/dev/null || true
@@ -345,3 +364,6 @@ echo "The Pi should now appear as TWO USB storage devices when connected:"
 echo "  - LUN 0: TeslaCam (Read-Write) - Tesla can record dashcam footage"
 echo "  - LUN 1: Lightshow (Read-Only) - Optimized read performance for Tesla"
 echo "Read-only mounts available at: $RO_MNT_DIR/part1-ro and $RO_MNT_DIR/part2-ro"
+
+log_timing "Script completed successfully"
+echo "[PERFORMANCE] Total execution time: $(($(date +%s%3N) - SCRIPT_START))ms"

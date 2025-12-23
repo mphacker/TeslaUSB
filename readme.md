@@ -6,8 +6,8 @@ Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings 
 
 TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB drives** to your Tesla:
 
-- **TeslaCam Drive**: Large exFAT partition (400GB+) for dashcam and sentry recordings
-- **LightShow Drive**: Smaller FAT32 partition (20GB) for lock chimes and light shows with read-only optimization
+- **TeslaCam Drive**: Large exFAT partition for dashcam and sentry recordings
+- **LightShow Drive**: Smaller FAT32 partition for lock chimes and light shows with read-only optimization
 
 **Key Benefits:**
 - Remote access to dashcam footage without physically removing storage

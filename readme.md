@@ -50,7 +50,11 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips)
 - Auto-generated video thumbnails
 - In-browser playback with multi-camera session view (6 cameras synchronized)
-- **Real-time telemetry overlay**: Videos display driving data including speed (mph/km/h), gear selection (P/R/N/D), steering wheel angle, accelerator/brake pedal position, turn signals, and Autopilot status (Self-Driving, Autosteer, or TACC)
+- **HUD Overlay Toggle**: Switch between two playback modes:
+  - **Stream Mode** (default): Instant video playback with minimal bandwidth - perfect for quick video review
+  - **Overlay Mode**: Downloads full video to display real-time telemetry overlay with speed, gear selection (P/R/N/D), steering wheel angle, accelerator/brake pedal position, turn signals, and Autopilot status (Self-Driving, Autosteer, or TACC)
+  - Toggle preference is remembered across sessions
+  - Bandwidth optimization: Partial downloads are cached and resumed when switching modes
 - Download or delete videos individually or in bulk
 - Storage analytics with folder-by-folder breakdown
 

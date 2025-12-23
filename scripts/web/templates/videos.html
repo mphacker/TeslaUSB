@@ -281,11 +281,34 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Track loaded thumbnails to prevent duplicate loads
     const loadedThumbnails = new Set();
+    
+    // Track active fetch requests for cancellation
+    const activeRequests = new Map(); // Map<img, AbortController>
 
     // Queue management: limit concurrent thumbnail loads to prevent overwhelming the Pi
     let concurrentLoads = 0;
     const MAX_CONCURRENT = 3; // Max 3 thumbnails loading at once
     const loadQueue = [];
+    
+    // Function to abort all pending thumbnail requests
+    function abortAllThumbnails() {
+        const startTime = performance.now();
+        const activeCount = activeRequests.size;
+        const queueCount = loadQueue.length;
+        
+        // Cancel all active fetch requests
+        activeRequests.forEach((controller, img) => {
+            controller.abort();
+        });
+        activeRequests.clear();
+        
+        // Clear the queue
+        loadQueue.length = 0;
+        concurrentLoads = 0;
+        
+        const elapsed = performance.now() - startTime;
+        console.log(`Aborted ${activeCount} active thumbnails, cleared ${queueCount} queued (${elapsed.toFixed(1)}ms)`);
+    }
 
     function processQueue() {
         while (concurrentLoads < MAX_CONCURRENT && loadQueue.length > 0) {
@@ -303,32 +326,43 @@ document.addEventListener('DOMContentLoaded', function() {
                 thumbnailContainer.classList.add('loading');
             }
 
-            // Create a new image to load in background
-            const loader = new Image();
+            // Create AbortController for this request
+            const controller = new AbortController();
+            activeRequests.set(img, controller);
 
-            loader.onload = function() {
-                img.src = originalSrc;
-                img.classList.add('loaded');
-                if (thumbnailContainer) {
-                    thumbnailContainer.classList.remove('loading');
-                }
-                concurrentLoads--;
-                processQueue();
-            };
-
-            loader.onerror = function() {
-                // Trigger the onerror handler on the actual img element
-                if (img.onerror) {
-                    img.onerror.call(img);
-                }
-                if (thumbnailContainer) {
-                    thumbnailContainer.classList.remove('loading');
-                }
-                concurrentLoads--;
-                processQueue();
-            };
-
-            loader.src = originalSrc;
+            // Fetch thumbnail with abort support
+            fetch(originalSrc, { signal: controller.signal })
+                .then(response => {
+                    if (!response.ok) throw new Error('Failed to load');
+                    return response.blob();
+                })
+                .then(blob => {
+                    const objectUrl = URL.createObjectURL(blob);
+                    img.src = objectUrl;
+                    img.classList.add('loaded');
+                    if (thumbnailContainer) {
+                        thumbnailContainer.classList.remove('loading');
+                    }
+                })
+                .catch(err => {
+                    if (err.name === 'AbortError') {
+                        // Silently handle abort
+                        console.log('Thumbnail load cancelled');
+                    } else {
+                        // Trigger the onerror handler on error
+                        if (img.onerror) {
+                            img.onerror.call(img);
+                        }
+                        if (thumbnailContainer) {
+                            thumbnailContainer.classList.remove('loading');
+                        }
+                    }
+                })
+                .finally(() => {
+                    activeRequests.delete(img);
+                    concurrentLoads--;
+                    processQueue();
+                });
         }
     }
 
@@ -361,11 +395,44 @@ document.addEventListener('DOMContentLoaded', function() {
     thumbnails.forEach(function(img) {
         observer.observe(img);
     });
+    
+    // Cancel all thumbnail requests when user clicks on any event card (navigation)
+    const eventCards = document.querySelectorAll('.event-card');
+    eventCards.forEach(function(card) {
+        card.addEventListener('click', function(e) {
+            const clickTime = performance.now();
+            console.log('🖱️ Event card clicked');
+            
+            // Prevent immediate navigation
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            
+            // Abort all thumbnails first
+            const abortStart = performance.now();
+            abortAllThumbnails();
+            const abortTime = performance.now() - abortStart;
+            console.log(`⏱️ Abort completed in ${abortTime.toFixed(1)}ms`);
+            
+            // Small delay to ensure aborts are processed, then navigate
+            setTimeout(function() {
+                // Get the href from the onclick attribute
+                const onclickAttr = card.getAttribute('onclick');
+                if (onclickAttr) {
+                    const match = onclickAttr.match(/window\.location\.href='([^']+)'/);
+                    if (match) {
+                        const totalTime = performance.now() - clickTime;
+                        console.log(`🚀 Navigating after ${totalTime.toFixed(1)}ms total delay`);
+                        window.location.href = match[1];
+                    }
+                }
+            }, 10); // 10ms delay to let aborts complete
+        }, { capture: true }); // Capture phase to intercept before other handlers
+    });
 
     // Cleanup on page unload to cancel pending requests
     window.addEventListener('beforeunload', function() {
+        abortAllThumbnails();
         observer.disconnect();
-        loadQueue.length = 0;
     });
 });
 </script>

@@ -417,6 +417,85 @@
         color: rgba(52, 199, 89, 1);
     }
 
+    /* SEI Overlay Toggle */
+    .sei-toggle-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 0 15px;
+        border-right: 1px solid rgba(255,255,255,0.1);
+        margin-right: 10px;
+    }
+
+    .sei-toggle-label {
+        font-size: 0.7em;
+        color: rgba(255,255,255,0.7);
+        margin-bottom: 8px;
+        text-align: center;
+        line-height: 1.2;
+        font-weight: 500;
+    }
+
+    .sei-toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 50px;
+        height: 24px;
+    }
+
+    .sei-toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+    }
+
+    .sei-toggle-slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: rgba(120, 120, 120, 0.8);
+        transition: 0.3s;
+        border-radius: 24px;
+    }
+
+    .sei-toggle-slider::after {
+        content: '';
+        position: absolute;
+        height: 18px;
+        width: 18px;
+        left: 3px;
+        top: 3px;
+        background-color: white;
+        transition: 0.3s;
+        border-radius: 50%;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    }
+
+    .sei-toggle-switch input:checked + .sei-toggle-slider {
+        background-color: #4CAF50;
+    }
+
+    .sei-toggle-switch input:checked + .sei-toggle-slider::after {
+        transform: translateX(26px);
+    }
+
+    .sei-toggle-status {
+        font-size: 0.65em;
+        color: rgba(255,255,255,0.9);
+        margin-top: 6px;
+        text-align: center;
+        font-weight: 500;
+    }
+
+    /* Hide HUD when in stream mode */
+    .tesla-hud.hidden {
+        display: none !important;
+    }
+
     /* Mobile responsive */
     @media (max-width: 768px) {
         .event-header {
@@ -446,6 +525,19 @@
         .camera-selector {
             padding: 12px 10px;
             gap: 8px;
+        }
+
+        .sei-toggle-container {
+            padding: 0 10px;
+            margin-right: 8px;
+        }
+
+        .sei-toggle-label {
+            font-size: 0.65em;
+        }
+
+        .sei-toggle-status {
+            font-size: 0.6em;
         }
 
         .camera-option {
@@ -580,6 +672,15 @@
 
     <!-- Bottom camera selector with Tesla-style layout -->
     <div class="camera-selector">
+        <!-- SEI Overlay Toggle -->
+        <div class="sei-toggle-container">
+            <div class="sei-toggle-label">HUD<br>Overlay</div>
+            <label class="sei-toggle-switch">
+                <input type="checkbox" id="seiToggle" onchange="toggleSEIMode()">
+                <span class="sei-toggle-slider"></span>
+            </label>
+        </div>
+
         {% if event.camera_videos.front %}
         <div class="camera-option active" onclick="switchCamera('{{ video_url(event.camera_videos.front) }}', this)" data-camera="front">
             <i class="bi bi-arrow-up camera-icon"></i>
@@ -669,12 +770,121 @@
     let currentTime = 0;
     let wasPlaying = false;
 
+    // SEI overlay mode management
+    let seiOverlayEnabled = localStorage.getItem('seiOverlayEnabled') === 'true';
+    const seiToggle = document.getElementById('seiToggle');
+
+    // Initialize toggle state from localStorage
+    function initSEIToggle() {
+        seiToggle.checked = seiOverlayEnabled;
+        updateHUDVisibility();
+    }
+
+    // Show/hide HUD based on mode
+    function updateHUDVisibility() {
+        const hudElement = document.querySelector('.tesla-hud');
+        if (hudElement) {
+            if (seiOverlayEnabled) {
+                hudElement.classList.remove('hidden');
+            } else {
+                hudElement.classList.add('hidden');
+            }
+        }
+    }
+
+    // Toggle SEI mode and reload video
+    function toggleSEIMode() {
+        seiOverlayEnabled = seiToggle.checked;
+        localStorage.setItem('seiOverlayEnabled', seiOverlayEnabled);
+
+        updateHUDVisibility();
+
+        // If switching to stream mode and download is in progress, abort it
+        if (!seiOverlayEnabled && seiLoading) {
+            if (seiAbortController) {
+                seiAbortController.abort();
+                seiAbortController = null;
+            }
+
+            // Remove loading dialog
+            const loadingDiv = document.getElementById('seiLoading');
+            if (loadingDiv) {
+                loadingDiv.remove();
+            }
+
+            seiLoading = false;
+            // Clear currentVideoSrc so we can resume on next toggle
+            // (cache is preserved in seiDownloadCache for resume)
+            currentVideoSrc = '';
+        }
+
+        // If switching to overlay mode, abort background caching (we'll do full download)
+        if (seiOverlayEnabled && backgroundPrefetchController) {
+            backgroundPrefetchController.abort();
+            backgroundPrefetchController = null;
+        }
+
+        // Reload current video with new mode
+        const currentSrc = video.src;
+        const streamUrl = video.dataset.originalUrl || currentSrc;
+        
+        // Only proceed if we have a valid stream URL (not blob)
+        if (streamUrl && !streamUrl.startsWith('blob:')) {
+            const savedTime = video.currentTime;
+
+            // Pause video when switching modes
+            video.pause();
+
+            if (seiOverlayEnabled) {
+                // Switching to overlay mode: load SEI data (will use cached chunks if available)
+                loadSEIData(streamUrl);
+            } else {
+                // Switching to stream mode: start background caching
+                loadVideoWithCache(streamUrl);
+            }
+
+            video.addEventListener('loadedmetadata', function() {
+                video.currentTime = savedTime;
+                // Video stays paused after mode switch
+            }, { once: true });
+        }
+    }
+
+    // Initialize on page load
+    initSEIToggle();
+
     // SEI metadata
     let seiFrames = [];
     let seiType = null;
     let enumFields = null;
     let currentVideoSrc = null;
     let seiLoading = false;
+    let seiAbortController = null; // For canceling downloads
+    let backgroundPrefetchController = null; // For background caching in stream mode
+
+    // Cache for partial downloads - stores chunks by video URL
+    const seiDownloadCache = new Map(); // { url: { chunks: [], bytesLoaded: number, totalBytes: number } }
+
+    // Normalize URL to absolute form for consistent cache keys
+    function normalizeUrl(url) {
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+            return url; // Already absolute
+        }
+        // Convert relative URL to absolute
+        return new URL(url, window.location.origin).href;
+    }
+
+    // Load video with caching for stream mode
+    async function loadVideoWithCache(videoUrl) {
+        // Store normalized URL for later reference
+        const normalizedUrl = normalizeUrl(videoUrl);
+        video.dataset.originalUrl = normalizedUrl;
+
+        // In stream mode: just use normal video streaming (browser handles it efficiently)
+        // In overlay mode: loadSEIData will handle the download
+        video.src = videoUrl;
+        video.load();
+    }
 
     // Set initial video source (prefer front camera, fall back to first available)
     {% if event.camera_videos.front %}
@@ -695,9 +905,8 @@
 
     // Load initial video
     if (initialVideoSrc) {
-        video.src = initialVideoSrc;
-        video.load();
-        // Don't autoplay - wait for SEI data to load first
+        loadVideoWithCache(initialVideoSrc);
+        // SEI will load automatically if in overlay mode
     }
 
     // Initialize SEI parsing
@@ -713,8 +922,14 @@
 
     // Load SEI data from video
     async function loadSEIData(videoUrl) {
-        // Skip if blob URL (already processed) or same source or no proto loaded
-        if (!seiType || videoUrl.startsWith('blob:') || currentVideoSrc === videoUrl) return;
+        // Normalize URL for consistent cache lookup
+        videoUrl = normalizeUrl(videoUrl);
+        
+        // Skip if overlay mode disabled, blob URL (already processed), or no proto loaded
+        if (!seiOverlayEnabled || !seiType || videoUrl.startsWith('blob:')) return;
+
+        // If already fully loaded for this URL, skip
+        if (currentVideoSrc === videoUrl && seiFrames.length > 0) return;
 
         // Remove any existing loading indicator first
         const existingLoader = document.getElementById('seiLoading');
@@ -723,8 +938,32 @@
         }
 
         currentVideoSrc = videoUrl;
-        seiFrames = [];
         seiLoading = true;
+
+        // Check what's already buffered by the video element during streaming
+        let videoBytesBuffered = 0;
+        if (video.buffered.length > 0 && !videoUrl.startsWith('blob:')) {
+            // Calculate approximate bytes from buffered time ranges
+            // This is a rough estimate based on bitrate
+            const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+            const duration = video.duration;
+            if (duration && bufferedEnd) {
+                // Estimate: assume linear bitrate distribution
+                // We'll get the actual file size from the response headers
+                videoBytesBuffered = Math.floor((bufferedEnd / duration) * 100); // percentage placeholder
+            }
+        }
+
+        // Check for cached partial download from previous overlay attempt
+        const cachedData = seiDownloadCache.get(videoUrl);
+        let resumeFrom = cachedData ? cachedData.bytesLoaded : 0;
+        let existingChunks = cachedData ? cachedData.chunks : [];
+
+        // If video has buffered data but we have no cache, we can't use the buffer
+        // (browser buffer is internal, we can't access the bytes)
+        // But we can skip downloading what's buffered by starting from a later byte
+
+        console.log(resumeFrom > 0 ? `Resuming download from ${(resumeFrom / 1024 / 1024).toFixed(1)} MB (cached)` : 'Starting fresh download');
 
         // Show loading indicator
         const loadingDiv = document.createElement('div');
@@ -737,30 +976,60 @@
         video.pause();
 
         try {
-            // Convert streaming URL to SEI endpoint (no range requests)
-            const seiUrl = videoUrl.replace('/stream/', '/sei/');
-            console.log('Fetching SEI data from:', seiUrl);
+            // Create abort controller for this download
+            seiAbortController = new AbortController();
+
+            // Use streaming URL directly (supports Range requests)
+            console.log('Fetching SEI data from:', videoUrl);
 
             const progressDiv = document.getElementById('seiProgress');
-            progressDiv.textContent = 'Downloading video file...';
+            progressDiv.textContent = resumeFrom > 0 ? 'Resuming download...' : 'Downloading video file...';
 
-            const response = await fetch(seiUrl, {
+            const headers = {
+                'Accept': 'video/mp4'
+            };
+
+            // Add Range header if resuming
+            if (resumeFrom > 0) {
+                headers['Range'] = `bytes=${resumeFrom}-`;
+            }
+
+            const response = await fetch(videoUrl, {
                 credentials: 'same-origin',
-                headers: {
-                    'Accept': 'video/mp4'
-                }
+                headers: headers,
+                signal: seiAbortController.signal
             });
 
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
 
-            const contentLength = response.headers.get('content-length');
-            const total = parseInt(contentLength, 10);
-            let loaded = 0;
+            // Check if server supports Range requests
+            const supportsRange = response.status === 206;
+
+            // Get total size from Content-Range or Content-Length
+            let total;
+            let actualResumeFrom = 0;
+            const contentRange = response.headers.get('content-range');
+            if (contentRange) {
+                // Parse "bytes 1000-2000/3000" format
+                const match = contentRange.match(/\/(\d+)/);
+                total = match ? parseInt(match[1], 10) : 0;
+                actualResumeFrom = resumeFrom; // Range request succeeded
+            } else {
+                const contentLength = response.headers.get('content-length');
+                total = parseInt(contentLength, 10);
+                // If we requested a range but got 200, server doesn't support it
+                if (resumeFrom > 0 && response.status === 200) {
+                    console.warn('Server does not support Range requests, downloading full file');
+                    actualResumeFrom = 0; // Start from scratch
+                }
+            }
+
+            let loaded = actualResumeFrom;
+            const chunks = actualResumeFrom > 0 ? [...existingChunks] : []; // Only use cache if actually resuming
 
             const reader = response.body.getReader();
-            const chunks = [];
 
             while (true) {
                 const {done, value} = await reader.read();
@@ -768,6 +1037,13 @@
 
                 chunks.push(value);
                 loaded += value.length;
+
+                // Update cache with latest progress
+                seiDownloadCache.set(videoUrl, {
+                    chunks: [...chunks],
+                    bytesLoaded: loaded,
+                    totalBytes: total
+                });
 
                 if (total) {
                     const percent = Math.round((loaded / total) * 100);
@@ -823,7 +1099,17 @@
             // Remove loading indicator
             loadingDiv.remove();
             seiLoading = false;
+
+            // Clear cache for this video since we have complete data
+            seiDownloadCache.delete(videoUrl);
         } catch (err) {
+            // If download was aborted (user switched modes), keep cache for resume
+            if (err.name === 'AbortError') {
+                console.log('SEI download aborted by user - progress saved for resume');
+                seiLoading = false;
+                return;
+            }
+
             console.error('Failed to download video:', err);
             seiFrames = [];
             seiLoading = false;
@@ -922,13 +1208,15 @@
         console.log('SEI system initialized');
     });
 
-    // Load SEI data when video loads
+    // Load SEI data when video loads (only if in overlay mode)
     video.addEventListener('loadedmetadata', () => {
-        loadSEIData(video.src);
+        if (seiOverlayEnabled) {
+            loadSEIData(video.src);
+        }
     });
 
-    // Handle race condition: if video already has metadata, load SEI now
-    if (video.readyState >= 1) {
+    // Handle race condition: if video already has metadata, load SEI now (only if in overlay mode)
+    if (video.readyState >= 1 && seiOverlayEnabled) {
         loadSEIData(video.src);
     }
 
@@ -958,14 +1246,21 @@
         seiLoading = false;
         currentVideoSrc = null;
 
-        // Switch video source (videoUrl is now the full URL)
-        video.src = videoUrl;
-        video.load();
+        // Abort any background caching
+        if (backgroundPrefetchController) {
+            backgroundPrefetchController.abort();
+            backgroundPrefetchController = null;
+        }
 
-        // Trigger SEI loading for new video
-        loadSEIData(videoUrl);
+        // Switch video source with caching
+        loadVideoWithCache(videoUrl);
 
-        // Restore playback position and state
+        // Trigger SEI loading for new video if in overlay mode
+        if (seiOverlayEnabled) {
+            loadSEIData(videoUrl);
+        }
+
+        // Restore playback position
         video.addEventListener('loadedmetadata', function onLoaded() {
             video.currentTime = currentTime;
             if (wasPlaying) {

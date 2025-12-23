@@ -71,6 +71,8 @@ NEED_SIZE_VALIDATION=0
 USABLE_MIB=0
 
 if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
+  # Ensure parent directory exists for df check
+  mkdir -p "$GADGET_DIR_DEFAULT" 2>/dev/null || true
   FS_AVAIL_BYTES="$(fs_avail_bytes_for_path "$GADGET_DIR_DEFAULT")"
 
   # Headroom: default 5G, user-adjustable
@@ -86,7 +88,7 @@ if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
   if [ "$FS_AVAIL_BYTES" -le "$RESERVE_BYTES" ]; then
     echo "ERROR: Not enough free space to safely create image files under $GADGET_DIR_DEFAULT."
     echo "Free:    $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
-    echo "Safety Reserve: $RESERVE_SIZE ($((RESERVE_BYTES / 1024 / 1024)) MiB"
+    echo "Safety Reserve: $RESERVE_SIZE ($((RESERVE_BYTES / 1024 / 1024)) MiB)"
     echo "Free up space or move GADGET_DIR to a larger filesystem."
     exit 1
   fi
@@ -126,11 +128,23 @@ if [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; then
   if [ -z "${PART2_SIZE}" ]; then
     read -r -p "Enter Lightshow size (default ${SUG_P2_STR}): " PART2_SIZE_INPUT
     PART2_SIZE="${PART2_SIZE_INPUT:-$SUG_P2_STR}"
+    # Validate format immediately
+    if ! size_to_bytes "$PART2_SIZE" >/dev/null 2>&1; then
+      echo "ERROR: Invalid size format for Lightshow: $PART2_SIZE"
+      echo "Use format like 512M or 5G (whole numbers only)"
+      exit 2
+    fi
   fi
 
   if [ -z "${PART1_SIZE}" ]; then
     read -r -p "Enter TeslaCam size (default ${SUG_P1_STR}): " PART1_SIZE_INPUT
     PART1_SIZE="${PART1_SIZE_INPUT:-$SUG_P1_STR}"
+    # Validate format immediately
+    if ! size_to_bytes "$PART1_SIZE" >/dev/null 2>&1; then
+      echo "ERROR: Invalid size format for TeslaCam: $PART1_SIZE"
+      echo "Use format like 512M or 5G (whole numbers only)"
+      exit 2
+    fi
   fi
 
   echo ""
@@ -198,7 +212,7 @@ case "$PROCEED_LC" in
 esac
 echo ""
 
-# Install prerequisites (only fetch/install if something is missing) 
+# Install prerequisites (only fetch/install if something is missing)
 
 REQUIRED_PACKAGES=(
   parted

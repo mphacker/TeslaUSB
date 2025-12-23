@@ -281,7 +281,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Track loaded thumbnails to prevent duplicate loads
     const loadedThumbnails = new Set();
-    
+
     // Track active fetch requests for cancellation
     const activeRequests = new Map(); // Map<img, AbortController>
 
@@ -289,23 +289,23 @@ document.addEventListener('DOMContentLoaded', function() {
     let concurrentLoads = 0;
     const MAX_CONCURRENT = 3; // Max 3 thumbnails loading at once
     const loadQueue = [];
-    
+
     // Function to abort all pending thumbnail requests
     function abortAllThumbnails() {
         const startTime = performance.now();
         const activeCount = activeRequests.size;
         const queueCount = loadQueue.length;
-        
+
         // Cancel all active fetch requests
         activeRequests.forEach((controller, img) => {
             controller.abort();
         });
         activeRequests.clear();
-        
+
         // Clear the queue
         loadQueue.length = 0;
         concurrentLoads = 0;
-        
+
         const elapsed = performance.now() - startTime;
         console.log(`Aborted ${activeCount} active thumbnails, cleared ${queueCount} queued (${elapsed.toFixed(1)}ms)`);
     }
@@ -395,24 +395,24 @@ document.addEventListener('DOMContentLoaded', function() {
     thumbnails.forEach(function(img) {
         observer.observe(img);
     });
-    
+
     // Cancel all thumbnail requests when user clicks on any event card (navigation)
     const eventCards = document.querySelectorAll('.event-card');
     eventCards.forEach(function(card) {
         card.addEventListener('click', function(e) {
             const clickTime = performance.now();
             console.log('🖱️ Event card clicked');
-            
+
             // Prevent immediate navigation
             e.preventDefault();
             e.stopImmediatePropagation();
-            
+
             // Abort all thumbnails first
             const abortStart = performance.now();
             abortAllThumbnails();
             const abortTime = performance.now() - abortStart;
             console.log(`⏱️ Abort completed in ${abortTime.toFixed(1)}ms`);
-            
+
             // Small delay to ensure aborts are processed, then navigate
             setTimeout(function() {
                 // Get the href from the onclick attribute

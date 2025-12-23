@@ -827,7 +827,7 @@
         // Reload current video with new mode
         const currentSrc = video.src;
         const streamUrl = video.dataset.originalUrl || currentSrc;
-        
+
         // Only proceed if we have a valid stream URL (not blob)
         if (streamUrl && !streamUrl.startsWith('blob:')) {
             const savedTime = video.currentTime;
@@ -924,7 +924,7 @@
     async function loadSEIData(videoUrl) {
         // Normalize URL for consistent cache lookup
         videoUrl = normalizeUrl(videoUrl);
-        
+
         // Skip if overlay mode disabled, blob URL (already processed), or no proto loaded
         if (!seiOverlayEnabled || !seiType || videoUrl.startsWith('blob:')) return;
 

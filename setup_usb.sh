@@ -221,6 +221,7 @@ REQUIRED_PACKAGES=(
   util-linux
   psmisc
   python3-flask
+  python3-waitress
   python3-av
   python3-pil
   samba
@@ -234,6 +235,7 @@ REQUIRED_PACKAGES=(
 )
 
 # Note on packages:
+# - python3-waitress: Production WSGI server (10-20x faster than Flask dev server)
 # - python3-av: PyAV for instant thumbnail generation
 # - python3-pil: PIL/Pillow for image resizing
 # - ffmpeg: Used by lock chime service for audio validation and re-encoding
@@ -837,6 +839,35 @@ if [ ! -f "$STATE_FILE" ]; then
   chown "$TARGET_USER:$TARGET_USER" "$STATE_FILE"
 fi
 
+# ===== Clean up deprecated thumbnail system =====
+echo "Cleaning up deprecated thumbnail generation system..."
+
+# Stop and disable old thumbnail services
+if systemctl is-enabled thumbnail_generator.service 2>/dev/null; then
+  systemctl stop thumbnail_generator.service 2>/dev/null || true
+  systemctl disable thumbnail_generator.service 2>/dev/null || true
+fi
+
+if systemctl is-enabled thumbnail_generator.timer 2>/dev/null; then
+  systemctl stop thumbnail_generator.timer 2>/dev/null || true
+  systemctl disable thumbnail_generator.timer 2>/dev/null || true
+fi
+
+# Remove systemd service files
+rm -f /etc/systemd/system/thumbnail_generator.service 2>/dev/null || true
+rm -f /etc/systemd/system/thumbnail_generator.timer 2>/dev/null || true
+
+# Remove thumbnail service Python file
+rm -f "$GADGET_DIR/scripts/web/services/thumbnail_service.py" 2>/dev/null || true
+
+# Remove thumbnail cache directory
+if [ -d "$GADGET_DIR/thumbnails" ]; then
+  echo "  Removing thumbnail cache directory..."
+  rm -rf "$GADGET_DIR/thumbnails" 2>/dev/null || true
+fi
+
+echo "Deprecated thumbnail system cleanup complete."
+
 # ===== Systemd services =====
 echo "Installing systemd services..."
 
@@ -875,8 +906,15 @@ configure_service "$TEMPLATES_DIR/wifi-powersave-off.service" "$WIFI_POWERSAVE_S
 WIFI_MONITOR_SERVICE="/etc/systemd/system/wifi-monitor.service"
 configure_service "$TEMPLATES_DIR/wifi-monitor.service" "$WIFI_MONITOR_SERVICE"
 
-# Ensure wifi-monitor.sh is executable (it's already in scripts/)
+# Ensure wifi-monitor.sh and optimize_network.sh are executable
 chmod +x "$SCRIPT_DIR/scripts/wifi-monitor.sh"
+chmod +x "$SCRIPT_DIR/scripts/optimize_network.sh" 2>/dev/null || true
+
+# Apply network optimizations on first boot
+if [ -f "$SCRIPT_DIR/scripts/optimize_network.sh" ]; then
+  echo "Applying network optimizations..."
+  "$SCRIPT_DIR/scripts/optimize_network.sh" 2>/dev/null || echo "  Note: Some optimizations require reboot to take effect"
+fi
 
 # Reload systemd and enable services
 systemctl daemon-reload
@@ -899,10 +937,10 @@ systemctl restart gadget_web.service || true
 echo
 echo "Configuring system reliability features..."
 
-# Configure sysctl for kernel panic auto-reboot
+# Configure sysctl for kernel panic auto-reboot and network performance
 SYSCTL_CONF="/etc/sysctl.d/99-teslausb.conf"
 if [ ! -f "$SYSCTL_CONF" ] || ! grep -q "kernel.panic" "$SYSCTL_CONF" 2>/dev/null; then
-  echo "Creating sysctl configuration for kernel panic auto-reboot..."
+  echo "Creating sysctl configuration for system reliability and network performance..."
   cat > "$SYSCTL_CONF" <<'EOF'
 # TeslaUSB System Reliability Configuration
 
@@ -917,6 +955,40 @@ vm.panic_on_oom = 0
 
 # Swappiness (how aggressively to use swap) - low value for SD card longevity
 vm.swappiness = 10
+
+# Network Performance Tuning (WiFi optimization)
+# Increase network buffer sizes for better throughput
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+
+# TCP buffer auto-tuning (min, default, max in bytes)
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
+
+# Enable TCP window scaling for high-latency networks
+net.ipv4.tcp_window_scaling = 1
+
+# Use BBR congestion control (better for WiFi/wireless)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# Reduce TIME_WAIT socket timeout to free resources faster
+net.ipv4.tcp_fin_timeout = 15
+
+# Allow reuse of TIME_WAIT sockets
+net.ipv4.tcp_tw_reuse = 1
+
+# Increase max queued packets
+net.core.netdev_max_backlog = 5000
+
+# Enable TCP fast open
+net.ipv4.tcp_fastopen = 3
+
+# Disable IPv6 if not needed (reduces overhead)
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
 EOF
   chmod 644 "$SYSCTL_CONF"
   echo "  Created $SYSCTL_CONF"

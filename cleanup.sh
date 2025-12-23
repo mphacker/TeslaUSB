@@ -14,7 +14,7 @@ echo "==============================="
 #!/bin/bash
 
 # cleanup.sh - Remove all Tesla USB Gadget files and configuration
-# 
+#
 # This script safely removes all files and system configurations
 # created by setup_usb.sh while ensuring proper cleanup
 # of system resources like loop devices, mounts, and services.
@@ -35,21 +35,21 @@ echo "Image file: $IMG_PATH"
 cleanup_service() {
   local service_name="$1"
   local service_file="$2"
-  
+
   echo "Cleaning up service: $service_name"
-  
+
   # Stop service if running
   if systemctl is-active --quiet "$service_name" 2>/dev/null; then
     echo "  Stopping $service_name..."
     systemctl stop "$service_name" || true
   fi
-  
+
   # Disable service if enabled
   if systemctl is-enabled --quiet "$service_name" 2>/dev/null; then
     echo "  Disabling $service_name..."
     systemctl disable "$service_name" || true
   fi
-  
+
   # Remove service file
   if [ -f "$service_file" ]; then
     echo "  Removing service file: $service_file"
@@ -60,14 +60,14 @@ cleanup_service() {
 # Function to cleanup USB gadget and loop devices
 cleanup_usb_gadget() {
   echo "Cleaning up USB gadget and loop devices..."
-  
+
   # Remove USB gadget module if loaded
   if lsmod | grep -q '^g_mass_storage'; then
     echo "  Removing g_mass_storage module..."
     rmmod g_mass_storage 2>/dev/null || true
     sleep 1
   fi
-  
+
   # Unmount any mounted partitions (edit mode)
   echo "  Unmounting edit mode partitions..."
   for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
@@ -76,7 +76,7 @@ cleanup_usb_gadget() {
       umount "$mp" || true
     fi
   done
-  
+
   # Unmount any read-only mounted partitions (present mode)
   echo "  Unmounting read-only partitions..."
   for mp in "$MNT_DIR/part1-ro" "$MNT_DIR/part2-ro"; do
@@ -85,13 +85,7 @@ cleanup_usb_gadget() {
       umount "$mp" || true
     fi
   done
-  
-  # Remove thumbnail cache directory
-  echo "  Removing thumbnail cache..."
-  if [ -d "$GADGET_DIR/thumbnails" ]; then
-    rm -rf "$GADGET_DIR/thumbnails" || true
-  fi
-  
+
   # Detach any loop devices associated with the image
   if [ -f "$IMG_PATH" ]; then
     echo "  Detaching loop devices for $IMG_PATH..."
@@ -107,27 +101,27 @@ cleanup_usb_gadget() {
 # Function to cleanup Samba configuration
 cleanup_samba() {
   echo "Cleaning up Samba configuration..."
-  
+
   if [ -f "$SMB_CONF" ]; then
     # Remove gadget_part1 and gadget_part2 shares from smb.conf
     echo "  Removing gadget shares from $SMB_CONF..."
-    
+
     # Create backup before modification
     cp "$SMB_CONF" "${SMB_CONF}.cleanup_backup.$(date +%s)" 2>/dev/null || true
-    
+
     # Remove gadget share sections using awk
     awk '
       BEGIN{skip=0}
       /^\[gadget_part1\]/{skip=1; next}
       /^\[gadget_part2\]/{skip=1; next}
-      /^\[.*\]$/ { 
-        if(skip==1 && $0 !~ /^\[gadget_part1\]/ && $0 !~ /^\[gadget_part2\]/) { 
-          skip=0 
-        } 
+      /^\[.*\]$/ {
+        if(skip==1 && $0 !~ /^\[gadget_part1\]/ && $0 !~ /^\[gadget_part2\]/) {
+          skip=0
+        }
       }
       { if(skip==0) print }
     ' "$SMB_CONF" > "${SMB_CONF}.tmp" && mv "${SMB_CONF}.tmp" "$SMB_CONF" || true
-    
+
     # Restart Samba to apply changes
     echo "  Restarting Samba services..."
     systemctl restart smbd nmbd 2>/dev/null || systemctl restart smbd 2>/dev/null || true
@@ -137,7 +131,7 @@ cleanup_samba() {
 # Function to remove mount directories
 cleanup_mount_dirs() {
   echo "Cleaning up mount directories..."
-  
+
   for dir in "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part1-ro" "$MNT_DIR/part2-ro" "$MNT_DIR"; do
     if [ -d "$dir" ]; then
       echo "  Removing directory: $dir"
@@ -149,15 +143,15 @@ cleanup_mount_dirs() {
 # Function to remove gadget directory files (except this script)
 cleanup_gadget_files() {
   echo "Cleaning up gadget directory files..."
-  
+
   # List of files created by setup_usb.sh (excluding this script and templates)
   local files_to_remove=(
     "present_usb.sh"
-    "edit_usb.sh" 
+    "edit_usb.sh"
     "web_control.py"
     "state.txt"
   )
-  
+
   for file in "${files_to_remove[@]}"; do
     local file_path="$GADGET_DIR/$file"
     if [ -f "$file_path" ]; then
@@ -165,11 +159,11 @@ cleanup_gadget_files() {
       rm -f "$file_path" || true
     fi
   done
-  
+
   # Remove any backup files or logs that might have been created
   echo "  Removing any backup or temporary files..."
   rm -f "$GADGET_DIR"/*.bak "$GADGET_DIR"/*.tmp "$GADGET_DIR"/*.log 2>/dev/null || true
-  
+
   # Note: We intentionally leave the scripts/ and templates/ directories
   # as they are part of the source repository, not generated files
 }
@@ -179,47 +173,45 @@ main() {
   echo
   echo "Starting cleanup process..."
   echo
-  
+
   # Ensure we're running as root for system cleanup
   if [ "$EUID" -ne 0 ]; then
     echo "Error: This script must be run as root (use sudo)"
     echo "Usage: sudo $0"
     exit 1
   fi
-  
+
   # Step 1: Stop and disable systemd services
   echo "Step 1: Cleaning up systemd services"
   cleanup_service "gadget_web.service" "/etc/systemd/system/gadget_web.service"
   cleanup_service "present_usb_on_boot.service" "/etc/systemd/system/present_usb_on_boot.service"
-  cleanup_service "thumbnail_generator.timer" "/etc/systemd/system/thumbnail_generator.timer"
-  cleanup_service "thumbnail_generator.service" "/etc/systemd/system/thumbnail_generator.service"
-  
+
   # Reload systemd after removing service files
   echo "  Reloading systemd daemon..."
   systemctl daemon-reload || true
-  
+
   echo
-  
+
   # Step 2: Clean up USB gadget and loop devices
   echo "Step 2: Cleaning up USB gadget and loop devices"
   cleanup_usb_gadget
   echo
-  
+
   # Step 3: Clean up Samba configuration
   echo "Step 3: Cleaning up Samba configuration"
   cleanup_samba
   echo
-  
+
   # Step 4: Remove mount directories
   echo "Step 4: Cleaning up mount directories"
   cleanup_mount_dirs
   echo
-  
+
   # Step 5: Remove gadget files (this should be last, before the image)
   echo "Step 5: Cleaning up gadget directory files"
   cleanup_gadget_files
   echo
-  
+
   echo "Cleanup completed successfully!"
   echo
   echo "Summary of actions performed:"
@@ -241,7 +233,7 @@ main() {
 # Confirmation prompt
 echo "This will remove all USB gadget configuration and files."
 echo "The following will be cleaned up:"
-echo "  - Systemd services (gadget_web, present_usb_on_boot)" 
+echo "  - Systemd services (gadget_web, present_usb_on_boot)"
 echo "  - USB gadget module and loop devices"
 echo "  - Samba share configuration"
 echo "  - Mount directories ($MNT_DIR)"

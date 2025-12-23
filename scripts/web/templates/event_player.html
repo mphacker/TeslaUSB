@@ -1,0 +1,1053 @@
+{% extends "base.html" %}
+
+{# Macro to build video URL based on folder structure #}
+{% macro video_url(filename) -%}
+    {% if folder_structure == 'flat' -%}
+        {{ url_for('videos.stream_video', filepath=folder + '/' + filename) }}
+    {%- else -%}
+        {{ url_for('videos.stream_video', filepath=folder + '/' + event.name + '/' + filename) }}
+    {%- endif %}
+{%- endmacro %}
+
+{% block head %}
+<style>
+    /* Tesla Cam Style Player - Fullscreen Immersive */
+    .event-player-container {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: #000;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+    }
+
+    /* Video fills most of viewport, leaving room for controls */
+    .main-video-container {
+        flex: 1;
+        position: relative;
+        background: #000;
+        min-height: 0;
+    }
+
+    .main-video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+    }
+
+    /* iOS-specific fixes to prevent native video controls from hiding overlays */
+    .main-video::-webkit-media-controls-panel {
+        display: flex !important;
+        opacity: 1 !important;
+    }
+
+    /* Ensure video stays within container on iOS */
+    .main-video {
+        -webkit-transform: translateZ(0);
+        transform: translateZ(0);
+    }
+
+    /* Top overlay header with location and info */
+    .event-header {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 10;
+        background: linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0) 100%);
+        padding: 15px 20px 40px 20px;
+        padding-right: 80px; /* Make room for X button */
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        pointer-events: none; /* Allow clicks to pass through to video controls */
+        -webkit-transform: translateZ(1px); /* Force iOS to render on top */
+        transform: translateZ(1px);
+    }
+
+    /* Re-enable pointer events for interactive elements within header */
+    .event-header a,
+    .event-header button {
+        pointer-events: auto;
+    }
+
+    .event-info {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .event-location {
+        color: #fff;
+        font-size: 1.1em;
+        font-weight: 500;
+        margin: 0;
+    }
+
+    .event-datetime {
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 0.85em;
+    }
+
+    /* Tesla HUD Overlay - Top center like native Tesla viewer */
+    .tesla-hud {
+        position: absolute;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%) translateZ(3px);
+        -webkit-transform: translateX(-50%) translateZ(3px);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        z-index: 20;
+        pointer-events: none;
+    }
+
+    /* HUD Card */
+    .hud-card {
+        padding: 6px 10px 8px;
+        border-radius: 18px;
+        backdrop-filter: blur(14px);
+        background: rgba(10, 10, 12, 0.38);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    }
+
+    /* Grid layout matching Tesla's design */
+    .hud-grid {
+        display: grid;
+        grid-template-columns: auto 1fr 32px 3ch 32px 1fr auto;
+        grid-template-rows: 1fr 1fr;
+        grid-template-areas:
+            "gear . left speed right . wheel"
+            "brake . . . . . throttle";
+        column-gap: 8px;
+        align-items: center;
+    }
+
+    /* Speed display */
+    .hud-speed {
+        grid-area: speed;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        line-height: 1;
+        transform: translateY(16px);
+    }
+
+    .hud-speed-value {
+        font-size: 28px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+        color: rgba(255, 255, 255, 0.95);
+    }
+
+    .hud-speed-label {
+        font-size: 12px;
+        opacity: 0.8;
+        margin-top: 4px;
+        color: rgba(255, 255, 255, 0.95);
+    }
+
+    /* Turn signals */
+    .hud-blinker {
+        width: 32px;
+        height: 24px;
+        display: grid;
+        place-items: center;
+        border-radius: 10px;
+        opacity: 0.4;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        font-size: 14px;
+        transform: translateY(16px);
+    }
+
+    .hud-blinker.left { grid-area: left; }
+    .hud-blinker.right { grid-area: right; }
+
+    .hud-blinker.active {
+        opacity: 1;
+        background: rgba(120, 255, 120, 0.18);
+        border-color: rgba(120, 255, 120, 0.45);
+        animation: blink 0.55s steps(2, end) infinite;
+    }
+
+    @keyframes blink {
+        0%, 49% { filter: brightness(1.3); }
+        50%, 100% { filter: brightness(0.7); }
+    }
+
+    /* Steering wheel */
+    .hud-steering {
+        grid-area: wheel;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+
+    .hud-steering svg {
+        width: 26px;
+        height: 26px;
+        transform: rotate(var(--wheel-rotation, 0deg));
+        transition: transform 0.05s linear;
+    }
+
+    /* Pedals (brake and throttle) */
+    .hud-pedal {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        position: relative;
+        border: 2px solid rgba(255, 255, 255, 0.25);
+        overflow: hidden;
+        justify-self: center;
+    }
+
+    .hud-pedal.brake {
+        grid-area: brake;
+        --pedal-color: rgba(255, 90, 90, 0.75);
+    }
+
+    .hud-pedal.throttle {
+        grid-area: throttle;
+        --pedal-color: rgba(120, 255, 120, 0.7);
+    }
+
+    .hud-pedal::before {
+        content: "";
+        position: absolute;
+        inset: 4px;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.4);
+    }
+
+    .hud-pedal .fill {
+        position: absolute;
+        inset: 4px;
+        overflow: hidden;
+        border-radius: 50%;
+    }
+
+    .hud-pedal .fill i {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: var(--pedal-fill, 0%);
+        background: var(--pedal-color);
+    }
+
+    .hud-pedal svg {
+        position: absolute;
+        z-index: 2;
+        stroke: rgba(136, 136, 136, 0.9);
+        fill: none;
+    }
+
+    /* Gear indicator */
+    .hud-gear {
+        grid-area: gear;
+        font-size: 12px;
+        font-weight: 800;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        color: rgba(255, 255, 255, 0.95);
+    }
+
+    /* Autopilot status label */
+    .hud-autopilot {
+        text-align: center;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        color: rgb(90, 160, 255);
+        opacity: 0;
+        max-height: 0;
+        transform: translateY(-4px);
+        transition: opacity 0.25s ease, transform 0.25s ease, max-height 0.25s ease;
+    }
+
+    .hud-autopilot.active {
+        opacity: 1;
+        max-height: 24px;
+        transform: translateY(0);
+    }
+
+    .event-meta-right {
+        text-align: right;
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 0.85em;
+    }
+
+    /* Back button overlay */
+    .back-link {
+        position: absolute;
+        top: 15px;
+        right: 20px;
+        z-index: 11;
+        padding: 8px 16px;
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        text-decoration: none;
+        border-radius: 20px;
+        font-size: 0.9em;
+        transition: all 0.2s;
+        backdrop-filter: blur(10px);
+        -webkit-transform: translateZ(2px); /* Force iOS to render on top */
+        transform: translateZ(2px);
+    }
+
+    .back-link:hover {
+        background: rgba(0, 0, 0, 0.8);
+        transform: scale(1.05);
+    }
+
+    /* Bottom camera selector - Tesla style with thumbnails */
+    .camera-selector {
+        position: relative;
+        z-index: 10;
+        background: rgba(0,0,0,0.95);
+        padding: 15px 20px;
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        flex-shrink: 0;
+        border-top: 1px solid rgba(255,255,255,0.1);
+        -webkit-transform: translateZ(1px); /* Force iOS to render on top */
+        transform: translateZ(1px);
+    }
+
+    .camera-option {
+        position: relative;
+        width: 120px;
+        height: 80px;
+        cursor: pointer;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 3px solid rgba(255,255,255,0.3);
+        transition: all 0.2s ease;
+        background: rgba(20,20,20,0.8);
+        backdrop-filter: blur(10px);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .camera-option:hover:not(.unavailable) {
+        border-color: rgba(255,255,255,0.6);
+        transform: translateY(-4px);
+    }
+
+    .camera-option.active {
+        border-color: #fff;
+        box-shadow: 0 4px 12px rgba(255, 255, 255, 0.3);
+        background: rgba(40,40,40,0.9);
+    }
+
+    .camera-option.unavailable {
+        opacity: 0.3;
+        cursor: not-allowed;
+        border-color: rgba(255,255,255,0.15);
+    }
+
+    .camera-thumbnail {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        opacity: 0.6;
+    }
+
+    .camera-option.active .camera-thumbnail {
+        opacity: 1;
+    }
+
+    .camera-icon {
+        font-size: 1.5em;
+        color: rgba(255,255,255,0.8);
+        margin-bottom: 4px;
+    }
+
+    .camera-label {
+        font-size: 0.75em;
+        font-weight: 600;
+        color: #fff;
+        text-align: center;
+        padding: 4px 8px;
+        background: rgba(0,0,0,0.6);
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        backdrop-filter: blur(4px);
+    }
+
+    .download-option {
+        border-color: rgba(52, 199, 89, 0.6);
+        background: rgba(20, 80, 40, 0.8);
+    }
+
+    .download-option:hover {
+        border-color: rgba(52, 199, 89, 1);
+        background: rgba(30, 100, 50, 0.9);
+        transform: translateY(-4px);
+    }
+
+    .download-option .camera-icon {
+        color: rgba(52, 199, 89, 1);
+    }
+
+    /* Mobile responsive */
+    @media (max-width: 768px) {
+        .event-header {
+            padding: 12px 15px 30px 15px;
+        }
+
+        .event-location {
+            font-size: 0.95em;
+        }
+
+        .event-datetime,
+        .event-meta-right {
+            font-size: 0.75em;
+        }
+
+        .event-speed {
+            font-size: 2em;
+        }
+
+        .back-link {
+            top: 12px;
+            right: 15px;
+            padding: 6px 12px;
+            font-size: 0.85em;
+        }
+
+        .camera-selector {
+            padding: 12px 10px;
+            gap: 8px;
+        }
+
+        .camera-option {
+            width: 90px;
+            height: 60px;
+        }
+
+        .camera-icon {
+            font-size: 1.2em;
+        }
+
+        .camera-label {
+            font-size: 0.65em;
+            padding: 3px 6px;
+        }
+    }
+
+    /* Small mobile screens */
+    @media (max-width: 480px) {
+        .camera-option {
+            width: 70px;
+            height: 50px;
+        }
+
+        .camera-icon {
+            font-size: 1em;
+        }
+
+        .camera-label {
+            font-size: 0.6em;
+            padding: 2px 4px;
+        }
+    }
+
+    /* Hide default controls on fullscreen */
+    .main-video::-webkit-media-controls {
+        opacity: 0.7;
+    }
+
+    .main-video:hover::-webkit-media-controls {
+        opacity: 1;
+    }
+</style>
+{% endblock %}
+
+
+{% block content %}
+<div class="event-player-container">
+    <!-- Back button overlay -->
+    <a href="{{ url_for('videos.file_browser', folder=folder) }}" class="back-link">
+        <i class="bi bi-x-lg"></i>
+    </a>
+
+    <!-- Main video -->
+    <div class="main-video-container">
+        <video id="mainVideo" class="main-video" controls playsinline webkit-playsinline>
+            Your browser does not support the video tag.
+        </video>
+    </div>
+
+    <!-- Top overlay with location and info -->
+    <div class="event-header" id="topOverlay">
+        <div class="event-info">
+            {% if event.city %}<h2 class="event-location">{{ event.city }}</h2>{% endif %}
+            <div class="event-datetime">{{ event.datetime }}</div>
+        </div>
+
+        <!-- Tesla HUD with SEI data -->
+        <div class="tesla-hud" id="teslaHud">
+            <div class="hud-card">
+                <div class="hud-grid">
+                    <!-- Gear -->
+                    <div class="hud-gear" id="hudGear">P</div>
+
+                    <!-- Brake pedal -->
+                    <div class="hud-pedal brake" id="brakePedal">
+                        <span class="fill"><i></i></span>
+                        <svg viewBox="0 0 24 24" width="24" height="24">
+                            <path d="M6 7 L18 7 L20 16 Q12 19 4 16 Z" stroke-width="2" stroke-linejoin="round"/>
+                            <line x1="8" y1="9" x2="8" y2="14" stroke-width="1.5"/>
+                            <line x1="10" y1="9" x2="10" y2="14" stroke-width="1.5"/>
+                            <line x1="12" y1="9" x2="12" y2="14" stroke-width="1.5"/>
+                            <line x1="14" y1="9" x2="14" y2="14" stroke-width="1.5"/>
+                            <line x1="16" y1="9" x2="16" y2="14" stroke-width="1.5"/>
+                        </svg>
+                    </div>
+
+                    <!-- Left turn signal -->
+                    <span class="hud-blinker left" id="blinkerLeft">◀</span>
+
+                    <!-- Speed -->
+                    <div class="hud-speed">
+                        <div class="hud-speed-value" id="hudSpeed">0</div>
+                        <div class="hud-speed-label">mph</div>
+                    </div>
+
+                    <!-- Right turn signal -->
+                    <span class="hud-blinker right" id="blinkerRight">▶</span>
+
+                    <!-- Steering wheel -->
+                    <div class="hud-steering" id="hudSteering">
+                        <svg viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="8" stroke="white" stroke-width="1.4"/>
+                            <path d="M6.8 9.8 H17.2" stroke="white" stroke-width="2" stroke-linecap="round"/>
+                            <path d="M12 9.8 V16.8" stroke="white" stroke-width="2" stroke-linecap="round"/>
+                            <circle cx="12" cy="12" r="1.8" stroke="white" stroke-width="1.4"/>
+                        </svg>
+                    </div>
+
+                    <!-- Throttle pedal -->
+                    <div class="hud-pedal throttle" id="throttlePedal">
+                        <span class="fill"><i></i></span>
+                        <svg viewBox="0 0 24 24" width="24" height="24">
+                            <path d="M9 4 L15 4 L16 18 Q12 20 8 18 Z" stroke-width="2" stroke-linejoin="round"/>
+                            <rect x="9" y="2" width="6" height="2" rx="1" stroke-width="2"/>
+                        </svg>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Autopilot status label -->
+            <div class="hud-autopilot" id="autopilotIndicator">Self-Driving</div>
+        </div>
+
+        {% if event.reason or event.size_mb %}
+        <div class="event-meta-right">
+            {% if event.reason %}<div>{{ event.reason.replace('_', ' ').title() }}</div>{% endif %}
+            {% if event.size_mb %}<div>{{ event.size_mb }} MB</div>{% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Bottom camera selector with Tesla-style layout -->
+    <div class="camera-selector">
+        {% if event.camera_videos.front %}
+        <div class="camera-option active" onclick="switchCamera('{{ video_url(event.camera_videos.front) }}', this)" data-camera="front">
+            <i class="bi bi-arrow-up camera-icon"></i>
+            <div class="camera-label">Front</div>
+        </div>
+        {% else %}
+        <div class="camera-option unavailable">
+            <i class="bi bi-arrow-up camera-icon"></i>
+            <div class="camera-label">Front</div>
+        </div>
+        {% endif %}
+
+        {% if event.camera_videos.back %}
+        <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.back) }}', this)" data-camera="rear">
+            <i class="bi bi-arrow-down camera-icon"></i>
+            <div class="camera-label">Rear</div>
+        </div>
+        {% else %}
+        <div class="camera-option unavailable">
+            <i class="bi bi-arrow-down camera-icon"></i>
+            <div class="camera-label">Rear</div>
+        </div>
+        {% endif %}
+
+        {% if event.camera_videos.left_repeater %}
+        <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.left_repeater) }}', this)" data-camera="left">
+            <i class="bi bi-arrow-left camera-icon"></i>
+            <div class="camera-label">Left</div>
+        </div>
+        {% else %}
+        <div class="camera-option unavailable">
+            <i class="bi bi-arrow-left camera-icon"></i>
+            <div class="camera-label">Left</div>
+        </div>
+        {% endif %}
+
+        {% if event.camera_videos.right_repeater %}
+        <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.right_repeater) }}', this)" data-camera="right">
+            <i class="bi bi-arrow-right camera-icon"></i>
+            <div class="camera-label">Right</div>
+        </div>
+        {% else %}
+        <div class="camera-option unavailable">
+            <i class="bi bi-arrow-right camera-icon"></i>
+            <div class="camera-label">Right</div>
+        </div>
+        {% endif %}
+
+        {% if event.camera_videos.left_pillar %}
+        <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.left_pillar) }}', this)" data-camera="left-pillar">
+            <i class="bi bi-arrow-bar-left camera-icon"></i>
+            <div class="camera-label">Left Pillar</div>
+        </div>
+        {% else %}
+        <div class="camera-option unavailable">
+            <i class="bi bi-arrow-bar-left camera-icon"></i>
+            <div class="camera-label">Left Pillar</div>
+        </div>
+        {% endif %}
+
+        {% if event.camera_videos.right_pillar %}
+        <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.right_pillar) }}', this)" data-camera="right-pillar">
+            <i class="bi bi-arrow-bar-right camera-icon"></i>
+            <div class="camera-label">Right Pillar</div>
+        </div>
+        {% else %}
+        <div class="camera-option unavailable">
+            <i class="bi bi-arrow-bar-right camera-icon"></i>
+            <div class="camera-label">Right Pillar</div>
+        </div>
+        {% endif %}
+
+        <!-- Download Event Button -->
+        <div class="camera-option download-option" id="downloadButton" onclick="downloadEvent()">
+            <i class="bi bi-download camera-icon" id="downloadIcon"></i>
+            <div class="camera-label" id="downloadLabel">Download All</div>
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/protobuf.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashcam-mp4.js') }}"></script>
+<script>
+    const folder = "{{ folder }}";
+    const eventName = "{{ event.name }}";
+    const video = document.getElementById('mainVideo');
+    let currentTime = 0;
+    let wasPlaying = false;
+
+    // SEI metadata
+    let seiFrames = [];
+    let seiType = null;
+    let enumFields = null;
+    let currentVideoSrc = null;
+    let seiLoading = false;
+
+    // Set initial video source (prefer front camera, fall back to first available)
+    {% if event.camera_videos.front %}
+    const initialVideoSrc = "{{ video_url(event.camera_videos.front) }}";
+    {% elif event.camera_videos.back %}
+    const initialVideoSrc = "{{ video_url(event.camera_videos.back) }}";
+    {% elif event.camera_videos.left_repeater %}
+    const initialVideoSrc = "{{ video_url(event.camera_videos.left_repeater) }}";
+    {% elif event.camera_videos.right_repeater %}
+    const initialVideoSrc = "{{ video_url(event.camera_videos.right_repeater) }}";
+    {% elif event.camera_videos.left_pillar %}
+    const initialVideoSrc = "{{ video_url(event.camera_videos.left_pillar) }}";
+    {% elif event.camera_videos.right_pillar %}
+    const initialVideoSrc = "{{ video_url(event.camera_videos.right_pillar) }}";
+    {% else %}
+    const initialVideoSrc = null;
+    {% endif %}
+
+    // Load initial video
+    if (initialVideoSrc) {
+        video.src = initialVideoSrc;
+        video.load();
+        // Don't autoplay - wait for SEI data to load first
+    }
+
+    // Initialize SEI parsing
+    async function initSEI() {
+        try {
+            const result = await DashcamHelpers.initProtobuf('{{ url_for("static", filename="dashcam.proto") }}');
+            seiType = result.SeiMetadata;
+            enumFields = result.enumFields;
+        } catch (err) {
+            console.error('Failed to initialize SEI:', err);
+        }
+    }
+
+    // Load SEI data from video
+    async function loadSEIData(videoUrl) {
+        // Skip if blob URL (already processed) or same source or no proto loaded
+        if (!seiType || videoUrl.startsWith('blob:') || currentVideoSrc === videoUrl) return;
+
+        // Remove any existing loading indicator first
+        const existingLoader = document.getElementById('seiLoading');
+        if (existingLoader) {
+            existingLoader.remove();
+        }
+
+        currentVideoSrc = videoUrl;
+        seiFrames = [];
+        seiLoading = true;
+
+        // Show loading indicator
+        const loadingDiv = document.createElement('div');
+        loadingDiv.id = 'seiLoading';
+        loadingDiv.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.9);color:#fff;padding:30px 50px;border-radius:12px;z-index:9999;font-size:18px;text-align:center;backdrop-filter:blur(10px);';
+        loadingDiv.innerHTML = '<div style="margin-bottom:15px;">⏳ Loading Video...</div><div style="font-size:14px;opacity:0.7;" id="seiProgress">Preparing...</div>';
+        document.body.appendChild(loadingDiv);
+
+        // Pause video while loading
+        video.pause();
+
+        try {
+            // Convert streaming URL to SEI endpoint (no range requests)
+            const seiUrl = videoUrl.replace('/stream/', '/sei/');
+            console.log('Fetching SEI data from:', seiUrl);
+
+            const progressDiv = document.getElementById('seiProgress');
+            progressDiv.textContent = 'Downloading video file...';
+
+            const response = await fetch(seiUrl, {
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'video/mp4'
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const contentLength = response.headers.get('content-length');
+            const total = parseInt(contentLength, 10);
+            let loaded = 0;
+
+            const reader = response.body.getReader();
+            const chunks = [];
+
+            while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+
+                chunks.push(value);
+                loaded += value.length;
+
+                if (total) {
+                    const percent = Math.round((loaded / total) * 100);
+                    const mb = (loaded / 1024 / 1024).toFixed(1);
+                    const totalMb = (total / 1024 / 1024).toFixed(1);
+                    progressDiv.textContent = `Downloaded ${mb} MB / ${totalMb} MB (${percent}%)`;
+                }
+            }
+
+            progressDiv.textContent = 'Parsing video data...';
+
+            // Combine chunks into single buffer
+            const buffer = new Uint8Array(loaded);
+            let position = 0;
+            for (const chunk of chunks) {
+                buffer.set(chunk, position);
+                position += chunk.length;
+            }
+
+            const mp4 = new DashcamMP4(buffer.buffer);
+            const frames = mp4.parseFrames(seiType);
+
+            // Build frame lookup with timing
+            const config = mp4.getConfig();
+            let time = 0;
+            seiFrames = frames.map(frame => {
+                const result = { time: time / 1000, sei: frame.sei };
+                time += config.durations[frame.index] || 33;
+                return result;
+            });
+
+            console.log(`Loaded ${seiFrames.filter(f => f.sei).length} SEI frames from ${seiFrames.length} total frames`);
+
+            // Create Blob URL from downloaded buffer and use it as video source
+            // This avoids downloading the same file twice (once for SEI, once for playback)
+            const blob = new Blob([buffer], { type: 'video/mp4' });
+            const blobUrl = URL.createObjectURL(blob);
+
+            // Save current time before switching source
+            const savedTime = video.currentTime;
+
+            // Switch video to use the Blob URL
+            video.src = blobUrl;
+            video.load();
+
+            // Restore playback position and start playing
+            video.addEventListener('loadedmetadata', function onLoaded() {
+                video.currentTime = savedTime;
+                video.play().catch(err => console.log('Autoplay prevented:', err));
+                video.removeEventListener('loadedmetadata', onLoaded);
+            }, { once: true });
+
+            // Remove loading indicator
+            loadingDiv.remove();
+            seiLoading = false;
+        } catch (err) {
+            console.error('Failed to download video:', err);
+            seiFrames = [];
+            seiLoading = false;
+
+            // Show error and remove loading indicator
+            const loadingDiv = document.getElementById('seiLoading');
+            if (loadingDiv) {
+                loadingDiv.innerHTML = '<div style="color:#ff5555;">❌ Video download failed</div><div style="font-size:14px;margin-top:10px;">' + err.message + '</div><div style="margin-top:15px;font-size:14px;opacity:0.7;">Please check your connection and try again</div>';
+                setTimeout(() => loadingDiv.remove(), 3000);
+            }
+
+            // Don't try to play if download failed
+        }
+    }
+
+    // Update HUD with SEI data
+    function updateHUD(currentTime) {
+        const frame = seiFrames.find((f, i) => {
+            const next = seiFrames[i + 1];
+            return f.time <= currentTime && (!next || next.time > currentTime);
+        });
+
+        if (!frame || !frame.sei) {
+            document.getElementById('hudSpeed').textContent = '0';
+            document.getElementById('hudGear').textContent = 'P';
+            document.getElementById('hudSteering').style.setProperty('--wheel-rotation', '0deg');
+            document.getElementById('brakePedal').style.setProperty('--pedal-fill', '0%');
+            document.getElementById('throttlePedal').style.setProperty('--pedal-fill', '0%');
+            document.getElementById('autopilotIndicator').classList.remove('active');
+            return;
+        }
+
+        const sei = frame.sei;
+
+        // Speed (convert m/s to mph)
+        if (sei.vehicleSpeedMps !== undefined) {
+            const mph = Math.round(sei.vehicleSpeedMps * 2.23694);
+            document.getElementById('hudSpeed').textContent = mph;
+        } else {
+            document.getElementById('hudSpeed').textContent = '0';
+        }
+
+        // Gear state (use protobuf enum)
+        if (sei.gearState !== undefined && enumFields?.gearState) {
+            const gearName = DashcamHelpers.formatValue(sei.gearState, enumFields.gearState);
+            // Extract just the letter (GEAR_PARK -> P, GEAR_DRIVE -> D, etc.)
+            const gearLetter = gearName.replace('GEAR_', '').charAt(0);
+            document.getElementById('hudGear').textContent = gearLetter;
+        }
+
+        // Steering wheel angle
+        if (sei.steeringWheelAngle !== undefined) {
+            document.getElementById('hudSteering').style.setProperty('--wheel-rotation', `${sei.steeringWheelAngle}deg`);
+        }
+
+        // Blinkers (always visible, highlight when active)
+        const leftBlinker = document.getElementById('blinkerLeft');
+        const rightBlinker = document.getElementById('blinkerRight');
+        leftBlinker.classList.toggle('active', sei.blinkerOnLeft === true);
+        rightBlinker.classList.toggle('active', sei.blinkerOnRight === true);
+
+        // Brake pedal (binary: 0% or 100%)
+        if (sei.brakeApplied !== undefined) {
+            const brakePercent = sei.brakeApplied ? '100%' : '0%';
+            document.getElementById('brakePedal').style.setProperty('--pedal-fill', brakePercent);
+        }
+
+        // Throttle pedal (0-100%)
+        if (sei.acceleratorPedalPosition !== undefined) {
+            let throttle = sei.acceleratorPedalPosition;
+            // Convert to percentage if needed (value may be 0-1 or 0-100)
+            if (throttle <= 1.2) {
+                throttle *= 100;
+            }
+            const throttlePercent = Math.min(100, Math.max(0, throttle));
+            document.getElementById('throttlePedal').style.setProperty('--pedal-fill', `${throttlePercent}%`);
+        }
+
+        // Autopilot state (use protobuf enum)
+        const apIndicator = document.getElementById('autopilotIndicator');
+        if (sei.autopilotState !== undefined && enumFields?.autopilotState) {
+            const apName = DashcamHelpers.formatValue(sei.autopilotState, enumFields.autopilotState);
+            // Active if not NONE (SELF_DRIVING, AUTOSTEER, or TACC)
+            apIndicator.classList.toggle('active', apName !== 'NONE');
+        }
+    }
+
+    // Update HUD during playback
+    video.addEventListener('timeupdate', () => {
+        currentTime = video.currentTime;
+        updateHUD(currentTime);
+    });
+
+    // Initialize on page load
+    initSEI().then(() => {
+        console.log('SEI system initialized');
+    });
+
+    // Load SEI data when video loads
+    video.addEventListener('loadedmetadata', () => {
+        loadSEIData(video.src);
+    });
+
+    // Handle race condition: if video already has metadata, load SEI now
+    if (video.readyState >= 1) {
+        loadSEIData(video.src);
+    }
+
+    function switchCamera(videoUrl, element) {
+        if (!videoUrl || element.classList.contains('unavailable')) {
+            return;
+        }
+
+        // Remove any stuck loading indicators from previous switches
+        const existingLoader = document.getElementById('seiLoading');
+        if (existingLoader) {
+            existingLoader.remove();
+        }
+
+        // Stop video playback when switching cameras
+        video.pause();
+        wasPlaying = false;
+        currentTime = video.currentTime;
+
+        // Update active state
+        document.querySelectorAll('.camera-option').forEach(opt => {
+            opt.classList.remove('active');
+        });
+        element.classList.add('active');
+
+        // Reset SEI loading state to allow new SEI data to load
+        seiLoading = false;
+        currentVideoSrc = null;
+
+        // Switch video source (videoUrl is now the full URL)
+        video.src = videoUrl;
+        video.load();
+
+        // Trigger SEI loading for new video
+        loadSEIData(videoUrl);
+
+        // Restore playback position and state
+        video.addEventListener('loadedmetadata', function onLoaded() {
+            video.currentTime = currentTime;
+            if (wasPlaying) {
+                video.play().catch(err => console.log('Playback prevented:', err));
+            }
+            video.removeEventListener('loadedmetadata', onLoaded);
+        });
+    }
+
+    let downloadInProgress = false;
+
+    function downloadEvent() {
+        // Prevent multiple simultaneous downloads
+        if (downloadInProgress) {
+            return;
+        }
+        downloadInProgress = true;
+
+        const button = document.getElementById('downloadButton');
+        const icon = document.getElementById('downloadIcon');
+        const label = document.getElementById('downloadLabel');
+
+        // Disable button
+        button.style.pointerEvents = 'none';
+        button.style.opacity = '0.5';
+
+        // Show preparing state
+        icon.className = 'bi bi-hourglass-split camera-icon';
+        label.textContent = 'Preparing...';
+
+        // Build download URL
+        const downloadUrl = "{{ url_for('videos.download_event', folder=folder, event_name=event.name) }}";
+
+        // Trigger download with anchor tag
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = '{{ event.name }}.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        // Show downloading state after 1 second
+        setTimeout(() => {
+            icon.className = 'bi bi-cloud-download camera-icon';
+            label.textContent = 'Downloading...';
+        }, 1000);
+
+        // Reset to ready state after 8 seconds
+        setTimeout(() => {
+            icon.className = 'bi bi-download camera-icon';
+            label.textContent = 'Download All';
+            button.style.pointerEvents = '';
+            button.style.opacity = '';
+            downloadInProgress = false;
+        }, 8000);
+    }
+
+    // Keyboard controls
+    document.addEventListener('keydown', (e) => {
+        switch(e.key) {
+            case ' ':
+                e.preventDefault();
+                video.paused ? video.play() : video.pause();
+                break;
+            case 'ArrowLeft':
+                e.preventDefault();
+                video.currentTime = Math.max(0, video.currentTime - 5);
+                break;
+            case 'ArrowRight':
+                e.preventDefault();
+                video.currentTime = Math.min(video.duration, video.currentTime + 5);
+                break;
+            case 'f':
+                e.preventDefault();
+                if (video.requestFullscreen) {
+                    video.requestFullscreen();
+                } else if (video.webkitRequestFullscreen) {
+                    video.webkitRequestFullscreen();
+                }
+                break;
+        }
+    });
+
+    // Prevent default navbar from showing (since we're fullscreen)
+    document.addEventListener('DOMContentLoaded', () => {
+        const navbar = document.querySelector('nav');
+        if (navbar) {
+            navbar.style.display = 'none';
+        }
+    });
+</script>
+{% endblock %}
+

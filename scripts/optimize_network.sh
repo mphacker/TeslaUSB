@@ -47,5 +47,4 @@ echo ""
 echo "Network optimization complete!"
 echo "Recommendations:"
 echo "  - Move Pi closer to WiFi router if signal is weak (< -65 dBm)"
-echo "  - Use 5GHz WiFi if available (less interference, higher speed)"
-echo "  - Consider wired Ethernet for best performance"
+

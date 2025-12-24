@@ -1149,52 +1149,37 @@ else
 fi
 
 # Configure hardware watchdog
+# ALWAYS overwrite with known-good config to prevent boot loops from aggressive settings
 WATCHDOG_CONF="/etc/watchdog.conf"
-# Check if watchdog-device is uncommented and configured (not just present as a comment)
-if [ ! -f "$WATCHDOG_CONF" ] || ! grep -q "^watchdog-device[[:space:]]*=" "$WATCHDOG_CONF" 2>/dev/null; then
-  echo "Configuring hardware watchdog..."
-  cat > "$WATCHDOG_CONF" <<'EOF'
+echo "Configuring hardware watchdog..."
+if [ -f "$WATCHDOG_CONF" ]; then
+  cp "$WATCHDOG_CONF" "${WATCHDOG_CONF}.bak.$(date +%s)"
+  echo "  Backed up existing config"
+fi
+cat > "$WATCHDOG_CONF" <<'EOF'
 # TeslaUSB Hardware Watchdog Configuration
-# Tuned for Raspberry Pi Zero 2W (512MB RAM, 4 cores)
+# Simple, reliable config for Raspberry Pi Zero 2W
+#
+# WARNING: Do not add aggressive settings like min-memory or repair-binary
+# as they can cause boot loops on low-memory devices like Pi Zero 2W.
+# See TeslaUSB readme.md for details.
 
 # Watchdog device
 watchdog-device = /dev/watchdog
 
-# Watchdog timeout (hardware reset after 15 seconds of no response)
-watchdog-timeout = 15
-
-# Test /dev/watchdog every 10 seconds
-interval = 10
+# Watchdog timeout (hardware reset after 60 seconds of no response)
+# Note: 60s needed for large disk images (400GB+) which take longer to configure
+watchdog-timeout = 60
 
 # Reboot if 1-minute load average exceeds 24 (6x the 4 cores)
 max-load-1 = 24
 
-# Reboot if free memory drops below 50MB (about 10% of 512MB)
-min-memory = 50000
-
 # Realtime priority for watchdog daemon
 realtime = yes
 priority = 1
-
-# Log to syslog
-log-dir = /var/log/watchdog
-
-# Repair binary (try to fix issues before forcing reboot)
-repair-binary = /usr/lib/watchdog/repair
-repair-timeout = 60
-
-# Test network connectivity (optional - can be enabled if desired)
-# ping = 8.8.8.8
-# ping-count = 3
-
-# Verbose logging
-verbose = yes
 EOF
-  chmod 644 "$WATCHDOG_CONF"
-  echo "  Created $WATCHDOG_CONF"
-else
-  echo "Watchdog configuration already exists at $WATCHDOG_CONF"
-fi
+chmod 644 "$WATCHDOG_CONF"
+echo "  Applied TeslaUSB watchdog configuration"
 
 # Enable and start watchdog service
 echo "Enabling watchdog service..."

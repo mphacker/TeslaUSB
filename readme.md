@@ -369,6 +369,38 @@ sudo systemctl restart gadget_web.service
 sudo systemctl disable present_usb_on_boot.service
 ```
 
+### Hardware Watchdog Configuration
+
+The hardware watchdog automatically reboots the Pi if the system becomes unresponsive. The default configuration is intentionally simple and reliable:
+
+```
+watchdog-device = /dev/watchdog
+watchdog-timeout = 60
+max-load-1 = 24
+realtime = yes
+priority = 1
+```
+
+**⚠️ Warning: Aggressive watchdog settings can cause boot loops!**
+
+The following options should be **avoided** on Raspberry Pi Zero 2 W (512MB RAM):
+
+| Setting | Problem |
+|---------|---------|
+| `min-memory = 50000` | Pi Zero 2 W often has <50MB free during normal operation, triggering unnecessary reboots |
+| `repair-binary = /usr/lib/watchdog/repair` | This file doesn't exist on Raspberry Pi OS |
+| `interval` (low values) | Can cause timing issues with the kernel watchdog |
+
+**If your device keeps rebooting in a loop**, the watchdog configuration may be too aggressive. To fix:
+
+1. Pull the SD card and mount it on another computer
+2. Edit `cmdline.txt` on the boot partition and add: `systemd.mask=watchdog.service`
+3. Boot the Pi and SSH in
+4. Fix `/etc/watchdog.conf` to use the simple configuration above
+5. Remove the mask from `cmdline.txt` and reboot
+
+**Watchdog timeout**: Set to 60 seconds to accommodate large disk images (400GB+) which take longer to configure at boot. Smaller images work fine with 15 seconds, but 60 seconds is safe for all configurations.
+
 ## Troubleshooting
 
 ### Common Issues

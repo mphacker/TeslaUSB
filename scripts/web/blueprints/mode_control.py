@@ -10,7 +10,7 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash
 from config import GADGET_DIR
 from services.mode_service import mode_display
 from services.ap_service import ap_status, ap_force, get_ap_config, update_ap_config
-from services.wifi_service import get_current_wifi_connection, update_wifi_credentials
+from services.wifi_service import get_current_wifi_connection, update_wifi_credentials, get_available_networks, get_wifi_status, clear_wifi_status
 
 mode_control_bp = Blueprint('mode_control', __name__)
 
@@ -43,6 +43,9 @@ def index():
     wifi_status = get_current_wifi_connection()
     timings['wifi_status'] = time.time() - t0
 
+    # Get any pending WiFi change status (for displaying alerts)
+    wifi_change_status = get_wifi_status()
+
     total_time = time.time() - start_time
     timings['total'] = total_time
 
@@ -63,10 +66,10 @@ def index():
         ap_status=ap,
         ap_config=ap_config,
         wifi_status=wifi_status,
+        wifi_change_status=wifi_change_status,
         auto_refresh=False,
         hostname=socket.gethostname(),
     )
-
 
 @mode_control_bp.route("/present_usb", methods=["POST"])
 def present_usb():
@@ -239,3 +242,26 @@ def configure_wifi():
     return redirect(url_for("mode_control.index"))
 
 
+@mode_control_bp.route("/wifi/scan", methods=["GET"])
+def scan_wifi_networks():
+    """Scan for available WiFi networks and return as JSON."""
+    try:
+        networks = get_available_networks()
+        return {
+            "success": True,
+            "networks": networks,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Error scanning WiFi networks: {exc}")
+        return {
+            "success": False,
+            "error": str(exc),
+            "networks": [],
+        }
+
+
+@mode_control_bp.route("/wifi/dismiss-status", methods=["POST"])
+def dismiss_wifi_status():
+    """Dismiss the WiFi change status alert."""
+    clear_wifi_status()
+    return {"success": True}

@@ -88,6 +88,43 @@
 
     <div class="info-box" style="margin-top: 20px;">
         <strong>WiFi Client Configuration:</strong><br>
+        
+        {% if wifi_change_status %}
+        <div id="wifiStatusAlert" style="margin: 10px 0; padding: 12px; border-radius: 6px; position: relative;
+            {% if wifi_change_status.success %}
+                background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724;
+            {% elif wifi_change_status.action == 'reverted' %}
+                background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404;
+            {% elif wifi_change_status.action == 'ap_started' %}
+                background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24;
+            {% else %}
+                background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24;
+            {% endif %}">
+            <button type="button" onclick="dismissWifiStatus()" 
+                    style="position: absolute; top: 8px; right: 8px; background: none; border: none; font-size: 18px; cursor: pointer; opacity: 0.7;"
+                    title="Dismiss">✕</button>
+            <div style="padding-right: 30px;">
+                <strong>
+                    {% if wifi_change_status.success %}
+                        ✓ WiFi Connection Updated
+                    {% elif wifi_change_status.action == 'reverted' %}
+                        ⚠️ WiFi Connection Reverted
+                    {% elif wifi_change_status.action == 'ap_started' %}
+                        🔴 WiFi Connection Failed - AP Started
+                    {% else %}
+                        ❌ WiFi Connection Failed
+                    {% endif %}
+                </strong>
+                <div style="margin-top: 4px; font-size: 0.95em;">{{ wifi_change_status.message }}</div>
+                <div style="margin-top: 6px; font-size: 0.85em; opacity: 0.8;">
+                    {% if wifi_change_status.timestamp %}
+                        📅 {{ wifi_change_status.timestamp }}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        
         <div style="margin-bottom: 8px;">
             {% if wifi_status.connected %}
                 <span style="color: var(--success-color);">✓ Connected to: <code>{{ wifi_status.current_ssid }}</code></span>
@@ -103,13 +140,23 @@
             <strong style="color: var(--text-primary);">Update WiFi Credentials:</strong>
             <form method="post" action="{{ url_for('mode_control.configure_wifi') }}" id="wifiConfigForm" style="margin-top: 8px;">
                 <div style="margin-bottom: 8px;">
-                    <label for="wifi_ssid" style="display: inline-block; width: 120px; color: var(--text-primary);">Network Name:</label>
+                    <label for="wifi_ssid_select" style="display: inline-block; width: 120px; color: var(--text-primary);">Network Name:</label>
+                    <div style="display: inline-flex; align-items: center; gap: 4px;">
+                        <select id="wifi_ssid_select" 
+                                style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                            <option value="">-- Select Network --</option>
+                            <option value="__hidden__">Enter hidden SSID...</option>
+                        </select>
+                        <button type="button" id="scanWifiBtn" onclick="scanWifiNetworks()" 
+                                style="padding: 4px 8px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer; white-space: nowrap;"
+                                title="Scan for available networks">🔄 Scan</button>
+                    </div>
                     <input type="text" id="wifi_ssid" name="wifi_ssid" maxlength="32" required
                            placeholder="Enter WiFi SSID"
-                           style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                    <span style="font-size: 0.85em; color: var(--text-secondary);">(1-32 chars)</span>
+                           style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px; margin-left: 124px; margin-top: 4px; display: none;">
+                    <span id="wifi_ssid_hint" style="font-size: 0.85em; color: var(--text-secondary); display: none;">(1-32 chars)</span>
                 </div>
-                <div style="margin-bottom: 8px;">
+                <div id="wifi_password_row" style="margin-bottom: 8px;">
                     <label for="wifi_password" style="display: inline-block; width: 120px; color: var(--text-primary);">Password:</label>
                     <input type="password" id="wifi_password" name="wifi_password" minlength="8" maxlength="63"
                            placeholder="Enter WiFi password"
@@ -313,10 +360,164 @@ wifiConfigForm.addEventListener('submit', function(e) {
         e.preventDefault();
         return false;
     }
+    // Validate SSID is selected or entered
+    const ssidInput = document.getElementById('wifi_ssid');
+    if (!ssidInput.value.trim()) {
+        e.preventDefault();
+        alert('Please select a network or enter a hidden SSID');
+        return false;
+    }
     updateWifiBtn.disabled = true;
     updateWifiBtn.style.opacity = '0.5';
     updateWifiBtn.style.cursor = 'not-allowed';
     updateWifiBtn.textContent = 'Connecting...';
 });
+
+// WiFi network scanning functionality
+const wifiSsidSelect = document.getElementById('wifi_ssid_select');
+const wifiSsidInput = document.getElementById('wifi_ssid');
+const wifiSsidHint = document.getElementById('wifi_ssid_hint');
+const wifiPasswordRow = document.getElementById('wifi_password_row');
+const wifiPasswordInput = document.getElementById('wifi_password');
+const scanWifiBtn = document.getElementById('scanWifiBtn');
+
+// Show/hide password field based on network security
+function updatePasswordVisibility(secured) {
+    if (secured) {
+        wifiPasswordRow.style.display = 'block';
+        wifiPasswordInput.required = true;
+    } else {
+        wifiPasswordRow.style.display = 'none';
+        wifiPasswordInput.required = false;
+        wifiPasswordInput.value = '';  // Clear password for open networks
+    }
+}
+
+// Handle dropdown selection
+wifiSsidSelect.addEventListener('change', function() {
+    const value = this.value;
+    const selectedOption = this.options[this.selectedIndex];
+    const isSecured = selectedOption.dataset.secured !== 'false';  // Default to secured for hidden networks
+    
+    if (value === '__hidden__') {
+        // Show text input for hidden SSID - assume secured (user can leave password blank if open)
+        wifiSsidInput.style.display = 'block';
+        wifiSsidHint.style.display = 'inline';
+        wifiSsidInput.value = '';
+        wifiSsidInput.focus();
+        wifiSsidInput.required = true;
+        updatePasswordVisibility(true);  // Show password for hidden networks (user can leave blank if open)
+    } else if (value) {
+        // Network selected from dropdown
+        wifiSsidInput.style.display = 'none';
+        wifiSsidHint.style.display = 'none';
+        wifiSsidInput.value = value;
+        wifiSsidInput.required = true;
+        updatePasswordVisibility(isSecured);  // Show/hide password based on network security
+    } else {
+        // Nothing selected
+        wifiSsidInput.style.display = 'none';
+        wifiSsidHint.style.display = 'none';
+        wifiSsidInput.value = '';
+        updatePasswordVisibility(true);  // Default: show password field
+    }
+});
+
+// Scan for WiFi networks
+function scanWifiNetworks() {
+    scanWifiBtn.disabled = true;
+    scanWifiBtn.innerHTML = '⏳ Scanning...';
+    scanWifiBtn.style.opacity = '0.7';
+    
+    fetch('{{ url_for("mode_control.scan_wifi_networks") }}')
+        .then(response => response.json())
+        .then(data => {
+            // Remember current selection
+            const currentValue = wifiSsidSelect.value;
+            const currentHiddenValue = (currentValue === '__hidden__') ? wifiSsidInput.value : '';
+            
+            // Clear existing options except the first two
+            while (wifiSsidSelect.options.length > 2) {
+                wifiSsidSelect.remove(2);
+            }
+            
+            if (data.success && data.networks && data.networks.length > 0) {
+                // Add separator
+                const separator = document.createElement('option');
+                separator.disabled = true;
+                separator.textContent = '─── Available Networks ───';
+                wifiSsidSelect.appendChild(separator);
+                
+                // Add networks sorted by signal strength
+                data.networks.forEach(network => {
+                    const option = document.createElement('option');
+                    option.value = network.ssid;
+                    option.dataset.secured = network.secured ? 'true' : 'false';
+                    const signalIcon = getSignalIcon(network.signal);
+                    const lockIcon = network.secured ? '🔒' : '';
+                    const signalPct = network.signal ? ` (${network.signal}%)` : '';
+                    option.textContent = `${signalIcon} ${network.ssid}${signalPct} ${lockIcon}`;
+                    wifiSsidSelect.appendChild(option);
+                });
+                
+                // Restore selection if it still exists
+                if (currentValue === '__hidden__') {
+                    wifiSsidSelect.value = '__hidden__';
+                    wifiSsidInput.value = currentHiddenValue;
+                } else if (currentValue) {
+                    // Check if previously selected network is still in list
+                    const exists = Array.from(wifiSsidSelect.options).some(opt => opt.value === currentValue);
+                    if (exists) {
+                        wifiSsidSelect.value = currentValue;
+                    }
+                }
+            } else {
+                // No networks found or error
+                const noNetworks = document.createElement('option');
+                noNetworks.disabled = true;
+                noNetworks.textContent = '─── No networks found ───';
+                wifiSsidSelect.appendChild(noNetworks);
+            }
+        })
+        .catch(error => {
+            console.error('Error scanning networks:', error);
+        })
+        .finally(() => {
+            scanWifiBtn.disabled = false;
+            scanWifiBtn.innerHTML = '🔄 Scan';
+            scanWifiBtn.style.opacity = '1';
+        });
+}
+
+// Get signal strength indicator (using bars representation)
+function getSignalIcon(signal) {
+    const signalNum = parseInt(signal) || 0;
+    if (signalNum >= 75) return '▂▄▆█';     // Excellent
+    if (signalNum >= 50) return '▂▄▆_';     // Good
+    if (signalNum >= 25) return '▂▄__';     // Fair  
+    return '▂___';                           // Weak
+}
+
+// Dismiss WiFi status alert
+function dismissWifiStatus() {
+    const alert = document.getElementById('wifiStatusAlert');
+    if (alert) {
+        alert.style.display = 'none';
+    }
+    // Also clear it on the server so it doesn't show again
+    fetch('{{ url_for("mode_control.dismiss_wifi_status") }}', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    }).catch(error => {
+        console.error('Error dismissing WiFi status:', error);
+    });
+}
+
+// Auto-scan networks on page load (delayed to not slow down initial render)
+setTimeout(function() {
+    scanWifiNetworks();
+}, 500);
 </script>
 {% endblock %}

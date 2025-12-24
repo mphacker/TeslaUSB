@@ -528,76 +528,89 @@ def get_session_thumbnail(folder, session_name):
         return "Failed to generate thumbnail", 500
 
 
-@videos_bp.route("/delete/<folder>/<filename>", methods=["POST"])
-def delete_video(folder, filename):
-    """Delete a single video file."""
+@videos_bp.route("/delete_event/<folder>/<event_name>", methods=["POST"])
+def delete_event(folder, event_name):
+    """Delete all videos for an event/session.
+
+    For SavedClips/SentryClips (event structure): Deletes the entire event folder.
+    For RecentClips (flat structure): Deletes all camera views for the session.
+    """
     # Only allow deletion in edit mode
     if current_mode() != "edit":
-        flash("Videos can only be deleted in Edit Mode.", "error")
-        return redirect(url_for("videos.file_browser", folder=folder))
+        return jsonify({
+            'success': False,
+            'error': 'Videos can only be deleted in Edit Mode.'
+        }), 403
 
     teslacam_path = get_teslacam_path()
     if not teslacam_path:
-        flash("TeslaCam not accessible.", "error")
-        return redirect(url_for("videos.file_browser"))
+        return jsonify({
+            'success': False,
+            'error': 'TeslaCam not accessible.'
+        }), 404
 
     # Sanitize inputs
     folder = os.path.basename(folder)
-    filename = os.path.basename(filename)
-
-    video_path = os.path.join(teslacam_path, folder, filename)
-
-    if not os.path.isfile(video_path):
-        flash("Video not found.", "error")
-        return redirect(url_for("videos.file_browser", folder=folder))
-
-    try:
-        # Delete the video file
-        os.remove(video_path)
-        flash(f"Successfully deleted {filename}", "success")
-    except OSError as e:
-        flash(f"Error deleting {filename}: {str(e)}", "error")
-
-    return redirect(url_for("videos.file_browser", folder=folder))
-
-
-@videos_bp.route("/delete_all/<folder>", methods=["POST"])
-def delete_all_videos(folder):
-    """Delete all videos in a folder."""
-    # Only allow deletion in edit mode
-    if current_mode() != "edit":
-        flash("Videos can only be deleted in Edit Mode.", "error")
-        return redirect(url_for("videos.file_browser", folder=folder))
-
-    teslacam_path = get_teslacam_path()
-    if not teslacam_path:
-        flash("TeslaCam not accessible.", "error")
-        return redirect(url_for("videos.file_browser"))
-
-    # Sanitize input
-    folder = os.path.basename(folder)
+    event_name = os.path.basename(event_name)
     folder_path = os.path.join(teslacam_path, folder)
 
     if not os.path.isdir(folder_path):
-        flash("Folder not found.", "error")
-        return redirect(url_for("videos.file_browser"))
+        return jsonify({
+            'success': False,
+            'error': f'Folder not found: {folder}'
+        }), 404
 
-    # Get all videos in the folder
-    videos = get_video_files(folder_path)
+    # Determine folder structure
+    folders = get_teslacam_folders()
+    folder_info = next((f for f in folders if f['name'] == folder), None)
+    folder_structure = folder_info['structure'] if folder_info else 'events'
+
     deleted_count = 0
     error_count = 0
+    deleted_files = []
 
-    for video in videos:
-        try:
-            # Delete the video file
-            os.remove(video['path'])
-            deleted_count += 1
-        except OSError:
-            error_count += 1
+    try:
+        if folder_structure == 'flat':
+            # RecentClips: Delete all videos matching the session timestamp
+            session_videos = get_session_videos(folder_path, event_name)
+            for video in session_videos:
+                try:
+                    os.remove(video['path'])
+                    deleted_count += 1
+                    deleted_files.append(video['name'])
+                except OSError as e:
+                    logger.error(f"Failed to delete {video['path']}: {e}")
+                    error_count += 1
+        else:
+            # SavedClips/SentryClips: Delete the entire event folder
+            import shutil
+            event_path = os.path.join(folder_path, event_name)
 
-    if deleted_count > 0:
-        flash(f"Successfully deleted {deleted_count} video(s) from {folder}", "success")
-    if error_count > 0:
-        flash(f"Failed to delete {error_count} video(s)", "error")
+            if not os.path.isdir(event_path):
+                return jsonify({
+                    'success': False,
+                    'error': f'Event not found: {event_name}'
+                }), 404
 
-    return redirect(url_for("videos.file_browser", folder=folder))
+            # Count files before deletion
+            for entry in os.scandir(event_path):
+                if entry.is_file():
+                    deleted_count += 1
+                    deleted_files.append(entry.name)
+
+            # Delete the entire folder
+            shutil.rmtree(event_path)
+
+    except Exception as e:
+        logger.error(f"Error deleting event {event_name}: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+    return jsonify({
+        'success': True,
+        'deleted_count': deleted_count,
+        'deleted_files': deleted_files,
+        'error_count': error_count
+    })

@@ -72,11 +72,11 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 
 ## Offline Access Point
 - Three force modes: `auto` (default, AP starts when WiFi fails), `force_on` (AP always on), `force_off` (AP blocked, never starts).
-- Force mode persists across reboots via `OFFLINE_AP_FORCE_MODE` in `config.sh`.
-- Runtime force mode stored in `/run/teslausb-ap/force.mode`; on boot, `wifi-monitor.sh` initializes runtime file from config.
-- Web UI "Start AP Now" sets `force_on` (persistent); "Stop AP" sets `force-auto` (persistent, returns to auto behavior).
+- Force mode configured in `config.yaml` under `offline_ap.force_mode`.
+- Runtime force mode stored in `/run/teslausb-ap/force.mode`; on boot, `wifi-monitor.sh` initializes runtime file from config.yaml.
+- Web UI "Start AP Now" sets `force_on`; "Stop AP" sets `auto` (returns to auto behavior).
+- **Note**: Runtime changes to force mode only persist until reboot. To make permanent changes, edit `config.yaml`.
 - AP runs concurrently with WiFi client on virtual interface `uap0`; WiFi client stays active on `wlan0`.
-- `ap_control.sh set_force_mode()` writes both runtime file and persists to config.sh using `sed`.
 
 ## WiFi Roaming
 - **Mesh/Extender support**: Configured to automatically switch between access points with the same SSID for optimal signal strength.

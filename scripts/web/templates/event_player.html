@@ -428,6 +428,31 @@
         color: rgba(52, 199, 89, 1);
     }
 
+    /* Delete Event Button */
+    .delete-option {
+        border-color: rgba(255, 59, 48, 0.6);
+        background: rgba(80, 20, 20, 0.8);
+    }
+
+    .delete-option:hover:not(.disabled) {
+        border-color: rgba(255, 59, 48, 1);
+        background: rgba(100, 30, 30, 0.9);
+        transform: translateY(-4px);
+    }
+
+    .delete-option .camera-icon {
+        color: rgba(255, 59, 48, 1);
+    }
+
+    .delete-option.disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    .delete-option.disabled:hover {
+        transform: none;
+    }
+
     /* SEI Overlay Toggle */
     .sei-toggle-container {
         display: flex;
@@ -892,6 +917,19 @@
             <i class="bi bi-download camera-icon" id="downloadIcon"></i>
             <div class="camera-label" id="downloadLabel">Download All</div>
         </div>
+
+        <!-- Delete Event Button -->
+        {% if mode_token == 'edit' %}
+        <div class="camera-option delete-option" id="deleteButton" onclick="deleteEvent()">
+            <i class="bi bi-trash camera-icon" id="deleteIcon"></i>
+            <div class="camera-label" id="deleteLabel">Delete</div>
+        </div>
+        {% else %}
+        <div class="camera-option delete-option disabled" id="deleteButton" title="Switch to Edit Mode to delete videos">
+            <i class="bi bi-trash camera-icon" id="deleteIcon"></i>
+            <div class="camera-label" id="deleteLabel">Delete</div>
+        </div>
+        {% endif %}
     </div>
 </div>
 
@@ -1700,6 +1738,71 @@
             button.style.opacity = '';
             downloadInProgress = false;
         }, 8000);
+    }
+
+    // Delete event function
+    function deleteEvent() {
+        const button = document.getElementById('deleteButton');
+
+        // Check if disabled (not in edit mode)
+        if (button.classList.contains('disabled')) {
+            alert('Switch to Edit Mode to delete videos');
+            return;
+        }
+
+        // Confirm deletion
+        const confirmMsg = folderStructure === 'flat'
+            ? `Delete all camera views for session "${eventName}"?`
+            : `Delete entire event folder "${eventName}" and all its contents?`;
+
+        if (!confirm(confirmMsg + '\n\nThis cannot be undone.')) {
+            return;
+        }
+
+        const icon = document.getElementById('deleteIcon');
+        const label = document.getElementById('deleteLabel');
+
+        // Disable button and show deleting state
+        button.style.pointerEvents = 'none';
+        button.style.opacity = '0.5';
+        icon.className = 'bi bi-hourglass-split camera-icon';
+        label.textContent = 'Deleting...';
+
+        // Make delete request
+        fetch(`/videos/delete_event/${encodeURIComponent(folder)}/${encodeURIComponent(eventName)}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                icon.className = 'bi bi-check-circle camera-icon';
+                label.textContent = 'Deleted!';
+
+                // Redirect back to video list after a brief delay
+                setTimeout(() => {
+                    window.location.href = `/videos/?folder=${encodeURIComponent(folder)}`;
+                }, 1000);
+            } else {
+                throw new Error(data.error || 'Delete failed');
+            }
+        })
+        .catch(error => {
+            console.error('Delete error:', error);
+            icon.className = 'bi bi-exclamation-triangle camera-icon';
+            label.textContent = 'Error';
+            alert('Failed to delete: ' + error.message);
+
+            // Reset button after error
+            setTimeout(() => {
+                icon.className = 'bi bi-trash camera-icon';
+                label.textContent = 'Delete';
+                button.style.pointerEvents = '';
+                button.style.opacity = '';
+            }, 2000);
+        });
     }
 
     // Keyboard controls

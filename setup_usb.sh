@@ -1135,9 +1135,8 @@ net.core.netdev_max_backlog = 5000
 # Enable TCP fast open
 net.ipv4.tcp_fastopen = 3
 
-# Disable IPv6 if not needed (reduces overhead)
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
+# Note: IPv6 is left ENABLED because mDNS (.local hostname resolution) requires it
+# Disabling IPv6 breaks cybertruckusb.local and similar hostnames
 EOF
   chmod 644 "$SYSCTL_CONF"
   echo "  Created $SYSCTL_CONF"
@@ -1281,6 +1280,25 @@ else
     swapon "$SWAP_FILE" 2>/dev/null || true
   fi
 fi
+
+# ===== Disable Raspberry Pi OS Swap Management (we manage our own swap) =====
+# These services expect /var/swap to be a FILE, but we use /var/swap/ as a DIRECTORY
+# containing fsck.swap. Mask them to prevent noisy errors in logs.
+echo "Disabling Raspberry Pi OS swap management services (we manage our own)..."
+RPI_SWAP_SERVICES=(
+  "rpi-resize-swap-file.service"
+  "rpi-setup-loop@var-swap.service"
+  "rpi-remove-swap-file@var-swap.service"
+  "systemd-zram-setup@zram0.service"
+  "dev-zram0.swap"
+)
+for service in "${RPI_SWAP_SERVICES[@]}"; do
+  if systemctl list-unit-files "$service" &>/dev/null; then
+    systemctl stop "$service" 2>/dev/null || true
+    systemctl mask "$service" 2>/dev/null || true
+  fi
+done
+echo "  ✓ Raspberry Pi OS swap services disabled (using our own swap at $SWAP_FILE)"
 
 # ===== Disable Unnecessary Desktop Services (Save ~30MB RAM) =====
 echo

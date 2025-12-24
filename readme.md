@@ -17,8 +17,8 @@ Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings 
 
 TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB drives** to your Tesla:
 
-- **TeslaCam Drive**: Large exFAT partition for dashcam and sentry recordings
-- **LightShow Drive**: Smaller FAT32 partition for lock chimes and light shows with read-only optimization
+- **TeslaCam Drive**: Large exFAT drive for dashcam and sentry recordings
+- **LightShow Drive**: Smaller FAT32 drive for lock chimes and light shows with read-only optimization
 
 **Key Benefits:**
 - Remote access to dashcam footage without physically removing storage
@@ -49,13 +49,14 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 ### Video Management
 - Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips)
 - Auto-generated video thumbnails
-- In-browser playback with multi-camera session view (6 cameras synchronized)
+- In-browser multi-camera event player with 6 camera angles
 - **HUD Overlay Toggle**: Switch between two playback modes:
   - **Stream Mode** (default): Instant video playback with minimal bandwidth - perfect for quick video review
-  - **Overlay Mode**: Downloads full video to display real-time telemetry overlay with speed, gear selection (P/R/N/D), steering wheel angle, accelerator/brake pedal position, turn signals, and Autopilot status (Self-Driving, Autosteer, or TACC)
+  - **Overlay Mode**: Downloads full video to display real-time telemetry overlay with speed, gear selection (P/R/N/D), steering wheel angle, accelerator/brake pedal position, turn signals, and Autopilot status
   - Toggle preference is remembered across sessions
   - Bandwidth optimization: Partial downloads are cached and resumed when switching modes
-- Download or delete videos individually or in bulk
+- Download all camera views for an event as a zip file
+- Delete entire events (Edit mode only)
 - Storage analytics with folder-by-folder breakdown
 
 ### Lock Chime Management
@@ -124,7 +125,7 @@ The setup script will:
 - Install required packages (parted, dosfstools, python3-flask, python3-av, samba, hostapd, dnsmasq, ffmpeg)
 - Optimize memory for low-RAM systems (disable desktop services, enable swap)
 - Configure USB gadget kernel modules and hardware watchdog
-- Create dual disk images (427GB TeslaCam + 20GB LightShow)
+- Create dual disk images (TeslaCam + LightShow)
 - Set up Samba shares and web interface with on-demand thumbnail generation
 - Configure systemd services with auto-restart on failure
 - Create `/Chimes` library and migrate existing lock chimes
@@ -162,13 +163,13 @@ The TeslaUSB device only runs when the car is awake. When your Tesla enters slee
 
 **Present USB Mode** (default on boot):
 - Pi appears as USB drives to Tesla
-- Partitions mounted read-only locally at `/mnt/gadget/part1-ro`, `/mnt/gadget/part2-ro`
+- Drives mounted read-only locally at `/mnt/gadget/part1-ro`, `/mnt/gadget/part2-ro`
 - Web interface: View/play only (no editing)
 - Samba shares disabled
 
 **Edit USB Mode**:
 - USB gadget disconnected
-- Partitions mounted read-write at `/mnt/gadget/part1`, `/mnt/gadget/part2`
+- Drives mounted read-write at `/mnt/gadget/part1`, `/mnt/gadget/part2`
 - Web interface: Full file management (upload, delete, organize)
 - Samba shares active for network access
 
@@ -181,21 +182,21 @@ sudo /home/pi/TeslaUSB/edit_usb.sh     # Activate Edit mode
 ### Network Access
 
 **Samba Shares** (Edit mode only):
-- `\\<pi-ip-address>\gadget_part1` - TeslaCam partition
-- `\\<pi-ip-address>\gadget_part2` - LightShow partition
+- `\\<pi-ip-address>\gadget_part1` - TeslaCam drive
+- `\\<pi-ip-address>\gadget_part2` - LightShow drive
 - Default credentials: username = `pi`, password = `tesla`
 
 **Offline Access Point with Captive Portal**:
 When WiFi is unavailable, the Pi automatically creates a fallback access point:
-- SSID: `TeslaUSB` (configurable in `scripts/config.sh`)
+- SSID: `TeslaUSB` (configurable in `config.yaml`)
 - Password: `teslausb1234` (change this!)
 - IP: `192.168.4.1`
 - **Captive Portal**: Automatically opens web interface when you connect (no URL needed!)
 - Manual access: `http://192.168.4.1` or `http://teslausb` (port 80)
 - Control from web UI: Force start/stop AP or leave in auto mode
-  - **Start AP Now**: Forces AP on, persists across reboots (AP always on)
-  - **Stop AP**: Returns to auto mode, persists across reboots (AP only starts if WiFi fails)
-- Change credentials in `scripts/config.sh` before first use
+  - **Start AP Now**: Forces AP on until reboot or manually stopped
+  - **Stop AP**: Returns to auto mode (AP only starts if WiFi fails)
+- Change credentials in `config.yaml` before first use
 - **Note**: After clicking "Start AP Now" or "Stop AP" buttons, the status may not update immediately. Wait 10-20 seconds and refresh the page to see the current state.
 
 ### Web Features
@@ -207,10 +208,10 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 
 **Videos Tab**:
 - Browse all TeslaCam folders with auto-generated thumbnails
-- Play videos in browser or download to computer
-- Multi-camera session view (6 synchronized cameras)
-- Delete videos individually or in bulk (Edit mode only)
-- Low bandwidth mode for Pi Zero 2 W
+- Multi-camera event player with 6 camera angles
+- Download all camera views as zip file
+- Delete entire events (Edit mode only) - deletes all camera views for the session
+
 
 **Lock Chimes Tab**:
 - Upload WAV/MP3 files (auto-converted to Tesla format)
@@ -230,7 +231,7 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Delete complete light show sets
 
 **Analytics Tab**:
-- Partition usage gauge and folder breakdown
+- Drive usage gauge and folder breakdown
 - Video count and size statistics
 - Configure cleanup policies (age, size, count-based)
 - Preview and execute cleanup operations
@@ -381,8 +382,8 @@ sudo journalctl -u gadget_web.service -f
 
 **Videos not showing:**
 - Verify correct mode (Present or Edit, not Unknown)
-- Check TeslaCam folder exists on partition 1
-- Confirm partition is properly mounted
+- Check TeslaCam folder exists on drive 1
+- Confirm drive is properly mounted
 
 **Samba shares appear empty:**
 ```bash
@@ -455,7 +456,7 @@ All screenshots shown in dark mode.
 <img src="examples/settings.png" alt="Settings Panel" width="400">
 <img src="examples/analytics.png" alt="Storage Analytics Dashboard" width="400">
 <img src="examples/videos-browser.png" alt="Video Browser" width="400">
-<img src="examples/session-view.png" alt="Multi-Camera Session View" width="400">
+<img src="examples/session-view.png" alt="Multi-Camera Event Player" width="400">
 <img src="examples/lock-chimes.png" alt="Lock Chimes Management" width="400">
 <img src="examples/lock-chime-editor-waveform.png" alt="Lock Chime Audio Editor with Waveform" width="400">
 <img src="examples/light-shows.png" alt="Light Shows Management" width="400">

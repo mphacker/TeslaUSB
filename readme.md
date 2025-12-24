@@ -143,6 +143,19 @@ Connect the Pi to your Tesla's USB port:
 
 Tesla will detect two separate USB drives automatically.
 
+### Power & Sleep Behavior
+
+The TeslaUSB device only runs when the car is awake. When your Tesla enters sleep mode, USB ports are powered off and the Raspberry Pi shuts down.
+
+**To keep your vehicle awake for extended management sessions:**
+1. Turn on climate control
+2. Enable "Dog Mode" or "Camp Mode" from the climate screen
+3. Connect to the TeslaUSB web interface and manage your lock chimes, light shows, or videos
+4. When finished, disable Dog/Camp Mode and turn off climate control
+5. The vehicle will return to sleep, powering off the USB ports
+
+**Note:** For quick operations like viewing videos or changing a lock chime, the car typically stays awake long enough without needing Dog Mode. Use Dog/Camp Mode only for longer management sessions.
+
 ## Usage
 
 ### Operating Modes
@@ -242,7 +255,7 @@ Both bash scripts and the Python web application read from this YAML file, ensur
 installation:
   gadget_dir: /home/pi/TeslaUSB    # Installation directory
   target_user: pi                   # Linux user running services
-  mount_dir: /mnt/gadget           # Mount directory for USB partitions
+  mount_dir: /mnt/gadget           # Mount directory for USB drives
 
 # ============================================================================
 # Disk Images
@@ -250,16 +263,17 @@ installation:
 disk_images:
   cam_name: usb_cam.img            # TeslaCam disk image filename
   lightshow_name: usb_lightshow.img # LightShow disk image filename
-  cam_label: TeslaCam              # Filesystem label for TeslaCam
-  lightshow_label: Lightshow       # Filesystem label for LightShow
+  cam_label: TeslaCam              # Filesystem label for TeslaCam drive
+  lightshow_label: Lightshow       # Filesystem label for LightShow drive
+  boot_fsck_enabled: true          # Auto-repair filesystems on boot (recommended)
 
 # ============================================================================
 # Setup Configuration (used only by setup_usb.sh)
 # ============================================================================
 # Leave empty ("") for interactive prompts during setup
 setup:
-  part1_size: ""                   # TeslaCam size (e.g., "50G")
-  part2_size: ""                   # LightShow size (e.g., "10G")
+  part1_size: ""                   # TeslaCam drive size (e.g., "50G")
+  part2_size: ""                   # LightShow drive size (e.g., "10G")
   reserve_size: ""                 # Free space headroom (default: 5G)
 
 # ============================================================================
@@ -293,6 +307,9 @@ web:
 - `offline_ap.ssid` - Default is `TeslaUSB` (customize for your vehicle)
 - `offline_ap.passphrase` - Default is `teslausb1234` (change this!)
 - `web.secret_key` - Auto-generated on first run, but can be set manually
+
+**Optional settings:**
+- `disk_images.boot_fsck_enabled` - Auto-repair filesystems on boot (default: `true`, recommended)
 
 **After making changes:** Restart affected services
 ```bash

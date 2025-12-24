@@ -14,8 +14,9 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - After editing `config.yaml`, restart affected services: `gadget_web.service` (web/Python changes), `wifi-monitor.service` (AP changes).
 
 ## Architecture & Modes
-- Two disk images: `usb_cam.img` (part1 TeslaCam) and `usb_lightshow.img` (part2 LightShow/Chimes).
+- Two disk images: `usb_cam.img` (part1 TeslaCam drive) and `usb_lightshow.img` (part2 LightShow/Chimes drive).
 - Modes: **present** (USB gadget active, RO mounts at `/mnt/gadget/part*-ro`, Samba off) vs **edit** (gadget off, RW mounts at `/mnt/gadget/part*`, Samba on). `state.txt` holds the token; `mode_service.current_mode()` falls back to detection.
+- **Boot-time fsck**: When `disk_images.boot_fsck_enabled: true` (default), `present_usb.sh` runs `fsck -p` on both drives before presenting to Tesla (~1 second total). Auto-repairs minor filesystem issues.
 - Always resolve paths via `partition_service.get_mount_path/iter_all_partitions` instead of hardcoding.
 
 ## Template System

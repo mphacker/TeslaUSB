@@ -50,7 +50,7 @@ def get_current_wifi_connection():
             check=False,
             timeout=5,
         )
-        
+
         if result.returncode == 0:
             for line in result.stdout.splitlines():
                 parts = line.split(":")
@@ -60,7 +60,7 @@ def get_current_wifi_connection():
                         "current_ssid": parts[1] if len(parts) > 1 else "Unknown",
                         "signal": parts[2] if len(parts) > 2 else "0",
                     }
-        
+
         # Fallback: check with iw
         result = subprocess.run(
             ["iw", "dev", "wlan0", "link"],
@@ -69,7 +69,7 @@ def get_current_wifi_connection():
             check=False,
             timeout=5,
         )
-        
+
         if result.returncode == 0 and "Connected to" in result.stdout:
             # Extract SSID from iw output
             ssid_match = re.search(r"SSID:\s*(.+)", result.stdout)
@@ -79,7 +79,7 @@ def get_current_wifi_connection():
                 "current_ssid": ssid,
                 "signal": "Unknown",
             }
-        
+
         return {
             "connected": False,
             "current_ssid": None,
@@ -130,7 +130,7 @@ def _activate_connection(connection_name: str, timeout: int = 30):
             time.sleep(3)
             current = get_current_wifi_connection()
             return current.get("connected", False)
-        
+
         # Even if returncode != 0, wait and check if connection happened
         # NetworkManager can be finicky with reporting
         for _ in range(5):  # Check up to 5 times over 10 seconds
@@ -156,7 +156,7 @@ def _start_fallback_ap():
 def update_wifi_credentials(ssid: str, password: str):
     """
     Update WiFi credentials using NetworkManager with failsafe mechanisms.
-    
+
     This function:
     1. Stores the current working connection info
     2. Validates input
@@ -165,23 +165,23 @@ def update_wifi_credentials(ssid: str, password: str):
     5. If connection fails, reverts to the previous connection
     6. If revert also fails, starts the fallback AP
     7. Saves status for display on the settings page
-    
+
     Returns a dict with success status, message, and details about any failover actions.
     """
     # Validate inputs
     if not ssid or len(ssid) > 32:
         raise ValueError("SSID must be 1-32 characters")
-    
+
     if password and (len(password) < 8 or len(password) > 63):
         raise ValueError("Password must be 8-63 characters (or empty for open network)")
-    
+
     # Store the current working connection before making changes
     previous_connection = get_current_wifi_connection()
     previous_connection_name = _get_current_connection_name()
     previous_ssid = previous_connection.get("current_ssid") if previous_connection.get("connected") else None
-    
+
     connection_name = f"WiFi-{ssid}"
-    
+
     try:
         # Check if connection already exists
         check_result = subprocess.run(
@@ -191,10 +191,10 @@ def update_wifi_credentials(ssid: str, password: str):
             check=False,
             timeout=5,
         )
-        
+
         connection_exists = connection_name in check_result.stdout.splitlines()
         initial_error = None  # Track initial errors for failsafe messages
-        
+
         if connection_exists:
             # Modify existing connection
             if password:
@@ -211,7 +211,7 @@ def update_wifi_credentials(ssid: str, password: str):
                     "wifi.ssid", ssid,
                     "wifi-sec.key-mgmt", "none",
                 ]
-            
+
             result = subprocess.run(
                 modify_cmd,
                 capture_output=True,
@@ -219,7 +219,7 @@ def update_wifi_credentials(ssid: str, password: str):
                 check=False,
                 timeout=10,
             )
-            
+
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to modify connection: {result.stderr}")
         else:
@@ -236,7 +236,7 @@ def update_wifi_credentials(ssid: str, password: str):
                     "sudo", "-n", "nmcli", "device", "wifi", "connect", ssid,
                     "name", connection_name,
                 ]
-            
+
             result = subprocess.run(
                 add_cmd,
                 capture_output=True,
@@ -244,11 +244,11 @@ def update_wifi_credentials(ssid: str, password: str):
                 check=False,
                 timeout=30,
             )
-            
+
             # Store the initial connection attempt error for later use in failsafe
             if result.returncode != 0:
                 initial_error = result.stderr
-            
+
             if result.returncode != 0:
                 # Connection might have been created but activation failed
                 # Check if it's a critical creation failure (not just activation failure)
@@ -264,7 +264,7 @@ def update_wifi_credentials(ssid: str, password: str):
                 else:
                     # Other errors - continue to failsafe handling
                     pass
-        
+
         # Try to activate the connection
         activate_result = subprocess.run(
             ["sudo", "-n", "nmcli", "connection", "up", connection_name],
@@ -273,12 +273,12 @@ def update_wifi_credentials(ssid: str, password: str):
             check=False,
             timeout=30,
         )
-        
+
         # Wait a moment and check if we're actually connected
         import time
         time.sleep(3)
         current = get_current_wifi_connection()
-        
+
         if current.get("connected") and current.get("current_ssid") == ssid:
             # Success! New connection is working
             status = {
@@ -297,7 +297,7 @@ def update_wifi_credentials(ssid: str, password: str):
                 time.sleep(2)
                 current = get_current_wifi_connection()
                 current_connected_ssid = current.get("current_ssid") if current.get("connected") else None
-                
+
                 # Check if we've connected to the NEW network (late success)
                 if current.get("connected") and current_connected_ssid == ssid:
                     status = {
@@ -309,7 +309,7 @@ def update_wifi_credentials(ssid: str, password: str):
                     }
                     _save_wifi_status(status)
                     return status
-                
+
                 # Check if NetworkManager auto-reconnected to the previous network
                 if current.get("connected") and previous_ssid and current_connected_ssid == previous_ssid:
                     # We're back on the previous network
@@ -324,11 +324,11 @@ def update_wifi_credentials(ssid: str, password: str):
                     }
                     _save_wifi_status(status)
                     return status
-            
+
             # After all retries, check final state
             current = get_current_wifi_connection()
             current_connected_ssid = current.get("current_ssid") if current.get("connected") else None
-            
+
             # Final check for auto-reconnection
             if current.get("connected") and previous_ssid and current_connected_ssid == previous_ssid:
                 error_msg = initial_error if initial_error else (activate_result.stderr if activate_result.returncode != 0 else "Connection verification failed")
@@ -342,24 +342,24 @@ def update_wifi_credentials(ssid: str, password: str):
                 }
                 _save_wifi_status(status)
                 return status
-            
+
             # Try to manually reconnect to the previous network
             reverted = False
             ap_started = False
-            
+
             if previous_connection_name and previous_ssid:
                 if _activate_connection(previous_connection_name):
                     current = get_current_wifi_connection()
                     if current.get("connected"):
                         reverted = True
-            
+
             if not reverted:
                 # Could not revert - start the fallback AP
                 ap_started = _start_fallback_ap()
-            
+
             # Build the failure status
             error_msg = initial_error if initial_error else (activate_result.stderr if activate_result.returncode != 0 else "Connection verification failed")
-            
+
             if reverted:
                 status = {
                     "success": False,
@@ -387,10 +387,10 @@ def update_wifi_credentials(ssid: str, password: str):
                     "action": "failed",
                     "error": error_msg,
                 }
-            
+
             _save_wifi_status(status)
             return status
-    
+
     except subprocess.TimeoutExpired:
         # Timeout - check if we're still connected (NetworkManager might have auto-reconnected)
         import time
@@ -398,7 +398,7 @@ def update_wifi_credentials(ssid: str, password: str):
         current = get_current_wifi_connection()
         reverted = False
         ap_started = False
-        
+
         # Check if we're already back on the previous network
         if current.get("connected") and previous_ssid and current.get("current_ssid") == previous_ssid:
             reverted = True
@@ -408,10 +408,10 @@ def update_wifi_credentials(ssid: str, password: str):
                 current = get_current_wifi_connection()
                 if current.get("connected"):
                     reverted = True
-        
+
         if not reverted:
             ap_started = _start_fallback_ap()
-        
+
         if reverted:
             status = {
                 "success": False,
@@ -439,10 +439,10 @@ def update_wifi_credentials(ssid: str, password: str):
                 "action": "failed",
                 "error": "timeout",
             }
-        
+
         _save_wifi_status(status)
         return status
-    
+
     except ValueError as e:
         raise e
     except Exception as e:
@@ -452,11 +452,11 @@ def update_wifi_credentials(ssid: str, password: str):
 def get_available_networks(rescan: bool = True):
     """
     Get list of available WiFi networks.
-    
+
     Args:
         rescan: If True, trigger a new scan before listing (takes ~2-4 seconds)
                 If False, return cached results quickly
-    
+
     Returns:
         List of network dictionaries with 'ssid', 'signal', and 'secured' keys
     """
@@ -473,7 +473,7 @@ def get_available_networks(rescan: bool = True):
             # Small delay to let scan complete
             import time
             time.sleep(1)
-        
+
         # List available networks
         result = subprocess.run(
             ["sudo", "-n", "nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "dev", "wifi", "list"],
@@ -482,20 +482,20 @@ def get_available_networks(rescan: bool = True):
             check=False,
             timeout=10,
         )
-        
+
         if result.returncode != 0:
             return []
-        
+
         networks = []
         seen_ssids = set()
-        
+
         for line in result.stdout.splitlines():
             parts = line.split(":")
             if len(parts) >= 2:
                 ssid = parts[0].strip()
                 signal = parts[1].strip() if len(parts) > 1 else "0"
                 security = parts[2].strip() if len(parts) > 2 else ""
-                
+
                 # Skip duplicates and hidden networks (empty SSID)
                 if ssid and ssid not in seen_ssids:
                     seen_ssids.add(ssid)
@@ -504,10 +504,10 @@ def get_available_networks(rescan: bool = True):
                         "signal": signal,
                         "secured": bool(security),
                     })
-        
+
         # Sort by signal strength (descending)
         networks.sort(key=lambda x: int(x["signal"]) if x["signal"].isdigit() else 0, reverse=True)
-        
+
         return networks
     except Exception:
         return []

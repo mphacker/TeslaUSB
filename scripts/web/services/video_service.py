@@ -134,6 +134,73 @@ def get_events(folder_path):
     return events
 
 
+def _parse_clips_from_event(event_path):
+    """
+    Parse all video clips from a SavedClips event folder and group by timestamp.
+
+    SavedClips events contain multiple 1-minute clips over time, each with all camera angles.
+    For example: 2025-12-23_18-15-46-front.mp4, 2025-12-23_18-15-46-back.mp4, etc.
+
+    Args:
+        event_path: Full path to the event folder
+
+    Returns:
+        list: Sorted list of clip dictionaries (oldest to newest), each containing:
+              - timestamp_str: Clip timestamp (e.g., "2025-12-23_18-15-46")
+              - timestamp: Unix timestamp
+              - camera_videos: Dict mapping camera angles to filenames
+              Empty list if no clips found.
+    """
+    clips_by_timestamp = {}
+
+    try:
+        for entry in os.scandir(event_path):
+            if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                # Skip event.mp4 grid view
+                if entry.name.lower() == 'event.mp4':
+                    continue
+
+                # Parse filename: YYYY-MM-DD_HH-MM-SS-camera.mp4
+                parts = entry.name.rsplit('-', 1)  # Split from right to get camera
+                if len(parts) != 2:
+                    continue
+
+                timestamp_str = parts[0]  # "2025-12-23_18-15-46"
+                camera_with_ext = parts[1]  # "front.mp4"
+                camera = camera_with_ext.rsplit('.', 1)[0]  # "front"
+
+                # Create clip entry if not exists
+                if timestamp_str not in clips_by_timestamp:
+                    # Parse timestamp to datetime for sorting
+                    try:
+                        dt = datetime.strptime(timestamp_str, '%Y-%m-%d_%H-%M-%S')
+                        clips_by_timestamp[timestamp_str] = {
+                            'timestamp_str': timestamp_str,
+                            'timestamp': dt.timestamp(),
+                            'camera_videos': {
+                                'front': None,
+                                'back': None,
+                                'left_repeater': None,
+                                'right_repeater': None,
+                                'left_pillar': None,
+                                'right_pillar': None,
+                            }
+                        }
+                    except ValueError:
+                        continue
+
+                # Add camera video to clip
+                if camera in clips_by_timestamp[timestamp_str]['camera_videos']:
+                    clips_by_timestamp[timestamp_str]['camera_videos'][camera] = entry.name
+
+    except OSError:
+        return []
+
+    # Convert to sorted list (oldest to newest)
+    clips_list = sorted(clips_by_timestamp.values(), key=lambda x: x['timestamp'])
+    return clips_list
+
+
 def _parse_event_folder(event_path, event_name):
     """
     Parse a Tesla event folder and extract metadata.
@@ -161,7 +228,11 @@ def _parse_event_folder(event_path, event_name):
         thumb_path = os.path.join(event_path, 'thumb.png')
         has_thumbnail = os.path.exists(thumb_path)
 
+        # Parse clips from event folder (for SavedClips with multiple timestamps)
+        clips = _parse_clips_from_event(event_path)
+
         # Scan for video files and categorize by camera angle
+        # For backward compatibility, also get first/default clip videos
         camera_videos = {
             'front': None,
             'back': None,
@@ -182,27 +253,27 @@ def _parse_event_folder(event_path, event_name):
                     total_size += stat_info.st_size
                     latest_timestamp = max(latest_timestamp, stat_info.st_mtime)
 
-                    # Categorize video by camera angle
+                    # Categorize video by camera angle (use first found for compatibility)
                     name_lower = entry.name.lower()
-                    if 'front' in name_lower:
-                        camera_videos['front'] = entry.name
-                    elif 'back' in name_lower:
-                        camera_videos['back'] = entry.name
-                    elif 'left_repeater' in name_lower:
-                        camera_videos['left_repeater'] = entry.name
-                    elif 'right_repeater' in name_lower:
-                        camera_videos['right_repeater'] = entry.name
-                    elif 'left_pillar' in name_lower:
-                        camera_videos['left_pillar'] = entry.name
-                    elif 'right_pillar' in name_lower:
-                        camera_videos['right_pillar'] = entry.name
-                    elif name_lower == 'event.mp4':
+                    if name_lower == 'event.mp4':
                         camera_videos['event'] = entry.name
+                    elif 'front' in name_lower and camera_videos['front'] is None:
+                        camera_videos['front'] = entry.name
+                    elif 'back' in name_lower and camera_videos['back'] is None:
+                        camera_videos['back'] = entry.name
+                    elif 'left_repeater' in name_lower and camera_videos['left_repeater'] is None:
+                        camera_videos['left_repeater'] = entry.name
+                    elif 'right_repeater' in name_lower and camera_videos['right_repeater'] is None:
+                        camera_videos['right_repeater'] = entry.name
+                    elif 'left_pillar' in name_lower and camera_videos['left_pillar'] is None:
+                        camera_videos['left_pillar'] = entry.name
+                    elif 'right_pillar' in name_lower and camera_videos['right_pillar'] is None:
+                        camera_videos['right_pillar'] = entry.name
                 except OSError:
                     continue
 
         # If no videos found, not a valid event
-        if not any(camera_videos.values()):
+        if not any(camera_videos.values()) and not clips:
             return None
 
         # Parse timestamp from event name (format: YYYY-MM-DD_HH-MM-SS)
@@ -213,6 +284,15 @@ def _parse_event_folder(event_path, event_name):
         except ValueError:
             # Fall back to latest file timestamp
             event_timestamp = latest_timestamp if latest_timestamp > 0 else 0
+
+        # Determine starting clip index (closest clip before or at event timestamp)
+        starting_clip_index = 0
+        if clips:
+            for i, clip in enumerate(clips):
+                if clip['timestamp'] <= event_timestamp:
+                    starting_clip_index = i
+                else:
+                    break
 
         return {
             'name': event_name,
@@ -226,6 +306,8 @@ def _parse_event_folder(event_path, event_name):
             'metadata': event_metadata,
             'city': event_metadata.get('city', ''),
             'reason': event_metadata.get('reason', ''),
+            'clips': clips,  # List of all clips in chronological order
+            'starting_clip_index': starting_clip_index,  # Which clip to start playback at
         }
     except OSError:
         return None

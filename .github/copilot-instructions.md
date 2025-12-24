@@ -77,6 +77,18 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - AP runs concurrently with WiFi client on virtual interface `uap0`; WiFi client stays active on `wlan0`.
 - `ap_control.sh set_force_mode()` writes both runtime file and persists to config.sh using `sed`.
 
+## WiFi Roaming
+- **Mesh/Extender support**: Configured to automatically switch between access points with the same SSID for optimal signal strength.
+- **NetworkManager configuration**: `/etc/NetworkManager/conf.d/wifi-roaming.conf` disables power save (wifi.powersave=2), enables MAC randomization, and performs frequent connectivity checks (every 60 seconds).
+- **Power save disabled**: Keeping WiFi power save off (`wifi.powersave=2`) is THE MOST CRITICAL setting for responsive roaming and fast scanning. This is more important than any other roaming parameter.
+- **wpa_supplicant management**: NetworkManager manages wpa_supplicant automatically via D-Bus (`-u -s` flags). It does NOT use `/etc/wpa_supplicant/wpa_supplicant.conf` files.
+- **Background scanning**: NetworkManager uses hardcoded bgscan parameters (`simple:30:-65:300` - scans every 30s when signal < -65 dBm). These cannot be overridden via configuration files.
+- **Setup**: Automatically configured by `setup_usb.sh` during installation - creates NetworkManager roaming config only.
+- **No BSSID lock**: Connections must not have BSSID locked to allow roaming between access points.
+- **Automatic switching**: Device scans for better access points when signal is weak; wpa_supplicant handles the actual roaming decision based on signal strength, link quality, and auth compatibility.
+- **Signal threshold**: -65 dBm threshold triggers aggressive scanning to find stronger access points (NetworkManager default).
+- **Connectivity checks**: NetworkManager checks connection health every 60 seconds to detect issues early and potentially trigger reconnection.
+
 ## Captive Portal
 - **DNS spoofing**: dnsmasq configured with `address=/#/<gateway-ip>` to redirect all DNS queries to the AP gateway.
 - **Captive portal detection**: Flask blueprint (`scripts/web/blueprints/captive_portal.py`) intercepts OS-specific connectivity check URLs (Apple `/hotspot-detect.html`, Android `/generate_204`, Windows `/connecttest.txt`, etc.).

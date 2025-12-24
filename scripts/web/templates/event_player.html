@@ -580,6 +580,74 @@
     .main-video:hover::-webkit-media-controls {
         opacity: 1;
     }
+
+    /* Clip navigation controls */
+    .clip-nav-container {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        background: rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(10px);
+        border-radius: 8px;
+        margin-right: 12px;
+    }
+
+    .clip-nav-btn {
+        background: rgba(255, 255, 255, 0.15);
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        color: white;
+        width: 36px;
+        height: 36px;
+        border-radius: 6px;
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+        transition: all 0.2s;
+        font-size: 16px;
+    }
+
+    .clip-nav-btn:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.25);
+        border-color: rgba(255, 255, 255, 0.4);
+        transform: scale(1.05);
+    }
+
+    .clip-nav-btn:active:not(:disabled) {
+        transform: scale(0.95);
+    }
+
+    .clip-nav-btn:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+    }
+
+    .clip-info {
+        color: rgba(255, 255, 255, 0.9);
+        font-size: 13px;
+        font-weight: 500;
+        min-width: 80px;
+        text-align: center;
+        user-select: none;
+    }
+
+    @media (max-width: 768px) {
+        .clip-nav-container {
+            padding: 6px 10px;
+            gap: 8px;
+        }
+
+        .clip-nav-btn {
+            width: 32px;
+            height: 32px;
+            font-size: 14px;
+        }
+
+        .clip-info {
+            font-size: 11px;
+            min-width: 70px;
+        }
+    }
 </style>
 {% endblock %}
 
@@ -672,6 +740,19 @@
 
     <!-- Bottom camera selector with Tesla-style layout -->
     <div class="camera-selector">
+        <!-- Clip Navigation (SavedClips only) -->
+        {% if event.clips and event.clips|length > 1 %}
+        <div class="clip-nav-container">
+            <button class="clip-nav-btn" id="prevClipBtn" onclick="navigateClip(-1)" title="Previous Clip">
+                <i class="bi bi-chevron-left"></i>
+            </button>
+            <div class="clip-info" id="clipInfo">Clip 1 of 1</div>
+            <button class="clip-nav-btn" id="nextClipBtn" onclick="navigateClip(1)" title="Next Clip">
+                <i class="bi bi-chevron-right"></i>
+            </button>
+        </div>
+        {% endif %}
+
         <!-- SEI Overlay Toggle -->
         <div class="sei-toggle-container">
             <div class="sei-toggle-label">HUD<br>Overlay</div>
@@ -766,9 +847,137 @@
 <script>
     const folder = "{{ folder }}";
     const eventName = "{{ event.name }}";
+    const folderStructure = "{{ folder_structure }}";
     const video = document.getElementById('mainVideo');
     let currentTime = 0;
     let wasPlaying = false;
+
+    // Clip navigation data (for SavedClips with multiple clips)
+    {% if event.clips and event.clips|length > 0 %}
+    const eventClips = {{ event.clips | tojson }};
+    let currentClipIndex = {{ event.starting_clip_index }};
+    let currentCameraAngle = 'front';  // Track current camera selection
+    {% else %}
+    const eventClips = [];
+    let currentClipIndex = 0;
+    let currentCameraAngle = 'front';
+    {% endif %}
+
+    // Helper to build video URL based on folder structure and clip
+    function buildVideoUrl(filename) {
+        if (!filename) return null;
+        if (folderStructure === 'flat') {
+            return `{{ url_for('videos.stream_video', filepath='') }}${folder}/${filename}`;
+        } else {
+            return `{{ url_for('videos.stream_video', filepath='') }}${folder}/${eventName}/${filename}`;
+        }
+    }
+
+    // Update clip navigation UI
+    function updateClipNavigation() {
+        if (eventClips.length === 0) return;
+
+        const clipInfo = document.getElementById('clipInfo');
+        const prevBtn = document.getElementById('prevClipBtn');
+        const nextBtn = document.getElementById('nextClipBtn');
+
+        if (clipInfo) {
+            clipInfo.textContent = `Clip ${currentClipIndex + 1} of ${eventClips.length}`;
+        }
+
+        if (prevBtn) {
+            prevBtn.disabled = currentClipIndex === 0;
+        }
+
+        if (nextBtn) {
+            nextBtn.disabled = currentClipIndex === eventClips.length - 1;
+        }
+    }
+
+    // Navigate to previous/next clip
+    function navigateClip(direction) {
+        if (eventClips.length === 0) return;
+
+        const newIndex = currentClipIndex + direction;
+        if (newIndex < 0 || newIndex >= eventClips.length) return;
+
+        currentClipIndex = newIndex;
+        const clip = eventClips[currentClipIndex];
+
+        // Reset HUD to default values while new video loads
+        resetHUDToDefaults();
+
+        // Update all camera angle videos
+        updateCameraOptionsForClip(clip);
+
+        // Load the current camera angle for the new clip
+        const newVideoFilename = clip.camera_videos[currentCameraAngle];
+        if (newVideoFilename) {
+            const videoUrl = buildVideoUrl(newVideoFilename);
+            if (videoUrl) {
+                loadVideoWithCache(videoUrl);
+            }
+        } else {
+            // Current camera not available, try front first
+            const fallbackCameras = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
+            for (const camera of fallbackCameras) {
+                const filename = clip.camera_videos[camera];
+                if (filename) {
+                    currentCameraAngle = camera;
+                    const videoUrl = buildVideoUrl(filename);
+                    if (videoUrl) {
+                        loadVideoWithCache(videoUrl);
+                        // Update active camera button
+                        document.querySelectorAll('.camera-option').forEach(opt => {
+                            opt.classList.remove('active');
+                            if (opt.dataset.camera === camera) {
+                                opt.classList.add('active');
+                            }
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+
+        updateClipNavigation();
+    }
+
+    // Update camera option buttons for current clip
+    function updateCameraOptionsForClip(clip) {
+        if (!clip) return;
+
+        const cameraMap = {
+            'front': 'front',
+            'rear': 'back',
+            'left': 'left_repeater',
+            'right': 'right_repeater',
+            'left-pillar': 'left_pillar',
+            'right-pillar': 'right_pillar'
+        };
+
+        document.querySelectorAll('.camera-option[data-camera]').forEach(btn => {
+            const btnCamera = btn.dataset.camera;
+            const clipCamera = cameraMap[btnCamera];
+            const videoFilename = clip.camera_videos[clipCamera];
+
+            if (videoFilename) {
+                btn.classList.remove('unavailable');
+                const videoUrl = buildVideoUrl(videoFilename);
+                btn.onclick = function() { switchCameraToClip(videoUrl, this, clipCamera); };
+            } else {
+                btn.classList.add('unavailable');
+                btn.onclick = null;
+            }
+        });
+    }
+
+    // Switch camera within current clip
+    function switchCameraToClip(videoUrl, element, camera) {
+        if (!videoUrl) return;
+        currentCameraAngle = camera;
+        switchCamera(videoUrl, element);
+    }
 
     // SEI overlay mode management
     let seiOverlayEnabled = localStorage.getItem('seiOverlayEnabled') === 'true';
@@ -886,22 +1095,46 @@
         video.load();
     }
 
-    // Set initial video source (prefer front camera, fall back to first available)
-    {% if event.camera_videos.front %}
-    const initialVideoSrc = "{{ video_url(event.camera_videos.front) }}";
-    {% elif event.camera_videos.back %}
-    const initialVideoSrc = "{{ video_url(event.camera_videos.back) }}";
-    {% elif event.camera_videos.left_repeater %}
-    const initialVideoSrc = "{{ video_url(event.camera_videos.left_repeater) }}";
-    {% elif event.camera_videos.right_repeater %}
-    const initialVideoSrc = "{{ video_url(event.camera_videos.right_repeater) }}";
-    {% elif event.camera_videos.left_pillar %}
-    const initialVideoSrc = "{{ video_url(event.camera_videos.left_pillar) }}";
-    {% elif event.camera_videos.right_pillar %}
-    const initialVideoSrc = "{{ video_url(event.camera_videos.right_pillar) }}";
-    {% else %}
-    const initialVideoSrc = null;
-    {% endif %}
+    // Set initial video source
+    let initialVideoSrc = null;
+
+    // If we have clips (SavedClips with multiple timestamps), use the starting clip
+    if (eventClips.length > 0) {
+        const startingClip = eventClips[currentClipIndex];
+        // Prefer front camera, fall back to first available
+        const cameras = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
+        for (const camera of cameras) {
+            if (startingClip.camera_videos[camera]) {
+                initialVideoSrc = buildVideoUrl(startingClip.camera_videos[camera]);
+                currentCameraAngle = camera;
+                break;
+            }
+        }
+        // Update camera options for starting clip
+        updateCameraOptionsForClip(startingClip);
+        updateClipNavigation();
+    } else {
+        // Single clip event or flat structure (RecentClips)
+        {% if event.camera_videos.front %}
+        initialVideoSrc = "{{ video_url(event.camera_videos.front) }}";
+        currentCameraAngle = 'front';
+        {% elif event.camera_videos.back %}
+        initialVideoSrc = "{{ video_url(event.camera_videos.back) }}";
+        currentCameraAngle = 'back';
+        {% elif event.camera_videos.left_repeater %}
+        initialVideoSrc = "{{ video_url(event.camera_videos.left_repeater) }}";
+        currentCameraAngle = 'left_repeater';
+        {% elif event.camera_videos.right_repeater %}
+        initialVideoSrc = "{{ video_url(event.camera_videos.right_repeater) }}";
+        currentCameraAngle = 'right_repeater';
+        {% elif event.camera_videos.left_pillar %}
+        initialVideoSrc = "{{ video_url(event.camera_videos.left_pillar) }}";
+        currentCameraAngle = 'left_pillar';
+        {% elif event.camera_videos.right_pillar %}
+        initialVideoSrc = "{{ video_url(event.camera_videos.right_pillar) }}";
+        currentCameraAngle = 'right_pillar';
+        {% endif %}
+    }
 
     // Load initial video
     if (initialVideoSrc) {
@@ -1126,6 +1359,22 @@
     }
 
     // Update HUD with SEI data
+    // Reset HUD to default state (0 mph, Park, centered wheel, no indicators)
+    function resetHUDToDefaults() {
+        document.getElementById('hudSpeed').textContent = '0';
+        document.getElementById('hudGear').textContent = 'P';
+        document.getElementById('hudSteering').style.setProperty('--wheel-rotation', '0deg');
+        document.getElementById('brakePedal').style.setProperty('--pedal-fill', '0%');
+        document.getElementById('throttlePedal').style.setProperty('--pedal-fill', '0%');
+        document.getElementById('autopilotIndicator').classList.remove('active');
+        
+        // Reset blinkers
+        const leftBlinker = document.getElementById('blinkerLeft');
+        const rightBlinker = document.getElementById('blinkerRight');
+        if (leftBlinker) leftBlinker.classList.remove('active');
+        if (rightBlinker) rightBlinker.classList.remove('active');
+    }
+
     function updateHUD(currentTime) {
         const frame = seiFrames.find((f, i) => {
             const next = seiFrames[i + 1];
@@ -1133,12 +1382,7 @@
         });
 
         if (!frame || !frame.sei) {
-            document.getElementById('hudSpeed').textContent = '0';
-            document.getElementById('hudGear').textContent = 'P';
-            document.getElementById('hudSteering').style.setProperty('--wheel-rotation', '0deg');
-            document.getElementById('brakePedal').style.setProperty('--pedal-fill', '0%');
-            document.getElementById('throttlePedal').style.setProperty('--pedal-fill', '0%');
-            document.getElementById('autopilotIndicator').classList.remove('active');
+            resetHUDToDefaults();
             return;
         }
 
@@ -1231,16 +1475,32 @@
             existingLoader.remove();
         }
 
+        // Reset HUD to default values while new video loads
+        resetHUDToDefaults();
+
         // Stop video playback when switching cameras
         video.pause();
         wasPlaying = false;
         currentTime = video.currentTime;
 
-        // Update active state
+        // Update active state and track current camera
         document.querySelectorAll('.camera-option').forEach(opt => {
             opt.classList.remove('active');
         });
         element.classList.add('active');
+
+        // Track current camera angle for clip navigation
+        if (element.dataset.camera) {
+            const cameraMap = {
+                'front': 'front',
+                'rear': 'back',
+                'left': 'left_repeater',
+                'right': 'right_repeater',
+                'left-pillar': 'left_pillar',
+                'right-pillar': 'right_pillar'
+            };
+            currentCameraAngle = cameraMap[element.dataset.camera] || element.dataset.camera;
+        }
 
         // Reset SEI loading state to allow new SEI data to load
         seiLoading = false;

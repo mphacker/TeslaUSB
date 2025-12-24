@@ -86,6 +86,7 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 ### Network Features
 - **Samba Shares**: Windows/Mac/Linux file access in Edit mode
 - **Offline Access Point**: Automatic fallback AP when WiFi unavailable (in-car web access)
+- **WiFi Roaming**: Automatic switching between access points with the same SSID for optimal signal strength (mesh networks and WiFi extenders)
 
 ## Requirements
 

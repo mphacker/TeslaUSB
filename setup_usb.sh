@@ -553,6 +553,40 @@ else
   echo "NetworkManager already configured to ignore uap0"
 fi
 
+# Configure WiFi roaming for mesh/extender networks (multiple APs with same SSID)
+# NetworkManager controls wpa_supplicant via D-Bus, so we configure NM directly
+NM_ROAMING_CONF="$NM_CONF_DIR/wifi-roaming.conf"
+if [ ! -f "$NM_ROAMING_CONF" ]; then
+  mkdir -p "$NM_CONF_DIR"
+  cat > "$NM_ROAMING_CONF" <<EOF
+[device]
+# Enable aggressive WiFi roaming for better mesh/extender network support
+wifi.scan-rand-mac-address = no
+
+[connection]
+# Disable power save to maintain better connection stability and faster roaming
+# This is the most important setting for responsive roaming
+wifi.powersave = 2
+# Enable MAC randomization for privacy
+wifi.mac-address-randomization = 1
+
+[connectivity]
+# Check connectivity frequently to detect network issues and trigger roaming
+interval = 60
+EOF
+  echo "Created WiFi roaming configuration for mesh/extender networks"
+  if systemctl is-active --quiet NetworkManager; then
+    systemctl reload NetworkManager 2>/dev/null || true
+  fi
+else
+  echo "WiFi roaming configuration already exists"
+fi
+
+# Note: NetworkManager manages wpa_supplicant directly via D-Bus (-u -s flags)
+# and does not use /etc/wpa_supplicant/wpa_supplicant.conf files.
+# Background scanning (bgscan) parameters are hardcoded in NetworkManager.
+# The wifi.powersave=2 setting above is the key to aggressive roaming.
+
 # Ensure config.txt contains dtoverlay=dwc2 and dtparam=watchdog=on under [all]
 # Note: We use dtoverlay=dwc2 WITHOUT dr_mode parameter to allow auto-detection
 CONFIG_CHANGED=0
@@ -1069,7 +1103,8 @@ fi
 
 # Configure hardware watchdog
 WATCHDOG_CONF="/etc/watchdog.conf"
-if [ ! -f "$WATCHDOG_CONF" ] || ! grep -q "watchdog-device" "$WATCHDOG_CONF" 2>/dev/null; then
+# Check if watchdog-device is uncommented and configured (not just present as a comment)
+if [ ! -f "$WATCHDOG_CONF" ] || ! grep -q "^watchdog-device[[:space:]]*=" "$WATCHDOG_CONF" 2>/dev/null; then
   echo "Configuring hardware watchdog..."
   cat > "$WATCHDOG_CONF" <<'EOF'
 # TeslaUSB Hardware Watchdog Configuration

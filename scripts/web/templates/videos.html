@@ -24,20 +24,22 @@
     </div>
 
     {% if events %}
-    <div class="events-grid">
+    <div class="events-grid" id="eventsGrid">
         {% for event in events %}
         <div class="event-card" onclick="window.location.href='{{ url_for('videos.view_event', folder=current_folder, event_name=event.name) }}'">
             <div class="event-thumbnail">
                 {% if event.has_thumbnail %}
                     {% if folder_structure == 'flat' %}
-                    <img src="{{ url_for('videos.get_session_thumbnail', folder=current_folder, session_name=event.name) }}"
+                    <img data-src="{{ url_for('videos.get_session_thumbnail', folder=current_folder, session_name=event.name) }}"
+                         class="lazy-thumbnail"
                          alt="Session thumbnail"
-                         loading="lazy"
+                         src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
                          onerror="this.parentElement.innerHTML='<div class=\'event-thumbnail-placeholder\'><i class=\'bi bi-camera-video\' style=\'font-size: 3em;\'></i></div>';">
                     {% else %}
-                    <img src="{{ url_for('videos.get_event_thumbnail', folder=current_folder, event_name=event.name) }}"
+                    <img data-src="{{ url_for('videos.get_event_thumbnail', folder=current_folder, event_name=event.name) }}"
+                         class="lazy-thumbnail"
                          alt="Event thumbnail"
-                         loading="lazy"
+                         src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
                          onerror="this.parentElement.innerHTML='<div class=\'event-thumbnail-placeholder\'><i class=\'bi bi-camera-video\' style=\'font-size: 3em;\'></i></div>';">
                     {% endif %}
                 {% else %}
@@ -69,6 +71,19 @@
         </div>
         {% endfor %}
     </div>
+
+    <!-- Infinite Scroll Loading Indicator -->
+    <div id="loading-indicator" style="display: none; text-align: center; padding: 20px;">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+    </div>
+
+    <!-- End of List Indicator -->
+    <div id="end-of-list" style="display: none; text-align: center; padding: 20px; color: var(--text-muted);">
+        <p>No more videos</p>
+    </div>
+
     {% else %}
     <div class="no-videos">
         <p>No events found in {{ current_folder }}.</p>
@@ -80,6 +95,210 @@
     </div>
     {% endif %}
 </div>
+
+<script>
+// Infinite Scroll & Thumbnail Queue Implementation
+document.addEventListener('DOMContentLoaded', function() {
+    const eventsGrid = document.getElementById('eventsGrid');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    const endOfList = document.getElementById('end-of-list');
+
+    if (!eventsGrid) return;
+
+    let currentPage = {{ current_page|default(1) }};
+    let hasNext = {{ 'true' if has_next else 'false' }};
+    let isLoading = false;
+    const currentFolder = "{{ current_folder }}";
+
+    // Thumbnail Queue System
+    // Prioritizes visible thumbnails and loads them one by one to prevent CPU saturation
+    const thumbnailQueue = {
+        queue: [],
+        processing: false,
+
+        add: function(imgElement) {
+            if (!this.queue.includes(imgElement)) {
+                this.queue.push(imgElement);
+                this.process();
+            }
+        },
+
+        remove: function(imgElement) {
+            const index = this.queue.indexOf(imgElement);
+            if (index > -1) {
+                this.queue.splice(index, 1);
+            }
+        },
+
+        process: function() {
+            if (this.processing || this.queue.length === 0) return;
+
+            this.processing = true;
+            const img = this.queue.shift(); // FIFO
+
+            // Load the image
+            const tempImage = new Image();
+            tempImage.onload = () => {
+                img.src = img.dataset.src;
+                img.classList.add('loaded');
+                this.processing = false;
+                this.process(); // Process next
+            };
+            tempImage.onerror = () => {
+                // Handle error (placeholder already set by onerror in HTML)
+                this.processing = false;
+                this.process(); // Process next
+            };
+            tempImage.src = img.dataset.src;
+        }
+    };
+
+    // Intersection Observer for Lazy Loading Thumbnails
+    const thumbnailObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                const img = entry.target;
+                if (!img.classList.contains('loaded') && img.dataset.src) {
+                    thumbnailQueue.add(img);
+                }
+            } else {
+                // Optional: Remove from queue if scrolled out of view before loading
+                // thumbnailQueue.remove(entry.target);
+            }
+        });
+    }, {
+        rootMargin: '50px 0px', // Preload slightly before viewport
+        threshold: 0.1
+    });
+
+    // Observe existing thumbnails
+    document.querySelectorAll('.lazy-thumbnail').forEach(img => {
+        thumbnailObserver.observe(img);
+    });
+
+    // Infinite Scroll Logic
+    window.addEventListener('scroll', () => {
+        if (isLoading || !hasNext) return;
+
+        // Check if near bottom of page
+        if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+            loadMoreEvents();
+        }
+    });
+
+    function loadMoreEvents() {
+        isLoading = true;
+        loadingIndicator.style.display = 'block';
+
+        const nextPage = currentPage + 1;
+        const url = `{{ url_for('videos.file_browser') }}?folder=${encodeURIComponent(currentFolder)}&page=${nextPage}`;
+
+        fetch(url, {
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.events && data.events.length > 0) {
+                appendEvents(data.events, data.folder_structure);
+                currentPage = data.next_page;
+                hasNext = data.has_next;
+            } else {
+                hasNext = false;
+            }
+
+            if (!hasNext) {
+                endOfList.style.display = 'block';
+            }
+        })
+        .catch(error => {
+            console.error('Error loading more events:', error);
+        })
+        .finally(() => {
+            isLoading = false;
+            loadingIndicator.style.display = 'none';
+        });
+    }
+
+    function appendEvents(events, folderStructure) {
+        events.forEach(event => {
+            const card = document.createElement('div');
+            card.className = 'event-card';
+            card.onclick = () => window.location.href = `/videos/event/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`;
+
+            // Build Thumbnail HTML
+            let thumbnailHtml = '';
+            if (event.has_thumbnail) {
+                const thumbUrl = folderStructure === 'flat'
+                    ? `/videos/session_thumbnail/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`
+                    : `/videos/event_thumbnail/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`;
+
+                thumbnailHtml = `
+                    <img data-src="${thumbUrl}"
+                         class="lazy-thumbnail"
+                         alt="Thumbnail"
+                         src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+                         onerror="this.parentElement.innerHTML='<div class=\\'event-thumbnail-placeholder\\'><i class=\\'bi bi-camera-video\\' style=\\'font-size: 3em;\\'></i></div>';">
+                `;
+            } else {
+                thumbnailHtml = `
+                    <div class="event-thumbnail-placeholder">
+                        <i class="bi bi-camera-video" style="font-size: 3em;"></i>
+                    </div>
+                `;
+            }
+
+            // Build Cameras HTML
+            let camerasHtml = '';
+            const cams = event.camera_videos;
+            if (cams.front) camerasHtml += '<span class="camera-badge">Front</span>';
+            if (cams.back) camerasHtml += '<span class="camera-badge">Back</span>';
+            if (cams.left_repeater) camerasHtml += '<span class="camera-badge">Left</span>';
+            if (cams.right_repeater) camerasHtml += '<span class="camera-badge">Right</span>';
+            if (cams.left_pillar) camerasHtml += '<span class="camera-badge">L-Pillar</span>';
+            if (cams.right_pillar) camerasHtml += '<span class="camera-badge">R-Pillar</span>';
+
+            // Build Reason HTML
+            let reasonHtml = '';
+            if (event.reason) {
+                reasonHtml = `<span class="event-reason">${event.reason.replace('_', ' ')}</span>`;
+            }
+
+            // Build Location HTML
+            let locationHtml = '';
+            if (event.city) {
+                locationHtml = `<div class="event-location">📍 ${event.city}</div>`;
+            }
+
+            card.innerHTML = `
+                <div class="event-thumbnail">
+                    ${thumbnailHtml}
+                </div>
+                <div class="event-info">
+                    <div class="event-datetime">${event.datetime}</div>
+                    ${locationHtml}
+                    <div class="event-meta">
+                        <span>💾 ${event.size_mb} MB</span>
+                        ${reasonHtml}
+                    </div>
+                    <div class="event-cameras">
+                        ${camerasHtml}
+                    </div>
+                </div>
+            `;
+
+            eventsGrid.appendChild(card);
+
+            // Observe new thumbnail
+            const newImg = card.querySelector('.lazy-thumbnail');
+            if (newImg) {
+                thumbnailObserver.observe(newImg);
+            }
+        });
+    }
+});
+</script>
 
 <style>
 .events-grid {
@@ -217,7 +436,7 @@
 
 .folder-selector select {
     padding: 10px 16px;
-    border: 2px solid var(--border-color);
+    border: 2px solid var(--border);
     border-radius: 8px;
     background: var(--bg-container);
     color: var(--text-primary);

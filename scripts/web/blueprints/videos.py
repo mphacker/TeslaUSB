@@ -48,7 +48,16 @@ def file_browser():
 
     folders = get_teslacam_folders()
     current_folder = request.args.get('folder', folders[0]['name'] if folders else None)
+
+    # Pagination parameters
+    try:
+        page_num = int(request.args.get('page', 1))
+    except ValueError:
+        page_num = 1
+    per_page = 12
+
     events = []
+    total_events = 0
     folder_structure = 'events'  # Default to event-based structure
 
     if current_folder:
@@ -61,10 +70,19 @@ def file_browser():
             # Get events/sessions based on folder structure
             if folder_structure == 'flat':
                 # RecentClips: Group flat files by session
-                events = group_videos_by_session(folder_path)
+                events, total_events = group_videos_by_session(folder_path, page=page_num, per_page=per_page)
             else:
                 # SavedClips/SentryClips: Get event subfolders
-                events = get_events(folder_path)
+                events, total_events = get_events(folder_path, page=page_num, per_page=per_page)
+
+    # Check if this is an AJAX request for infinite scroll
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return jsonify({
+            'events': events,
+            'has_next': (page_num * per_page) < total_events,
+            'next_page': page_num + 1,
+            'folder_structure': folder_structure
+        })
 
     return render_template(
         'videos.html',
@@ -78,6 +96,8 @@ def file_browser():
         current_folder=current_folder,
         folder_structure=folder_structure,
         hostname=socket.gethostname(),
+        current_page=page_num,
+        has_next=(page_num * per_page) < total_events
     )
 
 

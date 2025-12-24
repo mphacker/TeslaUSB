@@ -14,9 +14,9 @@ import os
 import json
 import av
 from datetime import datetime
-from pathlib import Path
 from PIL import Image
 import logging
+from threading import Semaphore
 
 # Import configuration
 from config import (
@@ -27,6 +27,11 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Semaphore to limit concurrent thumbnail generation
+# Pi Zero 2 W has 4 cores but limited RAM/thermal headroom
+# Limit to 1 concurrent generation to prevent CPU starvation for other requests
+thumbnail_semaphore = Semaphore(1)
 
 # Import other services
 from services.mode_service import current_mode
@@ -102,36 +107,55 @@ def get_video_files(folder_path):
     return videos
 
 
-def get_events(folder_path):
+def get_events(folder_path, page=1, per_page=12):
     """
     Get all Tesla events (event-based folder structure) from a TeslaCam folder.
 
     Args:
         folder_path: Path to a TeslaCam folder (e.g., SavedClips, SentryClips)
+        page: Page number (1-based)
+        per_page: Number of items per page
 
     Returns:
-        list: List of event dictionaries with metadata, sorted by timestamp (newest first)
-
-    Each event is a subfolder containing:
-    - Multiple camera angle videos (front, back, left_repeater, right_repeater, left_pillar, right_pillar)
-    - event.json with metadata (timestamp, city, reason, camera, etc.)
-    - thumb.png thumbnail
-    - event.mp4 grid view video (optional)
+        tuple: (events_list, total_count)
+        - events_list: List of event dictionaries for the requested page
+        - total_count: Total number of events available
     """
     events = []
 
     try:
         for entry in os.scandir(folder_path):
             if entry.is_dir():
-                event_data = _parse_event_folder(entry.path, entry.name)
-                if event_data:
-                    events.append(event_data)
+                # Quick check if it looks like an event folder before full parsing
+                # This speeds up listing significantly
+                events.append({
+                    'name': entry.name,
+                    'path': entry.path,
+                    'timestamp': entry.stat().st_mtime
+                })
     except OSError:
         pass
 
     # Sort by timestamp, newest first
     events.sort(key=lambda x: x['timestamp'], reverse=True)
-    return events
+
+    total_count = len(events)
+
+    # Calculate pagination slice
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+
+    # Slice the raw list first to avoid parsing everything
+    paged_raw_events = events[start_idx:end_idx]
+
+    # Fully parse only the requested page
+    parsed_events = []
+    for raw_event in paged_raw_events:
+        event_data = _parse_event_folder(raw_event['path'], raw_event['name'])
+        if event_data:
+            parsed_events.append(event_data)
+
+    return parsed_events, total_count
 
 
 def _parse_clips_from_event(event_path):
@@ -350,25 +374,19 @@ def get_session_videos(folder_path, session_id):
     return session_videos
 
 
-def group_videos_by_session(folder_path):
+def group_videos_by_session(folder_path, page=1, per_page=12):
     """
     Group flat video files by recording session (for RecentClips folder).
 
     Args:
         folder_path: Path to folder with flat video files
+        page: Page number (1-based)
+        per_page: Number of items per page
 
     Returns:
-        list: List of session dictionaries mimicking event structure,
-              sorted by timestamp (newest first)
-
-    Each session dict contains:
-    - name: Session ID (timestamp)
-    - timestamp: Unix timestamp
-    - datetime: Formatted datetime string
-    - size: Total size of all videos in session
-    - size_mb: Total size in MB
-    - camera_videos: Dict mapping camera angles to filenames
-    - has_thumbnail: False (flat structure doesn't have thumbnails)
+        tuple: (session_list, total_count)
+        - session_list: List of session dictionaries for the requested page
+        - total_count: Total number of sessions available
     """
     all_videos = get_video_files(folder_path)
 
@@ -406,16 +424,27 @@ def group_videos_by_session(folder_path):
         if camera in sessions[session_id]['camera_videos']:
             sessions[session_id]['camera_videos'][camera] = video['name']
 
-    # Convert to list and format
-    session_list = []
-    for session_id, session_data in sessions.items():
-        session_data['size_mb'] = round(session_data['size'] / (1024 * 1024), 2)
-        session_data['datetime'] = datetime.fromtimestamp(session_data['timestamp']).strftime('%Y-%m-%d %I:%M:%S %p')
-        session_list.append(session_data)
+    # Convert to list
+    session_list = list(sessions.values())
 
     # Sort by timestamp, newest first
     session_list.sort(key=lambda x: x['timestamp'], reverse=True)
-    return session_list
+
+    total_count = len(session_list)
+
+    # Calculate pagination slice
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+
+    # Slice the list
+    paged_sessions = session_list[start_idx:end_idx]
+
+    # Format only the paged items
+    for session_data in paged_sessions:
+        session_data['size_mb'] = round(session_data['size'] / (1024 * 1024), 2)
+        session_data['datetime'] = datetime.fromtimestamp(session_data['timestamp']).strftime('%Y-%m-%d %I:%M:%S %p')
+
+    return paged_sessions, total_count
 
 
 def generate_video_thumbnail(video_path, output_path, size=(80, 45)):
@@ -431,7 +460,13 @@ def generate_video_thumbnail(video_path, output_path, size=(80, 45)):
         bool: True if successful, False otherwise
 
     Optimized for Pi Zero 2 W memory constraints.
+    Uses a semaphore to prevent concurrent CPU saturation.
     """
+    # Acquire semaphore to limit concurrency
+    if not thumbnail_semaphore.acquire(blocking=True, timeout=10):
+        logger.warning(f"Timeout waiting for thumbnail semaphore: {video_path}")
+        return False
+
     try:
         # Open video container
         container = av.open(video_path)
@@ -457,6 +492,9 @@ def generate_video_thumbnail(video_path, output_path, size=(80, 45)):
     except Exception as e:
         logger.error(f"Failed to generate thumbnail for {video_path}: {e}")
         return False
+    finally:
+        # Always release the semaphore
+        thumbnail_semaphore.release()
 
     return False
 

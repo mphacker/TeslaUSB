@@ -65,7 +65,7 @@ if __name__ == "__main__":
         from waitress import serve
         print("Using Waitress production server")
         serve(app, host="0.0.0.0", port=WEB_PORT, threads=6, channel_timeout=300,
-              send_bytes=1048576)  # 1MB send buffer
+              send_bytes=4194304)  # 4MB send buffer for better video streaming
     except ImportError:
         print("Waitress not available, using Flask development server")
         print("WARNING: Flask dev server is slow for large files. Install waitress: pip3 install waitress")

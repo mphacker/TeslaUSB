@@ -465,6 +465,16 @@ cleanup_old_services() {
     echo "    ✓ Removed generate_thumbnails.py"
   fi
 
+  # Remove old wifi-powersave-off service (replaced by network-optimizations.service)
+  if systemctl list-unit-files | grep -q 'wifi-powersave-off'; then
+    echo "  Removing old wifi-powersave-off service (replaced by network-optimizations)..."
+    systemctl stop wifi-powersave-off.service 2>/dev/null || true
+    systemctl disable wifi-powersave-off.service 2>/dev/null || true
+    rm -f /etc/systemd/system/wifi-powersave-off.service
+    systemctl daemon-reload
+    echo "    ✓ Removed wifi-powersave-off service"
+  fi
+
   echo "Old service cleanup complete."
 }
 
@@ -640,10 +650,19 @@ if [ -f "$CONFIG_FILE" ]; then
     else
       echo "dtparam=watchdog=on already present in $CONFIG_FILE"
     fi
+
+    # Reduce GPU memory to 16MB (headless system doesn't need GPU, frees 48MB RAM)
+    if ! grep -q '^gpu_mem=' "$CONFIG_FILE"; then
+      sed -i '/^\[all\]/a gpu_mem=16' "$CONFIG_FILE"
+      echo "Added gpu_mem=16 under [all] section in $CONFIG_FILE (saves 48MB RAM)"
+      CONFIG_CHANGED=1
+    else
+      echo "gpu_mem already configured in $CONFIG_FILE"
+    fi
   else
     # No [all] section - append it with both entries
-    printf '\n[all]\ndtoverlay=dwc2\ndtparam=watchdog=on\n' >> "$CONFIG_FILE"
-    echo "Appended [all] section with dtoverlay=dwc2 and dtparam=watchdog=on to $CONFIG_FILE"
+    printf '\n[all]\ndtoverlay=dwc2\ndtparam=watchdog=on\ngpu_mem=16\n' >> "$CONFIG_FILE"
+    echo "Appended [all] section with dtoverlay=dwc2, dtparam=watchdog=on and gpu_mem=16 to $CONFIG_FILE"
     CONFIG_CHANGED=1
   fi
 else
@@ -1025,19 +1044,20 @@ configure_service "$TEMPLATES_DIR/chime_scheduler.service" "$CHIME_SCHEDULER_SER
 CHIME_SCHEDULER_TIMER="/etc/systemd/system/chime_scheduler.timer"
 configure_service "$TEMPLATES_DIR/chime_scheduler.timer" "$CHIME_SCHEDULER_TIMER"
 
-# WiFi power management disable service
-WIFI_POWERSAVE_SERVICE="/etc/systemd/system/wifi-powersave-off.service"
-configure_service "$TEMPLATES_DIR/wifi-powersave-off.service" "$WIFI_POWERSAVE_SERVICE"
-
 # WiFi monitor service
 WIFI_MONITOR_SERVICE="/etc/systemd/system/wifi-monitor.service"
 configure_service "$TEMPLATES_DIR/wifi-monitor.service" "$WIFI_MONITOR_SERVICE"
+
+# Network optimizations service (applies runtime settings at boot)
+# This handles: CPU governor, TX queue, read-ahead, RTS threshold, regulatory domain
+NETWORK_OPT_SERVICE="/etc/systemd/system/network-optimizations.service"
+configure_service "$TEMPLATES_DIR/network-optimizations.service" "$NETWORK_OPT_SERVICE"
 
 # Ensure wifi-monitor.sh and optimize_network.sh are executable
 chmod +x "$SCRIPT_DIR/scripts/wifi-monitor.sh"
 chmod +x "$SCRIPT_DIR/scripts/optimize_network.sh" 2>/dev/null || true
 
-# Apply network optimizations on first boot
+# Apply network optimizations immediately during setup
 if [ -f "$SCRIPT_DIR/scripts/optimize_network.sh" ]; then
   echo "Applying network optimizations..."
   "$SCRIPT_DIR/scripts/optimize_network.sh" 2>/dev/null || echo "  Note: Some optimizations require reboot to take effect"
@@ -1053,9 +1073,11 @@ systemctl enable present_usb_on_boot.service || true
 # Enable and start chime scheduler timer
 systemctl enable --now chime_scheduler.timer || systemctl restart chime_scheduler.timer
 
-# Enable and start WiFi monitoring services
-systemctl enable --now wifi-powersave-off.service || systemctl restart wifi-powersave-off.service
+# Enable and start WiFi monitoring service
 systemctl enable --now wifi-monitor.service || systemctl restart wifi-monitor.service
+
+# Enable network optimizations service (applies runtime settings at each boot)
+systemctl enable network-optimizations.service || true
 
 # Ensure the web service picks up the latest code changes
 systemctl restart gadget_web.service || true

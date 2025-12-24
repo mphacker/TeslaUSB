@@ -371,6 +371,17 @@
         border-color: rgba(255,255,255,0.15);
     }
 
+    .camera-option.encrypted {
+        opacity: 0.5;
+        cursor: not-allowed;
+        border-color: rgba(255,100,100,0.4);
+        background: rgba(80,30,30,0.7);
+    }
+
+    .camera-option.encrypted .camera-icon {
+        color: #ff6b6b;
+    }
+
     .camera-thumbnail {
         width: 100%;
         height: 100%;
@@ -763,10 +774,17 @@
         </div>
 
         {% if event.camera_videos.front %}
+            {% if event.encrypted_videos and event.encrypted_videos.front %}
+        <div class="camera-option encrypted" data-camera="front" title="Video file cannot be played">
+            <i class="bi bi-arrow-up camera-icon"></i>
+            <div class="camera-label">Front</div>
+        </div>
+            {% else %}
         <div class="camera-option active" onclick="switchCamera('{{ video_url(event.camera_videos.front) }}', this)" data-camera="front">
             <i class="bi bi-arrow-up camera-icon"></i>
             <div class="camera-label">Front</div>
         </div>
+            {% endif %}
         {% else %}
         <div class="camera-option unavailable">
             <i class="bi bi-arrow-up camera-icon"></i>
@@ -775,10 +793,17 @@
         {% endif %}
 
         {% if event.camera_videos.back %}
+            {% if event.encrypted_videos and event.encrypted_videos.back %}
+        <div class="camera-option encrypted" data-camera="rear" title="Video file cannot be played">
+            <i class="bi bi-arrow-down camera-icon"></i>
+            <div class="camera-label">Rear</div>
+        </div>
+            {% else %}
         <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.back) }}', this)" data-camera="rear">
             <i class="bi bi-arrow-down camera-icon"></i>
             <div class="camera-label">Rear</div>
         </div>
+            {% endif %}
         {% else %}
         <div class="camera-option unavailable">
             <i class="bi bi-arrow-down camera-icon"></i>
@@ -787,10 +812,17 @@
         {% endif %}
 
         {% if event.camera_videos.left_repeater %}
+            {% if event.encrypted_videos and event.encrypted_videos.left_repeater %}
+        <div class="camera-option encrypted" data-camera="left" title="Video file cannot be played">
+            <i class="bi bi-arrow-left camera-icon"></i>
+            <div class="camera-label">Left</div>
+        </div>
+            {% else %}
         <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.left_repeater) }}', this)" data-camera="left">
             <i class="bi bi-arrow-left camera-icon"></i>
             <div class="camera-label">Left</div>
         </div>
+            {% endif %}
         {% else %}
         <div class="camera-option unavailable">
             <i class="bi bi-arrow-left camera-icon"></i>
@@ -799,10 +831,17 @@
         {% endif %}
 
         {% if event.camera_videos.right_repeater %}
+            {% if event.encrypted_videos and event.encrypted_videos.right_repeater %}
+        <div class="camera-option encrypted" data-camera="right" title="Video file cannot be played">
+            <i class="bi bi-arrow-right camera-icon"></i>
+            <div class="camera-label">Right</div>
+        </div>
+            {% else %}
         <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.right_repeater) }}', this)" data-camera="right">
             <i class="bi bi-arrow-right camera-icon"></i>
             <div class="camera-label">Right</div>
         </div>
+            {% endif %}
         {% else %}
         <div class="camera-option unavailable">
             <i class="bi bi-arrow-right camera-icon"></i>
@@ -811,10 +850,17 @@
         {% endif %}
 
         {% if event.camera_videos.left_pillar %}
+            {% if event.encrypted_videos and event.encrypted_videos.left_pillar %}
+        <div class="camera-option encrypted" data-camera="left-pillar" title="Video file cannot be played">
+            <i class="bi bi-arrow-bar-left camera-icon"></i>
+            <div class="camera-label">Left Pillar</div>
+        </div>
+            {% else %}
         <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.left_pillar) }}', this)" data-camera="left-pillar">
             <i class="bi bi-arrow-bar-left camera-icon"></i>
             <div class="camera-label">Left Pillar</div>
         </div>
+            {% endif %}
         {% else %}
         <div class="camera-option unavailable">
             <i class="bi bi-arrow-bar-left camera-icon"></i>
@@ -823,10 +869,17 @@
         {% endif %}
 
         {% if event.camera_videos.right_pillar %}
+            {% if event.encrypted_videos and event.encrypted_videos.right_pillar %}
+        <div class="camera-option encrypted" data-camera="right-pillar" title="Video file cannot be played">
+            <i class="bi bi-arrow-bar-right camera-icon"></i>
+            <div class="camera-label">Right Pillar</div>
+        </div>
+            {% else %}
         <div class="camera-option" onclick="switchCamera('{{ video_url(event.camera_videos.right_pillar) }}', this)" data-camera="right-pillar">
             <i class="bi bi-arrow-bar-right camera-icon"></i>
             <div class="camera-label">Right Pillar</div>
         </div>
+            {% endif %}
         {% else %}
         <div class="camera-option unavailable">
             <i class="bi bi-arrow-bar-right camera-icon"></i>
@@ -904,6 +957,28 @@
         currentClipIndex = newIndex;
         const clip = eventClips[currentClipIndex];
 
+        // CRITICAL: Abort any in-progress downloads before starting new one
+        // This prevents bandwidth competition and stalled downloads
+        if (seiAbortController) {
+            console.log('Aborting previous SEI download for clip navigation');
+            seiAbortController.abort();
+            seiAbortController = null;
+        }
+        if (backgroundPrefetchController) {
+            backgroundPrefetchController.abort();
+            backgroundPrefetchController = null;
+        }
+
+        // Remove any stuck loading indicators
+        const existingLoader = document.getElementById('seiLoading');
+        if (existingLoader) {
+            existingLoader.remove();
+        }
+
+        // Reset SEI state for new clip
+        seiLoading = false;
+        currentVideoSrc = null;
+
         // Reset HUD to default values while new video loads
         resetHUDToDefaults();
 
@@ -916,6 +991,7 @@
             const videoUrl = buildVideoUrl(newVideoFilename);
             if (videoUrl) {
                 loadVideoWithCache(videoUrl);
+                // SEI loading is handled inside loadVideoWithCache when overlay mode is enabled
             }
         } else {
             // Current camera not available, try front first
@@ -927,6 +1003,7 @@
                     const videoUrl = buildVideoUrl(filename);
                     if (videoUrl) {
                         loadVideoWithCache(videoUrl);
+                        // SEI loading is handled inside loadVideoWithCache when overlay mode is enabled
                         // Update active camera button
                         document.querySelectorAll('.camera-option').forEach(opt => {
                             opt.classList.remove('active');
@@ -1011,6 +1088,7 @@
         // If switching to stream mode and download is in progress, abort it
         if (!seiOverlayEnabled && seiLoading) {
             if (seiAbortController) {
+                console.log('Aborting SEI download - overlay mode disabled');
                 seiAbortController.abort();
                 seiAbortController = null;
             }
@@ -1027,6 +1105,14 @@
             currentVideoSrc = '';
         }
 
+        // Also remove loading indicator even if seiLoading flag wasn't set (edge case)
+        if (!seiOverlayEnabled) {
+            const loadingDiv = document.getElementById('seiLoading');
+            if (loadingDiv) {
+                loadingDiv.remove();
+            }
+        }
+
         // If switching to overlay mode, abort background caching (we'll do full download)
         if (seiOverlayEnabled && backgroundPrefetchController) {
             backgroundPrefetchController.abort();
@@ -1035,7 +1121,10 @@
 
         // Reload current video with new mode
         const currentSrc = video.src;
-        const streamUrl = video.dataset.originalUrl || currentSrc;
+        // Use originalUrl (set before clearing src), or currentVideoSrc (from SEI load), or current src
+        const streamUrl = video.dataset.originalUrl || currentVideoSrc || currentSrc;
+
+        console.log('Toggle mode - streamUrl:', streamUrl, 'originalUrl:', video.dataset.originalUrl, 'currentVideoSrc:', currentVideoSrc);
 
         // Only proceed if we have a valid stream URL (not blob)
         if (streamUrl && !streamUrl.startsWith('blob:')) {
@@ -1089,8 +1178,15 @@
         const normalizedUrl = normalizeUrl(videoUrl);
         video.dataset.originalUrl = normalizedUrl;
 
-        // In stream mode: just use normal video streaming (browser handles it efficiently)
-        // In overlay mode: loadSEIData will handle the download
+        // In overlay mode: DON'T set video.src here - loadSEIData will fetch the video,
+        // parse SEI metadata, and set video.src to a blob URL. This avoids double download.
+        if (seiOverlayEnabled && seiType) {
+            console.log('HUD Overlay mode: deferring video load to SEI fetch');
+            loadSEIData(videoUrl);
+            return;
+        }
+
+        // In stream mode: use normal video streaming (browser handles it efficiently)
         video.src = videoUrl;
         video.load();
     }
@@ -1098,13 +1194,16 @@
     // Set initial video source
     let initialVideoSrc = null;
 
+    // Track encrypted videos
+    const encryptedVideos = {{ (event.encrypted_videos or {}) | tojson }};
+
     // If we have clips (SavedClips with multiple timestamps), use the starting clip
     if (eventClips.length > 0) {
         const startingClip = eventClips[currentClipIndex];
-        // Prefer front camera, fall back to first available
+        // Prefer front camera, fall back to first available non-encrypted
         const cameras = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
         for (const camera of cameras) {
-            if (startingClip.camera_videos[camera]) {
+            if (startingClip.camera_videos[camera] && !startingClip.encrypted_videos?.[camera]) {
                 initialVideoSrc = buildVideoUrl(startingClip.camera_videos[camera]);
                 currentCameraAngle = camera;
                 break;
@@ -1115,31 +1214,55 @@
         updateClipNavigation();
     } else {
         // Single clip event or flat structure (RecentClips)
-        {% if event.camera_videos.front %}
+        // Find first available non-encrypted camera
+        {% if event.camera_videos.front and not (event.encrypted_videos and event.encrypted_videos.front) %}
         initialVideoSrc = "{{ video_url(event.camera_videos.front) }}";
         currentCameraAngle = 'front';
-        {% elif event.camera_videos.back %}
+        {% elif event.camera_videos.back and not (event.encrypted_videos and event.encrypted_videos.back) %}
         initialVideoSrc = "{{ video_url(event.camera_videos.back) }}";
         currentCameraAngle = 'back';
-        {% elif event.camera_videos.left_repeater %}
+        {% elif event.camera_videos.left_repeater and not (event.encrypted_videos and event.encrypted_videos.left_repeater) %}
         initialVideoSrc = "{{ video_url(event.camera_videos.left_repeater) }}";
         currentCameraAngle = 'left_repeater';
-        {% elif event.camera_videos.right_repeater %}
+        {% elif event.camera_videos.right_repeater and not (event.encrypted_videos and event.encrypted_videos.right_repeater) %}
         initialVideoSrc = "{{ video_url(event.camera_videos.right_repeater) }}";
         currentCameraAngle = 'right_repeater';
-        {% elif event.camera_videos.left_pillar %}
+        {% elif event.camera_videos.left_pillar and not (event.encrypted_videos and event.encrypted_videos.left_pillar) %}
         initialVideoSrc = "{{ video_url(event.camera_videos.left_pillar) }}";
         currentCameraAngle = 'left_pillar';
-        {% elif event.camera_videos.right_pillar %}
+        {% elif event.camera_videos.right_pillar and not (event.encrypted_videos and event.encrypted_videos.right_pillar) %}
         initialVideoSrc = "{{ video_url(event.camera_videos.right_pillar) }}";
         currentCameraAngle = 'right_pillar';
         {% endif %}
     }
 
+    // Update active camera button based on currentCameraAngle
+    function updateActiveCameraButton() {
+        const cameraMap = {
+            'front': 'front',
+            'back': 'rear',
+            'left_repeater': 'left',
+            'right_repeater': 'right',
+            'left_pillar': 'left-pillar',
+            'right_pillar': 'right-pillar'
+        };
+        const dataCamera = cameraMap[currentCameraAngle] || currentCameraAngle;
+        document.querySelectorAll('.camera-option').forEach(opt => {
+            opt.classList.remove('active');
+            if (opt.dataset.camera === dataCamera && !opt.classList.contains('encrypted') && !opt.classList.contains('unavailable')) {
+                opt.classList.add('active');
+            }
+        });
+    }
+
     // Load initial video
     if (initialVideoSrc) {
         loadVideoWithCache(initialVideoSrc);
+        updateActiveCameraButton();
         // SEI will load automatically if in overlay mode
+    } else {
+        // No playable videos - show message
+        console.warn('No playable videos found - all may be encrypted');
     }
 
     // Initialize SEI parsing
@@ -1173,28 +1296,16 @@
         currentVideoSrc = videoUrl;
         seiLoading = true;
 
-        // Check what's already buffered by the video element during streaming
-        let videoBytesBuffered = 0;
-        if (video.buffered.length > 0 && !videoUrl.startsWith('blob:')) {
-            // Calculate approximate bytes from buffered time ranges
-            // This is a rough estimate based on bitrate
-            const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-            const duration = video.duration;
-            if (duration && bufferedEnd) {
-                // Estimate: assume linear bitrate distribution
-                // We'll get the actual file size from the response headers
-                videoBytesBuffered = Math.floor((bufferedEnd / duration) * 100); // percentage placeholder
-            }
-        }
+        // CRITICAL: Clear video source to stop any browser buffering/downloading
+        // This prevents double-download and removes stale frame from previous video
+        video.pause();
+        video.removeAttribute('src');
+        video.load(); // This clears the buffer and stops network activity
 
         // Check for cached partial download from previous overlay attempt
         const cachedData = seiDownloadCache.get(videoUrl);
         let resumeFrom = cachedData ? cachedData.bytesLoaded : 0;
         let existingChunks = cachedData ? cachedData.chunks : [];
-
-        // If video has buffered data but we have no cache, we can't use the buffer
-        // (browser buffer is internal, we can't access the bytes)
-        // But we can skip downloading what's buffered by starting from a later byte
 
         console.log(resumeFrom > 0 ? `Resuming download from ${(resumeFrom / 1024 / 1024).toFixed(1)} MB (cached)` : 'Starting fresh download');
 
@@ -1204,9 +1315,6 @@
         loadingDiv.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.9);color:#fff;padding:30px 50px;border-radius:12px;z-index:9999;font-size:18px;text-align:center;backdrop-filter:blur(10px);';
         loadingDiv.innerHTML = '<div style="margin-bottom:15px;">⏳ Loading Video...</div><div style="font-size:14px;opacity:0.7;" id="seiProgress">Preparing...</div>';
         document.body.appendChild(loadingDiv);
-
-        // Pause video while loading
-        video.pause();
 
         try {
             // Create abort controller for this download
@@ -1450,19 +1558,31 @@
     // Initialize on page load
     initSEI().then(() => {
         console.log('SEI system initialized');
-    });
-
-    // Load SEI data when video loads (only if in overlay mode)
-    video.addEventListener('loadedmetadata', () => {
-        if (seiOverlayEnabled) {
-            loadSEIData(video.src);
+        // If overlay mode is enabled and video already loaded (before SEI init),
+        // trigger SEI loading now to avoid double download on next navigation
+        if (seiOverlayEnabled && video.src && !video.src.startsWith('blob:') && !seiLoading) {
+            const originalUrl = video.dataset.originalUrl || video.src;
+            if (originalUrl) {
+                console.log('SEI init complete - loading SEI for already-playing video');
+                loadSEIData(originalUrl);
+            }
         }
     });
 
-    // Handle race condition: if video already has metadata, load SEI now (only if in overlay mode)
-    if (video.readyState >= 1 && seiOverlayEnabled) {
-        loadSEIData(video.src);
-    }
+    // Load SEI data when video loads - but ONLY for blob URLs (already processed)
+    // or when overlay was enabled after video started loading in stream mode.
+    // Normal overlay loading is handled by loadVideoWithCache() to avoid double download.
+    video.addEventListener('loadedmetadata', () => {
+        if (seiOverlayEnabled && !video.src.startsWith('blob:') && !seiLoading && seiFrames.length === 0) {
+            // This handles the case where overlay mode was enabled mid-stream
+            // or when the video was loaded before SEI system initialized
+            const originalUrl = video.dataset.originalUrl || video.src;
+            if (originalUrl && !originalUrl.startsWith('blob:')) {
+                console.log('Late SEI load triggered by loadedmetadata');
+                loadSEIData(originalUrl);
+            }
+        }
+    });
 
     function switchCamera(videoUrl, element) {
         if (!videoUrl || element.classList.contains('unavailable')) {
@@ -1473,6 +1593,14 @@
         const existingLoader = document.getElementById('seiLoading');
         if (existingLoader) {
             existingLoader.remove();
+        }
+
+        // CRITICAL: Abort any in-progress SEI download before starting new one
+        // This prevents bandwidth competition and stalled downloads
+        if (seiAbortController) {
+            console.log('Aborting previous SEI download for camera switch');
+            seiAbortController.abort();
+            seiAbortController = null;
         }
 
         // Reset HUD to default values while new video loads
@@ -1513,12 +1641,8 @@
         }
 
         // Switch video source with caching
+        // SEI loading is handled inside loadVideoWithCache when overlay mode is enabled
         loadVideoWithCache(videoUrl);
-
-        // Trigger SEI loading for new video if in overlay mode
-        if (seiOverlayEnabled) {
-            loadSEIData(videoUrl);
-        }
 
         // Restore playback position
         video.addEventListener('loadedmetadata', function onLoaded() {

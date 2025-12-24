@@ -40,6 +40,35 @@ from services.mode_service import current_mode
 from utils import parse_session_from_filename
 
 
+# MP4 magic bytes: ftyp box signature
+MP4_FTYP_SIGNATURE = b'ftyp'
+
+
+def is_valid_mp4(filepath):
+    """
+    Check if a file has valid MP4 headers (not encrypted by Tesla).
+
+    Tesla encrypts some camera angles in RecentClips until they're saved.
+    This function checks for the 'ftyp' box which is required for valid MP4.
+
+    Args:
+        filepath: Path to the video file
+
+    Returns:
+        bool: True if file has valid MP4 headers, False if encrypted/corrupt
+    """
+    try:
+        with open(filepath, 'rb') as f:
+            # Read first 12 bytes - ftyp box is typically at offset 4-7
+            header = f.read(12)
+            if len(header) < 12:
+                return False
+            # Check for 'ftyp' signature (typically at bytes 4-7)
+            return MP4_FTYP_SIGNATURE in header
+    except (OSError, IOError):
+        return False
+
+
 def get_teslacam_path():
     """
     Get the TeslaCam path based on current mode.
@@ -173,6 +202,7 @@ def _parse_clips_from_event(event_path):
               - timestamp_str: Clip timestamp (e.g., "2025-12-23_18-15-46")
               - timestamp: Unix timestamp
               - camera_videos: Dict mapping camera angles to filenames
+              - encrypted_videos: Dict mapping camera angles to True if encrypted
               Empty list if no clips found.
     """
     clips_by_timestamp = {}
@@ -208,14 +238,25 @@ def _parse_clips_from_event(event_path):
                                 'right_repeater': None,
                                 'left_pillar': None,
                                 'right_pillar': None,
+                            },
+                            'encrypted_videos': {
+                                'front': False,
+                                'back': False,
+                                'left_repeater': False,
+                                'right_repeater': False,
+                                'left_pillar': False,
+                                'right_pillar': False,
                             }
                         }
                     except ValueError:
                         continue
 
-                # Add camera video to clip
+                # Add camera video to clip and check if encrypted
                 if camera in clips_by_timestamp[timestamp_str]['camera_videos']:
                     clips_by_timestamp[timestamp_str]['camera_videos'][camera] = entry.name
+                    # Check if video has valid MP4 headers
+                    if not is_valid_mp4(entry.path):
+                        clips_by_timestamp[timestamp_str]['encrypted_videos'][camera] = True
 
     except OSError:
         return []
@@ -267,6 +308,16 @@ def _parse_event_folder(event_path, event_name):
             'event': None  # Grid view video
         }
 
+        # Track encrypted/invalid videos (Tesla encrypts some camera angles)
+        encrypted_videos = {
+            'front': False,
+            'back': False,
+            'left_repeater': False,
+            'right_repeater': False,
+            'left_pillar': False,
+            'right_pillar': False,
+        }
+
         total_size = 0
         latest_timestamp = 0
 
@@ -279,20 +330,31 @@ def _parse_event_folder(event_path, event_name):
 
                     # Categorize video by camera angle (use first found for compatibility)
                     name_lower = entry.name.lower()
+                    camera_key = None
                     if name_lower == 'event.mp4':
                         camera_videos['event'] = entry.name
                     elif 'front' in name_lower and camera_videos['front'] is None:
                         camera_videos['front'] = entry.name
+                        camera_key = 'front'
                     elif 'back' in name_lower and camera_videos['back'] is None:
                         camera_videos['back'] = entry.name
+                        camera_key = 'back'
                     elif 'left_repeater' in name_lower and camera_videos['left_repeater'] is None:
                         camera_videos['left_repeater'] = entry.name
+                        camera_key = 'left_repeater'
                     elif 'right_repeater' in name_lower and camera_videos['right_repeater'] is None:
                         camera_videos['right_repeater'] = entry.name
+                        camera_key = 'right_repeater'
                     elif 'left_pillar' in name_lower and camera_videos['left_pillar'] is None:
                         camera_videos['left_pillar'] = entry.name
+                        camera_key = 'left_pillar'
                     elif 'right_pillar' in name_lower and camera_videos['right_pillar'] is None:
                         camera_videos['right_pillar'] = entry.name
+                        camera_key = 'right_pillar'
+
+                    # Check if video has valid MP4 headers
+                    if camera_key and not is_valid_mp4(entry.path):
+                        encrypted_videos[camera_key] = True
                 except OSError:
                     continue
 
@@ -327,6 +389,7 @@ def _parse_event_folder(event_path, event_name):
             'size_mb': round(total_size / (1024 * 1024), 2),
             'has_thumbnail': has_thumbnail,
             'camera_videos': camera_videos,
+            'encrypted_videos': encrypted_videos,  # Track which videos are encrypted
             'metadata': event_metadata,
             'city': event_metadata.get('city', ''),
             'reason': event_metadata.get('reason', ''),
@@ -410,6 +473,14 @@ def group_videos_by_session(folder_path, page=1, per_page=12):
                     'left_pillar': None,
                     'right_pillar': None,
                 },
+                'encrypted_videos': {
+                    'front': False,
+                    'back': False,
+                    'left_repeater': False,
+                    'right_repeater': False,
+                    'left_pillar': False,
+                    'right_pillar': False,
+                },
                 'has_thumbnail': True,  # Generated on-demand
                 'metadata': {},
                 'city': '',
@@ -419,10 +490,13 @@ def group_videos_by_session(folder_path, page=1, per_page=12):
         # Add video to session
         sessions[session_id]['size'] += video['size']
 
-        # Map to camera angle
+        # Map to camera angle and check encryption
         camera = video.get('camera', '').lower()
         if camera in sessions[session_id]['camera_videos']:
             sessions[session_id]['camera_videos'][camera] = video['name']
+            # Check if video has valid MP4 headers
+            if not is_valid_mp4(video['path']):
+                sessions[session_id]['encrypted_videos'][camera] = True
 
     # Convert to list
     session_list = list(sessions.values())

@@ -19,6 +19,7 @@ from services.video_service import (
     get_event_details,
     group_videos_by_session,
     generate_video_thumbnail,
+    is_valid_mp4,
 )
 
 logger = logging.getLogger(__name__)
@@ -146,14 +147,25 @@ def view_event(folder, event_name):
                 'left_pillar': None,
                 'right_pillar': None,
             },
+            'encrypted_videos': {
+                'front': False,
+                'back': False,
+                'left_repeater': False,
+                'right_repeater': False,
+                'left_pillar': False,
+                'right_pillar': False,
+            },
             'has_thumbnail': False,
         }
 
-        # Map videos to camera angles
+        # Map videos to camera angles and check for encryption
         for video in session_videos:
             camera = video.get('camera', '').lower()
             if camera in event['camera_videos']:
                 event['camera_videos'][camera] = video['name']
+                # Check if video has valid MP4 headers
+                if not is_valid_mp4(video['path']):
+                    event['encrypted_videos'][camera] = True
 
         return render_template(
             'event_player.html',

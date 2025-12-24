@@ -22,7 +22,7 @@
             <p>Your cleanup operation completed successfully.</p>
         </div>
     {% endif %}
-    
+
     <!-- Summary -->
     <div class="report-summary">
         <div class="summary-card">
@@ -32,7 +32,7 @@
                 <p>Videos {% if dry_run %}Would Be {% endif %}Deleted</p>
             </div>
         </div>
-        
+
         <div class="summary-card">
             <div class="summary-icon">💾</div>
             <div class="summary-content">
@@ -41,13 +41,13 @@
             </div>
         </div>
     </div>
-    
+
     {% if not dry_run and partition_usage %}
     <!-- Updated Storage Status -->
     <div class="storage-update">
         <h2>📊 Updated Storage Status</h2>
         <div class="partition-card">
-            <h3>🚗 TeslaCam Partition</h3>
+            <h3>🚗 TeslaCam Drive</h3>
             <div class="storage-stat">
                 <span class="stat-label">Total Space:</span>
                 <span class="stat-value">{{ partition_usage['total_gb'] }} GB</span>
@@ -60,15 +60,15 @@
                 <span class="stat-label">Free:</span>
                 <span class="stat-value">{{ partition_usage['free_gb'] }} GB</span>
             </div>
-            
+
             <div class="progress-bar-container">
-                <div class="progress-bar progress-normal" 
+                <div class="progress-bar progress-normal"
                      style="width: {{ partition_usage['percent_used'] }}%"></div>
             </div>
         </div>
     </div>
     {% endif %}
-    
+
     <!-- Action Buttons -->
     <div class="button-group">
         <a href="{{ url_for('analytics.dashboard') }}" class="btn btn-primary">
@@ -86,7 +86,7 @@
         </a>
         {% endif %}
     </div>
-    
+
     {% if not dry_run %}
     <div class="help-text">
         <h3>ℹ️ What's Next?</h3>

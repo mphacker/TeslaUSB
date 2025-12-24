@@ -180,7 +180,7 @@ def get_storage_health():
                     f"{friendly_name}: Filesystem not checked in {int(last_check['age_hours'] / 24)} days"
                 )
                 health['recommendations'].append(
-                    f"Run filesystem check on {friendly_name} partition (Analytics page)"
+                    f"Run filesystem check on {friendly_name} drive (Analytics page)"
                 )
         else:
             health['fsck_status'][partition_name] = {
@@ -189,7 +189,7 @@ def get_storage_health():
             }
             # Don't alert on first boot, but note it's available
             health['recommendations'].append(
-                f"Consider running initial filesystem check on {friendly_name} partition (Analytics page)"
+                f"Consider running initial filesystem check on {friendly_name} drive (Analytics page)"
             )
 
     # Check each partition for storage space
@@ -206,12 +206,12 @@ def get_storage_health():
         if percent >= 95:
             health['status'] = 'critical'
             health['alerts'].append(f"{friendly_name}: Critical storage ({percent:.1f}% used)")
-            health['recommendations'].append(f"Delete videos from {friendly_name} partition immediately")
+            health['recommendations'].append(f"Delete videos from {friendly_name} drive immediately")
         elif percent >= 90:
             if health['status'] != 'critical':
                 health['status'] = 'warning'
             health['alerts'].append(f"{friendly_name}: Low storage ({percent:.1f}% used)")
-            health['recommendations'].append(f"Consider cleaning up old videos from {friendly_name} partition")
+            health['recommendations'].append(f"Consider cleaning up old videos from {friendly_name} drive")
         elif percent >= 80:
             if health['status'] == 'healthy':
                 health['status'] = 'warning'

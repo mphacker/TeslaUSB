@@ -11,7 +11,7 @@
 installation:
   gadget_dir: /home/pi/TeslaUSB    # Installation directory where TeslaUSB is installed
   target_user: pi                   # Linux user running the TeslaUSB services
-  mount_dir: /mnt/gadget           # Mount directory for USB partitions
+  mount_dir: /mnt/gadget           # Mount directory for USB drives
 
 # ============================================================================
 # Disk Images
@@ -19,8 +19,9 @@ installation:
 disk_images:
   cam_name: usb_cam.img            # TeslaCam disk image filename
   lightshow_name: usb_lightshow.img # LightShow disk image filename
-  cam_label: TeslaCam              # Filesystem label for TeslaCam partition
-  lightshow_label: Lightshow       # Filesystem label for LightShow partition
+  cam_label: TeslaCam              # Filesystem label for TeslaCam drive
+  lightshow_label: Lightshow       # Filesystem label for LightShow drive
+  boot_fsck_enabled: true          # Auto-repair filesystems on boot (recommended)
 
 # ============================================================================
 # Setup Configuration (used only by setup_usb.sh)
@@ -28,8 +29,8 @@ disk_images:
 # These values are specific to the setup process and can be configured here
 # or left empty ("") for interactive prompts during setup.
 setup:
-  part1_size: ""                   # TeslaCam partition size (e.g., "50G" or leave empty for interactive)
-  part2_size: ""                   # LightShow partition size (e.g., "10G" or leave empty for interactive)
+  part1_size: ""                   # TeslaCam drive size (e.g., "50G" or leave empty for interactive)
+  part2_size: ""                   # LightShow drive size (e.g., "10G" or leave empty for interactive)
   reserve_size: ""                 # Headroom to leave free on Pi filesystem (default: 5G)
 
 # ============================================================================

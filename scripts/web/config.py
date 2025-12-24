@@ -74,7 +74,7 @@ RO_MNT_DIR = MNT_DIR  # Same as MNT_DIR since we use -ro and -rw suffixes
 # State management
 STATE_FILE = os.path.join(GADGET_DIR, "state.txt")
 
-# USB partition configuration
+# USB drive configuration
 USB_PARTITIONS = ("part1", "part2")
 PART_LABEL_MAP = {"part1": "gadget_part1", "part2": "gadget_part2"}
 

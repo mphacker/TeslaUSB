@@ -879,6 +879,26 @@
     line-height: 1.6;
 }
 
+.last-check-result.status-healthy {
+    color: #2e7d32;
+}
+
+.last-check-result.status-repaired {
+    color: #ed6c02;
+}
+
+.last-check-result.status-recording {
+    color: #1976d2;
+}
+
+.last-check-result.status-errors {
+    color: #d32f2f;
+}
+
+.last-check-result.status-warning {
+    color: #ed6c02;
+}
+
 .last-check-never {
     color: #999;
     font-style: italic;
@@ -1020,6 +1040,26 @@
 
 [data-theme="dark"] .last-check-result {
     color: var(--text-primary);
+}
+
+[data-theme="dark"] .last-check-result.status-healthy {
+    color: #66bb6a;
+}
+
+[data-theme="dark"] .last-check-result.status-repaired {
+    color: #ffa726;
+}
+
+[data-theme="dark"] .last-check-result.status-recording {
+    color: #64b5f6;
+}
+
+[data-theme="dark"] .last-check-result.status-errors {
+    color: #ef5350;
+}
+
+[data-theme="dark"] .last-check-result.status-warning {
+    color: #ffa726;
 }
 
 [data-theme="dark"] .fsck-history-container {

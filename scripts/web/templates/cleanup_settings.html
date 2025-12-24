@@ -14,7 +14,7 @@
         <a href="{{ url_for('analytics.dashboard') }}" class="btn btn-back">← Back to Analytics</a>
         <h2>🧹 Auto-Cleanup Settings</h2>
     </div>
-    
+
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
@@ -22,15 +22,15 @@
             {% endfor %}
         {% endif %}
     {% endwith %}
-    
+
     {% if mode != 'edit' %}
         <div class="alert alert-warning">
             <strong>⚠️ Edit Mode Required</strong><br>
-            You must be in Edit mode to configure and run cleanup. 
+            You must be in Edit mode to configure and run cleanup.
             <a href="{{ url_for('mode_control.index') }}">Switch to Edit mode</a>
         </div>
     {% endif %}
-    
+
     <form method="POST" action="{{ url_for('cleanup.save_settings') }}" class="cleanup-form">
         <!-- Dynamic folder settings based on detected folders -->
         {% for folder_name, policy in policies.items() %}
@@ -46,7 +46,7 @@
                     {{ folder_name }}
                 </h2>
                 <label class="toggle-switch">
-                    <input type="checkbox" name="{{ folder_name }}_enabled" 
+                    <input type="checkbox" name="{{ folder_name }}_enabled"
                            {% if policy['enabled'] %}checked{% endif %}
                            {% if mode != 'edit' %}disabled{% endif %}>
                     <span class="toggle-slider"></span>
@@ -58,7 +58,7 @@
                     </span>
                 </label>
             </div>
-            
+
             <div class="policy-options">
                 <div class="policy-option">
                     <label class="checkbox-label">
@@ -67,12 +67,12 @@
                                {% if mode != 'edit' %}disabled{% endif %}>
                         Age-based: Delete videos older than
                     </label>
-                    <input type="number" name="{{ folder_name }}_age_days" 
-                           value="{{ policy['age_based']['days'] }}" 
+                    <input type="number" name="{{ folder_name }}_age_days"
+                           value="{{ policy['age_based']['days'] }}"
                            min="1" max="3650" class="number-input"
                            {% if mode != 'edit' %}disabled{% endif %}> days
                 </div>
-                
+
                 {% if 'size_based' in policy %}
                 <div class="policy-option">
                     <label class="checkbox-label">
@@ -81,13 +81,13 @@
                                {% if mode != 'edit' %}disabled{% endif %}>
                         Size-based: Keep maximum of
                     </label>
-                    <input type="number" name="{{ folder_name }}_size_gb" 
-                           value="{{ policy['size_based']['max_gb'] }}" 
+                    <input type="number" name="{{ folder_name }}_size_gb"
+                           value="{{ policy['size_based']['max_gb'] }}"
                            min="1" max="1000" class="number-input"
                            {% if mode != 'edit' %}disabled{% endif %}> GB
                 </div>
                 {% endif %}
-                
+
                 {% if 'count_based' in policy %}
                 <div class="policy-option">
                     <label class="checkbox-label">
@@ -96,8 +96,8 @@
                                {% if mode != 'edit' %}disabled{% endif %}>
                         Count-based: Keep only newest
                     </label>
-                    <input type="number" name="{{ folder_name }}_count_videos" 
-                           value="{{ policy['count_based']['max_videos'] }}" 
+                    <input type="number" name="{{ folder_name }}_count_videos"
+                           value="{{ policy['count_based']['max_videos'] }}"
                            min="1" max="10000" class="number-input"
                            {% if mode != 'edit' %}disabled{% endif %}> videos
                 </div>
@@ -105,14 +105,14 @@
             </div>
         </div>
         {% endfor %}
-        
+
         <!-- Action Buttons -->
         <div class="button-group">
             <button type="submit" class="btn btn-primary" {% if mode != 'edit' %}disabled{% endif %}>💾 Save Settings</button>
             <a href="{{ url_for('cleanup.preview') }}" class="btn btn-secondary {% if mode != 'edit' %}disabled{% endif %}">🔍 Preview Cleanup</a>
         </div>
     </form>
-    
+
     <!-- Help Card -->
     <div class="cleanup-card help-card">
         <h3>ℹ️ How Auto-Cleanup Works</h3>
@@ -124,7 +124,7 @@
             <li><strong>SentryClips:</strong> Security event recordings - disabled by default for safety</li>
             <li><strong>EncryptedClips:</strong> Cybertruck encrypted footage - disabled by default</li>
             <li><strong>Protected videos:</strong> Videos from the past hour are never deleted (might still be recording)</li>
-            <li><strong>Boot sequence:</strong> On startup, the system mounts partitions read-write, runs cleanup for enabled folders, then unmounts and presents the USB gadget to Tesla</li>
+            <li><strong>Boot sequence:</strong> On startup, the system mounts drives read-write, runs cleanup for enabled folders, then unmounts and presents the USB gadget to Tesla</li>
         </ul>
     </div>
 </div>

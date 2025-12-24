@@ -120,9 +120,9 @@ unmount_with_retry() {
   return 0
 }
 
-# Unmount partitions if mounted
+# Unmount drives if mounted
 log_timing "Starting unmount sequence"
-echo "Unmounting partitions..."
+echo "Unmounting drives..."
 for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   # Sync each partition before unmounting
   if mountpoint -q "$mp" 2>/dev/null; then
@@ -135,7 +135,7 @@ for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   fi
 done
 
-log_timing "Partitions unmounted"
+log_timing "Drives unmounted"
 
 # Also unmount any existing read-only mounts from previous present mode
 echo "Unmounting any existing read-only mounts..."
@@ -151,8 +151,60 @@ done
 sync
 log_timing "Final sync completed"
 
-# Filesystem checks removed from mode switching for faster operation
-# Use the web interface Analytics page to run manual filesystem checks
+# ============================================================================
+# Boot-time filesystem check and repair (optional, ~1 second total)
+# ============================================================================
+if [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
+  echo "Running boot-time filesystem check and repair..."
+
+  # Create temporary loop devices for fsck
+  LOOP_CAM_FSCK=$(sudo losetup --show -f "$IMG_CAM" 2>/dev/null)
+  LOOP_LIGHTSHOW_FSCK=$(sudo losetup --show -f "$IMG_LIGHTSHOW" 2>/dev/null)
+
+  # Detect filesystem types
+  FS_TYPE_CAM=$(sudo blkid -o value -s TYPE "$LOOP_CAM_FSCK" 2>/dev/null || echo "exfat")
+  FS_TYPE_LIGHTSHOW=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW_FSCK" 2>/dev/null || echo "vfat")
+
+  # Run fsck on TeslaCam (part1)
+  echo "  Checking TeslaCam ($FS_TYPE_CAM)..."
+  if [ "$FS_TYPE_CAM" = "exfat" ]; then
+    if sudo fsck.exfat -p "$LOOP_CAM_FSCK" 2>&1; then
+      echo "    ✓ TeslaCam: clean"
+    else
+      echo "    ⚠ TeslaCam: repaired or has issues"
+    fi
+  else
+    if sudo fsck.vfat -p "$LOOP_CAM_FSCK" 2>&1; then
+      echo "    ✓ TeslaCam: clean"
+    else
+      echo "    ⚠ TeslaCam: repaired or has issues"
+    fi
+  fi
+
+  # Run fsck on LightShow (part2)
+  echo "  Checking LightShow ($FS_TYPE_LIGHTSHOW)..."
+  if [ "$FS_TYPE_LIGHTSHOW" = "exfat" ]; then
+    if sudo fsck.exfat -p "$LOOP_LIGHTSHOW_FSCK" 2>&1; then
+      echo "    ✓ LightShow: clean"
+    else
+      echo "    ⚠ LightShow: repaired or has issues"
+    fi
+  else
+    if sudo fsck.vfat -p "$LOOP_LIGHTSHOW_FSCK" 2>&1; then
+      echo "    ✓ LightShow: clean"
+    else
+      echo "    ⚠ LightShow: repaired or has issues"
+    fi
+  fi
+
+  # Clean up fsck loop devices
+  sudo losetup -d "$LOOP_CAM_FSCK" 2>/dev/null || true
+  sudo losetup -d "$LOOP_LIGHTSHOW_FSCK" 2>/dev/null || true
+
+  log_timing "Boot fsck completed"
+else
+  echo "Boot-time fsck disabled (set disk_images.boot_fsck_enabled: true to enable)"
+fi
 
 # Remove mount directories to avoid accidental access when unmounted
 echo "Removing mount directories..."

@@ -6,6 +6,7 @@ with proper unmount/remount handling in edit mode.
 """
 
 import os
+import re
 import subprocess
 import time
 import json
@@ -13,7 +14,7 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 from config import GADGET_DIR, MNT_DIR
 from .partition_service import iter_all_partitions
@@ -35,6 +36,139 @@ _cancel_requested = False
 class FsckError(Exception):
     """Exception raised when fsck operations fail."""
     pass
+
+
+# Patterns for transient errors (from active Tesla writes)
+# These are expected when Tesla is actively recording and not real corruption
+TRANSIENT_ERROR_PATTERNS = [
+    r'cluster [0-9a-fx]+ is marked as free',  # Bitmap not synced yet
+    r'file size.*does not match.*allocated',   # Size mismatch during write
+]
+
+# Patterns for real corruption that needs repair
+REAL_CORRUPTION_PATTERNS = [
+    r'cross.?linked',                          # Two files claim same cluster
+    r'orphan',                                 # Lost clusters
+    r'directory.*corrupt',                     # Directory structure damage
+    r'invalid.*cluster',                       # Bad cluster chain
+    r'loop.*detected',                         # Circular reference
+    r'boot.*sector',                           # Boot sector issues
+    r'fat.*table',                             # FAT corruption
+]
+
+
+def _classify_fsck_errors(log_path: str) -> Tuple[List[str], List[str], bool]:
+    """
+    Classify errors from fsck log into transient vs real corruption.
+
+    Args:
+        log_path: Path to fsck log file
+
+    Returns:
+        Tuple of (transient_errors, real_errors, only_transient)
+    """
+    transient_errors = []
+    real_errors = []
+
+    try:
+        if not os.path.exists(log_path):
+            return [], [], False
+
+        with open(log_path, 'r') as f:
+            content = f.read()
+
+        # Find all ERROR lines
+        for line in content.split('\n'):
+            if 'ERROR:' not in line and 'error:' not in line.lower():
+                continue
+
+            line_lower = line.lower()
+
+            # Check for real corruption patterns first (higher priority)
+            is_real = False
+            for pattern in REAL_CORRUPTION_PATTERNS:
+                if re.search(pattern, line_lower):
+                    real_errors.append(line.strip())
+                    is_real = True
+                    break
+
+            if is_real:
+                continue
+
+            # Check for transient patterns
+            is_transient = False
+            for pattern in TRANSIENT_ERROR_PATTERNS:
+                if re.search(pattern, line_lower):
+                    transient_errors.append(line.strip())
+                    is_transient = True
+                    break
+
+            # Unknown error type - treat as real corruption to be safe
+            if not is_transient:
+                real_errors.append(line.strip())
+
+    except Exception as e:
+        logger.warning(f"Failed to classify fsck errors: {e}")
+        return [], [], False
+
+    only_transient = len(transient_errors) > 0 and len(real_errors) == 0
+    return transient_errors, real_errors, only_transient
+
+
+def _is_actively_recording(partition_num: int) -> bool:
+    """
+    Check if Tesla is actively recording to this partition.
+
+    Looks for recently modified files in RecentClips (< 2 minutes old).
+    Only applies to TeslaCam partition (part1).
+
+    Args:
+        partition_num: Partition number (1 or 2)
+
+    Returns:
+        True if Tesla appears to be actively recording
+    """
+    # Only TeslaCam (part1) has RecentClips
+    if partition_num != 1:
+        return False
+
+    # Check if in present mode (USB connected to Tesla)
+    if current_mode() != 'present':
+        return False
+
+    try:
+        # Get mount path
+        mount_path = None
+        for part, path in iter_all_partitions():
+            if part == f'part{partition_num}':
+                mount_path = path
+                break
+
+        if not mount_path:
+            return False
+
+        recent_clips = os.path.join(mount_path, 'TeslaCam', 'RecentClips')
+
+        # Use nsenter to check in PID 1 namespace
+        result = subprocess.run(
+            ['sudo', 'nsenter', '--mount=/proc/1/ns/mnt', '--',
+             'find', recent_clips, '-maxdepth', '1', '-type', 'f',
+             '-mmin', '-2', '-name', '*.mp4'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+
+        # If any files found, Tesla is recording
+        recent_files = [f for f in result.stdout.strip().split('\n') if f]
+        if recent_files:
+            logger.info(f"Active recording detected: {len(recent_files)} recent files")
+            return True
+
+    except Exception as e:
+        logger.debug(f"Could not check for active recording: {e}")
+
+    return False
 
 
 def _get_status() -> Dict:
@@ -258,8 +392,28 @@ def _run_fsck_background(partition_num: int, mode: str):
             result = 'repaired'
             details = 'Errors corrected - consider rebooting'
         elif fsck_status == 4:
-            result = 'errors'
-            details = 'Errors left uncorrected'
+            # Errors found - check if transient (from active Tesla writes) or real corruption
+            log_path = f"/var/log/teslausb/fsck_{os.path.basename(loop_dev)}.log"
+            transient, real, only_transient = _classify_fsck_errors(log_path)
+
+            if only_transient and _is_actively_recording(partition_num):
+                # Only transient errors and Tesla is recording - this is expected
+                result = 'recording'
+                details = f'Tesla recording in progress ({len(transient)} transient inconsistencies)'
+                logger.info(f"Classified as active recording: {len(transient)} transient errors")
+            elif only_transient and mode == 'quick':
+                # Only transient errors but not actively recording - might have just stopped
+                result = 'recording'
+                details = f'Recent writes detected ({len(transient)} pending sync)'
+                logger.info(f"Transient errors only (no active recording): {len(transient)}")
+            else:
+                # Real corruption found
+                result = 'errors'
+                if real:
+                    details = f'Real corruption detected ({len(real)} issues)'
+                    logger.warning(f"Real corruption found: {real[:3]}...")  # Log first 3
+                else:
+                    details = 'Errors left uncorrected'
         elif fsck_status == 8:
             result = 'failed'
             details = 'Operational error during fsck'
@@ -465,7 +619,7 @@ def get_history() -> list:
 
 def get_last_check(partition_num: int) -> Optional[Dict]:
     """
-    Get the last successful fsck result for a partition.
+    Get the last fsck result for a partition.
 
     Args:
         partition_num: Partition number (1 or 2)
@@ -476,9 +630,9 @@ def get_last_check(partition_num: int) -> Optional[Dict]:
     history = _get_history()
     partition_name = f"part{partition_num}"
 
-    # Find most recent successful check for this partition
+    # Find most recent check for this partition (any result)
     for entry in reversed(history):
-        if entry['partition'] == partition_name and entry['result'] in ['healthy', 'repaired']:
+        if entry['partition'] == partition_name:
             return {
                 'timestamp': entry['timestamp'],
                 'result': entry['result'],

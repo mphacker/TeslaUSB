@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # edit_usb.sh - Switch to edit mode with local mounts and Samba
-# This script removes the USB gadget, mounts partitions locally, and starts Samba
+# This script removes the USB gadget, mounts drives locally, and starts Samba
 
 # Load configuration
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -227,7 +227,7 @@ sudo mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
 sudo chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
 
 # Ensure previous mounts are cleared before setting up new loop devices
-# This prevents remounting while partitions are still in use
+# This prevents remounting while drives are still in use
 for PART_NUM in 1 2; do
   MP="$MNT_DIR/part${PART_NUM}"
   if mountpoint -q "$MP" 2>/dev/null; then
@@ -297,10 +297,10 @@ trap cleanup_loops_on_failure EXIT
 # Filesystem checks removed from mode switching for faster operation
 # Use the web interface Analytics page to run manual filesystem checks
 
-# Mount partitions
-echo "Mounting partitions..."
+# Mount drives
+echo "Mounting drives..."
 
-# Mount TeslaCam partition (part1) in system mount namespace
+# Mount TeslaCam drive (part1) in system mount namespace
 MP="$MNT_DIR/part1"
 FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "unknown")
 echo "  Mounting $LOOP_CAM at $MP..."
@@ -320,7 +320,7 @@ if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$MP"; then
 fi
 echo "  Mounted $LOOP_CAM at $MP (filesystem: $FS_TYPE)"
 
-# Mount Lightshow partition (part2) in system mount namespace
+# Mount Lightshow drive (part2) in system mount namespace
 MP="$MNT_DIR/part2"
 FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "unknown")
 echo "  Mounting $LOOP_LIGHTSHOW at $MP..."
@@ -340,7 +340,7 @@ if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$MP"; then
 fi
 echo "  Mounted $LOOP_LIGHTSHOW at $MP (filesystem: $FS_TYPE)"
 
-# Refresh Samba so shares expose the freshly mounted partitions
+# Refresh Samba so shares expose the freshly mounted drives
 echo "Refreshing Samba shares..."
 # Force close any cached shares
 sudo smbcontrol all close-share gadget_part1 2>/dev/null || true
@@ -367,7 +367,7 @@ echo "Ensuring buffered writes are flushed..."
 sync
 
 echo "Edit mode activated successfully!"
-echo "Partitions are now mounted locally and accessible via Samba shares:"
+echo "Drives are now mounted locally and accessible via Samba shares:"
 echo "  - Part 1: $MNT_DIR/part1"
 echo "  - Part 2: $MNT_DIR/part2"
 echo "  - Samba shares: gadget_part1, gadget_part2"

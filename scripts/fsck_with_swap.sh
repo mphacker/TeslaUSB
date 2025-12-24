@@ -92,6 +92,9 @@ case "$FS_TYPE" in
 esac
 
 # Interpret fsck exit codes
+# Note: Exit code meaning depends on mode:
+#   - Quick mode (-n): exit 1 = errors found but not fixed (read-only)
+#   - Repair mode (-a/-p): exit 1 = errors found and corrected
 case $FSCK_STATUS in
   0)
     echo "✓ Filesystem check passed - no errors found"
@@ -99,14 +102,22 @@ case $FSCK_STATUS in
     exit 0
     ;;
   1)
-    echo "✓ Filesystem errors corrected successfully"
-    echo "   Details: $LOG_FILE"
-    exit 0
+    if [ "$MODE" = "repair" ]; then
+      echo "✓ Filesystem errors corrected successfully"
+      echo "   Details: $LOG_FILE"
+      exit 1
+    else
+      # Quick mode: exit 1 means errors were found but not fixed (read-only check)
+      echo "⚠ Filesystem errors detected (read-only check)"
+      echo "   Run repair to fix these errors"
+      echo "   Details: $LOG_FILE"
+      exit 4  # Map to "errors uncorrected" for quick mode
+    fi
     ;;
   2)
     echo "⚠ Filesystem corrected - system should be rebooted"
     echo "   Details: $LOG_FILE"
-    exit 0
+    exit 2
     ;;
   4)
     echo "✗ Filesystem errors left uncorrected"

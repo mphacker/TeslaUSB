@@ -55,7 +55,7 @@
 
         <div class="fsck-partitions">
             <div class="fsck-partition-card">
-                <h4>📹 TeslaCam Partition</h4>
+                <h4>📹 TeslaCam Drive</h4>
                 <div id="part1-last-check" class="last-check-info">Loading...</div>
                 <div class="fsck-actions">
                     <button onclick="startFsck(1, 'quick')" class="btn btn-secondary" id="btn-fsck-part1-quick">
@@ -68,7 +68,7 @@
             </div>
 
             <div class="fsck-partition-card">
-                <h4>💡 LightShow Partition</h4>
+                <h4>💡 LightShow Drive</h4>
                 <div id="part2-last-check" class="last-check-info">Loading...</div>
                 <div class="fsck-actions">
                     <button onclick="startFsck(2, 'quick')" class="btn btn-secondary" id="btn-fsck-part2-quick">
@@ -89,11 +89,11 @@
         </div>
     </div>
 
-    <!-- Partition Usage Cards -->
+    <!-- Drive Usage Cards -->
     <div class="analytics-grid">
         {% for partition_name, usage in analytics.partition_usage.items() %}
         <div class="analytics-card">
-            <h3>{{ '📹 TeslaCam Partition' if partition_name == 'part1' else '💡 LightShow Partition' }}</h3>
+            <h3>{{ '📹 TeslaCam Drive' if partition_name == 'part1' else '💡 LightShow Drive' }}</h3>
 
             {% if 'error' in usage %}
                 <div class="error-message">{{ usage.error }}</div>
@@ -582,10 +582,20 @@ function updateLastChecks() {
                                    `${Math.round(ageHours / 24)} days ago`;
 
                     const icon = data.result === 'healthy' ? '✅' :
-                                data.result === 'repaired' ? '🔧' : '❓';
+                                data.result === 'repaired' ? '🔧' :
+                                data.result === 'recording' ? '📹' :
+                                data.result === 'errors' ? '⚠️' :
+                                data.result === 'failed' ? '❌' :
+                                data.result === 'timeout' ? '⏱️' : '❓';
+
+                    const statusClass = data.result === 'healthy' ? 'status-healthy' :
+                                       data.result === 'repaired' ? 'status-repaired' :
+                                       data.result === 'recording' ? 'status-recording' :
+                                       data.result === 'errors' ? 'status-errors' :
+                                       'status-warning';
 
                     container.innerHTML = `
-                        <div class="last-check-result">
+                        <div class="last-check-result ${statusClass}">
                             ${icon} Last checked: ${ageStr}
                             <br><small>${data.details}</small>
                         </div>
@@ -613,13 +623,14 @@ function updateFsckHistory() {
             // Show last 5 entries
             const recent = history.slice(-5).reverse();
             let html = '<table class="fsck-history-table"><thead><tr>' +
-                       '<th>Time</th><th>Partition</th><th>Mode</th><th>Result</th><th>Details</th>' +
+                       '<th>Time</th><th>Drive</th><th>Mode</th><th>Result</th><th>Details</th>' +
                        '</tr></thead><tbody>';
 
             recent.forEach(entry => {
                 const date = new Date(entry.timestamp);
                 const icon = entry.result === 'healthy' ? '✅' :
                             entry.result === 'repaired' ? '🔧' :
+                            entry.result === 'recording' ? '📹' :
                             entry.result === 'timeout' ? '⏱️' :
                             entry.result === 'failed' ? '❌' : '❓';
                 const friendlyPartition = getFriendlyPartitionName(entry.partition);

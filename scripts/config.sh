@@ -43,6 +43,7 @@ eval "$(yq -r '
   "IMG_LIGHTSHOW_NAME=\"" + .disk_images.lightshow_name + "\"",
   "LABEL1=\"" + .disk_images.cam_label + "\"",
   "LABEL2=\"" + .disk_images.lightshow_label + "\"",
+  "BOOT_FSCK_ENABLED=\"" + (.disk_images.boot_fsck_enabled | tostring) + "\"",
   "PART1_SIZE=\"" + .setup.part1_size + "\"",
   "PART2_SIZE=\"" + .setup.part2_size + "\"",
   "RESERVE_SIZE=\"" + .setup.reserve_size + "\"",

@@ -726,18 +726,18 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && [ "$NEED_CAM_IMAGE" = "1" ]; then
 
   echo "Using loop device: $LOOP_CAM"
 
-  # Format as single filesystem - use exFAT for large partitions (>32GB), FAT32 for smaller
-  echo "Formatting TeslaCam partition (${LABEL1})..."
+  # Format as single filesystem - use exFAT for large drives (>32GB), FAT32 for smaller
+  echo "Formatting TeslaCam drive (${LABEL1})..."
   if [ "$P1_MB" -gt 32768 ]; then
-    echo "  Using exFAT (partition size: ${P1_MB}MB > 32GB)"
+    echo "  Using exFAT (drive size: ${P1_MB}MB > 32GB)"
     mkfs.exfat -n "$LABEL1" "$LOOP_CAM" || {
-      echo "Error: Failed to format TeslaCam partition with exFAT"
+      echo "Error: Failed to format TeslaCam drive with exFAT"
       exit 1
     }
   else
-    echo "  Using FAT32 (partition size: ${P1_MB}MB <= 32GB)"
+    echo "  Using FAT32 (drive size: ${P1_MB}MB <= 32GB)"
     mkfs.vfat -F 32 -n "$LABEL1" "$LOOP_CAM" || {
-      echo "Error: Failed to format TeslaCam partition with FAT32"
+      echo "Error: Failed to format TeslaCam drive with FAT32"
       exit 1
     }
   fi
@@ -772,18 +772,18 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && [ "$NEED_LIGHTSHOW_IMAGE" = "1" ]; then
 
   echo "Using loop device: $LOOP_LIGHTSHOW"
 
-  # Format Lightshow partition
-  echo "Formatting Lightshow partition (${LABEL2})..."
+  # Format Lightshow drive
+  echo "Formatting Lightshow drive (${LABEL2})..."
   if [ "$P2_MB" -gt 32768 ]; then
-    echo "  Using exFAT (partition size: ${P2_MB}MB > 32GB)"
+    echo "  Using exFAT (drive size: ${P2_MB}MB > 32GB)"
     mkfs.exfat -n "$LABEL2" "$LOOP_LIGHTSHOW" || {
-      echo "Error: Failed to format Lightshow partition with exFAT"
+      echo "Error: Failed to format Lightshow drive with exFAT"
       exit 1
     }
   else
-    echo "  Using FAT32 (partition size: ${P2_MB}MB <= 32GB)"
+    echo "  Using FAT32 (drive size: ${P2_MB}MB <= 32GB)"
     mkfs.vfat -F 32 -n "$LABEL2" "$LOOP_LIGHTSHOW" || {
-      echo "Error: Failed to format Lightshow partition with FAT32"
+      echo "Error: Failed to format Lightshow drive with FAT32"
       exit 1
     }
   fi
@@ -1298,13 +1298,13 @@ done
 
 echo "  ✓ Desktop services disabled (saves ~30MB RAM)"
 
-# ===== Create TeslaCam folder on TeslaCam partition =====
+# ===== Create TeslaCam folder on TeslaCam drive =====
 echo
-echo "Setting up TeslaCam folder on TeslaCam partition..."
+echo "Setting up TeslaCam folder on TeslaCam drive..."
 TEMP_MOUNT="/tmp/teslacam_setup_$$"
 mkdir -p "$TEMP_MOUNT"
 
-# Mount TeslaCam partition temporarily
+# Mount TeslaCam drive temporarily
 LOOP_SETUP=$(losetup -f)
 losetup "$LOOP_SETUP" "$IMG_CAM_PATH"
 
@@ -1331,13 +1331,13 @@ losetup -d "$LOOP_SETUP"
 rmdir "$TEMP_MOUNT"
 echo "TeslaCam folder setup complete."
 
-# ===== Create Chimes folder on Lightshow partition =====
+# ===== Create Chimes folder on Lightshow drive =====
 echo
-echo "Setting up Chimes folder on Lightshow partition..."
+echo "Setting up Chimes folder on Lightshow drive..."
 TEMP_MOUNT="/tmp/lightshow_setup_$$"
 mkdir -p "$TEMP_MOUNT"
 
-# Mount lightshow partition temporarily
+# Mount lightshow drive temporarily
 LOOP_SETUP=$(losetup -f)
 losetup "$LOOP_SETUP" "$IMG_LIGHTSHOW_PATH"
 mount "$LOOP_SETUP" "$TEMP_MOUNT"

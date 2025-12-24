@@ -8,7 +8,7 @@ import logging
 from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify
 
 from config import (GADGET_DIR, LOCK_CHIME_FILENAME, CHIMES_FOLDER, MAX_LOCK_CHIME_SIZE,
-                    MAX_LOCK_CHIME_DURATION, MIN_LOCK_CHIME_DURATION, 
+                    MAX_LOCK_CHIME_DURATION, MIN_LOCK_CHIME_DURATION,
                     SPEED_RANGE_MIN, SPEED_RANGE_MAX, SPEED_STEP)
 from utils import format_file_size
 from services.mode_service import mode_display, current_mode
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Volume preset mapping (LUFS values to friendly names)
 VOLUME_PRESETS = {
     -23: 'Broadcast',
-    -16: 'Streaming', 
+    -16: 'Streaming',
     -14: 'Loud',
     -12: 'Maximum'
 }
@@ -43,10 +43,10 @@ VOLUME_PRESETS = {
 def lock_chimes():
     """Lock chimes management page."""
     token, label, css_class, share_paths = mode_display()
-    
+
     # Check if file operation is in progress
     op_status = check_operation_in_progress()
-    
+
     # If operation in progress, show limited page with operation banner
     if op_status['in_progress']:
         # Still load groups for UI - handle gracefully if files aren't accessible
@@ -63,7 +63,7 @@ def lock_chimes():
                 'last_selected': None,
                 'updated_at': None
             }
-        
+
         return render_template(
             'lock_chimes.html',
             page='chimes',
@@ -85,11 +85,11 @@ def lock_chimes():
             lock_age=op_status['lock_age'],
             estimated_completion=op_status['estimated_completion'],
         )
-    
+
     # Get current active chime from part2 root
     active_chime = None
     part2_mount = get_mount_path("part2")
-    
+
     if part2_mount:
         active_chime_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
         if os.path.isfile(active_chime_path):
@@ -101,7 +101,7 @@ def lock_chimes():
                 "size_str": format_file_size(size),
                 "mtime": mtime,
             }
-    
+
     # Get all WAV files from Chimes folder on part2
     chime_files = []
     if part2_mount:
@@ -112,15 +112,15 @@ def lock_chimes():
                 for entry in entries:
                     if not entry.lower().endswith(".wav"):
                         continue
-                    
+
                     full_path = os.path.join(chimes_dir, entry)
                     if os.path.isfile(full_path):
                         size = os.path.getsize(full_path)
                         mtime = int(os.path.getmtime(full_path))
-                        
+
                         # Validate the file
                         is_valid, msg = validate_tesla_wav(full_path)
-                        
+
                         chime_files.append({
                             "filename": entry,
                             "size": size,
@@ -131,20 +131,20 @@ def lock_chimes():
                         })
             except OSError:
                 pass
-    
+
     # Sort alphabetically
     chime_files.sort(key=lambda x: x["filename"].lower())
-    
+
     # Load schedules
     scheduler = get_scheduler()
     schedules = scheduler.list_schedules()
-    
+
     # Get holidays list with dates for current year
     holidays = get_holidays_with_dates()
-    
+
     # Get recurring intervals for the dropdown
     recurring_intervals = get_recurring_intervals()
-    
+
     # Load chime groups - handle gracefully if files aren't accessible
     try:
         group_manager = get_group_manager()
@@ -159,7 +159,7 @@ def lock_chimes():
             'last_selected': None,
             'updated_at': None
         }
-    
+
     return render_template(
         'lock_chimes.html',
         page='chimes',
@@ -194,14 +194,14 @@ def play_active_chime():
     """Stream the active LockChime.wav file from part2 root."""
     part2_mount = get_mount_path("part2")
     if not part2_mount:
-        flash("Partition not mounted", "error")
+        flash("Drive not mounted", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     file_path = os.path.join(part2_mount, LOCK_CHIME_FILENAME)
     if not os.path.isfile(file_path):
         flash("Active lock chime not found", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     return send_file(file_path, mimetype="audio/wav")
 
 
@@ -210,19 +210,19 @@ def play_lock_chime(filename):
     """Stream a lock chime WAV file from the Chimes folder."""
     part2_mount = get_mount_path("part2")
     if not part2_mount:
-        flash("Partition not mounted", "error")
+        flash("Drive not mounted", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     # Sanitize filename
     filename = os.path.basename(filename)
-    
+
     chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
     file_path = os.path.join(chimes_dir, filename)
-    
+
     if not os.path.isfile(file_path) or not filename.lower().endswith(".wav"):
         flash("File not found", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     return send_file(file_path, mimetype="audio/wav")
 
 
@@ -231,19 +231,19 @@ def download_lock_chime(filename):
     """Download a lock chime WAV file from the Chimes folder."""
     part2_mount = get_mount_path("part2")
     if not part2_mount:
-        flash("Partition not mounted", "error")
+        flash("Drive not mounted", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     # Sanitize filename
     filename = os.path.basename(filename)
-    
+
     chimes_dir = os.path.join(part2_mount, CHIMES_FOLDER)
     file_path = os.path.join(chimes_dir, filename)
-    
+
     if not os.path.isfile(file_path) or not filename.lower().endswith(".wav"):
         flash("File not found", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     return send_file(file_path, mimetype="audio/wav", as_attachment=True, download_name=filename)
 
 
@@ -251,23 +251,23 @@ def download_lock_chime(filename):
 def upload_lock_chime():
     """Upload a new lock chime WAV or MP3 file."""
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
-    
+
     if "chime_file" not in request.files:
         if is_ajax:
             return jsonify({"success": False, "error": "No file selected"}), 400
         flash("No file selected", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     file = request.files["chime_file"]
     if file.filename == "":
         if is_ajax:
             return jsonify({"success": False, "error": "No file selected"}), 400
         flash("No file selected", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     # Check if this is a pre-trimmed file from the audio trimmer
     pre_trimmed = request.form.get('pre_trimmed', 'false').lower() == 'true'
-    
+
     # Check file extension - allow WAV and MP3
     file_ext = os.path.splitext(file.filename.lower())[1]
     if file_ext not in [".wav", ".mp3"]:
@@ -275,25 +275,25 @@ def upload_lock_chime():
             return jsonify({"success": False, "error": "Only WAV and MP3 files are allowed"}), 400
         flash("Only WAV and MP3 files are allowed", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     # Final filename will always be .wav
     filename = os.path.splitext(os.path.basename(file.filename))[0] + ".wav"
     logger.info(f"Upload: Received filename from client: {file.filename}, processed as: {filename}")
-    
+
     # Get normalization parameters
     normalize = request.form.get('normalize', 'false').lower() == 'true'
     target_lufs = float(request.form.get('target_lufs', -16))
-    
+
     # Validate LUFS is one of our presets
     if normalize and target_lufs not in VOLUME_PRESETS:
         if is_ajax:
             return jsonify({"success": False, "error": "Invalid volume preset"}), 400
         flash("Invalid volume preset", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     # Get part2 mount path (may be None in present mode, which is fine)
     part2_mount = get_mount_path("part2")
-    
+
     # Use the appropriate service function based on whether file is pre-trimmed
     if pre_trimmed:
         # Import the save_pretrimmed_wav function
@@ -302,7 +302,7 @@ def upload_lock_chime():
     else:
         # Use standard upload (converts and re-encodes)
         success, message = upload_chime_file(file, filename, part2_mount, normalize, target_lufs)
-    
+
     if success:
         # Force Samba to see the new file (only in Edit mode)
         if current_mode() == "edit":
@@ -311,10 +311,10 @@ def upload_lock_chime():
                 restart_samba_services()
             except Exception:
                 pass  # Not critical if Samba refresh fails
-        
+
         # Small delay to let filesystem settle after quick_edit remount
         time.sleep(0.2)
-        
+
         if is_ajax:
             return jsonify({"success": True, "message": message}), 200
         flash(message, "success")
@@ -322,7 +322,7 @@ def upload_lock_chime():
         if is_ajax:
             return jsonify({"success": False, "error": message}), 400
         flash(message, "error")
-    
+
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
@@ -330,28 +330,28 @@ def upload_lock_chime():
 def upload_bulk_chimes():
     """Bulk upload lock chimes - validation only, no processing."""
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
-    
+
     # Get all uploaded files
     files = request.files.getlist('chime_files')
-    
+
     if not files or len(files) == 0:
         if is_ajax:
             return jsonify({"success": False, "error": "No files selected"}), 400
         flash("No files selected", "error")
         return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     # Get part2 mount path (may be None in present mode, which is fine)
     part2_mount = get_mount_path("part2")
-    
+
     results = []
     total_uploaded = 0
-    
+
     for file in files:
         if file.filename == "":
             continue
-        
+
         filename = os.path.basename(file.filename)
-        
+
         # Only accept WAV files
         if not filename.lower().endswith(".wav"):
             results.append({
@@ -360,18 +360,18 @@ def upload_bulk_chimes():
                 'message': 'Only WAV files are accepted in bulk upload mode'
             })
             continue
-        
+
         # Save to temp location for validation
         import tempfile
         temp_dir = tempfile.mkdtemp(prefix='chime_bulk_')
         temp_path = os.path.join(temp_dir, filename)
-        
+
         try:
             file.save(temp_path)
-            
+
             # Validate file meets Tesla requirements (no processing)
             is_valid, error_msg = validate_tesla_wav(temp_path)
-            
+
             if not is_valid:
                 results.append({
                     'filename': filename,
@@ -381,27 +381,27 @@ def upload_bulk_chimes():
                 os.remove(temp_path)
                 os.rmdir(temp_dir)
                 continue
-            
+
             # File is valid - upload it directly (no re-encoding)
             from services.lock_chime_service import upload_validated_chime
             success, message = upload_validated_chime(temp_path, filename, part2_mount)
-            
+
             results.append({
                 'filename': filename,
                 'success': success,
                 'message': message
             })
-            
+
             if success:
                 total_uploaded += 1
-            
+
             # Cleanup temp file
             try:
                 os.remove(temp_path)
                 os.rmdir(temp_dir)
             except:
                 pass
-                
+
         except Exception as e:
             results.append({
                 'filename': filename,
@@ -414,7 +414,7 @@ def upload_bulk_chimes():
                 os.rmdir(temp_dir)
             except:
                 pass
-    
+
     # Refresh Samba shares only if in edit mode and files were uploaded
     if current_mode() == "edit" and total_uploaded > 0:
         try:
@@ -422,11 +422,11 @@ def upload_bulk_chimes():
             restart_samba_services()
         except Exception as e:
             logger.error(f"Samba refresh failed: {e}")
-    
+
     # Delay for filesystem settling
     if total_uploaded > 0:
         time.sleep(0.5)
-    
+
     if is_ajax:
         success_count = sum(1 for r in results if r['success'])
         return jsonify({
@@ -435,7 +435,7 @@ def upload_bulk_chimes():
             'total_uploaded': total_uploaded,
             'summary': f"Successfully uploaded {total_uploaded} of {len(results)} file(s)"
         }), 200
-    
+
     # Non-AJAX fallback
     success_count = sum(1 for r in results if r['success'])
     if success_count > 0:
@@ -445,7 +445,7 @@ def upload_bulk_chimes():
             flash(f"Failed: {', '.join(failed[:3])}" + (" and more" if len(failed) > 3 else ""), "warning")
     else:
         flash("All files were rejected. Check file requirements.", "error")
-    
+
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
@@ -454,13 +454,13 @@ def set_as_chime(filename):
     """Set a WAV file from Chimes folder as the active lock chime."""
     # Sanitize filename
     filename = os.path.basename(filename)
-    
+
     # Get part2 mount path (may be None in present mode, which is fine)
     part2_mount = get_mount_path("part2")
-    
+
     # Use the service function (works in both modes)
     success, message = set_active_chime(filename, part2_mount)
-    
+
     if success:
         # Force Samba to see the change (only in Edit mode)
         if current_mode() == "edit":
@@ -469,14 +469,14 @@ def set_as_chime(filename):
                 restart_samba_services()
             except Exception:
                 pass  # Not critical if Samba refresh fails
-        
+
         # Small delay to let filesystem settle after quick_edit remount
         time.sleep(0.2)
-        
+
         flash(message, "success")
     else:
         flash(message, "error")
-    
+
     # Add timestamp to force browser cache refresh
     return redirect(url_for("lock_chimes.lock_chimes", _=int(time.time())))
 
@@ -486,13 +486,13 @@ def delete_lock_chime(filename):
     """Delete a lock chime file from Chimes folder."""
     # Sanitize filename
     filename = os.path.basename(filename)
-    
+
     # Get part2 mount path (may be None in present mode, which is fine)
     part2_mount = get_mount_path("part2")
-    
+
     # Use the service function (works in both modes)
     success, message = delete_chime_file(filename, part2_mount)
-    
+
     if success:
         # Force Samba to see the change (only in Edit mode)
         if current_mode() == "edit":
@@ -501,14 +501,14 @@ def delete_lock_chime(filename):
                 restart_samba_services()
             except Exception:
                 pass  # Not critical if Samba refresh fails
-        
+
         # Small delay to let filesystem settle after quick_edit remount
         time.sleep(0.2)
-        
+
         flash(message, "success")
     else:
         flash(message, "error")
-    
+
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
@@ -524,7 +524,7 @@ def add_schedule():
         schedule_name = request.form.get('schedule_name', '').strip()
         chime_filename = request.form.get('chime_filename', '').strip()
         schedule_type = request.form.get('schedule_type', 'weekly').strip()
-        
+
         # Get time - for holidays and recurring, default to 12:00 AM
         if schedule_type in ['holiday', 'recurring']:
             hour_24 = 0
@@ -533,7 +533,7 @@ def add_schedule():
             hour_12 = int(request.form.get('hour', '12'))
             minute = request.form.get('minute', '00')
             am_pm = request.form.get('am_pm', 'AM').upper()
-            
+
             # Convert to 24-hour format
             if am_pm == 'PM' and hour_12 != 12:
                 hour_24 = hour_12 + 12
@@ -541,20 +541,20 @@ def add_schedule():
                 hour_24 = 0
             else:
                 hour_24 = hour_12
-        
+
         time_str = f"{hour_24:02d}:{minute}"
-        
+
         enabled = request.form.get('enabled') == 'true'
-        
+
         # Validate inputs
         if not schedule_name:
             flash("Schedule name is required", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-        
+
         if not chime_filename:
             flash("Please select a chime", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-        
+
         # Type-specific validation and parameter gathering
         params = {
             'chime_filename': chime_filename,
@@ -563,14 +563,14 @@ def add_schedule():
             'name': schedule_name,
             'enabled': enabled
         }
-        
+
         if schedule_type == 'weekly':
             days = request.form.getlist('days')
             if not days:
                 flash("Please select at least one day", "error")
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['days'] = days
-        
+
         elif schedule_type == 'date':
             month = request.form.get('month')
             day = request.form.get('day')
@@ -579,36 +579,36 @@ def add_schedule():
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['month'] = int(month)
             params['day'] = int(day)
-        
+
         elif schedule_type == 'holiday':
             holiday = request.form.get('holiday', '').strip()
             if not holiday:
                 flash("Please select a holiday", "error")
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['holiday'] = holiday
-        
+
         elif schedule_type == 'recurring':
             interval = request.form.get('interval', '').strip()
             if not interval:
                 flash("Please select an interval", "error")
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['interval'] = interval
-            
+
             # Check if user confirmed disabling other schedules
             confirm_disable = request.form.get('confirm_disable_others') == 'true'
-        
+
         else:
             flash(f"Invalid schedule type: {schedule_type}", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-        
+
         # Add schedule
         scheduler = get_scheduler()
-        
+
         # Handle recurring schedules specially if enabled
         if schedule_type == 'recurring' and enabled:
             # Check if there are other enabled schedules that need disabling
             other_enabled = [s for s in scheduler.get_enabled_schedules() if s.get('schedule_type') != 'recurring']
-            
+
             if other_enabled and not confirm_disable:
                 # Need user confirmation to disable other schedules
                 return jsonify({
@@ -638,15 +638,15 @@ def add_schedule():
         else:
             # Normal schedule addition
             success, message, schedule_id = scheduler.add_schedule(**params)
-            
+
             if success:
                 flash(f"Schedule '{schedule_name}' created successfully", "success")
             else:
                 flash(f"Failed to create schedule: {message}", "error")
-    
+
     except Exception as e:
         flash(f"Error adding schedule: {str(e)}", "error")
-    
+
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
@@ -656,15 +656,15 @@ def toggle_schedule(schedule_id):
     try:
         scheduler = get_scheduler()
         schedule = scheduler.get_schedule(schedule_id)
-        
+
         if not schedule:
             flash("Schedule not found", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-        
+
         # Toggle enabled state
         new_enabled = not schedule.get('enabled', True)
         success, message = scheduler.update_schedule(schedule_id, enabled=new_enabled)
-        
+
         if success:
             status = "enabled" if new_enabled else "disabled"
             flash(f"Schedule '{schedule['name']}' {status}", "success")
@@ -678,10 +678,10 @@ def toggle_schedule(schedule_id):
                     flash("Cannot enable this schedule due to conflicts with other active schedules", "error")
             else:
                 flash(f"Failed to update schedule: {message}", "error")
-    
+
     except Exception as e:
         flash(f"Error toggling schedule: {str(e)}", "error")
-    
+
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
@@ -691,21 +691,21 @@ def delete_schedule(schedule_id):
     try:
         scheduler = get_scheduler()
         schedule = scheduler.get_schedule(schedule_id)
-        
+
         if not schedule:
             flash("Schedule not found", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-        
+
         success, message = scheduler.delete_schedule(schedule_id)
-        
+
         if success:
             flash(f"Schedule '{schedule['name']}' deleted", "success")
         else:
             flash(f"Failed to delete schedule: {message}", "error")
-    
+
     except Exception as e:
         flash(f"Error deleting schedule: {str(e)}", "error")
-    
+
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
@@ -714,14 +714,14 @@ def edit_schedule(schedule_id):
     """Edit an existing schedule (GET returns JSON, POST updates)."""
     scheduler = get_scheduler()
     schedule = scheduler.get_schedule(schedule_id)
-    
+
     if not schedule:
         if request.method == "GET":
             return jsonify({"success": False, "error": "Schedule not found"}), 404
         else:
             flash("Schedule not found", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-    
+
     if request.method == "GET":
         # Convert 24-hour time to 12-hour format
         time_str = schedule.get('time', '00:00')
@@ -729,12 +729,12 @@ def edit_schedule(schedule_id):
             time_parts = time_str.split(':')
             hour_24 = int(time_parts[0])
             minute = int(time_parts[1])
-            
+
             am_pm = 'AM' if hour_24 < 12 else 'PM'
             hour_12 = hour_24 % 12
             if hour_12 == 0:
                 hour_12 = 12
-            
+
             schedule_data = {
                 "id": schedule['id'],
                 "name": schedule['name'],
@@ -746,7 +746,7 @@ def edit_schedule(schedule_id):
                 "schedule_type": schedule.get('schedule_type', 'weekly'),
                 "enabled": schedule.get('enabled', True)
             }
-            
+
             # Add type-specific fields
             if schedule_data['schedule_type'] == 'weekly':
                 schedule_data['days'] = schedule.get('days', [])
@@ -757,21 +757,21 @@ def edit_schedule(schedule_id):
                 schedule_data['holiday'] = schedule.get('holiday', '')
             elif schedule_data['schedule_type'] == 'recurring':
                 schedule_data['interval'] = schedule.get('interval', 'on_boot')
-            
+
             return jsonify({
                 "success": True,
                 "schedule": schedule_data
             })
         except (ValueError, IndexError):
             return jsonify({"success": False, "error": "Invalid time format in schedule"}), 500
-    
+
     # POST - Update schedule
     try:
         # Get form data
         schedule_name = request.form.get('schedule_name', '').strip()
         chime_filename = request.form.get('chime_filename', '').strip()
         schedule_type = request.form.get('schedule_type', 'weekly').strip()
-        
+
         # Get time - for holidays and recurring, default to 12:00 AM
         if schedule_type in ['holiday', 'recurring']:
             hour_24 = 0
@@ -780,7 +780,7 @@ def edit_schedule(schedule_id):
             hour_12 = int(request.form.get('hour', '12'))
             minute = request.form.get('minute', '00')
             am_pm = request.form.get('am_pm', 'AM').upper()
-            
+
             # Convert to 24-hour format
             if am_pm == 'PM' and hour_12 != 12:
                 hour_24 = hour_12 + 12
@@ -788,20 +788,20 @@ def edit_schedule(schedule_id):
                 hour_24 = 0
             else:
                 hour_24 = hour_12
-        
+
         time_str = f"{hour_24:02d}:{minute}"
-        
+
         enabled = request.form.get('enabled') == 'true'
-        
+
         # Validate inputs
         if not schedule_name:
             flash("Schedule name is required", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-        
+
         if not chime_filename:
             flash("Please select a chime", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-        
+
         # Type-specific validation and parameter gathering
         params = {
             'chime_filename': chime_filename,
@@ -810,14 +810,14 @@ def edit_schedule(schedule_id):
             'name': schedule_name,
             'enabled': enabled
         }
-        
+
         if schedule_type == 'weekly':
             days = request.form.getlist('days')
             if not days:
                 flash("Please select at least one day", "error")
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['days'] = days
-        
+
         elif schedule_type == 'date':
             month = request.form.get('month')
             day = request.form.get('day')
@@ -826,36 +826,36 @@ def edit_schedule(schedule_id):
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['month'] = int(month)
             params['day'] = int(day)
-        
+
         elif schedule_type == 'holiday':
             holiday = request.form.get('holiday', '').strip()
             if not holiday:
                 flash("Please select a holiday", "error")
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['holiday'] = holiday
-        
+
         elif schedule_type == 'recurring':
             interval = request.form.get('interval', '').strip()
             if not interval:
                 flash("Please select an interval", "error")
                 return redirect(url_for("lock_chimes.lock_chimes"))
             params['interval'] = interval
-        
+
         else:
             flash(f"Invalid schedule type: {schedule_type}", "error")
             return redirect(url_for("lock_chimes.lock_chimes"))
-        
+
         # Update schedule
         success, message = scheduler.update_schedule(schedule_id=schedule_id, **params)
-        
+
         if success:
             flash(f"Schedule '{schedule_name}' updated successfully", "success")
         else:
             flash(f"Failed to update schedule: {message}", "error")
-    
+
     except Exception as e:
         flash(f"Error updating schedule: {str(e)}", "error")
-    
+
     return redirect(url_for("lock_chimes.lock_chimes"))
 
 
@@ -870,7 +870,7 @@ def list_groups():
         manager = get_group_manager()
         groups = manager.list_groups()
         random_config = manager.get_random_config()
-        
+
         return jsonify({
             "success": True,
             "groups": groups,
@@ -886,16 +886,16 @@ def create_group():
     """Create a new chime group."""
     try:
         data = request.get_json() if request.is_json else request.form
-        
+
         name = data.get('name', '').strip()
         description = data.get('description', '').strip()
-        
+
         if not name:
             return jsonify({"success": False, "error": "Group name is required"}), 400
-        
+
         manager = get_group_manager()
         success, message, group_id = manager.create_group(name, description)
-        
+
         if success:
             return jsonify({
                 "success": True,
@@ -904,7 +904,7 @@ def create_group():
             })
         else:
             return jsonify({"success": False, "error": message}), 400
-    
+
     except Exception as e:
         logger.error(f"Error creating group: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -915,23 +915,23 @@ def update_group(group_id):
     """Update a chime group."""
     try:
         data = request.get_json() if request.is_json else request.form
-        
+
         manager = get_group_manager()
-        
+
         # Collect fields to update
         updates = {}
         if 'name' in data:
             updates['name'] = data['name'].strip()
         if 'description' in data:
             updates['description'] = data['description'].strip()
-        
+
         success, message = manager.update_group(group_id, **updates)
-        
+
         if success:
             return jsonify({"success": True, "message": message})
         else:
             return jsonify({"success": False, "error": message}), 400
-    
+
     except Exception as e:
         logger.error(f"Error updating group: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -943,12 +943,12 @@ def delete_group(group_id):
     try:
         manager = get_group_manager()
         success, message = manager.delete_group(group_id)
-        
+
         if success:
             return jsonify({"success": True, "message": message})
         else:
             return jsonify({"success": False, "error": message}), 400
-    
+
     except Exception as e:
         logger.error(f"Error deleting group: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -960,18 +960,18 @@ def add_chime_to_group(group_id):
     try:
         data = request.get_json() if request.is_json else request.form
         chime_filename = data.get('chime_filename', '').strip()
-        
+
         if not chime_filename:
             return jsonify({"success": False, "error": "Chime filename is required"}), 400
-        
+
         manager = get_group_manager()
         success, message = manager.add_chime_to_group(group_id, chime_filename)
-        
+
         if success:
             return jsonify({"success": True, "message": message})
         else:
             return jsonify({"success": False, "error": message}), 400
-    
+
     except Exception as e:
         logger.error(f"Error adding chime to group: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -983,18 +983,18 @@ def remove_chime_from_group(group_id):
     try:
         data = request.get_json() if request.is_json else request.form
         chime_filename = data.get('chime_filename', '').strip()
-        
+
         if not chime_filename:
             return jsonify({"success": False, "error": "Chime filename is required"}), 400
-        
+
         manager = get_group_manager()
         success, message = manager.remove_chime_from_group(group_id, chime_filename)
-        
+
         if success:
             return jsonify({"success": True, "message": message})
         else:
             return jsonify({"success": False, "error": message}), 400
-    
+
     except Exception as e:
         logger.error(f"Error removing chime from group: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -1012,15 +1012,15 @@ def set_random_mode():
         else:
             enabled = str(enabled_value).lower() == 'true'
         group_id = data.get('group_id', '').strip() if enabled else None
-        
+
         manager = get_group_manager()
         success, message = manager.set_random_mode(enabled, group_id)
-        
+
         if success:
             return jsonify({"success": True, "message": message})
         else:
             return jsonify({"success": False, "error": message}), 400
-    
+
     except Exception as e:
         logger.error(f"Error setting random mode: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

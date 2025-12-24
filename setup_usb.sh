@@ -8,22 +8,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Enable swap and free memory BEFORE any package installations
 early_memory_optimization() {
   echo "Preparing system memory for installation..."
-  
+
   # Stop lightdm to free ~100MB RAM (critical for package installs)
   if systemctl is-active --quiet lightdm 2>/dev/null; then
     echo "  Stopping display manager to free memory..."
     systemctl stop lightdm 2>/dev/null || true
   fi
-  
+
   # Enable swap if available
   if [ -f /var/swap/fsck.swap ]; then
     swapon /var/swap/fsck.swap 2>/dev/null || true
   fi
-  
+
   # Drop caches to free memory
   sync
   echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-  
+
   echo "  Memory optimization complete"
 }
 

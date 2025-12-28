@@ -420,6 +420,38 @@ button {
     color: var(--btn-success-text);
 }
 
+/* Shared action button styles for consistent sizing between links and buttons */
+.action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    font-weight: 500;
+    line-height: 1.5;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    text-decoration: none;
+    box-sizing: border-box;
+    transition: opacity 0.3s ease;
+}
+
+.action-btn:hover {
+    opacity: 0.85;
+}
+
+.action-btn.btn-success {
+    background-color: var(--btn-success-bg);
+    color: var(--btn-success-text);
+}
+
+.action-btn.btn-danger {
+    background-color: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
 .set-chime-btn {
     background-color: var(--btn-purple-bg);
     color: var(--btn-purple-text);
@@ -1989,4 +2021,96 @@ details summary span:first-of-type {
     }
 }
 
+/* ================================================
+   Custom Wraps Styles
+   ================================================ */
 
+/* Wrap thumbnail container - desktop table view */
+.wrap-thumbnail-container {
+    width: 80px;
+    height: 80px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-video-player);
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid var(--border-light);
+}
+
+.wrap-thumbnail {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+}
+
+/* Wrap thumbnail container - mobile card view */
+.wrap-thumbnail-container-mobile {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    max-width: 200px;
+    margin: 0 auto 15px auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-video-player);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border-light);
+}
+
+.wrap-thumbnail-mobile {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+}
+
+/* Wrap card styling - extends mobile-card */
+.wrap-card {
+    text-align: center;
+}
+
+.wrap-card .mobile-card-title {
+    text-align: center;
+    word-break: break-word;
+}
+
+.wrap-card .mobile-card-info {
+    text-align: left;
+}
+
+/* Hover effect for thumbnails */
+.wrap-thumbnail-container:hover,
+.wrap-thumbnail-container-mobile:hover {
+    border-color: var(--btn-purple-bg);
+    box-shadow: 0 2px 8px var(--shadow);
+}
+
+/* Dark mode adjustments for wrap thumbnails */
+[data-theme="dark"] .wrap-thumbnail-container,
+[data-theme="dark"] .wrap-thumbnail-container-mobile {
+    background: var(--bg-video-player);
+    border-color: var(--border-color);
+}
+
+[data-theme="dark"] .wrap-thumbnail-container:hover,
+[data-theme="dark"] .wrap-thumbnail-container-mobile:hover {
+    border-color: var(--btn-purple-bg);
+}
+
+/* Responsive adjustments for wrap page */
+@media (max-width: 768px) {
+    .wrap-thumbnail-container-mobile {
+        max-width: 150px;
+    }
+}
+
+@media (max-width: 480px) {
+    .wrap-thumbnail-container-mobile {
+        max-width: 120px;
+    }
+}

@@ -77,6 +77,13 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Preview MP3/WAV tracks in browser
 - Delete complete light show sets
 
+### Custom Wrap Management
+- Upload PNG files for Tesla's Paint Shop 3D vehicle visualization
+- Thumbnail previews of all uploaded wraps
+- Automatic validation (512-1024px dimensions, max 1MB, PNG only)
+- Supports up to 10 custom wraps at a time
+- Drag-and-drop upload with progress indicator
+
 ### Automatic Maintenance
 - **Storage Cleanup**: Age, size, or count-based policies per folder
 - **Boot Cleanup**: Optional automatic cleanup before presenting to Tesla
@@ -229,6 +236,13 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Grouped display for matching files
 - Preview MP3/WAV audio in browser
 - Delete complete light show sets
+
+**Wraps Tab**:
+- Upload PNG files for custom Tesla vehicle wraps (Paint Shop → Wraps)
+- Thumbnail preview gallery of all uploaded wraps
+- Client-side validation before upload (dimensions, file size, format)
+- Download or delete existing wraps
+- Requirements: PNG format, 512x512 to 1024x1024 pixels, max 1MB, up to 10 wraps
 
 **Analytics Tab**:
 - Drive usage gauge and folder breakdown

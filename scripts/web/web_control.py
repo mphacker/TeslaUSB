@@ -25,6 +25,7 @@ from blueprints import (
     videos_bp,
     lock_chimes_bp,
     light_shows_bp,
+    wraps_bp,
     analytics_bp,
     cleanup_bp,
     api_bp,
@@ -37,6 +38,7 @@ app.register_blueprint(mode_control_bp)
 app.register_blueprint(videos_bp)
 app.register_blueprint(lock_chimes_bp)
 app.register_blueprint(light_shows_bp)
+app.register_blueprint(wraps_bp)
 app.register_blueprint(analytics_bp)
 app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)

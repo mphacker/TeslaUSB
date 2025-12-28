@@ -37,16 +37,17 @@
                 <a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
                 <a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
                 <a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
+                <a href="{{ url_for('wraps.wraps') }}" {% if page == 'wraps' %}class="active"{% endif %}>Wraps</a>
                 <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
                     <i class="bi bi-moon-stars-fill" id="theme-icon"></i>
                 </button>
             </div>
         </div>
     </div>
-    
+
     <!-- Mobile Menu Overlay -->
     <div class="mobile-menu-overlay" id="mobileMenuOverlay" onclick="toggleMobileMenu()"></div>
-    
+
     <!-- Mobile Menu -->
     <div class="mobile-menu" id="mobileMenu">
         <div class="mobile-menu-close" onclick="toggleMobileMenu()">&times;</div>
@@ -55,6 +56,7 @@
         <a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
         <a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
         <a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
+        <a href="{{ url_for('wraps.wraps') }}" {% if page == 'wraps' %}class="active"{% endif %}>Wraps</a>
         <div class="mobile-theme-toggle">
             <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
                 <i class="bi bi-moon-stars-fill" id="theme-icon-mobile"></i>
@@ -62,7 +64,7 @@
             </button>
         </div>
     </div>
-    
+
     <div class="main-content{% if expandable %} expandable{% endif %}">
         {% if operation_in_progress %}
         <div class="operation-banner" id="operation-banner">
@@ -83,7 +85,7 @@
             <div class="operation-countdown" id="retry-countdown"></div>
         </div>
         {% endif %}
-        
+
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 <div class="messages">
@@ -93,10 +95,10 @@
                 </div>
             {% endif %}
         {% endwith %}
-        
+
         {% block content %}{% endblock %}
     </div>
-    
+
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
     {% if operation_in_progress %}
     <script>

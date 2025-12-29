@@ -18,11 +18,11 @@ Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings 
 TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB drives** to your Tesla:
 
 - **TeslaCam Drive**: Large exFAT drive for dashcam and sentry recordings
-- **LightShow Drive**: Smaller FAT32 drive for lock chimes and light shows with read-only optimization
+- **LightShow Drive**: Smaller FAT32 drive for lock chimes, custom wrap images, and light shows with read-only optimization
 
 **Key Benefits:**
 - Remote access to dashcam footage without physically removing storage
-- Web interface for browsing videos, managing chimes/light shows, and monitoring storage (with light/dark mode)
+- Web interface for browsing videos, managing chimes, managing light shows, managing custom wrap images and monitoring storage (with light/dark mode)
 - Automatic cleanup policies to manage disk space
 - Scheduled chime changes for holidays, events, or automatic rotation
 - Offline access point for in-car web access when WiFi is unavailable
@@ -98,13 +98,38 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 
 ## Requirements
 
+> **Note**: This project has only been tested on **Raspberry Pi Zero 2 W**. Other OTG-capable models should work but are untested.
+
 - **Tesla Software**: Version **2025.44.25.1 or later** (2025 Holiday Update) required for event thumbnails, SEI telemetry data, and multi-camera event structure
-- Raspberry Pi with USB OTG capability (Pi Zero 2 W recommended, Pi 4, Pi 5)
+- **Raspberry Pi Zero 2 W** (tested and recommended) - Small form factor, low power, powered directly from Tesla USB port
+- Other Raspberry Pi models with USB OTG capability should work (Pi 4, Pi 5, Compute Modules) - **untested**
 - 128GB+ microSD card (for OS, dashcam storage, and light shows)
 - Raspberry Pi OS (64-bit) Desktop - Debian "Trixie"
 - Internet connection for initial setup
 
+### Raspberry Pi OTG Compatibility
+
+For USB gadget projects like TeslaUSB, the **Raspberry Pi Zero family and Compute Modules are the best choice**. Raspberry Pi 4 and 5 offer OTG support, but their higher power requirements can be an issue. **Raspberry Pi A, B, 2B, 3B, and 3B+ do NOT support OTG** (host mode only).
+
+For detailed information, see the official Raspberry Pi whitepaper: [Using OTG mode on Raspberry Pi SBCs](https://pip.raspberrypi.com/categories/685-app-notes-guides-whitepapers/documents/RP-009276-WP/Using-OTG-mode-on-Raspberry-Pi-SBCs.pdf)
+
+| Model | OTG Support | Notes |
+|-------|-------------|-------|
+| Raspberry Pi Zero / Zero W / Zero 2 W | ✅ Yes | Fully supported on USB data port |
+| Raspberry Pi 4 | ⚠️ Yes* | USB-C port in device mode |
+| Raspberry Pi 5 | ⚠️ Yes* | USB-C port in device mode |
+| Raspberry Pi A/B/2B/3B/3B+ | ❌ No | Only host mode - **not compatible** |
+| Raspberry Pi Compute Module 1-3 | ✅ Yes | Exposed on OTG pins |
+| Raspberry Pi Compute Module 4 | ✅ Yes | micro-USB on CM4 IO board |
+
+*\* Raspberry Pi 4 and 5 draw power from the host via USB cable, so there may be limitations on available current due to their higher power requirements.*
+
 **Note for Pi Zero 2 W users**: Setup automatically optimizes memory by disabling unnecessary desktop services and enabling 1GB swap. This ensures stable operation on the 512MB RAM platform.
+
+**⚠️ Note for Raspberry Pi 4/5 users**: USB OTG/gadget mode is **only available on the USB-C port**, which is also the power input. This creates a challenge: you cannot simultaneously power the Pi from a standard USB charger and present as a USB device to Tesla. Options include:
+- USB-C power + data splitter adapters (search "USB-C OTG with PD charging")
+- Powering the Pi via GPIO pins from a separate car charger (advanced)
+- Using a larger SD card instead of external USB storage to avoid power budget issues
 
 ## Installation
 

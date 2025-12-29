@@ -23,6 +23,55 @@ QUICK_EDIT_LOCK = os.path.join(GADGET_DIR, '.quick_edit_part2.lock')
 LOCK_MAX_AGE = 120  # 2 minutes
 
 
+def get_or_create_loop(img_path: str) -> str:
+    """
+    Get an existing loop device for the image or create a new one.
+
+    Uses the --nooverlap (-L) flag which:
+    1. Checks if a loop device already exists for this file
+    2. If yes, returns that device (reuse)
+    3. If no, creates a new one
+
+    This prevents accumulation of duplicate loop devices.
+
+    Args:
+        img_path: Path to the image file
+
+    Returns:
+        Loop device path (e.g., /dev/loop0) or empty string on failure
+    """
+    try:
+        # Use -L (--nooverlap) to reuse existing devices
+        result = subprocess.run(
+            ['sudo', '/usr/sbin/losetup', '--show', '-f', '-L', img_path],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            loop_dev = result.stdout.strip()
+            logger.debug(f"Got loop device {loop_dev} for {img_path} (via --nooverlap)")
+            return loop_dev
+
+        # Fallback without --nooverlap (older losetup versions)
+        result = subprocess.run(
+            ['sudo', '/usr/sbin/losetup', '--show', '-f', img_path],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10
+        )
+        loop_dev = result.stdout.strip()
+        logger.debug(f"Created new loop device {loop_dev} for {img_path}")
+        return loop_dev
+
+    except Exception as e:
+        logger.error(f"Failed to get/create loop device for {img_path}: {e}")
+        return ''
+
+
 class OperationTimeout(Exception):
     """Exception raised when operation exceeds maximum time limit."""
     pass
@@ -393,7 +442,7 @@ def quick_edit_part2(operation_callback, timeout=10):
                     timeout=10
                 )
 
-                # Unmount and detach ALL existing loop devices for this image
+                # Unmount any existing mounts for loop devices (but don't detach - we'll reuse)
                 if result.returncode == 0 and result.stdout.strip():
                     for line in result.stdout.strip().splitlines():
                         old_loop_dev = line.split(':')[0].strip()
@@ -422,33 +471,22 @@ def quick_edit_part2(operation_callback, timeout=10):
                                 if mount_point == mount_ro:
                                     cleanup_state['ro_unmounted'] = True
 
-                        # Detach the loop device
-                        logger.info(f"Detaching old loop device: {old_loop_dev}")
-                        subprocess.run(
-                            ['sudo', '/usr/sbin/losetup', '-d', old_loop_dev],
-                            capture_output=True,
-                            check=False,
-                            timeout=10
-                        )
+                        # NOTE: We do NOT detach the loop device here - it will be reused
+                        # in get_or_create_loop() below. This prevents loop device accumulation.
             except Exception as e:
-                logger.warning(f"Error during unmount/detach (non-fatal): {e}")
+                logger.warning(f"Error during unmount (non-fatal): {e}")
 
-            # Step 3: Create new RW loop device
-            logger.info("Creating read-write loop device")
+            # Step 3: Get or create RW loop device (reuse existing if possible)
+            logger.info("Getting/creating read-write loop device")
             try:
-                result = subprocess.run(
-                    ['sudo', '/usr/sbin/losetup', '--show', '-f', img_path],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=10
-                )
-                loop_dev = result.stdout.strip()
+                loop_dev = get_or_create_loop(img_path)
+                if not loop_dev:
+                    raise ValueError("Could not get/create loop device")
                 cleanup_state['loop_dev'] = loop_dev
-                logger.info(f"Created RW loop device: {loop_dev}")
+                logger.info(f"Using loop device: {loop_dev}")
             except Exception as e:
-                logger.error(f"Failed to create loop device: {e}")
-                raise ValueError(f"Could not create loop device: {e}")
+                logger.error(f"Failed to get/create loop device: {e}")
+                raise ValueError(f"Could not get/create loop device: {e}")
 
             # Step 4: Detect filesystem type and mount read-write
             try:
@@ -517,8 +555,9 @@ def quick_edit_part2(operation_callback, timeout=10):
             # Step 6: Sync filesystem - critical for ensuring changes are written
             logger.info("Syncing filesystem")
             try:
-                subprocess.run(['sync'], check=False)
-                time.sleep(1)  # Give sync time to complete
+                subprocess.run(['sync'], check=False, timeout=5)
+                # Reduced from 1s - sync is synchronous on completion
+                time.sleep(0.3)
             except Exception as e:
                 logger.warning(f"Sync failed (non-fatal): {e}")
 
@@ -542,29 +581,14 @@ def quick_edit_part2(operation_callback, timeout=10):
                     )
                     logger.info("✓ Unmounted RW mount")
 
-                # Detach RW loop device
-                if cleanup_state['loop_dev']:
-                    logger.info(f"Detaching RW loop device {cleanup_state['loop_dev']}")
-                    subprocess.run(
-                        ['sudo', '/usr/sbin/losetup', '-d', cleanup_state['loop_dev']],
-                        capture_output=True,
-                        check=False
-                    )
+                # The loop device created earlier is RW - we can mount it RO without detaching
+                # Using mount -o ro on a RW loop device works fine
+                ro_loop_dev = cleanup_state['loop_dev']
 
-                # Create new RO loop device
-                logger.info("Creating read-only loop device")
-                result = subprocess.run(
-                    ['sudo', '/usr/sbin/losetup', '--show', '-f', '-r', img_path],
-                    capture_output=True,
-                    text=True,
-                    check=False
-                )
+                if ro_loop_dev:
+                    logger.info(f"Reusing existing loop device for RO mount: {ro_loop_dev}")
 
-                if result.returncode == 0:
-                    ro_loop_dev = result.stdout.strip()
-                    logger.info(f"Created RO loop device: {ro_loop_dev}")
-
-                    # Remount RO
+                    # Remount RO using the same loop device
                     subprocess.run(
                         ['sudo', 'mkdir', '-p', mount_ro],
                         capture_output=True,
@@ -648,7 +672,7 @@ def quick_edit_part2(operation_callback, timeout=10):
         return False, f"Unexpected error: {str(e)}"
 
 
-def rebind_usb_gadget(delay_seconds=2):
+def rebind_usb_gadget(delay_seconds=1):
     """
     Unbind and rebind the USB gadget to force Tesla to re-enumerate the device.
 
@@ -660,7 +684,7 @@ def rebind_usb_gadget(delay_seconds=2):
     Critical for lock chime changes to be recognized by the vehicle.
 
     Args:
-        delay_seconds: Seconds to wait between unbind and rebind (default 2)
+        delay_seconds: Seconds to wait between unbind and rebind (default 1, reduced from 2)
 
     Returns:
         (success: bool, message: str)

@@ -13,6 +13,34 @@ log_timing() {
   echo "[TIMING] ${label}: ${elapsed}ms ($(date '+%H:%M:%S.%3N'))"
 }
 
+# Smart wait with verification - replaces fixed sleeps for safety with speed
+# Usage: wait_until <check_command> <max_seconds> <description>
+wait_until() {
+  local check_cmd="$1"
+  local max_wait="$2"
+  local desc="${3:-operation}"
+  local elapsed=0
+  local interval=0.1
+
+  while ! eval "$check_cmd" 2>/dev/null; do
+    sleep $interval
+    elapsed=$(echo "$elapsed + $interval" | bc)
+    if (( $(echo "$elapsed >= $max_wait" | bc -l) )); then
+      echo "  Warning: $desc did not complete within ${max_wait}s"
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Create a fresh loop device for an image file
+# After clearing any previous state, we create fresh loop devices.
+# Usage: LOOP_DEV=$(create_loop "/path/to/image.img")
+create_loop() {
+  local img="$1"
+  sudo losetup --show -f "$img"
+}
+
 # Load configuration
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 log_timing "Script start"
@@ -55,21 +83,7 @@ fi
 
 log_timing "Lock check completed"
 
-EPHEMERAL_LOOP=0
-LOOP_DEV_FSCK=""
-
-cleanup_ephemeral_loop() {
-  if [ "${EPHEMERAL_LOOP:-0}" -eq 1 ] && [ -n "$LOOP_DEV_FSCK" ]; then
-    sudo losetup -d "$LOOP_DEV_FSCK" 2>/dev/null || true
-  fi
-}
-trap cleanup_ephemeral_loop EXIT
-
 echo "Switching to USB gadget presentation mode..."
-
-# Stop thumbnail generator to prevent file access during mode switch
-echo "Stopping thumbnail generator..."
-sudo systemctl stop thumbnail_generator.service 2>/dev/null || true
 
 # Ask Samba to drop any open handles before shutting it down
 echo "Closing Samba shares..."
@@ -84,7 +98,8 @@ sudo systemctl stop nmbd || true
 # Force all buffered data to disk before unmounting
 echo "Flushing buffered writes to disk..."
 sync
-sleep 1
+# Brief pause to ensure filesystem metadata is stable (reduced from 1s)
+sleep 0.3
 
 # Helper to unmount even if Samba clients are still attached
 unmount_with_retry() {
@@ -151,30 +166,49 @@ done
 sync
 log_timing "Final sync completed"
 
+# Clean up existing loop devices for our images
+# After unmounting, detach any lingering loop devices to avoid accumulation
+echo "Cleaning up existing loop devices..."
+for img in "$IMG_CAM" "$IMG_LIGHTSHOW"; do
+  for loop in $(losetup -j "$img" 2>/dev/null | cut -d: -f1); do
+    if [ -n "$loop" ]; then
+      echo "  Detaching $loop..."
+      sudo losetup -d "$loop" 2>/dev/null || true
+    fi
+  done
+done
+# Brief pause for loop device cleanup to complete
+sleep 0.2
+log_timing "Loop devices cleaned up"
+
 # ============================================================================
 # Boot-time filesystem check and repair (optional, ~1 second total)
 # ============================================================================
+# These variables will hold loop devices for reuse later in the script
+LOOP_CAM=""
+LOOP_LIGHTSHOW=""
+
 if [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
   echo "Running boot-time filesystem check and repair..."
 
-  # Create temporary loop devices for fsck
-  LOOP_CAM_FSCK=$(sudo losetup --show -f "$IMG_CAM" 2>/dev/null)
-  LOOP_LIGHTSHOW_FSCK=$(sudo losetup --show -f "$IMG_LIGHTSHOW" 2>/dev/null)
+  # Create loop devices for fsck (will be reused for local mounts too)
+  LOOP_CAM=$(create_loop "$IMG_CAM")
+  LOOP_LIGHTSHOW=$(create_loop "$IMG_LIGHTSHOW")
 
   # Detect filesystem types
-  FS_TYPE_CAM=$(sudo blkid -o value -s TYPE "$LOOP_CAM_FSCK" 2>/dev/null || echo "exfat")
-  FS_TYPE_LIGHTSHOW=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW_FSCK" 2>/dev/null || echo "vfat")
+  FS_TYPE_CAM=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "exfat")
+  FS_TYPE_LIGHTSHOW=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "vfat")
 
   # Run fsck on TeslaCam (part1)
   echo "  Checking TeslaCam ($FS_TYPE_CAM)..."
   if [ "$FS_TYPE_CAM" = "exfat" ]; then
-    if sudo fsck.exfat -p "$LOOP_CAM_FSCK" 2>&1; then
+    if sudo fsck.exfat -p "$LOOP_CAM" 2>&1; then
       echo "    ✓ TeslaCam: clean"
     else
       echo "    ⚠ TeslaCam: repaired or has issues"
     fi
   else
-    if sudo fsck.vfat -p "$LOOP_CAM_FSCK" 2>&1; then
+    if sudo fsck.vfat -p "$LOOP_CAM" 2>&1; then
       echo "    ✓ TeslaCam: clean"
     else
       echo "    ⚠ TeslaCam: repaired or has issues"
@@ -184,22 +218,21 @@ if [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
   # Run fsck on LightShow (part2)
   echo "  Checking LightShow ($FS_TYPE_LIGHTSHOW)..."
   if [ "$FS_TYPE_LIGHTSHOW" = "exfat" ]; then
-    if sudo fsck.exfat -p "$LOOP_LIGHTSHOW_FSCK" 2>&1; then
+    if sudo fsck.exfat -p "$LOOP_LIGHTSHOW" 2>&1; then
       echo "    ✓ LightShow: clean"
     else
       echo "    ⚠ LightShow: repaired or has issues"
     fi
   else
-    if sudo fsck.vfat -p "$LOOP_LIGHTSHOW_FSCK" 2>&1; then
+    if sudo fsck.vfat -p "$LOOP_LIGHTSHOW" 2>&1; then
       echo "    ✓ LightShow: clean"
     else
       echo "    ⚠ LightShow: repaired or has issues"
     fi
   fi
 
-  # Clean up fsck loop devices
-  sudo losetup -d "$LOOP_CAM_FSCK" 2>/dev/null || true
-  sudo losetup -d "$LOOP_LIGHTSHOW_FSCK" 2>/dev/null || true
+  # Note: Loop devices (LOOP_CAM, LOOP_LIGHTSHOW) preserved for later reuse in local mounts
+  echo "  Loop devices preserved for local mount reuse"
 
   log_timing "Boot fsck completed"
 else
@@ -219,25 +252,14 @@ for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
   fi
 done
 
-# Flush any pending writes to the image before detaching loops
+# Flush any pending writes to the image files
 echo "Flushing pending filesystem buffers..."
 sync
 
-# Detach loop devices for the images so the gadget gets an exclusive handle
-echo "Detaching loop devices..."
-for loop in $(losetup -j "$IMG_CAM" 2>/dev/null | cut -d: -f1); do
-  if [ -n "$loop" ]; then
-    echo "  Detaching $loop"
-    sudo losetup -d "$loop" || true
-  fi
-done
-for loop in $(losetup -j "$IMG_LIGHTSHOW" 2>/dev/null | cut -d: -f1); do
-  if [ -n "$loop" ]; then
-    echo "  Detaching $loop"
-    sudo losetup -d "$loop" || true
-  fi
-done
-EPHEMERAL_LOOP=0
+# Note: We don't need to detach existing loop devices for the gadget to work.
+# The USB gadget uses the image files directly, not through loop devices.
+# Loop devices are only needed for local mounting. If they exist from a previous
+# session, that's fine - the gadget can still access the files.
 
 # Remove legacy gadget module if present
 if lsmod | grep -q '^g_mass_storage'; then
@@ -254,8 +276,17 @@ if [ -d "$CONFIGFS_GADGET" ]; then
   # Unbind UDC first
   if [ -f "$CONFIGFS_GADGET/UDC" ]; then
     echo "" | sudo tee "$CONFIGFS_GADGET/UDC" > /dev/null 2>&1 || true
-    sleep 1
+    # Brief settle time (reduced from 1s - unbind is synchronous)
+    sleep 0.3
   fi
+
+  # Clear LUN backing files to release kernel file references
+  for lun in "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.*; do
+    if [ -f "$lun/file" ]; then
+      echo "" | sudo tee "$lun/file" > /dev/null 2>&1 || true
+    fi
+  done
+  sleep 0.1
 
   # Remove function links
   sudo rm -f "$CONFIGFS_GADGET"/configs/*/mass_storage.* 2>/dev/null || true
@@ -357,10 +388,9 @@ sudo mkdir -p "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"
 UID_VAL=$(id -u "$TARGET_USER")
 GID_VAL=$(id -g "$TARGET_USER")
 
-# Mount TeslaCam image (part1) - separate loop device for local read-only access
-LOOP_CAM=$(losetup -j "$IMG_CAM" 2>/dev/null | head -n1 | cut -d: -f1)
-if [ -z "$LOOP_CAM" ]; then
-  LOOP_CAM=$(sudo losetup --show -f "$IMG_CAM")
+# Mount TeslaCam image (part1) - reuse fsck loop device if available, otherwise create
+if [ -z "$LOOP_CAM" ] || [ ! -e "$LOOP_CAM" ]; then
+  LOOP_CAM=$(create_loop "$IMG_CAM")
 fi
 
 if [ -n "$LOOP_CAM" ] && [ -e "$LOOP_CAM" ]; then
@@ -370,11 +400,11 @@ if [ -n "$LOOP_CAM" ] && [ -e "$LOOP_CAM" ]; then
   echo "  Mounting ${LOOP_CAM} (TeslaCam) at $RO_MNT_DIR/part1-ro (read-only)..."
 
   if [ "$FS_TYPE" = "vfat" ]; then
-    sudo mount -t vfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_CAM" "$RO_MNT_DIR/part1-ro"
+    sudo nsenter --mount=/proc/1/ns/mnt mount -t vfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_CAM" "$RO_MNT_DIR/part1-ro"
   elif [ "$FS_TYPE" = "exfat" ]; then
-    sudo mount -t exfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_CAM" "$RO_MNT_DIR/part1-ro"
+    sudo nsenter --mount=/proc/1/ns/mnt mount -t exfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_CAM" "$RO_MNT_DIR/part1-ro"
   else
-    sudo mount -o ro "$LOOP_CAM" "$RO_MNT_DIR/part1-ro"
+    sudo nsenter --mount=/proc/1/ns/mnt mount -o ro "$LOOP_CAM" "$RO_MNT_DIR/part1-ro"
   fi
 
   echo "  Mounted successfully at $RO_MNT_DIR/part1-ro"
@@ -382,10 +412,9 @@ else
   echo "  Warning: Unable to attach loop device for TeslaCam read-only mounting"
 fi
 
-# Mount Lightshow image (part2) - separate loop device for local read-only access
-LOOP_LIGHTSHOW=$(losetup -j "$IMG_LIGHTSHOW" 2>/dev/null | head -n1 | cut -d: -f1)
-if [ -z "$LOOP_LIGHTSHOW" ]; then
-  LOOP_LIGHTSHOW=$(sudo losetup --show -f "$IMG_LIGHTSHOW")
+# Mount Lightshow image (part2) - reuse fsck loop device if available, otherwise create
+if [ -z "$LOOP_LIGHTSHOW" ] || [ ! -e "$LOOP_LIGHTSHOW" ]; then
+  LOOP_LIGHTSHOW=$(create_loop "$IMG_LIGHTSHOW")
 fi
 
 if [ -n "$LOOP_LIGHTSHOW" ] && [ -e "$LOOP_LIGHTSHOW" ]; then
@@ -395,11 +424,11 @@ if [ -n "$LOOP_LIGHTSHOW" ] && [ -e "$LOOP_LIGHTSHOW" ]; then
   echo "  Mounting ${LOOP_LIGHTSHOW} (Lightshow) at $RO_MNT_DIR/part2-ro (read-only)..."
 
   if [ "$FS_TYPE" = "vfat" ]; then
-    sudo mount -t vfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_LIGHTSHOW" "$RO_MNT_DIR/part2-ro"
+    sudo nsenter --mount=/proc/1/ns/mnt mount -t vfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_LIGHTSHOW" "$RO_MNT_DIR/part2-ro"
   elif [ "$FS_TYPE" = "exfat" ]; then
-    sudo mount -t exfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_LIGHTSHOW" "$RO_MNT_DIR/part2-ro"
+    sudo nsenter --mount=/proc/1/ns/mnt mount -t exfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_LIGHTSHOW" "$RO_MNT_DIR/part2-ro"
   else
-    sudo mount -o ro "$LOOP_LIGHTSHOW" "$RO_MNT_DIR/part2-ro"
+    sudo nsenter --mount=/proc/1/ns/mnt mount -o ro "$LOOP_LIGHTSHOW" "$RO_MNT_DIR/part2-ro"
   fi
 
   echo "  Mounted successfully at $RO_MNT_DIR/part2-ro"
@@ -407,9 +436,6 @@ else
   echo "  Warning: Unable to attach loop device for Lightshow read-only mounting"
 fi
 log_timing "USB gadget fully configured and mounted"
-# Restart thumbnail generator timer now that we're in present mode with read-only mounts
-echo "Restarting thumbnail generator timer..."
-sudo systemctl start thumbnail_generator.timer 2>/dev/null || true
 
 echo "USB gadget presented successfully!"
 echo "The Pi should now appear as TWO USB storage devices when connected:"

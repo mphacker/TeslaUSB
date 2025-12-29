@@ -4,6 +4,45 @@ set -euo pipefail
 # edit_usb.sh - Switch to edit mode with local mounts and Samba
 # This script removes the USB gadget, mounts drives locally, and starts Samba
 
+# Performance tracking
+SCRIPT_START=$(date +%s%3N)
+log_timing() {
+  local label="$1"
+  local now=$(date +%s%3N)
+  local elapsed=$((now - SCRIPT_START))
+  echo "[TIMING] ${label}: ${elapsed}ms ($(date '+%H:%M:%S.%3N'))"
+}
+
+# Smart wait: polls until condition is true or timeout (much faster than fixed sleep)
+# Usage: wait_until "test -condition" 5 "description"
+wait_until() {
+  local check_cmd="$1"
+  local max_wait="$2"
+  local desc="${3:-operation}"
+  local start=$(date +%s%3N)
+  local deadline=$((start + max_wait * 1000))
+
+  while ! eval "$check_cmd" 2>/dev/null; do
+    local now=$(date +%s%3N)
+    if [ $now -ge $deadline ]; then
+      return 1
+    fi
+    sleep 0.05
+  done
+  return 0
+}
+
+# Create a fresh loop device for an image file
+# After clearing gadget LUN files and unmounting, existing loop devices will have
+# AUTOCLEAR set and will be automatically destroyed. We create fresh ones.
+# Usage: LOOP_DEV=$(create_loop "/path/to/image.img")
+create_loop() {
+  local img="$1"
+  sudo losetup --show -f "$img"
+}
+
+log_timing "Script start"
+
 # Load configuration
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
@@ -59,23 +98,16 @@ safe_unmount_dir() {
 
   # Try normal unmount in the system mount namespace
   for attempt in 1 2 3; do
-    echo "  Unmounting $target (attempt $attempt)..."
-
     if sudo nsenter --mount=/proc/1/ns/mnt umount "$target" 2>/dev/null; then
-      sleep 1
-      # Verify it's actually gone
-      if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$target" 2>/dev/null; then
-        echo "  Successfully unmounted $target"
+      # Quick poll to verify unmount (much faster than fixed sleep)
+      if wait_until "! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q '$target'" 1 "verify unmount"; then
         return 0
-      else
-        echo "  WARNING: umount succeeded but mount still exists (multiple mounts?)"
       fi
+      echo "  WARNING: umount succeeded but mount still exists (multiple mounts?)"
     fi
 
-    # Still mounted, wait before retry
-    if [ $attempt -lt 3 ]; then
-      sleep 2
-    fi
+    # Still mounted, brief pause before retry
+    [ $attempt -lt 3 ] && sleep 0.2
   done
 
   # If still mounted, this is an error - don't continue
@@ -91,14 +123,26 @@ if [ -d "$CONFIGFS_GADGET" ]; then
   echo "Removing configfs USB gadget..."
   # Sync all pending writes first
   sync
-  sleep 1
+  # Brief pause for filesystem stability (reduced from 1s)
+  sleep 0.2
 
   # Unbind UDC FIRST - this disconnects the gadget from USB before touching mounts
   if [ -f "$CONFIGFS_GADGET/UDC" ]; then
     echo "  Unbinding UDC..."
     echo "" | sudo tee "$CONFIGFS_GADGET/UDC" > /dev/null 2>&1 || true
-    sleep 2
+    # Brief settle time (reduced from 2s - unbind is synchronous)
+    sleep 0.5
   fi
+
+  # Clear LUN backing files BEFORE removing functions
+  # This releases the kernel's file references to the image files
+  echo "  Clearing LUN backing files..."
+  for lun in "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.*; do
+    if [ -f "$lun/file" ]; then
+      echo "" | sudo tee "$lun/file" > /dev/null 2>&1 || true
+    fi
+  done
+  sleep 0.2
 
   # Remove function links
   echo "  Removing function links..."
@@ -121,7 +165,8 @@ if [ -d "$CONFIGFS_GADGET" ]; then
   sudo rmdir "$CONFIGFS_GADGET" 2>/dev/null || true
 
   echo "  Configfs gadget removed successfully"
-  sleep 2
+  # Brief settle time (reduced from 2s)
+  sleep 0.5
 
   # NOW unmount read-only mounts after gadget is fully disconnected
   echo "Unmounting read-only mounts from present mode..."
@@ -182,44 +227,31 @@ elif lsmod | grep -q '^g_mass_storage'; then
   sleep 1
 fi
 
-# Ensure read-only mounts from present mode are unmounted (critical for mode switching)
-# This runs regardless of which gadget type was active, as a safety measure
-echo "Ensuring read-only mounts are cleared..."
+# Verify all mounts are released (quick check - already unmounted above)
 RO_MNT_DIR="/mnt/gadget"
 for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
-  if mountpoint -q "$mp" 2>/dev/null; then
-    echo "  Unmounting $mp..."
-    if ! safe_unmount_dir "$mp"; then
-      echo "  WARNING: Could not cleanly unmount $mp, but continuing anyway..." >&2
-    else
-      echo "  Successfully unmounted $mp"
+  if sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$mp" 2>/dev/null; then
+    echo "  Clearing remaining mount: $mp"
+    safe_unmount_dir "$mp" || true
+  fi
+done
+log_timing "Mounts released"
+
+# Detach all existing loop devices for our images
+# After clearing LUN files and unmounting, loop devices may still exist
+# We must detach them before creating fresh ones to avoid accumulation
+echo "Cleaning up existing loop devices..."
+for img in "$IMG_CAM" "$IMG_LIGHTSHOW"; do
+  for loop in $(losetup -j "$img" 2>/dev/null | cut -d: -f1); do
+    if [ -n "$loop" ]; then
+      echo "  Detaching $loop..."
+      sudo losetup -d "$loop" 2>/dev/null || true
     fi
-  fi
+  done
 done
-
-# Wait for lazy unmounts to complete
-echo "Waiting for mounts to fully release..."
-sleep 3
-sync
-
-# Clean up any stale loop devices that might still be attached to the read-only mounts
-# This is important because loop devices from present mode might still be active
-echo "Cleaning up loop devices from present mode..."
-for existing in $(sudo losetup -j "$IMG_CAM" 2>/dev/null | cut -d: -f1); do
-  if [ -n "$existing" ]; then
-    echo "  Detaching loop device (TeslaCam): $existing"
-    sudo losetup -d "$existing" 2>/dev/null || true
-  fi
-done
-for existing in $(sudo losetup -j "$IMG_LIGHTSHOW" 2>/dev/null | cut -d: -f1); do
-  if [ -n "$existing" ]; then
-    echo "  Detaching loop device (Lightshow): $existing"
-    sudo losetup -d "$existing" 2>/dev/null || true
-  fi
-done
-
-sync
-sleep 2
+# Brief pause for loop device cleanup to complete
+sleep 0.3
+log_timing "Loop devices cleaned up"
 
 # Prepare mount points
 echo "Preparing mount points..."
@@ -239,15 +271,16 @@ for PART_NUM in 1 2; do
   fi
 done
 
-# Ensure all pending operations complete before setting up new loop devices
+# Ensure all pending operations complete before setting up loop devices
 sync
-sleep 1
+# Brief pause for stability (reduced from 1s)
+sleep 0.2
 
 # Setup loop device for TeslaCam image (part1)
 echo "Setting up loop device for TeslaCam..."
-LOOP_CAM=$(sudo losetup --show -f "$IMG_CAM")
+LOOP_CAM=$(create_loop "$IMG_CAM")
 if [ -z "$LOOP_CAM" ]; then
-  echo "ERROR: Failed to create loop device for $IMG_CAM"
+  echo "ERROR: Failed to get/create loop device for $IMG_CAM"
   exit 1
 fi
 echo "Using loop device for TeslaCam: $LOOP_CAM"
@@ -263,9 +296,9 @@ echo "Verified: $LOOP_CAM is attached to $IMG_CAM"
 
 # Setup loop device for Lightshow image (part2)
 echo "Setting up loop device for Lightshow..."
-LOOP_LIGHTSHOW=$(sudo losetup --show -f "$IMG_LIGHTSHOW")
+LOOP_LIGHTSHOW=$(create_loop "$IMG_LIGHTSHOW")
 if [ -z "$LOOP_LIGHTSHOW" ]; then
-  echo "ERROR: Failed to create loop device for $IMG_LIGHTSHOW"
+  echo "ERROR: Failed to get/create loop device for $IMG_LIGHTSHOW"
   sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
   exit 1
 fi
@@ -283,16 +316,16 @@ echo "Verified: $LOOP_LIGHTSHOW is attached to $IMG_LIGHTSHOW"
 
 sleep 0.5
 
-# Trap to clean up loop devices only on script failure (not on successful exit)
-cleanup_loops_on_failure() {
+# Trap to log on failure but NOT detach loop devices (they may be reused/shared)
+log_failure_on_exit() {
   local exit_code=$?
   if [ $exit_code -ne 0 ]; then
-    echo "Script failed with exit code $exit_code, cleaning up loop devices..."
-    [ -n "${LOOP_CAM:-}" ] && sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
-    [ -n "${LOOP_LIGHTSHOW:-}" ] && sudo losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
+    echo "Script failed with exit code $exit_code"
+    echo "Loop devices preserved for debugging:"
+    sudo losetup -l | head -5
   fi
 }
-trap cleanup_loops_on_failure EXIT
+trap log_failure_on_exit EXIT
 
 # Filesystem checks removed from mode switching for faster operation
 # Use the web interface Analytics page to run manual filesystem checks
@@ -342,15 +375,17 @@ echo "  Mounted $LOOP_LIGHTSHOW at $MP (filesystem: $FS_TYPE)"
 
 # Refresh Samba so shares expose the freshly mounted drives
 echo "Refreshing Samba shares..."
-# Force close any cached shares
+# Close any cached shares and reload config (faster than full restart)
 sudo smbcontrol all close-share gadget_part1 2>/dev/null || true
 sudo smbcontrol all close-share gadget_part2 2>/dev/null || true
-# Reload Samba configuration
-sudo smbcontrol all reload-config 2>/dev/null || true
-# Restart Samba services to ensure they see the new mounts
-sudo systemctl restart smbd nmbd 2>/dev/null || true
-# Give Samba a moment to initialize
-sleep 2
+# If Samba is running, reload config is sufficient; otherwise start it
+if systemctl is-active --quiet smbd; then
+  sudo smbcontrol all reload-config 2>/dev/null || true
+else
+  sudo systemctl start smbd nmbd 2>/dev/null || true
+  wait_until "systemctl is-active --quiet smbd" 2 "Samba startup" || true
+fi
+log_timing "Samba refreshed"
 # Verify mounts are accessible
 if [ -d "$MNT_DIR/part1" ]; then
   echo "  Part1 files: $(ls -A "$MNT_DIR/part1" 2>/dev/null | wc -l) items"
@@ -371,3 +406,6 @@ echo "Drives are now mounted locally and accessible via Samba shares:"
 echo "  - Part 1: $MNT_DIR/part1"
 echo "  - Part 2: $MNT_DIR/part2"
 echo "  - Samba shares: gadget_part1, gadget_part2"
+
+log_timing "Script completed successfully"
+echo "[PERFORMANCE] Total execution time: $(($(date +%s%3N) - SCRIPT_START))ms"

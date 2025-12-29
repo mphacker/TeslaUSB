@@ -23,6 +23,14 @@
         </div>
     </div>
 
+    <!-- Loading indicator for folder switch -->
+    <div id="folder-loading" style="display: none; text-align: center; padding: 60px;">
+        <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+    </div>
+
+    <div id="events-container">
     {% if events %}
     <div class="events-grid" id="eventsGrid">
         {% for event in events %}
@@ -85,220 +93,17 @@
     </div>
 
     {% else %}
-    <div class="no-videos">
+    <div class="no-videos" id="no-videos-message">
         <p>No events found in {{ current_folder }}.</p>
     </div>
     {% endif %}
+    </div>
     {% else %}
     <div class="no-videos">
         <p>No folders available in TeslaCam.</p>
     </div>
     {% endif %}
 </div>
-
-<script>
-// Infinite Scroll & Thumbnail Queue Implementation
-document.addEventListener('DOMContentLoaded', function() {
-    const eventsGrid = document.getElementById('eventsGrid');
-    const loadingIndicator = document.getElementById('loading-indicator');
-    const endOfList = document.getElementById('end-of-list');
-
-    if (!eventsGrid) return;
-
-    let currentPage = {{ current_page|default(1) }};
-    let hasNext = {{ 'true' if has_next else 'false' }};
-    let isLoading = false;
-    const currentFolder = "{{ current_folder }}";
-
-    // Thumbnail Queue System
-    // Prioritizes visible thumbnails and loads them one by one to prevent CPU saturation
-    const thumbnailQueue = {
-        queue: [],
-        processing: false,
-
-        add: function(imgElement) {
-            if (!this.queue.includes(imgElement)) {
-                this.queue.push(imgElement);
-                this.process();
-            }
-        },
-
-        remove: function(imgElement) {
-            const index = this.queue.indexOf(imgElement);
-            if (index > -1) {
-                this.queue.splice(index, 1);
-            }
-        },
-
-        process: function() {
-            if (this.processing || this.queue.length === 0) return;
-
-            this.processing = true;
-            const img = this.queue.shift(); // FIFO
-
-            // Load the image
-            const tempImage = new Image();
-            tempImage.onload = () => {
-                img.src = img.dataset.src;
-                img.classList.add('loaded');
-                this.processing = false;
-                this.process(); // Process next
-            };
-            tempImage.onerror = () => {
-                // Handle error (placeholder already set by onerror in HTML)
-                this.processing = false;
-                this.process(); // Process next
-            };
-            tempImage.src = img.dataset.src;
-        }
-    };
-
-    // Intersection Observer for Lazy Loading Thumbnails
-    const thumbnailObserver = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                const img = entry.target;
-                if (!img.classList.contains('loaded') && img.dataset.src) {
-                    thumbnailQueue.add(img);
-                }
-            } else {
-                // Optional: Remove from queue if scrolled out of view before loading
-                // thumbnailQueue.remove(entry.target);
-            }
-        });
-    }, {
-        rootMargin: '50px 0px', // Preload slightly before viewport
-        threshold: 0.1
-    });
-
-    // Observe existing thumbnails
-    document.querySelectorAll('.lazy-thumbnail').forEach(img => {
-        thumbnailObserver.observe(img);
-    });
-
-    // Infinite Scroll Logic
-    window.addEventListener('scroll', () => {
-        if (isLoading || !hasNext) return;
-
-        // Check if near bottom of page
-        if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
-            loadMoreEvents();
-        }
-    });
-
-    function loadMoreEvents() {
-        isLoading = true;
-        loadingIndicator.style.display = 'block';
-
-        const nextPage = currentPage + 1;
-        const url = `{{ url_for('videos.file_browser') }}?folder=${encodeURIComponent(currentFolder)}&page=${nextPage}`;
-
-        fetch(url, {
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            }
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.events && data.events.length > 0) {
-                appendEvents(data.events, data.folder_structure);
-                currentPage = data.next_page;
-                hasNext = data.has_next;
-            } else {
-                hasNext = false;
-            }
-
-            if (!hasNext) {
-                endOfList.style.display = 'block';
-            }
-        })
-        .catch(error => {
-            console.error('Error loading more events:', error);
-        })
-        .finally(() => {
-            isLoading = false;
-            loadingIndicator.style.display = 'none';
-        });
-    }
-
-    function appendEvents(events, folderStructure) {
-        events.forEach(event => {
-            const card = document.createElement('div');
-            card.className = 'event-card';
-            card.onclick = () => window.location.href = `/videos/event/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`;
-
-            // Build Thumbnail HTML
-            let thumbnailHtml = '';
-            if (event.has_thumbnail) {
-                const thumbUrl = folderStructure === 'flat'
-                    ? `/videos/session_thumbnail/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`
-                    : `/videos/event_thumbnail/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`;
-
-                thumbnailHtml = `
-                    <img data-src="${thumbUrl}"
-                         class="lazy-thumbnail"
-                         alt="Thumbnail"
-                         src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
-                         onerror="this.parentElement.innerHTML='<div class=\\'event-thumbnail-placeholder\\'><i class=\\'bi bi-camera-video\\' style=\\'font-size: 3em;\\'></i></div>';">
-                `;
-            } else {
-                thumbnailHtml = `
-                    <div class="event-thumbnail-placeholder">
-                        <i class="bi bi-camera-video" style="font-size: 3em;"></i>
-                    </div>
-                `;
-            }
-
-            // Build Cameras HTML
-            let camerasHtml = '';
-            const cams = event.camera_videos;
-            if (cams.front) camerasHtml += '<span class="camera-badge">Front</span>';
-            if (cams.back) camerasHtml += '<span class="camera-badge">Back</span>';
-            if (cams.left_repeater) camerasHtml += '<span class="camera-badge">Left</span>';
-            if (cams.right_repeater) camerasHtml += '<span class="camera-badge">Right</span>';
-            if (cams.left_pillar) camerasHtml += '<span class="camera-badge">L-Pillar</span>';
-            if (cams.right_pillar) camerasHtml += '<span class="camera-badge">R-Pillar</span>';
-
-            // Build Reason HTML
-            let reasonHtml = '';
-            if (event.reason) {
-                reasonHtml = `<span class="event-reason">${event.reason.replace('_', ' ')}</span>`;
-            }
-
-            // Build Location HTML
-            let locationHtml = '';
-            if (event.city) {
-                locationHtml = `<div class="event-location">📍 ${event.city}</div>`;
-            }
-
-            card.innerHTML = `
-                <div class="event-thumbnail">
-                    ${thumbnailHtml}
-                </div>
-                <div class="event-info">
-                    <div class="event-datetime">${event.datetime}</div>
-                    ${locationHtml}
-                    <div class="event-meta">
-                        <span>💾 ${event.size_mb} MB</span>
-                        ${reasonHtml}
-                    </div>
-                    <div class="event-cameras">
-                        ${camerasHtml}
-                    </div>
-                </div>
-            `;
-
-            eventsGrid.appendChild(card);
-
-            // Observe new thumbnail
-            const newImg = card.querySelector('.lazy-thumbnail');
-            if (newImg) {
-                thumbnailObserver.observe(newImg);
-            }
-        });
-    }
-});
-</script>
 
 <style>
 .events-grid {
@@ -487,172 +292,320 @@ document.addEventListener('DOMContentLoaded', function() {
 </style>
 
 <script>
-function loadFolder(folderName) {
-    window.location.href = '{{ url_for("videos.file_browser") }}?folder=' + encodeURIComponent(folderName);
-}
+// Video Browser - AJAX folder switching, infinite scroll, and thumbnail queue
+(function() {
+    'use strict';
 
-// Progressive thumbnail loading with IntersectionObserver
-// Optimized for Pi Zero 2 W performance
-document.addEventListener('DOMContentLoaded', function() {
-    const thumbnails = document.querySelectorAll('.event-thumbnail img[loading="lazy"]');
+    // State
+    let currentFolder = "{{ current_folder or '' }}";
+    let currentPage = {{ current_page|default(1) }};
+    let hasNext = {{ 'true' if has_next else 'false' }};
+    let folderStructure = "{{ folder_structure|default('events') }}";
+    let isLoading = false;
 
-    if (thumbnails.length === 0) return;
+    // DOM elements
+    const eventsGrid = document.getElementById('eventsGrid');
+    const eventsContainer = document.getElementById('events-container');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    const folderLoading = document.getElementById('folder-loading');
+    const endOfList = document.getElementById('end-of-list');
+    const folderSelect = document.getElementById('folderSelect');
 
-    // Track loaded thumbnails to prevent duplicate loads
-    const loadedThumbnails = new Set();
+    // Thumbnail Queue System - limits concurrent loads to prevent CPU saturation
+    const thumbnailQueue = {
+        queue: [],
+        processing: false,
+        loadedSet: new Set(),
+        activeRequests: new Map(),
 
-    // Track active fetch requests for cancellation
-    const activeRequests = new Map(); // Map<img, AbortController>
+        add(img) {
+            if (!this.loadedSet.has(img) && !this.queue.includes(img)) {
+                this.queue.push(img);
+                this.process();
+            }
+        },
 
-    // Queue management: limit concurrent thumbnail loads to prevent overwhelming the Pi
-    let concurrentLoads = 0;
-    const MAX_CONCURRENT = 1; // Max 1 thumbnail at a time (Pi Zero 2 W has only 512MB RAM)
-    const loadQueue = [];
+        clear() {
+            // Cancel all active requests
+            this.activeRequests.forEach((controller) => controller.abort());
+            this.activeRequests.clear();
+            this.queue.length = 0;
+            this.processing = false;
+            this.loadedSet.clear();
+        },
 
-    // Function to abort all pending thumbnail requests
-    function abortAllThumbnails() {
-        const startTime = performance.now();
-        const activeCount = activeRequests.size;
-        const queueCount = loadQueue.length;
+        process() {
+            if (this.processing || this.queue.length === 0) return;
 
-        // Cancel all active fetch requests
-        activeRequests.forEach((controller, img) => {
-            controller.abort();
-        });
-        activeRequests.clear();
+            this.processing = true;
+            const img = this.queue.shift();
+            this.loadedSet.add(img);
 
-        // Clear the queue
-        loadQueue.length = 0;
-        concurrentLoads = 0;
-
-        const elapsed = performance.now() - startTime;
-        console.log(`Aborted ${activeCount} active thumbnails, cleared ${queueCount} queued (${elapsed.toFixed(1)}ms)`);
-    }
-
-    function processQueue() {
-        while (concurrentLoads < MAX_CONCURRENT && loadQueue.length > 0) {
-            const img = loadQueue.shift();
-            if (loadedThumbnails.has(img)) continue;
-
-            loadedThumbnails.add(img);
-            concurrentLoads++;
-
-            const originalSrc = img.dataset.src || img.src;
-            const thumbnailContainer = img.closest('.event-thumbnail');
-
-            // Add loading state
-            if (thumbnailContainer) {
-                thumbnailContainer.classList.add('loading');
+            const src = img.dataset.src;
+            if (!src) {
+                this.processing = false;
+                this.process();
+                return;
             }
 
-            // Create AbortController for this request
             const controller = new AbortController();
-            activeRequests.set(img, controller);
+            this.activeRequests.set(img, controller);
 
-            // Fetch thumbnail with abort support
-            fetch(originalSrc, { signal: controller.signal })
+            const container = img.closest('.event-thumbnail');
+            if (container) container.classList.add('loading');
+
+            fetch(src, { signal: controller.signal })
                 .then(response => {
-                    if (!response.ok) throw new Error('Failed to load');
+                    if (!response.ok) throw new Error('Failed');
                     return response.blob();
                 })
                 .then(blob => {
-                    const objectUrl = URL.createObjectURL(blob);
-                    img.src = objectUrl;
+                    img.src = URL.createObjectURL(blob);
                     img.classList.add('loaded');
-                    if (thumbnailContainer) {
-                        thumbnailContainer.classList.remove('loading');
-                    }
                 })
                 .catch(err => {
-                    if (err.name === 'AbortError') {
-                        // Silently handle abort
-                        console.log('Thumbnail load cancelled');
-                    } else {
-                        // Trigger the onerror handler on error
-                        if (img.onerror) {
-                            img.onerror.call(img);
-                        }
-                        if (thumbnailContainer) {
-                            thumbnailContainer.classList.remove('loading');
-                        }
+                    if (err.name !== 'AbortError' && img.onerror) {
+                        img.onerror.call(img);
                     }
                 })
                 .finally(() => {
-                    activeRequests.delete(img);
-                    concurrentLoads--;
-                    processQueue();
+                    this.activeRequests.delete(img);
+                    if (container) container.classList.remove('loading');
+                    this.processing = false;
+                    this.process();
                 });
         }
-    }
-
-    // Use IntersectionObserver for viewport-based loading
-    // Only load thumbnails when they're about to enter the viewport
-    const observerOptions = {
-        root: null, // viewport
-        rootMargin: '50px', // Start loading 50px before entering viewport
-        threshold: 0.01 // Trigger when even 1% is visible
     };
 
-    const observer = new IntersectionObserver(function(entries) {
-        entries.forEach(function(entry) {
+    // Intersection Observer for lazy loading thumbnails
+    const thumbnailObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
             if (entry.isIntersecting) {
-                const img = entry.target;
-
-                // Add to queue if not already loaded
-                if (!loadedThumbnails.has(img)) {
-                    loadQueue.push(img);
-                    processQueue();
-                }
-
-                // Stop observing once queued
-                observer.unobserve(img);
+                thumbnailQueue.add(entry.target);
+                thumbnailObserver.unobserve(entry.target);
             }
         });
-    }, observerOptions);
+    }, { rootMargin: '100px', threshold: 0.01 });
 
-    // Observe all lazy-loaded thumbnails
-    thumbnails.forEach(function(img) {
-        observer.observe(img);
-    });
+    // Observe all lazy thumbnails in a container
+    function observeThumbnails(container) {
+        container.querySelectorAll('.lazy-thumbnail').forEach(img => {
+            if (!img.classList.contains('loaded')) {
+                thumbnailObserver.observe(img);
+            }
+        });
+    }
 
-    // Cancel all thumbnail requests when user clicks on any event card (navigation)
-    const eventCards = document.querySelectorAll('.event-card');
-    eventCards.forEach(function(card) {
-        card.addEventListener('click', function(e) {
-            const clickTime = performance.now();
-            console.log('🖱️ Event card clicked');
+    // Create event card HTML
+    function createEventCard(event) {
+        const card = document.createElement('div');
+        card.className = 'event-card';
+        card.onclick = () => {
+            thumbnailQueue.clear();
+            window.location.href = `/videos/event/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`;
+        };
 
-            // Prevent immediate navigation
-            e.preventDefault();
-            e.stopImmediatePropagation();
+        // Thumbnail
+        let thumbnailHtml;
+        if (event.has_thumbnail) {
+            const thumbUrl = folderStructure === 'flat'
+                ? `/videos/session_thumbnail/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`
+                : `/videos/event_thumbnail/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`;
+            thumbnailHtml = `<img data-src="${thumbUrl}" class="lazy-thumbnail" alt="Thumbnail"
+                src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+                onerror="this.parentElement.innerHTML='<div class=\\'event-thumbnail-placeholder\\'><i class=\\'bi bi-camera-video\\' style=\\'font-size: 3em;\\'></i></div>';">`;
+        } else {
+            thumbnailHtml = `<div class="event-thumbnail-placeholder"><i class="bi bi-camera-video" style="font-size: 3em;"></i></div>`;
+        }
 
-            // Abort all thumbnails first
-            const abortStart = performance.now();
-            abortAllThumbnails();
-            const abortTime = performance.now() - abortStart;
-            console.log(`⏱️ Abort completed in ${abortTime.toFixed(1)}ms`);
+        // Camera badges (works with both full and compact camera_videos)
+        const cams = event.camera_videos || {};
+        let camerasHtml = '';
+        if (cams.front) camerasHtml += '<span class="camera-badge">Front</span>';
+        if (cams.back) camerasHtml += '<span class="camera-badge">Back</span>';
+        if (cams.left_repeater) camerasHtml += '<span class="camera-badge">Left</span>';
+        if (cams.right_repeater) camerasHtml += '<span class="camera-badge">Right</span>';
+        if (cams.left_pillar) camerasHtml += '<span class="camera-badge">L-Pillar</span>';
+        if (cams.right_pillar) camerasHtml += '<span class="camera-badge">R-Pillar</span>';
 
-            // Small delay to ensure aborts are processed, then navigate
-            setTimeout(function() {
-                // Get the href from the onclick attribute
-                const onclickAttr = card.getAttribute('onclick');
-                if (onclickAttr) {
-                    const match = onclickAttr.match(/window\.location\.href='([^']+)'/);
-                    if (match) {
-                        const totalTime = performance.now() - clickTime;
-                        console.log(`🚀 Navigating after ${totalTime.toFixed(1)}ms total delay`);
-                        window.location.href = match[1];
+        card.innerHTML = `
+            <div class="event-thumbnail">${thumbnailHtml}</div>
+            <div class="event-info">
+                <div class="event-datetime">${event.datetime}</div>
+                ${event.city ? `<div class="event-location">📍 ${event.city}</div>` : ''}
+                <div class="event-meta">
+                    <span>💾 ${event.size_mb} MB</span>
+                    ${event.reason ? `<span class="event-reason">${event.reason.replace('_', ' ')}</span>` : ''}
+                </div>
+                <div class="event-cameras">${camerasHtml}</div>
+            </div>`;
+
+        return card;
+    }
+
+    // Load folder via AJAX (no full page reload)
+    window.loadFolder = function(folderName) {
+        if (isLoading || folderName === currentFolder) return;
+
+        // Update URL without reload (for bookmarking/back button)
+        const newUrl = `{{ url_for("videos.file_browser") }}?folder=${encodeURIComponent(folderName)}`;
+        history.pushState({ folder: folderName }, '', newUrl);
+
+        // Clear state and show loading
+        thumbnailQueue.clear();
+        isLoading = true;
+        currentFolder = folderName;
+        currentPage = 1;
+        hasNext = false;
+
+        // Show folder loading spinner, hide content
+        if (folderLoading) folderLoading.style.display = 'block';
+        if (eventsContainer) eventsContainer.style.display = 'none';
+        if (endOfList) endOfList.style.display = 'none';
+
+        // Fetch first page of new folder
+        fetch(`{{ url_for("videos.file_browser") }}?folder=${encodeURIComponent(folderName)}&page=1`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(response => response.json())
+        .then(data => {
+            folderStructure = data.folder_structure || 'events';
+            hasNext = data.has_next;
+            currentPage = 1;
+
+            // Rebuild events grid
+            if (eventsContainer) {
+                if (data.events && data.events.length > 0) {
+                    // Create new grid
+                    let grid = eventsContainer.querySelector('.events-grid');
+                    if (!grid) {
+                        grid = document.createElement('div');
+                        grid.className = 'events-grid';
+                        grid.id = 'eventsGrid';
+                        // Clear and add grid
+                        eventsContainer.innerHTML = '';
+                        eventsContainer.appendChild(grid);
+                        // Re-add loading indicators
+                        const loadInd = document.createElement('div');
+                        loadInd.id = 'loading-indicator';
+                        loadInd.style.cssText = 'display: none; text-align: center; padding: 20px;';
+                        loadInd.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
+                        eventsContainer.appendChild(loadInd);
+                        const endInd = document.createElement('div');
+                        endInd.id = 'end-of-list';
+                        endInd.style.cssText = 'display: none; text-align: center; padding: 20px; color: var(--text-muted);';
+                        endInd.innerHTML = '<p>No more videos</p>';
+                        eventsContainer.appendChild(endInd);
+                    } else {
+                        grid.innerHTML = '';
                     }
+
+                    // Add event cards
+                    data.events.forEach(event => {
+                        grid.appendChild(createEventCard(event));
+                    });
+
+                    // Start observing thumbnails
+                    observeThumbnails(grid);
+
+                    // Show end indicator if no more
+                    const endList = document.getElementById('end-of-list');
+                    if (endList) endList.style.display = hasNext ? 'none' : 'block';
+                } else {
+                    // No events
+                    eventsContainer.innerHTML = `<div class="no-videos" id="no-videos-message"><p>No events found in ${folderName}.</p></div>`;
                 }
-            }, 10); // 10ms delay to let aborts complete
-        }, { capture: true }); // Capture phase to intercept before other handlers
+                eventsContainer.style.display = 'block';
+            }
+        })
+        .catch(err => {
+            console.error('Error loading folder:', err);
+            if (eventsContainer) {
+                eventsContainer.innerHTML = `<div class="no-videos"><p>Error loading folder. Please try again.</p></div>`;
+                eventsContainer.style.display = 'block';
+            }
+        })
+        .finally(() => {
+            isLoading = false;
+            if (folderLoading) folderLoading.style.display = 'none';
+        });
+    };
+
+    // Handle browser back/forward
+    window.addEventListener('popstate', function(e) {
+        if (e.state && e.state.folder) {
+            if (folderSelect) folderSelect.value = e.state.folder;
+            loadFolder(e.state.folder);
+        }
     });
 
-    // Cleanup on page unload to cancel pending requests
-    window.addEventListener('beforeunload', function() {
-        abortAllThumbnails();
-        observer.disconnect();
+    // Load more events (infinite scroll)
+    function loadMoreEvents() {
+        if (isLoading || !hasNext) return;
+
+        isLoading = true;
+        const loadInd = document.getElementById('loading-indicator');
+        if (loadInd) loadInd.style.display = 'block';
+
+        const nextPage = currentPage + 1;
+        fetch(`{{ url_for("videos.file_browser") }}?folder=${encodeURIComponent(currentFolder)}&page=${nextPage}`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.events && data.events.length > 0) {
+                const grid = document.getElementById('eventsGrid');
+                if (grid) {
+                    data.events.forEach(event => {
+                        grid.appendChild(createEventCard(event));
+                    });
+                    observeThumbnails(grid);
+                }
+                currentPage = data.next_page;
+                hasNext = data.has_next;
+            } else {
+                hasNext = false;
+            }
+
+            const endList = document.getElementById('end-of-list');
+            if (endList && !hasNext) endList.style.display = 'block';
+        })
+        .catch(err => console.error('Error loading more:', err))
+        .finally(() => {
+            isLoading = false;
+            const loadInd = document.getElementById('loading-indicator');
+            if (loadInd) loadInd.style.display = 'none';
+        });
+    }
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', function() {
+        // Set initial history state
+        if (currentFolder) {
+            history.replaceState({ folder: currentFolder }, '', window.location.href);
+        }
+
+        // Observe initial thumbnails
+        if (eventsGrid) {
+            observeThumbnails(eventsGrid);
+        }
+
+        // Infinite scroll
+        window.addEventListener('scroll', () => {
+            if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+                loadMoreEvents();
+            }
+        });
+
+        // Handle clicks on initial event cards (clear thumbnail queue before navigation)
+        document.querySelectorAll('.event-card').forEach(card => {
+            const originalOnclick = card.onclick;
+            card.onclick = function(e) {
+                thumbnailQueue.clear();
+                if (originalOnclick) originalOnclick.call(this, e);
+            };
+        });
     });
-});
+})();
 </script>
 {% endblock %}

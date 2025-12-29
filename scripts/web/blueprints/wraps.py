@@ -1,7 +1,6 @@
 """Blueprint for custom wrap management routes."""
 
 import os
-import socket
 import time
 import logging
 from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify
@@ -9,8 +8,8 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 logger = logging.getLogger(__name__)
 
 from config import USB_PARTITIONS, PART_LABEL_MAP
-from utils import format_file_size
-from services.mode_service import mode_display, current_mode
+from utils import format_file_size, get_base_context
+from services.mode_service import current_mode
 from services.partition_service import get_mount_path, iter_all_partitions
 from services.partition_mount_service import check_operation_in_progress
 from services.wrap_service import (
@@ -33,7 +32,7 @@ wraps_bp = Blueprint('wraps', __name__, url_prefix='/wraps')
 @wraps_bp.route("/")
 def wraps():
     """Custom wraps management page."""
-    token, label, css_class, share_paths = mode_display()
+    ctx = get_base_context()
 
     # Check if file operation is in progress
     op_status = check_operation_in_progress()
@@ -43,14 +42,11 @@ def wraps():
         return render_template(
             'wraps.html',
             page='wraps',
-            mode_label=label,
-            mode_class=css_class,
-            mode_token=token,
+            **ctx,
             wrap_files=[],
             wrap_count=0,
             max_wrap_count=MAX_WRAP_COUNT,
             auto_refresh=False,
-            hostname=socket.gethostname(),
             operation_in_progress=True,
             lock_age=op_status['lock_age'],
             estimated_completion=op_status['estimated_completion'],
@@ -81,14 +77,11 @@ def wraps():
     return render_template(
         'wraps.html',
         page='wraps',
-        mode_label=label,
-        mode_class=css_class,
-        mode_token=token,
+        **ctx,
         wrap_files=wrap_files,
         wrap_count=len(wrap_files),
         max_wrap_count=MAX_WRAP_COUNT,
         auto_refresh=False,
-        hostname=socket.gethostname(),
         operation_in_progress=False,
         # Validation limits for client-side
         max_file_size=MAX_WRAP_SIZE,

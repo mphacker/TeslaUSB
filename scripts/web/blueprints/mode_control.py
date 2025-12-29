@@ -1,13 +1,13 @@
 """Blueprint for mode control routes (present/edit mode switching)."""
 
 import os
-import socket
 import subprocess
 import time
 import logging
 from flask import Blueprint, render_template, request, redirect, url_for, flash
 
 from config import GADGET_DIR
+from utils import get_base_context
 from services.mode_service import mode_display
 from services.ap_service import ap_status, ap_force, get_ap_config, update_ap_config
 from services.wifi_service import get_current_wifi_connection, update_wifi_credentials, get_available_networks, get_wifi_status, clear_wifi_status
@@ -23,9 +23,9 @@ def index():
     start_time = time.time()
     timings = {}
 
-    # Measure mode_display
+    # Measure get_base_context (includes mode_display)
     t0 = time.time()
-    token, label, css_class, share_paths = mode_display()
+    ctx = get_base_context()
     timings['mode_display'] = time.time() - t0
 
     # Measure ap_status
@@ -59,16 +59,12 @@ def index():
     return render_template(
         'index.html',
         page='control',
-        mode_label=label,
-        mode_class=css_class,
-        share_paths=share_paths,
-        mode_token=token,
+        **ctx,
         ap_status=ap,
         ap_config=ap_config,
         wifi_status=wifi_status,
         wifi_change_status=wifi_change_status,
         auto_refresh=False,
-        hostname=socket.gethostname(),
     )
 
 @mode_control_bp.route("/present_usb", methods=["POST"])
@@ -154,15 +150,15 @@ def edit_usb():
 @mode_control_bp.route("/status")
 def status():
     """Simple status endpoint for health checks."""
-    token, label, css_class, share_paths = mode_display()
+    ctx = get_base_context()
     ap = ap_status()
     return {
         "status": "running",
         "gadget_dir": GADGET_DIR,
-        "mode": token,
-        "mode_label": label,
-        "mode_class": css_class,
-        "share_paths": share_paths,
+        "mode": ctx['mode_token'],
+        "mode_label": ctx['mode_label'],
+        "mode_class": ctx['mode_class'],
+        "share_paths": ctx['share_paths'],
         "ap": ap,
     }
 

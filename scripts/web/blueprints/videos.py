@@ -1,15 +1,14 @@
 """Blueprint for video browsing and management routes."""
 
 import os
-import socket
 import logging
 import tempfile
 import zipfile
 from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify, Response, after_this_request
 
-from config import THUMBNAIL_CACHE_DIR
-from utils import generate_thumbnail_hash
-from services.mode_service import mode_display, current_mode
+from config import THUMBNAIL_CACHE_DIR, empty_camera_videos, empty_encrypted_flags
+from utils import generate_thumbnail_hash, get_base_context
+from services.mode_service import current_mode
 from services.video_service import (
     get_teslacam_path,
     get_video_files,
@@ -30,21 +29,18 @@ videos_bp = Blueprint('videos', __name__, url_prefix='/videos')
 @videos_bp.route("/")
 def file_browser():
     """Event list page for TeslaCam videos - shows list of events by folder."""
-    token, label, css_class, share_paths = mode_display()
+    ctx = get_base_context()
     teslacam_path = get_teslacam_path()
 
     if not teslacam_path:
         return render_template(
             'videos.html',
             page='browser',
-            mode_label=label,
-            mode_class=css_class,
-            mode_token=token,
+            **ctx,
             teslacam_available=False,
             folders=[],
             events=[],
             current_folder=None,
-            hostname=socket.gethostname(),
         )
 
     folders = get_teslacam_folders()
@@ -78,8 +74,30 @@ def file_browser():
 
     # Check if this is an AJAX request for infinite scroll
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        # Send compact JSON - only include non-null camera_videos to reduce payload
+        compact_events = []
+        for event in events:
+            compact_event = {
+                'name': event['name'],
+                'datetime': event['datetime'],
+                'size_mb': event['size_mb'],
+                'has_thumbnail': event.get('has_thumbnail', False),
+                # Only include non-null values to reduce payload size
+                'camera_videos': {k: v for k, v in event.get('camera_videos', {}).items() if v},
+            }
+            # Only add optional fields if they have values
+            if event.get('city'):
+                compact_event['city'] = event['city']
+            if event.get('reason'):
+                compact_event['reason'] = event['reason']
+            # Only include encrypted_videos with True values
+            encrypted = {k: v for k, v in event.get('encrypted_videos', {}).items() if v}
+            if encrypted:
+                compact_event['encrypted_videos'] = encrypted
+            compact_events.append(compact_event)
+
         return jsonify({
-            'events': events,
+            'events': compact_events,
             'has_next': (page_num * per_page) < total_events,
             'next_page': page_num + 1,
             'folder_structure': folder_structure
@@ -88,15 +106,12 @@ def file_browser():
     return render_template(
         'videos.html',
         page='browser',
-        mode_label=label,
-        mode_class=css_class,
-        mode_token=token,
+        **ctx,
         teslacam_available=True,
         folders=folders,
         events=events,
         current_folder=current_folder,
         folder_structure=folder_structure,
-        hostname=socket.gethostname(),
         current_page=page_num,
         has_next=(page_num * per_page) < total_events
     )
@@ -105,7 +120,7 @@ def file_browser():
 @videos_bp.route("/event/<folder>/<event_name>")
 def view_event(folder, event_name):
     """View a Tesla event in Tesla-style multi-camera player."""
-    token, label, css_class, share_paths = mode_display()
+    ctx = get_base_context()
     teslacam_path = get_teslacam_path()
 
     if not teslacam_path:
@@ -139,22 +154,8 @@ def view_event(folder, event_name):
             'datetime': session_videos[0]['modified'] if session_videos else event_name,
             'city': '',  # Flat structure doesn't have location metadata
             'reason': '',
-            'camera_videos': {
-                'front': None,
-                'back': None,
-                'left_repeater': None,
-                'right_repeater': None,
-                'left_pillar': None,
-                'right_pillar': None,
-            },
-            'encrypted_videos': {
-                'front': False,
-                'back': False,
-                'left_repeater': False,
-                'right_repeater': False,
-                'left_pillar': False,
-                'right_pillar': False,
-            },
+            'camera_videos': empty_camera_videos(),
+            'encrypted_videos': empty_encrypted_flags(),
             'has_thumbnail': False,
         }
 
@@ -170,13 +171,10 @@ def view_event(folder, event_name):
         return render_template(
             'event_player.html',
             page='event',
-            mode_label=label,
-            mode_class=css_class,
-            mode_token=token,
+            **ctx,
             folder=folder,
             event=event,
             folder_structure=folder_structure,  # Pass structure type to template
-            hostname=socket.gethostname(),
         )
 
     # Get event details (for event-based structure)
@@ -189,20 +187,17 @@ def view_event(folder, event_name):
     return render_template(
         'event_player.html',
         page='event',
-        mode_label=label,
-        mode_class=css_class,
-        mode_token=token,
+        **ctx,
         folder=folder,
         event=event,
         folder_structure=folder_structure,  # Pass structure type to template
-        hostname=socket.gethostname(),
     )
 
 
 @videos_bp.route("/session/<folder>/<session>")
 def view_session(folder, session):
     """View all videos from a recording session in synchronized multi-camera view."""
-    token, label, css_class, share_paths = mode_display()
+    ctx = get_base_context()
     teslacam_path = get_teslacam_path()
 
     if not teslacam_path:
@@ -227,13 +222,10 @@ def view_session(folder, session):
     return render_template(
         'session.html',
         page='session',
-        mode_label=label,
-        mode_class=css_class,
-        mode_token=token,
+        **ctx,
         folder=folder,
         session_id=session,
         videos=session_videos,
-        hostname=socket.gethostname(),
     )
 
 
@@ -494,13 +486,14 @@ def get_session_thumbnail(folder, session_name):
     front_video = None
 
     try:
-        for entry in os.scandir(folder_path):
-            if (entry.is_file() and
-                entry.name.startswith(session_name) and
-                'front' in entry.name.lower() and
-                entry.name.lower().endswith(('.mp4', '.avi', '.mov'))):
-                front_video = entry.path
-                break
+        with os.scandir(folder_path) as entries:
+            for entry in entries:
+                if (entry.is_file() and
+                    entry.name.startswith(session_name) and
+                    'front' in entry.name.lower() and
+                    entry.name.lower().endswith(('.mp4', '.avi', '.mov'))):
+                    front_video = entry.path
+                    break
     except OSError:
         return "Video not found", 404
 
@@ -521,11 +514,14 @@ def get_session_thumbnail(folder, session_name):
                         max_age=604800, conditional=True)
 
     # Generate thumbnail (1-3 seconds on Pi Zero 2 W)
+    # May fail for encrypted/incomplete RecentClips videos - return 404 not 500
     if generate_video_thumbnail(front_video, cache_path):
         return send_file(cache_path, mimetype='image/png',
                         max_age=604800, conditional=True)
     else:
-        return "Failed to generate thumbnail", 500
+        # Video exists but can't generate thumbnail (likely encrypted)
+        # Return 404 so browser onerror handler shows placeholder
+        return "Thumbnail unavailable", 404
 
 
 @videos_bp.route("/delete_event/<folder>/<event_name>", methods=["POST"])
@@ -593,10 +589,11 @@ def delete_event(folder, event_name):
                 }), 404
 
             # Count files before deletion
-            for entry in os.scandir(event_path):
-                if entry.is_file():
-                    deleted_count += 1
-                    deleted_files.append(entry.name)
+            with os.scandir(event_path) as entries:
+                for entry in entries:
+                    if entry.is_file():
+                        deleted_count += 1
+                        deleted_files.append(entry.name)
 
             # Delete the entire folder
             shutil.rmtree(event_path)

@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import glob
+import logging
 
 # Import configuration
 from config import (
@@ -21,6 +22,8 @@ from config import (
     USB_PARTITIONS,
     MODE_DISPLAY,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _configfs_gadget_present():
@@ -44,6 +47,7 @@ def detect_mode():
     """Attempt to infer the current mode when the state file is missing."""
     # Prefer configfs gadget detection (current path) over legacy g_mass_storage
     if _configfs_gadget_present():
+        logger.debug("Detected present mode via configfs gadget")
         return "present"
 
     try:
@@ -51,18 +55,21 @@ def detect_mode():
             ["lsmod"], capture_output=True, text=True, check=False, timeout=5
         )
         if result.stdout and "g_mass_storage" in result.stdout:
+            logger.debug("Detected present mode via g_mass_storage module")
             return "present"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error checking lsmod for g_mass_storage: {e}")
 
     try:
         for part in USB_PARTITIONS:
             mp = os.path.join(MNT_DIR, part)
             if os.path.ismount(mp):
+                logger.debug(f"Detected edit mode via mounted partition {mp}")
                 return "edit"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error checking mount points: {e}")
 
+    logger.debug("Could not determine mode, returning unknown")
     return "unknown"
 
 
@@ -73,10 +80,11 @@ def current_mode():
             token = state_file.read().strip().lower()
             if token in MODE_DISPLAY:
                 return token
+            logger.warning(f"Invalid mode token in state file: {token}")
     except FileNotFoundError:
-        pass
-    except OSError:
-        pass
+        logger.debug(f"State file not found: {STATE_FILE}, falling back to detection")
+    except OSError as e:
+        logger.warning(f"Error reading state file: {e}")
 
     return detect_mode()
 

@@ -10,6 +10,27 @@ web_control.py application.
 import os
 import hashlib
 import re
+import socket
+
+
+def get_base_context():
+    """
+    Return common template context variables for all pages.
+
+    Returns:
+        dict: Context with mode_token, mode_label, mode_class, share_paths, hostname
+    """
+    # Import here to avoid circular imports
+    from services.mode_service import mode_display
+
+    token, label, css_class, share_paths = mode_display()
+    return {
+        'mode_token': token,
+        'mode_label': label,
+        'mode_class': css_class,
+        'share_paths': share_paths,
+        'hostname': socket.gethostname(),
+    }
 
 
 def format_file_size(size_bytes):

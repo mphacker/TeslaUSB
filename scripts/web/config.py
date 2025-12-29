@@ -92,6 +92,20 @@ MODE_DISPLAY = {
 VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv')
 LIGHT_SHOW_EXTENSIONS = ('.fseq', '.mp3', '.wav')
 
+# Tesla camera angles (6 cameras)
+CAMERA_ANGLES = ('front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar')
+
+
+def empty_camera_videos():
+    """Return a new dict of camera angles with None values (no video assigned)."""
+    return {cam: None for cam in CAMERA_ANGLES}
+
+
+def empty_encrypted_flags():
+    """Return a new dict of camera angles with False values (not encrypted)."""
+    return {cam: False for cam in CAMERA_ANGLES}
+
+
 # Script paths (scripts are in GADGET_DIR/scripts/)
 def get_script_path(script_name):
     """Get the full path to a script in the GADGET_DIR/scripts/ directory."""

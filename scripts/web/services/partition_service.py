@@ -9,6 +9,9 @@ Partitions can be accessed in different ways depending on the current mode:
 """
 
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Import configuration
 from config import (
@@ -32,7 +35,7 @@ def iter_mounted_partitions():
 def iter_all_partitions():
     """Yield all accessible USB partitions based on current mode."""
     mode = current_mode()
-    
+
     if mode == "present":
         # Use read-only mounts in present mode
         for part in USB_PARTITIONS:
@@ -51,9 +54,9 @@ def get_mount_path(partition):
     """Get the mount path for a specific partition based on current mode."""
     if partition not in USB_PARTITIONS:
         return None
-    
+
     mode = current_mode()
-    
+
     if mode == "present":
         # Use read-only mount in present mode
         ro_path = os.path.join(RO_MNT_DIR, f"{partition}-ro")
@@ -64,5 +67,5 @@ def get_mount_path(partition):
         rw_path = os.path.join(MNT_DIR, partition)
         if os.path.isdir(rw_path):
             return rw_path
-    
+
     return None

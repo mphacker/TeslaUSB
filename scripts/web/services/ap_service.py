@@ -1,9 +1,12 @@
 import json
+import logging
 import os
 import subprocess
 import yaml
 
 from config import GADGET_DIR
+
+logger = logging.getLogger(__name__)
 
 
 SCRIPT_NAME = "ap_control.sh"

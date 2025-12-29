@@ -12,9 +12,7 @@ subfolder containing multiple camera angle videos, event.json, thumb.png, etc.
 
 import os
 import json
-import av
 from datetime import datetime
-from PIL import Image
 import logging
 from threading import Semaphore
 
@@ -24,6 +22,8 @@ from config import (
     RO_MNT_DIR,
     VIDEO_EXTENSIONS,
     THUMBNAIL_CACHE_DIR,
+    empty_camera_videos,
+    empty_encrypted_flags,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,23 +111,24 @@ def get_video_files(folder_path):
     videos = []
 
     try:
-        for entry in os.scandir(folder_path):
-            if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
-                try:
-                    stat_info = entry.stat()
-                    session_info = parse_session_from_filename(entry.name)
-                    videos.append({
-                        'name': entry.name,
-                        'path': entry.path,
-                        'size': stat_info.st_size,
-                        'size_mb': round(stat_info.st_size / (1024 * 1024), 2),
-                        'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %I:%M:%S %p'),
-                        'timestamp': stat_info.st_mtime,
-                        'session': session_info['session'] if session_info else None,
-                        'camera': session_info['camera'] if session_info else None
-                    })
-                except OSError:
-                    continue
+        with os.scandir(folder_path) as entries:
+            for entry in entries:
+                if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                    try:
+                        stat_info = entry.stat()
+                        session_info = parse_session_from_filename(entry.name)
+                        videos.append({
+                            'name': entry.name,
+                            'path': entry.path,
+                            'size': stat_info.st_size,
+                            'size_mb': round(stat_info.st_size / (1024 * 1024), 2),
+                            'modified': datetime.fromtimestamp(stat_info.st_mtime).strftime('%Y-%m-%d %I:%M:%S %p'),
+                            'timestamp': stat_info.st_mtime,
+                            'session': session_info['session'] if session_info else None,
+                            'camera': session_info['camera'] if session_info else None
+                        })
+                    except OSError:
+                        continue
     except OSError:
         pass
 
@@ -153,15 +154,16 @@ def get_events(folder_path, page=1, per_page=12):
     events = []
 
     try:
-        for entry in os.scandir(folder_path):
-            if entry.is_dir():
-                # Quick check if it looks like an event folder before full parsing
-                # This speeds up listing significantly
-                events.append({
-                    'name': entry.name,
-                    'path': entry.path,
-                    'timestamp': entry.stat().st_mtime
-                })
+        with os.scandir(folder_path) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    # Quick check if it looks like an event folder before full parsing
+                    # This speeds up listing significantly
+                    events.append({
+                        'name': entry.name,
+                        'path': entry.path,
+                        'timestamp': entry.stat().st_mtime
+                    })
     except OSError:
         pass
 
@@ -177,14 +179,102 @@ def get_events(folder_path, page=1, per_page=12):
     # Slice the raw list first to avoid parsing everything
     paged_raw_events = events[start_idx:end_idx]
 
-    # Fully parse only the requested page
+    # Use lightweight parser for list view (skips expensive encryption checks)
     parsed_events = []
     for raw_event in paged_raw_events:
-        event_data = _parse_event_folder(raw_event['path'], raw_event['name'])
+        event_data = _parse_event_folder_lightweight(raw_event['path'], raw_event['name'])
         if event_data:
             parsed_events.append(event_data)
 
     return parsed_events, total_count
+
+
+def _parse_event_folder_lightweight(event_path, event_name):
+    """
+    Lightweight event folder parser for list view.
+
+    Skips expensive operations like:
+    - is_valid_mp4() checks (encryption detection)
+    - Full clip parsing (_parse_clips_from_event)
+
+    These are only needed when viewing the actual event, not listing.
+
+    Args:
+        event_path: Full path to the event folder
+        event_name: Name of the event folder
+
+    Returns:
+        dict: Event metadata for list view, or None if not valid
+    """
+    try:
+        # Read event.json for city/reason metadata
+        event_json_path = os.path.join(event_path, 'event.json')
+        event_metadata = {}
+
+        if os.path.exists(event_json_path):
+            try:
+                with open(event_json_path, 'r') as f:
+                    event_metadata = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        # Check for thumb.png
+        thumb_path = os.path.join(event_path, 'thumb.png')
+        has_thumbnail = os.path.exists(thumb_path)
+
+        # Quick scan for video files - just get names and sizes, no file opens
+        camera_videos = empty_camera_videos()
+        total_size = 0
+        latest_timestamp = 0
+
+        with os.scandir(event_path) as entries:
+            for entry in entries:
+                if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                    try:
+                        stat_info = entry.stat()
+                        total_size += stat_info.st_size
+                        latest_timestamp = max(latest_timestamp, stat_info.st_mtime)
+
+                        # Categorize video by camera angle (first found only)
+                        name_lower = entry.name.lower()
+                        if 'front' in name_lower and camera_videos['front'] is None:
+                            camera_videos['front'] = entry.name
+                        elif 'back' in name_lower and camera_videos['back'] is None:
+                            camera_videos['back'] = entry.name
+                        elif 'left_repeater' in name_lower and camera_videos['left_repeater'] is None:
+                            camera_videos['left_repeater'] = entry.name
+                        elif 'right_repeater' in name_lower and camera_videos['right_repeater'] is None:
+                            camera_videos['right_repeater'] = entry.name
+                        elif 'left_pillar' in name_lower and camera_videos['left_pillar'] is None:
+                            camera_videos['left_pillar'] = entry.name
+                        elif 'right_pillar' in name_lower and camera_videos['right_pillar'] is None:
+                            camera_videos['right_pillar'] = entry.name
+                    except OSError:
+                        continue
+
+        # Must have at least one video
+        if not any(camera_videos.values()):
+            return None
+
+        # Parse timestamp from event name
+        try:
+            dt = datetime.strptime(event_name, '%Y-%m-%d_%H-%M-%S')
+            event_timestamp = dt.timestamp()
+        except ValueError:
+            event_timestamp = latest_timestamp if latest_timestamp > 0 else 0
+
+        return {
+            'name': event_name,
+            'timestamp': event_timestamp,
+            'datetime': datetime.fromtimestamp(event_timestamp).strftime('%Y-%m-%d %I:%M:%S %p'),
+            'size_mb': round(total_size / (1024 * 1024), 2),
+            'has_thumbnail': has_thumbnail,
+            'camera_videos': camera_videos,
+            'city': event_metadata.get('city', ''),
+            'reason': event_metadata.get('reason', ''),
+        }
+    except OSError:
+        return None
 
 
 def _parse_clips_from_event(event_path):
@@ -208,11 +298,12 @@ def _parse_clips_from_event(event_path):
     clips_by_timestamp = {}
 
     try:
-        for entry in os.scandir(event_path):
-            if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
-                # Skip event.mp4 grid view
-                if entry.name.lower() == 'event.mp4':
-                    continue
+        with os.scandir(event_path) as entries:
+            for entry in entries:
+                if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                    # Skip event.mp4 grid view
+                    if entry.name.lower() == 'event.mp4':
+                        continue
 
                 # Parse filename: YYYY-MM-DD_HH-MM-SS-camera.mp4
                 parts = entry.name.rsplit('-', 1)  # Split from right to get camera
@@ -231,22 +322,8 @@ def _parse_clips_from_event(event_path):
                         clips_by_timestamp[timestamp_str] = {
                             'timestamp_str': timestamp_str,
                             'timestamp': dt.timestamp(),
-                            'camera_videos': {
-                                'front': None,
-                                'back': None,
-                                'left_repeater': None,
-                                'right_repeater': None,
-                                'left_pillar': None,
-                                'right_pillar': None,
-                            },
-                            'encrypted_videos': {
-                                'front': False,
-                                'back': False,
-                                'left_repeater': False,
-                                'right_repeater': False,
-                                'left_pillar': False,
-                                'right_pillar': False,
-                            }
+                            'camera_videos': empty_camera_videos(),
+                            'encrypted_videos': empty_encrypted_flags(),
                         }
                     except ValueError:
                         continue
@@ -298,65 +375,52 @@ def _parse_event_folder(event_path, event_name):
 
         # Scan for video files and categorize by camera angle
         # For backward compatibility, also get first/default clip videos
-        camera_videos = {
-            'front': None,
-            'back': None,
-            'left_repeater': None,
-            'right_repeater': None,
-            'left_pillar': None,
-            'right_pillar': None,
-            'event': None  # Grid view video
-        }
+        camera_videos = empty_camera_videos()
+        camera_videos['event'] = None  # Grid view video (extra key for events)
 
         # Track encrypted/invalid videos (Tesla encrypts some camera angles)
-        encrypted_videos = {
-            'front': False,
-            'back': False,
-            'left_repeater': False,
-            'right_repeater': False,
-            'left_pillar': False,
-            'right_pillar': False,
-        }
+        encrypted_videos = empty_encrypted_flags()
 
         total_size = 0
         latest_timestamp = 0
 
-        for entry in os.scandir(event_path):
-            if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
-                try:
-                    stat_info = entry.stat()
-                    total_size += stat_info.st_size
-                    latest_timestamp = max(latest_timestamp, stat_info.st_mtime)
+        with os.scandir(event_path) as entries:
+            for entry in entries:
+                if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                    try:
+                        stat_info = entry.stat()
+                        total_size += stat_info.st_size
+                        latest_timestamp = max(latest_timestamp, stat_info.st_mtime)
 
-                    # Categorize video by camera angle (use first found for compatibility)
-                    name_lower = entry.name.lower()
-                    camera_key = None
-                    if name_lower == 'event.mp4':
-                        camera_videos['event'] = entry.name
-                    elif 'front' in name_lower and camera_videos['front'] is None:
-                        camera_videos['front'] = entry.name
-                        camera_key = 'front'
-                    elif 'back' in name_lower and camera_videos['back'] is None:
-                        camera_videos['back'] = entry.name
-                        camera_key = 'back'
-                    elif 'left_repeater' in name_lower and camera_videos['left_repeater'] is None:
-                        camera_videos['left_repeater'] = entry.name
-                        camera_key = 'left_repeater'
-                    elif 'right_repeater' in name_lower and camera_videos['right_repeater'] is None:
-                        camera_videos['right_repeater'] = entry.name
-                        camera_key = 'right_repeater'
-                    elif 'left_pillar' in name_lower and camera_videos['left_pillar'] is None:
-                        camera_videos['left_pillar'] = entry.name
-                        camera_key = 'left_pillar'
-                    elif 'right_pillar' in name_lower and camera_videos['right_pillar'] is None:
-                        camera_videos['right_pillar'] = entry.name
-                        camera_key = 'right_pillar'
+                        # Categorize video by camera angle (use first found for compatibility)
+                        name_lower = entry.name.lower()
+                        camera_key = None
+                        if name_lower == 'event.mp4':
+                            camera_videos['event'] = entry.name
+                        elif 'front' in name_lower and camera_videos['front'] is None:
+                            camera_videos['front'] = entry.name
+                            camera_key = 'front'
+                        elif 'back' in name_lower and camera_videos['back'] is None:
+                            camera_videos['back'] = entry.name
+                            camera_key = 'back'
+                        elif 'left_repeater' in name_lower and camera_videos['left_repeater'] is None:
+                            camera_videos['left_repeater'] = entry.name
+                            camera_key = 'left_repeater'
+                        elif 'right_repeater' in name_lower and camera_videos['right_repeater'] is None:
+                            camera_videos['right_repeater'] = entry.name
+                            camera_key = 'right_repeater'
+                        elif 'left_pillar' in name_lower and camera_videos['left_pillar'] is None:
+                            camera_videos['left_pillar'] = entry.name
+                            camera_key = 'left_pillar'
+                        elif 'right_pillar' in name_lower and camera_videos['right_pillar'] is None:
+                            camera_videos['right_pillar'] = entry.name
+                            camera_key = 'right_pillar'
 
-                    # Check if video has valid MP4 headers
-                    if camera_key and not is_valid_mp4(entry.path):
-                        encrypted_videos[camera_key] = True
-                except OSError:
-                    continue
+                        # Check if video has valid MP4 headers
+                        if camera_key and not is_valid_mp4(entry.path):
+                            encrypted_videos[camera_key] = True
+                    except OSError:
+                        continue
 
         # If no videos found, not a valid event
         if not any(camera_videos.values()) and not clips:
@@ -441,6 +505,9 @@ def group_videos_by_session(folder_path, page=1, per_page=12):
     """
     Group flat video files by recording session (for RecentClips folder).
 
+    Optimized for pagination: Uses efficient two-pass approach that avoids
+    loading all file metadata for every request.
+
     Args:
         folder_path: Path to folder with flat video files
         page: Page number (1-based)
@@ -451,74 +518,96 @@ def group_videos_by_session(folder_path, page=1, per_page=12):
         - session_list: List of session dictionaries for the requested page
         - total_count: Total number of sessions available
     """
-    all_videos = get_video_files(folder_path)
+    # Pass 1: Quick scan to get unique session IDs and their newest timestamp
+    # Only reads filename (no stat calls yet) for session extraction
+    session_timestamps = {}  # session_id -> (newest_timestamp, any_file_path)
 
-    # Group by session
-    sessions = {}
-    for video in all_videos:
-        session_id = video.get('session')
-        if not session_id:
-            continue
+    try:
+        with os.scandir(folder_path) as entries:
+            for entry in entries:
+                if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                    session_info = parse_session_from_filename(entry.name)
+                    if session_info and session_info['session']:
+                        session_id = session_info['session']
+                        # Get mtime only once per file (cached by scandir)
+                        try:
+                            mtime = entry.stat().st_mtime
+                            if session_id not in session_timestamps or mtime > session_timestamps[session_id][0]:
+                                session_timestamps[session_id] = (mtime, entry.path)
+                        except OSError:
+                            continue
+    except OSError:
+        return [], 0
 
-        if session_id not in sessions:
-            sessions[session_id] = {
-                'name': session_id,
-                'timestamp': video['timestamp'],
-                'size': 0,
-                'camera_videos': {
-                    'front': None,
-                    'back': None,
-                    'left_repeater': None,
-                    'right_repeater': None,
-                    'left_pillar': None,
-                    'right_pillar': None,
-                },
-                'encrypted_videos': {
-                    'front': False,
-                    'back': False,
-                    'left_repeater': False,
-                    'right_repeater': False,
-                    'left_pillar': False,
-                    'right_pillar': False,
-                },
-                'has_thumbnail': True,  # Generated on-demand
-                'metadata': {},
-                'city': '',
-                'reason': '',
-            }
+    total_count = len(session_timestamps)
 
-        # Add video to session
-        sessions[session_id]['size'] += video['size']
-
-        # Map to camera angle and check encryption
-        camera = video.get('camera', '').lower()
-        if camera in sessions[session_id]['camera_videos']:
-            sessions[session_id]['camera_videos'][camera] = video['name']
-            # Check if video has valid MP4 headers
-            if not is_valid_mp4(video['path']):
-                sessions[session_id]['encrypted_videos'][camera] = True
-
-    # Convert to list
-    session_list = list(sessions.values())
-
-    # Sort by timestamp, newest first
-    session_list.sort(key=lambda x: x['timestamp'], reverse=True)
-
-    total_count = len(session_list)
+    # Sort session IDs by timestamp, newest first
+    sorted_sessions = sorted(
+        session_timestamps.items(),
+        key=lambda x: x[1][0],
+        reverse=True
+    )
 
     # Calculate pagination slice
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
+    paged_session_ids = [sid for sid, _ in sorted_sessions[start_idx:end_idx]]
 
-    # Slice the list
-    paged_sessions = session_list[start_idx:end_idx]
+    if not paged_session_ids:
+        return [], total_count
 
-    # Format only the paged items
-    for session_data in paged_sessions:
+    # Pass 2: Full metadata only for requested page's sessions
+    # Re-scan folder but only process files belonging to paged sessions
+    paged_sessions_data = {sid: {
+        'name': sid,
+        'timestamp': session_timestamps[sid][0],
+        'size': 0,
+        'camera_videos': empty_camera_videos(),
+        'encrypted_videos': empty_encrypted_flags(),
+        'has_thumbnail': True,  # Generated on-demand
+        'metadata': {},
+        'city': '',
+        'reason': '',
+    } for sid in paged_session_ids}
+
+    paged_session_set = set(paged_session_ids)
+
+    try:
+        with os.scandir(folder_path) as entries:
+            for entry in entries:
+                if entry.is_file() and entry.name.lower().endswith(VIDEO_EXTENSIONS):
+                    session_info = parse_session_from_filename(entry.name)
+                    if not session_info or session_info['session'] not in paged_session_set:
+                        continue
+
+                    session_id = session_info['session']
+                    session_data = paged_sessions_data[session_id]
+
+                    try:
+                        stat_info = entry.stat()
+                        session_data['size'] += stat_info.st_size
+
+                        # Map to camera angle and check encryption
+                        camera = session_info.get('camera', '').lower()
+                        if camera in session_data['camera_videos']:
+                            session_data['camera_videos'][camera] = entry.name
+                            # Check if video has valid MP4 headers
+                            if not is_valid_mp4(entry.path):
+                                session_data['encrypted_videos'][camera] = True
+                    except OSError:
+                        continue
+    except OSError:
+        pass
+
+    # Build result list in sorted order, format the data
+    result = []
+    for session_id in paged_session_ids:
+        session_data = paged_sessions_data[session_id]
         session_data['size_mb'] = round(session_data['size'] / (1024 * 1024), 2)
         session_data['datetime'] = datetime.fromtimestamp(session_data['timestamp']).strftime('%Y-%m-%d %I:%M:%S %p')
+        result.append(session_data)
 
-    return paged_sessions, total_count
+    return result, total_count
 
 
 def generate_video_thumbnail(video_path, output_path, size=(80, 45)):
@@ -542,6 +631,10 @@ def generate_video_thumbnail(video_path, output_path, size=(80, 45)):
         return False
 
     try:
+        # Lazy import heavy libraries only when needed (saves ~10MB baseline memory)
+        import av
+        from PIL import Image
+
         # Open video container
         container = av.open(video_path)
 
@@ -592,17 +685,18 @@ def get_teslacam_folders():
 
     folders = []
     try:
-        for entry in os.scandir(teslacam_path):
-            if entry.is_dir():
-                # Determine structure type
-                # RecentClips stores files directly, others use event subfolders
-                structure_type = 'flat' if entry.name == 'RecentClips' else 'events'
+        with os.scandir(teslacam_path) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    # Determine structure type
+                    # RecentClips stores files directly, others use event subfolders
+                    structure_type = 'flat' if entry.name == 'RecentClips' else 'events'
 
-                folders.append({
-                    'name': entry.name,
-                    'path': entry.path,
-                    'structure': structure_type
-                })
+                    folders.append({
+                        'name': entry.name,
+                        'path': entry.path,
+                        'structure': structure_type
+                    })
     except OSError:
         pass
 

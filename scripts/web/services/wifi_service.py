@@ -1,9 +1,11 @@
 import json
+import logging
 import subprocess
 import re
 import os
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
 
 # File to store WiFi change history/status
 WIFI_STATUS_FILE = "/tmp/teslausb_wifi_status.json"

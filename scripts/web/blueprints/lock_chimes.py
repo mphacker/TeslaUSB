@@ -1,7 +1,6 @@
 """Blueprint for lock chime management routes."""
 
 import os
-import socket
 import subprocess
 import time
 import logging
@@ -10,8 +9,8 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 from config import (GADGET_DIR, LOCK_CHIME_FILENAME, CHIMES_FOLDER, MAX_LOCK_CHIME_SIZE,
                     MAX_LOCK_CHIME_DURATION, MIN_LOCK_CHIME_DURATION,
                     SPEED_RANGE_MIN, SPEED_RANGE_MAX, SPEED_STEP)
-from utils import format_file_size
-from services.mode_service import mode_display, current_mode
+from utils import format_file_size, get_base_context
+from services.mode_service import current_mode
 from services.partition_service import get_mount_path
 from services.partition_mount_service import check_operation_in_progress
 from services.samba_service import close_samba_share, restart_samba_services
@@ -42,7 +41,7 @@ VOLUME_PRESETS = {
 @lock_chimes_bp.route("/")
 def lock_chimes():
     """Lock chimes management page."""
-    token, label, css_class, share_paths = mode_display()
+    ctx = get_base_context()
 
     # Check if file operation is in progress
     op_status = check_operation_in_progress()
@@ -67,9 +66,7 @@ def lock_chimes():
         return render_template(
             'lock_chimes.html',
             page='chimes',
-            mode_label=label,
-            mode_class=css_class,
-            mode_token=token,
+            **ctx,
             active_chime=None,
             chime_files=[],
             schedules=[],
@@ -80,7 +77,6 @@ def lock_chimes():
             format_schedule=format_schedule_display,
             format_last_run=format_last_run,
             auto_refresh=False,
-            hostname=socket.gethostname(),
             operation_in_progress=True,
             lock_age=op_status['lock_age'],
             estimated_completion=op_status['estimated_completion'],
@@ -163,9 +159,7 @@ def lock_chimes():
     return render_template(
         'lock_chimes.html',
         page='chimes',
-        mode_label=label,
-        mode_class=css_class,
-        mode_token=token,
+        **ctx,
         active_chime=active_chime,
         chime_files=chime_files,
         schedules=schedules,
@@ -177,7 +171,6 @@ def lock_chimes():
         format_last_run=format_last_run,
         auto_refresh=False,
         expandable=True,  # Allow page to expand beyond viewport for scheduler
-        hostname=socket.gethostname(),
         operation_in_progress=False,
         # Trimmer configuration
         MAX_LOCK_CHIME_SIZE=MAX_LOCK_CHIME_SIZE,

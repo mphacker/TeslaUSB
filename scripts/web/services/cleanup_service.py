@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
+from config import VIDEO_EXTENSIONS
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -48,9 +50,6 @@ DEFAULT_POLICY_TEMPLATES = {
         'count_based': {'max_videos': 500, 'enabled': False}
     }
 }
-
-# Video file extensions
-VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv'}
 
 
 class CleanupService:

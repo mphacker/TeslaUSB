@@ -16,8 +16,9 @@ from config import SECRET_KEY, WEB_PORT, GADGET_DIR
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
-# Enable sendfile for efficient large file serving
+# Production optimizations
 app.config['USE_X_SENDFILE'] = False  # Disabled - requires nginx/apache
+app.config['TEMPLATES_AUTO_RELOAD'] = False  # Disable template watching - saves memory
 
 # Register blueprints
 from blueprints import (
@@ -66,7 +67,8 @@ if __name__ == "__main__":
     try:
         from waitress import serve
         print("Using Waitress production server")
-        serve(app, host="0.0.0.0", port=WEB_PORT, threads=6, channel_timeout=300,
+        # 3 threads optimal for Pi Zero 2 W (4 cores, 512MB RAM) - saves memory vs 6 threads
+        serve(app, host="0.0.0.0", port=WEB_PORT, threads=3, channel_timeout=300,
               send_bytes=4194304)  # 4MB send buffer for better video streaming
     except ImportError:
         print("Waitress not available, using Flask development server")

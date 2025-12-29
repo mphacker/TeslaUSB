@@ -11,8 +11,11 @@ Provides functions for:
 
 import os
 import shutil
+import logging
 from datetime import datetime
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 from config import MNT_DIR, RO_MNT_DIR, VIDEO_EXTENSIONS
 from services.mode_service import current_mode

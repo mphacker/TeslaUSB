@@ -1,9 +1,8 @@
 """Blueprint for storage analytics and monitoring."""
 
-import socket
 from flask import Blueprint, render_template, jsonify
 
-from services.mode_service import mode_display
+from utils import get_base_context
 from services.partition_mount_service import check_operation_in_progress
 from services.analytics_service import (
     get_complete_analytics,
@@ -18,21 +17,18 @@ analytics_bp = Blueprint('analytics', __name__, url_prefix='/analytics')
 @analytics_bp.route("/")
 def dashboard():
     """Storage analytics dashboard page."""
-    token, label, css_class, share_paths = mode_display()
-    
+    ctx = get_base_context()
+
     # Check if operation in progress (though analytics reads from part1, not affected by quick_edit_part2)
     op_status = check_operation_in_progress()
-    
+
     analytics = get_complete_analytics()
-    
+
     return render_template(
         'analytics.html',
         page='analytics',
-        mode_label=label,
-        mode_class=css_class,
-        mode_token=token,
+        **ctx,
         analytics=analytics,
-        hostname=socket.gethostname(),
         operation_in_progress=op_status['in_progress'],
         lock_age=op_status.get('lock_age', 0),
         estimated_completion=op_status.get('estimated_completion', 0),

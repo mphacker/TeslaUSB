@@ -150,6 +150,7 @@ For detailed information, see the official Raspberry Pi whitepaper: [Using OTG m
 ```bash
 git clone https://github.com/mphacker/TeslaUSB.git
 cd TeslaUSB
+chmod +x setup_usb.sh
 sudo ./setup_usb.sh
 ```
 

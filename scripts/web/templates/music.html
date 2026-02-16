@@ -148,6 +148,7 @@
 <div id="music-page" class="music-layout" data-chunk-mb="{{ max_upload_chunk_mb }}"
     data-max-mb="{{ max_upload_size_mb }}" data-upload-url="{{ url_for('music.upload_chunk') }}"
     data-delete-url="{{ url_for('music.delete_music', filename='__NAME__') }}"
+    data-delete-dir-url="{{ url_for('music.delete_music_dir', dirname='__DIR__') }}"
     data-move-url="{{ url_for('music.move_music') }}" data-current-path="{{ current_path }}"
     data-browse-url="{{ url_for('music.music_home') }}" data-mkdir-url="{{ url_for('music.create_music_folder') }}">
     <div class="music-card">
@@ -191,7 +192,8 @@
         <table class="music-table" id="folderTable">
             <thead>
                 <tr>
-                    <th colspan="2">Folders</th>
+                    <th>Folders</th>
+                    <th style="width:180px; text-align:right;">Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -203,7 +205,10 @@
                 {% for d in dirs %}
                 <tr class="folder-row" data-dir="{{ d.path }}">
                     <td>📁 {{ d.name }}</td>
-                    <td style="width:120px; text-align:right;">Open</td>
+                    <td style="text-align:right; display:flex; gap:6px; justify-content:flex-end;">
+                        <button class="secondary" data-open="{{ d.path }}">Open</button>
+                        <button class="secondary" data-delete-dir="{{ d.path }}">Delete</button>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -221,7 +226,7 @@
             <tbody>
                 {% for file in files %}
                 <tr data-filename="{{ file.path }}">
-                    <td>{{ file.path }}</td>
+                    <td>{{ file.name }}</td>
                     <td>{{ format_file_size(file.size) }}</td>
                     <td>
                         <button class="secondary" data-move="{{ file.path }}">Move</button>

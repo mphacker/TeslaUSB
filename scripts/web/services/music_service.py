@@ -3,6 +3,7 @@
 
 import os
 import uuid
+import shutil
 import logging
 from typing import Tuple, List
 
@@ -308,6 +309,30 @@ def create_directory(rel_path: str, name: str) -> Tuple[bool, str]:
     except Exception:
         return False, "Could not create folder"
     return True, f"Created folder {safe_name}"
+
+
+def delete_directory(rel_path: str) -> Tuple[bool, str]:
+    mount_path, err = _ensure_music_mount()
+    if err:
+        return False, err
+
+    if not rel_path:
+        return False, "Invalid folder path"
+
+    target_dir = _resolve_subpath(mount_path, rel_path)
+    if os.path.abspath(target_dir) == os.path.abspath(mount_path):
+        return False, "Cannot delete root folder"
+    if not os.path.isdir(target_dir):
+        return False, "Folder not found"
+
+    try:
+        shutil.rmtree(target_dir)
+        _fsync_dir(os.path.dirname(target_dir))
+        close_samba_share("part3")
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("Failed to delete folder %s: %s", rel_path, exc)
+        return False, "Unable to delete folder"
+    return True, "Deleted folder"
 
 
 def move_music_file(source_rel: str, dest_rel: str, new_name: str = "") -> Tuple[bool, str]:

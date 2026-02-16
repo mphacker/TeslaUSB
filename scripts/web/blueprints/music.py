@@ -9,6 +9,7 @@ from services.music_service import (
     save_file,
     handle_chunk,
     delete_music_file,
+    delete_directory,
     create_directory,
     move_music_file,
     UploadError,
@@ -153,6 +154,31 @@ def delete_music(filename):
 
     flash(msg, "success" if ok else "error")
     return redirect(url_for("music.music_home", path=request.args.get("path", ""), _=request.args.get('_', 0)))
+
+
+@music_bp.route("/delete_dir/<path:dirname>", methods=["POST"])
+def delete_music_dir(dirname):
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    try:
+        require_edit_mode()
+    except UploadError as exc:
+        if is_ajax:
+            return jsonify({"success": False, "error": str(exc)}), 400
+        flash(str(exc), "error")
+        return redirect(url_for("music.music_home"))
+
+    try:
+        ok, msg = delete_directory(dirname)
+    except UploadError as exc:
+        ok, msg = False, str(exc)
+
+    if is_ajax:
+        status = 200 if ok else 400
+        return jsonify({"success": ok, "message": msg}), status
+
+    flash(msg, "success" if ok else "error")
+    parent = dirname.rsplit("/", 1)[0] if "/" in dirname else ""
+    return redirect(url_for("music.music_home", path=parent, _=request.args.get('_', 0)))
 
 
 @music_bp.route("/move", methods=["POST"])

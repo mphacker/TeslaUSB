@@ -6,6 +6,7 @@
     const maxMb = parseInt(page.dataset.maxMb || '0', 10) || 0;
     const uploadUrl = page.dataset.uploadUrl;
     const deleteTemplate = page.dataset.deleteUrl;
+    const deleteDirTemplate = page.dataset.deleteDirUrl;
     const moveUrl = page.dataset.moveUrl;
     const browseUrl = page.dataset.browseUrl;
     const mkdirUrl = page.dataset.mkdirUrl;
@@ -348,8 +349,47 @@
     }
 
     if (folderTable) {
-        folderTable.addEventListener('click', (e) => {
-            const row = e.target.closest('tr');
+        folderTable.addEventListener('click', async (e) => {
+            const target = e.target;
+            const deleteDir = target.getAttribute('data-delete-dir');
+            const openDir = target.getAttribute('data-open');
+
+            if (deleteDir) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!deleteDirTemplate) return;
+                target.disabled = true;
+                const url = deleteDirTemplate.replace('__DIR__', encodeURIComponent(deleteDir));
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                });
+                let data;
+                try {
+                    data = await res.json();
+                } catch (err) {
+                    target.disabled = false;
+                    setStatus('Delete folder failed: bad response', true);
+                    return;
+                }
+                target.disabled = false;
+                if (!res.ok || !data.success) {
+                    setStatus(data && data.error ? data.error : 'Delete folder failed', true);
+                    return;
+                }
+                const row = target.closest('tr');
+                if (row) row.remove();
+                setStatus(data.message || 'Folder deleted', false);
+                return;
+            }
+
+            if (openDir) {
+                e.preventDefault();
+                navigateTo(openDir);
+                return;
+            }
+
+            const row = target.closest('tr');
             if (!row) return;
             const dir = row.getAttribute('data-dir');
             if (dir !== null) {

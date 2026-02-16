@@ -109,6 +109,28 @@
         color: var(--muted-text);
     }
 
+    .breadcrumb {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 10px 0;
+        color: var(--muted-text);
+        font-size: 0.95rem;
+    }
+
+    .breadcrumb a {
+        color: var(--link-color);
+    }
+
+    .folder-row {
+        cursor: pointer;
+    }
+
+    .folder-row:hover {
+        background: var(--panel-bg);
+    }
+
     @media (max-width: 960px) {
         .music-layout {
             grid-template-columns: 1fr;
@@ -120,7 +142,9 @@
 {% block content %}
 <div id="music-page" class="music-layout" data-chunk-mb="{{ max_upload_chunk_mb }}"
     data-max-mb="{{ max_upload_size_mb }}" data-upload-url="{{ url_for('music.upload_chunk') }}"
-    data-delete-url="{{ url_for('music.delete_music', filename='__NAME__') }}">
+    data-delete-url="{{ url_for('music.delete_music', filename='__NAME__') }}"
+    data-move-url="{{ url_for('music.move_music') }}" data-current-path="{{ current_path }}"
+    data-browse-url="{{ url_for('music.music_home') }}" data-mkdir-url="{{ url_for('music.create_music_folder') }}">
     <div class="music-card">
         <h2>Music Library</h2>
         {% if error %}
@@ -143,25 +167,60 @@
         {% set total_space = total_size + free_bytes %}
         {% set used_pct = (100 * total_size / total_space) if total_space else 0 %}
         <div class="music-meter" aria-label="Usage">
-            <span style="width: {{ used_pct|round(2) }}%"></span>
+            <span id="musicUsage" data-used="{{ used_pct|round(2) }}"></span>
+        </div>
+        <div class="breadcrumb">
+            <a href="{{ url_for('music.music_home') }}">Music</a>
+            {% if current_path %}
+            {% set parts = current_path.split('/') %}
+            {% set accum = [] %}
+            {% for part in parts %}
+            {% set _ = accum.append(part) %}
+            <span>/</span>
+            <a href="{{ url_for('music.music_home', path=('/'.join(accum))) }}">{{ part }}</a>
+            {% endfor %}
+            {% endif %}
         </div>
         <h3 style="margin-top:18px;">Files</h3>
+        {% if dirs %}
+        <table class="music-table" id="folderTable">
+            <thead>
+                <tr>
+                    <th colspan="2">Folders</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if current_path %}
+                <tr class="folder-row" data-dir="{{ current_path.rsplit('/', 1)[0] if '/' in current_path else '' }}">
+                    <td colspan="2">⬆️ Up one level</td>
+                </tr>
+                {% endif %}
+                {% for d in dirs %}
+                <tr class="folder-row" data-dir="{{ d.path }}">
+                    <td>📁 {{ d.name }}</td>
+                    <td style="width:120px; text-align:right;">Open</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
         {% if files %}
-        <table class="music-table">
+        <table class="music-table" id="fileTable">
             <thead>
                 <tr>
                     <th>Name</th>
                     <th style="width:140px;">Size</th>
-                    <th style="width:100px;"></th>
+                    <th style="width:160px;">Actions</th>
                 </tr>
             </thead>
             <tbody>
                 {% for file in files %}
-                <tr data-filename="{{ file.name }}">
-                    <td>{{ file.name }}</td>
+                <tr data-filename="{{ file.path }}">
+                    <td>{{ file.path }}</td>
                     <td>{{ format_file_size(file.size) }}</td>
                     <td>
-                        <button class="secondary" data-delete="{{ file.name }}">Delete</button>
+                        <button class="secondary" data-move="{{ file.path }}">Move</button>
+                        <button class="secondary" data-delete="{{ file.path }}">Delete</button>
                     </td>
                 </tr>
                 {% endfor %}
@@ -175,7 +234,7 @@
     <div class="music-card">
         <h3>Upload</h3>
         <p class="muted">Uploads require Edit mode. Files larger than {{ max_upload_chunk_mb }} MiB are sent in chunks
-            to keep memory low.</p>
+            to keep memory low. Target folder: <strong id="currentPathLabel">/{{ current_path }}</strong></p>
         <div id="dropZone" class="drop-zone">
             <div><strong>Drop files here</strong> or click to choose</div>
             <div class="muted" style="margin-top:6px;">Allowed: mp3, flac, wav, aac, m4a. Max {{ max_upload_size_mb }}
@@ -184,6 +243,10 @@
                 accept=".mp3,.flac,.wav,.aac,.m4a">
         </div>
         <div class="file-list" id="fileList"></div>
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+            <input id="folderName" type="text" placeholder="New folder name" style="flex:1;">
+            <button id="createFolder" class="secondary">Create Folder</button>
+        </div>
         <div style="display:flex; gap:8px; margin-top:8px;">
             <button id="startUpload" class="primary" disabled>Upload</button>
             <button id="clearSelection" class="secondary" disabled>Clear</button>
@@ -191,5 +254,14 @@
         <div id="uploadStatus" class="muted" style="margin-top:8px;"></div>
     </div>
 </div>
+<script>
+    (function () {
+        const usage = document.getElementById('musicUsage');
+        if (usage) {
+            const pct = Math.max(0, Math.min(100, parseFloat(usage.dataset.used || '0')));
+            usage.style.width = `${pct}%`;
+        }
+    })();
+</script>
 <script src="{{ url_for('static', filename='js/music.js') }}"></script>
 {% endblock %}

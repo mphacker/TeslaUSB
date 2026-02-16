@@ -9,6 +9,8 @@ from services.music_service import (
     save_file,
     handle_chunk,
     delete_music_file,
+    create_directory,
+    move_music_file,
     UploadError,
     generate_upload_id,
     require_edit_mode,
@@ -21,15 +23,18 @@ logger = logging.getLogger(__name__)
 @music_bp.route("/")
 def music_home():
     ctx = get_base_context()
-    files, error, total_size, free_bytes = list_music_files()
+    current_path = request.args.get("path", "")
+    dirs, files, error, total_size, free_bytes, current_path = list_music_files(current_path)
     return render_template(
         "music.html",
         page="music",
         **ctx,
+        dirs=dirs,
         files=files,
         error=error,
         total_size=total_size,
         free_bytes=free_bytes,
+        current_path=current_path,
         format_file_size=format_file_size,
         max_upload_size_mb=current_app.config.get("MAX_CONTENT_LENGTH", 0) // (1024 * 1024),
         max_upload_chunk_mb=current_app.config.get("MAX_FORM_MEMORY_SIZE", 0) // (1024 * 1024),
@@ -39,6 +44,7 @@ def music_home():
 @music_bp.route("/upload", methods=["POST"])
 def upload_music():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    current_path = request.args.get("path") or request.form.get("path") or ""
     try:
         require_edit_mode()
     except UploadError as exc:
@@ -59,7 +65,7 @@ def upload_music():
     for file in files:
         if not file or not file.filename:
             continue
-        ok, msg = save_file(file)
+        ok, msg = save_file(file, current_path)
         if ok:
             successes += 1
         messages.append(msg)
@@ -76,12 +82,13 @@ def upload_music():
         flash(f"Uploaded {successes} file(s)", "success")
     else:
         flash("Failed to upload files", "error")
-    return redirect(url_for("music.music_home", _=request.args.get('_', 0)))
+    return redirect(url_for("music.music_home", path=current_path, _=request.args.get('_', 0)))
 
 
 @music_bp.route("/upload_chunk", methods=["POST"])
 def upload_chunk():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    current_path = request.args.get("path") or request.form.get("path") or ""
     try:
         require_edit_mode()
     except UploadError as exc:
@@ -112,6 +119,7 @@ def upload_chunk():
             total_chunks=total_chunks,
             total_size=total_size,
             stream=request.stream,
+            rel_path=current_path,
         )
     except UploadError as exc:
         logger.warning("Chunk upload rejected: %s", exc)
@@ -144,4 +152,53 @@ def delete_music(filename):
         return jsonify({"success": ok, "message": msg}), status
 
     flash(msg, "success" if ok else "error")
-    return redirect(url_for("music.music_home", _=request.args.get('_', 0)))
+    return redirect(url_for("music.music_home", path=request.args.get("path", ""), _=request.args.get('_', 0)))
+
+
+@music_bp.route("/move", methods=["POST"])
+def move_music():
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    try:
+        require_edit_mode()
+    except UploadError as exc:
+        if is_ajax:
+            return jsonify({"success": False, "error": str(exc)}), 400
+        flash(str(exc), "error")
+        return redirect(url_for("music.music_home"))
+
+    data = request.get_json(silent=True) or request.form
+    source = data.get("source", "") if data else ""
+    dest_path = data.get("dest_path", "") if data else ""
+    new_name = data.get("new_name", "") if data else ""
+
+    ok, msg = move_music_file(source, dest_path, new_name)
+    if is_ajax:
+        status = 200 if ok else 400
+        return jsonify({"success": ok, "message": msg}), status
+
+    flash(msg, "success" if ok else "error")
+    return redirect(url_for("music.music_home", path=dest_path))
+
+
+@music_bp.route("/mkdir", methods=["POST"])
+def create_music_folder():
+    is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    try:
+        require_edit_mode()
+    except UploadError as exc:
+        if is_ajax:
+            return jsonify({"success": False, "error": str(exc)}), 400
+        flash(str(exc), "error")
+        return redirect(url_for("music.music_home"))
+
+    data = request.get_json(silent=True) or request.form
+    current_path = data.get("path", "") if data else ""
+    name = data.get("name", "") if data else ""
+
+    ok, msg = create_directory(current_path, name)
+    if is_ajax:
+        status = 200 if ok else 400
+        return jsonify({"success": ok, "message": msg}), status
+
+    flash(msg, "success" if ok else "error")
+    return redirect(url_for("music.music_home", path=current_path))

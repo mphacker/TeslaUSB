@@ -4,7 +4,7 @@
 import os
 import uuid
 import logging
-from typing import Tuple
+from typing import Tuple, List
 
 from werkzeug.utils import secure_filename
 
@@ -59,6 +59,34 @@ def _stream_to_file(stream, dest_path: str) -> int:
     return total
 
 
+def _normalize_rel_path(rel_path: str) -> str:
+    rel = (rel_path or "").strip("/")
+    if not rel:
+        return ""
+    cleaned: List[str] = []
+    for segment in rel.split("/"):
+        segment = segment.strip()
+        if segment in {"", ".", ".."}:
+            continue
+        safe_seg = secure_filename(segment)
+        if not safe_seg:
+            raise UploadError("Invalid folder name")
+        cleaned.append(safe_seg)
+    return "/".join(cleaned)
+
+
+def _resolve_subpath(mount_path: str, rel_path: str) -> str:
+    """Return an absolute path within the music mount for the given relative path."""
+    rel = _normalize_rel_path(rel_path)
+    if not rel:
+        return mount_path
+    target = os.path.join(mount_path, rel)
+    common = os.path.commonpath([mount_path, target])
+    if common != os.path.abspath(mount_path):
+        raise UploadError("Invalid path")
+    return target
+
+
 def _ensure_music_mount() -> Tuple[str, str]:
     """Return the music mount path or an error string."""
     mount_path = get_mount_path("part3")
@@ -79,38 +107,56 @@ def _validate_filename(name: str) -> str:
     return safe
 
 
-def list_music_files():
+def list_music_files(rel_path: str = ""):
     mount_path, err = _ensure_music_mount()
     if err:
-        return [], err, 0, 0
+        return [], [], err, 0, 0, ""
 
+    try:
+        current_rel = _normalize_rel_path(rel_path)
+    except UploadError as exc:
+        return [], [], str(exc), 0, 0, ""
+
+    target_dir = _resolve_subpath(mount_path, current_rel)
+    if not os.path.isdir(target_dir):
+        return [], [], "Folder not found", 0, 0, current_rel
+
+    dirs = []
     music_files = []
     total_size = 0
     try:
-        for entry in os.scandir(mount_path):
+        for entry in os.scandir(target_dir):
+            if entry.is_dir():
+                dirs.append({
+                    "name": entry.name,
+                    "path": f"{current_rel + '/' if current_rel else ''}{entry.name}",
+                })
+                continue
             if not entry.is_file():
                 continue
             ext = os.path.splitext(entry.name)[1].lower()
             if ext not in ALLOWED_EXTS:
                 continue
             stat = entry.stat()
+            rel_file = f"{current_rel + '/' if current_rel else ''}{entry.name}"
             music_files.append({
                 "name": entry.name,
+                "path": rel_file,
                 "size": stat.st_size,
                 "mtime": int(stat.st_mtime),
             })
             total_size += stat.st_size
     except OSError as e:
         logger.warning("Could not read music directory: %s", e)
-        return [], "Unable to read music directory", 0, 0
+        return [], [], "Unable to read music directory", 0, 0, current_rel
 
     free_bytes = _fs_free_bytes(mount_path)
+    dirs.sort(key=lambda x: x["name"].lower())
     music_files.sort(key=lambda x: x["name"].lower())
-    return music_files, "", total_size, free_bytes
+    return dirs, music_files, "", total_size, free_bytes, current_rel
 
 
-def _prepare_paths(filename: str, mount_path: str):
-    music_dir = mount_path
+def _prepare_paths(filename: str, music_dir: str):
     tmp_dir = os.path.join(music_dir, ".uploads")
     os.makedirs(tmp_dir, exist_ok=True)
     tmp_path = os.path.join(tmp_dir, f"{filename}.upload")
@@ -118,14 +164,21 @@ def _prepare_paths(filename: str, mount_path: str):
     return tmp_dir, tmp_path, final_path
 
 
-def save_file(file_storage) -> Tuple[bool, str]:
+def save_file(file_storage, rel_path: str = "") -> Tuple[bool, str]:
     """Stream a Werkzeug FileStorage to the music partition with fsync + atomic rename."""
     mount_path, err = _ensure_music_mount()
     if err:
         return False, err
 
+    target_dir = _resolve_subpath(mount_path, rel_path)
+    if not os.path.isdir(target_dir):
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except OSError:
+            return False, "Target folder unavailable"
+
     filename = _validate_filename(file_storage.filename)
-    tmp_dir, tmp_path, final_path = _prepare_paths(filename, mount_path)
+    tmp_dir, tmp_path, final_path = _prepare_paths(filename, target_dir)
 
     # Free space check
     file_storage.stream.seek(0, os.SEEK_END)
@@ -147,7 +200,7 @@ def save_file(file_storage) -> Tuple[bool, str]:
     _fsync_dir(tmp_dir)
 
     os.replace(tmp_path, final_path)
-    _fsync_dir(mount_path)
+    _fsync_dir(target_dir)
     try:
         close_samba_share("part3")
     except Exception:
@@ -155,7 +208,7 @@ def save_file(file_storage) -> Tuple[bool, str]:
     return True, f"Uploaded {filename}"
 
 
-def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: int, total_size: int, stream) -> Tuple[bool, str, bool]:
+def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: int, total_size: int, stream, rel_path: str = "") -> Tuple[bool, str, bool]:
     """
     Append a chunk to the staged upload file.
 
@@ -168,11 +221,14 @@ def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: 
     if err:
         return False, err, False
 
+    target_dir = _resolve_subpath(mount_path, rel_path)
+    os.makedirs(target_dir, exist_ok=True)
+
     filename = _validate_filename(filename)
-    tmp_dir = os.path.join(mount_path, ".uploads")
+    tmp_dir = os.path.join(target_dir, ".uploads")
     os.makedirs(tmp_dir, exist_ok=True)
     staged_path = os.path.join(tmp_dir, f"{upload_id}.part")
-    final_path = os.path.join(mount_path, filename)
+    final_path = os.path.join(target_dir, filename)
 
     # On first chunk, ensure space and clear any stale parts
     if chunk_index == 0:
@@ -196,7 +252,7 @@ def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: 
     _fsync_path(staged_path)
     _fsync_dir(tmp_dir)
     os.replace(staged_path, final_path)
-    _fsync_dir(mount_path)
+    _fsync_dir(target_dir)
 
     try:
         close_samba_share("part3")
@@ -206,24 +262,78 @@ def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: 
     return True, f"Uploaded {filename}", True
 
 
-def delete_music_file(filename: str) -> Tuple[bool, str]:
+def delete_music_file(rel_path: str) -> Tuple[bool, str]:
     mount_path, err = _ensure_music_mount()
     if err:
         return False, err
 
-    filename = _validate_filename(filename)
-    target = os.path.join(mount_path, filename)
-    if not os.path.isfile(target):
+    target_path = _resolve_subpath(mount_path, rel_path)
+    filename = os.path.basename(target_path)
+    if not os.path.isfile(target_path):
         return False, "File not found"
 
     try:
-        os.remove(target)
-        _fsync_dir(mount_path)
+        os.remove(target_path)
+        _fsync_dir(os.path.dirname(target_path))
         close_samba_share("part3")
     except Exception as exc:
         logger.error("Failed to delete %s: %s", filename, exc)
         return False, "Unable to delete file"
     return True, f"Deleted {filename}"
+
+
+def create_directory(rel_path: str, name: str) -> Tuple[bool, str]:
+    mount_path, err = _ensure_music_mount()
+    if err:
+        return False, err
+
+    base_dir = _resolve_subpath(mount_path, rel_path)
+    safe_name = secure_filename(name or "")
+    if not safe_name:
+        return False, "Invalid folder name"
+
+    target_dir = os.path.join(base_dir, safe_name)
+    common = os.path.commonpath([mount_path, target_dir])
+    if common != os.path.abspath(mount_path):
+        return False, "Invalid folder path"
+
+    try:
+        os.makedirs(target_dir, exist_ok=False)
+        _fsync_dir(base_dir)
+    except FileExistsError:
+        return False, "Folder already exists"
+    except Exception:
+        return False, "Could not create folder"
+    return True, f"Created folder {safe_name}"
+
+
+def move_music_file(source_rel: str, dest_rel: str, new_name: str = "") -> Tuple[bool, str]:
+    mount_path, err = _ensure_music_mount()
+    if err:
+        return False, err
+
+    src_path = _resolve_subpath(mount_path, source_rel)
+    if not os.path.isfile(src_path):
+        return False, "Source file not found"
+
+    dest_dir = _resolve_subpath(mount_path, dest_rel)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError:
+        return False, "Destination unavailable"
+
+    dest_name = _validate_filename(new_name) if new_name else os.path.basename(src_path)
+    dest_path = os.path.join(dest_dir, dest_name)
+
+    try:
+        os.replace(src_path, dest_path)
+        _fsync_dir(os.path.dirname(src_path))
+        _fsync_dir(dest_dir)
+        close_samba_share("part3")
+    except Exception as exc:
+        logger.error("Failed to move %s -> %s: %s", src_path, dest_path, exc)
+        return False, "Unable to move file"
+    return True, f"Moved to {dest_name}"
 
 
 def require_edit_mode():

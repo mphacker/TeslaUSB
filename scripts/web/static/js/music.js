@@ -6,6 +6,10 @@
     const maxMb = parseInt(page.dataset.maxMb || '0', 10) || 0;
     const uploadUrl = page.dataset.uploadUrl;
     const deleteTemplate = page.dataset.deleteUrl;
+    const moveUrl = page.dataset.moveUrl;
+    const browseUrl = page.dataset.browseUrl;
+    const mkdirUrl = page.dataset.mkdirUrl;
+    const currentPath = page.dataset.currentPath || '';
     const chunkSize = Math.max(1, chunkMb) * 1024 * 1024;
     const maxBytes = maxMb > 0 ? maxMb * 1024 * 1024 : null;
 
@@ -15,7 +19,11 @@
     const startBtn = document.getElementById('startUpload');
     const clearBtn = document.getElementById('clearSelection');
     const statusEl = document.getElementById('uploadStatus');
-    const table = page.querySelector('table');
+    const fileTable = document.getElementById('fileTable');
+    const folderTable = document.getElementById('folderTable');
+    const folderNameInput = document.getElementById('folderName');
+    const createFolderBtn = document.getElementById('createFolder');
+    const currentPathLabel = document.getElementById('currentPathLabel');
 
     let queue = [];
     let uploading = false;
@@ -100,6 +108,7 @@
                 total_chunks: String(totalChunks),
                 total_size: String(file.size),
             });
+            if (currentPath) params.set('path', currentPath);
 
             const res = await fetch(`${uploadUrl}?${params.toString()}`, {
                 method: 'POST',
@@ -150,7 +159,8 @@
         clearBtn.disabled = queue.length === 0;
         // Refresh page to show new files
         if (!statusEl.classList.contains('error')) {
-            setTimeout(() => window.location.reload(), 600);
+            const target = currentPath ? `${browseUrl}?path=${encodeURIComponent(currentPath)}` : browseUrl;
+            setTimeout(() => { window.location.href = target; }, 600);
         }
     }
 
@@ -195,35 +205,125 @@
     startBtn.addEventListener('click', () => uploadQueue());
     clearBtn.addEventListener('click', () => clearQueue());
 
-    // Delete handling
-    if (table) {
-        table.addEventListener('click', async (e) => {
+    const navigateTo = (path) => {
+        const target = path ? `${browseUrl}?path=${encodeURIComponent(path)}` : browseUrl;
+        window.location.href = target;
+    };
+
+    // File actions: delete or move
+    if (fileTable) {
+        fileTable.addEventListener('click', async (e) => {
             const target = e.target;
             const filename = target.getAttribute('data-delete');
-            if (!filename) return;
+            const moveTarget = target.getAttribute('data-move');
+            if (!filename && !moveTarget) return;
             e.preventDefault();
-            const url = deleteTemplate.replace('__NAME__', encodeURIComponent(filename));
-            target.disabled = true;
-            const res = await fetch(url, {
+
+            if (filename) {
+                const url = deleteTemplate.replace('__NAME__', encodeURIComponent(filename));
+                target.disabled = true;
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                });
+                let data;
+                try {
+                    data = await res.json();
+                } catch (err) {
+                    target.disabled = false;
+                    setStatus('Delete failed: bad response', true);
+                    return;
+                }
+                if (!res.ok || !data.success) {
+                    target.disabled = false;
+                    setStatus(data && data.error ? data.error : 'Delete failed', true);
+                    return;
+                }
+                const row = target.closest('tr');
+                if (row) row.remove();
+                setStatus(data.message || 'Deleted', false);
+                return;
+            }
+
+            if (moveTarget) {
+                const dest = window.prompt('Move to folder (relative path):', currentPath);
+                if (dest === null) return;
+                const newName = window.prompt('Optional new filename (leave blank to keep name):', '');
+                target.disabled = true;
+                const res = await fetch(moveUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                    body: JSON.stringify({ source: moveTarget, dest_path: dest || '', new_name: newName || '' }),
+                });
+                let data;
+                try {
+                    data = await res.json();
+                } catch (err) {
+                    target.disabled = false;
+                    setStatus('Move failed: bad response', true);
+                    return;
+                }
+                target.disabled = false;
+                if (!res.ok || !data.success) {
+                    setStatus(data && data.error ? data.error : 'Move failed', true);
+                    return;
+                }
+                const targetPath = dest ? `${browseUrl}?path=${encodeURIComponent(dest)}` : browseUrl;
+                window.location.href = targetPath;
+            }
+        });
+    }
+
+    if (folderTable) {
+        folderTable.addEventListener('click', (e) => {
+            const row = e.target.closest('tr');
+            if (!row) return;
+            const dir = row.getAttribute('data-dir');
+            if (dir !== null) {
+                navigateTo(dir);
+            }
+        });
+    }
+
+    if (createFolderBtn) {
+        createFolderBtn.addEventListener('click', async () => {
+            const name = (folderNameInput.value || '').trim();
+            if (!name) {
+                setStatus('Folder name required', true);
+                return;
+            }
+            createFolderBtn.disabled = true;
+            const res = await fetch(mkdirUrl, {
                 method: 'POST',
-                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                body: JSON.stringify({ path: currentPath, name }),
             });
             let data;
             try {
                 data = await res.json();
             } catch (err) {
-                target.disabled = false;
-                setStatus('Delete failed: bad response', true);
+                createFolderBtn.disabled = false;
+                setStatus('Create folder failed: bad response', true);
                 return;
             }
+            createFolderBtn.disabled = false;
             if (!res.ok || !data.success) {
-                target.disabled = false;
-                setStatus(data && data.error ? data.error : 'Delete failed', true);
+                setStatus(data && data.error ? data.error : 'Create folder failed', true);
                 return;
             }
-            const row = target.closest('tr');
-            if (row) row.remove();
-            setStatus(data.message || 'Deleted', false);
+            const target = currentPath ? `${browseUrl}?path=${encodeURIComponent(currentPath)}` : browseUrl;
+            window.location.href = target;
         });
+    }
+
+    if (currentPathLabel) {
+        const labelPath = currentPath ? `/${currentPath}` : '/';
+        currentPathLabel.textContent = labelPath;
     }
 })();

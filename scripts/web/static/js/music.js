@@ -50,7 +50,13 @@
             const bar = document.createElement('span');
             progress.appendChild(bar);
             row.appendChild(progress);
+            const status = document.createElement('div');
+            status.className = 'meta';
+            status.textContent = 'Waiting';
+            row.appendChild(status);
             item.progressEl = bar;
+            item.statusEl = status;
+            item.rowEl = row;
             fileList.appendChild(row);
         });
         const disabled = queue.length === 0 || uploading;
@@ -134,6 +140,10 @@
         const uploadId = crypto.randomUUID ? crypto.randomUUID() : `upload-${Date.now()}-${Math.random()}`;
         const pathForFile = item.targetPath || currentPath || '';
 
+        if (item.statusEl) item.statusEl.textContent = 'Starting...';
+        if (item.rowEl) item.rowEl.classList.remove('uploaded');
+        if (item.progressEl) item.progressEl.style.width = '0%';
+
         for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
             const start = chunkIndex * chunkSize;
             const end = Math.min(start + chunkSize, file.size);
@@ -162,20 +172,26 @@
             try {
                 data = await res.json();
             } catch (e) {
+                if (item.statusEl) item.statusEl.textContent = 'Failed';
                 setStatus('Upload failed: invalid server response', true);
                 return false;
             }
 
             if (!res.ok || !data.success) {
                 const message = data && data.error ? data.error : 'Upload failed';
+                if (item.statusEl) item.statusEl.textContent = 'Failed';
                 setStatus(`${file.name}: ${message}`, true);
                 return false;
             }
 
             const pct = Math.round(((chunkIndex + 1) / totalChunks) * 100);
             if (item.progressEl) item.progressEl.style.width = `${pct}%`;
+            if (item.statusEl) item.statusEl.textContent = `${pct}%`;
         }
 
+        if (item.progressEl) item.progressEl.style.width = '100%';
+        if (item.statusEl) item.statusEl.textContent = 'Uploaded';
+        if (item.rowEl) item.rowEl.classList.add('uploaded');
         setStatus(`${file.name} uploaded`, false);
         return true;
     }

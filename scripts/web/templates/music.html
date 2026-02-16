@@ -234,13 +234,15 @@
     <div class="music-card">
         <h3>Upload</h3>
         <p class="muted">Uploads require Edit mode. Files larger than {{ max_upload_chunk_mb }} MiB are sent in chunks
-            to keep memory low. Target folder: <strong id="currentPathLabel">/{{ current_path }}</strong></p>
+            to keep memory low. You can drop whole folders; we'll preserve subfolder structure. Target folder:
+            <strong id="currentPathLabel">/{{ current_path }}</strong>
+        </p>
         <div id="dropZone" class="drop-zone">
             <div><strong>Drop files here</strong> or click to choose</div>
             <div class="muted" style="margin-top:6px;">Allowed: mp3, flac, wav, aac, m4a. Max {{ max_upload_size_mb }}
                 MiB per file.</div>
-            <input id="fileInput" type="file" name="music_files" multiple style="display:none;"
-                accept=".mp3,.flac,.wav,.aac,.m4a">
+            <input id="fileInput" type="file" name="music_files" multiple webkitdirectory directory
+                style="display:none;" accept=".mp3,.flac,.wav,.aac,.m4a">
         </div>
         <div class="file-list" id="fileList"></div>
         <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">

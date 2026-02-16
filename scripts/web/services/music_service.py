@@ -126,6 +126,9 @@ def list_music_files(rel_path: str = ""):
     total_size = 0
     try:
         for entry in os.scandir(target_dir):
+            if entry.name.startswith('.'):
+                # Skip temp/upload internals and hidden items
+                continue
             if entry.is_dir():
                 dirs.append({
                     "name": entry.name,

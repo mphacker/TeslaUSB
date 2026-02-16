@@ -41,7 +41,7 @@
             row.innerHTML = `
                 <div>
                     <div>${item.file.name}</div>
-                    <div class="meta">${formatBytes(item.file.size)}</div>
+                    <div class="meta">${formatBytes(item.file.size)} → /${item.targetPath || currentPath || ''}</div>
                 </div>
                 <button class="secondary" data-remove="${idx}">Remove</button>
             `;
@@ -71,6 +71,14 @@
         return `${val.toFixed(val >= 10 ? 0 : 1)} ${units[i - 1] || 'KB'}`;
     }
 
+    function deriveTargetPath(file) {
+        const rel = (file.webkitRelativePath || file.relativePath || '').replace(/^\/+/, '');
+        const relDir = rel.includes('/') ? rel.substring(0, rel.lastIndexOf('/')) : '';
+        if (currentPath && relDir) return `${currentPath}/${relDir}`;
+        if (currentPath) return currentPath;
+        return relDir;
+    }
+
     function addFiles(files) {
         const allowed = ['.mp3', '.flac', '.wav', '.aac', '.m4a'];
         Array.from(files).forEach((file) => {
@@ -83,7 +91,7 @@
                 setStatus(`${file.name} exceeds ${maxMb} MiB limit`, true);
                 return;
             }
-            queue.push({ file, progressEl: null });
+            queue.push({ file, progressEl: null, targetPath: deriveTargetPath(file) });
         });
         if (queue.length > 0) {
             setStatus(`${queue.length} file(s) queued`, false);
@@ -95,6 +103,7 @@
         const file = item.file;
         const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
         const uploadId = crypto.randomUUID ? crypto.randomUUID() : `upload-${Date.now()}-${Math.random()}`;
+        const pathForFile = item.targetPath || currentPath || '';
 
         for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
             const start = chunkIndex * chunkSize;
@@ -108,7 +117,7 @@
                 total_chunks: String(totalChunks),
                 total_size: String(file.size),
             });
-            if (currentPath) params.set('path', currentPath);
+            if (pathForFile) params.set('path', pathForFile);
 
             const res = await fetch(`${uploadUrl}?${params.toString()}`, {
                 method: 'POST',

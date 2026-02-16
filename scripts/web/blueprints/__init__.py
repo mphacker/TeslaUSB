@@ -9,6 +9,7 @@ from .analytics import analytics_bp
 from .cleanup import cleanup_bp
 from .api import api_bp
 from .fsck import fsck_bp
+from .music import music_bp
 from .captive_portal import captive_portal_bp, catch_all_redirect
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     'cleanup_bp',
     'api_bp',
     'fsck_bp',
+    'music_bp',
     'captive_portal_bp',
     'catch_all_redirect'
 ]

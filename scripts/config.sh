@@ -41,11 +41,16 @@ eval "$(yq -r '
   "MNT_DIR=\"" + .installation.mount_dir + "\"",
   "IMG_CAM_NAME=\"" + .disk_images.cam_name + "\"",
   "IMG_LIGHTSHOW_NAME=\"" + .disk_images.lightshow_name + "\"",
+  "IMG_MUSIC_NAME=\"" + (.disk_images.music_name // "usb_music.img") + "\"",
   "LABEL1=\"" + .disk_images.cam_label + "\"",
   "LABEL2=\"" + .disk_images.lightshow_label + "\"",
+  "LABEL3=\"" + (.disk_images.music_label // "Music") + "\"",
+  "MUSIC_ENABLED=\"" + (.disk_images.music_enabled // true | tostring) + "\"",
+  "MUSIC_FS=\"" + (.disk_images.music_fs // "fat32") + "\"",
   "BOOT_FSCK_ENABLED=\"" + (.disk_images.boot_fsck_enabled | tostring) + "\"",
   "PART1_SIZE=\"" + .setup.part1_size + "\"",
   "PART2_SIZE=\"" + .setup.part2_size + "\"",
+  "PART3_SIZE=\"" + (.setup.part3_size // "") + "\"",
   "RESERVE_SIZE=\"" + .setup.reserve_size + "\"",
   "SAMBA_PASS=\"" + .network.samba_password + "\"",
   "WEB_PORT=\"" + (.network.web_port | tostring) + "\"",
@@ -74,4 +79,5 @@ eval "$(yq -r '
 # ============================================================================
 IMG_CAM="$GADGET_DIR/$IMG_CAM_NAME"
 IMG_LIGHTSHOW="$GADGET_DIR/$IMG_LIGHTSHOW_NAME"
+IMG_MUSIC="$GADGET_DIR/$IMG_MUSIC_NAME"
 STATE_FILE="$GADGET_DIR/state.txt"

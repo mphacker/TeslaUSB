@@ -36,6 +36,10 @@ MNT_DIR = config['installation']['mount_dir']
 # Disk Images
 IMG_CAM_NAME = config['disk_images']['cam_name']
 IMG_LIGHTSHOW_NAME = config['disk_images']['lightshow_name']
+IMG_MUSIC_NAME = config['disk_images'].get('music_name', 'usb_music.img')
+MUSIC_ENABLED = bool(config['disk_images'].get('music_enabled', False))
+MUSIC_FS = config['disk_images'].get('music_fs', 'fat32')
+MUSIC_LABEL = config['disk_images'].get('music_label', 'Music')
 
 # Network & Security
 WEB_PORT = config['network']['web_port']
@@ -63,6 +67,8 @@ SPEED_STEP = config['web']['speed_step']
 
 # Light Show Configuration
 LIGHT_SHOW_FOLDER = config['web']['lightshow_folder']
+MAX_UPLOAD_SIZE_MB = int(config['web'].get('max_upload_size_mb', 2048))
+MAX_UPLOAD_CHUNK_MB = int(config['web'].get('max_upload_chunk_mb', 16))
 
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)
@@ -75,8 +81,16 @@ RO_MNT_DIR = MNT_DIR  # Same as MNT_DIR since we use -ro and -rw suffixes
 STATE_FILE = os.path.join(GADGET_DIR, "state.txt")
 
 # USB drive configuration
-USB_PARTITIONS = ("part1", "part2")
-PART_LABEL_MAP = {"part1": "gadget_part1", "part2": "gadget_part2"}
+USB_PARTITIONS = tuple(
+    part for part in ("part1", "part2", "part3")
+    if part != "part3" or MUSIC_ENABLED
+)
+
+PART_LABEL_MAP = {
+    "part1": "gadget_part1",
+    "part2": "gadget_part2",
+    **({"part3": "gadget_part3"} if MUSIC_ENABLED else {}),
+}
 
 # Thumbnail configuration
 THUMBNAIL_CACHE_DIR = os.path.join(GADGET_DIR, "thumbnails")

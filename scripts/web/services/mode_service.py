@@ -21,6 +21,7 @@ from config import (
     MNT_DIR,
     USB_PARTITIONS,
     MODE_DISPLAY,
+    PART_LABEL_MAP,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,10 +98,9 @@ def mode_display():
 
     if token == "edit":
         hostname = socket.gethostname()
-        share_paths = [
-            f"\\\\{hostname}\\gadget_part1",
-            f"\\\\{hostname}\\gadget_part2",
-        ]
+        for part in USB_PARTITIONS:
+            share_name = PART_LABEL_MAP.get(part, f"gadget_{part}")
+            share_paths.append(f"\\\\{hostname}\\{share_name}")
 
     return token, label, css_class, share_paths
 

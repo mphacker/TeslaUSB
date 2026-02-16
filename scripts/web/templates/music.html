@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+    .music-layout {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: 16px;
+        align-items: start;
+    }
+
+    .music-card {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 16px;
+        box-shadow: var(--card-shadow);
+    }
+
+    .music-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+    }
+
+    .music-meter {
+        width: 100%;
+        height: 10px;
+        background: var(--border-color);
+        border-radius: 999px;
+        overflow: hidden;
+        margin-top: 6px;
+    }
+
+    .music-meter span {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg, #1e90ff, #5ad6ff);
+        transition: width 0.2s ease;
+    }
+
+    .drop-zone {
+        border: 2px dashed var(--border-color);
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color 0.2s ease, background 0.2s ease;
+    }
+
+    .drop-zone.dragging {
+        border-color: #1e90ff;
+        background: rgba(30, 144, 255, 0.08);
+    }
+
+    .file-list {
+        max-height: 220px;
+        overflow-y: auto;
+        margin-top: 10px;
+    }
+
+    .file-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 10px;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        margin-bottom: 8px;
+        background: var(--panel-bg);
+    }
+
+    .file-row .meta {
+        color: var(--muted-text);
+        font-size: 0.9rem;
+    }
+
+    .progress-bar {
+        height: 8px;
+        background: var(--border-color);
+        border-radius: 999px;
+        overflow: hidden;
+        margin-top: 6px;
+    }
+
+    .progress-bar span {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg, #2ecc71, #52ffa8);
+        width: 0;
+        transition: width 0.15s ease;
+    }
+
+    .music-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .music-table th,
+    .music-table td {
+        padding: 10px;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .music-table th {
+        text-align: left;
+        text-transform: uppercase;
+        font-size: 0.8rem;
+        letter-spacing: 0.04em;
+        color: var(--muted-text);
+    }
+
+    @media (max-width: 960px) {
+        .music-layout {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="music-page" class="music-layout" data-chunk-mb="{{ max_upload_chunk_mb }}"
+    data-max-mb="{{ max_upload_size_mb }}" data-upload-url="{{ url_for('music.upload_chunk') }}"
+    data-delete-url="{{ url_for('music.delete_music', filename='__NAME__') }}">
+    <div class="music-card">
+        <h2>Music Library</h2>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        <div class="music-summary">
+            <div>
+                <div class="label">Used</div>
+                <div class="value">{{ format_file_size(total_size) }}</div>
+            </div>
+            <div>
+                <div class="label">Free</div>
+                <div class="value">{{ format_file_size(free_bytes) }}</div>
+            </div>
+            <div>
+                <div class="label">Files</div>
+                <div class="value">{{ files|length }}</div>
+            </div>
+        </div>
+        {% set total_space = total_size + free_bytes %}
+        {% set used_pct = (100 * total_size / total_space) if total_space else 0 %}
+        <div class="music-meter" aria-label="Usage">
+            <span style="width: {{ used_pct|round(2) }}%"></span>
+        </div>
+        <h3 style="margin-top:18px;">Files</h3>
+        {% if files %}
+        <table class="music-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th style="width:140px;">Size</th>
+                    <th style="width:100px;"></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for file in files %}
+                <tr data-filename="{{ file.name }}">
+                    <td>{{ file.name }}</td>
+                    <td>{{ format_file_size(file.size) }}</td>
+                    <td>
+                        <button class="secondary" data-delete="{{ file.name }}">Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No music files found on the drive.</p>
+        {% endif %}
+    </div>
+
+    <div class="music-card">
+        <h3>Upload</h3>
+        <p class="muted">Uploads require Edit mode. Files larger than {{ max_upload_chunk_mb }} MiB are sent in chunks
+            to keep memory low.</p>
+        <div id="dropZone" class="drop-zone">
+            <div><strong>Drop files here</strong> or click to choose</div>
+            <div class="muted" style="margin-top:6px;">Allowed: mp3, flac, wav, aac, m4a. Max {{ max_upload_size_mb }}
+                MiB per file.</div>
+            <input id="fileInput" type="file" name="music_files" multiple style="display:none;"
+                accept=".mp3,.flac,.wav,.aac,.m4a">
+        </div>
+        <div class="file-list" id="fileList"></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+            <button id="startUpload" class="primary" disabled>Upload</button>
+            <button id="clearSelection" class="secondary" disabled>Clear</button>
+        </div>
+        <div id="uploadStatus" class="muted" style="margin-top:8px;"></div>
+    </div>
+</div>
+<script src="{{ url_for('static', filename='js/music.js') }}"></script>
+{% endblock %}

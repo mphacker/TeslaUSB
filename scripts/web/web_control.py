@@ -10,11 +10,15 @@ from flask import Flask
 import os
 
 # Import configuration
-from config import SECRET_KEY, WEB_PORT, GADGET_DIR
+from config import SECRET_KEY, WEB_PORT, GADGET_DIR, MAX_UPLOAD_SIZE_MB, MAX_UPLOAD_CHUNK_MB
 
 # Flask app initialization
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
+
+# Upload limits (protect RAM-constrained devices)
+app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+app.config['MAX_FORM_MEMORY_SIZE'] = MAX_UPLOAD_CHUNK_MB * 1024 * 1024
 
 # Production optimizations
 app.config['USE_X_SENDFILE'] = False  # Disabled - requires nginx/apache
@@ -26,6 +30,7 @@ from blueprints import (
     videos_bp,
     lock_chimes_bp,
     light_shows_bp,
+    music_bp,
     wraps_bp,
     analytics_bp,
     cleanup_bp,
@@ -39,6 +44,7 @@ app.register_blueprint(mode_control_bp)
 app.register_blueprint(videos_bp)
 app.register_blueprint(lock_chimes_bp)
 app.register_blueprint(light_shows_bp)
+app.register_blueprint(music_bp)
 app.register_blueprint(wraps_bp)
 app.register_blueprint(analytics_bp)
 app.register_blueprint(cleanup_bp)

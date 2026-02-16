@@ -81,12 +81,13 @@
 
     function addFiles(files) {
         const allowed = ['.mp3', '.flac', '.wav', '.aac', '.m4a'];
+        let skipped = 0;
         Array.from(files).forEach((file) => {
-            const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-            if (!allowed.includes(ext)) {
-                setStatus(`${file.name} skipped (unsupported type)`, true);
-                return;
-            }
+            if (file.name.startsWith('.')) { skipped += 1; return; }
+            const lastDot = file.name.lastIndexOf('.');
+            if (lastDot < 0) { skipped += 1; return; }
+            const ext = file.name.substring(lastDot).toLowerCase();
+            if (!allowed.includes(ext)) { skipped += 1; return; }
             if (maxBytes && file.size > maxBytes) {
                 setStatus(`${file.name} exceeds ${maxMb} MiB limit`, true);
                 return;
@@ -95,8 +96,36 @@
         });
         if (queue.length > 0) {
             setStatus(`${queue.length} file(s) queued`, false);
+        } else if (skipped > 0) {
+            setStatus(`${skipped} item(s) skipped (unsupported type)`, true);
         }
         renderQueue();
+    }
+
+    function readEntriesAsync(dirReader) {
+        return new Promise((resolve, reject) => {
+            dirReader.readEntries((entries) => resolve(entries), reject);
+        });
+    }
+
+    async function collectFromEntry(entry, basePath, out) {
+        if (entry.isFile) {
+            const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+            if (file.name.startsWith('.')) return;
+            file.relativePath = basePath ? `${basePath}/${file.name}` : file.name;
+            out.push(file);
+            return;
+        }
+        if (entry.isDirectory) {
+            const reader = entry.createReader();
+            let entries;
+            do {
+                entries = await readEntriesAsync(reader);
+                for (const child of entries) {
+                    await collectFromEntry(child, basePath ? `${basePath}/${entry.name}` : entry.name, out);
+                }
+            } while (entries.length > 0);
+        }
     }
 
     async function uploadFile(item) {
@@ -190,9 +219,25 @@
 
     dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragging'));
 
-    dropZone.addEventListener('drop', (e) => {
+    dropZone.addEventListener('drop', async (e) => {
         e.preventDefault();
         dropZone.classList.remove('dragging');
+
+        const items = e.dataTransfer.items;
+        if (items && items.length && items[0].webkitGetAsEntry) {
+            const collected = [];
+            for (const item of items) {
+                const entry = item.webkitGetAsEntry();
+                if (entry) {
+                    await collectFromEntry(entry, '', collected);
+                }
+            }
+            if (collected.length) {
+                addFiles(collected);
+                return;
+            }
+        }
+
         if (e.dataTransfer.files) {
             addFiles(e.dataTransfer.files);
         }

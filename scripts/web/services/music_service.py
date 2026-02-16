@@ -111,16 +111,25 @@ def _validate_filename(name: str) -> str:
 def list_music_files(rel_path: str = ""):
     mount_path, err = _ensure_music_mount()
     if err:
-        return [], [], err, 0, 0, ""
+        return [], [], err, 0, 0, "", 0
 
     try:
         current_rel = _normalize_rel_path(rel_path)
     except UploadError as exc:
-        return [], [], str(exc), 0, 0, ""
+        return [], [], str(exc), 0, 0, "", 0
+
+    try:
+        stat = os.statvfs(mount_path)
+        total_bytes = stat.f_blocks * stat.f_frsize
+        free_bytes = stat.f_bavail * stat.f_frsize
+        used_bytes = max(0, total_bytes - (stat.f_bfree * stat.f_frsize))
+    except OSError as exc:
+        logger.warning("Could not stat music mount: %s", exc)
+        return [], [], "Music drive unavailable", 0, 0, current_rel, 0
 
     target_dir = _resolve_subpath(mount_path, current_rel)
     if not os.path.isdir(target_dir):
-        return [], [], "Folder not found", 0, 0, current_rel
+        return [], [], "Folder not found", used_bytes, free_bytes, current_rel, total_bytes
 
     dirs = []
     music_files = []
@@ -152,12 +161,11 @@ def list_music_files(rel_path: str = ""):
             total_size += stat.st_size
     except OSError as e:
         logger.warning("Could not read music directory: %s", e)
-        return [], [], "Unable to read music directory", 0, 0, current_rel
+        return [], [], "Unable to read music directory", used_bytes, free_bytes, current_rel, total_bytes
 
-    free_bytes = _fs_free_bytes(mount_path)
     dirs.sort(key=lambda x: x["name"].lower())
     music_files.sort(key=lambda x: x["name"].lower())
-    return dirs, music_files, "", total_size, free_bytes, current_rel
+    return dirs, music_files, "", used_bytes, free_bytes, current_rel, total_bytes
 
 
 def _prepare_paths(filename: str, music_dir: str):

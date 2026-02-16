@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 def music_home():
     ctx = get_base_context()
     current_path = request.args.get("path", "")
-    dirs, files, error, total_size, free_bytes, current_path = list_music_files(current_path)
+    dirs, files, error, used_bytes, free_bytes, current_path, total_bytes = list_music_files(current_path)
     return render_template(
         "music.html",
         page="music",
@@ -33,8 +33,9 @@ def music_home():
         dirs=dirs,
         files=files,
         error=error,
-        total_size=total_size,
+        used_bytes=used_bytes,
         free_bytes=free_bytes,
+        total_bytes=total_bytes,
         current_path=current_path,
         format_file_size=format_file_size,
         max_upload_size_mb=current_app.config.get("MAX_CONTENT_LENGTH", 0) // (1024 * 1024),

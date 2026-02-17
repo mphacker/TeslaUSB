@@ -98,6 +98,17 @@ def _ensure_music_mount() -> Tuple[str, str]:
     return mount_path, ""
 
 
+def _get_music_root(mount_path: str) -> Tuple[str, str]:
+    """Ensure the Tesla-required Music folder exists and return its path."""
+    music_root = os.path.join(mount_path, "Music")
+    try:
+        os.makedirs(music_root, exist_ok=True)
+    except OSError as exc:
+        logger.error("Unable to create Music folder: %s", exc)
+        return "", "Unable to access Music folder"
+    return music_root, ""
+
+
 def _validate_filename(name: str) -> str:
     safe = secure_filename(name)
     if not safe:
@@ -110,6 +121,10 @@ def _validate_filename(name: str) -> str:
 
 def list_music_files(rel_path: str = ""):
     mount_path, err = _ensure_music_mount()
+    if err:
+        return [], [], err, 0, 0, "", 0
+
+    music_root, err = _get_music_root(mount_path)
     if err:
         return [], [], err, 0, 0, "", 0
 
@@ -127,7 +142,7 @@ def list_music_files(rel_path: str = ""):
         logger.warning("Could not stat music mount: %s", exc)
         return [], [], "Music drive unavailable", 0, 0, current_rel, 0
 
-    target_dir = _resolve_subpath(mount_path, current_rel)
+    target_dir = _resolve_subpath(music_root, current_rel)
     if not os.path.isdir(target_dir):
         return [], [], "Folder not found", used_bytes, free_bytes, current_rel, total_bytes
 
@@ -182,7 +197,11 @@ def save_file(file_storage, rel_path: str = "") -> Tuple[bool, str]:
     if err:
         return False, err
 
-    target_dir = _resolve_subpath(mount_path, rel_path)
+    music_root, err = _get_music_root(mount_path)
+    if err:
+        return False, err
+
+    target_dir = _resolve_subpath(music_root, rel_path)
     if not os.path.isdir(target_dir):
         try:
             os.makedirs(target_dir, exist_ok=True)
@@ -233,7 +252,11 @@ def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: 
     if err:
         return False, err, False
 
-    target_dir = _resolve_subpath(mount_path, rel_path)
+    music_root, err = _get_music_root(mount_path)
+    if err:
+        return False, err, False
+
+    target_dir = _resolve_subpath(music_root, rel_path)
     os.makedirs(target_dir, exist_ok=True)
 
     filename = _validate_filename(filename)
@@ -279,7 +302,11 @@ def delete_music_file(rel_path: str) -> Tuple[bool, str]:
     if err:
         return False, err
 
-    target_path = _resolve_subpath(mount_path, rel_path)
+    music_root, err = _get_music_root(mount_path)
+    if err:
+        return False, err
+
+    target_path = _resolve_subpath(music_root, rel_path)
     filename = os.path.basename(target_path)
     if not os.path.isfile(target_path):
         return False, "File not found"
@@ -299,15 +326,16 @@ def create_directory(rel_path: str, name: str) -> Tuple[bool, str]:
     if err:
         return False, err
 
-    base_dir = _resolve_subpath(mount_path, rel_path)
+    music_root, err = _get_music_root(mount_path)
+    if err:
+        return False, err
+
+    base_dir = _resolve_subpath(music_root, rel_path)
     safe_name = secure_filename(name or "")
     if not safe_name:
         return False, "Invalid folder name"
 
     target_dir = os.path.join(base_dir, safe_name)
-    common = os.path.commonpath([mount_path, target_dir])
-    if common != os.path.abspath(mount_path):
-        return False, "Invalid folder path"
 
     try:
         os.makedirs(target_dir, exist_ok=False)
@@ -324,11 +352,15 @@ def delete_directory(rel_path: str) -> Tuple[bool, str]:
     if err:
         return False, err
 
+    music_root, err = _get_music_root(mount_path)
+    if err:
+        return False, err
+
     if not rel_path:
         return False, "Invalid folder path"
 
-    target_dir = _resolve_subpath(mount_path, rel_path)
-    if os.path.abspath(target_dir) == os.path.abspath(mount_path):
+    target_dir = _resolve_subpath(music_root, rel_path)
+    if os.path.abspath(target_dir) == os.path.abspath(music_root):
         return False, "Cannot delete root folder"
     if not os.path.isdir(target_dir):
         return False, "Folder not found"
@@ -348,11 +380,15 @@ def move_music_file(source_rel: str, dest_rel: str, new_name: str = "") -> Tuple
     if err:
         return False, err
 
-    src_path = _resolve_subpath(mount_path, source_rel)
+    music_root, err = _get_music_root(mount_path)
+    if err:
+        return False, err
+
+    src_path = _resolve_subpath(music_root, source_rel)
     if not os.path.isfile(src_path):
         return False, "Source file not found"
 
-    dest_dir = _resolve_subpath(mount_path, dest_rel)
+    dest_dir = _resolve_subpath(music_root, dest_rel)
     try:
         os.makedirs(dest_dir, exist_ok=True)
     except OSError:

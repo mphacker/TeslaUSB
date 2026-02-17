@@ -136,6 +136,14 @@
         background: var(--panel-bg);
     }
 
+    .callout {
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: var(--panel-bg);
+        margin: 10px 0 4px 0;
+    }
+
     @media (max-width: 960px) {
         .music-layout {
             grid-template-columns: 1fr;
@@ -156,6 +164,8 @@
         {% if error %}
         <div class="error">{{ error }}</div>
         {% endif %}
+        <div class="callout">Tesla only scans music inside the <code>/Music</code> folder. This page always reads and
+            uploads inside that folder; paths shown below are relative to <code>/Music</code>.</div>
         <div class="music-summary">
             <div>
                 <div class="label">Used</div>

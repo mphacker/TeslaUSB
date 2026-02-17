@@ -21,7 +21,6 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - **LightShow Drive**: Smaller FAT32 drive for lock chimes, custom wrap images, and light shows with read-only optimization
 
 **Key Benefits:**
-
 - Remote access to dashcam footage without physically removing storage
 - Web interface for browsing videos, managing chimes, managing light shows, managing custom wrap images and monitoring storage (with light/dark mode)
 - Automatic cleanup policies to manage disk space
@@ -31,7 +30,6 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 > **⚠️ Personal Project Notice**
 >
 > This is a personal project built for my own use. You are welcome to fork the code and make your own changes or updates. Please be aware:
->
 > - The Git repository may update frequently with new features and changes
 > - Bugs may be introduced into the main branch without extensive testing
 > - Bug fixes will be worked on as time permits, but **no timelines or guarantees** are provided
@@ -41,7 +39,6 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 ## Features
 
 ### Core Functionality
-
 - **Dual-Drive USB Gadget**: Two independent filesystems (TeslaCam + LightShow) with optimized performance
 - **Two Operating Modes**:
   - **Present Mode**: Active USB gadget for Tesla recording
@@ -50,7 +47,6 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - **Captive Portal**: Automatic splash screen when connecting to TeslaUSB WiFi network
 
 ### Video Management
-
 - Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips)
 - Auto-generated video thumbnails
 - In-browser multi-camera event player with 6 camera angles
@@ -64,7 +60,6 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Storage analytics with folder-by-folder breakdown
 
 ### Lock Chime Management
-
 - Upload WAV or MP3 files (automatically converted to Tesla-compatible format)
 - Organized chime library with preview and download
 - Volume normalization presets (Broadcast, Streaming, Loud, Maximum)
@@ -77,14 +72,12 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
   - Recurring rotation (every 15min to 12 hours, or on boot)
 
 ### Light Show Management
-
 - Upload FSEQ and MP3/WAV files
 - Grouped display (pairs sequence + audio files)
 - Preview MP3/WAV tracks in browser
 - Delete complete light show sets
 
 ### Custom Wrap Management
-
 - Upload PNG files for Tesla's Paint Shop 3D vehicle visualization
 - Thumbnail previews of all uploaded wraps
 - Automatic validation (512-1024px dimensions, max 1MB, PNG only)
@@ -92,7 +85,6 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - Drag-and-drop upload with progress indicator
 
 ### Automatic Maintenance
-
 - **Storage Cleanup**: Age, size, or count-based policies per folder
 - **Boot Cleanup**: Optional automatic cleanup before presenting to Tesla
 - **On-Demand Thumbnails**: Instant generation via PyAV as you browse (cached for 7 days)
@@ -100,7 +92,6 @@ TeslaUSB creates a dual-drive USB gadget that appears as **two separate USB driv
 - **Hardware Watchdog**: Automatic system recovery on hangs or crashes
 
 ### Network Features
-
 - **Samba Shares**: Windows/Mac/Linux file access in Edit mode
 - **Offline Access Point**: Automatic fallback AP when WiFi unavailable (in-car web access)
 - **WiFi Roaming**: Automatic switching between access points with the same SSID for optimal signal strength (mesh networks and WiFi extenders)
@@ -136,7 +127,6 @@ For detailed information, see the official Raspberry Pi whitepaper: [Using OTG m
 **Note for Pi Zero 2 W users**: Setup automatically optimizes memory by disabling unnecessary desktop services and enabling 1GB swap. This ensures stable operation on the 512MB RAM platform.
 
 **⚠️ Note for Raspberry Pi 4/5 users**: USB OTG/gadget mode is **only available on the USB-C port**, which is also the power input. This creates a challenge: you cannot simultaneously power the Pi from a standard USB charger and present as a USB device to Tesla. Options include:
-
 - USB-C power + data splitter adapters (search "USB-C OTG with PD charging")
 - Powering the Pi via GPIO pins from a separate car charger (advanced)
 - Using a larger SD card instead of external USB storage to avoid power budget issues
@@ -165,7 +155,6 @@ sudo ./setup_usb.sh
 ```
 
 The setup script will:
-
 - Install required packages (parted, dosfstools, python3-flask, python3-av, samba, hostapd, dnsmasq, ffmpeg)
 - Optimize memory for low-RAM systems (disable desktop services, enable swap)
 - Configure USB gadget kernel modules and hardware watchdog
@@ -183,7 +172,6 @@ Alternatively, connect to the TeslaUSB WiFi network and the captive portal will 
 ### 4. Connect to Tesla
 
 Connect the Pi to your Tesla's USB port:
-
 - **Pi Zero 2 W**: Use USB port labeled "USB" (not "PWR")
 - **Pi 4/5**: Use USB-C port
 
@@ -194,7 +182,6 @@ Tesla will detect two separate USB drives automatically.
 The TeslaUSB device only runs when the car is awake. When your Tesla enters sleep mode, USB ports are powered off and the Raspberry Pi shuts down.
 
 **To keep your vehicle awake for extended management sessions:**
-
 1. Turn on climate control
 2. Enable "Dog Mode" or "Camp Mode" from the climate screen
 3. Connect to the TeslaUSB web interface and manage your lock chimes, light shows, or videos
@@ -208,21 +195,18 @@ The TeslaUSB device only runs when the car is awake. When your Tesla enters slee
 ### Operating Modes
 
 **Present USB Mode** (default on boot):
-
 - Pi appears as USB drives to Tesla
 - Drives mounted read-only locally at `/mnt/gadget/part1-ro`, `/mnt/gadget/part2-ro`
 - Web interface: View/play only (no editing)
 - Samba shares disabled
 
 **Edit USB Mode**:
-
 - USB gadget disconnected
 - Drives mounted read-write at `/mnt/gadget/part1`, `/mnt/gadget/part2`
 - Web interface: Full file management (upload, delete, organize)
 - Samba shares active for network access
 
 **Switch modes** via web interface or command line:
-
 ```bash
 sudo /home/pi/TeslaUSB/present_usb.sh  # Activate Present mode
 sudo /home/pi/TeslaUSB/edit_usb.sh     # Activate Edit mode
@@ -231,14 +215,12 @@ sudo /home/pi/TeslaUSB/edit_usb.sh     # Activate Edit mode
 ### Network Access
 
 **Samba Shares** (Edit mode only):
-
 - `\\<pi-ip-address>\gadget_part1` - TeslaCam drive
 - `\\<pi-ip-address>\gadget_part2` - LightShow drive
 - Default credentials: username = `pi`, password = `tesla`
 
 **Offline Access Point with Captive Portal**:
 When WiFi is unavailable, the Pi automatically creates a fallback access point:
-
 - SSID: `TeslaUSB` (configurable in `config.yaml`)
 - Password: `teslausb1234` (change this!)
 - IP: `192.168.4.1`
@@ -253,20 +235,17 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 ### Web Features
 
 **Settings Tab**:
-
 - Switch between Present USB and Edit USB modes
 - Configure offline access point (SSID, password, auto/manual mode)
 - View network status and Samba share information
 
 **Videos Tab**:
-
 - Browse all TeslaCam folders with auto-generated thumbnails
 - Multi-camera event player with 6 camera angles
 - Download all camera views as zip file
 - Delete entire events (Edit mode only) - deletes all camera views for the session
 
 **Music Tab**:
-
 - Tesla scans music only from a root-level `Music` folder; the app enforces this and automatically creates it if missing
 - Browse folders with breadcrumb navigation and clean per-folder views
 - Drag-and-drop or select files and whole folders; chunked uploads keep memory low and preserve subfolder structure
@@ -275,7 +254,6 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Usage gauge shows used/free space for the music partition
 
 **Lock Chimes Tab**:
-
 - Upload WAV/MP3 files (auto-converted to Tesla format)
 - Preview all chimes with in-browser audio player
 - Set any chime as active `LockChime.wav`
@@ -287,14 +265,12 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Schedule automatic chime changes (weekly, date, holiday, recurring)
 
 **Light Shows Tab**:
-
 - Upload and manage FSEQ + MP3/WAV light show files
 - Grouped display for matching files
 - Preview MP3/WAV audio in browser
 - Delete complete light show sets
 
 **Wraps Tab**:
-
 - Upload PNG files for custom Tesla vehicle wraps (Paint Shop → Wraps)
 - Thumbnail preview gallery of all uploaded wraps
 - Client-side validation before upload (dimensions, file size, format)
@@ -302,7 +278,6 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Requirements: PNG format, 512x512 to 1024x1024 pixels, max 1MB, up to 10 wraps
 
 **Analytics Tab**:
-
 - Drive usage gauge and folder breakdown
 - Video count and size statistics
 - Configure cleanup policies (age, size, count-based)
@@ -376,25 +351,21 @@ web:
 ```
 
 **Important settings to change before first use:**
-
 - `network.samba_password` - Default is `tesla` (change this!)
 - `offline_ap.ssid` - Default is `TeslaUSB` (customize for your vehicle)
 - `offline_ap.passphrase` - Default is `teslausb1234` (change this!)
 - `web.secret_key` - Auto-generated on first run, but can be set manually
 
 **Optional settings:**
-
 - `disk_images.boot_fsck_enabled` - Auto-repair filesystems on boot (default: `true`, recommended)
 
 **After making changes:** Restart affected services
-
 ```bash
 sudo systemctl restart gadget_web.service    # For web application changes
 sudo systemctl restart wifi-monitor.service  # For offline AP changes
 ```
 
 **How it works:**
-
 - Bash scripts use `yq` to read YAML values
 - Python web app uses `PyYAML` to load configuration
 - Single source of truth for all settings
@@ -423,7 +394,7 @@ Removes all files, services, and system configuration.
 ## Systemd Services
 
 | Service/Timer | Purpose |
-| --- | --- |
+|---------------|---------|
 | `gadget_web.service` | Web interface (port 80) with captive portal |
 | `present_usb_on_boot.service` | Auto-present USB on boot with optional cleanup |
 | `chime_scheduler.timer` | Check scheduled chime changes every 60 seconds |
@@ -431,7 +402,6 @@ Removes all files, services, and system configuration.
 | `watchdog.service` | Hardware watchdog for system reliability |
 
 **Common Commands:**
-
 ```bash
 # Check service status
 sudo systemctl status gadget_web.service
@@ -463,7 +433,7 @@ priority = 1
 The following options should be **avoided** on Raspberry Pi Zero 2 W (512MB RAM):
 
 | Setting | Problem |
-| --- | --- |
+|---------|---------|
 | `min-memory = 50000` | Pi Zero 2 W often has <50MB free during normal operation, triggering unnecessary reboots |
 | `repair-binary = /usr/lib/watchdog/repair` | This file doesn't exist on Raspberry Pi OS |
 | `interval` (low values) | Can cause timing issues with the kernel watchdog |
@@ -483,7 +453,6 @@ The following options should be **avoided** on Raspberry Pi Zero 2 W (512MB RAM)
 ### Common Issues
 
 **Web interface not accessible:**
-
 ```bash
 # Check service status and logs
 sudo systemctl status gadget_web.service
@@ -491,13 +460,11 @@ sudo journalctl -u gadget_web.service -f
 ```
 
 **Videos not showing:**
-
 - Verify correct mode (Present or Edit, not Unknown)
 - Check TeslaCam folder exists on drive 1
 - Confirm drive is properly mounted
 
 **Samba shares appear empty:**
-
 ```bash
 # Force Samba refresh
 sudo smbcontrol all close-share gadget_part1
@@ -507,14 +474,12 @@ sudo systemctl restart smbd nmbd
 
 **Tesla not recognizing new lock chime:**
 Try these steps in order:
-
 1. Power cycle Tesla (close doors, walk away 5+ minutes, wake up)
 2. Switch USB modes (Edit → wait 10s → Present)
 3. Physical reconnect (unplug Pi, wait 10s, plug back in)
 4. Tesla reboot (hold both scroll wheels until screen goes black)
 
 **Operation in Progress banner stuck:**
-
 ```bash
 # Check and remove stale lock file if older than 120 seconds
 ls -lh /home/pi/TeslaUSB/.quick_edit_part2.lock
@@ -522,7 +487,6 @@ rm /home/pi/TeslaUSB/.quick_edit_part2.lock
 ```
 
 **iOS file upload not working:**
-
 - Use **Safari** on iOS (third-party browsers have restricted file access)
 - Desktop browsers work normally regardless of choice
 
@@ -542,25 +506,21 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 ## Technical Details
 
 **Dual-Drive Architecture:**
-
 - Two separate disk images (`usb_cam.img` exFAT, `usb_lightshow.img` FAT32)
 - Sparse files (only use space as needed)
 - Presented as dual-LUN USB gadget to Tesla
 
 **USB Gadget Implementation:**
-
 - Linux `g_mass_storage` kernel module via `libcomposite`
 - LUN 0: Read-write (ro=0) for TeslaCam recordings
 - LUN 1: Read-only (ro=1) for LightShow/Chimes
 
 **Concurrency Protection:**
-
 - `.quick_edit_part2.lock` file prevents race conditions
 - 10-second timeout, 120-second stale lock detection
 - All services and scripts respect lock state
 
 **Performance Optimizations:**
-
 - **Boot time**: ~14 seconds on Pi Zero 2 W (detects existing RW mount at boot to skip unnecessary remount operations)
 - **Configuration loading**: Single YAML parse with secure eval (properly quoted values prevent command injection)
 - **Web UI responsiveness**: Settings page loads in ~0.4s (optimized from 133s through batched configuration reads)

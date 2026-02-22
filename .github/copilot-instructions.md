@@ -42,6 +42,20 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - Samba cache: after edits in edit mode, call `close_samba_share()` and `restart_samba_services()` (see lock chime routes).
 - **Web service runs on port 80** (not 5000) to enable captive portal functionality. The service runs as root (via systemd) to bind to privileged port 80.
 
+## Feature Availability (Image-Gated UI)
+- **Dynamic gating**: Nav items and routes are hidden/blocked when their required `.img` file doesn't exist. Uses per-request `os.path.isfile()` checks (negligible overhead, no restart needed).
+- **Image path constants**: `IMG_CAM_PATH`, `IMG_LIGHTSHOW_PATH`, `IMG_MUSIC_PATH` in `config.py` — computed from `GADGET_DIR` + image name.
+- **Availability function**: `partition_service.get_feature_availability()` returns a dict of boolean flags checked per request.
+- **Feature-to-image mapping**:
+  - `usb_cam.img` (part1) → `analytics_available`, `videos_available` (also gates cleanup sub-pages)
+  - `usb_lightshow.img` (part2) → `chimes_available`, `shows_available`, `wraps_available`
+  - `usb_music.img` (part3) → `music_available` (also requires `MUSIC_ENABLED`)
+- **Template layer**: `get_base_context()` in `utils.py` merges availability flags into every template context. `base.html` wraps nav links in `{% if <flag> %}` guards (both desktop and mobile menus). Settings is always shown.
+- **Route layer**: Each gated blueprint has a `@bp.before_request` hook that checks `os.path.isfile()` on the relevant image path. AJAX requests (`X-Requested-With: XMLHttpRequest`) get 503 JSON; normal requests redirect to Settings with a flash message.
+- **Blueprints are always registered** — routes just redirect when images are missing. This keeps URL routing stable and avoids import-time checks.
+- **Adding a new gated feature**: Add the image path check to `get_feature_availability()`, wrap the nav link in `base.html`, and add a `@bp.before_request` guard in the blueprint.
+- **fsck.py is not gated** — it's API-only with no nav link and handles missing images internally.
+
 ## Thumbnail System
 - **On-demand generation**: Thumbnails generated via PyAV when requested (80x45px, 1-3s generation time).
 - **Queue-based loading**: Client-side queue with max 3 concurrent checks, 1-at-a-time generation to prevent memory exhaustion.
@@ -103,3 +117,4 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - Editing templates without rerunning `setup_usb.sh` (placeholders stay unexpanded).
 - Long quick-edit operations holding the lock and leaving LUN unbound on failure; ensure cleanup paths restore RO mount and gadget backing.
 - Modifying AP force mode without persisting to config.sh (state lost on reboot); always use `ap_control.sh` or `ap_service.ap_force()`.
+- Adding a new blueprint route without a `before_request` image guard when the feature depends on a disk image (users hit crashes or empty pages).

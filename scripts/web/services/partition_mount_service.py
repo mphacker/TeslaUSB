@@ -699,6 +699,308 @@ def quick_edit_part2(operation_callback, timeout=10):
         return False, f"Unexpected error: {str(e)}"
 
 
+def quick_edit_part3(operation_callback, timeout=10):
+    """
+    Temporarily mount part3 (music) read-write to execute an operation.
+
+    This is safe to call while in Present mode because:
+    - The USB gadget serves the image FILE directly, not mount points
+    - Tesla's LUN 2 (music) is read-only from Tesla's perspective
+    - Part1 (TeslaCam) and Part2 (lightshow) remain untouched
+
+    Process mirrors quick_edit_part2 but targets LUN 2 / part3:
+    1. Check and recover any existing bad state
+    2. Acquire exclusive lock
+    3. Clear LUN2 backing (temporary)
+    4. Unmount part3-ro (read-only mount)
+    5. Setup RW loop device and mount
+    6. Execute operation_callback (with timeout)
+    7. Priority cleanup:
+       - P1: Restore LUN2 backing file (CRITICAL - with retries)
+       - P2: Restore RO mount
+       - P3: Cleanup temp mounts and loops
+    8. Validate final state
+
+    Args:
+        operation_callback: Function to execute while part3 is writable.
+                          Should return (success, message)
+        timeout: Maximum seconds to wait for lock acquisition (default: 10).
+                Note: Operation gets 60s max.
+
+    Returns:
+        (success: bool, message: str)
+    """
+    from config import IMG_MUSIC_NAME
+
+    logger.info("Starting quick edit part3 (music) operation")
+
+    img_path = os.path.join(GADGET_DIR, IMG_MUSIC_NAME)
+
+    if not os.path.isfile(img_path):
+        return False, f"Music image not found: {img_path}"
+
+    # PRE-FLIGHT: Check and fix any existing bad state before we start
+    try:
+        state_check = check_and_recover_gadget_state()
+        if state_check['errors']:
+            logger.error(f"Pre-flight check failed with errors: {state_check['errors']}")
+            return False, f"System in bad state: {'; '.join(state_check['errors'])}"
+        if state_check['fixes_applied']:
+            logger.info(f"Pre-flight fixes applied: {state_check['fixes_applied']}")
+    except Exception as e:
+        logger.error(f"Pre-flight check failed: {e}", exc_info=True)
+        # Continue anyway - we'll try to recover
+
+    mount_ro = os.path.join(MNT_DIR, 'part3-ro')
+    mount_rw = os.path.join(MNT_DIR, 'part3')
+
+    # Track what we've done for cleanup
+    cleanup_state = {
+        'lun_cleared': False,
+        'ro_unmounted': False,
+        'rw_mounted': False,
+        'loop_dev': None,
+        'operation_success': False
+    }
+
+    fs_type = 'vfat'  # default, detected below
+
+    try:
+        with _acquire_lock(timeout=timeout):
+
+            # Step 1: Clear the file backing for LUN 2 (music) WITHOUT removing LUN structure
+            logger.info("Clearing file backing for LUN 2 (music)")
+            try:
+                subprocess.run(
+                    ['sudo', 'sh', '-c', 'echo "" > /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.2/file'],
+                    capture_output=True,
+                    check=False,
+                    timeout=5
+                )
+                cleanup_state['lun_cleared'] = True
+            except Exception as e:
+                logger.warning(f"Could not clear LUN2 backing (non-fatal): {e}")
+
+            # Step 2: Unmount ALL mounts of the loop device and detach all loop devices
+            logger.info("Unmounting all mounts of music loop device")
+            try:
+                result = subprocess.run(
+                    ['sudo', '/usr/sbin/losetup', '-j', img_path],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10
+                )
+
+                if result.returncode == 0 and result.stdout.strip():
+                    for line in result.stdout.strip().splitlines():
+                        old_loop_dev = line.split(':')[0].strip()
+                        logger.info(f"Found existing loop device: {old_loop_dev}")
+
+                        mount_result = subprocess.run(
+                            ['mount'],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=5
+                        )
+
+                        for mount_line in mount_result.stdout.splitlines():
+                            parts = mount_line.split()
+                            if len(parts) >= 3 and parts[0] == old_loop_dev:
+                                mount_point = parts[2]
+                                logger.info(f"Unmounting {mount_point} (from {old_loop_dev})")
+                                subprocess.run(
+                                    ['sudo', 'nsenter', '--mount=/proc/1/ns/mnt', 'umount', mount_point],
+                                    capture_output=True,
+                                    check=False,
+                                    timeout=10
+                                )
+                                if mount_point == mount_ro:
+                                    cleanup_state['ro_unmounted'] = True
+            except Exception as e:
+                logger.warning(f"Error during unmount (non-fatal): {e}")
+
+            # Step 3: Get or create RW loop device (reuse existing if possible)
+            logger.info("Getting/creating read-write loop device for music")
+            try:
+                loop_dev = get_or_create_loop(img_path)
+                if not loop_dev:
+                    raise ValueError("Could not get/create loop device")
+                cleanup_state['loop_dev'] = loop_dev
+                logger.info(f"Using loop device: {loop_dev}")
+            except Exception as e:
+                logger.error(f"Failed to get/create loop device: {e}")
+                raise ValueError(f"Could not get/create loop device: {e}")
+
+            # Step 4: Detect filesystem type and mount read-write
+            try:
+                result = subprocess.run(
+                    ['sudo', '/usr/sbin/blkid', '-o', 'value', '-s', 'TYPE', loop_dev],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10
+                )
+                fs_type = result.stdout.strip() if result.returncode == 0 else 'vfat'
+                logger.info(f"Music filesystem type: {fs_type}")
+
+                subprocess.run(
+                    ['sudo', 'mkdir', '-p', mount_rw],
+                    capture_output=True,
+                    check=True
+                )
+
+                logger.info(f"Mounting {loop_dev} read-write at {mount_rw}")
+                mount_cmd = [
+                    'sudo', 'nsenter', '--mount=/proc/1/ns/mnt',
+                    'mount', '-t', fs_type,
+                    '-o', 'rw,uid=1000,gid=1000,umask=000',
+                    loop_dev, mount_rw
+                ]
+
+                subprocess.run(
+                    mount_cmd,
+                    capture_output=True,
+                    check=True
+                )
+                cleanup_state['rw_mounted'] = True
+                logger.info("✓ Music RW mount successful")
+
+            except Exception as e:
+                logger.error(f"Failed to mount music RW: {e}")
+                raise ValueError(f"Could not mount music filesystem: {e}")
+
+            # Step 5: Execute the operation with overall timeout protection
+            logger.info("Executing music operation callback")
+            operation_start = time.time()
+
+            try:
+                success, message = run_with_timeout(operation_callback, 60)
+                operation_time = time.time() - operation_start
+                logger.info(f"Music operation completed in {operation_time:.2f}s: {message}")
+                cleanup_state['operation_success'] = success
+
+                if not success:
+                    logger.warning(f"Music operation reported failure: {message}")
+
+            except OperationTimeout as e:
+                logger.error(f"Music operation timed out: {e}")
+                success = False
+                message = "Operation timed out after 60 seconds"
+            except Exception as e:
+                logger.error(f"Music operation callback raised exception: {e}", exc_info=True)
+                success = False
+                message = f"Operation error: {str(e)}"
+
+            # Step 6: Sync filesystem
+            logger.info("Syncing filesystem")
+            try:
+                subprocess.run(['sync'], check=False, timeout=5)
+                time.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"Sync failed (non-fatal): {e}")
+
+            # CRITICAL SECTION: Cleanup with priority levels
+            # Priority 1: RESTORE LUN2 BACKING (MUST SUCCEED)
+            logger.info("PRIORITY 1: Restoring LUN2 (music) backing file")
+            lun_restored = _restore_lun_backing(img_path, max_retries=3, lun_number=2)
+            if not lun_restored:
+                logger.error("CRITICAL: LUN2 backing restoration failed!")
+
+            # Priority 2: Restore RO mount for normal operations
+            logger.info("PRIORITY 2: Restoring music RO mount")
+            try:
+                if cleanup_state['rw_mounted']:
+                    subprocess.run(
+                        ['sudo', 'nsenter', '--mount=/proc/1/ns/mnt', 'umount', mount_rw],
+                        capture_output=True,
+                        check=False
+                    )
+                    logger.info("✓ Unmounted music RW mount")
+
+                ro_loop_dev = cleanup_state['loop_dev']
+
+                if ro_loop_dev:
+                    logger.info(f"Reusing existing loop device for music RO mount: {ro_loop_dev}")
+
+                    subprocess.run(
+                        ['sudo', 'mkdir', '-p', mount_ro],
+                        capture_output=True,
+                        check=False
+                    )
+
+                    mount_ro_cmd = [
+                        'sudo', 'nsenter', '--mount=/proc/1/ns/mnt',
+                        'mount', '-t', fs_type,
+                        '-o', 'ro,uid=1000,gid=1000,umask=022',
+                        ro_loop_dev, mount_ro
+                    ]
+
+                    ro_mount_result = subprocess.run(
+                        mount_ro_cmd,
+                        capture_output=True,
+                        check=False
+                    )
+
+                    if ro_mount_result.returncode == 0:
+                        logger.info("✓ Music RO mount restored")
+                    else:
+                        logger.warning("Music RO mount failed (non-critical)")
+
+                    subprocess.run(
+                        ['sudo', '/usr/sbin/blockdev', '--flushbufs', ro_loop_dev],
+                        capture_output=True,
+                        check=False
+                    )
+
+            except Exception as e:
+                logger.error(f"Error during music RO mount restoration: {e}", exc_info=True)
+
+            # Priority 3: Drop caches (nice to have)
+            try:
+                subprocess.run(
+                    ['sudo', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
+                    capture_output=True,
+                    check=False
+                )
+                logger.info("✓ Dropped caches")
+            except Exception:
+                pass
+
+            logger.info("Quick edit part3 (music) operation completed")
+
+            # Final state validation
+            final_state = check_and_recover_gadget_state()
+            if not final_state['healthy']:
+                logger.warning(f"Post-operation state check found issues: {final_state['issues_found']}")
+                if final_state['fixes_applied']:
+                    logger.info(f"Auto-applied fixes: {final_state['fixes_applied']}")
+
+            return success, message
+
+    except TimeoutError as e:
+        logger.error(f"Timeout during quick edit part3: {e}")
+        _restore_lun_backing(img_path, max_retries=3, lun_number=2)
+        return False, f"Operation timed out: {e}"
+
+    except subprocess.TimeoutExpired:
+        logger.error("Command timeout during quick edit part3")
+        _restore_lun_backing(img_path, max_retries=3, lun_number=2)
+        return False, "Operation timed out"
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Command failed during quick edit part3: {e}")
+        stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ''
+        _restore_lun_backing(img_path, max_retries=3, lun_number=2)
+        return False, f"Mount operation failed: {stderr[:200]}"
+
+    except Exception as e:
+        logger.error(f"Unexpected error during quick edit part3: {e}", exc_info=True)
+        _restore_lun_backing(img_path, max_retries=3, lun_number=2)
+        return False, f"Unexpected error: {str(e)}"
+
+
 def rebind_usb_gadget(delay_seconds=1):
     """
     Unbind and rebind the USB gadget to force Tesla to re-enumerate the device.

@@ -33,12 +33,12 @@
             <h1><a href="{{ url_for('mode_control.index') }}">🚗 Tesla USB Gadget Control - {{ hostname }}</a></h1>
             <div class="nav-links">
                 <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Settings</a>
-                <a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>
-                <a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
-                <a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
-                <a href="{{ url_for('music.music_home') }}" {% if page == 'music' %}class="active"{% endif %}>Music</a>
-                <a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
-                <a href="{{ url_for('wraps.wraps') }}" {% if page == 'wraps' %}class="active"{% endif %}>Wraps</a>
+                {% if analytics_available %}<a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>{% endif %}
+                {% if videos_available %}<a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>{% endif %}
+                {% if chimes_available %}<a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>{% endif %}
+                {% if music_available %}<a href="{{ url_for('music.music_home') }}" {% if page == 'music' %}class="active"{% endif %}>Music</a>{% endif %}
+                {% if shows_available %}<a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>{% endif %}
+                {% if wraps_available %}<a href="{{ url_for('wraps.wraps') }}" {% if page == 'wraps' %}class="active"{% endif %}>Wraps</a>{% endif %}
                 <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
                     <i class="bi bi-moon-stars-fill" id="theme-icon"></i>
                 </button>
@@ -53,12 +53,12 @@
     <div class="mobile-menu" id="mobileMenu">
         <div class="mobile-menu-close" onclick="toggleMobileMenu()">&times;</div>
         <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Settings</a>
-        <a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>
-        <a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>
-        <a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>
-        <a href="{{ url_for('music.music_home') }}" {% if page == 'music' %}class="active"{% endif %}>Music</a>
-        <a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>
-        <a href="{{ url_for('wraps.wraps') }}" {% if page == 'wraps' %}class="active"{% endif %}>Wraps</a>
+        {% if analytics_available %}<a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>{% endif %}
+        {% if videos_available %}<a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>{% endif %}
+        {% if chimes_available %}<a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>{% endif %}
+        {% if music_available %}<a href="{{ url_for('music.music_home') }}" {% if page == 'music' %}class="active"{% endif %}>Music</a>{% endif %}
+        {% if shows_available %}<a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>{% endif %}
+        {% if wraps_available %}<a href="{{ url_for('wraps.wraps') }}" {% if page == 'wraps' %}class="active"{% endif %}>Wraps</a>{% endif %}
         <div class="mobile-theme-toggle">
             <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
                 <i class="bi bi-moon-stars-fill" id="theme-icon-mobile"></i>

@@ -9,10 +9,11 @@ import logging
 import time
 from typing import Tuple, List
 
-from config import MAX_UPLOAD_CHUNK_MB, MAX_UPLOAD_SIZE_MB
+from config import MAX_UPLOAD_CHUNK_MB, MAX_UPLOAD_SIZE_MB, MNT_DIR
 from services.partition_service import get_mount_path
 from services.samba_service import close_samba_share
 from services.mode_service import current_mode
+from services.partition_mount_service import quick_edit_part3
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,26 @@ def _validate_filename(name: str) -> str:
     return safe
 
 
+def resolve_music_file_path(rel_path: str) -> str:
+    """Return the absolute filesystem path for a music file given its relative path.
+
+    Raises MusicServiceError if the drive is not mounted or the file doesn't exist.
+    """
+    mount_path, err = _ensure_music_mount()
+    if err:
+        raise MusicServiceError(err)
+    music_root, err = _get_music_root(mount_path)
+    if err:
+        raise MusicServiceError(err)
+    file_path = _resolve_subpath(music_root, rel_path)
+    if not os.path.isfile(file_path):
+        raise MusicServiceError("File not found")
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in ALLOWED_EXTS:
+        raise MusicServiceError("Unsupported file type")
+    return file_path
+
+
 def list_music_files(rel_path: str = ""):
     mount_path, err = _ensure_music_mount()
     if err:
@@ -235,230 +256,323 @@ def _prepare_paths(filename: str, music_dir: str):
 
 
 def save_file(file_storage, rel_path: str = "") -> Tuple[bool, str]:
-    """Stream a Werkzeug FileStorage to the music partition with fsync + atomic rename."""
-    mount_path, err = _ensure_music_mount()
-    if err:
-        return False, err
+    """Stream a Werkzeug FileStorage to the music partition with fsync + atomic rename.
 
-    music_root, err = _get_music_root(mount_path)
-    if err:
-        return False, err
-
-    target_dir = _resolve_subpath(music_root, rel_path)
-    if not os.path.isdir(target_dir):
-        try:
-            os.makedirs(target_dir, exist_ok=True)
-        except OSError:
-            return False, "Target folder unavailable"
+    Mode-aware: in present mode, uses quick_edit_part3 for temporary RW access.
+    """
+    mode = current_mode()
 
     filename = _validate_filename(file_storage.filename)
-    tmp_dir, tmp_path, final_path = _prepare_paths(filename, target_dir)
 
-    # Free space check
+    # Read file content into memory so we can use it inside quick_edit callback
     file_storage.stream.seek(0, os.SEEK_END)
     incoming_size = file_storage.stream.tell()
     file_storage.stream.seek(0)
     if incoming_size > MAX_UPLOAD_BYTES:
         return False, f"File too large (>{MAX_UPLOAD_SIZE_MB} MiB limit)"
 
-    free_bytes = _fs_free_bytes(mount_path)
-    if free_bytes <= incoming_size + (4 * 1024 * 1024):
-        return False, "Not enough free space on Music drive"
+    file_bytes = file_storage.read()
 
-    # Stream to temp then atomically move
-    if os.path.exists(tmp_path):
-        os.remove(tmp_path)
+    def _do_save(music_root: str, mount_path: str) -> Tuple[bool, str]:
+        target_dir = _resolve_subpath(music_root, rel_path)
+        if not os.path.isdir(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except OSError:
+                return False, "Target folder unavailable"
 
-    _stream_to_file(file_storage.stream, tmp_path)
-    _fsync_path(tmp_path)
-    _fsync_dir(tmp_dir)
+        tmp_dir, tmp_path, final_path = _prepare_paths(filename, target_dir)
 
-    os.replace(tmp_path, final_path)
-    _fsync_dir(target_dir)
-    try:
-        close_samba_share("part3")
-    except Exception:
-        pass
-    return True, f"Uploaded {filename}"
+        free_bytes = _fs_free_bytes(mount_path)
+        if free_bytes <= incoming_size + (4 * 1024 * 1024):
+            return False, "Not enough free space on Music drive"
+
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+        with open(tmp_path, "wb") as fh:
+            fh.write(file_bytes)
+
+        _fsync_path(tmp_path)
+        _fsync_dir(tmp_dir)
+
+        os.replace(tmp_path, final_path)
+        _fsync_dir(target_dir)
+        try:
+            close_samba_share("part3")
+        except Exception:
+            pass
+        return True, f"Uploaded {filename}"
+
+    if mode == 'present':
+        def _quick_callback():
+            rw_mount = os.path.join(MNT_DIR, 'part3')
+            music_root = os.path.join(rw_mount, "Music")
+            os.makedirs(music_root, exist_ok=True)
+            return _do_save(music_root, rw_mount)
+
+        return quick_edit_part3(_quick_callback, timeout=30)
+    else:
+        mount_path, err = _ensure_music_mount()
+        if err:
+            return False, err
+        music_root, err = _get_music_root(mount_path)
+        if err:
+            return False, err
+        return _do_save(music_root, mount_path)
 
 
 def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: int, total_size: int, stream, rel_path: str = "") -> Tuple[bool, str, bool]:
     """
     Append a chunk to the staged upload file.
 
+    Mode-aware: in present mode, uses quick_edit_part3 for temporary RW access
+    on every chunk write (each chunk is a quick atomic operation).
+
     Returns (success, message, is_finalized)
     """
     if total_size > MAX_UPLOAD_BYTES:
         raise MusicServiceError(f"File too large (>{MAX_UPLOAD_SIZE_MB} MiB limit)")
 
-    mount_path, err = _ensure_music_mount()
-    if err:
-        return False, err, False
-
-    music_root, err = _get_music_root(mount_path)
-    if err:
-        return False, err, False
-
-    target_dir = _resolve_subpath(music_root, rel_path)
-    os.makedirs(target_dir, exist_ok=True)
-
-    # Validate upload_id is a hex UUID (prevents path traversal)
     if not _UPLOAD_ID_RE.match(upload_id or ""):
         raise MusicServiceError("Invalid upload ID")
 
     filename = _validate_filename(filename)
-    tmp_dir = os.path.join(target_dir, ".uploads")
-    os.makedirs(tmp_dir, exist_ok=True)
-    staged_path = os.path.join(tmp_dir, f"{upload_id}.part")
-    final_path = os.path.join(target_dir, filename)
 
-    # On first chunk, purge stale uploads and ensure space
-    if chunk_index == 0:
-        _purge_stale_chunks(tmp_dir)
-        if os.path.exists(staged_path):
-            os.remove(staged_path)
-        free_bytes = _fs_free_bytes(mount_path)
-        if free_bytes <= total_size + (4 * 1024 * 1024):
-            raise MusicServiceError("Not enough free space on Music drive")
+    # Read chunk data into memory so we can use it inside quick_edit callback
+    chunk_data = stream.read(CHUNK_SIZE + 1024 * 1024)  # read generously
 
-    written = _stream_to_file(stream, staged_path)
-    logger.debug("Chunk %s/%s wrote %s bytes", chunk_index + 1, total_chunks, written)
+    mode = current_mode()
 
-    if chunk_index < total_chunks - 1:
-        return True, "Chunk stored", False
+    def _do_chunk(music_root: str, mount_path: str) -> Tuple[bool, str, bool]:
+        target_dir = _resolve_subpath(music_root, rel_path)
+        os.makedirs(target_dir, exist_ok=True)
 
-    # Final chunk: validate size then atomically move
-    actual_size = os.path.getsize(staged_path)
-    if actual_size != total_size:
-        raise MusicServiceError(f"Size mismatch. Expected {total_size} bytes, got {actual_size}")
+        tmp_dir = os.path.join(target_dir, ".uploads")
+        os.makedirs(tmp_dir, exist_ok=True)
+        staged_path = os.path.join(tmp_dir, f"{upload_id}.part")
+        final_path = os.path.join(target_dir, filename)
 
-    _fsync_path(staged_path)
-    _fsync_dir(tmp_dir)
-    os.replace(staged_path, final_path)
-    _fsync_dir(target_dir)
+        if chunk_index == 0:
+            _purge_stale_chunks(tmp_dir)
+            if os.path.exists(staged_path):
+                os.remove(staged_path)
+            free_bytes = _fs_free_bytes(mount_path)
+            if free_bytes <= total_size + (4 * 1024 * 1024):
+                raise MusicServiceError("Not enough free space on Music drive")
 
-    try:
-        close_samba_share("part3")
-    except Exception:
-        pass
+        with open(staged_path, "ab", buffering=0) as fh:
+            fh.write(chunk_data)
+        written = len(chunk_data)
+        logger.debug("Chunk %s/%s wrote %s bytes", chunk_index + 1, total_chunks, written)
 
-    return True, f"Uploaded {filename}", True
+        if chunk_index < total_chunks - 1:
+            return True, "Chunk stored", False
+
+        actual_size = os.path.getsize(staged_path)
+        if actual_size != total_size:
+            raise MusicServiceError(f"Size mismatch. Expected {total_size} bytes, got {actual_size}")
+
+        _fsync_path(staged_path)
+        _fsync_dir(tmp_dir)
+        os.replace(staged_path, final_path)
+        _fsync_dir(target_dir)
+
+        try:
+            close_samba_share("part3")
+        except Exception:
+            pass
+
+        return True, f"Uploaded {filename}", True
+
+    if mode == 'present':
+        # Each chunk gets a quick_edit session (short RW window)
+        result_holder = [None]
+        exception_holder = [None]
+
+        def _quick_callback():
+            try:
+                rw_mount = os.path.join(MNT_DIR, 'part3')
+                music_root = os.path.join(rw_mount, "Music")
+                os.makedirs(music_root, exist_ok=True)
+                res = _do_chunk(music_root, rw_mount)
+                result_holder[0] = res
+                return True, "Chunk processed"
+            except MusicServiceError as exc:
+                exception_holder[0] = exc
+                return False, str(exc)
+            except Exception as exc:
+                exception_holder[0] = exc
+                return False, str(exc)
+
+        success, msg = quick_edit_part3(_quick_callback, timeout=30)
+        if exception_holder[0]:
+            raise exception_holder[0]
+        if not success:
+            return False, msg, False
+        return result_holder[0] if result_holder[0] else (False, msg, False)
+    else:
+        mount_path, err = _ensure_music_mount()
+        if err:
+            return False, err, False
+        music_root, err = _get_music_root(mount_path)
+        if err:
+            return False, err, False
+        return _do_chunk(music_root, mount_path)
 
 
 def delete_music_file(rel_path: str) -> Tuple[bool, str]:
-    mount_path, err = _ensure_music_mount()
-    if err:
-        return False, err
+    """Delete a music file. Mode-aware: uses quick_edit_part3 in present mode."""
+    mode = current_mode()
 
-    music_root, err = _get_music_root(mount_path)
-    if err:
-        return False, err
+    def _do_delete(music_root: str) -> Tuple[bool, str]:
+        target_path = _resolve_subpath(music_root, rel_path)
+        filename = os.path.basename(target_path)
+        if not os.path.isfile(target_path):
+            return False, "File not found"
+        try:
+            os.remove(target_path)
+            _fsync_dir(os.path.dirname(target_path))
+            close_samba_share("part3")
+        except Exception as exc:
+            logger.error("Failed to delete %s: %s", filename, exc)
+            return False, "Unable to delete file"
+        return True, f"Deleted {filename}"
 
-    target_path = _resolve_subpath(music_root, rel_path)
-    filename = os.path.basename(target_path)
-    if not os.path.isfile(target_path):
-        return False, "File not found"
-
-    try:
-        os.remove(target_path)
-        _fsync_dir(os.path.dirname(target_path))
-        close_samba_share("part3")
-    except Exception as exc:
-        logger.error("Failed to delete %s: %s", filename, exc)
-        return False, "Unable to delete file"
-    return True, f"Deleted {filename}"
+    if mode == 'present':
+        def _quick_callback():
+            rw_mount = os.path.join(MNT_DIR, 'part3')
+            music_root = os.path.join(rw_mount, "Music")
+            return _do_delete(music_root)
+        return quick_edit_part3(_quick_callback, timeout=30)
+    else:
+        mount_path, err = _ensure_music_mount()
+        if err:
+            return False, err
+        music_root, err = _get_music_root(mount_path)
+        if err:
+            return False, err
+        return _do_delete(music_root)
 
 
 def create_directory(rel_path: str, name: str) -> Tuple[bool, str]:
-    mount_path, err = _ensure_music_mount()
-    if err:
-        return False, err
-
-    music_root, err = _get_music_root(mount_path)
-    if err:
-        return False, err
-
-    base_dir = _resolve_subpath(music_root, rel_path)
+    """Create a directory. Mode-aware: uses quick_edit_part3 in present mode."""
     safe_name = _sanitize_name(name or "")
     if not safe_name:
         return False, "Invalid folder name"
 
-    target_dir = os.path.join(base_dir, safe_name)
+    mode = current_mode()
 
-    try:
-        os.makedirs(target_dir, exist_ok=False)
-        _fsync_dir(base_dir)
-    except FileExistsError:
-        return False, "Folder already exists"
-    except Exception:
-        return False, "Could not create folder"
-    return True, f"Created folder {safe_name}"
+    def _do_mkdir(music_root: str) -> Tuple[bool, str]:
+        base_dir = _resolve_subpath(music_root, rel_path)
+        target_dir = os.path.join(base_dir, safe_name)
+        try:
+            os.makedirs(target_dir, exist_ok=False)
+            _fsync_dir(base_dir)
+        except FileExistsError:
+            return False, "Folder already exists"
+        except Exception:
+            return False, "Could not create folder"
+        return True, f"Created folder {safe_name}"
+
+    if mode == 'present':
+        def _quick_callback():
+            rw_mount = os.path.join(MNT_DIR, 'part3')
+            music_root = os.path.join(rw_mount, "Music")
+            os.makedirs(music_root, exist_ok=True)
+            return _do_mkdir(music_root)
+        return quick_edit_part3(_quick_callback, timeout=30)
+    else:
+        mount_path, err = _ensure_music_mount()
+        if err:
+            return False, err
+        music_root, err = _get_music_root(mount_path)
+        if err:
+            return False, err
+        return _do_mkdir(music_root)
 
 
 def delete_directory(rel_path: str) -> Tuple[bool, str]:
-    mount_path, err = _ensure_music_mount()
-    if err:
-        return False, err
-
-    music_root, err = _get_music_root(mount_path)
-    if err:
-        return False, err
-
+    """Delete a directory. Mode-aware: uses quick_edit_part3 in present mode."""
     if not rel_path:
         return False, "Invalid folder path"
 
-    target_dir = _resolve_subpath(music_root, rel_path)
-    if os.path.abspath(target_dir) == os.path.abspath(music_root):
-        return False, "Cannot delete root folder"
-    if not os.path.isdir(target_dir):
-        return False, "Folder not found"
+    mode = current_mode()
 
-    try:
-        shutil.rmtree(target_dir)
-        _fsync_dir(os.path.dirname(target_dir))
-        close_samba_share("part3")
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Failed to delete folder %s: %s", rel_path, exc)
-        return False, "Unable to delete folder"
-    return True, "Deleted folder"
+    def _do_rmdir(music_root: str) -> Tuple[bool, str]:
+        target_dir = _resolve_subpath(music_root, rel_path)
+        if os.path.abspath(target_dir) == os.path.abspath(music_root):
+            return False, "Cannot delete root folder"
+        if not os.path.isdir(target_dir):
+            return False, "Folder not found"
+        try:
+            shutil.rmtree(target_dir)
+            _fsync_dir(os.path.dirname(target_dir))
+            close_samba_share("part3")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Failed to delete folder %s: %s", rel_path, exc)
+            return False, "Unable to delete folder"
+        return True, "Deleted folder"
+
+    if mode == 'present':
+        def _quick_callback():
+            rw_mount = os.path.join(MNT_DIR, 'part3')
+            music_root = os.path.join(rw_mount, "Music")
+            return _do_rmdir(music_root)
+        return quick_edit_part3(_quick_callback, timeout=30)
+    else:
+        mount_path, err = _ensure_music_mount()
+        if err:
+            return False, err
+        music_root, err = _get_music_root(mount_path)
+        if err:
+            return False, err
+        return _do_rmdir(music_root)
 
 
 def move_music_file(source_rel: str, dest_rel: str, new_name: str = "") -> Tuple[bool, str]:
-    mount_path, err = _ensure_music_mount()
-    if err:
-        return False, err
+    """Move a music file. Mode-aware: uses quick_edit_part3 in present mode."""
+    dest_name = _validate_filename(new_name) if new_name else None
+    mode = current_mode()
 
-    music_root, err = _get_music_root(mount_path)
-    if err:
-        return False, err
+    def _do_move(music_root: str) -> Tuple[bool, str]:
+        src_path = _resolve_subpath(music_root, source_rel)
+        if not os.path.isfile(src_path):
+            return False, "Source file not found"
 
-    src_path = _resolve_subpath(music_root, source_rel)
-    if not os.path.isfile(src_path):
-        return False, "Source file not found"
+        dest_dir = _resolve_subpath(music_root, dest_rel)
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError:
+            return False, "Destination unavailable"
 
-    dest_dir = _resolve_subpath(music_root, dest_rel)
-    try:
-        os.makedirs(dest_dir, exist_ok=True)
-    except OSError:
-        return False, "Destination unavailable"
+        final_name = dest_name if dest_name else os.path.basename(src_path)
+        dest_path = os.path.join(dest_dir, final_name)
 
-    dest_name = _validate_filename(new_name) if new_name else os.path.basename(src_path)
-    dest_path = os.path.join(dest_dir, dest_name)
+        try:
+            os.replace(src_path, dest_path)
+            _fsync_dir(os.path.dirname(src_path))
+            _fsync_dir(dest_dir)
+            close_samba_share("part3")
+        except Exception as exc:
+            logger.error("Failed to move %s -> %s: %s", src_path, dest_path, exc)
+            return False, "Unable to move file"
+        return True, f"Moved to {final_name}"
 
-    try:
-        os.replace(src_path, dest_path)
-        _fsync_dir(os.path.dirname(src_path))
-        _fsync_dir(dest_dir)
-        close_samba_share("part3")
-    except Exception as exc:
-        logger.error("Failed to move %s -> %s: %s", src_path, dest_path, exc)
-        return False, "Unable to move file"
-    return True, f"Moved to {dest_name}"
-
-
-def require_edit_mode():
-    if current_mode() != "edit":
-        raise MusicServiceError("Switch to Edit mode to upload music.")
+    if mode == 'present':
+        def _quick_callback():
+            rw_mount = os.path.join(MNT_DIR, 'part3')
+            music_root = os.path.join(rw_mount, "Music")
+            return _do_move(music_root)
+        return quick_edit_part3(_quick_callback, timeout=30)
+    else:
+        mount_path, err = _ensure_music_mount()
+        if err:
+            return False, err
+        music_root, err = _get_music_root(mount_path)
+        if err:
+            return False, err
+        return _do_move(music_root)
 
 
 def generate_upload_id() -> str:

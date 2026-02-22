@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
-from config import GADGET_DIR, MNT_DIR
+from config import GADGET_DIR, MNT_DIR, IMG_MUSIC_NAME
 from .partition_service import iter_all_partitions
 from .mode_service import current_mode
 
@@ -261,8 +261,11 @@ def _run_fsck_background(partition_num: int, mode: str):
         _save_status(status)
 
         # Construct partition info
-        # Image files: part1 = usb_cam.img, part2 = usb_lightshow.img
-        img_name = 'usb_cam.img' if partition_num == 1 else 'usb_lightshow.img'
+        # Image files: part1 = usb_cam.img, part2 = usb_lightshow.img, part3 = music img
+        img_name_map = {1: 'usb_cam.img', 2: 'usb_lightshow.img', 3: IMG_MUSIC_NAME}
+        img_name = img_name_map.get(partition_num)
+        if not img_name:
+            raise FsckError(f"Unknown partition number: {partition_num}")
         img_path = os.path.join(GADGET_DIR, img_name)
 
         # Verify image exists

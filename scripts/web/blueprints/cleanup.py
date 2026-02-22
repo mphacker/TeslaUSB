@@ -3,6 +3,7 @@ Cleanup Blueprint for TeslaUSB Web Interface
 Handles cleanup configuration, preview, and execution
 """
 
+import os
 from flask import Blueprint, render_template, request, jsonify, redirect, url_for, flash
 from pathlib import Path
 import sys
@@ -10,7 +11,7 @@ import sys
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import GADGET_DIR
+from config import GADGET_DIR, IMG_CAM_PATH
 from utils import get_base_context
 from services.cleanup_service import get_cleanup_service
 from services.analytics_service import get_partition_usage
@@ -18,6 +19,15 @@ from services.mode_service import current_mode
 from services.partition_service import get_mount_path
 
 cleanup_bp = Blueprint('cleanup', __name__, url_prefix='/cleanup')
+
+
+@cleanup_bp.before_request
+def _require_cam_image():
+    if not os.path.isfile(IMG_CAM_PATH):
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"error": "Feature unavailable"}), 503
+        flash("This feature is not available because the required disk image has not been created.")
+        return redirect(url_for('mode_control.index'))
 
 
 @cleanup_bp.route('/')

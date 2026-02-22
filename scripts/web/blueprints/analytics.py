@@ -1,7 +1,9 @@
 """Blueprint for storage analytics and monitoring."""
 
-from flask import Blueprint, render_template, jsonify
+import os
+from flask import Blueprint, render_template, jsonify, request, redirect, url_for, flash
 
+from config import IMG_CAM_PATH
 from utils import get_base_context
 from services.partition_mount_service import check_operation_in_progress
 from services.analytics_service import (
@@ -12,6 +14,15 @@ from services.analytics_service import (
 )
 
 analytics_bp = Blueprint('analytics', __name__, url_prefix='/analytics')
+
+
+@analytics_bp.before_request
+def _require_cam_image():
+    if not os.path.isfile(IMG_CAM_PATH):
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"error": "Feature unavailable"}), 503
+        flash("This feature is not available because the required disk image has not been created.")
+        return redirect(url_for('mode_control.index'))
 
 
 @analytics_bp.route("/")

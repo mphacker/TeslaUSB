@@ -1,8 +1,10 @@
 """Blueprint for music library management."""
 
+import os
 import logging
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, current_app
+from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, current_app, send_file
 
+from config import MUSIC_ENABLED, IMG_MUSIC_PATH
 from utils import get_base_context, format_file_size
 from services.music_service import (
     list_music_files,
@@ -12,13 +14,22 @@ from services.music_service import (
     delete_directory,
     create_directory,
     move_music_file,
+    resolve_music_file_path,
     MusicServiceError,
     generate_upload_id,
-    require_edit_mode,
 )
 
 music_bp = Blueprint("music", __name__, url_prefix="/music")
 logger = logging.getLogger(__name__)
+
+
+@music_bp.before_request
+def _require_music_image():
+    if not MUSIC_ENABLED or not os.path.isfile(IMG_MUSIC_PATH):
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"error": "Feature unavailable"}), 503
+        flash("This feature is not available because the required disk image has not been created.")
+        return redirect(url_for('mode_control.index'))
 
 
 @music_bp.route("/")
@@ -47,13 +58,6 @@ def music_home():
 def upload_music():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     current_path = request.args.get("path") or request.form.get("path") or ""
-    try:
-        require_edit_mode()
-    except MusicServiceError as exc:
-        if is_ajax:
-            return jsonify({"success": False, "error": str(exc)}), 400
-        flash(str(exc), "error")
-        return redirect(url_for("music.music_home"))
 
     files = request.files.getlist("music_files")
     if not files:
@@ -91,13 +95,6 @@ def upload_music():
 def upload_chunk():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     current_path = request.args.get("path") or request.form.get("path") or ""
-    try:
-        require_edit_mode()
-    except MusicServiceError as exc:
-        if is_ajax:
-            return jsonify({"success": False, "error": str(exc)}), 400
-        flash(str(exc), "error")
-        return redirect(url_for("music.music_home"))
 
     try:
         upload_id = request.args.get("upload_id") or request.form.get("upload_id") or generate_upload_id()
@@ -136,13 +133,6 @@ def upload_chunk():
 @music_bp.route("/delete/<path:filename>", methods=["POST"])
 def delete_music(filename):
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-    try:
-        require_edit_mode()
-    except MusicServiceError as exc:
-        if is_ajax:
-            return jsonify({"success": False, "error": str(exc)}), 400
-        flash(str(exc), "error")
-        return redirect(url_for("music.music_home"))
 
     try:
         ok, msg = delete_music_file(filename)
@@ -160,13 +150,6 @@ def delete_music(filename):
 @music_bp.route("/delete_dir/<path:dirname>", methods=["POST"])
 def delete_music_dir(dirname):
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-    try:
-        require_edit_mode()
-    except MusicServiceError as exc:
-        if is_ajax:
-            return jsonify({"success": False, "error": str(exc)}), 400
-        flash(str(exc), "error")
-        return redirect(url_for("music.music_home"))
 
     try:
         ok, msg = delete_directory(dirname)
@@ -185,13 +168,6 @@ def delete_music_dir(dirname):
 @music_bp.route("/move", methods=["POST"])
 def move_music():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-    try:
-        require_edit_mode()
-    except MusicServiceError as exc:
-        if is_ajax:
-            return jsonify({"success": False, "error": str(exc)}), 400
-        flash(str(exc), "error")
-        return redirect(url_for("music.music_home"))
 
     data = request.get_json(silent=True) or request.form
     source = data.get("source", "") if data else ""
@@ -210,13 +186,6 @@ def move_music():
 @music_bp.route("/mkdir", methods=["POST"])
 def create_music_folder():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-    try:
-        require_edit_mode()
-    except MusicServiceError as exc:
-        if is_ajax:
-            return jsonify({"success": False, "error": str(exc)}), 400
-        flash(str(exc), "error")
-        return redirect(url_for("music.music_home"))
 
     data = request.get_json(silent=True) or request.form
     current_path = data.get("path", "") if data else ""
@@ -229,3 +198,25 @@ def create_music_folder():
 
     flash(msg, "success" if ok else "error")
     return redirect(url_for("music.music_home", path=current_path))
+
+
+@music_bp.route("/play/<path:filepath>")
+def play_music(filepath):
+    """Stream a music file for in-browser playback."""
+    try:
+        file_path = resolve_music_file_path(filepath)
+    except MusicServiceError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("music.music_home"))
+
+    lower = filepath.lower()
+    mime_map = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".flac": "audio/flac",
+        ".aac": "audio/aac",
+        ".m4a": "audio/mp4",
+    }
+    ext = os.path.splitext(lower)[1]
+    mimetype = mime_map.get(ext, "application/octet-stream")
+    return send_file(file_path, mimetype=mimetype)

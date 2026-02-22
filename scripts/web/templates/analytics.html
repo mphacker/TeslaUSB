@@ -79,6 +79,21 @@
                     </button>
                 </div>
             </div>
+
+            {% if music_available %}
+            <div class="fsck-partition-card">
+                <h4>🎵 Music Drive</h4>
+                <div id="part3-last-check" class="last-check-info">Loading...</div>
+                <div class="fsck-actions">
+                    <button onclick="startFsck(3, 'quick')" class="btn btn-secondary" id="btn-fsck-part3-quick">
+                        Quick Check
+                    </button>
+                    <button onclick="startFsck(3, 'repair')" class="btn btn-warning" id="btn-fsck-part3-repair">
+                        Check & Repair
+                    </button>
+                </div>
+            </div>
+            {% endif %}
         </div>
 
         <div id="fsck-history-container" class="fsck-history-container">
@@ -93,7 +108,7 @@
     <div class="analytics-grid">
         {% for partition_name, usage in analytics.partition_usage.items() %}
         <div class="analytics-card">
-            <h3>{{ '📹 TeslaCam Drive' if partition_name == 'part1' else '💡 LightShow Drive' }}</h3>
+            <h3>{% if partition_name == 'part1' %}📹 TeslaCam Drive{% elif partition_name == 'part3' %}🎵 Music Drive{% else %}💡 LightShow Drive{% endif %}</h3>
 
             {% if 'error' in usage %}
                 <div class="error-message">{{ usage.error }}</div>
@@ -460,6 +475,7 @@ function startFsckStatusPolling() {
 function getFriendlyPartitionName(partition) {
     if (partition === 'part1') return 'TeslaCam';
     if (partition === 'part2') return 'LightShow';
+    if (partition === 'part3') return 'Music';
     return partition;
 }
 
@@ -569,7 +585,7 @@ function disableFsckButtons(disabled) {
 }
 
 function updateLastChecks() {
-    [1, 2].forEach(partition => {
+    [1, 2{{ ', 3' if music_available else '' }}].forEach(partition => {
         fetch(`/fsck/api/last-check/${partition}`)
             .then(response => response.json())
             .then(data => {

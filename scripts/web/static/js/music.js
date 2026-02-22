@@ -22,32 +22,45 @@
     const statusEl = document.getElementById('uploadStatus');
     const fileTable = document.getElementById('fileTable');
     const folderTable = document.getElementById('folderTable');
+    const mobileFolderList = document.getElementById('mobileFolderList');
+    const mobileFileList = document.getElementById('mobileFileList');
     const folderNameInput = document.getElementById('folderName');
     const createFolderBtn = document.getElementById('createFolder');
     const currentPathLabel = document.getElementById('currentPathLabel');
 
+    const overlay = document.getElementById('musicLoadingOverlay');
+    const overlayText = document.getElementById('musicOverlayText');
     let queue = [];
     let uploading = false;
 
+    function showOverlay(msg) {
+        if (overlayText) overlayText.textContent = msg || 'Processing...';
+        if (overlay) overlay.style.display = 'flex';
+    }
+
+    function hideOverlay() {
+        if (overlay) overlay.style.display = 'none';
+    }
+
     function setStatus(msg, isError) {
         statusEl.textContent = msg || '';
-        statusEl.className = isError ? 'error' : 'muted';
+        statusEl.className = isError ? 'music-status error' : 'music-status';
     }
 
     function renderQueue() {
         fileList.innerHTML = '';
         queue.forEach((item, idx) => {
             const row = document.createElement('div');
-            row.className = 'file-row';
+            row.className = 'music-file-row';
             row.innerHTML = `
                 <div>
                     <div>${item.file.name}</div>
                     <div class="meta">${formatBytes(item.file.size)} → /${item.targetPath || currentPath || ''}</div>
                 </div>
-                <button class="secondary" data-remove="${idx}">Remove</button>
+                <button class="action-btn btn-danger" data-remove="${idx}">Remove</button>
             `;
             const progress = document.createElement('div');
-            progress.className = 'progress-bar';
+            progress.className = 'music-progress-bar';
             const bar = document.createElement('span');
             progress.appendChild(bar);
             row.appendChild(progress);
@@ -138,7 +151,7 @@
     async function uploadFile(item) {
         const file = item.file;
         const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
-        const uploadId = crypto.randomUUID ? crypto.randomUUID() : `upload-${Date.now()}-${Math.random()}`;
+        const uploadId = (crypto.randomUUID ? crypto.randomUUID() : `upload-${Date.now()}-${Math.random()}`).replaceAll('-', '').replace(/[^0-9a-f]/gi, '').slice(0, 32).padEnd(32, '0');
         const pathForFile = item.targetPath || currentPath || '';
 
         if (item.statusEl) item.statusEl.textContent = 'Starting...';
@@ -202,6 +215,7 @@
         uploading = true;
         startBtn.disabled = true;
         clearBtn.disabled = true;
+        showOverlay('Uploading files...');
 
         for (const item of queue) {
             if (item.progressEl) item.progressEl.style.width = '0%';
@@ -210,6 +224,7 @@
         }
 
         uploading = false;
+        hideOverlay();
         startBtn.disabled = queue.length === 0;
         clearBtn.disabled = queue.length === 0;
         // Refresh page to show new files
@@ -282,122 +297,136 @@
     };
 
     // File actions: delete or move
-    if (fileTable) {
-        fileTable.addEventListener('click', async (e) => {
-            const target = e.target;
-            const filename = target.getAttribute('data-delete');
-            const moveTarget = target.getAttribute('data-move');
-            if (!filename && !moveTarget) return;
-            e.preventDefault();
-
-            if (filename) {
-                if (!confirm(`Delete "${filename}"?`)) return;
-                const url = deleteTemplate.replace('__NAME__', encodeURIComponent(filename));
-                target.disabled = true;
-                const res = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
-                });
-                let data;
-                try {
-                    data = await res.json();
-                } catch (err) {
-                    target.disabled = false;
-                    setStatus('Delete failed: bad response', true);
-                    return;
-                }
-                if (!res.ok || !data.success) {
-                    target.disabled = false;
-                    setStatus(data && data.error ? data.error : 'Delete failed', true);
-                    return;
-                }
-                const row = target.closest('tr');
-                if (row) row.remove();
-                setStatus(data.message || 'Deleted', false);
-                return;
-            }
-
-            if (moveTarget) {
-                const dest = window.prompt('Move to folder (relative path):', currentPath);
-                if (dest === null) return;
-                const newName = window.prompt('Optional new filename (leave blank to keep name):', '');
-                target.disabled = true;
-                const res = await fetch(moveUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest',
-                    },
-                    body: JSON.stringify({ source: moveTarget, dest_path: dest || '', new_name: newName || '' }),
-                });
-                let data;
-                try {
-                    data = await res.json();
-                } catch (err) {
-                    target.disabled = false;
-                    setStatus('Move failed: bad response', true);
-                    return;
-                }
-                target.disabled = false;
-                if (!res.ok || !data.success) {
-                    setStatus(data && data.error ? data.error : 'Move failed', true);
-                    return;
-                }
-                const targetPath = dest ? `${browseUrl}?path=${encodeURIComponent(dest)}` : browseUrl;
-                window.location.href = targetPath;
-            }
+    async function handleDeleteFile(target, filename) {
+        if (!confirm(`Delete "${filename}"?`)) return;
+        const url = deleteTemplate.replace('__NAME__', encodeURIComponent(filename));
+        target.disabled = true;
+        showOverlay('Deleting file...');
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
         });
+        let data;
+        try {
+            data = await res.json();
+        } catch (err) {
+            hideOverlay();
+            target.disabled = false;
+            setStatus('Delete failed: bad response', true);
+            return;
+        }
+        hideOverlay();
+        if (!res.ok || !data.success) {
+            target.disabled = false;
+            setStatus(data && data.error ? data.error : 'Delete failed', true);
+            return;
+        }
+        // Remove from both table and mobile views
+        document.querySelectorAll(`tr[data-filename="${filename}"]`).forEach(el => el.remove());
+        document.querySelectorAll(`.music-mobile-file[data-filename="${filename}"]`).forEach(el => el.remove());
+        setStatus(data.message || 'Deleted', false);
     }
 
-    if (folderTable) {
-        folderTable.addEventListener('click', async (e) => {
-            const target = e.target;
-            const deleteDir = target.getAttribute('data-delete-dir');
-            const openDir = target.getAttribute('data-open');
-
-            if (deleteDir) {
-                e.preventDefault();
-                e.stopPropagation();
-                if (!deleteDirTemplate) return;
-                if (!confirm(`Delete folder "${deleteDir}" and all its contents?`)) return;
-                target.disabled = true;
-                const url = deleteDirTemplate.replace('__DIR__', encodeURIComponent(deleteDir));
-                const res = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
-                });
-                let data;
-                try {
-                    data = await res.json();
-                } catch (err) {
-                    target.disabled = false;
-                    setStatus('Delete folder failed: bad response', true);
-                    return;
-                }
-                target.disabled = false;
-                if (!res.ok || !data.success) {
-                    setStatus(data && data.error ? data.error : 'Delete folder failed', true);
-                    return;
-                }
-                const row = target.closest('tr');
-                if (row) row.remove();
-                setStatus(data.message || 'Folder deleted', false);
-                return;
-            }
-
-            if (openDir) {
-                e.preventDefault();
-                navigateTo(openDir);
-                return;
-            }
-
-            const row = target.closest('tr');
-            if (!row) return;
-            const dir = row.getAttribute('data-dir');
-            if (dir !== null) {
-                navigateTo(dir);
-            }
+    async function handleMoveFile(target, moveSource) {
+        const dest = window.prompt('Move to folder (relative path):', currentPath);
+        if (dest === null) return;
+        const newName = window.prompt('Optional new filename (leave blank to keep name):', '');
+        target.disabled = true;
+        showOverlay('Moving file...');
+        const res = await fetch(moveUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ source: moveSource, dest_path: dest || '', new_name: newName || '' }),
         });
+        let data;
+        try {
+            data = await res.json();
+        } catch (err) {
+            hideOverlay();
+            target.disabled = false;
+            setStatus('Move failed: bad response', true);
+            return;
+        }
+        hideOverlay();
+        target.disabled = false;
+        if (!res.ok || !data.success) {
+            setStatus(data && data.error ? data.error : 'Move failed', true);
+            return;
+        }
+        const targetPath = dest ? `${browseUrl}?path=${encodeURIComponent(dest)}` : browseUrl;
+        window.location.href = targetPath;
+    }
+
+    async function handleDeleteDir(target, deleteDir) {
+        if (!confirm(`Delete folder "${deleteDir}" and all its contents?`)) return;
+        if (!deleteDirTemplate) return;
+        target.disabled = true;
+        showOverlay('Deleting folder...');
+        const url = deleteDirTemplate.replace('__DIR__', encodeURIComponent(deleteDir));
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        let data;
+        try {
+            data = await res.json();
+        } catch (err) {
+            hideOverlay();
+            target.disabled = false;
+            setStatus('Delete folder failed: bad response', true);
+            return;
+        }
+        hideOverlay();
+        target.disabled = false;
+        if (!res.ok || !data.success) {
+            setStatus(data && data.error ? data.error : 'Delete folder failed', true);
+            return;
+        }
+        // Remove from both table and mobile views
+        document.querySelectorAll(`tr[data-dir="${deleteDir}"]`).forEach(el => el.remove());
+        document.querySelectorAll(`.music-mobile-folder[data-dir="${deleteDir}"]`).forEach(el => el.remove());
+        setStatus(data.message || 'Folder deleted', false);
+    }
+
+    function handleFileClick(e) {
+        const target = e.target;
+        const filename = target.getAttribute('data-delete');
+        const moveTarget = target.getAttribute('data-move');
+        if (!filename && !moveTarget) return;
+        e.preventDefault();
+        if (filename) return handleDeleteFile(target, filename);
+        if (moveTarget) return handleMoveFile(target, moveTarget);
+    }
+
+    function handleFolderClick(e) {
+        const target = e.target;
+        const deleteDir = target.getAttribute('data-delete-dir');
+        if (deleteDir) {
+            e.preventDefault();
+            e.stopPropagation();
+            return handleDeleteDir(target, deleteDir);
+        }
+        // Navigate on row/card click
+        const container = target.closest('tr[data-dir]') || target.closest('.music-mobile-folder[data-dir]');
+        if (!container) return;
+        const dir = container.getAttribute('data-dir');
+        if (dir !== null) navigateTo(dir);
+    }
+
+    if (fileTable) {
+        fileTable.addEventListener('click', handleFileClick);
+    }
+    if (mobileFileList) {
+        mobileFileList.addEventListener('click', handleFileClick);
+    }
+    if (folderTable) {
+        folderTable.addEventListener('click', handleFolderClick);
+    }
+    if (mobileFolderList) {
+        mobileFolderList.addEventListener('click', handleFolderClick);
     }
 
     if (createFolderBtn) {
@@ -408,6 +437,7 @@
                 return;
             }
             createFolderBtn.disabled = true;
+            showOverlay('Creating folder...');
             const res = await fetch(mkdirUrl, {
                 method: 'POST',
                 headers: {
@@ -420,10 +450,12 @@
             try {
                 data = await res.json();
             } catch (err) {
+                hideOverlay();
                 createFolderBtn.disabled = false;
                 setStatus('Create folder failed: bad response', true);
                 return;
             }
+            hideOverlay();
             createFolderBtn.disabled = false;
             if (!res.ok || !data.success) {
                 setStatus(data && data.error ? data.error : 'Create folder failed', true);

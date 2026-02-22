@@ -22,6 +22,7 @@ def get_base_context():
     """
     # Import here to avoid circular imports
     from services.mode_service import mode_display
+    from services.partition_service import get_feature_availability
 
     token, label, css_class, share_paths = mode_display()
     return {
@@ -30,6 +31,7 @@ def get_base_context():
         'mode_class': css_class,
         'share_paths': share_paths,
         'hostname': socket.gethostname(),
+        **get_feature_availability(),
     }
 
 

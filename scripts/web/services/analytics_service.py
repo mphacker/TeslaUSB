@@ -17,9 +17,17 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-from config import MNT_DIR, RO_MNT_DIR, VIDEO_EXTENSIONS
+from config import MNT_DIR, RO_MNT_DIR, VIDEO_EXTENSIONS, MUSIC_ENABLED
 from services.mode_service import current_mode
 from services.partition_service import iter_all_partitions
+
+# Friendly name mapping for partitions
+_PARTITION_NAMES = {'part1': 'TeslaCam', 'part2': 'LightShow', 'part3': 'Music'}
+
+
+def _friendly_name(partition):
+    """Return a human-readable name for a partition identifier."""
+    return _PARTITION_NAMES.get(partition, partition)
 
 
 def get_partition_usage():
@@ -164,10 +172,11 @@ def get_storage_health():
     }
 
     # Check filesystem health for each partition
-    for partition_num in [1, 2]:
+    partition_nums = [1, 2] + ([3] if MUSIC_ENABLED else [])
+    for partition_num in partition_nums:
         last_check = fsck_service.get_last_check(partition_num)
         partition_name = f"part{partition_num}"
-        friendly_name = "TeslaCam" if partition_num == 1 else "LightShow"
+        friendly_name = _friendly_name(partition_name)
 
         if last_check:
             health['fsck_status'][partition_name] = {
@@ -197,7 +206,7 @@ def get_storage_health():
 
     # Check each partition for storage space
     for partition_name, stats in usage.items():
-        friendly_name = "TeslaCam" if partition_name == "part1" else "LightShow"
+        friendly_name = _friendly_name(partition_name)
 
         if 'error' in stats:
             health['status'] = 'critical'

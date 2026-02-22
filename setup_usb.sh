@@ -872,6 +872,66 @@ fi
 # Background scanning (bgscan) parameters are hardcoded in NetworkManager.
 # The wifi.powersave=2 setting above is the key to aggressive roaming.
 
+# ===== Detect and disable conflicting USB gadget services =====
+# Raspberry Pi OS Bookworm+ ships with rpi-usb-gadget enabled by default on
+# OTG-capable boards (e.g. Pi Zero 2 W). It configures a USB Ethernet gadget
+# that claims the UDC, preventing TeslaUSB's mass-storage gadget from binding.
+# We also check for usb-gadget.service (alternative naming on some images).
+for svc in rpi-usb-gadget.service usb-gadget.service; do
+  if systemctl list-unit-files "$svc" >/dev/null 2>&1 && \
+     systemctl list-unit-files "$svc" | grep -q "$svc"; then
+    echo "Detected conflicting service: $svc"
+    # Stop it if running (releases UDC)
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      echo "  Stopping $svc..."
+      systemctl stop "$svc" 2>/dev/null || true
+      sleep 0.5
+    fi
+    # Disable so it doesn't start on next boot
+    if systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+      echo "  Disabling $svc..."
+      systemctl disable "$svc" 2>/dev/null || true
+    fi
+    # Mask to prevent manual/dependency activation
+    echo "  Masking $svc to prevent conflicts..."
+    systemctl mask "$svc" 2>/dev/null || true
+    echo "  $svc has been stopped, disabled, and masked."
+  fi
+done
+
+# Also clean up any gadget left behind by rpi-usb-gadget in configfs
+# (it typically creates /sys/kernel/config/usb_gadget/g1)
+for other_gadget in /sys/kernel/config/usb_gadget/*/; do
+  gadget_name="$(basename "$other_gadget")"
+  # Skip our own gadget
+  [ "$gadget_name" = "teslausb" ] && continue
+  [ "$gadget_name" = "*" ] && continue
+  if [ -d "$other_gadget" ]; then
+    echo "Cleaning up leftover USB gadget: $gadget_name"
+    # Unbind UDC
+    if [ -f "$other_gadget/UDC" ]; then
+      echo "" > "$other_gadget/UDC" 2>/dev/null || true
+      sleep 0.3
+    fi
+    # Remove function links from configs
+    for cfg in "$other_gadget"/configs/*/; do
+      [ -d "$cfg" ] || continue
+      find "$cfg" -maxdepth 1 -type l -delete 2>/dev/null || true
+      rmdir "$cfg"/strings/* 2>/dev/null || true
+      rmdir "$cfg" 2>/dev/null || true
+    done
+    # Remove functions
+    for func in "$other_gadget"/functions/*/; do
+      [ -d "$func" ] || continue
+      rmdir "$func" 2>/dev/null || true
+    done
+    # Remove strings and gadget
+    rmdir "$other_gadget"/strings/* 2>/dev/null || true
+    rmdir "$other_gadget" 2>/dev/null || true
+    echo "  Removed gadget: $gadget_name"
+  fi
+done
+
 # Ensure config.txt contains dtoverlay=dwc2 and dtparam=watchdog=on under [all]
 # Note: We use dtoverlay=dwc2 WITHOUT dr_mode parameter to allow auto-detection
 CONFIG_CHANGED=0

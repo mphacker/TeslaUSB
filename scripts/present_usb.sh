@@ -305,6 +305,16 @@ sync
 # Loop devices are only needed for local mounting. If they exist from a previous
 # session, that's fine - the gadget can still access the files.
 
+# Stop conflicting rpi-usb-gadget service if running (Pi OS Bookworm+ default)
+# This service claims the UDC for a USB Ethernet gadget, blocking our mass-storage gadget
+for svc in rpi-usb-gadget.service usb-gadget.service; do
+  if systemctl is-active --quiet "$svc" 2>/dev/null; then
+    echo "Stopping conflicting $svc..."
+    sudo systemctl stop "$svc" 2>/dev/null || true
+    sleep 0.3
+  fi
+done
+
 # Remove legacy gadget module if present
 if lsmod | grep -q '^g_mass_storage'; then
   echo "Removing existing USB gadget module..."

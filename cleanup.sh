@@ -239,6 +239,15 @@ restore_desktop_services() {
     fi
   done
 
+  # Unmask rpi-usb-gadget if we masked it during setup
+  for svc in rpi-usb-gadget.service usb-gadget.service; do
+    if systemctl is-masked "$svc" >/dev/null 2>&1; then
+      echo "  Unmasking $svc (restoring Raspberry Pi OS default)..."
+      systemctl unmask "$svc" 2>/dev/null || true
+      systemctl enable "$svc" 2>/dev/null || true
+    fi
+  done
+
   # Check if we changed default target to multi-user
   if systemctl get-default 2>/dev/null | grep -q "multi-user.target"; then
     echo "  Restoring graphical.target as default..."

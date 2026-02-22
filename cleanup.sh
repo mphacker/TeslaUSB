@@ -24,7 +24,7 @@ else
   MNT_DIR="/mnt/gadget"
   SMB_CONF="/etc/samba/smb.conf"
   CONFIG_FILE="/boot/firmware/config.txt"
-  TARGET_USER="${SUDO_USER:-pi}"
+  TARGET_USER="${SUDO_USER:-$(whoami)}"
 fi
 
 # Compute image paths

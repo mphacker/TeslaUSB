@@ -9,8 +9,7 @@
 # Installation & Paths
 # ============================================================================
 installation:
-  gadget_dir: /home/pi/TeslaUSB # Installation directory where TeslaUSB is installed
-  target_user: pi # Linux user running the TeslaUSB services
+  target_user: pi # Linux user running the TeslaUSB services (auto-overridden by SUDO_USER during setup)
   mount_dir: /mnt/gadget # Mount directory for USB drives
 
 # ============================================================================

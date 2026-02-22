@@ -208,8 +208,8 @@ The TeslaUSB device only runs when the car is awake. When your Tesla enters slee
 
 **Switch modes** via web interface or command line:
 ```bash
-sudo /home/pi/TeslaUSB/present_usb.sh  # Activate Present mode
-sudo /home/pi/TeslaUSB/edit_usb.sh     # Activate Edit mode
+sudo ~/TeslaUSB/present_usb.sh  # Activate Present mode
+sudo ~/TeslaUSB/edit_usb.sh     # Activate Edit mode
 ```
 
 ### Network Access
@@ -302,7 +302,6 @@ Both bash scripts and the Python web application read from this YAML file, ensur
 # Installation & Paths
 # ============================================================================
 installation:
-  gadget_dir: /home/pi/TeslaUSB    # Installation directory
   target_user: pi                   # Linux user running services
   mount_dir: /mnt/gadget           # Mount directory for USB drives
 
@@ -377,7 +376,7 @@ sudo systemctl restart wifi-monitor.service  # For offline AP changes
 ### Upgrade to Latest Version
 
 ```bash
-cd /home/pi/TeslaUSB
+cd ~/TeslaUSB
 ./upgrade.sh
 ```
 
@@ -386,7 +385,7 @@ Pulls latest code from GitHub and prompts to run setup. Disk images and configur
 ### Uninstall
 
 ```bash
-cd /home/pi/TeslaUSB
+cd ~/TeslaUSB
 sudo ./cleanup.sh
 ```
 
@@ -484,8 +483,8 @@ Try these steps in order:
 **Operation in Progress banner stuck:**
 ```bash
 # Check and remove stale lock file if older than 120 seconds
-ls -lh /home/pi/TeslaUSB/.quick_edit_part2.lock
-rm /home/pi/TeslaUSB/.quick_edit_part2.lock
+ls -lh ~/TeslaUSB/.quick_edit_part2.lock
+rm ~/TeslaUSB/.quick_edit_part2.lock
 ```
 
 **iOS file upload not working:**

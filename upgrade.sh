@@ -7,7 +7,8 @@ set -euo pipefail
 
 REPO_URL="https://github.com/mphacker/TeslaUSB"
 ARCHIVE_BASE_URL="https://github.com/mphacker/TeslaUSB/archive/refs/heads"
-INSTALL_DIR="/home/pi/TeslaUSB"
+# Auto-derive install directory from this script's location (run-in-place)
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BRANCH="main"
 BACKUP_DIR=""
 
@@ -21,7 +22,7 @@ cleanup_on_error() {
         echo "============================================"
         echo ""
         echo "Restoring from backup: $BACKUP_DIR"
-        
+
         # Restore backed up files
         if [ -f "$BACKUP_DIR/state.txt" ]; then
             cp "$BACKUP_DIR/state.txt" "$INSTALL_DIR/" 2>/dev/null || true
@@ -30,7 +31,7 @@ cleanup_on_error() {
             rm -rf "$INSTALL_DIR/thumbnails"
             cp -r "$BACKUP_DIR/thumbnails" "$INSTALL_DIR/" 2>/dev/null || true
         fi
-        
+
         echo "Backup restored."
         echo "Removing backup directory..."
         rm -rf "$BACKUP_DIR"
@@ -62,39 +63,39 @@ echo ""
 if [ -d "$INSTALL_DIR/.git" ]; then
     echo "Git repository detected - using git pull method"
     echo ""
-    
+
     cd "$INSTALL_DIR"
-    
+
     echo "Current directory: $(pwd)"
     echo "Current branch: $(git branch --show-current)"
     echo ""
-    
+
     # Fetch latest changes
     echo "Fetching latest changes from GitHub..."
     git fetch origin
-    
+
     # Reset any local changes to tracked files (including chmod changes)
     echo "Resetting local changes to tracked files..."
     git reset --hard origin/$BRANCH
-    
+
     # Clean up any untracked files (optional - commented out for safety)
     # git clean -fd
-    
+
 else
     echo "No git repository detected - using direct download method"
     echo ""
-    
+
     # Create backup directory with timestamp
     BACKUP_DIR="${INSTALL_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
     echo "Creating backup at: $BACKUP_DIR"
-    
+
     # Backup important files
     mkdir -p "$BACKUP_DIR"
     [ -f "$INSTALL_DIR/state.txt" ] && cp "$INSTALL_DIR/state.txt" "$BACKUP_DIR/"
     [ -f "$INSTALL_DIR/usb_cam.img" ] && echo "Preserving usb_cam.img (not backed up due to size)"
     [ -f "$INSTALL_DIR/usb_lightshow.img" ] && echo "Preserving usb_lightshow.img (not backed up due to size)"
     [ -d "$INSTALL_DIR/thumbnails" ] && cp -r "$INSTALL_DIR/thumbnails" "$BACKUP_DIR/"
-    
+
     echo ""
     echo "Downloading latest files from GitHub..."
     TEMP_DIR=$(mktemp -d)
@@ -156,12 +157,12 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo ""
     echo "Running setup_usb.sh..."
     sudo ./setup_usb.sh
-    
+
     echo ""
     echo "==================================="
     echo "Upgrade complete!"
     echo "==================================="
-    
+
     # Restore previous mode if it was in edit mode
     if [ "$CURRENT_MODE" = "edit" ]; then
         echo ""

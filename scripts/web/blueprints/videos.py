@@ -428,8 +428,9 @@ def download_event(folder, event_name):
         return "No videos found for this event", 404
 
     # Create zip file on disk (not in /tmp which is RAM-based and too small)
-    # Use /home/pi for temp storage to avoid filling tmpfs
-    temp_dir = '/home/pi/.cache/teslausb/zip_temp'
+    # Use GADGET_DIR for temp storage to avoid filling tmpfs
+    from config import GADGET_DIR as _gadget_dir
+    temp_dir = os.path.join(_gadget_dir, '.cache', 'zip_temp')
     os.makedirs(temp_dir, exist_ok=True)
 
     temp_fd, temp_path = tempfile.mkstemp(suffix='.zip', dir=temp_dir)

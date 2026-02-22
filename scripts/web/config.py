@@ -29,7 +29,10 @@ with open(CONFIG_YAML, 'r') as f:
 # ============================================================================
 
 # Installation & Paths
-GADGET_DIR = config['installation']['gadget_dir']
+# Auto-derive GADGET_DIR from this file's location (run-in-place)
+# This ensures the correct path regardless of username or install location.
+# scripts/web/config.py -> two levels up is the gadget directory
+GADGET_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 TARGET_USER = config['installation']['target_user']
 MNT_DIR = config['installation']['mount_dir']
 

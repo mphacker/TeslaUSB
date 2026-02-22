@@ -36,7 +36,6 @@ fi
 # Now we call it once and use eval to set all variables
 # IMPORTANT: Values are properly quoted to prevent injection attacks
 eval "$(yq -r '
-  "GADGET_DIR=\"" + .installation.gadget_dir + "\"",
   "TARGET_USER=\"" + .installation.target_user + "\"",
   "MNT_DIR=\"" + .installation.mount_dir + "\"",
   "IMG_CAM_NAME=\"" + .disk_images.cam_name + "\"",
@@ -73,6 +72,17 @@ eval "$(yq -r '
   "CONFIG_FILE=\"" + .system.config_file + "\"",
   "SMB_CONF=\"" + .system.samba_conf + "\""
 ' "$CONFIG_YAML")"
+
+# ============================================================================
+# Auto-derive GADGET_DIR from script location (run-in-place)
+# This ensures the correct path regardless of username or install location.
+# The value in config.yaml is ignored; the actual directory is always used.
+# ============================================================================
+if [[ "$SCRIPT_DIR_CONFIG" == */scripts ]]; then
+  GADGET_DIR="$(dirname "$SCRIPT_DIR_CONFIG")"
+else
+  GADGET_DIR="$SCRIPT_DIR_CONFIG"
+fi
 
 # ============================================================================
 # Computed paths (don't modify these)

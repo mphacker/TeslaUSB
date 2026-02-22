@@ -1210,12 +1210,8 @@ if [ ! -d "$SCRIPTS_DIR/web" ]; then
   exit 1
 fi
 
-# Ensure GADGET_DIR and SCRIPTS_DIR are the same (run-in-place)
-if [ "$GADGET_DIR" != "$SCRIPT_DIR" ]; then
-  echo "WARNING: GADGET_DIR ($GADGET_DIR) differs from SCRIPT_DIR ($SCRIPT_DIR)"
-  echo "This setup expects to run in-place at $GADGET_DIR"
-  echo "Please ensure this script is run from $GADGET_DIR"
-fi
+# GADGET_DIR is auto-derived by config.sh — verify it matches expectations
+echo "Using GADGET_DIR: $GADGET_DIR (auto-derived from script location)"
 
 # Create runtime directories
 mkdir -p "$GADGET_DIR/thumbnails"

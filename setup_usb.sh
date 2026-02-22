@@ -27,6 +27,14 @@ early_memory_optimization() {
   echo "  Memory optimization complete"
 }
 
+# Handle legacy /var/swap file (Raspberry Pi OS creates it as a file;
+# we need it to be a directory for /var/swap/fsck.swap)
+if [ -f "/var/swap" ] && [ ! -d "/var/swap" ]; then
+  echo "  Moving legacy /var/swap file to /var/swap.old..."
+  swapoff /var/swap 2>/dev/null || true
+  mv /var/swap /var/swap.old
+fi
+
 # Run early optimization before any package installs
 early_memory_optimization
 
@@ -1507,6 +1515,7 @@ SWAP_SIZE_MB=1024  # 1GB swap
 # Handle legacy /var/swap file (move it aside if it exists as a file)
 if [ -f "/var/swap" ] && [ ! -d "/var/swap" ]; then
   echo "  Moving legacy /var/swap file to /var/swap.old..."
+  swapoff /var/swap 2>/dev/null || true
   mv /var/swap /var/swap.old
 fi
 

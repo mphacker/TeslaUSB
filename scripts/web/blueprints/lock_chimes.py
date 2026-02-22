@@ -8,7 +8,8 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 
 from config import (GADGET_DIR, LOCK_CHIME_FILENAME, CHIMES_FOLDER, MAX_LOCK_CHIME_SIZE,
                     MAX_LOCK_CHIME_DURATION, MIN_LOCK_CHIME_DURATION,
-                    SPEED_RANGE_MIN, SPEED_RANGE_MAX, SPEED_STEP)
+                    SPEED_RANGE_MIN, SPEED_RANGE_MAX, SPEED_STEP,
+                    IMG_LIGHTSHOW_PATH)
 from utils import format_file_size, get_base_context
 from services.mode_service import current_mode
 from services.partition_service import get_mount_path
@@ -28,6 +29,15 @@ from services.chime_group_service import get_group_manager
 
 lock_chimes_bp = Blueprint('lock_chimes', __name__, url_prefix='/lock_chimes')
 logger = logging.getLogger(__name__)
+
+
+@lock_chimes_bp.before_request
+def _require_lightshow_image():
+    if not os.path.isfile(IMG_LIGHTSHOW_PATH):
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"error": "Feature unavailable"}), 503
+        flash("This feature is not available because the required disk image has not been created.")
+        return redirect(url_for('mode_control.index'))
 
 # Volume preset mapping (LUFS values to friendly names)
 VOLUME_PRESETS = {

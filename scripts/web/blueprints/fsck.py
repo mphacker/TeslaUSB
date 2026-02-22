@@ -15,7 +15,7 @@ def start_check():
 
     POST body:
     {
-        "partition": 1 or 2,
+        "partition": 1, 2, or 3,
         "mode": "quick" or "repair"
     }
     """
@@ -25,10 +25,10 @@ def start_check():
         mode = data.get('mode', 'quick')
 
         # Validate partition
-        if partition not in [1, 2]:
+        if partition not in [1, 2, 3]:
             return jsonify({
                 'success': False,
-                'message': 'Invalid partition. Must be 1 or 2'
+                'message': 'Invalid partition. Must be 1, 2, or 3'
             }), 400
 
         # Start fsck
@@ -104,7 +104,7 @@ def get_history():
 def get_last_check(partition):
     """Get last successful check for a partition."""
     try:
-        if partition not in [1, 2]:
+        if partition not in [1, 2, 3]:
             return jsonify({
                 'error': 'Invalid partition'
             }), 400

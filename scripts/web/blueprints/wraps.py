@@ -7,7 +7,7 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 
 logger = logging.getLogger(__name__)
 
-from config import USB_PARTITIONS, PART_LABEL_MAP
+from config import USB_PARTITIONS, PART_LABEL_MAP, IMG_LIGHTSHOW_PATH
 from utils import format_file_size, get_base_context
 from services.mode_service import current_mode
 from services.partition_service import get_mount_path, iter_all_partitions
@@ -27,6 +27,15 @@ from services.wrap_service import (
 from services.samba_service import close_samba_share, restart_samba_services
 
 wraps_bp = Blueprint('wraps', __name__, url_prefix='/wraps')
+
+
+@wraps_bp.before_request
+def _require_lightshow_image():
+    if not os.path.isfile(IMG_LIGHTSHOW_PATH):
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"error": "Feature unavailable"}), 503
+        flash("This feature is not available because the required disk image has not been created.")
+        return redirect(url_for('mode_control.index'))
 
 
 @wraps_bp.route("/")

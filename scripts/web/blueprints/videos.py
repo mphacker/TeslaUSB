@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify, Response, after_this_request
 
-from config import THUMBNAIL_CACHE_DIR, empty_camera_videos, empty_encrypted_flags
+from config import THUMBNAIL_CACHE_DIR, empty_camera_videos, empty_encrypted_flags, IMG_CAM_PATH
 from utils import generate_thumbnail_hash, get_base_context
 from services.mode_service import current_mode
 from services.video_service import (
@@ -24,6 +24,15 @@ from services.video_service import (
 logger = logging.getLogger(__name__)
 
 videos_bp = Blueprint('videos', __name__, url_prefix='/videos')
+
+
+@videos_bp.before_request
+def _require_cam_image():
+    if not os.path.isfile(IMG_CAM_PATH):
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"error": "Feature unavailable"}), 503
+        flash("This feature is not available because the required disk image has not been created.")
+        return redirect(url_for('mode_control.index'))
 
 
 @videos_bp.route("/")

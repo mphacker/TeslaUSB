@@ -340,8 +340,12 @@ fi
 echo "Verified: $LOOP_LIGHTSHOW is attached to $IMG_LIGHTSHOW"
 
 if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
-  echo "Setting up loop device for Music..."
-  LOOP_MUSIC=$(create_loop "$IMG_MUSIC")
+  if [ ! -f "$IMG_MUSIC" ]; then
+    echo "WARNING: Music image not found at $IMG_MUSIC — skipping music partition" >&2
+    MUSIC_ENABLED_BOOL=0
+  else
+    echo "Setting up loop device for Music..."
+    LOOP_MUSIC=$(create_loop "$IMG_MUSIC")
   if [ -z "$LOOP_MUSIC" ]; then
     echo "ERROR: Failed to get/create loop device for $IMG_MUSIC"
     sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
@@ -359,6 +363,7 @@ if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
     exit 1
   fi
   echo "Verified: $LOOP_MUSIC is attached to $IMG_MUSIC"
+  fi
 fi
 
 sleep 0.5

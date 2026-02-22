@@ -1,279 +1,528 @@
 {% extends "base.html" %}
 {% block head %}
 <style>
+    /* Music page layout */
     .music-layout {
         display: grid;
         grid-template-columns: 2fr 1fr;
-        gap: 16px;
+        gap: 20px;
         align-items: start;
     }
 
-    .music-card {
-        background: var(--card-bg);
+    .music-panel {
+        background: var(--bg-container);
         border: 1px solid var(--border-color);
-        border-radius: 10px;
-        padding: 16px;
-        box-shadow: var(--card-shadow);
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 2px 10px var(--shadow);
+        transition: background-color 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
     }
 
+    /* Storage summary */
     .music-summary {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
         gap: 12px;
+        margin: 15px 0;
     }
 
+    .music-summary .stat-item {
+        text-align: center;
+    }
+
+    .music-summary .stat-label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+    }
+
+    .music-summary .stat-value {
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    /* Usage meter */
     .music-meter {
         width: 100%;
         height: 10px;
-        background: var(--border-color);
+        background: var(--border-light);
         border-radius: 999px;
         overflow: hidden;
-        margin-top: 6px;
+        margin: 8px 0 16px 0;
+        transition: background-color 0.3s ease;
     }
 
     .music-meter span {
         display: block;
         height: 100%;
-        background: linear-gradient(90deg, #1e90ff, #5ad6ff);
+        background: linear-gradient(90deg, var(--btn-primary-bg), var(--btn-info-bg));
         transition: width 0.2s ease;
     }
 
-    .drop-zone {
-        border: 2px dashed var(--border-color);
-        border-radius: 12px;
-        padding: 20px;
+    /* Breadcrumb */
+    .music-breadcrumb {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 12px 0;
+        color: var(--text-secondary);
+        font-size: 0.95rem;
+    }
+
+    .music-breadcrumb a {
+        color: var(--text-link);
+        text-decoration: none;
+    }
+
+    .music-breadcrumb a:hover {
+        text-decoration: underline;
+    }
+
+    /* Drop zone */
+    .music-drop-zone {
+        border: 3px dashed var(--border-input);
+        border-radius: 8px;
+        padding: 30px 20px;
         text-align: center;
+        background: var(--form-input-bg);
         cursor: pointer;
-        transition: border-color 0.2s ease, background 0.2s ease;
+        transition: all 0.3s ease;
+        margin-bottom: 15px;
     }
 
-    .drop-zone.dragging {
-        border-color: #1e90ff;
-        background: rgba(30, 144, 255, 0.08);
+    .music-drop-zone:hover {
+        border-color: var(--btn-primary-bg);
     }
 
-    .file-list {
+    .music-drop-zone.dragging {
+        border-color: var(--btn-primary-bg);
+        background: var(--bg-info);
+    }
+
+    .music-drop-zone .drop-icon {
+        font-size: 36px;
+        margin-bottom: 8px;
+    }
+
+    .music-drop-zone .drop-label {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 4px;
+    }
+
+    .music-drop-zone .drop-hint {
+        font-size: 13px;
+        color: var(--text-secondary);
+    }
+
+    /* Upload queue file rows */
+    .music-file-list {
         max-height: 220px;
         overflow-y: auto;
         margin-top: 10px;
     }
 
-    .file-row {
+    .music-file-row {
         display: flex;
+        flex-wrap: wrap;
         justify-content: space-between;
         align-items: center;
         padding: 8px 10px;
         border: 1px solid var(--border-color);
-        border-radius: 8px;
+        border-radius: 6px;
         margin-bottom: 8px;
-        background: var(--panel-bg);
+        background: var(--bg-secondary);
+        transition: border-color 0.3s ease, background-color 0.3s ease;
     }
 
-    .file-row.uploaded {
-        border-color: #2ecc71;
-        box-shadow: 0 0 0 1px rgba(46, 204, 113, 0.3);
+    .music-file-row.uploaded {
+        border-color: var(--success-border);
+        box-shadow: 0 0 0 1px rgba(40, 167, 69, 0.25);
     }
 
-    .file-row .meta {
-        color: var(--muted-text);
-        font-size: 0.9rem;
+    .music-file-row .meta {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
     }
 
-    .progress-bar {
-        height: 8px;
-        background: var(--border-color);
+    /* Upload progress bar */
+    .music-progress-bar {
+        width: 100%;
+        height: 6px;
+        background: var(--border-light);
         border-radius: 999px;
         overflow: hidden;
         margin-top: 6px;
+        transition: background-color 0.3s ease;
     }
 
-    .progress-bar span {
+    .music-progress-bar span {
         display: block;
         height: 100%;
-        background: linear-gradient(90deg, #2ecc71, #52ffa8);
+        background: linear-gradient(90deg, var(--btn-success-bg), #52c47a);
         width: 0;
         transition: width 0.15s ease;
     }
 
-    .music-table {
-        width: 100%;
-        border-collapse: collapse;
-    }
-
-    .music-table th,
-    .music-table td {
-        padding: 10px;
-        border-bottom: 1px solid var(--border-color);
-    }
-
-    .music-table th {
-        text-align: left;
-        text-transform: uppercase;
-        font-size: 0.8rem;
-        letter-spacing: 0.04em;
-        color: var(--muted-text);
-    }
-
-    .breadcrumb {
-        display: flex;
-        gap: 6px;
-        align-items: center;
-        flex-wrap: wrap;
-        margin: 10px 0;
-        color: var(--muted-text);
-        font-size: 0.95rem;
-    }
-
-    .breadcrumb a {
-        color: var(--link-color);
-    }
-
-    .folder-row {
+    /* Folder row in table */
+    .music-folder-row {
         cursor: pointer;
     }
 
-    .folder-row:hover {
-        background: var(--panel-bg);
+    .music-folder-row:hover {
+        background-color: var(--bg-table-hover);
     }
 
-    .callout {
-        border: 1px solid var(--border-color);
-        border-radius: 8px;
-        padding: 10px 12px;
-        background: var(--panel-bg);
-        margin: 10px 0 4px 0;
+    /* Upload status text */
+    .music-status {
+        font-size: 13px;
+        color: var(--text-secondary);
+        margin-top: 8px;
+        transition: color 0.3s ease;
     }
 
+    .music-status.error {
+        color: var(--error-text);
+    }
+
+    /* Folder input row */
+    .music-folder-input {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+        align-items: center;
+    }
+
+    .music-folder-input input[type="text"] {
+        flex: 1;
+        padding: 8px 12px;
+        border: 2px solid var(--border-input);
+        border-radius: 4px;
+        background: var(--form-input-bg);
+        color: var(--text-primary);
+        font-size: 14px;
+        transition: border-color 0.3s ease, background-color 0.3s ease;
+    }
+
+    .music-folder-input input[type="text"]:focus {
+        border-color: var(--btn-primary-bg);
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.1);
+    }
+
+    /* Upload action buttons */
+    .music-upload-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+    }
+
+    /* Responsive */
     @media (max-width: 960px) {
         .music-layout {
             grid-template-columns: 1fr;
+        }
+    }
+
+    /* Hide mobile-only blocks on desktop */
+    .music-mobile-folders,
+    .music-mobile-files {
+        display: none;
+    }
+
+    @media (max-width: 768px) {
+        .music-summary {
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+        .music-summary .stat-value {
+            font-size: 15px;
+        }
+        .music-drop-zone {
+            padding: 20px 15px;
+        }
+        .music-drop-zone .drop-icon {
+            font-size: 28px;
+        }
+        .music-drop-zone .drop-label {
+            font-size: 14px;
+        }
+        .music-folder-input {
+            flex-direction: column;
+        }
+        .music-folder-input input[type="text"] {
+            width: 100%;
+        }
+        .music-upload-actions {
+            flex-direction: column;
+        }
+        .music-upload-actions button {
+            width: 100%;
+            padding: 12px;
+            font-size: 15px;
+        }
+        .music-breadcrumb {
+            font-size: 0.85rem;
+        }
+        /* Mobile folder cards */
+        .music-mobile-folders,
+        .music-mobile-files {
+            display: block;
+        }
+        .music-mobile-folder {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--bg-container);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 14px 16px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .music-mobile-folder:hover,
+        .music-mobile-folder:active {
+            background: var(--bg-table-hover);
+            box-shadow: 0 2px 6px var(--shadow);
+        }
+        .music-mobile-folder-name {
+            color: var(--text-link);
+            font-weight: 500;
+            font-size: 15px;
+            flex: 1;
+            min-width: 0;
+            word-break: break-word;
+        }
+        .music-mobile-folder-actions {
+            flex-shrink: 0;
+            margin-left: 10px;
+        }
+        /* Mobile file cards */
+        .music-mobile-file {
+            background: var(--bg-container);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            transition: all 0.2s ease;
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+        .music-mobile-file-name {
+            font-weight: 500;
+            font-size: 15px;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+        .music-mobile-file-size {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+        .music-mobile-file audio {
+            width: 100%;
+            height: 40px;
+            margin-bottom: 10px;
+        }
+        .music-mobile-file-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .music-mobile-file-actions button {
+            flex: 1;
+            padding: 10px 8px;
+            font-size: 14px;
+            min-height: 44px;
         }
     }
 </style>
 {% endblock %}
 
 {% block content %}
-<div id="music-page" class="music-layout" data-chunk-mb="{{ max_upload_chunk_mb }}"
-    data-max-mb="{{ max_upload_size_mb }}" data-upload-url="{{ url_for('music.upload_chunk') }}"
-    data-delete-url="{{ url_for('music.delete_music', filename='__NAME__') }}"
-    data-delete-dir-url="{{ url_for('music.delete_music_dir', dirname='__DIR__') }}"
-    data-move-url="{{ url_for('music.move_music') }}" data-current-path="{{ current_path }}"
-    data-browse-url="{{ url_for('music.music_home') }}" data-mkdir-url="{{ url_for('music.create_music_folder') }}">
-    <div class="music-card">
-        <h2>Music Library</h2>
-        {% if error %}
-        <div class="error">{{ error }}</div>
-        {% endif %}
-        <div class="callout">Tesla only scans music inside the <code>/Music</code> folder. This page always reads and
-            uploads inside that folder; paths shown below are relative to <code>/Music</code>.</div>
-        <div class="music-summary">
-            <div>
-                <div class="label">Used</div>
-                <div class="value">{{ format_file_size(used_bytes) }}</div>
-            </div>
-            <div>
-                <div class="label">Free</div>
-                <div class="value">{{ format_file_size(free_bytes) }}</div>
-            </div>
-            <div>
-                <div class="label">Files</div>
-                <div class="value">{{ files|length }}</div>
-            </div>
-        </div>
-        {% set total_space = total_bytes if total_bytes else used_bytes + free_bytes %}
-        {% set used_pct = (100 * used_bytes / total_space) if total_space else 0 %}
-        <div class="music-meter" aria-label="Usage">
-            <span id="musicUsage" data-used="{{ used_pct|round(2) }}"></span>
-        </div>
-        <div class="breadcrumb">
-            <a href="{{ url_for('music.music_home') }}">Music</a>
-            {% if current_path %}
-            {% set parts = current_path.split('/') %}
-            {% set accum = [] %}
-            {% for part in parts %}
-            {% set _ = accum.append(part) %}
-            <span>/</span>
-            <a href="{{ url_for('music.music_home', path=('/'.join(accum))) }}">{{ part }}</a>
-            {% endfor %}
-            {% endif %}
-        </div>
-        <h3 style="margin-top:18px;">Files</h3>
-        {% if dirs %}
-        <table class="music-table" id="folderTable">
-            <thead>
-                <tr>
-                    <th>Folders</th>
-                    <th style="width:180px; text-align:right;">Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% if current_path %}
-                <tr class="folder-row" data-dir="{{ current_path.rsplit('/', 1)[0] if '/' in current_path else '' }}">
-                    <td colspan="2">⬆️ Up one level</td>
-                </tr>
-                {% endif %}
-                {% for d in dirs %}
-                <tr class="folder-row" data-dir="{{ d.path }}">
-                    <td>📁 {{ d.name }}</td>
-                    <td style="text-align:right; display:flex; gap:6px; justify-content:flex-end;">
-                        <button class="secondary" data-open="{{ d.path }}">Open</button>
-                        <button class="secondary" data-delete-dir="{{ d.path }}">Delete</button>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% endif %}
-        {% if files %}
-        <table class="music-table" id="fileTable">
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th style="width:140px;">Size</th>
-                    <th style="width:160px;">Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for file in files %}
-                <tr data-filename="{{ file.path }}">
-                    <td>{{ file.name }}</td>
-                    <td>{{ format_file_size(file.size) }}</td>
-                    <td>
-                        <button class="secondary" data-move="{{ file.path }}">Move</button>
-                        <button class="secondary" data-delete="{{ file.path }}">Delete</button>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <p class="muted">No music files found on the drive.</p>
-        {% endif %}
+<div class="container">
+    <h2>🎵 Music Library</h2>
+    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+
+    {% if error %}
+    <div class="messages"><div class="error">{{ error }}</div></div>
+    {% endif %}
+
+    <div class="info-box" style="margin-bottom: 20px;">
+        <p style="margin: 0; font-size: 13px; color: var(--text-secondary);">
+            Tesla only scans music inside the <code style="background: var(--bg-code); padding: 2px 5px; border-radius: 3px;">/Music</code> folder.
+            This page always reads and uploads inside that folder; paths shown below are relative to <code style="background: var(--bg-code); padding: 2px 5px; border-radius: 3px;">/Music</code>.
+        </p>
     </div>
 
-    <div class="music-card">
-        <h3>Upload</h3>
-        <p class="muted">Uploads require Edit mode. Files larger than {{ max_upload_chunk_mb }} MiB are sent in chunks
-            to keep memory low. You can drop whole folders; we'll preserve subfolder structure. Target folder:
-            <strong id="currentPathLabel">/{{ current_path }}</strong>
-        </p>
-        <div id="dropZone" class="drop-zone">
-            <div><strong>Drop files here</strong> or click to choose</div>
-            <div class="muted" style="margin-top:6px;">Allowed: mp3, flac, wav, aac, m4a. Max {{ max_upload_size_mb }}
-                MiB per file.</div>
-            <input id="fileInput" type="file" name="music_files" multiple webkitdirectory directory
-                style="display:none;" accept=".mp3,.flac,.wav,.aac,.m4a">
+    <div id="music-page" class="music-layout" data-chunk-mb="{{ max_upload_chunk_mb }}"
+        data-max-mb="{{ max_upload_size_mb }}" data-upload-url="{{ url_for('music.upload_chunk') }}"
+        data-delete-url="{{ url_for('music.delete_music', filename='__NAME__') }}"
+        data-delete-dir-url="{{ url_for('music.delete_music_dir', dirname='__DIR__') }}"
+        data-move-url="{{ url_for('music.move_music') }}" data-current-path="{{ current_path }}"
+        data-browse-url="{{ url_for('music.music_home') }}" data-mkdir-url="{{ url_for('music.create_music_folder') }}">
+
+        <!-- File browser panel -->
+        <div class="music-panel">
+            <div class="music-summary">
+                <div class="stat-item">
+                    <div class="stat-label">Used</div>
+                    <div class="stat-value">{{ format_file_size(used_bytes) }}</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Free</div>
+                    <div class="stat-value">{{ format_file_size(free_bytes) }}</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Files</div>
+                    <div class="stat-value">{{ files|length }}</div>
+                </div>
+            </div>
+            {% set total_space = total_bytes if total_bytes else used_bytes + free_bytes %}
+            {% set used_pct = (100 * used_bytes / total_space) if total_space else 0 %}
+            <div class="music-meter" aria-label="Usage">
+                <span id="musicUsage" data-used="{{ used_pct|round(2) }}"></span>
+            </div>
+
+            <div class="music-breadcrumb">
+                <span style="color: var(--text-secondary);">📂 /Music{% if current_path %}/{% endif %}</span>
+                {% if current_path %}
+                {% set parts = current_path.split('/') %}
+                {% set accum = [] %}
+                {% for part in parts %}
+                {% set _ = accum.append(part) %}
+                {% if not loop.last %}
+                <a href="{{ url_for('music.music_home', path=('/'.join(accum))) }}">{{ part }}</a>
+                <span>/</span>
+                {% else %}
+                <span style="color: var(--text-primary); font-weight: 600;">{{ part }}</span>
+                {% endif %}
+                {% endfor %}
+                {% endif %}
+            </div>
+
+            <h3 style="margin-top: 10px;">
+                {% if current_path %}
+                <a href="{{ url_for('music.music_home', path=(current_path.rsplit('/', 1)[0] if '/' in current_path else '')) }}" style="text-decoration: none; color: var(--text-link); font-size: 14px; margin-right: 8px;">⬆️ Up</a>
+                {% endif %}
+                Files
+            </h3>
+            {% if dirs %}
+            <div class="video-table-container">
+                <table class="video-table" id="folderTable" style="table-layout: fixed;">
+                    <thead>
+                        <tr>
+                            <th>Folders</th>
+                            <th style="width: 100px; text-align: right;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for d in dirs %}
+                        <tr class="music-folder-row" data-dir="{{ d.path }}">
+                            <td style="color: var(--text-link);">📁 {{ d.name }}</td>
+                            <td style="text-align: right;">
+                                <button class="action-btn btn-danger" data-delete-dir="{{ d.path }}">Delete</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <!-- Mobile folder cards -->
+            <div class="music-mobile-folders" id="mobileFolderList">
+                {% for d in dirs %}
+                <div class="music-mobile-folder" data-dir="{{ d.path }}">
+                    <span class="music-mobile-folder-name">📁 {{ d.name }}</span>
+                    <span class="music-mobile-folder-actions">
+                        <button class="action-btn btn-danger" data-delete-dir="{{ d.path }}">Delete</button>
+                    </span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if files %}
+            <div class="video-table-container">
+                <table class="video-table" id="fileTable" style="table-layout: fixed;">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th style="width: 120px;">Size</th>
+                            <th style="width: 240px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for file in files %}
+                        <tr data-filename="{{ file.path }}">
+                            <td style="word-wrap: break-word; overflow-wrap: break-word;">{{ file.name }}</td>
+                            <td>{{ format_file_size(file.size) }}</td>
+                            <td>
+                                <audio controls preload="none" style="width: 100%; max-width: 200px; height: 30px; margin-bottom: 6px;">
+                                    {% set ext = file.name.lower().rsplit('.', 1)[-1] %}
+                                    <source src="{{ url_for('music.play_music', filepath=file.path) }}" type="{{ 'audio/mpeg' if ext == 'mp3' else 'audio/wav' if ext == 'wav' else 'audio/flac' if ext == 'flac' else 'audio/aac' if ext == 'aac' else 'audio/mp4' if ext == 'm4a' else 'application/octet-stream' }}">
+                                </audio>
+                                <div style="display: flex; gap: 6px;">
+                                    <button class="action-btn btn-success" data-move="{{ file.path }}">Move</button>
+                                    <button class="action-btn btn-danger" data-delete="{{ file.path }}">Delete</button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <!-- Mobile file cards -->
+            <div class="music-mobile-files" id="mobileFileList">
+                {% for file in files %}
+                <div class="music-mobile-file" data-filename="{{ file.path }}">
+                    <div class="music-mobile-file-name">🎵 {{ file.name }}</div>
+                    <div class="music-mobile-file-size">{{ format_file_size(file.size) }}</div>
+                    <audio controls preload="none">
+                        {% set ext = file.name.lower().rsplit('.', 1)[-1] %}
+                        <source src="{{ url_for('music.play_music', filepath=file.path) }}" type="{{ 'audio/mpeg' if ext == 'mp3' else 'audio/wav' if ext == 'wav' else 'audio/flac' if ext == 'flac' else 'audio/aac' if ext == 'aac' else 'audio/mp4' if ext == 'm4a' else 'application/octet-stream' }}">
+                    </audio>
+                    <div class="music-mobile-file-actions">
+                        <button class="action-btn btn-success" data-move="{{ file.path }}">Move</button>
+                        <button class="action-btn btn-danger" data-delete="{{ file.path }}">Delete</button>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p style="color: var(--text-secondary); font-size: 14px; text-align: center; padding: 20px 0;">No music files found on the drive.</p>
+            {% endif %}
         </div>
-        <div class="file-list" id="fileList"></div>
-        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
-            <input id="folderName" type="text" placeholder="New folder name" style="flex:1;">
-            <button id="createFolder" class="secondary">Create Folder</button>
+
+        <!-- Upload panel -->
+        <div class="music-panel">
+            <h3 style="margin-top: 0;">📤 Upload</h3>
+            <p style="margin: 0 0 15px 0; font-size: 13px; color: var(--text-secondary);">
+                Uploads require Edit mode. Files larger than {{ max_upload_chunk_mb }} MiB are sent in chunks.
+                You can drop whole folders to preserve subfolder structure. Target folder:
+                <strong id="currentPathLabel" style="color: var(--text-primary);">/{{ current_path }}</strong>
+            </p>
+            <div id="dropZone" class="music-drop-zone">
+                <div class="drop-icon">🎵</div>
+                <div class="drop-label">Drop files here or click to choose</div>
+                <div class="drop-hint">Allowed: mp3, flac, wav, aac, m4a. Max {{ max_upload_size_mb }} MiB per file.</div>
+                <input id="fileInput" type="file" name="music_files" multiple webkitdirectory directory
+                    style="display: none;" accept=".mp3,.flac,.wav,.aac,.m4a">
+            </div>
+            <div class="music-file-list" id="fileList"></div>
+            <div class="music-folder-input">
+                <input id="folderName" type="text" placeholder="New folder name">
+                <button id="createFolder" class="action-btn btn-success">Create Folder</button>
+            </div>
+            <div class="music-upload-actions">
+                <button id="startUpload" class="edit-btn" disabled>📤 Upload</button>
+                <button id="clearSelection" class="btn-delete" disabled>✖ Clear</button>
+            </div>
+            <div id="uploadStatus" class="music-status"></div>
         </div>
-        <div style="display:flex; gap:8px; margin-top:8px;">
-            <button id="startUpload" class="primary" disabled>Upload</button>
-            <button id="clearSelection" class="secondary" disabled>Clear</button>
-        </div>
-        <div id="uploadStatus" class="muted" style="margin-top:8px;"></div>
     </div>
 </div>
 <script>
@@ -285,5 +534,28 @@
         }
     })();
 </script>
+<!-- Loading overlay for async operations -->
+<div id="musicLoadingOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center; align-items: center;">
+    <div style="text-align: center; color: white;">
+        <div class="music-spinner"></div>
+        <h3 id="musicOverlayText">Processing...</h3>
+        <p>Please wait</p>
+    </div>
+</div>
+<style>
+@keyframes music-spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+.music-spinner {
+    border: 8px solid #f3f3f3;
+    border-top: 8px solid #007bff;
+    border-radius: 50%;
+    width: 60px;
+    height: 60px;
+    animation: music-spin 1s linear infinite;
+    margin: 0 auto 20px;
+}
+</style>
 <script src="{{ url_for('static', filename='js/music.js') }}"></script>
 {% endblock %}

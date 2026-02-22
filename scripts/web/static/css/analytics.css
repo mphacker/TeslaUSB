@@ -912,8 +912,10 @@
 
 .fsck-actions button {
     flex: 1;
-    min-width: 120px;
+    min-width: 100px;
     white-space: nowrap;
+    font-size: 0.85em;
+    padding: 8px 10px;
 }
 
 /* Mobile responsiveness for fsck section */

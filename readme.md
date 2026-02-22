@@ -217,6 +217,7 @@ sudo /home/pi/TeslaUSB/edit_usb.sh     # Activate Edit mode
 **Samba Shares** (Edit mode only):
 - `\\<pi-ip-address>\gadget_part1` - TeslaCam drive
 - `\\<pi-ip-address>\gadget_part2` - LightShow drive
+- `\\<pi-ip-address>\gadget_part3` - Music drive (when `music_enabled: true`)
 - Default credentials: username = `pi`, password = `tesla`
 
 **Offline Access Point with Captive Portal**:
@@ -469,6 +470,7 @@ sudo journalctl -u gadget_web.service -f
 # Force Samba refresh
 sudo smbcontrol all close-share gadget_part1
 sudo smbcontrol all close-share gadget_part2
+sudo smbcontrol all close-share gadget_part3  # if music enabled
 sudo systemctl restart smbd nmbd
 ```
 

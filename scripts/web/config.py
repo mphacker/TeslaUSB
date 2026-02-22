@@ -41,6 +41,11 @@ MUSIC_ENABLED = bool(config['disk_images'].get('music_enabled', False))
 MUSIC_FS = config['disk_images'].get('music_fs', 'fat32')
 MUSIC_LABEL = config['disk_images'].get('music_label', 'Music')
 
+# Computed image file paths (used for feature-availability checks)
+IMG_CAM_PATH = os.path.join(GADGET_DIR, IMG_CAM_NAME)
+IMG_LIGHTSHOW_PATH = os.path.join(GADGET_DIR, IMG_LIGHTSHOW_NAME)
+IMG_MUSIC_PATH = os.path.join(GADGET_DIR, IMG_MUSIC_NAME)
+
 # Network & Security
 WEB_PORT = config['network']['web_port']
 

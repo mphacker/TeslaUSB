@@ -18,10 +18,35 @@ from config import (
     MNT_DIR,
     RO_MNT_DIR,
     USB_PARTITIONS,
+    IMG_CAM_PATH,
+    IMG_LIGHTSHOW_PATH,
+    IMG_MUSIC_PATH,
+    MUSIC_ENABLED,
 )
 
 # Import mode service
 from services.mode_service import current_mode
+
+
+def get_feature_availability():
+    """Return a dict of boolean flags indicating which features are available.
+
+    Checks os.path.isfile() on each image path at call time so the result
+    adapts dynamically when images are created or deleted — no service
+    restart needed.
+    """
+    cam_exists = os.path.isfile(IMG_CAM_PATH)
+    lightshow_exists = os.path.isfile(IMG_LIGHTSHOW_PATH)
+    music_exists = MUSIC_ENABLED and os.path.isfile(IMG_MUSIC_PATH)
+
+    return {
+        'analytics_available': cam_exists,
+        'videos_available': cam_exists,
+        'chimes_available': lightshow_exists,
+        'shows_available': lightshow_exists,
+        'wraps_available': lightshow_exists,
+        'music_available': music_exists,
+    }
 
 
 def iter_mounted_partitions():

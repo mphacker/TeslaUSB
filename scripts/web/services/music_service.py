@@ -2,12 +2,12 @@
 """Music upload and management helpers."""
 
 import os
+import re
 import uuid
 import shutil
 import logging
+import time
 from typing import Tuple, List
-
-from werkzeug.utils import secure_filename
 
 from config import MAX_UPLOAD_CHUNK_MB, MAX_UPLOAD_SIZE_MB
 from services.partition_service import get_mount_path
@@ -20,10 +20,34 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a"}
 CHUNK_SIZE = MAX_UPLOAD_CHUNK_MB * 1024 * 1024
 MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+# Maximum age (seconds) for orphaned .part files before cleanup
+STALE_CHUNK_AGE = 3600  # 1 hour
+
+# Regex: only allow hex characters (uuid4().hex output) in upload IDs
+_UPLOAD_ID_RE = re.compile(r'^[0-9a-f]{32}$')
 
 
-class UploadError(Exception):
-    """Raised for user-facing upload errors."""
+class MusicServiceError(Exception):
+    """Raised for user-facing music service errors."""
+
+
+# Keep UploadError as an alias for backwards compatibility with the blueprint
+UploadError = MusicServiceError
+
+
+def _sanitize_name(name: str) -> str:
+    """Sanitize a filename while preserving Unicode characters.
+
+    Uses os.path.basename to strip directory components, then removes
+    control characters and path-separator characters.  This mirrors the
+    pattern used by the existing lock_chime_service and light_show_service.
+    """
+    base = os.path.basename(name or "")
+    # Strip control chars, null bytes, and path separators
+    base = re.sub(r'[\x00-\x1f\x7f/\\:]', '', base).strip()
+    # Collapse whitespace
+    base = re.sub(r'\s+', ' ', base)
+    return base
 
 
 def _fs_free_bytes(path: str) -> int:
@@ -60,6 +84,25 @@ def _stream_to_file(stream, dest_path: str) -> int:
     return total
 
 
+def _purge_stale_chunks(uploads_dir: str) -> None:
+    """Remove orphaned .part files older than STALE_CHUNK_AGE."""
+    if not os.path.isdir(uploads_dir):
+        return
+    now = time.time()
+    try:
+        for entry in os.scandir(uploads_dir):
+            if entry.name.endswith('.part') and entry.is_file():
+                try:
+                    age = now - entry.stat().st_mtime
+                    if age > STALE_CHUNK_AGE:
+                        os.remove(entry.path)
+                        logger.info("Purged stale chunk: %s (age=%ds)", entry.name, int(age))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def _normalize_rel_path(rel_path: str) -> str:
     rel = (rel_path or "").strip("/")
     if not rel:
@@ -69,9 +112,9 @@ def _normalize_rel_path(rel_path: str) -> str:
         segment = segment.strip()
         if segment in {"", ".", ".."}:
             continue
-        safe_seg = secure_filename(segment)
+        safe_seg = _sanitize_name(segment)
         if not safe_seg:
-            raise UploadError("Invalid folder name")
+            raise MusicServiceError("Invalid folder name")
         cleaned.append(safe_seg)
     return "/".join(cleaned)
 
@@ -84,7 +127,7 @@ def _resolve_subpath(mount_path: str, rel_path: str) -> str:
     target = os.path.join(mount_path, rel)
     common = os.path.commonpath([mount_path, target])
     if common != os.path.abspath(mount_path):
-        raise UploadError("Invalid path")
+        raise MusicServiceError("Invalid path")
     return target
 
 
@@ -93,7 +136,7 @@ def _ensure_music_mount() -> Tuple[str, str]:
     mount_path = get_mount_path("part3")
     if not mount_path:
         return "", "Music drive not mounted. Switch to Edit mode and try again."
-    if not os.path.isdir(mount_path):
+    if not os.path.ismount(mount_path):
         return "", "Music drive is unavailable."
     return mount_path, ""
 
@@ -110,12 +153,12 @@ def _get_music_root(mount_path: str) -> Tuple[str, str]:
 
 
 def _validate_filename(name: str) -> str:
-    safe = secure_filename(name)
+    safe = _sanitize_name(name)
     if not safe:
-        raise UploadError("Invalid filename")
+        raise MusicServiceError("Invalid filename")
     ext = os.path.splitext(safe)[1].lower()
     if ext not in ALLOWED_EXTS:
-        raise UploadError("Unsupported file type. Allowed: mp3, flac, wav, aac, m4a")
+        raise MusicServiceError("Unsupported file type. Allowed: mp3, flac, wav, aac, m4a")
     return safe
 
 
@@ -246,7 +289,7 @@ def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: 
     Returns (success, message, is_finalized)
     """
     if total_size > MAX_UPLOAD_BYTES:
-        raise UploadError(f"File too large (>{MAX_UPLOAD_SIZE_MB} MiB limit)")
+        raise MusicServiceError(f"File too large (>{MAX_UPLOAD_SIZE_MB} MiB limit)")
 
     mount_path, err = _ensure_music_mount()
     if err:
@@ -259,19 +302,24 @@ def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: 
     target_dir = _resolve_subpath(music_root, rel_path)
     os.makedirs(target_dir, exist_ok=True)
 
+    # Validate upload_id is a hex UUID (prevents path traversal)
+    if not _UPLOAD_ID_RE.match(upload_id or ""):
+        raise MusicServiceError("Invalid upload ID")
+
     filename = _validate_filename(filename)
     tmp_dir = os.path.join(target_dir, ".uploads")
     os.makedirs(tmp_dir, exist_ok=True)
     staged_path = os.path.join(tmp_dir, f"{upload_id}.part")
     final_path = os.path.join(target_dir, filename)
 
-    # On first chunk, ensure space and clear any stale parts
+    # On first chunk, purge stale uploads and ensure space
     if chunk_index == 0:
+        _purge_stale_chunks(tmp_dir)
         if os.path.exists(staged_path):
             os.remove(staged_path)
         free_bytes = _fs_free_bytes(mount_path)
         if free_bytes <= total_size + (4 * 1024 * 1024):
-            raise UploadError("Not enough free space on Music drive")
+            raise MusicServiceError("Not enough free space on Music drive")
 
     written = _stream_to_file(stream, staged_path)
     logger.debug("Chunk %s/%s wrote %s bytes", chunk_index + 1, total_chunks, written)
@@ -282,7 +330,7 @@ def handle_chunk(upload_id: str, filename: str, chunk_index: int, total_chunks: 
     # Final chunk: validate size then atomically move
     actual_size = os.path.getsize(staged_path)
     if actual_size != total_size:
-        raise UploadError(f"Size mismatch. Expected {total_size} bytes, got {actual_size}")
+        raise MusicServiceError(f"Size mismatch. Expected {total_size} bytes, got {actual_size}")
 
     _fsync_path(staged_path)
     _fsync_dir(tmp_dir)
@@ -331,7 +379,7 @@ def create_directory(rel_path: str, name: str) -> Tuple[bool, str]:
         return False, err
 
     base_dir = _resolve_subpath(music_root, rel_path)
-    safe_name = secure_filename(name or "")
+    safe_name = _sanitize_name(name or "")
     if not safe_name:
         return False, "Invalid folder name"
 
@@ -410,7 +458,7 @@ def move_music_file(source_rel: str, dest_rel: str, new_name: str = "") -> Tuple
 
 def require_edit_mode():
     if current_mode() != "edit":
-        raise UploadError("Switch to Edit mode to upload music.")
+        raise MusicServiceError("Switch to Edit mode to upload music.")
 
 
 def generate_upload_id() -> str:

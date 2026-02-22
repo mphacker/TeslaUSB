@@ -367,7 +367,6 @@ REQUIRED_PACKAGES=(
   python3-av
   python3-pil
   python3-yaml
-  python3-pip
   yq
   samba
   samba-common-bin
@@ -614,19 +613,6 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
   echo "  ✓ Orphaned packages removed"
 else
   echo "All required packages already installed; skipping apt install."
-fi
-
-# Ensure Python web dependencies from requirements.txt are present (pip will no-op if already satisfied)
-REQ_FILE="$SCRIPT_DIR/scripts/web/requirements.txt"
-if [ -f "$REQ_FILE" ]; then
-  if command -v pip3 >/dev/null 2>&1; then
-    echo "Installing Python web requirements from $REQ_FILE..."
-    if ! pip3 install --no-deps --requirement "$REQ_FILE" >/dev/null; then
-      echo "Warning: pip install of web requirements failed; continuing with apt-provided packages"
-    fi
-  else
-    echo "pip3 not found; skip pip install (apt packages cover required modules)"
-  fi
 fi
 
 # Ensure hostapd/dnsmasq don't auto-start outside our controller
@@ -911,9 +897,14 @@ cleanup_loop_devices
 trap - EXIT INT TERM  # Remove trap since we're done with image creation
 
 # Create mount points
-mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part3"
-chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part3"
-chmod 775 "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part3"
+mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
+chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
+chmod 775 "$MNT_DIR/part1" "$MNT_DIR/part2"
+if [ $MUSIC_REQUIRED -eq 1 ]; then
+  mkdir -p "$MNT_DIR/part3"
+  chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part3"
+  chmod 775 "$MNT_DIR/part3"
+fi
 
 # Create thumbnail cache directory in persistent location
 THUMBNAIL_CACHE_DIR="$GADGET_DIR/thumbnails"

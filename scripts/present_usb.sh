@@ -404,11 +404,16 @@ echo "$IMG_LIGHTSHOW" | sudo tee functions/mass_storage.usb0/lun.1/file > /dev/n
 
 # Configure LUN 2: Music (READ-ONLY to Tesla)
 if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
-  sudo mkdir -p functions/mass_storage.usb0/lun.2
-  echo 1 | sudo tee functions/mass_storage.usb0/lun.2/removable > /dev/null
-  echo 1 | sudo tee functions/mass_storage.usb0/lun.2/ro > /dev/null
-  echo 0 | sudo tee functions/mass_storage.usb0/lun.2/cdrom > /dev/null
-  echo "$IMG_MUSIC" | sudo tee functions/mass_storage.usb0/lun.2/file > /dev/null
+  if [ ! -f "$IMG_MUSIC" ]; then
+    echo "WARNING: Music image not found at $IMG_MUSIC — skipping LUN 2" >&2
+    MUSIC_ENABLED_BOOL=0
+  else
+    sudo mkdir -p functions/mass_storage.usb0/lun.2
+    echo 1 | sudo tee functions/mass_storage.usb0/lun.2/removable > /dev/null
+    echo 1 | sudo tee functions/mass_storage.usb0/lun.2/ro > /dev/null
+    echo 0 | sudo tee functions/mass_storage.usb0/lun.2/cdrom > /dev/null
+    echo "$IMG_MUSIC" | sudo tee functions/mass_storage.usb0/lun.2/file > /dev/null
+  fi
 fi
 
 # Link function to configuration

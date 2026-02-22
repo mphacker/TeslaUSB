@@ -12,7 +12,7 @@ from services.music_service import (
     delete_directory,
     create_directory,
     move_music_file,
-    UploadError,
+    MusicServiceError,
     generate_upload_id,
     require_edit_mode,
 )
@@ -49,7 +49,7 @@ def upload_music():
     current_path = request.args.get("path") or request.form.get("path") or ""
     try:
         require_edit_mode()
-    except UploadError as exc:
+    except MusicServiceError as exc:
         if is_ajax:
             return jsonify({"success": False, "error": str(exc)}), 400
         flash(str(exc), "error")
@@ -93,7 +93,7 @@ def upload_chunk():
     current_path = request.args.get("path") or request.form.get("path") or ""
     try:
         require_edit_mode()
-    except UploadError as exc:
+    except MusicServiceError as exc:
         if is_ajax:
             return jsonify({"success": False, "error": str(exc)}), 400
         flash(str(exc), "error")
@@ -123,7 +123,7 @@ def upload_chunk():
             stream=request.stream,
             rel_path=current_path,
         )
-    except UploadError as exc:
+    except MusicServiceError as exc:
         logger.warning("Chunk upload rejected: %s", exc)
         return jsonify({"success": False, "error": str(exc)}), 400
     except Exception as exc:  # pylint: disable=broad-except
@@ -138,7 +138,7 @@ def delete_music(filename):
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         require_edit_mode()
-    except UploadError as exc:
+    except MusicServiceError as exc:
         if is_ajax:
             return jsonify({"success": False, "error": str(exc)}), 400
         flash(str(exc), "error")
@@ -146,7 +146,7 @@ def delete_music(filename):
 
     try:
         ok, msg = delete_music_file(filename)
-    except UploadError as exc:
+    except MusicServiceError as exc:
         ok, msg = False, str(exc)
 
     if is_ajax:
@@ -162,7 +162,7 @@ def delete_music_dir(dirname):
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         require_edit_mode()
-    except UploadError as exc:
+    except MusicServiceError as exc:
         if is_ajax:
             return jsonify({"success": False, "error": str(exc)}), 400
         flash(str(exc), "error")
@@ -170,7 +170,7 @@ def delete_music_dir(dirname):
 
     try:
         ok, msg = delete_directory(dirname)
-    except UploadError as exc:
+    except MusicServiceError as exc:
         ok, msg = False, str(exc)
 
     if is_ajax:
@@ -187,7 +187,7 @@ def move_music():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         require_edit_mode()
-    except UploadError as exc:
+    except MusicServiceError as exc:
         if is_ajax:
             return jsonify({"success": False, "error": str(exc)}), 400
         flash(str(exc), "error")
@@ -212,7 +212,7 @@ def create_music_folder():
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         require_edit_mode()
-    except UploadError as exc:
+    except MusicServiceError as exc:
         if is_ajax:
             return jsonify({"success": False, "error": str(exc)}), 400
         flash(str(exc), "error")

@@ -291,6 +291,7 @@
             e.preventDefault();
 
             if (filename) {
+                if (!confirm(`Delete "${filename}"?`)) return;
                 const url = deleteTemplate.replace('__NAME__', encodeURIComponent(filename));
                 target.disabled = true;
                 const res = await fetch(url, {
@@ -358,6 +359,7 @@
                 e.preventDefault();
                 e.stopPropagation();
                 if (!deleteDirTemplate) return;
+                if (!confirm(`Delete folder "${deleteDir}" and all its contents?`)) return;
                 target.disabled = true;
                 const url = deleteDirTemplate.replace('__DIR__', encodeURIComponent(deleteDir));
                 const res = await fetch(url, {

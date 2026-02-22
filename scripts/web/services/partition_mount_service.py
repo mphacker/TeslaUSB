@@ -161,7 +161,7 @@ def _acquire_lock(timeout=10):
             pass
 
 
-def _restore_lun_backing(img_path, max_retries=3):
+def _restore_lun_backing(img_path, max_retries=3, lun_number=1):
     """
     Restore the LUN backing file. This is CRITICAL and must succeed.
 
@@ -171,6 +171,7 @@ def _restore_lun_backing(img_path, max_retries=3):
     Args:
         img_path: Path to the image file to set as LUN backing
         max_retries: Maximum number of retry attempts
+        lun_number: LUN index (1 for lightshow, 2 for music)
 
     Returns:
         bool: True if successful, False otherwise
@@ -178,12 +179,12 @@ def _restore_lun_backing(img_path, max_retries=3):
     for attempt in range(max_retries):
         try:
             if attempt > 0:
-                logger.warning(f"Retrying LUN backing restoration (attempt {attempt + 1}/{max_retries})")
+                logger.warning(f"Retrying LUN{lun_number} backing restoration (attempt {attempt + 1}/{max_retries})")
                 time.sleep(0.5 * attempt)  # Exponential backoff
 
             # Find the gadget LUN file path
             result = subprocess.run(
-                ['sh', '-c', 'ls -d /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.1/file 2>/dev/null | head -n1'],
+                ['sh', '-c', f'ls -d /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.{lun_number}/file 2>/dev/null | head -n1'],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -319,6 +320,32 @@ def check_and_recover_gadget_state():
 
         except Exception as e:
             result['errors'].append(f"Error checking LUN backing: {e}")
+
+    # Check 2b: Verify LUN2 (music) backing file state (only in present mode)
+    if mode == 'present':
+        try:
+            from config import MUSIC_ENABLED, IMG_MUSIC_NAME
+            if MUSIC_ENABLED:
+                music_img_path = os.path.join(GADGET_DIR, IMG_MUSIC_NAME)
+                if os.path.isfile(music_img_path):
+                    proc = subprocess.run(
+                        ['sh', '-c', 'cat /sys/kernel/config/usb_gadget/*/functions/mass_storage.usb0/lun.2/file 2>/dev/null'],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=5
+                    )
+                    if proc.returncode == 0:
+                        current_backing = proc.stdout.strip()
+                        if not current_backing:
+                            result['issues_found'].append("LUN2 (music) backing file is empty")
+                            logger.info("Attempting to restore LUN2 backing file...")
+                            if _restore_lun_backing(music_img_path, lun_number=2):
+                                result['fixes_applied'].append("Restored LUN2 backing file")
+                            else:
+                                result['errors'].append("Failed to restore LUN2 backing file")
+        except ImportError:
+            pass  # Music config not available
 
     # Check 3: Look for orphaned RW mounts that should be RO (only in present mode)
     # In edit mode, RW mounts are expected and normal
@@ -695,6 +722,13 @@ def rebind_usb_gadget(delay_seconds=1):
         # Get the image path for LUN restoration
         img_path = os.path.join(GADGET_DIR, 'usb_lightshow.img')
 
+        # Check if music LUN is enabled
+        try:
+            from config import MUSIC_ENABLED, IMG_MUSIC_NAME
+            music_img_path = os.path.join(GADGET_DIR, IMG_MUSIC_NAME) if MUSIC_ENABLED else None
+        except ImportError:
+            music_img_path = None
+
         # Find the UDC device
         result = subprocess.run(
             ['sh', '-c', 'ls /sys/class/udc 2>/dev/null | head -n1'],
@@ -748,6 +782,12 @@ def rebind_usb_gadget(delay_seconds=1):
             logger.error("Failed to restore LUN backing before rebind")
             # Try to rebind anyway, but log the issue
 
+        # Step 3b: Ensure LUN2 (music) backing file if enabled
+        if music_img_path and os.path.isfile(music_img_path):
+            logger.info("Ensuring LUN2 (music) backing file is set before rebind...")
+            if not _restore_lun_backing(music_img_path, max_retries=3, lun_number=2):
+                logger.warning("Failed to restore music LUN backing before rebind")
+
         # Step 4: Rebind UDC (reconnect to Tesla)
         logger.info(f"Rebinding UDC: {udc_device}")
         result = subprocess.run(
@@ -763,6 +803,8 @@ def rebind_usb_gadget(delay_seconds=1):
             logger.error(f"Failed to rebind UDC: {stderr}")
             # Ensure LUN is restored even if rebind failed
             _restore_lun_backing(img_path, max_retries=3)
+            if music_img_path and os.path.isfile(music_img_path):
+                _restore_lun_backing(music_img_path, max_retries=3, lun_number=2)
             return False, f"Failed to rebind UDC: {stderr}"
 
         # Step 5: Verify rebind was successful
@@ -784,15 +826,25 @@ def rebind_usb_gadget(delay_seconds=1):
                     logger.warning("LUN backing verification/restoration failed after rebind")
                     return True, "USB gadget rebound (LUN may need attention)"
 
+                # Step 6b: Verify LUN2 (music) backing if enabled
+                if music_img_path and os.path.isfile(music_img_path):
+                    logger.info("Verifying LUN2 (music) backing file after rebind...")
+                    if not _restore_lun_backing(music_img_path, max_retries=3, lun_number=2):
+                        logger.warning("Music LUN backing verification failed after rebind")
+
                 return True, "USB gadget rebound successfully"
             else:
                 logger.error(f"UDC verification failed: expected '{udc_device}', got '{current_udc}'")
                 # Attempt to restore LUN even on verification failure
                 _restore_lun_backing(img_path, max_retries=3)
+                if music_img_path and os.path.isfile(music_img_path):
+                    _restore_lun_backing(music_img_path, max_retries=3, lun_number=2)
                 return False, f"UDC verification failed"
 
         # Attempt to restore LUN on any other failure path
         _restore_lun_backing(img_path, max_retries=3)
+        if music_img_path and os.path.isfile(music_img_path):
+            _restore_lun_backing(music_img_path, max_retries=3, lun_number=2)
         return False, "Could not verify UDC rebind"
 
     except subprocess.TimeoutExpired:
@@ -800,12 +852,22 @@ def rebind_usb_gadget(delay_seconds=1):
         # Ensure LUN is restored even on timeout
         img_path = os.path.join(GADGET_DIR, 'usb_lightshow.img')
         _restore_lun_backing(img_path, max_retries=3)
+        if music_img_path and os.path.isfile(music_img_path):
+            _restore_lun_backing(music_img_path, max_retries=3, lun_number=2)
         return False, "Operation timed out"
     except Exception as e:
         logger.error(f"Exception during USB gadget rebind: {e}", exc_info=True)
         # Ensure LUN is restored even on exception
         img_path = os.path.join(GADGET_DIR, 'usb_lightshow.img')
         _restore_lun_backing(img_path, max_retries=3)
+        try:
+            from config import MUSIC_ENABLED, IMG_MUSIC_NAME
+            if MUSIC_ENABLED:
+                m_path = os.path.join(GADGET_DIR, IMG_MUSIC_NAME)
+                if os.path.isfile(m_path):
+                    _restore_lun_backing(m_path, max_retries=3, lun_number=2)
+        except ImportError:
+            pass
         return False, f"Error rebinding gadget: {str(e)}"
 
 

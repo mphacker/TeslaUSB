@@ -1,6 +1,0 @@
-flask
-waitress
-pyyaml
-werkzeug
-av
-pillow

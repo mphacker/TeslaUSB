@@ -59,13 +59,18 @@ fi
 
 IMG_CAM_PATH="$GADGET_DIR/$IMG_CAM_NAME"
 IMG_LIGHTSHOW_PATH="$GADGET_DIR/$IMG_LIGHTSHOW_NAME"
+IMG_MUSIC_PATH="$GADGET_DIR/$IMG_MUSIC_NAME"
 
 # ===== Check if image files already exist =====
-# Skip sizing and creation if both images already exist
-if [ -f "$IMG_CAM_PATH" ] && [ -f "$IMG_LIGHTSHOW_PATH" ]; then
-  echo "Both image files already exist:"
+# Skip sizing and creation if all required images already exist
+MUSIC_ENABLED_LC="$(printf '%s' "${MUSIC_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
+MUSIC_REQUIRED=$([ "$MUSIC_ENABLED_LC" = "true" ] && echo 1 || echo 0)
+
+if [ -f "$IMG_CAM_PATH" ] && [ -f "$IMG_LIGHTSHOW_PATH" ] && { [ $MUSIC_REQUIRED -eq 0 ] || [ -f "$IMG_MUSIC_PATH" ]; }; then
+  echo "All required image files already exist:"
   echo "  - TeslaCam:  $IMG_CAM_PATH"
   echo "  - Lightshow: $IMG_LIGHTSHOW_PATH"
+  [ $MUSIC_REQUIRED -eq 1 ] && echo "  - Music:     $IMG_MUSIC_PATH"
   echo "Skipping size configuration and image creation."
   echo ""
   SKIP_IMAGE_CREATION=1
@@ -75,6 +80,7 @@ else
   # Determine which images need to be created
   NEED_CAM_IMAGE=0
   NEED_LIGHTSHOW_IMAGE=0
+  NEED_MUSIC_IMAGE=0
 
   if [ ! -f "$IMG_CAM_PATH" ]; then
     NEED_CAM_IMAGE=1
@@ -88,6 +94,15 @@ else
     echo "Lightshow image not found at $IMG_LIGHTSHOW_PATH - will create"
   else
     echo "Lightshow image already exists at $IMG_LIGHTSHOW_PATH"
+  fi
+
+  if [ $MUSIC_REQUIRED -eq 1 ]; then
+    if [ ! -f "$IMG_MUSIC_PATH" ]; then
+      NEED_MUSIC_IMAGE=1
+      echo "Music image not found at $IMG_MUSIC_PATH - will create"
+    else
+      echo "Music image already exists at $IMG_MUSIC_PATH"
+    fi
   fi
   echo ""
 fi
@@ -135,7 +150,7 @@ size_to_bytes() {
 NEED_SIZE_VALIDATION=0
 USABLE_MIB=0
 
-if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ]; }; then
+if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2_SIZE}" ] || { [ $MUSIC_REQUIRED -eq 1 ] && [ -z "${PART3_SIZE}" ]; }; }; then
   # Ensure parent directory exists for df check
   mkdir -p "$GADGET_DIR" 2>/dev/null || true
   FS_AVAIL_BYTES="$(fs_avail_bytes_for_path "$GADGET_DIR")"
@@ -161,19 +176,36 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2
   USABLE_BYTES=$(( FS_AVAIL_BYTES - RESERVE_BYTES ))
   USABLE_MIB=$(( USABLE_BYTES / 1024 / 1024 ))
 
-  # Default Lightshow to 10G
+  # Default sizes: Lightshow 10G, Music 32G (if enabled), remaining to TeslaCam
   DEFAULT_P2_MIB=10240
   DEFAULT_P2_STR="10G"
 
-  if [ "$USABLE_MIB" -le "$DEFAULT_P2_MIB" ]; then
-    echo "ERROR: Not enough usable space for Lightshow default (${DEFAULT_P2_STR}) after safety reserve."
-    echo "Usable: ${USABLE_MIB} MiB, Lightshow: ${DEFAULT_P2_MIB} MiB"
-    echo "Free up space or reduce Lightshow size."
+  DEFAULT_P3_MIB=32768
+  DEFAULT_P3_STR="32G"
+
+  # Compute total baseline needed
+  BASELINE_MIB=$DEFAULT_P2_MIB
+  if [ $MUSIC_REQUIRED -eq 1 ]; then
+    BASELINE_MIB=$(( BASELINE_MIB + DEFAULT_P3_MIB ))
+  fi
+
+  if [ "$USABLE_MIB" -le "$BASELINE_MIB" ]; then
+    echo "ERROR: Not enough usable space for defaults after safety reserve."
+    echo "Usable: ${USABLE_MIB} MiB, Baseline required: ${BASELINE_MIB} MiB"
+    echo "Free up space or reduce Lightshow/Music size."
     exit 1
   fi
 
   SUG_P2_STR="$DEFAULT_P2_STR"
-  SUG_P1_MIB="$(round_down_gib_mib $(( USABLE_MIB - DEFAULT_P2_MIB )))"
+
+  if [ $MUSIC_REQUIRED -eq 1 ]; then
+    SUG_P3_STR="$DEFAULT_P3_STR"
+    SUG_P1_MIB="$(round_down_gib_mib $(( USABLE_MIB - DEFAULT_P2_MIB - DEFAULT_P3_MIB )))"
+  else
+    SUG_P3_STR=""
+    SUG_P1_MIB="$(round_down_gib_mib $(( USABLE_MIB - DEFAULT_P2_MIB )))"
+  fi
+
   SUG_P1_STR="$(mib_to_gib_str "$SUG_P1_MIB")"
 
   echo ""
@@ -187,6 +219,7 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2
   echo ""
   echo "Recommended sizes (safe, leaves headroom for Raspberry Pi OS):"
   echo "  Lightshow (PART2_SIZE): $SUG_P2_STR (default)"
+  [ $MUSIC_REQUIRED -eq 1 ] && echo "  Music     (PART3_SIZE): ${SUG_P3_STR:-custom}" || true
   echo "  TeslaCam  (PART1_SIZE): $SUG_P1_STR (uses remaining usable space)"
   echo ""
 
@@ -203,6 +236,18 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2
   elif [ "$NEED_LIGHTSHOW_IMAGE" = "0" ]; then
     # Image exists, set dummy size to satisfy validation
     PART2_SIZE="${PART2_SIZE:-1G}"
+  fi
+
+  if [ $MUSIC_REQUIRED -eq 1 ] && [ "$NEED_MUSIC_IMAGE" = "1" ] && [ -z "${PART3_SIZE}" ]; then
+    read -r -p "Enter Music size (default ${SUG_P3_STR}): " PART3_SIZE_INPUT
+    PART3_SIZE="${PART3_SIZE_INPUT:-$SUG_P3_STR}"
+    if ! size_to_bytes "$PART3_SIZE" >/dev/null 2>&1; then
+      echo "ERROR: Invalid size format for Music: $PART3_SIZE"
+      echo "Use format like 512M or 5G (whole numbers only)"
+      exit 2
+    fi
+  elif [ $MUSIC_REQUIRED -eq 1 ] && [ "$NEED_MUSIC_IMAGE" = "0" ]; then
+    PART3_SIZE="${PART3_SIZE:-1G}"
   fi
 
   if [ "$NEED_CAM_IMAGE" = "1" ] && [ -z "${PART1_SIZE}" ]; then
@@ -223,6 +268,7 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2
   echo "Selected sizes:"
   echo "  PART1_SIZE=$PART1_SIZE"
   echo "  PART2_SIZE=$PART2_SIZE"
+  [ $MUSIC_REQUIRED -eq 1 ] && echo "  PART3_SIZE=$PART3_SIZE"
   echo ""
 
   NEED_SIZE_VALIDATION=1
@@ -232,6 +278,7 @@ fi
 if [ "$SKIP_IMAGE_CREATION" = "1" ]; then
   PART1_SIZE="${PART1_SIZE:-1G}"  # Dummy value - image already exists
   PART2_SIZE="${PART2_SIZE:-1G}"  # Dummy value - image already exists
+  [ $MUSIC_REQUIRED -eq 1 ] && PART3_SIZE="${PART3_SIZE:-1G}"
 fi
 
 # Validate user exists
@@ -257,17 +304,22 @@ to_mib() {
 }
 P1_MB=$(to_mib "$PART1_SIZE")
 P2_MB=$(to_mib "$PART2_SIZE")
+if [ $MUSIC_REQUIRED -eq 1 ]; then
+  P3_MB=$(to_mib "$PART3_SIZE")
+else
+  P3_MB=0
+fi
 
 # Note: We no longer need TOTAL_MB since we're creating separate images
 
 # Validate selected sizes against usable space (if computed and images need creation)
 if [ "${NEED_SIZE_VALIDATION:-0}" = "1" ] && [ "$SKIP_IMAGE_CREATION" = "0" ]; then
-  TOTAL_MIB=$(( P1_MB + P2_MB ))
+  TOTAL_MIB=$(( P1_MB + P2_MB + P3_MB ))
   if [ "$TOTAL_MIB" -gt "$USABLE_MIB" ]; then
     echo "ERROR: Selected sizes exceed safe usable space under $GADGET_DIR."
     echo "Usable:  ${USABLE_MIB} MiB (after safety reserve)"
-    echo "Chosen:  ${TOTAL_MIB} MiB (PART1=${P1_MB} MiB, PART2=${P2_MB} MiB)"
-    echo "Reduce TeslaCam and/or Lightshow sizes."
+    echo "Chosen:  ${TOTAL_MIB} MiB (PART1=${P1_MB} MiB, PART2=${P2_MB} MiB, PART3=${P3_MB} MiB)"
+    echo "Reduce TeslaCam, Lightshow, and/or Music sizes."
     exit 1
   fi
 fi
@@ -277,20 +329,17 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ]; then
   echo "============================================"
   echo "Preview"
   echo "============================================"
-  if [ "$NEED_CAM_IMAGE" = "1" ] && [ "$NEED_LIGHTSHOW_IMAGE" = "1" ]; then
+  if [ "$NEED_CAM_IMAGE" = "1" ] || [ "$NEED_LIGHTSHOW_IMAGE" = "1" ] || [ "$NEED_MUSIC_IMAGE" = "1" ]; then
     echo "This will create the following image files:"
-    echo "  1) TeslaCam  : $IMG_CAM_PATH  size=$PART1_SIZE  label=$LABEL1  (read-write)"
-    echo "  2) Lightshow : $IMG_LIGHTSHOW_PATH  size=$PART2_SIZE  label=$LABEL2  (read-only)"
-  elif [ "$NEED_CAM_IMAGE" = "1" ]; then
-    echo "This will create the TeslaCam image file:"
-    echo "  - TeslaCam  : $IMG_CAM_PATH  size=$PART1_SIZE  label=$LABEL1  (read-write)"
-    echo ""
-    echo "Lightshow image already exists at: $IMG_LIGHTSHOW_PATH"
-  elif [ "$NEED_LIGHTSHOW_IMAGE" = "1" ]; then
-    echo "This will create the Lightshow image file:"
-    echo "  - Lightshow : $IMG_LIGHTSHOW_PATH  size=$PART2_SIZE  label=$LABEL2  (read-only)"
-    echo ""
-    echo "TeslaCam image already exists at: $IMG_CAM_PATH"
+    [ "$NEED_CAM_IMAGE" = "1" ] && echo "  - TeslaCam  : $IMG_CAM_PATH  size=$PART1_SIZE  label=$LABEL1  (read-write)" || echo "  - TeslaCam  : already exists"
+    [ "$NEED_LIGHTSHOW_IMAGE" = "1" ] && echo "  - Lightshow : $IMG_LIGHTSHOW_PATH  size=$PART2_SIZE  label=$LABEL2  (read-only)" || echo "  - Lightshow : already exists"
+    if [ $MUSIC_REQUIRED -eq 1 ]; then
+      if [ "$NEED_MUSIC_IMAGE" = "1" ]; then
+        echo "  - Music     : $IMG_MUSIC_PATH  size=$PART3_SIZE  label=$LABEL3  (read-only by Tesla)"
+      else
+        echo "  - Music     : already exists"
+      fi
+    fi
   fi
   echo ""
   echo "Images are stored under: $GADGET_DIR"
@@ -318,6 +367,7 @@ REQUIRED_PACKAGES=(
   python3-av
   python3-pil
   python3-yaml
+  python3-pip
   yq
   samba
   samba-common-bin
@@ -566,6 +616,19 @@ else
   echo "All required packages already installed; skipping apt install."
 fi
 
+# Ensure Python web dependencies from requirements.txt are present (pip will no-op if already satisfied)
+REQ_FILE="$SCRIPT_DIR/scripts/web/requirements.txt"
+if [ -f "$REQ_FILE" ]; then
+  if command -v pip3 >/dev/null 2>&1; then
+    echo "Installing Python web requirements from $REQ_FILE..."
+    if ! pip3 install --no-deps --requirement "$REQ_FILE" >/dev/null; then
+      echo "Warning: pip install of web requirements failed; continuing with apt-provided packages"
+    fi
+  else
+    echo "pip3 not found; skip pip install (apt packages cover required modules)"
+  fi
+fi
+
 # Ensure hostapd/dnsmasq don't auto-start outside our controller
 systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
@@ -699,6 +762,11 @@ cleanup_loop_devices() {
     losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
     LOOP_LIGHTSHOW=""
   fi
+  if [ -n "${LOOP_MUSIC:-}" ]; then
+    echo "Cleaning up loop device: $LOOP_MUSIC"
+    losetup -d "$LOOP_MUSIC" 2>/dev/null || true
+    LOOP_MUSIC=""
+  fi
 }
 
 # Create TeslaCam image (if missing)
@@ -795,14 +863,57 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && [ "$NEED_LIGHTSHOW_IMAGE" = "1" ]; then
   echo "Lightshow image created and formatted."
 fi
 
+# Create Music image (if enabled and missing)
+if [ "$SKIP_IMAGE_CREATION" = "0" ] && [ $MUSIC_REQUIRED -eq 1 ] && [ "${NEED_MUSIC_IMAGE:-0}" = "1" ]; then
+  trap cleanup_loop_devices EXIT INT TERM
+
+  echo "Creating Music image $IMG_MUSIC_PATH (${P3_MB}M)..."
+  truncate -s "${P3_MB}M" "$IMG_MUSIC_PATH" || {
+    echo "Error: Failed to create Music image file"
+    exit 1
+  }
+
+  LOOP_MUSIC=$(losetup --find --show "$IMG_MUSIC_PATH") || {
+    echo "Error: Failed to create loop device for Music"
+    exit 1
+  }
+
+  if [ -z "$LOOP_MUSIC" ] || [ ! -e "$LOOP_MUSIC" ]; then
+    echo "Error: Loop device creation failed or device not accessible"
+    exit 1
+  fi
+
+  echo "Using loop device: $LOOP_MUSIC"
+
+  # Format Music drive (Tesla prefers FAT32 for media)
+  echo "Formatting Music drive (${LABEL3})..."
+  FS_LOWER="$(printf '%s' "$MUSIC_FS" | tr '[:upper:]' '[:lower:]')"
+  if [ "$FS_LOWER" = "exfat" ]; then
+    mkfs.exfat -n "$LABEL3" "$LOOP_MUSIC" || {
+      echo "Error: Failed to format Music drive with exFAT"
+      exit 1
+    }
+  else
+    mkfs.vfat -F 32 -n "$LABEL3" "$LOOP_MUSIC" || {
+      echo "Error: Failed to format Music drive with FAT32"
+      exit 1
+    }
+  fi
+
+  losetup -d "$LOOP_MUSIC" 2>/dev/null || true
+  LOOP_MUSIC=""
+
+  echo "Music image created and formatted."
+fi
+
 # Clean up any remaining loop devices
 cleanup_loop_devices
 trap - EXIT INT TERM  # Remove trap since we're done with image creation
 
 # Create mount points
-mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
-chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
-chmod 775 "$MNT_DIR/part1" "$MNT_DIR/part2"
+mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part3"
+chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part3"
+chmod 775 "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part3"
 
 # Create thumbnail cache directory in persistent location
 THUMBNAIL_CACHE_DIR="$GADGET_DIR/thumbnails"
@@ -824,7 +935,8 @@ awk '
   BEGIN{skip=0}
   /^\[gadget_part1\]/{skip=1}
   /^\[gadget_part2\]/{skip=1}
-  /^\[.*\]$/ { if(skip==1 && $0 !~ /^\[gadget_part1\]/ && $0 !~ /^\[gadget_part2\]/) { skip=0 } }
+  /^\[gadget_part3\]/{skip=1}
+  /^\[.*\]$/ { if(skip==1 && $0 !~ /^\[gadget_part1\]/ && $0 !~ /^\[gadget_part2\]/ && $0 !~ /^\[gadget_part3\]/) { skip=0 } }
   { if(skip==0) print }
 ' "$SMB_CONF" > "${SMB_CONF}.tmp" || cp "$SMB_CONF" "${SMB_CONF}.tmp"
 mv "${SMB_CONF}.tmp" "$SMB_CONF"
@@ -878,6 +990,20 @@ cat >> "$SMB_CONF" <<EOF
    create mask = 0775
    directory mask = 0775
 EOF
+
+if [ $MUSIC_REQUIRED -eq 1 ]; then
+cat >> "$SMB_CONF" <<EOF
+
+[gadget_part3]
+  path = $MNT_DIR/part3
+  browseable = yes
+  writable = yes
+  valid users = $TARGET_USER
+  guest ok = no
+  create mask = 0775
+  directory mask = 0775
+EOF
+fi
 
 # Restart Samba
 systemctl restart smbd nmbd 2>/dev/null || systemctl restart smbd || true

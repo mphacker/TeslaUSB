@@ -245,6 +245,13 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 - Download all camera views as zip file
 - Delete entire events (Edit mode only) - deletes all camera views for the session
 
+**Music Tab**:
+- Tesla scans music only from a root-level `Music` folder; the app enforces this and automatically creates it if missing
+- Browse folders with breadcrumb navigation and clean per-folder views
+- Drag-and-drop or select files and whole folders; chunked uploads keep memory low and preserve subfolder structure
+- Per-file progress and status indicators with size limit validation
+- Create folders, move files, and delete files or entire folders (Edit mode)
+- Usage gauge shows used/free space for the music partition
 
 **Lock Chimes Tab**:
 - Upload WAV/MP3 files (auto-converted to Tesla format)
@@ -413,7 +420,7 @@ sudo systemctl disable present_usb_on_boot.service
 
 The hardware watchdog automatically reboots the Pi if the system becomes unresponsive. The default configuration is intentionally simple and reliable:
 
-```
+```bash
 watchdog-device = /dev/watchdog
 watchdog-timeout = 60
 max-load-1 = 24
@@ -532,4 +539,3 @@ All screenshots shown in dark mode.
 <img src="examples/lock-chimes.png" alt="Lock Chimes Management" width="400">
 <img src="examples/lock-chime-editor-waveform.png" alt="Lock Chime Audio Editor with Waveform" width="400">
 <img src="examples/light-shows.png" alt="Light Shows Management" width="400">
-

@@ -47,6 +47,10 @@ log_timing "Script start"
 source "$SCRIPT_DIR/config.sh"
 log_timing "Config loaded"
 
+MUSIC_ENABLED_LC="$(printf '%s' "${MUSIC_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
+MUSIC_ENABLED_BOOL=0
+[ "$MUSIC_ENABLED_LC" = "true" ] && MUSIC_ENABLED_BOOL=1
+
 # Check for active file operations before proceeding
 LOCK_FILE="$GADGET_DIR/.quick_edit_part2.lock"
 LOCK_TIMEOUT=30
@@ -138,7 +142,11 @@ unmount_with_retry() {
 # Unmount drives if mounted
 log_timing "Starting unmount sequence"
 echo "Unmounting drives..."
-for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
+UNMOUNT_TARGETS=("$MNT_DIR/part1" "$MNT_DIR/part2")
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  UNMOUNT_TARGETS+=("$MNT_DIR/part3")
+fi
+for mp in "${UNMOUNT_TARGETS[@]}"; do
   # Sync each partition before unmounting
   if mountpoint -q "$mp" 2>/dev/null; then
     echo "  Syncing $mp..."
@@ -155,7 +163,11 @@ log_timing "Drives unmounted"
 # Also unmount any existing read-only mounts from previous present mode
 echo "Unmounting any existing read-only mounts..."
 RO_MNT_DIR="/mnt/gadget"
-for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+RO_UNMOUNT_TARGETS=("$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro")
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  RO_UNMOUNT_TARGETS+=("$RO_MNT_DIR/part3-ro")
+fi
+for mp in "${RO_UNMOUNT_TARGETS[@]}"; do
   if mountpoint -q "$mp" 2>/dev/null || sudo nsenter --mount=/proc/1/ns/mnt -- mountpoint -q "$mp" 2>/dev/null; then
     echo "  Unmounting $mp..."
     unmount_with_retry "$mp" || true
@@ -169,7 +181,11 @@ log_timing "Final sync completed"
 # Clean up existing loop devices for our images
 # After unmounting, detach any lingering loop devices to avoid accumulation
 echo "Cleaning up existing loop devices..."
-for img in "$IMG_CAM" "$IMG_LIGHTSHOW"; do
+LOOP_IMAGES=("$IMG_CAM" "$IMG_LIGHTSHOW")
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  LOOP_IMAGES+=("$IMG_MUSIC")
+fi
+for img in "${LOOP_IMAGES[@]}"; do
   for loop in $(losetup -j "$img" 2>/dev/null | cut -d: -f1); do
     if [ -n "$loop" ]; then
       echo "  Detaching $loop..."
@@ -187,6 +203,7 @@ log_timing "Loop devices cleaned up"
 # These variables will hold loop devices for reuse later in the script
 LOOP_CAM=""
 LOOP_LIGHTSHOW=""
+LOOP_MUSIC=""
 
 if [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
   echo "Running boot-time filesystem check and repair..."
@@ -194,10 +211,16 @@ if [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
   # Create loop devices for fsck (will be reused for local mounts too)
   LOOP_CAM=$(create_loop "$IMG_CAM")
   LOOP_LIGHTSHOW=$(create_loop "$IMG_LIGHTSHOW")
+  if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+    LOOP_MUSIC=$(create_loop "$IMG_MUSIC")
+  fi
 
   # Detect filesystem types
   FS_TYPE_CAM=$(sudo blkid -o value -s TYPE "$LOOP_CAM" 2>/dev/null || echo "exfat")
   FS_TYPE_LIGHTSHOW=$(sudo blkid -o value -s TYPE "$LOOP_LIGHTSHOW" 2>/dev/null || echo "vfat")
+  if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+    FS_TYPE_MUSIC=$(sudo blkid -o value -s TYPE "$LOOP_MUSIC" 2>/dev/null || echo "vfat")
+  fi
 
   # Run fsck on TeslaCam (part1)
   echo "  Checking TeslaCam ($FS_TYPE_CAM)..."
@@ -231,7 +254,24 @@ if [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
     fi
   fi
 
-  # Note: Loop devices (LOOP_CAM, LOOP_LIGHTSHOW) preserved for later reuse in local mounts
+  if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+    echo "  Checking Music ($FS_TYPE_MUSIC)..."
+    if [ "$FS_TYPE_MUSIC" = "exfat" ]; then
+      if sudo fsck.exfat -p "$LOOP_MUSIC" 2>&1; then
+        echo "    ✓ Music: clean"
+      else
+        echo "    ⚠ Music: repaired or has issues"
+      fi
+    else
+      if sudo fsck.vfat -p "$LOOP_MUSIC" 2>&1; then
+        echo "    ✓ Music: clean"
+      else
+        echo "    ⚠ Music: repaired or has issues"
+      fi
+    fi
+  fi
+
+  # Note: Loop devices (LOOP_CAM, LOOP_LIGHTSHOW, LOOP_MUSIC) preserved for later reuse in local mounts
   echo "  Loop devices preserved for local mount reuse"
 
   log_timing "Boot fsck completed"
@@ -241,7 +281,11 @@ fi
 
 # Remove mount directories to avoid accidental access when unmounted
 echo "Removing mount directories..."
-for mp in "$MNT_DIR/part1" "$MNT_DIR/part2"; do
+REMOVE_TARGETS=("$MNT_DIR/part1" "$MNT_DIR/part2")
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  REMOVE_TARGETS+=("$MNT_DIR/part3")
+fi
+for mp in "${REMOVE_TARGETS[@]}"; do
   # Check if mounted in host namespace
   if sudo nsenter --mount=/proc/1/ns/mnt -- mountpoint -q "$mp" 2>/dev/null || mountpoint -q "$mp" 2>/dev/null; then
     echo "  Skipping removal of $mp (still mounted)" >&2
@@ -358,6 +402,15 @@ echo 1 | sudo tee functions/mass_storage.usb0/lun.1/ro > /dev/null  # Read-only 
 echo 0 | sudo tee functions/mass_storage.usb0/lun.1/cdrom > /dev/null
 echo "$IMG_LIGHTSHOW" | sudo tee functions/mass_storage.usb0/lun.1/file > /dev/null
 
+# Configure LUN 2: Music (READ-ONLY to Tesla)
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  sudo mkdir -p functions/mass_storage.usb0/lun.2
+  echo 1 | sudo tee functions/mass_storage.usb0/lun.2/removable > /dev/null
+  echo 1 | sudo tee functions/mass_storage.usb0/lun.2/ro > /dev/null
+  echo 0 | sudo tee functions/mass_storage.usb0/lun.2/cdrom > /dev/null
+  echo "$IMG_MUSIC" | sudo tee functions/mass_storage.usb0/lun.2/file > /dev/null
+fi
+
 # Link function to configuration
 sudo ln -s functions/mass_storage.usb0 configs/c.1/
 
@@ -382,7 +435,11 @@ chown "$TARGET_USER:$TARGET_USER" "$STATE_FILE" 2>/dev/null || true
 # - Best used when Tesla is not actively recording (e.g., after driving)
 echo "Mounting partitions locally in read-only mode..."
 RO_MNT_DIR="/mnt/gadget"
-sudo mkdir -p "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  sudo mkdir -p "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro" "$RO_MNT_DIR/part3-ro"
+else
+  sudo mkdir -p "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"
+fi
 
 # Get user IDs for mounting
 UID_VAL=$(id -u "$TARGET_USER")
@@ -435,13 +492,49 @@ if [ -n "$LOOP_LIGHTSHOW" ] && [ -e "$LOOP_LIGHTSHOW" ]; then
 else
   echo "  Warning: Unable to attach loop device for Lightshow read-only mounting"
 fi
+
+# Mount Music image (part3) when enabled - reuse fsck loop device if available, otherwise create
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  if [ -z "$LOOP_MUSIC" ] || [ ! -e "$LOOP_MUSIC" ]; then
+    LOOP_MUSIC=$(create_loop "$IMG_MUSIC")
+  fi
+
+  if [ -n "$LOOP_MUSIC" ] && [ -e "$LOOP_MUSIC" ]; then
+    FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_MUSIC" 2>/dev/null || echo "vfat")
+
+    echo "  Mounting ${LOOP_MUSIC} (Music) at $RO_MNT_DIR/part3-ro (read-only)..."
+
+    if [ "$FS_TYPE" = "vfat" ]; then
+      sudo nsenter --mount=/proc/1/ns/mnt mount -t vfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_MUSIC" "$RO_MNT_DIR/part3-ro"
+    elif [ "$FS_TYPE" = "exfat" ]; then
+      sudo nsenter --mount=/proc/1/ns/mnt mount -t exfat -o ro,uid=$UID_VAL,gid=$GID_VAL,umask=022 "$LOOP_MUSIC" "$RO_MNT_DIR/part3-ro"
+    else
+      sudo nsenter --mount=/proc/1/ns/mnt mount -o ro "$LOOP_MUSIC" "$RO_MNT_DIR/part3-ro"
+    fi
+
+    echo "  Mounted successfully at $RO_MNT_DIR/part3-ro"
+  else
+    echo "  Warning: Unable to attach loop device for Music read-only mounting"
+  fi
+fi
 log_timing "USB gadget fully configured and mounted"
 
 echo "USB gadget presented successfully!"
-echo "The Pi should now appear as TWO USB storage devices when connected:"
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  echo "The Pi should now appear as THREE USB storage devices when connected:"
+else
+  echo "The Pi should now appear as TWO USB storage devices when connected:"
+fi
 echo "  - LUN 0: TeslaCam (Read-Write) - Tesla can record dashcam footage"
 echo "  - LUN 1: Lightshow (Read-Only) - Optimized read performance for Tesla"
-echo "Read-only mounts available at: $RO_MNT_DIR/part1-ro and $RO_MNT_DIR/part2-ro"
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  echo "  - LUN 2: Music (Read-Only) - Media files for Tesla audio"
+fi
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  echo "Read-only mounts available at: $RO_MNT_DIR/part1-ro, $RO_MNT_DIR/part2-ro, $RO_MNT_DIR/part3-ro"
+else
+  echo "Read-only mounts available at: $RO_MNT_DIR/part1-ro and $RO_MNT_DIR/part2-ro"
+fi
 
 log_timing "Script completed successfully"
 echo "[PERFORMANCE] Total execution time: $(($(date +%s%3N) - SCRIPT_START))ms"

@@ -47,6 +47,10 @@ log_timing "Script start"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
+MUSIC_ENABLED_LC="$(printf '%s' "${MUSIC_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
+MUSIC_ENABLED_BOOL=0
+[ "$MUSIC_ENABLED_LC" = "true" ] && MUSIC_ENABLED_BOOL=1
+
 # Check for active file operations before proceeding
 LOCK_FILE="$GADGET_DIR/.quick_edit_part2.lock"
 LOCK_TIMEOUT=30
@@ -171,7 +175,11 @@ if [ -d "$CONFIGFS_GADGET" ]; then
   # NOW unmount read-only mounts after gadget is fully disconnected
   echo "Unmounting read-only mounts from present mode..."
   RO_MNT_DIR="/mnt/gadget"
-  for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+  RO_UNMOUNT_TARGETS=("$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro")
+  if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+    RO_UNMOUNT_TARGETS+=("$RO_MNT_DIR/part3-ro")
+  fi
+  for mp in "${RO_UNMOUNT_TARGETS[@]}"; do
     if mountpoint -q "$mp" 2>/dev/null; then
       echo "  Unmounting $mp..."
       if ! safe_unmount_dir "$mp"; then
@@ -191,7 +199,11 @@ elif lsmod | grep -q '^g_mass_storage'; then
   # Unmount any read-only mounts from present mode first
   echo "Unmounting read-only mounts from present mode..."
   RO_MNT_DIR="/mnt/gadget"
-  for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+  LEGACY_RO_TARGETS=("$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro")
+  if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+    LEGACY_RO_TARGETS+=("$RO_MNT_DIR/part3-ro")
+  fi
+  for mp in "${LEGACY_RO_TARGETS[@]}"; do
     if mountpoint -q "$mp" 2>/dev/null; then
       echo "  Unmounting $mp..."
       if ! safe_unmount_dir "$mp"; then
@@ -229,7 +241,11 @@ fi
 
 # Verify all mounts are released (quick check - already unmounted above)
 RO_MNT_DIR="/mnt/gadget"
-for mp in "$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro"; do
+VERIFY_RO_TARGETS=("$RO_MNT_DIR/part1-ro" "$RO_MNT_DIR/part2-ro")
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  VERIFY_RO_TARGETS+=("$RO_MNT_DIR/part3-ro")
+fi
+for mp in "${VERIFY_RO_TARGETS[@]}"; do
   if sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$mp" 2>/dev/null; then
     echo "  Clearing remaining mount: $mp"
     safe_unmount_dir "$mp" || true
@@ -241,7 +257,11 @@ log_timing "Mounts released"
 # After clearing LUN files and unmounting, loop devices may still exist
 # We must detach them before creating fresh ones to avoid accumulation
 echo "Cleaning up existing loop devices..."
-for img in "$IMG_CAM" "$IMG_LIGHTSHOW"; do
+LOOP_IMAGES=("$IMG_CAM" "$IMG_LIGHTSHOW")
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  LOOP_IMAGES+=("$IMG_MUSIC")
+fi
+for img in "${LOOP_IMAGES[@]}"; do
   for loop in $(losetup -j "$img" 2>/dev/null | cut -d: -f1); do
     if [ -n "$loop" ]; then
       echo "  Detaching $loop..."
@@ -260,7 +280,12 @@ sudo chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2"
 
 # Ensure previous mounts are cleared before setting up new loop devices
 # This prevents remounting while drives are still in use
-for PART_NUM in 1 2; do
+PART_RANGE=(1 2)
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  PART_RANGE+=(3)
+fi
+
+for PART_NUM in "${PART_RANGE[@]}"; do
   MP="$MNT_DIR/part${PART_NUM}"
   if mountpoint -q "$MP" 2>/dev/null; then
     echo "Unmounting existing mount at $MP"
@@ -314,6 +339,28 @@ if [ -z "$VERIFY" ]; then
 fi
 echo "Verified: $LOOP_LIGHTSHOW is attached to $IMG_LIGHTSHOW"
 
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  echo "Setting up loop device for Music..."
+  LOOP_MUSIC=$(create_loop "$IMG_MUSIC")
+  if [ -z "$LOOP_MUSIC" ]; then
+    echo "ERROR: Failed to get/create loop device for $IMG_MUSIC"
+    sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
+    sudo losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
+    exit 1
+  fi
+  echo "Using loop device for Music: $LOOP_MUSIC"
+
+  VERIFY=$(sudo losetup -l | grep "$LOOP_MUSIC" | grep "$IMG_MUSIC" || true)
+  if [ -z "$VERIFY" ]; then
+    echo "ERROR: Loop device $LOOP_MUSIC is not attached to $IMG_MUSIC"
+    sudo losetup -d "$LOOP_CAM" 2>/dev/null || true
+    sudo losetup -d "$LOOP_LIGHTSHOW" 2>/dev/null || true
+    sudo losetup -d "$LOOP_MUSIC" 2>/dev/null || true
+    exit 1
+  fi
+  echo "Verified: $LOOP_MUSIC is attached to $IMG_MUSIC"
+fi
+
 sleep 0.5
 
 # Trap to log on failure but NOT detach loop devices (they may be reused/shared)
@@ -332,6 +379,17 @@ trap log_failure_on_exit EXIT
 
 # Mount drives
 echo "Mounting drives..."
+
+# Ensure mount points exist (present mode may remove them)
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  sudo mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2" "$MNT_DIR/part3"
+else
+  sudo mkdir -p "$MNT_DIR/part1" "$MNT_DIR/part2"
+fi
+sudo chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part1" "$MNT_DIR/part2" 2>/dev/null || true
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  sudo chown "$TARGET_USER:$TARGET_USER" "$MNT_DIR/part3" 2>/dev/null || true
+fi
 
 # Mount TeslaCam drive (part1) in system mount namespace
 MP="$MNT_DIR/part1"
@@ -373,11 +431,36 @@ if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$MP"; then
 fi
 echo "  Mounted $LOOP_LIGHTSHOW at $MP (filesystem: $FS_TYPE)"
 
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  echo "Mounting Music drive (part3) in system mount namespace"
+  MP="$MNT_DIR/part3"
+  FS_TYPE=$(sudo blkid -o value -s TYPE "$LOOP_MUSIC" 2>/dev/null || echo "unknown")
+  echo "  Mounting $LOOP_MUSIC at $MP..."
+
+  if [ "$FS_TYPE" = "exfat" ]; then
+    sudo nsenter --mount=/proc/1/ns/mnt mount -t exfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_MUSIC" "$MP"
+  elif [ "$FS_TYPE" = "vfat" ]; then
+    sudo nsenter --mount=/proc/1/ns/mnt mount -t vfat -o rw,uid=$UID_VAL,gid=$GID_VAL,umask=000 "$LOOP_MUSIC" "$MP"
+  else
+    echo "  Warning: Unknown filesystem type '$FS_TYPE', attempting generic mount"
+    sudo nsenter --mount=/proc/1/ns/mnt mount -o rw "$LOOP_MUSIC" "$MP"
+  fi
+
+  if ! sudo nsenter --mount=/proc/1/ns/mnt mountpoint -q "$MP"; then
+    echo "Error: Failed to mount $LOOP_MUSIC at $MP" >&2
+    exit 1
+  fi
+  echo "  Mounted $LOOP_MUSIC at $MP (filesystem: $FS_TYPE)"
+fi
+
 # Refresh Samba so shares expose the freshly mounted drives
 echo "Refreshing Samba shares..."
 # Close any cached shares and reload config (faster than full restart)
 sudo smbcontrol all close-share gadget_part1 2>/dev/null || true
 sudo smbcontrol all close-share gadget_part2 2>/dev/null || true
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  sudo smbcontrol all close-share gadget_part3 2>/dev/null || true
+fi
 # If Samba is running, reload config is sufficient; otherwise start it
 if systemctl is-active --quiet smbd; then
   sudo smbcontrol all reload-config 2>/dev/null || true
@@ -393,6 +476,9 @@ fi
 if [ -d "$MNT_DIR/part2" ]; then
   echo "  Part2 files: $(ls -A "$MNT_DIR/part2" 2>/dev/null | wc -l) items"
 fi
+if [ $MUSIC_ENABLED_BOOL -eq 1 ] && [ -d "$MNT_DIR/part3" ]; then
+  echo "  Part3 files: $(ls -A "$MNT_DIR/part3" 2>/dev/null | wc -l) items"
+fi
 
 echo "Updating mode state..."
 echo "edit" > "$STATE_FILE"
@@ -406,6 +492,10 @@ echo "Drives are now mounted locally and accessible via Samba shares:"
 echo "  - Part 1: $MNT_DIR/part1"
 echo "  - Part 2: $MNT_DIR/part2"
 echo "  - Samba shares: gadget_part1, gadget_part2"
+if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+  echo "  - Part 3: $MNT_DIR/part3"
+  echo "  - Samba shares: gadget_part3 (music)"
+fi
 
 log_timing "Script completed successfully"
 echo "[PERFORMANCE] Total execution time: $(($(date +%s%3N) - SCRIPT_START))ms"

@@ -89,3 +89,19 @@ web:
   lightshow_folder: LightShow # Folder on part2 where light shows are stored
   max_upload_size_mb: 2048 # Max accepted upload size for music/lightshow (MiB)
   max_upload_chunk_mb: 16 # Chunk size for streaming uploads (MiB)
+
+# ============================================================================
+# Mapping & Geo-Indexing Configuration
+# ============================================================================
+mapping:
+  enabled: true                          # Enable GPS/telemetry indexing of dashcam videos
+  index_on_startup: false                # Auto-start indexer when web app launches
+  sample_rate: 30                        # Extract every Nth frame (30 = ~1/sec at 30fps)
+  trip_gap_minutes: 5                    # Gap between waypoints to start a new trip
+  event_detection:
+    harsh_brake_threshold: -4.0          # m/s² longitudinal (negative = braking)
+    emergency_brake_threshold: -7.0      # m/s² longitudinal
+    hard_accel_threshold: 3.5            # m/s² longitudinal (positive = accelerating)
+    sharp_turn_lateral_g: 4.0            # m/s² lateral
+    speed_limit_mps: 35.76              # ~80 mph speed alert threshold (0 = disabled)
+    fsd_disengage_detect: true           # Detect FSD engagement/disengagement events

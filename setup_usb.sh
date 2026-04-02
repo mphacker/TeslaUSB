@@ -567,6 +567,7 @@ REQUIRED_PACKAGES=(
   python3-av
   python3-pil
   python3-yaml
+  python3-protobuf
   yq
   samba
   samba-common-bin

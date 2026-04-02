@@ -33,6 +33,7 @@ from blueprints import (
     music_bp,
     wraps_bp,
     analytics_bp,
+    mapping_bp,
     cleanup_bp,
     api_bp,
     fsck_bp,
@@ -47,6 +48,7 @@ app.register_blueprint(light_shows_bp)
 app.register_blueprint(music_bp)
 app.register_blueprint(wraps_bp)
 app.register_blueprint(analytics_bp)
+app.register_blueprint(mapping_bp)
 app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)
 app.register_blueprint(fsck_bp)

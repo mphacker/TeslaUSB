@@ -1,0 +1,434 @@
+{% extends "base.html" %}
+
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/MarkerCluster.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/MarkerCluster.Default.css') }}">
+<style>
+    .map-container { display: flex; flex-direction: column; height: calc(100vh - 80px); gap: 0; }
+    #map { flex: 1; min-height: 300px; border-radius: 8px; z-index: 1; }
+
+    .map-toolbar {
+        display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 0;
+        align-items: center; font-size: 14px;
+    }
+    .map-toolbar button, .map-toolbar select {
+        padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border-color, #ccc);
+        background: var(--card-bg, #fff); color: var(--text-color, #333);
+        cursor: pointer; font-size: 13px;
+    }
+    .map-toolbar button:hover { background: var(--accent-color, #007bff); color: #fff; }
+    .map-toolbar button.active { background: var(--accent-color, #007bff); color: #fff; }
+    .map-toolbar .separator { border-left: 1px solid var(--border-color, #ccc); height: 24px; }
+
+    .stats-bar {
+        display: flex; gap: 16px; padding: 8px 12px; font-size: 13px;
+        background: var(--card-bg, #f8f9fa); border-radius: 6px;
+        flex-wrap: wrap; align-items: center;
+    }
+    .stats-bar .stat { display: flex; align-items: center; gap: 4px; }
+    .stats-bar .stat-value { font-weight: 600; }
+
+    .legend {
+        position: absolute; bottom: 30px; right: 10px; z-index: 1000;
+        background: var(--card-bg, #fff); padding: 10px 14px; border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15); font-size: 12px;
+        max-width: 200px;
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    .legend-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+
+    .indexer-status {
+        padding: 8px 12px; border-radius: 6px; font-size: 13px;
+        background: var(--card-bg, #f8f9fa);
+    }
+    .indexer-status.running { border-left: 3px solid #f0ad4e; }
+
+    .popup-video-link { color: var(--accent-color, #007bff); cursor: pointer; text-decoration: underline; }
+
+    /* FSD legend colors */
+    .fsd-engaged { background: #28a745; }
+    .fsd-manual { background: #6c757d; }
+
+    @media (max-width: 768px) {
+        .map-container { height: calc(100vh - 60px); }
+        .map-toolbar { padding: 6px 0; gap: 4px; }
+        .stats-bar { gap: 8px; font-size: 12px; }
+        .legend { bottom: 20px; right: 5px; }
+    }
+</style>
+
+<div class="container" style="max-width: 100%; padding: 0 12px;">
+    <div class="map-container">
+        <!-- Toolbar -->
+        <div class="map-toolbar">
+            <button id="btnTrips" class="active" onclick="showTrips()">🛣️ Trips</button>
+            <button id="btnEvents" onclick="showEvents()">⚡ Events</button>
+            <div class="separator"></div>
+            <select id="eventFilter" onchange="filterEvents()">
+                <option value="">All Events</option>
+                <option value="harsh_brake">Harsh Braking</option>
+                <option value="emergency_brake">Emergency Braking</option>
+                <option value="hard_acceleration">Hard Acceleration</option>
+                <option value="sharp_turn">Sharp Turn</option>
+                <option value="speeding">Speeding</option>
+                <option value="fsd_disengage">FSD Disengagement</option>
+                <option value="fsd_engage">FSD Engagement</option>
+            </select>
+            <div class="separator"></div>
+            <button id="btnFsd" onclick="toggleFsdOverlay()">🤖 FSD Overlay</button>
+            <div style="flex:1"></div>
+            <button id="btnIndex" onclick="triggerIndex()">🔄 Index Videos</button>
+        </div>
+
+        <!-- Stats bar -->
+        <div class="stats-bar" id="statsBar">
+            <div class="stat">🛣️ <span class="stat-value" id="statTrips">—</span> trips</div>
+            <div class="stat">📍 <span class="stat-value" id="statWaypoints">—</span> points</div>
+            <div class="stat">⚡ <span class="stat-value" id="statEvents">—</span> events</div>
+            <div class="stat">📏 <span class="stat-value" id="statDistance">—</span> km</div>
+            <div class="stat">📁 <span class="stat-value" id="statFiles">—</span> indexed</div>
+        </div>
+
+        <!-- Indexer status -->
+        <div class="indexer-status" id="indexerStatus" style="display:none"></div>
+
+        <!-- Map -->
+        <div id="map"></div>
+
+        <!-- Legend -->
+        <div class="legend" id="legend" style="display:none">
+            <strong>Events</strong>
+            <div class="legend-item"><span class="legend-dot" style="background:#dc3545"></span> Critical</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#ffc107"></span> Warning</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#17a2b8"></span> Info</div>
+            <div style="margin-top:6px"><strong>FSD</strong></div>
+            <div class="legend-item"><span class="legend-dot fsd-engaged"></span> Engaged</div>
+            <div class="legend-item"><span class="legend-dot fsd-manual"></span> Manual</div>
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.markercluster.js') }}"></script>
+<script>
+// Fix Leaflet marker icon path for vendored setup
+L.Icon.Default.imagePath = '{{ url_for("static", filename="vendor/leaflet/images/") }}';
+
+// --- Map Initialization ---
+const map = L.map('map').setView([37.7749, -122.4194], 10);
+
+// OpenStreetMap tiles (loaded from OSM servers; cached by browser for offline)
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+}).addTo(map);
+
+// Layer groups
+const tripLayer = L.layerGroup().addTo(map);
+const eventLayer = L.layerGroup();
+const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true });
+const fsdLayer = L.layerGroup();
+
+let currentView = 'trips';
+let fsdVisible = false;
+let allTrips = [];
+let allEvents = [];
+
+// Event severity colors
+const severityColors = {
+    critical: '#dc3545',
+    warning: '#ffc107',
+    info: '#17a2b8',
+};
+
+const eventIcons = {
+    harsh_brake: '🔴', emergency_brake: '🔴', hard_acceleration: '🟢',
+    sharp_turn: '🟡', speeding: '🟡', fsd_disengage: '🟠', fsd_engage: '🔵',
+    sentry: '🟣', saved: '🔵',
+};
+
+// --- Data Loading ---
+
+async function loadStats() {
+    try {
+        const resp = await fetch('/map/api/stats');
+        const data = await resp.json();
+        document.getElementById('statTrips').textContent = data.trip_count || 0;
+        document.getElementById('statWaypoints').textContent = (data.waypoint_count || 0).toLocaleString();
+        document.getElementById('statEvents').textContent = data.event_count || 0;
+        document.getElementById('statDistance').textContent = (data.total_distance_km || 0).toFixed(1);
+        document.getElementById('statFiles').textContent = data.indexed_file_count || 0;
+    } catch(e) { console.error('Failed to load stats:', e); }
+}
+
+async function loadTrips() {
+    try {
+        const resp = await fetch('/map/api/trips?limit=200');
+        const data = await resp.json();
+        allTrips = data.trips || [];
+        renderTrips();
+    } catch(e) { console.error('Failed to load trips:', e); }
+}
+
+async function loadTripRoute(tripId) {
+    try {
+        const resp = await fetch(`/map/api/trip/${tripId}/route`);
+        return await resp.json();
+    } catch(e) {
+        console.error('Failed to load route:', e);
+        return null;
+    }
+}
+
+async function loadEvents() {
+    const filter = document.getElementById('eventFilter').value;
+    const params = new URLSearchParams({ limit: 500 });
+    if (filter) params.set('type', filter);
+
+    try {
+        const resp = await fetch(`/map/api/events?${params}`);
+        const data = await resp.json();
+        allEvents = data.events || [];
+        renderEvents();
+    } catch(e) { console.error('Failed to load events:', e); }
+}
+
+// --- Rendering ---
+
+function renderTrips() {
+    tripLayer.clearLayers();
+    const bounds = [];
+
+    allTrips.forEach(trip => {
+        if (!trip.start_lat || !trip.start_lon) return;
+
+        // Trip start marker
+        const marker = L.circleMarker([trip.start_lat, trip.start_lon], {
+            radius: 6, fillColor: '#007bff', color: '#fff', weight: 2, fillOpacity: 0.8,
+        });
+
+        const dist = (trip.distance_km || 0).toFixed(1);
+        const dur = Math.round((trip.duration_seconds || 0) / 60);
+        marker.bindPopup(
+            `<strong>Trip #${trip.id}</strong><br>` +
+            `📅 ${trip.start_time || 'Unknown'}<br>` +
+            `📏 ${dist} km · ⏱ ${dur} min<br>` +
+            `📁 ${trip.source_folder || ''}<br>` +
+            `<a class="popup-video-link" onclick="showTripRoute(${trip.id})">Show Route →</a>`
+        );
+
+        tripLayer.addLayer(marker);
+        bounds.push([trip.start_lat, trip.start_lon]);
+
+        if (trip.end_lat && trip.end_lon) {
+            bounds.push([trip.end_lat, trip.end_lon]);
+        }
+    });
+
+    if (bounds.length > 0) {
+        map.fitBounds(bounds, { padding: [30, 30] });
+    }
+}
+
+async function showTripRoute(tripId) {
+    const geojson = await loadTripRoute(tripId);
+    if (!geojson || !geojson.geometry) return;
+
+    tripLayer.clearLayers();
+
+    // Draw route polyline colored by speed
+    const coords = geojson.geometry.coordinates;
+    const waypoints = geojson.properties.waypoints || [];
+
+    // Main route line
+    const latLngs = coords.map(c => [c[1], c[0]]);
+    const routeLine = L.polyline(latLngs, {
+        color: '#007bff', weight: 4, opacity: 0.8,
+    }).addTo(tripLayer);
+
+    // FSD overlay segments
+    fsdLayer.clearLayers();
+    let segStart = 0;
+    for (let i = 1; i < waypoints.length; i++) {
+        const prevAp = waypoints[i-1].autopilot_state;
+        const curAp = waypoints[i].autopilot_state;
+        if (prevAp !== curAp || i === waypoints.length - 1) {
+            const segCoords = latLngs.slice(segStart, i + 1);
+            const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(prevAp);
+            L.polyline(segCoords, {
+                color: engaged ? '#28a745' : '#6c757d',
+                weight: 6, opacity: 0.7,
+            }).addTo(fsdLayer);
+            segStart = i;
+        }
+    }
+
+    // Start/end markers
+    if (latLngs.length > 0) {
+        L.circleMarker(latLngs[0], {
+            radius: 8, fillColor: '#28a745', color: '#fff', weight: 2, fillOpacity: 0.9,
+        }).bindPopup('🟢 Trip Start').addTo(tripLayer);
+
+        L.circleMarker(latLngs[latLngs.length - 1], {
+            radius: 8, fillColor: '#dc3545', color: '#fff', weight: 2, fillOpacity: 0.9,
+        }).bindPopup('🔴 Trip End').addTo(tripLayer);
+    }
+
+    // Click on route to see video link
+    routeLine.on('click', function(e) {
+        // Find nearest waypoint
+        let minDist = Infinity, nearest = null;
+        waypoints.forEach(wp => {
+            const d = map.distance(e.latlng, [wp.lat, wp.lon]);
+            if (d < minDist) { minDist = d; nearest = wp; }
+        });
+        if (nearest && nearest.video_path) {
+            L.popup()
+                .setLatLng(e.latlng)
+                .setContent(
+                    `📍 ${nearest.lat.toFixed(5)}, ${nearest.lon.toFixed(5)}<br>` +
+                    `🏎️ ${(nearest.speed_mps * 2.237).toFixed(0)} mph<br>` +
+                    `🤖 ${nearest.autopilot_state || 'N/A'}<br>` +
+                    `🎥 <a href="/videos/stream/${nearest.video_path}" target="_blank">View Video</a>`
+                )
+                .openOn(map);
+        }
+    });
+
+    map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
+}
+
+function renderEvents() {
+    eventCluster.clearLayers();
+
+    allEvents.forEach(ev => {
+        if (!ev.lat || !ev.lon) return;
+        const color = severityColors[ev.severity] || '#17a2b8';
+        const icon = eventIcons[ev.event_type] || '📍';
+
+        const marker = L.circleMarker([ev.lat, ev.lon], {
+            radius: 8, fillColor: color, color: '#fff', weight: 2, fillOpacity: 0.9,
+        });
+
+        marker.bindPopup(
+            `<strong>${icon} ${ev.event_type.replace(/_/g, ' ')}</strong><br>` +
+            `📅 ${ev.timestamp}<br>` +
+            `${ev.description || ''}<br>` +
+            (ev.video_path ?
+                `🎥 <a href="/videos/stream/${ev.video_path}" target="_blank">View Video</a>` : '')
+        );
+
+        eventCluster.addLayer(marker);
+    });
+}
+
+// --- View Switching ---
+
+function showTrips() {
+    currentView = 'trips';
+    document.getElementById('btnTrips').classList.add('active');
+    document.getElementById('btnEvents').classList.remove('active');
+    document.getElementById('legend').style.display = 'none';
+    map.removeLayer(eventCluster);
+    tripLayer.addTo(map);
+    loadTrips();
+}
+
+function showEvents() {
+    currentView = 'events';
+    document.getElementById('btnEvents').classList.add('active');
+    document.getElementById('btnTrips').classList.remove('active');
+    document.getElementById('legend').style.display = 'block';
+    map.removeLayer(tripLayer);
+    eventCluster.addTo(map);
+    loadEvents();
+}
+
+function filterEvents() {
+    if (currentView === 'events') loadEvents();
+}
+
+function toggleFsdOverlay() {
+    fsdVisible = !fsdVisible;
+    document.getElementById('btnFsd').classList.toggle('active', fsdVisible);
+    if (fsdVisible) {
+        fsdLayer.addTo(map);
+    } else {
+        map.removeLayer(fsdLayer);
+    }
+}
+
+// --- Indexer ---
+
+async function triggerIndex() {
+    const btn = document.getElementById('btnIndex');
+    btn.disabled = true;
+    btn.textContent = '⏳ Starting...';
+
+    try {
+        const resp = await fetch('/map/api/index/trigger', { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            pollIndexer();
+        } else {
+            alert(data.message || 'Failed to start indexer');
+            btn.disabled = false;
+            btn.textContent = '🔄 Index Videos';
+        }
+    } catch(e) {
+        alert('Failed to start indexer: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = '🔄 Index Videos';
+    }
+}
+
+async function pollIndexer() {
+    const statusDiv = document.getElementById('indexerStatus');
+    const btn = document.getElementById('btnIndex');
+
+    try {
+        const resp = await fetch('/map/api/index/status');
+        const data = await resp.json();
+
+        if (data.running) {
+            statusDiv.style.display = 'block';
+            statusDiv.className = 'indexer-status running';
+            statusDiv.textContent = `⏳ ${data.progress || 'Indexing...'} (${data.files_done || 0}/${data.files_total || '?'})`;
+            btn.disabled = true;
+            btn.textContent = '⏳ Indexing...';
+            setTimeout(pollIndexer, 2000);
+        } else {
+            statusDiv.style.display = data.error ? 'block' : 'none';
+            if (data.error) {
+                statusDiv.className = 'indexer-status';
+                statusDiv.textContent = `❌ ${data.error}`;
+            } else if (data.progress) {
+                statusDiv.style.display = 'block';
+                statusDiv.className = 'indexer-status';
+                statusDiv.textContent = `✅ ${data.progress}`;
+                setTimeout(() => { statusDiv.style.display = 'none'; }, 10000);
+            }
+            btn.disabled = false;
+            btn.textContent = '🔄 Index Videos';
+            // Reload data
+            loadStats();
+            if (currentView === 'trips') loadTrips();
+            else loadEvents();
+        }
+    } catch(e) {
+        btn.disabled = false;
+        btn.textContent = '🔄 Index Videos';
+    }
+}
+
+// --- Init ---
+loadStats();
+loadTrips();
+
+// Check if indexer is already running on page load
+fetch('/map/api/index/status')
+    .then(r => r.json())
+    .then(data => { if (data.running) pollIndexer(); });
+</script>
+{% endblock %}

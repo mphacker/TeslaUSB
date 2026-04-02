@@ -273,6 +273,60 @@
     </div>
     {% endif %}
 
+    <!-- Driving Statistics & Event Analytics (from geo-index) -->
+    {% if map_available %}
+    <div class="analytics-section" id="drivingStatsSection">
+        <h3>🗺️ Driving Statistics</h3>
+        <p class="section-description">GPS and telemetry data extracted from dashcam videos. <a href="{{ url_for('mapping.map_view') }}">Open Map →</a></p>
+        <div id="drivingStatsContent">
+            <div class="analytics-grid" id="drivingStatsGrid" style="display:none">
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Total Distance</span><span class="stat-value" id="dsTotalDist">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Total Drive Time</span><span class="stat-value" id="dsTotalTime">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Total Trips</span><span class="stat-value" id="dsTripCount">—</span></div>
+                </div>
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Avg Speed</span><span class="stat-value" id="dsAvgSpeed">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Max Speed</span><span class="stat-value" id="dsMaxSpeed">—</span></div>
+                    <div class="stat-row"><span class="stat-label">FSD Usage</span><span class="stat-value" id="dsFsdPct">—</span></div>
+                </div>
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Total Events</span><span class="stat-value" id="dsEventCount">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Warnings/Critical</span><span class="stat-value" id="dsWarnCount">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Events per 100 km</span><span class="stat-value" id="dsEvPer100">—</span></div>
+                </div>
+            </div>
+            <div id="drivingStatsEmpty" style="text-align:center;padding:20px;color:var(--text-muted,#888);">
+                No driving data indexed yet. <a href="{{ url_for('mapping.map_view') }}">Go to Map</a> and click "Index Videos" to get started.
+            </div>
+        </div>
+    </div>
+
+    <div class="analytics-section" id="eventChartsSection" style="display:none">
+        <h3>⚡ Event Analytics</h3>
+        <div class="analytics-grid" style="grid-template-columns: 1fr 1fr;">
+            <div class="analytics-card">
+                <h4 style="margin:0 0 8px">Events by Type</h4>
+                <canvas id="chartByType" height="220"></canvas>
+            </div>
+            <div class="analytics-card">
+                <h4 style="margin:0 0 8px">Events by Severity</h4>
+                <canvas id="chartBySeverity" height="220"></canvas>
+            </div>
+        </div>
+        <div class="analytics-grid" style="grid-template-columns: 1fr 1fr; margin-top: 12px;">
+            <div class="analytics-card">
+                <h4 style="margin:0 0 8px">Events Over Time (30 days)</h4>
+                <canvas id="chartOverTime" height="180"></canvas>
+            </div>
+            <div class="analytics-card">
+                <h4 style="margin:0 0 8px">FSD vs Manual Driving (30 days)</h4>
+                <canvas id="chartFsd" height="180"></canvas>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- Last Updated -->
     <div class="last-updated">
         Last updated: {{ analytics.last_updated }}
@@ -675,4 +729,115 @@ document.addEventListener('DOMContentLoaded', function() {
     updateFsckStatus(); // Check if any check is currently running
 });
 </script>
+
+{% if map_available %}
+<script src="{{ url_for('static', filename='vendor/chartjs/chart.umd.min.js') }}"></script>
+<script>
+// Driving Statistics & Event Charts
+const chartColors = {
+    critical: '#dc3545', warning: '#ffc107', info: '#17a2b8',
+    fsd: '#28a745', manual: '#6c757d', line: '#007bff',
+};
+
+async function loadDrivingStats() {
+    try {
+        const resp = await fetch('/map/api/driving-stats');
+        const data = await resp.json();
+        if (!data.has_data) return;
+
+        document.getElementById('drivingStatsGrid').style.display = '';
+        document.getElementById('drivingStatsEmpty').style.display = 'none';
+
+        document.getElementById('dsTotalDist').textContent = `${data.total_distance_mi} mi (${data.total_distance_km} km)`;
+        document.getElementById('dsTotalTime').textContent = `${data.total_duration_hours} hrs`;
+        document.getElementById('dsTripCount').textContent = data.trip_count;
+        document.getElementById('dsAvgSpeed').textContent = `${data.avg_speed_mph} mph`;
+        document.getElementById('dsMaxSpeed').textContent = `${data.max_speed_mph} mph`;
+        document.getElementById('dsFsdPct').textContent = `${data.fsd_usage_pct}%`;
+        document.getElementById('dsEventCount').textContent = data.total_events;
+        document.getElementById('dsWarnCount').textContent = data.warning_events;
+        document.getElementById('dsEvPer100').textContent = data.events_per_100km;
+    } catch(e) { console.error('Failed to load driving stats:', e); }
+}
+
+async function loadEventCharts() {
+    try {
+        const resp = await fetch('/map/api/event-charts');
+        const data = await resp.json();
+        if (!data.by_type || !data.by_type.labels.length) return;
+
+        document.getElementById('eventChartsSection').style.display = '';
+
+        // Events by Type — horizontal bar
+        new Chart(document.getElementById('chartByType'), {
+            type: 'bar',
+            data: {
+                labels: data.by_type.labels,
+                datasets: [{ data: data.by_type.values, backgroundColor: chartColors.line }]
+            },
+            options: {
+                indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: { x: { beginAtZero: true, ticks: { precision: 0 } } }
+            }
+        });
+
+        // Events by Severity — doughnut
+        new Chart(document.getElementById('chartBySeverity'), {
+            type: 'doughnut',
+            data: {
+                labels: data.by_severity.labels,
+                datasets: [{ data: data.by_severity.values, backgroundColor: data.by_severity.colors }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom' } }
+            }
+        });
+
+        // Events over time — line
+        if (data.over_time.labels.length > 0) {
+            new Chart(document.getElementById('chartOverTime'), {
+                type: 'line',
+                data: {
+                    labels: data.over_time.labels,
+                    datasets: [{
+                        label: 'Events', data: data.over_time.values,
+                        borderColor: chartColors.line, backgroundColor: 'rgba(0,123,255,0.1)',
+                        fill: true, tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+
+        // FSD vs Manual — stacked bar
+        if (data.fsd_timeline.labels.length > 0) {
+            new Chart(document.getElementById('chartFsd'), {
+                type: 'bar',
+                data: {
+                    labels: data.fsd_timeline.labels,
+                    datasets: [
+                        { label: 'FSD', data: data.fsd_timeline.fsd, backgroundColor: chartColors.fsd },
+                        { label: 'Manual', data: data.fsd_timeline.manual, backgroundColor: chartColors.manual }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: { x: { stacked: true }, y: { stacked: true, ticks: { precision: 0 } } },
+                    plugins: { legend: { position: 'bottom' } }
+                }
+            });
+        }
+    } catch(e) { console.error('Failed to load event charts:', e); }
+}
+
+loadDrivingStats();
+loadEventCharts();
+</script>
+{% endif %}
 {% endblock %}

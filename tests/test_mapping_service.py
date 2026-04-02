@@ -22,6 +22,8 @@ from services.mapping_service import (
     query_trip_route,
     query_events,
     get_stats,
+    get_driving_stats,
+    get_event_chart_data,
     DEFAULT_THRESHOLDS,
     _SCHEMA_VERSION,
 )
@@ -505,3 +507,160 @@ class TestIndexVideo:
         assert wc == 0
         assert ec == 0
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Driving Stats & Event Chart Data Tests
+# ---------------------------------------------------------------------------
+
+class TestDrivingStats:
+    @pytest.fixture
+    def db_with_driving_data(self, tmp_path):
+        db_path = str(tmp_path / "stats.db")
+        conn = _init_db(db_path)
+
+        conn.execute(
+            """INSERT INTO trips (id, start_time, end_time, start_lat, start_lon,
+               end_lat, end_lon, distance_km, duration_seconds, source_folder)
+               VALUES (1, '2025-11-08T08:15:44', '2025-11-08T08:25:44',
+               37.7749, -122.4194, 37.7850, -122.4100, 15.5, 600, 'RecentClips')"""
+        )
+        conn.execute(
+            """INSERT INTO trips (id, start_time, end_time, distance_km, duration_seconds, source_folder)
+               VALUES (2, '2025-11-09T10:00:00', '2025-11-09T10:30:00', 25.0, 1800, 'RecentClips')"""
+        )
+
+        # Waypoints with mixed autopilot states
+        for i in range(10):
+            ap = 'AUTOSTEER' if i < 4 else 'NONE'
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon, speed_mps,
+                   autopilot_state, video_path, frame_offset)
+                   VALUES (1, ?, ?, ?, ?, ?, 'test.mp4', ?)""",
+                (f'2025-11-08T08:1{5+i}:44', 37.77 + i*0.001, -122.41 + i*0.001,
+                 20.0 + i, ap, i*30)
+            )
+
+        # Events
+        conn.execute(
+            """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+               event_type, severity, description)
+               VALUES (1, '2025-11-08T08:17:44', 37.77, -122.41,
+               'harsh_brake', 'warning', 'test')"""
+        )
+        conn.execute(
+            """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+               event_type, severity, description)
+               VALUES (1, '2025-11-08T08:18:44', 37.77, -122.41,
+               'speeding', 'info', 'test')"""
+        )
+        conn.execute(
+            """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+               event_type, severity, description)
+               VALUES (1, '2025-11-08T08:19:44', 37.77, -122.41,
+               'emergency_brake', 'critical', 'test')"""
+        )
+
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_has_data(self, db_with_driving_data):
+        stats = get_driving_stats(db_with_driving_data)
+        assert stats['has_data'] is True
+
+    def test_trip_count(self, db_with_driving_data):
+        stats = get_driving_stats(db_with_driving_data)
+        assert stats['trip_count'] == 2
+
+    def test_total_distance(self, db_with_driving_data):
+        stats = get_driving_stats(db_with_driving_data)
+        assert stats['total_distance_km'] == 40.5  # 15.5 + 25.0
+
+    def test_fsd_usage(self, db_with_driving_data):
+        stats = get_driving_stats(db_with_driving_data)
+        # 4 out of 10 waypoints are AUTOSTEER = 40%
+        assert stats['fsd_usage_pct'] == 40.0
+
+    def test_event_counts(self, db_with_driving_data):
+        stats = get_driving_stats(db_with_driving_data)
+        assert stats['total_events'] == 3
+        assert stats['warning_events'] == 2  # 1 warning + 1 critical
+
+    def test_events_per_100km(self, db_with_driving_data):
+        stats = get_driving_stats(db_with_driving_data)
+        # 2 warning/critical events / 40.5 km * 100 = ~4.9
+        assert 4.0 < stats['events_per_100km'] < 6.0
+
+    def test_empty_db(self, tmp_path):
+        db_path = str(tmp_path / "empty.db")
+        _init_db(db_path)
+        stats = get_driving_stats(db_path)
+        assert stats['has_data'] is False
+
+
+class TestEventChartData:
+    @pytest.fixture
+    def db_with_events(self, tmp_path):
+        db_path = str(tmp_path / "charts.db")
+        conn = _init_db(db_path)
+
+        # Need a trip for FK constraints
+        conn.execute(
+            """INSERT INTO trips (id, start_time, distance_km, duration_seconds, source_folder)
+               VALUES (1, '2025-11-08T08:10:00', 10.0, 600, 'RecentClips')"""
+        )
+
+        # Insert waypoints with FSD data
+        for i in range(5):
+            ap = 'SELF_DRIVING' if i < 2 else 'NONE'
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon, speed_mps,
+                   autopilot_state) VALUES (1, ?, 37.0, -122.0, 25.0, ?)""",
+                (f'2025-11-08T08:1{i}:00', ap)
+            )
+
+        events = [
+            ('harsh_brake', 'warning'), ('harsh_brake', 'warning'),
+            ('speeding', 'info'), ('emergency_brake', 'critical'),
+            ('fsd_disengage', 'warning'),
+        ]
+        for i, (etype, sev) in enumerate(events):
+            conn.execute(
+                """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+                   event_type, severity, description)
+                   VALUES (1, ?, 37.0, -122.0, ?, ?, 'test')""",
+                (f'2025-11-08T08:1{i}:00', etype, sev)
+            )
+
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_by_type(self, db_with_events):
+        data = get_event_chart_data(db_with_events)
+        assert len(data['by_type']['labels']) > 0
+        assert sum(data['by_type']['values']) == 5
+
+    def test_by_severity(self, db_with_events):
+        data = get_event_chart_data(db_with_events)
+        assert len(data['by_severity']['labels']) == 3  # critical, warning, info
+        assert len(data['by_severity']['colors']) == 3
+
+    def test_over_time(self, db_with_events):
+        data = get_event_chart_data(db_with_events)
+        assert 'labels' in data['over_time']
+        assert 'values' in data['over_time']
+
+    def test_fsd_timeline(self, db_with_events):
+        data = get_event_chart_data(db_with_events)
+        assert 'labels' in data['fsd_timeline']
+        assert 'fsd' in data['fsd_timeline']
+        assert 'manual' in data['fsd_timeline']
+
+    def test_empty_db(self, tmp_path):
+        db_path = str(tmp_path / "empty.db")
+        _init_db(db_path)
+        data = get_event_chart_data(db_path)
+        assert data['by_type']['labels'] == []
+        assert data['by_type']['values'] == []

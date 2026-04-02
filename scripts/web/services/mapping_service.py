@@ -806,3 +806,125 @@ def get_stats(db_path: str) -> dict:
         }
     finally:
         conn.close()
+
+
+def get_driving_stats(db_path: str) -> dict:
+    """Get driving behavior statistics for the analytics dashboard."""
+    conn = _init_db(db_path)
+    try:
+        trip_count = conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0]
+        if trip_count == 0:
+            return {'has_data': False}
+
+        total_distance = conn.execute(
+            "SELECT COALESCE(SUM(distance_km), 0) FROM trips"
+        ).fetchone()[0]
+        total_duration = conn.execute(
+            "SELECT COALESCE(SUM(duration_seconds), 0) FROM trips"
+        ).fetchone()[0]
+        avg_speed = conn.execute(
+            "SELECT COALESCE(AVG(speed_mps), 0) FROM waypoints WHERE speed_mps > 0.5"
+        ).fetchone()[0]
+        max_speed = conn.execute(
+            "SELECT COALESCE(MAX(speed_mps), 0) FROM waypoints"
+        ).fetchone()[0]
+
+        # FSD usage
+        total_wp = conn.execute("SELECT COUNT(*) FROM waypoints").fetchone()[0]
+        fsd_wp = conn.execute(
+            "SELECT COUNT(*) FROM waypoints WHERE autopilot_state IN ('SELF_DRIVING', 'AUTOSTEER')"
+        ).fetchone()[0]
+        fsd_pct = round((fsd_wp / total_wp * 100) if total_wp > 0 else 0, 1)
+
+        # Events per 100 km (driving score proxy)
+        event_count = conn.execute("SELECT COUNT(*) FROM detected_events").fetchone()[0]
+        warning_count = conn.execute(
+            "SELECT COUNT(*) FROM detected_events WHERE severity IN ('warning', 'critical')"
+        ).fetchone()[0]
+        events_per_100km = round(
+            (warning_count / total_distance * 100) if total_distance > 0 else 0, 1
+        )
+
+        return {
+            'has_data': True,
+            'trip_count': trip_count,
+            'total_distance_km': round(total_distance, 1),
+            'total_distance_mi': round(total_distance * 0.621371, 1),
+            'total_duration_hours': round(total_duration / 3600, 1),
+            'avg_speed_mph': round(avg_speed * 2.23694, 1),
+            'max_speed_mph': round(max_speed * 2.23694, 1),
+            'fsd_usage_pct': fsd_pct,
+            'total_events': event_count,
+            'warning_events': warning_count,
+            'events_per_100km': events_per_100km,
+        }
+    finally:
+        conn.close()
+
+
+def get_event_chart_data(db_path: str) -> dict:
+    """Get event data formatted for Chart.js rendering."""
+    conn = _init_db(db_path)
+    try:
+        # Events by type
+        type_rows = conn.execute(
+            """SELECT event_type, COUNT(*) as cnt
+               FROM detected_events GROUP BY event_type ORDER BY cnt DESC"""
+        ).fetchall()
+        by_type = {
+            'labels': [r['event_type'].replace('_', ' ').title() for r in type_rows],
+            'values': [r['cnt'] for r in type_rows],
+        }
+
+        # Events by severity
+        sev_rows = conn.execute(
+            """SELECT severity, COUNT(*) as cnt
+               FROM detected_events GROUP BY severity ORDER BY
+               CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END"""
+        ).fetchall()
+        by_severity = {
+            'labels': [r['severity'].title() for r in sev_rows],
+            'values': [r['cnt'] for r in sev_rows],
+            'colors': [
+                '#dc3545' if r['severity'] == 'critical'
+                else '#ffc107' if r['severity'] == 'warning'
+                else '#17a2b8'
+                for r in sev_rows
+            ],
+        }
+
+        # Events over time (by day, last 30 days)
+        time_rows = conn.execute(
+            """SELECT DATE(timestamp) as day, COUNT(*) as cnt
+               FROM detected_events
+               WHERE timestamp >= DATE('now', '-30 days')
+               GROUP BY day ORDER BY day"""
+        ).fetchall()
+        over_time = {
+            'labels': [r['day'] for r in time_rows],
+            'values': [r['cnt'] for r in time_rows],
+        }
+
+        # FSD engage vs manual over time (by day)
+        fsd_rows = conn.execute(
+            """SELECT DATE(timestamp) as day,
+                      SUM(CASE WHEN autopilot_state IN ('SELF_DRIVING','AUTOSTEER') THEN 1 ELSE 0 END) as fsd,
+                      SUM(CASE WHEN autopilot_state NOT IN ('SELF_DRIVING','AUTOSTEER') THEN 1 ELSE 0 END) as manual
+               FROM waypoints
+               WHERE timestamp >= DATE('now', '-30 days')
+               GROUP BY day ORDER BY day"""
+        ).fetchall()
+        fsd_timeline = {
+            'labels': [r['day'] for r in fsd_rows],
+            'fsd': [r['fsd'] for r in fsd_rows],
+            'manual': [r['manual'] for r in fsd_rows],
+        }
+
+        return {
+            'by_type': by_type,
+            'by_severity': by_severity,
+            'over_time': over_time,
+            'fsd_timeline': fsd_timeline,
+        }
+    finally:
+        conn.close()

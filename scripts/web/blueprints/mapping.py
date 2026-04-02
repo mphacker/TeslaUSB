@@ -188,3 +188,29 @@ def api_index_cancel():
     from services.mapping_service import cancel_indexer
     success, message = cancel_indexer()
     return jsonify({'success': success, 'message': message})
+
+
+# ---------------------------------------------------------------------------
+# Driving Stats & Event Analytics APIs
+# ---------------------------------------------------------------------------
+
+@mapping_bp.route("/api/driving-stats")
+def api_driving_stats():
+    """Get driving behavior statistics."""
+    from services.mapping_service import get_driving_stats
+    try:
+        return jsonify(get_driving_stats(MAPPING_DB_PATH))
+    except Exception as e:
+        logger.error("Failed to get driving stats: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+@mapping_bp.route("/api/event-charts")
+def api_event_charts():
+    """Get event data formatted for Chart.js."""
+    from services.mapping_service import get_event_chart_data
+    try:
+        return jsonify(get_event_chart_data(MAPPING_DB_PATH))
+    except Exception as e:
+        logger.error("Failed to get event chart data: %s", e)
+        return jsonify({'error': str(e)}), 500

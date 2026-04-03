@@ -49,6 +49,33 @@
 
     .popup-video-link { color: var(--accent-color, #007bff); cursor: pointer; text-decoration: underline; }
 
+    /* Video player overlay */
+    .video-overlay {
+        position: fixed; z-index: 2000;
+        background: var(--bg-secondary, #1a1a2e); border-radius: 12px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.5); overflow: hidden;
+        width: 480px; max-width: 90vw;
+        border: 1px solid var(--border, #333);
+    }
+    .video-overlay-header {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 8px 12px; background: var(--bg-primary, #111);
+        font-size: 13px; color: var(--text-secondary, #aaa);
+    }
+    .video-overlay-header .close-btn {
+        background: none; border: none; color: var(--text-secondary, #aaa);
+        font-size: 20px; cursor: pointer; padding: 0 4px; line-height: 1;
+    }
+    .video-overlay-header .close-btn:hover { color: #dc3545; }
+    .video-overlay video {
+        width: 100%; display: block; background: #000;
+        max-height: 50vh;
+    }
+    .video-overlay-info {
+        padding: 8px 12px; font-size: 12px; color: var(--text-secondary, #aaa);
+        display: flex; gap: 12px; flex-wrap: wrap;
+    }
+
     /* FSD legend colors */
     .fsd-engaged { background: #28a745; }
     .fsd-manual { background: #6c757d; }
@@ -66,9 +93,11 @@
         <!-- Toolbar -->
         <div class="map-toolbar">
             <button id="btnTrips" class="active" onclick="showTrips()">🛣️ Trips</button>
+            <select id="tripFilter" onchange="filterTrips()" style="display:none">
+                <option value="">All Trips</option>
+            </select>
             <button id="btnEvents" onclick="showEvents()">⚡ Events</button>
-            <div class="separator"></div>
-            <select id="eventFilter" onchange="filterEvents()">
+            <select id="eventFilter" onchange="filterEvents()" style="display:none">
                 <option value="">All Events</option>
                 <option value="harsh_brake">Harsh Braking</option>
                 <option value="emergency_brake">Emergency Braking</option>
@@ -200,8 +229,32 @@ async function loadTrips() {
         const resp = await fetch('/map/api/trips?limit=200');
         const data = await resp.json();
         allTrips = data.trips || [];
-        renderTrips();
+
+        // Populate trip dropdown
+        const sel = document.getElementById('tripFilter');
+        sel.innerHTML = '<option value="">All Trips</option>';
+        allTrips.forEach(t => {
+            const date = (t.start_time || '').replace('T', ' ').substring(0, 16);
+            const dist = (t.distance_km || 0).toFixed(1);
+            sel.innerHTML += `<option value="${t.id}">${date} — ${dist} km</option>`;
+        });
+
+        await renderTrips();
     } catch(e) { console.error('Failed to load trips:', e); }
+}
+
+function filterTrips() {
+    const selected = document.getElementById('tripFilter').value;
+    if (selected) {
+        const trip = allTrips.find(t => t.id == selected);
+        if (trip) {
+            const saved = allTrips;
+            allTrips = [trip];
+            renderTrips().then(() => { allTrips = saved; });
+        }
+    } else {
+        renderTrips();
+    }
 }
 
 async function loadTripRoute(tripId) {
@@ -229,108 +282,162 @@ async function loadEvents() {
 
 // --- Rendering ---
 
-function renderTrips() {
+async function renderTrips() {
     tripLayer.clearLayers();
+    fsdLayer.clearLayers();
     const bounds = [];
 
-    allTrips.forEach(trip => {
-        if (!trip.start_lat || !trip.start_lon) return;
-
-        // Trip start marker
-        const marker = L.circleMarker([trip.start_lat, trip.start_lon], {
-            radius: 6, fillColor: '#007bff', color: '#fff', weight: 2, fillOpacity: 0.8,
-        });
-
-        const dist = (trip.distance_km || 0).toFixed(1);
-        const dur = Math.round((trip.duration_seconds || 0) / 60);
-        marker.bindPopup(
-            `<strong>Trip #${trip.id}</strong><br>` +
-            `📅 ${trip.start_time || 'Unknown'}<br>` +
-            `📏 ${dist} km · ⏱ ${dur} min<br>` +
-            `📁 ${trip.source_folder || ''}<br>` +
-            `<a class="popup-video-link" onclick="showTripRoute(${trip.id})">Show Route →</a>`
-        );
-
-        tripLayer.addLayer(marker);
+    for (const trip of allTrips) {
+        if (!trip.start_lat || !trip.start_lon) continue;
         bounds.push([trip.start_lat, trip.start_lon]);
+        if (trip.end_lat && trip.end_lon) bounds.push([trip.end_lat, trip.end_lon]);
 
-        if (trip.end_lat && trip.end_lon) {
-            bounds.push([trip.end_lat, trip.end_lon]);
+        const geojson = await loadTripRoute(trip.id);
+        if (!geojson || !geojson.geometry) continue;
+
+        const coords = geojson.geometry.coordinates;
+        const waypoints = geojson.properties.waypoints || [];
+        const latLngs = coords.map(c => [c[1], c[0]]);
+
+        // Route polyline
+        const routeLine = L.polyline(latLngs, {
+            color: '#007bff', weight: 4, opacity: 0.8,
+        }).addTo(tripLayer);
+
+        // FSD overlay segments
+        let segStart = 0;
+        for (let i = 1; i < waypoints.length; i++) {
+            const prevAp = waypoints[i-1].autopilot_state;
+            const curAp = waypoints[i].autopilot_state;
+            if (prevAp !== curAp || i === waypoints.length - 1) {
+                const segCoords = latLngs.slice(segStart, i + 1);
+                const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(prevAp);
+                L.polyline(segCoords, {
+                    color: engaged ? '#28a745' : '#6c757d',
+                    weight: 6, opacity: 0.7,
+                }).addTo(fsdLayer);
+                segStart = i;
+            }
         }
-    });
+
+        // Start/end markers
+        if (latLngs.length > 0) {
+            const dist = (trip.distance_km || 0).toFixed(1);
+            const dur = Math.round((trip.duration_seconds || 0) / 60);
+            L.circleMarker(latLngs[0], {
+                radius: 8, fillColor: '#28a745', color: '#fff', weight: 2, fillOpacity: 0.9,
+            }).bindPopup(
+                `<strong>🟢 Trip #${trip.id}</strong><br>` +
+                `📅 ${trip.start_time || 'Unknown'}<br>` +
+                `📏 ${dist} km · ⏱ ${dur} min`
+            ).addTo(tripLayer);
+
+            L.circleMarker(latLngs[latLngs.length - 1], {
+                radius: 8, fillColor: '#dc3545', color: '#fff', weight: 2, fillOpacity: 0.9,
+            }).bindPopup('🔴 Trip End').addTo(tripLayer);
+        }
+
+        // Click route to open video player overlay
+        routeLine.on('click', function(e) {
+            let minDist = Infinity, nearest = null;
+            waypoints.forEach(wp => {
+                const d = map.distance(e.latlng, [wp.lat, wp.lon]);
+                if (d < minDist) { minDist = d; nearest = wp; }
+            });
+            if (nearest && nearest.video_path) {
+                openVideoOverlay(nearest, e.containerPoint);
+            }
+        });
+    }
 
     if (bounds.length > 0) {
         map.fitBounds(bounds, { padding: [30, 30] });
     }
 }
 
-async function showTripRoute(tripId) {
-    const geojson = await loadTripRoute(tripId);
-    if (!geojson || !geojson.geometry) return;
+// --- Video Player Overlay ---
 
-    tripLayer.clearLayers();
+function openVideoOverlay(waypoint, clickPoint) {
+    // Remove any existing overlay
+    closeVideoOverlay();
 
-    // Draw route polyline colored by speed
-    const coords = geojson.geometry.coordinates;
-    const waypoints = geojson.properties.waypoints || [];
+    const streamUrl = `/videos/stream/${waypoint.video_path}`;
+    const speed = (waypoint.speed_mps * 2.237).toFixed(0);
+    const ap = waypoint.autopilot_state || 'N/A';
 
-    // Main route line
-    const latLngs = coords.map(c => [c[1], c[0]]);
-    const routeLine = L.polyline(latLngs, {
-        color: '#007bff', weight: 4, opacity: 0.8,
-    }).addTo(tripLayer);
+    // Position near click but keep on screen
+    const mapEl = document.getElementById('map');
+    const mapRect = mapEl.getBoundingClientRect();
+    let left = mapRect.left + clickPoint.x + 15;
+    let top = mapRect.top + clickPoint.y - 100;
+    // Keep within viewport
+    if (left + 490 > window.innerWidth) left = window.innerWidth - 500;
+    if (top + 350 > window.innerHeight) top = window.innerHeight - 360;
+    if (left < 10) left = 10;
+    if (top < 10) top = 10;
 
-    // FSD overlay segments
-    fsdLayer.clearLayers();
-    let segStart = 0;
-    for (let i = 1; i < waypoints.length; i++) {
-        const prevAp = waypoints[i-1].autopilot_state;
-        const curAp = waypoints[i].autopilot_state;
-        if (prevAp !== curAp || i === waypoints.length - 1) {
-            const segCoords = latLngs.slice(segStart, i + 1);
-            const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(prevAp);
-            L.polyline(segCoords, {
-                color: engaged ? '#28a745' : '#6c757d',
-                weight: 6, opacity: 0.7,
-            }).addTo(fsdLayer);
-            segStart = i;
-        }
-    }
+    const overlay = document.createElement('div');
+    overlay.className = 'video-overlay';
+    overlay.id = 'videoOverlay';
+    overlay.style.left = left + 'px';
+    overlay.style.top = top + 'px';
 
-    // Start/end markers
-    if (latLngs.length > 0) {
-        L.circleMarker(latLngs[0], {
-            radius: 8, fillColor: '#28a745', color: '#fff', weight: 2, fillOpacity: 0.9,
-        }).bindPopup('🟢 Trip Start').addTo(tripLayer);
+    overlay.innerHTML = `
+        <div class="video-overlay-header">
+            <span>🎥 ${waypoint.video_path.split('/').pop()}</span>
+            <button class="close-btn" onclick="closeVideoOverlay()">✕</button>
+        </div>
+        <video id="overlayVideo" controls autoplay muted>
+            <source src="${streamUrl}" type="video/mp4">
+        </video>
+        <div class="video-overlay-info">
+            <span>🏎️ ${speed} mph</span>
+            <span>🤖 ${ap}</span>
+            <span>📍 ${waypoint.lat.toFixed(4)}, ${waypoint.lon.toFixed(4)}</span>
+        </div>
+    `;
 
-        L.circleMarker(latLngs[latLngs.length - 1], {
-            radius: 8, fillColor: '#dc3545', color: '#fff', weight: 2, fillOpacity: 0.9,
-        }).bindPopup('🔴 Trip End').addTo(tripLayer);
-    }
+    document.body.appendChild(overlay);
 
-    // Click on route to see video link
-    routeLine.on('click', function(e) {
-        // Find nearest waypoint
-        let minDist = Infinity, nearest = null;
-        waypoints.forEach(wp => {
-            const d = map.distance(e.latlng, [wp.lat, wp.lon]);
-            if (d < minDist) { minDist = d; nearest = wp; }
-        });
-        if (nearest && nearest.video_path) {
-            const videoLink = buildVideoLink(nearest.video_path, nearest.timestamp);
-            L.popup()
-                .setLatLng(e.latlng)
-                .setContent(
-                    `📍 ${nearest.lat.toFixed(5)}, ${nearest.lon.toFixed(5)}<br>` +
-                    `🏎️ ${(nearest.speed_mps * 2.237).toFixed(0)} mph<br>` +
-                    `🤖 ${nearest.autopilot_state || 'N/A'}<br>` +
-                    `🎥 <a href="${videoLink}" target="_blank">View Video</a>`
-                )
-                .openOn(map);
-        }
+    // Make draggable
+    let isDragging = false, dragX, dragY;
+    const header = overlay.querySelector('.video-overlay-header');
+    header.style.cursor = 'grab';
+    header.addEventListener('mousedown', (e) => {
+        if (e.target.classList.contains('close-btn')) return;
+        isDragging = true;
+        dragX = e.clientX - overlay.offsetLeft;
+        dragY = e.clientY - overlay.offsetTop;
+        header.style.cursor = 'grabbing';
+    });
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        overlay.style.left = (e.clientX - dragX) + 'px';
+        overlay.style.top = (e.clientY - dragY) + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+        isDragging = false;
+        header.style.cursor = 'grab';
     });
 
-    map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
+    // Try to seek to approximate position (2 seconds before the waypoint's frame)
+    const video = document.getElementById('overlayVideo');
+    video.addEventListener('loadedmetadata', () => {
+        // Estimate time: frame_offset / 36 fps ≈ seconds, minus 2s buffer
+        const estimatedTime = Math.max(0, (waypoint.frame_offset || 0) / 36 - 2);
+        if (estimatedTime > 0 && estimatedTime < video.duration) {
+            video.currentTime = estimatedTime;
+        }
+    });
+}
+
+function closeVideoOverlay() {
+    const existing = document.getElementById('videoOverlay');
+    if (existing) {
+        const video = existing.querySelector('video');
+        if (video) { video.pause(); video.src = ''; }
+        existing.remove();
+    }
 }
 
 function renderEvents() {
@@ -363,6 +470,8 @@ function showTrips() {
     currentView = 'trips';
     document.getElementById('btnTrips').classList.add('active');
     document.getElementById('btnEvents').classList.remove('active');
+    document.getElementById('tripFilter').style.display = '';
+    document.getElementById('eventFilter').style.display = 'none';
     document.getElementById('legend').style.display = 'none';
     map.removeLayer(eventCluster);
     tripLayer.addTo(map);
@@ -373,6 +482,8 @@ function showEvents() {
     currentView = 'events';
     document.getElementById('btnEvents').classList.add('active');
     document.getElementById('btnTrips').classList.remove('active');
+    document.getElementById('eventFilter').style.display = '';
+    document.getElementById('tripFilter').style.display = 'none';
     document.getElementById('legend').style.display = 'block';
     map.removeLayer(tripLayer);
     eventCluster.addTo(map);

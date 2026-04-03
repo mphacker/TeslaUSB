@@ -266,7 +266,11 @@ async function loadTrips() {
 
         // Populate trip dropdown
         const sel = document.getElementById('tripFilter');
-        sel.innerHTML = '<option value="">All Trips</option>';
+        sel.replaceChildren();
+        const defaultOpt = document.createElement('option');
+        defaultOpt.value = '';
+        defaultOpt.textContent = 'All Trips';
+        sel.appendChild(defaultOpt);
         allTrips.forEach(t => {
             const date = formatLocalTime(t.start_time);
             const dist = ((t.distance_km || 0) * 0.621371).toFixed(1);
@@ -464,7 +468,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
 
     const cameraBtns = CAMERA_ANGLES.map(a => {
         const active = a === overlayCurrentAngle ? ' active' : '';
-        return `<button class="cam-btn${active}" data-angle="${a}" onclick="switchCamera('${a}')">${CAMERA_LABELS[a]}</button>`;
+        return `<button class="cam-btn${active}" data-angle="${a}">${CAMERA_LABELS[a]}</button>`;
     }).join('');
 
     overlay.innerHTML = `
@@ -654,6 +658,11 @@ document.addEventListener('click', function(e) {
             parseFloat(link.dataset.lat) || 0,
             parseFloat(link.dataset.lon) || 0
         );
+        return;
+    }
+    const camBtn = e.target.closest('.cam-btn');
+    if (camBtn && camBtn.dataset.angle) {
+        switchCamera(camBtn.dataset.angle);
     }
 });
 
@@ -684,7 +693,7 @@ function renderEvents() {
         });
 
         marker.bindPopup(
-            `<strong>${icon} ${ev.event_type.replace(/_/g, ' ')}</strong><br>` +
+            `<strong>${icon} ${(ev.event_type || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/_/g, ' ')}</strong><br>` +
             `📅 ${formatLocalTime(ev.timestamp)}<br>` +
             `${(ev.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}<br>` +
             (ev.video_path ?

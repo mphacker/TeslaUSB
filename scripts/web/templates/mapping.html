@@ -77,6 +77,7 @@
             </select>
             <div class="separator"></div>
             <button id="btnFsd" onclick="toggleFsdOverlay()">🤖 FSD Overlay</button>
+            <button id="btnHeat" onclick="toggleHeatmap()">🌡️ Heatmap</button>
             <div style="flex:1"></div>
             <button id="btnIndex" onclick="triggerIndex()">🔄 Index Videos</button>
         </div>
@@ -111,7 +112,15 @@
 
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.markercluster.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet-heat.js') }}"></script>
 <script>
+// Register Service Worker for offline tile caching (gap 1)
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('{{ url_for("static", filename="tile-cache-sw.js") }}', { scope: '/' })
+        .then(reg => console.log('Tile cache SW registered'))
+        .catch(err => console.warn('Tile cache SW failed:', err));
+}
+
 // Fix Leaflet marker icon path for vendored setup
 L.Icon.Default.imagePath = '{{ url_for("static", filename="vendor/leaflet/images/") }}';
 
@@ -129,13 +138,34 @@ const tripLayer = L.layerGroup().addTo(map);
 const eventLayer = L.layerGroup();
 const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true });
 const fsdLayer = L.layerGroup();
+let heatLayer = null;
 
 let currentView = 'trips';
 let fsdVisible = false;
+let heatVisible = false;
 let allTrips = [];
 let allEvents = [];
 
 // Event severity colors
+// Build a deep link to the event player for a video path
+// video_path format: "RecentClips/2025-11-08_08-15-44-front.mp4"
+//                 or "SavedClips/2025-11-08_08-15-44/2025-11-08_08-15-44-front.mp4"
+function buildVideoLink(videoPath, timestamp) {
+    const parts = videoPath.replace(/\\/g, '/').split('/');
+    if (parts.length >= 3) {
+        // Event structure: folder/event_name/filename → /videos/event/folder/event_name
+        return `/videos/event/${parts[0]}/${parts[1]}`;
+    } else if (parts.length === 2) {
+        // Flat structure: folder/filename → /videos/session/folder/session_id
+        const filename = parts[1];
+        // Extract session timestamp: 2025-11-08_08-15-44 from 2025-11-08_08-15-44-front.mp4
+        const match = filename.match(/^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})/);
+        if (match) return `/videos/session/${parts[0]}/${match[1]}`;
+    }
+    // Fallback: stream the raw file
+    return `/videos/stream/${videoPath}`;
+}
+
 const severityColors = {
     critical: '#dc3545',
     warning: '#ffc107',
@@ -284,13 +314,14 @@ async function showTripRoute(tripId) {
             if (d < minDist) { minDist = d; nearest = wp; }
         });
         if (nearest && nearest.video_path) {
+            const videoLink = buildVideoLink(nearest.video_path, nearest.timestamp);
             L.popup()
                 .setLatLng(e.latlng)
                 .setContent(
                     `📍 ${nearest.lat.toFixed(5)}, ${nearest.lon.toFixed(5)}<br>` +
                     `🏎️ ${(nearest.speed_mps * 2.237).toFixed(0)} mph<br>` +
                     `🤖 ${nearest.autopilot_state || 'N/A'}<br>` +
-                    `🎥 <a href="/videos/stream/${nearest.video_path}" target="_blank">View Video</a>`
+                    `🎥 <a href="${videoLink}" target="_blank">View Video</a>`
                 )
                 .openOn(map);
         }
@@ -316,7 +347,7 @@ function renderEvents() {
             `📅 ${ev.timestamp}<br>` +
             `${ev.description || ''}<br>` +
             (ev.video_path ?
-                `🎥 <a href="/videos/stream/${ev.video_path}" target="_blank">View Video</a>` : '')
+                `🎥 <a href="${buildVideoLink(ev.video_path, ev.timestamp)}" target="_blank">View Video</a>` : '')
         );
 
         eventCluster.addLayer(marker);
@@ -357,6 +388,54 @@ function toggleFsdOverlay() {
     } else {
         map.removeLayer(fsdLayer);
     }
+}
+
+async function toggleHeatmap() {
+    heatVisible = !heatVisible;
+    document.getElementById('btnHeat').classList.toggle('active', heatVisible);
+
+    if (!heatVisible) {
+        if (heatLayer) map.removeLayer(heatLayer);
+        return;
+    }
+
+    // Build heatmap from all trip waypoints
+    if (!heatLayer) {
+        try {
+            const resp = await fetch('/map/api/trips?limit=500');
+            const data = await resp.json();
+            const heatPoints = [];
+
+            for (const trip of (data.trips || [])) {
+                if (!trip.start_lat || !trip.start_lon) continue;
+                heatPoints.push([trip.start_lat, trip.start_lon, 0.5]);
+                if (trip.end_lat && trip.end_lon) {
+                    heatPoints.push([trip.end_lat, trip.end_lon, 0.5]);
+                }
+            }
+
+            // Also add event locations with higher intensity
+            const evResp = await fetch('/map/api/events?limit=1000');
+            const evData = await evResp.json();
+            for (const ev of (evData.events || [])) {
+                if (!ev.lat || !ev.lon) continue;
+                const intensity = ev.severity === 'critical' ? 1.0 : ev.severity === 'warning' ? 0.7 : 0.4;
+                heatPoints.push([ev.lat, ev.lon, intensity]);
+            }
+
+            if (heatPoints.length > 0) {
+                heatLayer = L.heatLayer(heatPoints, {
+                    radius: 20, blur: 15, maxZoom: 15,
+                    gradient: { 0.2: '#17a2b8', 0.4: '#28a745', 0.6: '#ffc107', 0.8: '#fd7e14', 1.0: '#dc3545' }
+                });
+            }
+        } catch(e) {
+            console.error('Failed to build heatmap:', e);
+            return;
+        }
+    }
+
+    if (heatLayer) heatLayer.addTo(map);
 }
 
 // --- Indexer ---

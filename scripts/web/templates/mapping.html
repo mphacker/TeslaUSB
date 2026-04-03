@@ -366,6 +366,160 @@
         .trip-card { padding: 8px 10px; min-width: 0; }
         .trip-card-date { font-size: 0.8125rem; }
     }
+
+    /* ── Video Browser Panel ── */
+    .video-panel {
+        position: absolute;
+        top: 0; right: 0; bottom: 0;
+        width: 340px;
+        z-index: 1500;
+        background: var(--bg-secondary);
+        border-left: 1px solid var(--border-color, var(--border));
+        box-shadow: -4px 0 16px rgba(0,0,0,0.15);
+        display: flex;
+        flex-direction: column;
+        transform: translateX(100%);
+        transition: transform 0.3s ease;
+    }
+    .video-panel.open { transform: translateX(0); }
+    [data-theme="dark"] .video-panel {
+        background: rgba(30, 41, 59, 0.97);
+        border-color: var(--border-color, #334155);
+    }
+    .video-panel-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border-color, var(--border));
+        flex-shrink: 0;
+    }
+    .video-panel-header h3 {
+        margin: 0;
+        font-size: 0.9375rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        white-space: nowrap;
+    }
+    .video-panel-header select {
+        flex: 1;
+        min-width: 0;
+        padding: 4px 8px;
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-sm, 4px);
+        background: var(--bg-primary, #fff);
+        color: var(--text-primary);
+        font-size: 0.8125rem;
+    }
+    [data-theme="dark"] .video-panel-header select {
+        background: rgba(15, 23, 42, 0.8);
+    }
+    .video-panel-header .close-btn {
+        background: none;
+        border: none;
+        color: var(--text-secondary);
+        font-size: 18px;
+        cursor: pointer;
+        padding: 2px 6px;
+        line-height: 1;
+        border-radius: var(--radius-sm, 4px);
+        flex-shrink: 0;
+    }
+    .video-panel-header .close-btn:hover { color: #dc3545; }
+    .video-panel-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px;
+    }
+    .vp-loading, .vp-empty {
+        text-align: center;
+        padding: 24px 12px;
+        color: var(--text-muted, var(--text-secondary));
+        font-size: 0.8125rem;
+    }
+    .vp-clip {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: var(--radius-sm, 4px);
+        border: 1px solid var(--border-color, var(--border));
+        margin-bottom: 6px;
+        background: var(--bg-primary, #fff);
+        transition: border-color 150ms ease;
+    }
+    .vp-clip:hover { border-color: var(--accent-primary, #3B82F6); }
+    [data-theme="dark"] .vp-clip { background: rgba(15, 23, 42, 0.6); }
+    .vp-clip-info {
+        flex: 1;
+        min-width: 0;
+    }
+    .vp-clip-date {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .vp-clip-meta {
+        font-size: 0.6875rem;
+        color: var(--text-muted, var(--text-secondary));
+        margin-top: 2px;
+    }
+    .vp-clip-reason {
+        font-size: 0.625rem;
+        color: var(--accent-primary, #3B82F6);
+        margin-top: 1px;
+        text-transform: capitalize;
+    }
+    .vp-actions {
+        display: flex;
+        gap: 4px;
+        flex-shrink: 0;
+    }
+    .vp-btn {
+        width: 28px; height: 28px;
+        border-radius: var(--radius-sm, 4px);
+        border: 1px solid var(--border-color, var(--border));
+        background: transparent;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        font-size: 13px;
+        transition: all 150ms ease;
+        padding: 0;
+    }
+    .vp-btn:hover { color: var(--text-primary); border-color: var(--accent-primary, #3B82F6); }
+    .vp-btn-danger:hover { color: #dc3545; border-color: #dc3545; }
+    .vp-load-more {
+        display: block;
+        width: 100%;
+        padding: 8px;
+        margin-top: 4px;
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-sm, 4px);
+        background: transparent;
+        color: var(--accent-primary, #3B82F6);
+        font-size: 0.8125rem;
+        cursor: pointer;
+        transition: all 150ms ease;
+    }
+    .vp-load-more:hover {
+        background: var(--accent-primary, #3B82F6);
+        color: #fff;
+    }
+    @media (max-width: 1023px) {
+        .video-panel {
+            width: 100vw;
+            padding-bottom: var(--bottomtab-height, 56px);
+        }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .video-panel { transition: none !important; }
+    }
 </style>
 
 <div class="map-container">
@@ -401,6 +555,9 @@
 
     <!-- FAB Group (right-side floating) -->
     <div class="map-fab-group" id="mapFabs">
+        <button class="map-fab" id="btnVideos" onclick="toggleVideoPanel()" aria-label="Video browser" title="Videos">
+            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-video"></use></svg>
+        </button>
         <div style="position:relative">
             <button class="map-fab" id="btnFsd" onclick="toggleFsdOverlay()" aria-label="FSD overlay" title="FSD Overlay">
                 <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-layers"></use></svg>
@@ -416,6 +573,22 @@
 
     <!-- Indexer status (floating, centered top) -->
     <div class="indexer-status" id="indexerStatus" style="display:none"></div>
+
+    <!-- Video Browser Slide-out Panel -->
+    <div class="video-panel" id="videoPanel">
+        <div class="video-panel-header">
+            <h3>Videos</h3>
+            <select id="vpFolder" onchange="loadVideoList()">
+                <option value="RecentClips">Recent Clips</option>
+                <option value="SavedClips">Saved Clips</option>
+                <option value="SentryClips">Sentry Clips</option>
+            </select>
+            <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel">✕</button>
+        </div>
+        <div class="video-panel-list" id="vpList">
+            <div class="vp-empty">Open to browse videos</div>
+        </div>
+    </div>
 </div>
 
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
@@ -1320,6 +1493,129 @@ async function pollIndexer() {
         btn.classList.remove('spinning');
     }
 }
+
+// --- Video Browser Panel ---
+let videoPanelOpen = false;
+let vpPage = 1;
+let vpHasNext = false;
+let vpFolderStructure = 'events';
+
+function toggleVideoPanel() {
+    videoPanelOpen = !videoPanelOpen;
+    document.getElementById('videoPanel').classList.toggle('open', videoPanelOpen);
+    document.getElementById('btnVideos').classList.toggle('active', videoPanelOpen);
+    if (videoPanelOpen) { vpPage = 1; loadVideoList(); }
+}
+
+async function loadVideoList(append) {
+    const folder = document.getElementById('vpFolder').value;
+    const list = document.getElementById('vpList');
+    if (!append) { list.innerHTML = '<div class="vp-loading">Loading\u2026</div>'; vpPage = 1; }
+
+    try {
+        const resp = await fetch('/videos/?folder=' + encodeURIComponent(folder) + '&page=' + vpPage, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        vpHasNext = data.has_next;
+        vpFolderStructure = data.folder_structure || 'events';
+
+        if (!append) list.innerHTML = '';
+        if (!data.events || data.events.length === 0) {
+            if (!append) list.innerHTML = '<div class="vp-empty">No videos in this folder</div>';
+            return;
+        }
+
+        data.events.forEach(function(ev) {
+            const card = document.createElement('div');
+            card.className = 'vp-clip';
+
+            const name = ev.name || 'Unknown';
+            const safeName = name.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const dateStr = name.replace(/_/g, ' ').substring(0, 16);
+            const safeDateStr = dateStr.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const sizeMb = ev.size_mb || 0;
+            const cameras = Object.keys(ev.camera_videos || {}).length;
+            const reason = ev.reason || '';
+            const safeReason = reason.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+            card.innerHTML =
+                '<div class="vp-clip-info">' +
+                    '<div class="vp-clip-date">' + safeDateStr + '</div>' +
+                    '<div class="vp-clip-meta">' + cameras + ' cam\u00b7 ' + sizeMb.toFixed(0) + ' MB</div>' +
+                    (reason ? '<div class="vp-clip-reason">' + safeReason + '</div>' : '') +
+                '</div>' +
+                '<div class="vp-actions">' +
+                    '<button class="vp-btn vp-btn-play" title="Play">&#9654;</button>' +
+                    '<button class="vp-btn vp-btn-dl" title="Download ZIP">&#11015;</button>' +
+                    '<button class="vp-btn vp-btn-danger vp-btn-del" title="Delete">&#128465;</button>' +
+                '</div>';
+
+            // Store data attributes for event delegation (safe from XSS)
+            card.dataset.folder = folder;
+            card.dataset.name = name;
+            card.dataset.structure = vpFolderStructure;
+            list.appendChild(card);
+        });
+
+        // Remove existing load-more button
+        var existingMore = list.querySelector('.vp-load-more');
+        if (existingMore) existingMore.remove();
+
+        if (vpHasNext) {
+            var more = document.createElement('button');
+            more.className = 'vp-load-more';
+            more.textContent = 'Load More';
+            more.onclick = function() { vpPage++; more.remove(); loadVideoList(true); };
+            list.appendChild(more);
+        }
+    } catch(e) {
+        console.error('Failed to load videos:', e);
+        if (!append) list.innerHTML = '<div class="vp-empty">Failed to load videos</div>';
+    }
+}
+
+function vpPlay(folder, name, structure) {
+    var path = structure === 'flat'
+        ? '/videos/session/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name)
+        : '/videos/event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name);
+    window.open(path, '_blank');
+}
+
+function vpDownload(folder, name) {
+    window.location.href = '/videos/download_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name);
+}
+
+async function vpDelete(folder, name) {
+    if (!confirm('Delete "' + name + '" and all its camera angles?')) return;
+    try {
+        var resp = await fetch('/videos/delete_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name), { method: 'POST' });
+        var data = await resp.json();
+        if (data.success) {
+            if (typeof showToast === 'function') showToast('Deleted ' + data.deleted_count + ' files', 'success');
+            loadVideoList();
+        } else {
+            if (typeof showToast === 'function') showToast(data.error || 'Delete failed', 'error');
+        }
+    } catch(e) {
+        if (typeof showToast === 'function') showToast('Delete failed: ' + e.message, 'error');
+    }
+}
+
+// Event delegation for video panel buttons (prevents XSS from inline onclick)
+document.getElementById('vpList').addEventListener('click', function(e) {
+    var btn = e.target.closest('.vp-btn');
+    if (!btn) return;
+    var clip = btn.closest('.vp-clip');
+    if (!clip) return;
+    var folder = clip.dataset.folder;
+    var name = clip.dataset.name;
+    var structure = clip.dataset.structure;
+    if (btn.classList.contains('vp-btn-play')) vpPlay(folder, name, structure);
+    else if (btn.classList.contains('vp-btn-dl')) vpDownload(folder, name);
+    else if (btn.classList.contains('vp-btn-del')) vpDelete(folder, name);
+});
 
 // --- Init ---
 loadStats();

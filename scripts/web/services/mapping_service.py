@@ -390,6 +390,89 @@ def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
                 pass
 
 
+def _infer_sentry_event(
+    conn: sqlite3.Connection,
+    rel_path: str,
+    file_timestamp: Optional[str],
+) -> bool:
+    """Create a sentry/saved event at inferred location for clips without GPS.
+
+    Looks up the most recent waypoint before the clip's timestamp to determine
+    where the car was parked when the event occurred.
+
+    Returns True if an event was created, False if location couldn't be inferred.
+    """
+    if not file_timestamp:
+        return False
+
+    # Find the most recent waypoint before this clip's timestamp
+    row = conn.execute(
+        """SELECT lat, lon, trip_id FROM waypoints
+           WHERE timestamp <= ? AND lat != 0 AND lon != 0
+           ORDER BY timestamp DESC LIMIT 1""",
+        (file_timestamp,)
+    ).fetchone()
+
+    if not row:
+        # Try any waypoint at all (clip might predate all trips)
+        row = conn.execute(
+            """SELECT lat, lon, trip_id FROM waypoints
+               WHERE lat != 0 AND lon != 0
+               ORDER BY timestamp ASC LIMIT 1""",
+            ()
+        ).fetchone()
+
+    if not row:
+        logger.info("Cannot infer location for %s — no waypoints in database", rel_path)
+        return False
+
+    # Determine event type from folder
+    event_type = 'sentry' if 'SentryClips' in rel_path else 'saved'
+    folder_name = rel_path.replace('\\', '/').split('/')[0]
+
+    # Extract event folder name for grouping (e.g., "2026-03-13_20-45-25")
+    parts = rel_path.replace('\\', '/').split('/')
+    event_folder = parts[1] if len(parts) > 2 else parts[0]
+
+    # Check if we already have an event for this folder+location
+    existing = conn.execute(
+        """SELECT id FROM detected_events
+           WHERE event_type = ? AND video_path LIKE ? LIMIT 1""",
+        (event_type, f'%{event_folder}%')
+    ).fetchone()
+
+    if existing:
+        return False  # Already created for this event folder
+
+    description = (
+        f"{'Sentry Mode' if event_type == 'sentry' else 'Saved Clip'} event "
+        f"(location inferred from nearest trip)"
+    )
+
+    conn.execute(
+        """INSERT INTO detected_events
+           (trip_id, timestamp, lat, lon, event_type, severity,
+            description, video_path, frame_offset, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            row['trip_id'],
+            file_timestamp,
+            row['lat'],
+            row['lon'],
+            event_type,
+            'info',
+            description,
+            rel_path,
+            0,
+            json.dumps({'inferred_location': True, 'source_folder': folder_name}),
+        )
+    )
+    conn.commit()
+    logger.info("Created inferred %s event for %s at %.4f,%.4f",
+                event_type, event_folder, row['lat'], row['lon'])
+    return True
+
+
 def _index_video(
     conn: sqlite3.Connection,
     video_path: str,
@@ -457,6 +540,12 @@ def _index_video(
         else:
             logger.info("%s: %d SEI messages but 0 had GPS (%d checked)",
                         rel_path, sei_count, no_gps_count)
+
+        # For Sentry/Saved clips with no GPS, infer location from nearest trip
+        if 'SentryClips' in rel_path or 'SavedClips' in rel_path:
+            inferred = _infer_sentry_event(conn, rel_path, file_timestamp)
+            if inferred:
+                return 0, 1  # 0 waypoints, 1 event
         return 0, 0
 
     # Determine source folder

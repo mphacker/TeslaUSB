@@ -98,10 +98,9 @@ def present_usb():
     log_path = os.path.join(GADGET_DIR, "present_usb_web.log")
 
     try:
-        # Run the script directly with sudo (script has #!/bin/bash shebang)
         with open(log_path, "w") as log:
             result = subprocess.run(
-                ["sudo", "-n", script_path],
+                ["sudo", "-n", "bash", script_path],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 cwd=GADGET_DIR,
@@ -140,10 +139,9 @@ def edit_usb():
     log_path = os.path.join(GADGET_DIR, "edit_usb_web.log")
 
     try:
-        # Run the script directly with sudo (script has #!/bin/bash shebang)
         with open(log_path, "w") as log:
             result = subprocess.run(
-                ["sudo", "-n", script_path],
+                ["sudo", "-n", "bash", script_path],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 cwd=GADGET_DIR,

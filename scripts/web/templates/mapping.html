@@ -348,7 +348,7 @@ async function renderTrips() {
                 const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(prevAp);
                 L.polyline(segCoords, {
                     color: engaged ? '#28a745' : '#6c757d',
-                    weight: 6, opacity: 0.7,
+                    weight: 6, opacity: 0.7, interactive: false,
                 }).addTo(fsdLayer);
                 segStart = i;
             }

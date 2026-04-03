@@ -363,8 +363,7 @@ async function renderTrips() {
                 if (d < minDist) { minDist = d; nearest = wp; }
             });
             if (nearest && nearest.video_path) {
-                overlayWaypoints = routeWaypoints; // store for telemetry updates
-                openVideoOverlay(nearest, e.containerPoint);
+                openVideoOverlay(nearest, e.containerPoint, routeWaypoints);
             }
         });
     }
@@ -395,8 +394,11 @@ function getBasePath(videoPath) {
     return angle ? videoPath.replace(`-${angle}.mp4`, '') : videoPath.replace('.mp4', '');
 }
 
-function openVideoOverlay(waypoint, clickPoint) {
+function openVideoOverlay(waypoint, clickPoint, routeWps) {
     closeVideoOverlay();
+
+    // Set waypoints AFTER close clears them
+    overlayWaypoints = routeWps || [];
 
     const filename = waypoint.video_path.split('/').pop();
     overlayCurrentAngle = CAMERA_ANGLES.find(a => filename.includes('-' + a + '.')) || 'front';
@@ -520,7 +522,7 @@ function updateOverlayTelemetry(wp) {
     const speed = document.getElementById('olSpeed');
     const apEl = document.getElementById('olAP');
     const coords = document.getElementById('olCoords');
-    if (speed) speed.textContent = `🏎️ ${((wp.speed_mps || 0) * 2.237).toFixed(0)} mph`;
+    if (speed) speed.textContent = `🏎️ ${Math.round(Math.abs((wp.speed_mps || 0) * 2.237))} mph`;
     if (apEl) {
         const ap = wp.autopilot_state || 'NONE';
         const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(ap);

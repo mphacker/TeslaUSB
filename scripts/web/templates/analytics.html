@@ -97,7 +97,11 @@
         <div class="totals-row">
             <div class="total-stat">
                 <div class="total-number">{{ video_stats.totals.total_videos }}</div>
-                <div class="total-label">Total Videos</div>
+                <div class="total-label">Total Files</div>
+            </div>
+            <div class="total-stat">
+                <div class="total-number">{{ (video_stats.totals.total_videos / 6) | int }}</div>
+                <div class="total-label">Clips (≈6 angles)</div>
             </div>
             <div class="total-stat">
                 <div class="total-number">{{ "%.2f"|format(video_stats.totals.total_size_gb) }} GB</div>

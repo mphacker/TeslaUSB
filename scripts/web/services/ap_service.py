@@ -23,11 +23,11 @@ def ap_status():
         return {"error": "missing_script"}
 
     result = subprocess.run(
-        ["sudo", "-n", path, "status"],
+        ["sudo", "-n", "bash", path, "status"],
         capture_output=True,
         text=True,
         check=False,
-        timeout=5,  # 5 second timeout to prevent hangs
+        timeout=5,
     )
 
     if result.returncode != 0:
@@ -52,7 +52,7 @@ def ap_force(mode: str):
 
     path = _script_path()
     result = subprocess.run(
-        ["sudo", "-n", path, mode],
+        ["sudo", "-n", "bash", path, mode],
         capture_output=True,
         text=True,
         check=False,
@@ -150,7 +150,7 @@ def update_ap_config(ssid: str, passphrase: str):
     if status.get("ap_active"):
         path = _script_path()
         result = subprocess.run(
-            ["sudo", "-n", path, "reload"],
+            ["sudo", "-n", "bash", path, "reload"],
             capture_output=True,
             text=True,
             check=False,

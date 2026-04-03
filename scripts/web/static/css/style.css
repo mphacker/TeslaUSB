@@ -575,6 +575,171 @@
 .toast.toast-warning { border-left: 3px solid var(--ds-accent-warning); }
 .toast.toast-info    { border-left: 3px solid var(--ds-accent-info); }
 
+.toast-close {
+    background: none;
+    border: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    color: inherit;
+    opacity: 0.7;
+    padding: 0 var(--space-1);
+    margin-left: auto;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.toast-close:hover { opacity: 1; }
+
+/* ============================================================
+   Device Status Card (Settings page)
+   ============================================================ */
+
+.device-status-card {
+    padding: var(--space-4);
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-4);
+    border: 1px solid var(--border-color);
+    transition: background-color var(--transition-normal), border-color var(--transition-normal);
+}
+
+.device-status-card.device-status-present {
+    background: var(--status-present-bg);
+    border-color: var(--success-border, #28a745);
+}
+
+.device-status-card.device-status-edit {
+    background: var(--status-edit-bg);
+    border-color: var(--ds-accent-warning, #f59e0b);
+}
+
+.device-status-card.device-status-unknown {
+    background: var(--status-unknown-bg);
+    border-color: var(--border-color);
+}
+
+.device-status-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+}
+
+.device-status-header .status-dot {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+.device-status-info strong {
+    display: block;
+    font-size: var(--text-lg);
+    color: var(--text-primary);
+}
+
+.device-status-info p {
+    margin: var(--space-1) 0 0;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+.device-status-present .device-status-info strong { color: var(--status-present-text); }
+.device-status-edit .device-status-info strong { color: var(--status-edit-text); }
+.device-status-unknown .device-status-info strong { color: var(--status-unknown-text); }
+
+.device-status-hint {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    margin-top: var(--space-2);
+    margin-bottom: 0;
+}
+
+.device-status-shares {
+    margin: var(--space-3) 0;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+}
+
+.device-status-shares ul {
+    margin: var(--space-1) 0 0;
+    padding-left: 18px;
+}
+
+.device-status-shares code {
+    background: var(--bg-code);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+}
+
+/* ============================================================
+   Settings Collapsible Sections
+   ============================================================ */
+
+.settings-section {
+    margin-bottom: var(--space-3);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    transition: border-color var(--transition-normal);
+}
+
+.settings-section summary {
+    padding: var(--space-3) var(--space-4);
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--bg-secondary);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    list-style: none;
+    user-select: none;
+    font-size: var(--text-base);
+    color: var(--text-primary);
+    transition: background var(--transition-fast);
+}
+
+.settings-section summary::-webkit-details-marker { display: none; }
+
+.settings-section summary::after {
+    content: '▸';
+    margin-left: auto;
+    font-size: 1.2em;
+    color: var(--text-secondary);
+    transition: color var(--transition-fast);
+}
+
+.settings-section[open] summary::after { content: '▾'; }
+
+.settings-section summary:hover {
+    background: var(--bg-info);
+}
+
+.settings-section .section-content {
+    padding: var(--space-4);
+    background: var(--bg-container);
+}
+
+/* ============================================================
+   Analytics Mobile Horizontal Scroll
+   ============================================================ */
+
+@media (max-width: 767px) {
+    .analytics-grid-scroll {
+        display: flex;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scroll-snap-type: x mandatory;
+        gap: 12px;
+        padding-bottom: var(--space-2);
+        scrollbar-width: none;
+    }
+    .analytics-grid-scroll::-webkit-scrollbar { display: none; }
+    .analytics-grid-scroll .analytics-card {
+        min-width: 260px;
+        flex-shrink: 0;
+        scroll-snap-align: start;
+    }
+}
+
 /* ============================================================
    Responsive: Desktop (≥1024px)
    ============================================================ */

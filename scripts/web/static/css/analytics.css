@@ -67,21 +67,21 @@
 }
 
 .analytics-card {
-    background: white;
-    border: 1px solid #ddd;
-    border-radius: 8px;
+    background: var(--bg-container, white);
+    border: 1px solid var(--border-color, #ddd);
+    border-radius: var(--radius-lg, 12px);
     padding: 20px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    transition: all 0.2s ease;
+    box-shadow: var(--shadow-sm, 0 1px 3px rgba(0,0,0,0.1));
+    transition: all var(--transition-normal, 0.2s ease);
 }
 
 .analytics-card:hover {
-    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+    box-shadow: var(--shadow-md, 0 4px 8px rgba(0,0,0,0.15));
 }
 
 .analytics-card h3 {
     margin-top: 0;
-    color: #333;
+    color: var(--text-primary, #333);
     font-size: 18px;
 }
 

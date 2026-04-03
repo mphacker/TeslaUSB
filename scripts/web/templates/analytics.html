@@ -5,7 +5,6 @@
 
 <div class="container">
     <h2>📊 Storage Analytics Dashboard</h2>
-    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
 
     <!-- Storage Health Status -->
     {% set health = analytics.storage_health %}
@@ -105,7 +104,7 @@
     </div>
 
     <!-- Drive Usage Cards -->
-    <div class="analytics-grid">
+    <div class="analytics-grid analytics-grid-scroll">
         {% for partition_name, usage in analytics.partition_usage.items() %}
         <div class="analytics-card">
             <h3>{% if partition_name == 'part1' %}📹 TeslaCam Drive{% elif partition_name == 'part3' %}🎵 Music Drive{% else %}💡 LightShow Drive{% endif %}</h3>

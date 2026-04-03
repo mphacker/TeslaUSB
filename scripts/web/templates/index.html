@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="container">
-    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
-
     <div id="loadingOverlay" class="loading-overlay">
         <div class="spinner"></div>
         <div class="loading-text">Switching modes, please wait...</div>
@@ -13,165 +11,200 @@
         <div class="loading-text">Updating AP settings, please wait...</div>
     </div>
 
-    <form method="post" id="modeToggleForm" style="display: flex; justify-content: center; align-items: center; gap: 15px; margin: 20px 0;">
-        <span class="mode-toggle-label" id="editLabel" style="font-weight: 500; color: var(--text-primary); transition: opacity 0.3s;">📁 Edit Mode</span>
-        <label class="toggle-switch" style="margin: 0;">
-            <input type="checkbox" id="modeToggle" {{ 'checked' if mode_token == 'present' else '' }}>
-            <span class="toggle-slider"></span>
-        </label>
-        <span class="mode-toggle-label" id="presentLabel" style="font-weight: 500; color: var(--text-primary); transition: opacity 0.3s;">📱 Present Mode</span>
-    </form>
-
-    <div class="info-box">
-        <strong>Present Mode:</strong> Pi appears as USB storage to Tesla. Files are accessible in read-only mode locally.<br>
-        <strong>Edit Mode:</strong> Drives mounted locally with Samba access for full read-write access.
+    <!-- Device Status Card -->
+    {% if mode_token == 'present' %}
+    <div class="device-status-card device-status-present">
+        <div class="device-status-header">
+            <span class="status-dot status-present"></span>
+            <div class="device-status-info">
+                <strong>Connected to Tesla</strong>
+                <p>USB drive is active and accessible by your vehicle.</p>
+            </div>
+        </div>
+        <button type="button" class="edit-btn" id="modeActionBtn">Enable Network Sharing</button>
+        <p class="device-status-hint">Access USB drive files from your computer via network. Tesla USB will be temporarily disconnected.</p>
     </div>
-
-    {% if share_paths %}
-    <div class="shares">
-        <strong>Network Shares:</strong>
-        <ul>
-            {% for path in share_paths %}
-            <li><code>{{ path }}</code></li>
-            {% endfor %}
-        </ul>
+    {% elif mode_token == 'edit' %}
+    <div class="device-status-card device-status-edit">
+        <div class="device-status-header">
+            <span class="status-dot status-edit"></span>
+            <div class="device-status-info">
+                <strong>Network Sharing Active</strong>
+                <p>Tesla USB disconnected — files accessible via network.</p>
+            </div>
+        </div>
+        {% if share_paths %}
+        <div class="device-status-shares">
+            <strong>Network Shares:</strong>
+            <ul>
+                {% for path in share_paths %}
+                <li><code>{{ path }}</code></li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        <button type="button" class="present-btn" id="modeActionBtn">Reconnect to Tesla</button>
+    </div>
+    {% else %}
+    <div class="device-status-card device-status-unknown">
+        <div class="device-status-header">
+            <span class="status-dot status-unknown"></span>
+            <div class="device-status-info">
+                <strong>Status Unknown</strong>
+                <p>Unable to determine current device status.</p>
+            </div>
+        </div>
     </div>
     {% endif %}
 
-    <div class="info-box" style="margin-top: 20px;">
-        <strong>Fallback Access Point:</strong><br>
-        {% if ap_status.error %}
-            <div style="color: #c00;">AP status unavailable ({{ ap_status.error }})</div>
-        {% else %}
-            <div>Status: {{ 'Active' if ap_status.ap_active else 'Inactive' }} | Mode: {{ 'AP On' if ap_status.force_mode == 'force_on' else 'Auto' }}</div>
-            <div>SSID: <code>{{ ap_status.ssid }}</code> | IP: <code>{{ ap_status.static_ip }}</code> | DHCP: <code>{{ ap_status.dhcp_range_start }} - {{ ap_status.dhcp_range_end }}</code></div>
-            {% if ap_status.allow_concurrent %}
-                <div style="font-size: 0.9em; color: var(--text-secondary); margin-top: 4px;">The AP runs on a virtual interface, allowing simultaneous WiFi and AP access.</div>
+    <!-- WiFi Configuration -->
+    <details class="settings-section" open>
+        <summary>WiFi Configuration</summary>
+        <div class="section-content">
+            {% if wifi_change_status %}
+            <div id="wifiStatusAlert" style="margin: 0 0 12px; padding: 12px; border-radius: 6px; position: relative;
+                {% if wifi_change_status.success %}
+                    background-color: var(--msg-success-bg); border: 1px solid var(--success-border); color: var(--msg-success-text);
+                {% elif wifi_change_status.action == 'reverted' %}
+                    background-color: var(--msg-warning-bg); border: 1px solid var(--warning-border); color: var(--msg-warning-text);
+                {% elif wifi_change_status.action == 'ap_started' %}
+                    background-color: var(--msg-error-bg); border: 1px solid var(--error-text); color: var(--msg-error-text);
+                {% else %}
+                    background-color: var(--msg-error-bg); border: 1px solid var(--error-text); color: var(--msg-error-text);
+                {% endif %}">
+                <button type="button" onclick="dismissWifiStatus()"
+                        style="position: absolute; top: 8px; right: 8px; background: none; border: none; font-size: 18px; cursor: pointer; opacity: 0.7; color: inherit;"
+                        title="Dismiss">&times;</button>
+                <div style="padding-right: 30px;">
+                    <strong>
+                        {% if wifi_change_status.success %}
+                            ✓ WiFi Connection Updated
+                        {% elif wifi_change_status.action == 'reverted' %}
+                            ⚠ WiFi Connection Reverted
+                        {% elif wifi_change_status.action == 'ap_started' %}
+                            WiFi Connection Failed — AP Started
+                        {% else %}
+                            WiFi Connection Failed
+                        {% endif %}
+                    </strong>
+                    <div style="margin-top: 4px; font-size: 0.95em;">{{ wifi_change_status.message }}</div>
+                    {% if wifi_change_status.timestamp %}
+                    <div style="margin-top: 6px; font-size: 0.85em; opacity: 0.8;">{{ wifi_change_status.timestamp }}</div>
+                    {% endif %}
+                </div>
+            </div>
             {% endif %}
 
-            <div style="margin-top: 12px; padding: 10px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: 4px;">
-                <strong style="color: var(--text-primary);">AP Configuration:</strong>
-                <form method="post" action="{{ url_for('mode_control.configure_ap') }}" id="apConfigForm" style="margin-top: 8px;">
+            <div style="margin-bottom: 12px;">
+                {% if wifi_status.connected %}
+                    <span style="color: var(--success-text);">✓ Connected to: <code>{{ wifi_status.current_ssid }}</code></span>
+                    {% if wifi_status.signal and wifi_status.signal != 'Unknown' %}
+                        <span style="margin-left: 8px; font-size: 0.9em; color: var(--text-secondary);">(Signal: {{ wifi_status.signal }}%)</span>
+                    {% endif %}
+                {% else %}
+                    <span style="color: var(--ds-accent-warning);">⚠ Not connected to WiFi</span>
+                {% endif %}
+            </div>
+
+            <div style="padding: 12px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: var(--radius-md, 8px);">
+                <strong style="color: var(--text-primary);">Update WiFi Credentials:</strong>
+                <form method="post" action="{{ url_for('mode_control.configure_wifi') }}" id="wifiConfigForm" style="margin-top: 8px;">
                     <div style="margin-bottom: 8px;">
-                        <label for="ap_ssid" style="display: inline-block; width: 100px; color: var(--text-primary);">SSID:</label>
-                        <input type="text" id="ap_ssid" name="ssid" value="{{ ap_config.ssid }}" maxlength="32" required
-                               style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                        <span style="font-size: 0.85em; color: var(--text-secondary);">(1-32 chars)</span>
+                        <label for="wifi_ssid_select" style="display: inline-block; width: 120px; color: var(--text-primary);">Network Name:</label>
+                        <div style="display: inline-flex; align-items: center; gap: 4px;">
+                            <select id="wifi_ssid_select"
+                                    style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                                <option value="">-- Select Network --</option>
+                                <option value="__hidden__">Enter hidden SSID...</option>
+                            </select>
+                            <button type="button" id="scanWifiBtn" onclick="scanWifiNetworks()"
+                                    style="padding: 4px 8px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer; white-space: nowrap;"
+                                    title="Scan for available networks">🔄 Scan</button>
+                        </div>
+                        <input type="text" id="wifi_ssid" name="wifi_ssid" maxlength="32" required
+                               placeholder="Enter WiFi SSID"
+                               style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px; margin-left: 124px; margin-top: 4px; display: none;">
+                        <span id="wifi_ssid_hint" style="font-size: 0.85em; color: var(--text-secondary); display: none;">(1-32 chars)</span>
                     </div>
-                    <div style="margin-bottom: 8px;">
-                        <label for="ap_passphrase" style="display: inline-block; width: 100px; color: var(--text-primary);">Password:</label>
-                        <input type="password" id="ap_passphrase" name="passphrase" value="{{ ap_config.passphrase }}" minlength="8" maxlength="63"
+                    <div id="wifi_password_row" style="margin-bottom: 8px;">
+                        <label for="wifi_password" style="display: inline-block; width: 120px; color: var(--text-primary);">Password:</label>
+                        <input type="password" id="wifi_password" name="wifi_password" minlength="8" maxlength="63"
+                               placeholder="Enter WiFi password"
                                style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                        <button type="button" onclick="togglePassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                        <button type="button" onclick="toggleWifiPassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
                         <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
                     </div>
-                    <button type="submit" class="edit-btn" id="updateApBtn" onclick="return confirm('Changing AP credentials will disconnect all connected clients. Continue?')">Update AP Credentials</button>
+                    <button type="submit" class="edit-btn" id="updateWifiBtn" onclick="return confirmWifiUpdate()">Update WiFi Credentials</button>
                 </form>
             </div>
 
-            <div style="margin-top: 12px; display:flex; gap:8px; flex-wrap:wrap;">
-                <form method="post" action="{{ url_for('mode_control.force_ap') }}" id="startApForm" style="margin: 0;">
-                    <input type="hidden" name="mode" value="on">
-                    <button type="submit" class="edit-btn" id="startApBtn">Start AP Now</button>
-                </form>
-                <form method="post" action="{{ url_for('mode_control.force_ap') }}" id="stopApForm" style="margin: 0;">
-                    <input type="hidden" name="mode" value="off">
-                    <button type="submit" class="present-btn" id="stopApBtn">Stop AP</button>
-                </form>
-            </div>
-            <div style="margin-top:6px; font-size: 0.95em; color: var(--text-secondary);">
-                <strong>Auto mode:</strong> AP automatically starts when WiFi is unavailable and stops when WiFi is restored.<br>
-                <strong>AP On mode:</strong> AP stays on continuously regardless of WiFi status (activated by "Start AP Now" button).
-            </div>
-        {% endif %}
-    </div>
-
-    <div class="info-box" style="margin-top: 20px;">
-        <strong>WiFi Client Configuration:</strong><br>
-
-        {% if wifi_change_status %}
-        <div id="wifiStatusAlert" style="margin: 10px 0; padding: 12px; border-radius: 6px; position: relative;
-            {% if wifi_change_status.success %}
-                background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724;
-            {% elif wifi_change_status.action == 'reverted' %}
-                background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404;
-            {% elif wifi_change_status.action == 'ap_started' %}
-                background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24;
-            {% else %}
-                background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24;
-            {% endif %}">
-            <button type="button" onclick="dismissWifiStatus()"
-                    style="position: absolute; top: 8px; right: 8px; background: none; border: none; font-size: 18px; cursor: pointer; opacity: 0.7;"
-                    title="Dismiss">✕</button>
-            <div style="padding-right: 30px;">
-                <strong>
-                    {% if wifi_change_status.success %}
-                        ✓ WiFi Connection Updated
-                    {% elif wifi_change_status.action == 'reverted' %}
-                        ⚠️ WiFi Connection Reverted
-                    {% elif wifi_change_status.action == 'ap_started' %}
-                        🔴 WiFi Connection Failed - AP Started
-                    {% else %}
-                        ❌ WiFi Connection Failed
-                    {% endif %}
-                </strong>
-                <div style="margin-top: 4px; font-size: 0.95em;">{{ wifi_change_status.message }}</div>
-                <div style="margin-top: 6px; font-size: 0.85em; opacity: 0.8;">
-                    {% if wifi_change_status.timestamp %}
-                        📅 {{ wifi_change_status.timestamp }}
-                    {% endif %}
-                </div>
+            <div style="margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);">
+                <strong>How it works:</strong> The Pi will attempt to connect to the new network. Thanks to concurrent AP mode, you can remain connected to the fallback AP during the transition. If the new WiFi network is unreachable or credentials are incorrect, you'll maintain access via the AP.
             </div>
         </div>
-        {% endif %}
+    </details>
 
-        <div style="margin-bottom: 8px;">
-            {% if wifi_status.connected %}
-                <span style="color: var(--success-color);">✓ Connected to: <code>{{ wifi_status.current_ssid }}</code></span>
-                {% if wifi_status.signal and wifi_status.signal != 'Unknown' %}
-                    <span style="margin-left: 8px; font-size: 0.9em; color: var(--text-secondary);">(Signal: {{ wifi_status.signal }}%)</span>
-                {% endif %}
+    <!-- Access Point -->
+    <details class="settings-section" open>
+        <summary>Access Point</summary>
+        <div class="section-content">
+            {% if ap_status.error %}
+                <div style="color: var(--error-text);">AP status unavailable ({{ ap_status.error }})</div>
             {% else %}
-                <span style="color: var(--warning-color);">⚠ Not connected to WiFi</span>
+                <div style="margin-bottom: 12px;">
+                    <div>Status: <strong>{{ 'Active' if ap_status.ap_active else 'Inactive' }}</strong> | Mode: <strong>{{ 'AP On' if ap_status.force_mode == 'force_on' else 'Auto' }}</strong></div>
+                    <div style="margin-top: 4px;">SSID: <code>{{ ap_status.ssid }}</code> | IP: <code>{{ ap_status.static_ip }}</code> | DHCP: <code>{{ ap_status.dhcp_range_start }} - {{ ap_status.dhcp_range_end }}</code></div>
+                    {% if ap_status.allow_concurrent %}
+                        <div style="font-size: 0.9em; color: var(--text-secondary); margin-top: 4px;">The AP runs on a virtual interface, allowing simultaneous WiFi and AP access.</div>
+                    {% endif %}
+                </div>
+
+                <div style="padding: 12px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: var(--radius-md, 8px); margin-bottom: 12px;">
+                    <strong style="color: var(--text-primary);">AP Configuration:</strong>
+                    <form method="post" action="{{ url_for('mode_control.configure_ap') }}" id="apConfigForm" style="margin-top: 8px;">
+                        <div style="margin-bottom: 8px;">
+                            <label for="ap_ssid" style="display: inline-block; width: 100px; color: var(--text-primary);">SSID:</label>
+                            <input type="text" id="ap_ssid" name="ssid" value="{{ ap_config.ssid }}" maxlength="32" required
+                                   style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                            <span style="font-size: 0.85em; color: var(--text-secondary);">(1-32 chars)</span>
+                        </div>
+                        <div style="margin-bottom: 8px;">
+                            <label for="ap_passphrase" style="display: inline-block; width: 100px; color: var(--text-primary);">Password:</label>
+                            <input type="password" id="ap_passphrase" name="passphrase" value="{{ ap_config.passphrase }}" minlength="8" maxlength="63"
+                                   style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                            <button type="button" onclick="togglePassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                            <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
+                        </div>
+                        <button type="submit" class="edit-btn" id="updateApBtn" onclick="return confirm('Changing AP credentials will disconnect all connected clients. Continue?')">Update AP Credentials</button>
+                    </form>
+                </div>
+
+                <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
+                    <form method="post" action="{{ url_for('mode_control.force_ap') }}" id="startApForm" style="margin: 0;">
+                        <input type="hidden" name="mode" value="on">
+                        <button type="submit" class="edit-btn" id="startApBtn">Start AP Now</button>
+                    </form>
+                    <form method="post" action="{{ url_for('mode_control.force_ap') }}" id="stopApForm" style="margin: 0;">
+                        <input type="hidden" name="mode" value="off">
+                        <button type="submit" class="present-btn" id="stopApBtn">Stop AP</button>
+                    </form>
+                </div>
+
+                <div style="font-size: 0.9em; color: var(--text-secondary);">
+                    <strong>Auto mode:</strong> AP automatically starts when WiFi is unavailable and stops when WiFi is restored.<br>
+                    <strong>AP On mode:</strong> AP stays on continuously regardless of WiFi status (activated by "Start AP Now" button).
+                </div>
             {% endif %}
         </div>
+    </details>
 
-        <div style="margin-top: 12px; padding: 10px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: 4px;">
-            <strong style="color: var(--text-primary);">Update WiFi Credentials:</strong>
-            <form method="post" action="{{ url_for('mode_control.configure_wifi') }}" id="wifiConfigForm" style="margin-top: 8px;">
-                <div style="margin-bottom: 8px;">
-                    <label for="wifi_ssid_select" style="display: inline-block; width: 120px; color: var(--text-primary);">Network Name:</label>
-                    <div style="display: inline-flex; align-items: center; gap: 4px;">
-                        <select id="wifi_ssid_select"
-                                style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                            <option value="">-- Select Network --</option>
-                            <option value="__hidden__">Enter hidden SSID...</option>
-                        </select>
-                        <button type="button" id="scanWifiBtn" onclick="scanWifiNetworks()"
-                                style="padding: 4px 8px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer; white-space: nowrap;"
-                                title="Scan for available networks">🔄 Scan</button>
-                    </div>
-                    <input type="text" id="wifi_ssid" name="wifi_ssid" maxlength="32" required
-                           placeholder="Enter WiFi SSID"
-                           style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px; margin-left: 124px; margin-top: 4px; display: none;">
-                    <span id="wifi_ssid_hint" style="font-size: 0.85em; color: var(--text-secondary); display: none;">(1-32 chars)</span>
-                </div>
-                <div id="wifi_password_row" style="margin-bottom: 8px;">
-                    <label for="wifi_password" style="display: inline-block; width: 120px; color: var(--text-primary);">Password:</label>
-                    <input type="password" id="wifi_password" name="wifi_password" minlength="8" maxlength="63"
-                           placeholder="Enter WiFi password"
-                           style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                    <button type="button" onclick="toggleWifiPassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
-                    <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
-                </div>
-                <button type="submit" class="edit-btn" id="updateWifiBtn" onclick="return confirmWifiUpdate()">Update WiFi Credentials</button>
-            </form>
+    <!-- System -->
+    <details class="settings-section">
+        <summary>System</summary>
+        <div class="section-content">
+            <p style="color: var(--text-secondary); margin: 0;">Device information and system controls will be available in a future update.</p>
         </div>
-
-        <div style="margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);">
-            <strong>ℹ️ How it works:</strong> The Pi will attempt to connect to the new network. Thanks to concurrent AP mode, you can remain connected to the fallback AP during the transition. If the new WiFi network is unreachable or credentials are incorrect, you'll maintain access via the AP.
-        </div>
-    </div>
+    </details>
 </div>
 
 <script>
@@ -198,19 +231,16 @@ function toggleWifiPassword(btn) {
 }
 
 function confirmWifiUpdate() {
-    // Check if user is currently connected via WiFi (not AP)
     const connectedViaWifi = {{ 'true' if wifi_status.connected else 'false' }};
     const currentSSID = {{ wifi_status.current_ssid | tojson if wifi_status.get('current_ssid') else 'null' }};
     const apActive = {{ 'true' if ap_status.ap_active else 'false' }};
     const apIP = {{ ap_status.static_ip | tojson if ap_status.get('static_ip') else 'null' }};
 
-    // Detect if user is accessing via AP IP
     const accessingViaAP = apIP && (window.location.hostname === apIP || window.location.hostname === apIP.split('/')[0]);
 
     let message = '';
 
     if (connectedViaWifi && !accessingViaAP && currentSSID) {
-        // User is connected via WiFi directly (not through AP)
         message = '⚠️ WARNING: You are currently connected via WiFi (network: ' + currentSSID + ').\n\n';
         message += 'If you change the WiFi credentials and they are incorrect, you will lose this connection.\n\n';
         message += 'HOWEVER: The fallback AP is ' + (apActive ? 'already running' : 'available') + '.\n';
@@ -218,13 +248,11 @@ function confirmWifiUpdate() {
         message += 'Recommended: Connect to the AP first for safer credential updates.\n\n';
         message += 'Continue anyway?';
     } else if (accessingViaAP || apActive) {
-        // User is accessing via AP - safe!
         message = '✓ You are connected via the fallback AP.\n\n';
         message += 'The Pi will attempt to connect to the new WiFi network.\n';
         message += 'Your AP connection will remain active during the process.\n\n';
         message += 'Continue?';
     } else {
-        // Not sure how they're connected - generic warning
         message = 'The Pi will attempt to connect to the new WiFi network.\n';
         message += 'The fallback AP will remain available if connection fails.\n\n';
         message += 'Continue?';
@@ -233,13 +261,44 @@ function confirmWifiUpdate() {
     return confirm(message);
 }
 
-// Prevent multiple mode switch submissions
-// Mode toggle elements
-const modeToggleForm = document.getElementById('modeToggleForm');
-const modeToggle = document.getElementById('modeToggle');
-const editLabel = document.getElementById('editLabel');
-const presentLabel = document.getElementById('presentLabel');
+// Mode switching
+const modeActionBtn = document.getElementById('modeActionBtn');
 const loadingOverlay = document.getElementById('loadingOverlay');
+
+if (modeActionBtn) {
+    modeActionBtn.addEventListener('click', function() {
+        if (modeActionBtn.disabled) return;
+
+        modeActionBtn.disabled = true;
+        loadingOverlay.style.display = 'flex';
+
+        // present → edit (enable network sharing), edit → present (reconnect)
+        const currentMode = '{{ mode_token }}';
+        const actionUrl = currentMode === 'present'
+            ? '{{ url_for("mode_control.edit_usb") }}'
+            : '{{ url_for("mode_control.present_usb") }}';
+
+        fetch(actionUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+        })
+        .then(response => {
+            if (response.redirected) {
+                window.location.href = response.url;
+            } else {
+                window.location.reload();
+            }
+        })
+        .catch(error => {
+            console.error('Error switching modes:', error);
+            modeActionBtn.disabled = false;
+            loadingOverlay.style.display = 'none';
+            alert('Error switching modes. Please try again.');
+        });
+    });
+}
 
 // AP form elements
 const apConfigForm = document.getElementById('apConfigForm');
@@ -250,128 +309,53 @@ const startApBtn = document.getElementById('startApBtn');
 const stopApBtn = document.getElementById('stopApBtn');
 const apLoadingOverlay = document.getElementById('apLoadingOverlay');
 
+function disableApButtons() {
+    if (updateApBtn) { updateApBtn.disabled = true; updateApBtn.style.opacity = '0.5'; updateApBtn.style.cursor = 'not-allowed'; }
+    if (startApBtn) { startApBtn.disabled = true; startApBtn.style.opacity = '0.5'; startApBtn.style.cursor = 'not-allowed'; }
+    if (stopApBtn) { stopApBtn.disabled = true; stopApBtn.style.opacity = '0.5'; stopApBtn.style.cursor = 'not-allowed'; }
+    if (apLoadingOverlay) apLoadingOverlay.style.display = 'flex';
+}
+
+if (apConfigForm) {
+    apConfigForm.addEventListener('submit', function(e) {
+        if (updateApBtn && updateApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
+if (startApForm) {
+    startApForm.addEventListener('submit', function(e) {
+        if (startApBtn && startApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
+if (stopApForm) {
+    stopApForm.addEventListener('submit', function(e) {
+        if (stopApBtn && stopApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
 // WiFi form elements
 const wifiConfigForm = document.getElementById('wifiConfigForm');
 const updateWifiBtn = document.getElementById('updateWifiBtn');
 
-// Update label opacity based on current mode
-function updateLabelOpacity() {
-    if (modeToggle.checked) {
-        // Present mode is active
-        editLabel.style.opacity = '0.5';
-        presentLabel.style.opacity = '1';
-        presentLabel.style.fontWeight = '600';
-        editLabel.style.fontWeight = '500';
-    } else {
-        // Edit mode is active
-        editLabel.style.opacity = '1';
-        presentLabel.style.opacity = '0.5';
-        editLabel.style.fontWeight = '600';
-        presentLabel.style.fontWeight = '500';
-    }
-}
-
-// Initialize label opacity on page load
-updateLabelOpacity();
-
-// Handle toggle switch changes
-modeToggle.addEventListener('change', function() {
-    if (modeToggle.disabled) {
-        return;
-    }
-
-    // Disable toggle and show loading
-    modeToggle.disabled = true;
-    loadingOverlay.style.display = 'flex';
-
-    // Determine which mode to switch to
-    const targetMode = modeToggle.checked ? 'present' : 'edit';
-    const actionUrl = targetMode === 'present'
-        ? '{{ url_for("mode_control.present_usb") }}'
-        : '{{ url_for("mode_control.edit_usb") }}';
-
-    // Update label opacity immediately for responsiveness
-    updateLabelOpacity();
-
-    // Submit the form
-    fetch(actionUrl, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-    })
-    .then(response => {
-        if (response.redirected) {
-            window.location.href = response.url;
-        } else {
-            return response.text();
+if (wifiConfigForm) {
+    wifiConfigForm.addEventListener('submit', function(e) {
+        if (updateWifiBtn && updateWifiBtn.disabled) { e.preventDefault(); return false; }
+        const ssidInput = document.getElementById('wifi_ssid');
+        if (!ssidInput.value.trim()) {
+            e.preventDefault();
+            alert('Please select a network or enter a hidden SSID');
+            return false;
         }
-    })
-    .catch(error => {
-        console.error('Error switching modes:', error);
-        // Revert toggle on error
-        modeToggle.checked = !modeToggle.checked;
-        updateLabelOpacity();
-        modeToggle.disabled = false;
-        loadingOverlay.style.display = 'none';
-        alert('Error switching modes. Please try again.');
+        updateWifiBtn.disabled = true;
+        updateWifiBtn.style.opacity = '0.5';
+        updateWifiBtn.style.cursor = 'not-allowed';
+        updateWifiBtn.textContent = 'Connecting...';
     });
-});
-
-function disableApButtons() {
-    updateApBtn.disabled = true;
-    startApBtn.disabled = true;
-    stopApBtn.disabled = true;
-    updateApBtn.style.opacity = '0.5';
-    startApBtn.style.opacity = '0.5';
-    stopApBtn.style.opacity = '0.5';
-    updateApBtn.style.cursor = 'not-allowed';
-    startApBtn.style.cursor = 'not-allowed';
-    stopApBtn.style.cursor = 'not-allowed';
-    apLoadingOverlay.style.display = 'flex';
 }
-
-apConfigForm.addEventListener('submit', function(e) {
-    if (updateApBtn.disabled) {
-        e.preventDefault();
-        return false;
-    }
-    disableApButtons();
-});
-
-startApForm.addEventListener('submit', function(e) {
-    if (startApBtn.disabled) {
-        e.preventDefault();
-        return false;
-    }
-    disableApButtons();
-});
-
-stopApForm.addEventListener('submit', function(e) {
-    if (stopApBtn.disabled) {
-        e.preventDefault();
-        return false;
-    }
-    disableApButtons();
-});
-
-wifiConfigForm.addEventListener('submit', function(e) {
-    if (updateWifiBtn.disabled) {
-        e.preventDefault();
-        return false;
-    }
-    // Validate SSID is selected or entered
-    const ssidInput = document.getElementById('wifi_ssid');
-    if (!ssidInput.value.trim()) {
-        e.preventDefault();
-        alert('Please select a network or enter a hidden SSID');
-        return false;
-    }
-    updateWifiBtn.disabled = true;
-    updateWifiBtn.style.opacity = '0.5';
-    updateWifiBtn.style.cursor = 'not-allowed';
-    updateWifiBtn.textContent = 'Connecting...';
-});
 
 // WiFi network scanning functionality
 const wifiSsidSelect = document.getElementById('wifi_ssid_select');
@@ -381,7 +365,6 @@ const wifiPasswordRow = document.getElementById('wifi_password_row');
 const wifiPasswordInput = document.getElementById('wifi_password');
 const scanWifiBtn = document.getElementById('scanWifiBtn');
 
-// Show/hide password field based on network security
 function updatePasswordVisibility(secured) {
     if (secured) {
         wifiPasswordRow.style.display = 'block';
@@ -389,41 +372,38 @@ function updatePasswordVisibility(secured) {
     } else {
         wifiPasswordRow.style.display = 'none';
         wifiPasswordInput.required = false;
-        wifiPasswordInput.value = '';  // Clear password for open networks
+        wifiPasswordInput.value = '';
     }
 }
 
-// Handle dropdown selection
-wifiSsidSelect.addEventListener('change', function() {
-    const value = this.value;
-    const selectedOption = this.options[this.selectedIndex];
-    const isSecured = selectedOption.dataset.secured !== 'false';  // Default to secured for hidden networks
+if (wifiSsidSelect) {
+    wifiSsidSelect.addEventListener('change', function() {
+        const value = this.value;
+        const selectedOption = this.options[this.selectedIndex];
+        const isSecured = selectedOption.dataset.secured !== 'false';
 
-    if (value === '__hidden__') {
-        // Show text input for hidden SSID - assume secured (user can leave password blank if open)
-        wifiSsidInput.style.display = 'block';
-        wifiSsidHint.style.display = 'inline';
-        wifiSsidInput.value = '';
-        wifiSsidInput.focus();
-        wifiSsidInput.required = true;
-        updatePasswordVisibility(true);  // Show password for hidden networks (user can leave blank if open)
-    } else if (value) {
-        // Network selected from dropdown
-        wifiSsidInput.style.display = 'none';
-        wifiSsidHint.style.display = 'none';
-        wifiSsidInput.value = value;
-        wifiSsidInput.required = true;
-        updatePasswordVisibility(isSecured);  // Show/hide password based on network security
-    } else {
-        // Nothing selected
-        wifiSsidInput.style.display = 'none';
-        wifiSsidHint.style.display = 'none';
-        wifiSsidInput.value = '';
-        updatePasswordVisibility(true);  // Default: show password field
-    }
-});
+        if (value === '__hidden__') {
+            wifiSsidInput.style.display = 'block';
+            wifiSsidHint.style.display = 'inline';
+            wifiSsidInput.value = '';
+            wifiSsidInput.focus();
+            wifiSsidInput.required = true;
+            updatePasswordVisibility(true);
+        } else if (value) {
+            wifiSsidInput.style.display = 'none';
+            wifiSsidHint.style.display = 'none';
+            wifiSsidInput.value = value;
+            wifiSsidInput.required = true;
+            updatePasswordVisibility(isSecured);
+        } else {
+            wifiSsidInput.style.display = 'none';
+            wifiSsidHint.style.display = 'none';
+            wifiSsidInput.value = '';
+            updatePasswordVisibility(true);
+        }
+    });
+}
 
-// Scan for WiFi networks
 function scanWifiNetworks() {
     scanWifiBtn.disabled = true;
     scanWifiBtn.innerHTML = '⏳ Scanning...';
@@ -432,23 +412,19 @@ function scanWifiNetworks() {
     fetch('{{ url_for("mode_control.scan_wifi_networks") }}')
         .then(response => response.json())
         .then(data => {
-            // Remember current selection
             const currentValue = wifiSsidSelect.value;
             const currentHiddenValue = (currentValue === '__hidden__') ? wifiSsidInput.value : '';
 
-            // Clear existing options except the first two
             while (wifiSsidSelect.options.length > 2) {
                 wifiSsidSelect.remove(2);
             }
 
             if (data.success && data.networks && data.networks.length > 0) {
-                // Add separator
                 const separator = document.createElement('option');
                 separator.disabled = true;
                 separator.textContent = '─── Available Networks ───';
                 wifiSsidSelect.appendChild(separator);
 
-                // Add networks sorted by signal strength
                 data.networks.forEach(network => {
                     const option = document.createElement('option');
                     option.value = network.ssid;
@@ -460,19 +436,16 @@ function scanWifiNetworks() {
                     wifiSsidSelect.appendChild(option);
                 });
 
-                // Restore selection if it still exists
                 if (currentValue === '__hidden__') {
                     wifiSsidSelect.value = '__hidden__';
                     wifiSsidInput.value = currentHiddenValue;
                 } else if (currentValue) {
-                    // Check if previously selected network is still in list
                     const exists = Array.from(wifiSsidSelect.options).some(opt => opt.value === currentValue);
                     if (exists) {
                         wifiSsidSelect.value = currentValue;
                     }
                 }
             } else {
-                // No networks found or error
                 const noNetworks = document.createElement('option');
                 noNetworks.disabled = true;
                 noNetworks.textContent = '─── No networks found ───';
@@ -489,22 +462,19 @@ function scanWifiNetworks() {
         });
 }
 
-// Get signal strength indicator (using bars representation)
 function getSignalIcon(signal) {
     const signalNum = parseInt(signal) || 0;
-    if (signalNum >= 75) return '▂▄▆█';     // Excellent
-    if (signalNum >= 50) return '▂▄▆_';     // Good
-    if (signalNum >= 25) return '▂▄__';     // Fair
-    return '▂___';                           // Weak
+    if (signalNum >= 75) return '▂▄▆█';
+    if (signalNum >= 50) return '▂▄▆_';
+    if (signalNum >= 25) return '▂▄__';
+    return '▂___';
 }
 
-// Dismiss WiFi status alert
 function dismissWifiStatus() {
     const alert = document.getElementById('wifiStatusAlert');
     if (alert) {
         alert.style.display = 'none';
     }
-    // Also clear it on the server so it doesn't show again
     fetch('{{ url_for("mode_control.dismiss_wifi_status") }}', {
         method: 'POST',
         headers: {
@@ -515,7 +485,7 @@ function dismissWifiStatus() {
     });
 }
 
-// Auto-scan networks on page load (delayed to not slow down initial render)
+// Auto-scan networks on page load
 setTimeout(function() {
     scanWifiNetworks();
 }, 500);

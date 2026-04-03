@@ -121,11 +121,13 @@
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
-                <div class="messages">
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
                     {% for cat, msg in messages %}
-                        <div class="{{cat}}">{{msg}}</div>
+                    showToast('{{ msg|e }}', '{{ cat }}');
                     {% endfor %}
-                </div>
+                });
+            </script>
             {% endif %}
         {% endwith %}
 

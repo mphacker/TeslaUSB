@@ -62,6 +62,35 @@ function toggleTheme() {
 // Initialize theme on page load
 initTheme();
 
+// Toast Notification System
+function showToast(message, type) {
+    type = type || 'info';
+    var container = document.getElementById('toast-container');
+    if (!container) return;
+
+    var toast = document.createElement('div');
+    toast.className = 'toast toast-' + type;
+    toast.innerHTML = '<span>' + message + '</span><button class="toast-close" onclick="dismissToast(this.parentElement)" aria-label="Dismiss">&times;</button>';
+    container.appendChild(toast);
+
+    // Trigger reflow then add .show for transition
+    toast.offsetHeight;
+    toast.classList.add('show');
+
+    // Auto-dismiss after 5 seconds
+    setTimeout(function() {
+        dismissToast(toast);
+    }, 5000);
+}
+
+function dismissToast(toast) {
+    if (!toast || !toast.parentElement) return;
+    toast.classList.remove('show');
+    setTimeout(function() {
+        if (toast.parentElement) toast.remove();
+    }, 250);
+}
+
 // Sidebar hover expand/collapse for desktop
 document.addEventListener('DOMContentLoaded', function() {
     const sidebar = document.getElementById('sidebarRail');

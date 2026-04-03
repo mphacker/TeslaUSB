@@ -1,6 +1,6 @@
 # TeslaUSB
 
-Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings with remote access, web-based file management, and automated maintenance.
+Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings with a map-centric dashboard, GPS trip visualization, telemetry-rich video playback, and automated maintenance.
 
 > **🚨 IMPORTANT - CHANGES FOR EXISTING USERS 🚨**
 >
@@ -22,8 +22,10 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Music Drive** *(optional)*: FAT32 drive for Tesla music playback (enabled via `music_enabled: true` in config)
 
 **Key Benefits:**
+- **Map-centric dashboard** with GPS trip routes, event markers, and floating trip cards as the landing page
+- **Telemetry HUD** overlay during video playback — speed, gear, steering, pedals, blinkers, Autopilot status
 - Remote access to dashcam footage without physically removing storage
-- Web interface for browsing videos, managing chimes, managing light shows, managing custom wrap images, managing music, and monitoring storage (with light/dark mode)
+- Web interface for browsing videos, managing chimes, light shows, wraps, music, and monitoring storage (with dark/light mode)
 - Automatic cleanup policies to manage disk space
 - Scheduled chime changes for holidays, events, or automatic rotation
 - Offline access point for in-car web access when WiFi is unavailable
@@ -42,23 +44,22 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 ### Core Functionality
 - **Multi-Drive USB Gadget**: Two or three independent filesystems (TeslaCam + LightShow + optional Music) with optimized performance
 - **Two Operating Modes**:
-  - **Present Mode**: Active USB gadget for Tesla recording
-  - **Edit Mode**: Network access via Samba shares for file management
-- **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>` (port 80)
+  - **Present Mode**: Active USB gadget for Tesla recording (shown as "Connected to Tesla" in the UI)
+  - **Edit Mode**: Network access via Samba shares for file management (shown as "Network Sharing Active" in the UI)
+- **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>` (port 80) with four main sections — Map (landing page), Analytics, Media, and Settings — plus a sidebar rail on desktop and bottom tabs on mobile
 - **Captive Portal**: Automatic splash screen when connecting to TeslaUSB WiFi network
+- **Design System**: Dark/light mode with CSS design tokens, Inter variable font (bundled offline), Lucide SVG icon sprite, and glassmorphic overlay HUD
 
 ### Video Management
-- Browse all TeslaCam folders (RecentClips, SavedClips, SentryClips)
-- Auto-generated video thumbnails
-- In-browser multi-camera event player with 6 camera angles
-- **HUD Overlay Toggle**: Switch between two playback modes:
-  - **Stream Mode** (default): Instant video playback with minimal bandwidth - perfect for quick video review
-  - **Overlay Mode**: Downloads full video to display real-time telemetry overlay with speed, gear selection (P/R/N/D), steering wheel angle, accelerator/brake pedal position, turn signals, and Autopilot status
-  - Toggle preference is remembered across sessions
-  - Bandwidth optimization: Partial downloads are cached and resumed when switching modes
+- **Map-integrated video browser**: Slide-out panel on the Map page with Clips tab and Sentry Timeline tab — no separate video pages
+- **Unified overlay player**: Full-screen video playback launched from the map with camera angle switching (front/back/left/right/pillars)
+- **Telemetry HUD**: Glassmorphic overlay showing real-time steering wheel angle, brake/gas pedal positions, speed, gear (P/R/N/D), turn signals, and Autopilot status — powered by pre-indexed server-side waypoint data (instant, no full video download needed)
+- **Auto-indexing**: GPS and telemetry data from dashcam SEI metadata indexed on startup (configurable) and after mode switches; sentry events placed on map using inferred location from nearest trip
+- **Skeuomorphic event markers**: Balloon-pin map markers — brake pedal, gas pedal, steering wheel, speedometer, eye (sentry) — always visible on the map
+- **Trip navigation**: Floating trip card with prev/next navigation; FSD overlay and heatmap toggles
 - Download all camera views for an event as a zip file
 - Delete entire events (Edit mode only)
-- Storage analytics with folder-by-folder breakdown
+- Cascade database cleanup when videos are deleted
 
 ### Lock Chime Management
 - Upload WAV or MP3 files (automatically converted to Tesla-compatible format)
@@ -196,22 +197,24 @@ The TeslaUSB device only runs when the car is awake. When your Tesla enters slee
 
 ### Operating Modes
 
-**Present USB Mode** (default on boot):
+The web interface abstracts the underlying modes behind user-friendly labels:
+
+**"Connected to Tesla"** (Present USB Mode — default on boot):
 - Pi appears as USB drives to Tesla
 - Drives mounted read-only locally at `/mnt/gadget/part1-ro`, `/mnt/gadget/part2-ro`, `/mnt/gadget/part3-ro` (if Music enabled)
 - Web interface: View/play only (no editing) — some operations (chime changes, music uploads) use temporary quick-edit for seamless access
 - Samba shares disabled
 
-**Edit USB Mode**:
+**"Network Sharing Active"** (Edit USB Mode):
 - USB gadget disconnected
 - Drives mounted read-write at `/mnt/gadget/part1`, `/mnt/gadget/part2`, `/mnt/gadget/part3` (if Music enabled)
 - Web interface: Full file management (upload, delete, organize)
 - Samba shares active for network access
 
-**Switch modes** via web interface or command line:
+**Switch modes** via the device status card on the Settings page ("Enable Network Sharing" / "Reconnect to Tesla" buttons) or command line:
 ```bash
-sudo ~/TeslaUSB/present_usb.sh  # Activate Present mode
-sudo ~/TeslaUSB/edit_usb.sh     # Activate Edit mode
+sudo ~/TeslaUSB/present_usb.sh  # Reconnect to Tesla
+sudo ~/TeslaUSB/edit_usb.sh     # Enable Network Sharing
 ```
 
 ### Network Access
@@ -237,57 +240,37 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 
 ### Web Features
 
-**Settings Tab**:
-- Switch between Present USB and Edit USB modes
-- Configure offline access point (SSID, password, auto/manual mode)
-- View network status and Samba share information
+The web interface uses a four-tab navigation — sidebar rail on desktop and bottom tabs on mobile.
 
-**Videos Tab**:
-- Browse all TeslaCam folders with auto-generated thumbnails
-- Multi-camera event player with 6 camera angles
-- Download all camera views as zip file
-- Delete entire events (Edit mode only) - deletes all camera views for the session
-
-**Music Tab** *(requires `music_enabled: true` and Music disk image)*:
-- Tesla scans music only from a root-level `Music` folder; the app enforces this and automatically creates it if missing
-- Browse folders with breadcrumb navigation and clean per-folder views
-- In-browser audio playback for each file (MP3, FLAC, WAV, AAC, M4A supported)
-- Drag-and-drop or select files and whole folders; chunked uploads keep memory low and preserve subfolder structure
-- Per-file progress and status indicators with size limit validation (configurable max upload size, default 2 GB)
-- Create folders, move files, and delete files or entire folders
-- Works in both Present mode (via temporary quick-edit) and Edit mode (full access)
-- Usage gauge shows used/free space for the music partition
-
-**Lock Chimes Tab**:
-- Upload WAV/MP3 files (auto-converted to Tesla format)
-- Preview all chimes with in-browser audio player
-- Set any chime as active `LockChime.wav`
-- Built-in audio editor with waveform visualization:
-  - Trim audio with visual waveform display
-  - Volume normalization presets (Broadcast, Streaming, Loud, Maximum)
-  - Real-time duration and file size preview
-  - Save as new file or replace existing
-- Schedule automatic chime changes (weekly, date, holiday, recurring)
-
-**Light Shows Tab**:
-- Upload and manage FSEQ + MP3/WAV light show files
-- Grouped display for matching files
-- Preview MP3/WAV audio in browser
-- Delete complete light show sets
-
-**Wraps Tab**:
-- Upload PNG files for custom Tesla vehicle wraps (Paint Shop → Wraps)
-- Thumbnail preview gallery of all uploaded wraps
-- Client-side validation before upload (dimensions, file size, format)
-- Download or delete existing wraps
-- Requirements: PNG format, 512x512 to 1024x1024 pixels, max 1MB, up to 10 wraps
+**Map Tab** *(landing page at `/`)*:
+- GPS trip routes rendered on an interactive map with floating trip card and prev/next navigation
+- Skeuomorphic balloon-pin event markers (brake pedal, gas pedal, steering wheel, speedometer, eye for sentry) — always visible
+- Video browser slide-out panel with two sub-tabs:
+  - **Clips**: Browse TeslaCam folders with clip cards (Play / Download ZIP / Delete)
+  - **Sentry Timeline**: Chronological view of sentry events
+- Unified overlay player with camera angle switching (front/back/left/right/pillars)
+- Telemetry HUD overlay showing speed, gear, steering wheel, brake/gas pedals, blinkers, and Autopilot status (uses pre-indexed server-side waypoint data — instant, no full download)
+- FSD overlay toggle, heatmap toggle
+- Auto-indexing of dashcam SEI telemetry on startup and mode switch
 
 **Analytics Tab**:
-- Drive usage gauge and folder breakdown (including Music drive when enabled)
-- Filesystem health checks: Quick Check (read-only, any mode) and Check & Repair (edit mode only)
+- Storage metrics with drive usage gauges and folder-by-folder breakdown (including Music drive when enabled)
+- Driving statistics and event analytics (Chart.js)
 - Video count and size statistics
-- Configure cleanup policies (age, size, count-based)
-- Preview and execute cleanup operations
+
+**Media Tab** *(hub with sub-tabs)*:
+- **Lock Chimes**: Upload WAV/MP3 files (auto-converted to Tesla format), preview with in-browser player, set active chime, built-in audio editor with waveform visualization, schedule automatic changes (weekly, date, holiday, recurring)
+- **Music** *(requires `music_enabled: true` and Music disk image)*: Browse folders with breadcrumb navigation, in-browser playback (MP3, FLAC, WAV, AAC, M4A), drag-and-drop uploads with chunked transfer, create/move/delete files and folders, usage gauge
+- **Light Shows**: Upload and manage FSEQ + MP3/WAV files, grouped display, preview audio in browser, delete complete sets
+- **Wraps**: Upload PNG files for Tesla Paint Shop wraps (512–1024px, max 1MB, up to 10), thumbnail gallery, download or delete
+
+**Settings Tab** *(at `/settings/`)*:
+- **Device status card**: Shows "Connected to Tesla" or "Network Sharing Active" with mode-switch buttons ("Enable Network Sharing" / "Reconnect to Tesla")
+- **WiFi configuration**: View and update network settings
+- **Access Point controls**: Force start/stop AP or leave in auto mode
+- **Auto-Cleanup settings**: Configure age, size, or count-based policies per folder; link to cleanup config page; preview and execute cleanup operations
+- **Filesystem Health Check**: Quick Check (read-only, any mode) and Check & Repair (edit mode only) for all drives
+- **System info**: Hostname, IP address, uptime, memory usage, disk image status, version
 
 ## Configuration
 
@@ -553,10 +536,10 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 
 All screenshots shown in dark mode.
 
-<img src="examples/settings.png" alt="Settings Panel" width="400">
-<img src="examples/analytics.png" alt="Storage Analytics Dashboard" width="400">
-<img src="examples/videos-browser.png" alt="Video Browser" width="400">
-<img src="examples/session-view.png" alt="Multi-Camera Event Player" width="400">
-<img src="examples/lock-chimes.png" alt="Lock Chimes Management" width="400">
+<img src="examples/settings.png" alt="Settings Page" width="400">
+<img src="examples/analytics.png" alt="Analytics Dashboard" width="400">
+<img src="examples/videos-browser.png" alt="Map Video Browser Panel" width="400">
+<img src="examples/session-view.png" alt="Unified Overlay Player with Telemetry HUD" width="400">
+<img src="examples/lock-chimes.png" alt="Media — Lock Chimes" width="400">
 <img src="examples/lock-chime-editor-waveform.png" alt="Lock Chime Audio Editor with Waveform" width="400">
-<img src="examples/light-shows.png" alt="Light Shows Management" width="400">
+<img src="examples/light-shows.png" alt="Media — Light Shows" width="400">

@@ -75,6 +75,17 @@
         padding: 8px 12px; font-size: 12px; color: var(--text-secondary, #aaa);
         display: flex; gap: 12px; flex-wrap: wrap;
     }
+    .cam-switcher {
+        display: flex; gap: 2px; padding: 4px 6px;
+        background: var(--bg-primary, #111); overflow-x: auto;
+    }
+    .cam-btn {
+        padding: 4px 10px; border: 1px solid var(--border, #333); border-radius: 4px;
+        background: var(--bg-secondary, #1a1a2e); color: var(--text-secondary, #aaa);
+        font-size: 11px; cursor: pointer; white-space: nowrap;
+    }
+    .cam-btn:hover { background: var(--bg-hover, #333); color: var(--text-primary, #eee); }
+    .cam-btn.active { background: var(--accent-color, #007bff); color: #fff; border-color: var(--accent-color, #007bff); }
 
     /* FSD legend colors */
     .fsd-engaged { background: #28a745; }
@@ -357,11 +368,20 @@ async function renderTrips() {
 
 // --- Video Player Overlay ---
 
+const CAMERA_ANGLES = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
+const CAMERA_LABELS = {
+    'front': '🎥 Front', 'back': '🔙 Back',
+    'left_repeater': '◀️ Left', 'right_repeater': '▶️ Right',
+    'left_pillar': '↙️ L Pillar', 'right_pillar': '↘️ R Pillar'
+};
+
 function openVideoOverlay(waypoint, clickPoint) {
-    // Remove any existing overlay
     closeVideoOverlay();
 
-    const streamUrl = `/videos/stream/${waypoint.video_path}`;
+    // Parse camera angle from filename (e.g., "2026-04-02_18-00-10-front.mp4")
+    const filename = waypoint.video_path.split('/').pop();
+    const currentAngle = CAMERA_ANGLES.find(a => filename.includes('-' + a + '.')) || 'front';
+    const basePath = waypoint.video_path.replace(`-${currentAngle}.mp4`, '');
     const speed = (waypoint.speed_mps * 2.237).toFixed(0);
     const ap = waypoint.autopilot_state || 'N/A';
 
@@ -370,7 +390,6 @@ function openVideoOverlay(waypoint, clickPoint) {
     const mapRect = mapEl.getBoundingClientRect();
     let left = mapRect.left + clickPoint.x + 15;
     let top = mapRect.top + clickPoint.y - 100;
-    // Keep within viewport
     if (left + 490 > window.innerWidth) left = window.innerWidth - 500;
     if (top + 350 > window.innerHeight) top = window.innerHeight - 360;
     if (left < 10) left = 10;
@@ -382,13 +401,20 @@ function openVideoOverlay(waypoint, clickPoint) {
     overlay.style.left = left + 'px';
     overlay.style.top = top + 'px';
 
+    // Build camera selector buttons
+    const cameraBtns = CAMERA_ANGLES.map(a => {
+        const active = a === currentAngle ? ' active' : '';
+        return `<button class="cam-btn${active}" data-angle="${a}" onclick="switchCamera('${basePath}', '${a}')">${CAMERA_LABELS[a]}</button>`;
+    }).join('');
+
     overlay.innerHTML = `
         <div class="video-overlay-header">
-            <span>🎥 ${waypoint.video_path.split('/').pop()}</span>
+            <span>🎥 ${filename}</span>
             <button class="close-btn" onclick="closeVideoOverlay()">✕</button>
         </div>
+        <div class="cam-switcher" id="camSwitcher">${cameraBtns}</div>
         <video id="overlayVideo" controls autoplay muted>
-            <source src="${streamUrl}" type="video/mp4">
+            <source src="/videos/stream/${waypoint.video_path}" type="video/mp4">
         </video>
         <div class="video-overlay-info">
             <span>🏎️ ${speed} mph</span>
@@ -396,6 +422,10 @@ function openVideoOverlay(waypoint, clickPoint) {
             <span>📍 ${waypoint.lat.toFixed(4)}, ${waypoint.lon.toFixed(4)}</span>
         </div>
     `;
+
+    // Store base path for camera switching
+    overlay.dataset.basePath = basePath;
+    overlay.dataset.frameOffset = waypoint.frame_offset || 0;
 
     document.body.appendChild(overlay);
 
@@ -417,18 +447,48 @@ function openVideoOverlay(waypoint, clickPoint) {
     });
     document.addEventListener('mouseup', () => {
         isDragging = false;
-        header.style.cursor = 'grab';
+        if (header) header.style.cursor = 'grab';
     });
 
-    // Try to seek to approximate position (2 seconds before the waypoint's frame)
+    // Seek to approximate position (2 seconds before the waypoint's frame)
     const video = document.getElementById('overlayVideo');
     video.addEventListener('loadedmetadata', () => {
-        // Estimate time: frame_offset / 36 fps ≈ seconds, minus 2s buffer
         const estimatedTime = Math.max(0, (waypoint.frame_offset || 0) / 36 - 2);
         if (estimatedTime > 0 && estimatedTime < video.duration) {
             video.currentTime = estimatedTime;
         }
     });
+}
+
+function switchCamera(basePath, angle) {
+    const video = document.getElementById('overlayVideo');
+    if (!video) return;
+
+    // Save current playback position
+    const currentTime = video.currentTime;
+    const wasPaused = video.paused;
+
+    // Build new video path
+    const newPath = `${basePath}-${angle}.mp4`;
+    const newFilename = newPath.split('/').pop();
+
+    // Update active button
+    document.querySelectorAll('#camSwitcher .cam-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.angle === angle);
+    });
+
+    // Update header filename
+    const header = document.querySelector('.video-overlay-header span');
+    if (header) header.textContent = `🎥 ${newFilename}`;
+
+    // Switch video source and restore position
+    video.src = `/videos/stream/${newPath}`;
+    video.load();
+    video.addEventListener('loadedmetadata', function onLoaded() {
+        video.currentTime = currentTime;
+        if (!wasPaused) video.play().catch(() => {});
+        video.removeEventListener('loadedmetadata', onLoaded);
+    }, { once: true });
 }
 
 function closeVideoOverlay() {

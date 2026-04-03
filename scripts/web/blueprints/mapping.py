@@ -234,3 +234,52 @@ def api_event_charts():
     except Exception as e:
         logger.error("Failed to get event chart data: %s", e)
         return jsonify({'error': str(e)}), 500
+
+
+@mapping_bp.route("/api/sentry-events")
+def api_sentry_events():
+    """Get sentry and saved events enriched with filesystem details."""
+    from services.mapping_service import query_events
+    from services.video_service import get_event_details
+
+    try:
+        # Fetch sentry events
+        sentry = query_events(MAPPING_DB_PATH, limit=100, event_type='sentry')
+        # Fetch saved events
+        saved = query_events(MAPPING_DB_PATH, limit=100, event_type='saved')
+        events = sentry + saved
+        # Sort combined list by timestamp descending
+        events.sort(key=lambda e: e.get('timestamp', ''), reverse=True)
+
+        teslacam = get_teslacam_path()
+        enriched = []
+        for ev in events:
+            vp = ev.get('video_path', '')
+            parts = vp.replace('\\', '/').split('/')
+            source_folder = parts[0] if parts else ''
+            event_folder = parts[1] if len(parts) > 2 else ''
+
+            result = dict(ev)
+            result['event_folder'] = event_folder
+            result['source_folder'] = source_folder
+
+            if teslacam and event_folder:
+                folder_path = os.path.join(teslacam, source_folder)
+                try:
+                    details = get_event_details(folder_path, event_folder)
+                    if details:
+                        cam_count = len([
+                            v for v in (details.get('camera_videos') or {}).values() if v
+                        ])
+                        result['clip_count'] = len(details.get('clips') or [])
+                        result['camera_count'] = cam_count
+                        result['size_mb'] = details.get('size_mb', 0)
+                except Exception:
+                    pass
+
+            enriched.append(result)
+
+        return jsonify({'events': enriched})
+    except Exception as e:
+        logger.error("Failed to get sentry events: %s", e)
+        return jsonify({'error': str(e)}), 500

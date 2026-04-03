@@ -401,19 +401,6 @@
         color: var(--text-primary);
         white-space: nowrap;
     }
-    .video-panel-header select {
-        flex: 1;
-        min-width: 0;
-        padding: 4px 8px;
-        border: 1px solid var(--border-color, var(--border));
-        border-radius: var(--radius-sm, 4px);
-        background: var(--bg-primary, #fff);
-        color: var(--text-primary);
-        font-size: 0.8125rem;
-    }
-    [data-theme="dark"] .video-panel-header select {
-        background: rgba(15, 23, 42, 0.8);
-    }
     .video-panel-header .close-btn {
         background: none;
         border: none;
@@ -511,6 +498,60 @@
         background: var(--accent-primary, #3B82F6);
         color: #fff;
     }
+    /* ── Video Panel Tabs ── */
+    .vp-tabs { display: flex; gap: 2px; flex: 1; min-width: 0; }
+    .vp-tab {
+        flex: 1; padding: 6px; border: none; border-radius: 6px;
+        background: transparent; color: var(--text-secondary);
+        font-size: 12px; font-weight: 600; cursor: pointer;
+        transition: all 150ms ease;
+    }
+    .vp-tab.active { background: var(--accent-primary, #3B82F6); color: #fff; }
+    .vp-tab:hover:not(.active) { background: var(--bg-hover, rgba(255,255,255,0.06)); }
+    .vp-folder-row {
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--border-color, var(--border));
+        flex-shrink: 0;
+    }
+    .vp-folder-row select {
+        width: 100%;
+        padding: 4px 8px;
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-sm, 4px);
+        background: var(--bg-primary, #fff);
+        color: var(--text-primary);
+        font-size: 0.8125rem;
+    }
+    [data-theme="dark"] .vp-folder-row select { background: rgba(15, 23, 42, 0.8); }
+    /* ── Sentry Timeline ── */
+    .sentry-timeline { padding: 12px; }
+    .st-summary {
+        font-size: 13px; color: var(--text-secondary);
+        margin-bottom: 12px; padding-bottom: 8px;
+        border-bottom: 1px solid var(--border-color, var(--border));
+    }
+    .st-event {
+        display: flex; gap: 12px; margin-bottom: 16px;
+        position: relative;
+    }
+    .st-event::before {
+        content: ''; position: absolute;
+        left: 7px; top: 18px; bottom: -16px; width: 2px;
+        background: var(--border-color, #333);
+    }
+    .st-event:last-child::before { display: none; }
+    .st-dot {
+        width: 16px; height: 16px; border-radius: 50%;
+        flex-shrink: 0; margin-top: 2px; z-index: 1;
+    }
+    .st-dot.sentry { background: #8b5cf6; }
+    .st-dot.saved { background: #007bff; }
+    .st-card { flex: 1; min-width: 0; }
+    .st-type { font-weight: 600; font-size: 13px; color: var(--text-primary); }
+    .st-date { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+    .st-meta { font-size: 11px; color: var(--text-muted, var(--text-secondary)); margin-top: 4px; }
+    .st-actions { display: flex; gap: 4px; margin-top: 8px; }
+    .st-actions .vp-btn { width: 28px; height: 28px; font-size: 13px; }
     @media (max-width: 1023px) {
         .video-panel {
             width: 100vw;
@@ -577,13 +618,18 @@
     <!-- Video Browser Slide-out Panel -->
     <div class="video-panel" id="videoPanel">
         <div class="video-panel-header">
-            <h3>Videos</h3>
+            <div class="vp-tabs">
+                <button class="vp-tab active" id="vpTabClips" onclick="vpShowClips()">Clips</button>
+                <button class="vp-tab" id="vpTabSentry" onclick="vpShowSentry()">Sentry</button>
+            </div>
+            <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel">✕</button>
+        </div>
+        <div class="vp-folder-row" id="vpFolderRow">
             <select id="vpFolder" onchange="loadVideoList()">
                 <option value="RecentClips">Recent Clips</option>
                 <option value="SavedClips">Saved Clips</option>
                 <option value="SentryClips">Sentry Clips</option>
             </select>
-            <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel">✕</button>
         </div>
         <div class="video-panel-list" id="vpList">
             <div class="vp-empty">Open to browse videos</div>
@@ -1499,12 +1545,105 @@ let videoPanelOpen = false;
 let vpPage = 1;
 let vpHasNext = false;
 let vpFolderStructure = 'events';
+let vpCurrentTab = 'clips';
 
 function toggleVideoPanel() {
     videoPanelOpen = !videoPanelOpen;
     document.getElementById('videoPanel').classList.toggle('open', videoPanelOpen);
     document.getElementById('btnVideos').classList.toggle('active', videoPanelOpen);
-    if (videoPanelOpen) { vpPage = 1; loadVideoList(); }
+    if (videoPanelOpen) {
+        if (vpCurrentTab === 'clips') { vpPage = 1; loadVideoList(); }
+        else { loadSentryTimeline(); }
+    }
+}
+
+function vpShowClips() {
+    vpCurrentTab = 'clips';
+    document.getElementById('vpTabClips').classList.add('active');
+    document.getElementById('vpTabSentry').classList.remove('active');
+    document.getElementById('vpFolderRow').style.display = '';
+    vpPage = 1;
+    loadVideoList();
+}
+
+function vpShowSentry() {
+    vpCurrentTab = 'sentry';
+    document.getElementById('vpTabSentry').classList.add('active');
+    document.getElementById('vpTabClips').classList.remove('active');
+    document.getElementById('vpFolderRow').style.display = 'none';
+    loadSentryTimeline();
+}
+
+async function loadSentryTimeline() {
+    const list = document.getElementById('vpList');
+    list.innerHTML = '<div class="vp-loading">Loading\u2026</div>';
+
+    try {
+        const resp = await fetch('/api/sentry-events');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+
+        if (!data.events || data.events.length === 0) {
+            list.innerHTML = '<div class="vp-empty">No Sentry or Saved events</div>';
+            return;
+        }
+
+        const events = data.events;
+        // Build date range for summary
+        const first = events[events.length - 1];
+        const last = events[0];
+        const fmtShort = function(iso) {
+            if (!iso) return '';
+            try {
+                var d = new Date(iso.replace(' ', 'T'));
+                return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+            } catch(e) { return ''; }
+        };
+        const rangeStr = events.length > 1
+            ? fmtShort(first.timestamp) + ' \u2013 ' + fmtShort(last.timestamp)
+            : fmtShort(last.timestamp);
+
+        let html = '<div class="sentry-timeline">';
+        html += '<div class="st-summary"><strong>' + events.length + ' Event' + (events.length !== 1 ? 's' : '') + '</strong> \u00b7 <span>' + rangeStr + '</span></div>';
+
+        events.forEach(function(ev) {
+            const isSentry = ev.event_type === 'sentry';
+            const dotClass = isSentry ? 'sentry' : 'saved';
+            const typeLabel = isSentry ? '\uD83D\uDFE3 Sentry Mode' : '\uD83D\uDD35 Saved Clip';
+            const dateStr = formatLocalTime(ev.timestamp);
+            const folder = (ev.event_folder || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const sourceFolder = (ev.source_folder || (isSentry ? 'SentryClips' : 'SavedClips')).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+            const clips = ev.clip_count != null ? ev.clip_count : '?';
+            const cams = ev.camera_count != null ? ev.camera_count : '?';
+            const sizePart = ev.size_mb ? Math.round(ev.size_mb) + ' MB' : '';
+            const metaParts = [clips + ' clips', cams + ' cameras'];
+            if (sizePart) metaParts.push(sizePart);
+
+            const hasCoords = ev.lat != null && ev.lon != null && (ev.lat !== 0 || ev.lon !== 0);
+
+            html += '<div class="st-event" data-folder="' + sourceFolder + '" data-name="' + folder + '">';
+            html += '<div class="st-dot ' + dotClass + '"></div>';
+            html += '<div class="st-card">';
+            html += '<div class="st-type">' + typeLabel + '</div>';
+            html += '<div class="st-date">' + dateStr + '</div>';
+            html += '<div class="st-meta">' + metaParts.join(' \u00b7 ') + '</div>';
+            html += '<div class="st-actions">';
+            html += '<button class="vp-btn st-btn-play" title="Play">&#9654;</button>';
+            html += '<button class="vp-btn st-btn-dl" title="Download ZIP">&#11015;</button>';
+            if (hasCoords) {
+                html += '<button class="vp-btn st-btn-map" title="Show on Map" data-lat="' + ev.lat + '" data-lon="' + ev.lon + '">&#128205;</button>';
+            }
+            html += '<button class="vp-btn vp-btn-danger st-btn-del" title="Delete">&#128465;</button>';
+            html += '</div></div></div>';
+        });
+
+        html += '</div>';
+        list.innerHTML = html;
+    } catch(e) {
+        console.error('Failed to load sentry timeline:', e);
+        list.innerHTML = '<div class="vp-empty">Failed to load events</div>';
+    }
 }
 
 async function loadVideoList(append) {
@@ -1607,6 +1746,32 @@ async function vpDelete(folder, name) {
 document.getElementById('vpList').addEventListener('click', function(e) {
     var btn = e.target.closest('.vp-btn');
     if (!btn) return;
+
+    // Sentry timeline event buttons
+    var stEvent = btn.closest('.st-event');
+    if (stEvent) {
+        var folder = stEvent.dataset.folder;
+        var name = stEvent.dataset.name;
+        if (btn.classList.contains('st-btn-play')) {
+            window.open('/videos/event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name), '_blank');
+        } else if (btn.classList.contains('st-btn-dl')) {
+            window.location.href = '/videos/download_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name);
+        } else if (btn.classList.contains('st-btn-map')) {
+            var lat = parseFloat(btn.dataset.lat);
+            var lon = parseFloat(btn.dataset.lon);
+            if (!isNaN(lat) && !isNaN(lon)) {
+                map.setView([lat, lon], 16);
+                toggleVideoPanel();
+            }
+        } else if (btn.classList.contains('st-btn-del')) {
+            vpDelete(folder, name).then(function() {
+                if (vpCurrentTab === 'sentry') loadSentryTimeline();
+            });
+        }
+        return;
+    }
+
+    // Clips tab buttons
     var clip = btn.closest('.vp-clip');
     if (!clip) return;
     var folder = clip.dataset.folder;

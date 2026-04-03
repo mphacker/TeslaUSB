@@ -267,7 +267,43 @@
     <details class="settings-section">
         <summary>System</summary>
         <div class="section-content">
-            <p style="color: var(--text-secondary); margin: 0;">Device information and system controls will be available in a future update.</p>
+            {% if system_info %}
+            <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 16px; font-size:0.9rem;">
+                <span style="color:var(--text-secondary)">Hostname</span>
+                <strong>{{ system_info.hostname }}</strong>
+
+                <span style="color:var(--text-secondary)">IP Address</span>
+                <span>{{ system_info.ip_addresses | join(', ') if system_info.ip_addresses else 'N/A' }}</span>
+
+                <span style="color:var(--text-secondary)">Uptime</span>
+                <span>{{ system_info.uptime }}</span>
+
+                <span style="color:var(--text-secondary)">Platform</span>
+                <span>{{ system_info.platform }} · Python {{ system_info.python }}</span>
+
+                <span style="color:var(--text-secondary)">Memory</span>
+                <span>{{ system_info.mem_avail_mb }} MB free / {{ system_info.mem_total_mb }} MB total</span>
+
+                <span style="color:var(--text-secondary)">Version</span>
+                <code style="font-size:0.8rem">{{ system_info.version }}</code>
+            </div>
+
+            {% if system_info.disk_images %}
+            <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+                <strong style="font-size:0.9rem">USB Drive Images</strong>
+                <div style="display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;">
+                    {% for img in system_info.disk_images %}
+                    <div style="padding:8px 14px; background:var(--bg-secondary, #f5f5f5); border-radius:8px; font-size:0.85rem;">
+                        <strong>{{ img.label }}</strong><br>
+                        <span style="color:var(--text-secondary)">{{ img.size_gb }} GB</span>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% else %}
+            <p style="color: var(--text-secondary); margin: 0;">System information unavailable.</p>
+            {% endif %}
         </div>
     </details>
 </div>

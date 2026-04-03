@@ -41,6 +41,96 @@ def _trigger_auto_index_after_mode_switch():
         logger.warning("Auto-index after mode switch failed: %s", e)
 
 
+def _get_system_info():
+    """Gather device information for the System settings section."""
+    import socket
+    import platform
+
+    info = {
+        'hostname': socket.gethostname(),
+        'platform': platform.machine(),
+        'python': platform.python_version(),
+    }
+
+    # IP addresses
+    try:
+        result = subprocess.run(
+            ['hostname', '-I'], capture_output=True, text=True, timeout=3
+        )
+        info['ip_addresses'] = result.stdout.strip().split() if result.returncode == 0 else []
+    except Exception:
+        info['ip_addresses'] = []
+
+    # Uptime
+    try:
+        with open('/proc/uptime', 'r') as f:
+            secs = float(f.read().split()[0])
+        days, rem = divmod(int(secs), 86400)
+        hours, rem = divmod(rem, 3600)
+        mins = rem // 60
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0:
+            parts.append(f"{hours}h")
+        parts.append(f"{mins}m")
+        info['uptime'] = ' '.join(parts)
+    except Exception:
+        info['uptime'] = 'unknown'
+
+    # Disk image sizes
+    from config import IMG_CAM_PATH, IMG_LIGHTSHOW_PATH, IMG_MUSIC_PATH, MUSIC_ENABLED
+    images = [
+        ('TeslaCam', IMG_CAM_PATH),
+        ('LightShow', IMG_LIGHTSHOW_PATH),
+    ]
+    if MUSIC_ENABLED:
+        images.append(('Music', IMG_MUSIC_PATH))
+    info['disk_images'] = []
+    for label, path in images:
+        try:
+            size = os.path.getsize(path)
+            info['disk_images'].append({
+                'label': label,
+                'size_gb': round(size / (1024 ** 3), 1),
+            })
+        except OSError:
+            pass
+
+    # Git version
+    try:
+        result = subprocess.run(
+            ['git', '-c', f'safe.directory={GADGET_DIR}',
+             '--no-pager', 'log', '--oneline', '-1'],
+            capture_output=True, text=True, timeout=3,
+            cwd=GADGET_DIR,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            info['version'] = result.stdout.strip()
+        else:
+            info['version'] = 'unknown'
+    except Exception:
+        info['version'] = 'unknown'
+
+    # Memory
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = {}
+            for line in f:
+                k, _, v = line.partition(':')
+                if v:
+                    meminfo[k.strip()] = v.strip()
+            total_kb = int(meminfo.get('MemTotal', '0').split()[0])
+            avail_kb = int(meminfo.get('MemAvailable', '0').split()[0])
+            info['mem_total_mb'] = round(total_kb / 1024)
+            info['mem_avail_mb'] = round(avail_kb / 1024)
+    except Exception:
+        info['mem_total_mb'] = 0
+        info['mem_avail_mb'] = 0
+
+    return info
+
+
 @mode_control_bp.route("/")
 def index():
     """Main page with control buttons."""
@@ -88,6 +178,7 @@ def index():
         ap_config=ap_config,
         wifi_status=wifi_status,
         wifi_change_status=wifi_change_status,
+        system_info=_get_system_info(),
         auto_refresh=False,
     )
 

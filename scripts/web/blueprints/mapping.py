@@ -99,6 +99,58 @@ def api_trip_route(trip_id):
         return jsonify({'error': str(e)}), 500
 
 
+@mapping_bp.route("/api/waypoints-for-clip")
+def api_waypoints_for_clip():
+    """Look up waypoints matching a video clip path (or nearby clips in same trip)."""
+    from services.mapping_service import get_db_connection
+
+    video_path = request.args.get('path', '')
+    if not video_path:
+        return jsonify({'waypoints': []})
+
+    try:
+        conn = get_db_connection(MAPPING_DB_PATH)
+        # First try exact match on the video_path
+        rows = conn.execute(
+            """SELECT w.* FROM waypoints w
+               WHERE w.video_path = ? ORDER BY w.id""",
+            (video_path,)
+        ).fetchall()
+
+        if rows:
+            # Found — also get all waypoints from the same trip for full HUD
+            trip_id = rows[0]['trip_id']
+            all_wps = conn.execute(
+                """SELECT * FROM waypoints WHERE trip_id = ? ORDER BY id""",
+                (trip_id,)
+            ).fetchall()
+            conn.close()
+            return jsonify({'waypoints': [dict(r) for r in all_wps], 'trip_id': trip_id})
+
+        # No exact match — try matching by base path (without -front.mp4 suffix)
+        base = video_path.replace('-front.mp4', '').replace('-back.mp4', '')
+        rows = conn.execute(
+            """SELECT DISTINCT trip_id FROM waypoints
+               WHERE video_path LIKE ? LIMIT 1""",
+            (f'%{base}%',)
+        ).fetchall()
+
+        if rows:
+            trip_id = rows[0]['trip_id']
+            all_wps = conn.execute(
+                """SELECT * FROM waypoints WHERE trip_id = ? ORDER BY id""",
+                (trip_id,)
+            ).fetchall()
+            conn.close()
+            return jsonify({'waypoints': [dict(r) for r in all_wps], 'trip_id': trip_id})
+
+        conn.close()
+        return jsonify({'waypoints': []})
+    except Exception as e:
+        logger.error("Failed to look up waypoints for clip: %s", e)
+        return jsonify({'waypoints': []})
+
+
 # ---------------------------------------------------------------------------
 # Event APIs
 # ---------------------------------------------------------------------------
@@ -283,3 +335,49 @@ def api_sentry_events():
     except Exception as e:
         logger.error("Failed to get sentry events: %s", e)
         return jsonify({'error': str(e)}), 500
+
+
+@mapping_bp.route("/api/event-clips/<folder>/<event_name>")
+def api_event_clips(folder, event_name):
+    """Get clip filenames for an event folder. Used by the overlay player."""
+    folder = os.path.basename(folder)
+    event_name = os.path.basename(event_name)
+
+    teslacam = get_teslacam_path()
+    if not teslacam:
+        return jsonify({'error': 'TeslaCam not accessible'}), 503
+
+    folder_path = os.path.join(teslacam, folder)
+    if not os.path.isdir(folder_path):
+        return jsonify({'error': f'Folder not found: {folder}'}), 404
+
+    # Event-based folders (SavedClips, SentryClips)
+    event_path = os.path.join(folder_path, event_name)
+    if os.path.isdir(event_path):
+        try:
+            clips = sorted([
+                f for f in os.listdir(event_path)
+                if f.endswith('.mp4') and '-front' in f
+            ])
+        except OSError:
+            clips = []
+
+        clip_paths = [f'{folder}/{event_name}/{c}' for c in clips]
+        first_front = clips[0] if clips else ''
+        return jsonify({
+            'folder': folder,
+            'event': event_name,
+            'structure': 'events',
+            'first_front': first_front,
+            'front_clips': clip_paths,
+        })
+
+    # Flat folder (RecentClips) — session-based
+    clip_path = f'{folder}/{event_name}-front.mp4'
+    return jsonify({
+        'folder': folder,
+        'event': event_name,
+        'structure': 'flat',
+        'first_front': f'{event_name}-front.mp4',
+        'front_clips': [clip_path],
+    })

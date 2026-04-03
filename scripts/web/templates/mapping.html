@@ -1152,6 +1152,8 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
             <div style="margin-left:auto; display:flex; gap:4px;">
                 <button class="nav-btn" onclick="navigateClip(-1)" title="Previous clip">⏮</button>
                 <button class="nav-btn" onclick="navigateClip(1)" title="Next clip">⏭</button>
+                <button class="nav-btn" onclick="overlayDownload()" title="Download ZIP">⬇</button>
+                <button class="nav-btn" onclick="overlayDelete()" title="Delete" style="color:#dc3545">🗑</button>
             </div>
         </div>
     `;
@@ -1175,8 +1177,16 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
     // Live telemetry on timeupdate
     video.addEventListener('timeupdate', onOverlayTimeUpdate);
 
+    // Show/hide HUD based on telemetry availability
+    const hud = document.getElementById('overlayHud');
+    if (hud) {
+        hud.style.display = overlayWaypoints.length > 0 ? '' : 'none';
+    }
+
     // Initial telemetry
-    updateOverlayTelemetry(waypoint);
+    if (overlayWaypoints.length > 0) {
+        updateOverlayTelemetry(waypoint);
+    }
 
     // Draggable
     let isDragging = false, dragX, dragY;
@@ -1378,6 +1388,43 @@ function closeVideoOverlay() {
     }
     overlayWaypoints = [];
     overlayClips = [];
+}
+
+function overlayDownload() {
+    const overlay = document.getElementById('videoOverlay');
+    if (!overlay) return;
+    const folder = overlay.dataset.folder;
+    const evt = overlay.dataset.event;
+    if (folder && evt) {
+        window.location.href = '/videos/download_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(evt);
+    } else if (overlayBasePath) {
+        // Fall back to downloading the current single file
+        window.location.href = '/videos/download/' + encodeURIComponent(overlayBasePath + '-' + overlayCurrentAngle + '.mp4');
+    }
+}
+
+async function overlayDelete() {
+    const overlay = document.getElementById('videoOverlay');
+    if (!overlay) return;
+    const folder = overlay.dataset.folder;
+    const evt = overlay.dataset.event;
+    if (!folder || !evt) {
+        if (typeof showToast === 'function') showToast('Cannot determine clip to delete', 'warning');
+        return;
+    }
+    if (!confirm('Delete "' + evt + '" and all camera angles?')) return;
+    try {
+        const resp = await fetch('/videos/delete_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(evt), { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            closeVideoOverlay();
+            if (typeof showToast === 'function') showToast('Deleted ' + data.deleted_count + ' files', 'success');
+        } else {
+            if (typeof showToast === 'function') showToast(data.error || 'Delete failed', 'error');
+        }
+    } catch(e) {
+        if (typeof showToast === 'function') showToast('Delete failed: ' + e.message, 'error');
+    }
 }
 
 function renderEvents() {
@@ -1716,10 +1763,56 @@ async function loadVideoList(append) {
 }
 
 function vpPlay(folder, name, structure) {
-    var path = structure === 'flat'
-        ? '/videos/session/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name)
-        : '/videos/event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name);
-    window.open(path, '_blank');
+    openVideoFromPanel(folder, name);
+}
+
+async function openVideoFromPanel(folder, eventName) {
+    // Close the video panel to see the map
+    if (videoPanelOpen) toggleVideoPanel();
+
+    try {
+        // Fetch actual clip paths from the server
+        const resp = await fetch(`/api/event-clips/${encodeURIComponent(folder)}/${encodeURIComponent(eventName)}`);
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        const frontClips = data.front_clips || [];
+        if (frontClips.length === 0) {
+            if (typeof showToast === 'function') showToast('No video clips found', 'warning');
+            return;
+        }
+
+        // Look up waypoints for this clip directly from the DB
+        const firstPath = frontClips[0];
+        let waypoints = [];
+        try {
+            const wpResp = await fetch(`/api/waypoints-for-clip?path=${encodeURIComponent(firstPath)}`);
+            const wpData = await wpResp.json();
+            waypoints = wpData.waypoints || [];
+        } catch(e) {
+            console.warn('Waypoint lookup failed:', e);
+        }
+
+        // Open overlay with the first front clip
+        const wp = waypoints.length > 0
+            ? (waypoints.find(w => w.video_path && firstPath.includes(getBasePath(w.video_path))) || waypoints[0])
+            : { video_path: firstPath, frame_offset: 0 };
+        // Ensure video_path points to the actual clip
+        wp.video_path = firstPath;
+
+        const clickPoint = { x: window.innerWidth / 3, y: window.innerHeight / 4 };
+        openVideoOverlay(wp, clickPoint, waypoints);
+
+        // Store folder/event for download/delete
+        const overlay = document.getElementById('videoOverlay');
+        if (overlay) {
+            overlay.dataset.folder = folder;
+            overlay.dataset.event = eventName;
+        }
+    } catch(e) {
+        console.error('Failed to open video:', e);
+        if (typeof showToast === 'function') showToast('Failed to open video: ' + e.message, 'error');
+    }
 }
 
 function vpDownload(folder, name) {
@@ -1753,7 +1846,7 @@ document.getElementById('vpList').addEventListener('click', function(e) {
         var folder = stEvent.dataset.folder;
         var name = stEvent.dataset.name;
         if (btn.classList.contains('st-btn-play')) {
-            window.open('/videos/event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name), '_blank');
+            openVideoFromPanel(folder, name);
         } else if (btn.classList.contains('st-btn-dl')) {
             window.location.href = '/videos/download_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name);
         } else if (btn.classList.contains('st-btn-map')) {

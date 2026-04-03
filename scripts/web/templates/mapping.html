@@ -503,7 +503,7 @@ const eventIcons = {
 
 async function loadStats() {
     try {
-        const resp = await fetch('/map/api/stats');
+        const resp = await fetch('/api/stats');
         const data = await resp.json();
         const indexedEl = document.getElementById('tripIndexedCount');
         if (indexedEl) indexedEl.textContent = (data.indexed_file_count || 0).toLocaleString();
@@ -512,7 +512,7 @@ async function loadStats() {
 
 async function loadTrips() {
     try {
-        const resp = await fetch('/map/api/trips?limit=200');
+        const resp = await fetch('/api/trips?limit=200');
         const data = await resp.json();
         allTrips = data.trips || [];
 
@@ -635,7 +635,7 @@ function filterTrips() {
 
 async function loadTripRoute(tripId) {
     try {
-        const resp = await fetch(`/map/api/trip/${tripId}/route`);
+        const resp = await fetch(`/api/trip/${tripId}/route`);
         return await resp.json();
     } catch(e) {
         console.error('Failed to load route:', e);
@@ -649,7 +649,7 @@ async function loadEvents() {
     if (filter) params.set('type', filter);
 
     try {
-        const resp = await fetch(`/map/api/events?${params}`);
+        const resp = await fetch(`/api/events?${params}`);
         const data = await resp.json();
         allEvents = data.events || [];
         renderEvents();
@@ -1094,7 +1094,7 @@ async function toggleHeatmap() {
     // Build heatmap from all trip waypoints
     if (!heatLayer) {
         try {
-            const resp = await fetch('/map/api/trips?limit=500');
+            const resp = await fetch('/api/trips?limit=500');
             const data = await resp.json();
             const heatPoints = [];
 
@@ -1107,7 +1107,7 @@ async function toggleHeatmap() {
             }
 
             // Also add event locations with higher intensity
-            const evResp = await fetch('/map/api/events?limit=1000');
+            const evResp = await fetch('/api/events?limit=1000');
             const evData = await evResp.json();
             for (const ev of (evData.events || [])) {
                 if (!ev.lat || !ev.lon) continue;
@@ -1138,7 +1138,7 @@ async function triggerIndex() {
     btn.classList.add('spinning');
 
     try {
-        const resp = await fetch('/map/api/index/trigger', { method: 'POST' });
+        const resp = await fetch('/api/index/trigger', { method: 'POST' });
         const data = await resp.json();
         if (data.success) {
             pollIndexer();
@@ -1159,7 +1159,7 @@ async function pollIndexer() {
     const btn = document.getElementById('btnIndex');
 
     try {
-        const resp = await fetch('/map/api/index/status');
+        const resp = await fetch('/api/index/status');
         const data = await resp.json();
 
         if (data.running) {
@@ -1198,7 +1198,7 @@ loadStats();
 loadTrips();
 
 // Check if indexer is already running on page load
-fetch('/map/api/index/status')
+fetch('/api/index/status')
     .then(r => r.json())
     .then(data => { if (data.running) pollIndexer(); });
 </script>

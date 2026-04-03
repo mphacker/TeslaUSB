@@ -740,7 +740,7 @@ const chartColors = {
 
 async function loadDrivingStats() {
     try {
-        const resp = await fetch('/map/api/driving-stats');
+        const resp = await fetch('/api/driving-stats');
         const data = await resp.json();
         if (!data.has_data) return;
 
@@ -761,7 +761,7 @@ async function loadDrivingStats() {
 
 async function loadEventCharts() {
     try {
-        const resp = await fetch('/map/api/event-charts');
+        const resp = await fetch('/api/event-charts');
         const data = await resp.json();
         if (!data.by_type || !data.by_type.labels.length) return;
 

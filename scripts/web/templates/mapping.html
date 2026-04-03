@@ -7,53 +7,245 @@
 <style>
     /* Override for full-height map page — no page scroll */
     html, body { overflow: hidden !important; height: 100vh !important; }
-    .main-content { margin-top: 4px !important; margin-bottom: 0 !important; overflow: hidden !important; }
-
-    .map-container { display: flex; flex-direction: column; height: calc(100vh - 145px); gap: 0; overflow: hidden; }
-    #map { flex: 1; min-height: 0; border-radius: 8px; z-index: 1; }
-
-    .map-toolbar {
-        display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0;
-        align-items: center; font-size: 13px;
+    .main-content {
+        margin: 0 !important; padding: 0 !important;
+        max-width: none !important; overflow: hidden !important;
+        min-height: 0 !important;
+        margin-left: var(--sidebar-collapsed) !important;
     }
-    .map-toolbar button, .map-toolbar select {
-        padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
-        background: var(--bg-container); color: var(--text-primary);
-        cursor: pointer; font-size: 13px;
-    }
-    .map-toolbar button:hover { background: var(--accent-color, #007bff); color: #fff; }
-    .map-toolbar button.active { background: var(--accent-color, #007bff); color: #fff; }
-    .map-toolbar .separator { border-left: 1px solid var(--border); height: 24px; }
 
-    .stats-bar {
-        display: flex; gap: 12px; padding: 5px 10px; font-size: 12px;
-        background: var(--bg-secondary); color: var(--text-secondary);
-        border-radius: 6px; flex-wrap: wrap; align-items: center;
-        border: 1px solid var(--border);
+    /* ── Map Container ── */
+    .map-container {
+        position: relative;
+        height: calc(100vh - var(--topbar-height));
+        overflow: hidden;
     }
-    .stats-bar .stat { display: flex; align-items: center; gap: 4px; }
-    .stats-bar .stat-value { font-weight: 600; color: var(--text-primary); }
+    #map { width: 100%; height: 100%; z-index: 1; }
 
+    /* Hidden selects for trip/event filtering */
+    .map-hidden-controls { display: none; }
+
+    /* ── Trip Card (bottom-left floating) ── */
+    .trip-card {
+        position: absolute;
+        bottom: 12px;
+        left: 12px;
+        z-index: 1000;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-lg, 12px);
+        padding: 10px 12px;
+        min-width: 240px;
+        max-width: 360px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        backdrop-filter: blur(8px);
+    }
+    [data-theme="dark"] .trip-card {
+        background: rgba(30, 41, 59, 0.9);
+        border-color: var(--border-color, #334155);
+    }
+    .trip-card-nav {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .trip-nav-btn {
+        width: 32px; height: 32px;
+        border-radius: 50%;
+        border: 1px solid var(--border-color, var(--border));
+        background: transparent;
+        color: var(--text-secondary);
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer;
+        transition: all 200ms ease;
+        flex-shrink: 0;
+    }
+    .trip-nav-btn:hover { color: var(--text-primary); border-color: var(--accent-primary, #3B82F6); }
+    .trip-nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .trip-nav-btn .nav-icon { width: 16px; height: 16px; }
+    .trip-card-info {
+        flex: 1;
+        min-width: 0;
+        text-align: center;
+    }
+    .trip-card-date {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .trip-card-stats {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .trip-card-indexed {
+        font-size: 0.6875rem;
+        color: var(--text-muted, var(--text-secondary));
+        text-align: center;
+        margin-top: 4px;
+        padding-top: 4px;
+        border-top: 1px solid var(--border-color, var(--border));
+    }
+    .trip-card-all-btn {
+        display: inline-block;
+        font-size: 0.6875rem;
+        color: var(--accent-primary, #3B82F6);
+        cursor: pointer;
+        margin-left: 6px;
+        text-decoration: underline;
+        background: none;
+        border: none;
+        padding: 0;
+    }
+    .trip-card-all-btn:hover { opacity: 0.8; }
+
+    /* ── FAB Group (right-side floating) ── */
+    .map-fab-group {
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    .map-fab {
+        width: 40px; height: 40px;
+        border-radius: 50%;
+        border: 1px solid var(--border-color, var(--border));
+        background: var(--bg-secondary);
+        color: var(--text-secondary);
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer;
+        transition: all 200ms ease;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        backdrop-filter: blur(8px);
+        position: relative;
+    }
+    .map-fab:hover { color: var(--text-primary); border-color: var(--accent-primary, #3B82F6); }
+    .map-fab.active { background: var(--accent-primary, #3B82F6); color: #fff; border-color: var(--accent-primary, #3B82F6); }
+    .map-fab:disabled { opacity: 0.5; cursor: not-allowed; }
+    .map-fab .nav-icon { width: 20px; height: 20px; }
+    .map-fab[title]:hover::after {
+        content: attr(title);
+        position: absolute;
+        right: calc(100% + 8px);
+        top: 50%; transform: translateY(-50%);
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        padding: 4px 8px;
+        border-radius: var(--radius-sm, 4px);
+        font-size: 0.75rem;
+        white-space: nowrap;
+        border: 1px solid var(--border-color, var(--border));
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        pointer-events: none;
+        z-index: 1001;
+    }
+    [data-theme="dark"] .map-fab {
+        background: rgba(30, 41, 59, 0.9);
+        border-color: var(--border-color, #334155);
+    }
+    [data-theme="dark"] .map-fab.active {
+        background: var(--accent-primary, #3B82F6);
+        border-color: var(--accent-primary, #3B82F6);
+    }
+    .map-fab.spinning .nav-icon {
+        animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Event Filter Dropdown ── */
+    .event-filter-dropdown {
+        position: absolute;
+        right: calc(100% + 8px);
+        top: 0;
+        z-index: 1001;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-lg, 12px);
+        padding: 8px 0;
+        min-width: 180px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        backdrop-filter: blur(8px);
+    }
+    [data-theme="dark"] .event-filter-dropdown {
+        background: rgba(30, 41, 59, 0.95);
+        border-color: var(--border-color, #334155);
+    }
+    .event-filter-dropdown .filter-option {
+        display: block; width: 100%;
+        padding: 6px 14px;
+        background: none; border: none;
+        color: var(--text-primary);
+        font-size: 0.8125rem;
+        text-align: left;
+        cursor: pointer;
+        transition: background 150ms ease;
+    }
+    .event-filter-dropdown .filter-option:hover {
+        background: var(--bg-tertiary, var(--bg-primary));
+    }
+    .event-filter-dropdown .filter-option.active {
+        color: var(--accent-primary, #3B82F6);
+        font-weight: 600;
+    }
+
+    /* ── Legend ── */
     .legend {
-        position: absolute; bottom: 30px; right: 10px; z-index: 1000;
-        background: var(--bg-container); color: var(--text-primary);
-        padding: 10px 14px; border-radius: 8px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15); font-size: 12px;
-        max-width: 200px; border: 1px solid var(--border);
+        position: absolute;
+        bottom: 30px;
+        right: 60px;
+        z-index: 1000;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        padding: 10px 14px;
+        border-radius: var(--radius-lg, 12px);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        font-size: 12px;
+        max-width: 200px;
+        border: 1px solid var(--border-color, var(--border));
+        backdrop-filter: blur(8px);
+    }
+    [data-theme="dark"] .legend {
+        background: rgba(30, 41, 59, 0.9);
+        border-color: var(--border-color, #334155);
     }
     .legend-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
     .legend-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
 
+    /* ── Indexer Status (floating on map) ── */
     .indexer-status {
-        padding: 8px 12px; border-radius: 6px; font-size: 13px;
-        background: var(--bg-secondary); color: var(--text-primary);
-        border: 1px solid var(--border);
+        position: absolute;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1000;
+        padding: 8px 16px;
+        border-radius: var(--radius-lg, 12px);
+        font-size: 0.8125rem;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color, var(--border));
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        backdrop-filter: blur(8px);
+        white-space: nowrap;
+    }
+    [data-theme="dark"] .indexer-status {
+        background: rgba(30, 41, 59, 0.9);
     }
     .indexer-status.running { border-left: 3px solid #f0ad4e; }
 
-    .popup-video-link { color: var(--accent-color, #007bff); cursor: pointer; text-decoration: underline; }
+    .popup-video-link { color: var(--accent-primary, #3B82F6); cursor: pointer; text-decoration: underline; }
 
-    /* Video player overlay */
+    /* ── Video Player Overlay (unchanged) ── */
     .video-overlay {
         position: fixed; z-index: 2000;
         background: var(--bg-secondary, #1a1a2e); border-radius: 12px;
@@ -101,66 +293,128 @@
     .fsd-engaged { background: #28a745; }
     .fsd-manual { background: #6c757d; }
 
-    @media (max-width: 768px) {
-        .map-container { height: calc(100vh - 160px); }
-        .map-toolbar { padding: 4px 0; gap: 4px; }
-        .stats-bar { gap: 6px; font-size: 11px; padding: 4px 8px; }
-        .legend { bottom: 20px; right: 5px; }
+    /* ── Reduced motion ── */
+    @media (prefers-reduced-motion: reduce) {
+        .map-fab, .trip-nav-btn, .trip-card, .legend, .indexer-status,
+        .event-filter-dropdown .filter-option {
+            transition: none !important;
+        }
+        .map-fab.spinning .nav-icon { animation: none !important; }
+    }
+
+    /* ── Mobile (<1024px): bottom tabs visible ── */
+    @media (max-width: 1023px) {
+        .main-content {
+            margin-left: 0 !important;
+        }
+        .map-container {
+            height: calc(100vh - var(--topbar-height) - var(--bottomtab-height));
+        }
+        .trip-card {
+            left: 8px; right: 8px; bottom: 8px;
+            max-width: none;
+        }
+        .map-fab-group {
+            top: auto; bottom: 140px;
+            right: 8px;
+            transform: none;
+        }
+        .legend {
+            bottom: 200px;
+            right: 8px;
+        }
+        .map-fab[title]:hover::after { display: none; }
+    }
+
+    /* ── Small mobile (<768px) ── */
+    @media (max-width: 767px) {
+        .trip-card { padding: 8px 10px; min-width: 0; }
+        .trip-card-date { font-size: 0.8125rem; }
     }
 </style>
 
-<div class="container" style="max-width: 100%; padding: 0 12px;">
-    <div class="map-container">
-        <!-- Toolbar -->
-        <div class="map-toolbar">
-            <button id="btnTrips" class="active" onclick="showTrips()">🛣️ Trips</button>
-            <select id="tripFilter" onchange="filterTrips()">
-                <option value="">All Trips</option>
-            </select>
-            <div class="separator"></div>
-            <button id="btnEvents" onclick="toggleEvents()">⚡ Events</button>
-            <select id="eventFilter" onchange="filterEvents()" style="display:none">
-                <option value="">All Events</option>
-                <option value="harsh_brake">Harsh Braking</option>
-                <option value="emergency_brake">Emergency Braking</option>
-                <option value="hard_acceleration">Hard Acceleration</option>
-                <option value="sharp_turn">Sharp Turn</option>
-                <option value="speeding">Speeding</option>
-                <option value="fsd_disengage">FSD Disengagement</option>
-                <option value="fsd_engage">FSD Engagement</option>
-            </select>
-            <div class="separator"></div>
-            <button id="btnFsd" onclick="toggleFsdOverlay()">🤖 FSD Overlay</button>
-            <button id="btnHeat" onclick="toggleHeatmap()">🌡️ Heatmap</button>
-            <div style="flex:1"></div>
-            <button id="btnIndex" onclick="triggerIndex()">🔄 Index Videos</button>
+<div class="map-container">
+    <!-- Hidden select controls (kept for data/filtering logic) -->
+    <div class="map-hidden-controls">
+        <select id="tripFilter" onchange="filterTrips()">
+            <option value="">All Trips</option>
+        </select>
+        <select id="eventFilter" onchange="filterEvents()">
+            <option value="">All Events</option>
+            <option value="harsh_brake">Harsh Braking</option>
+            <option value="emergency_brake">Emergency Braking</option>
+            <option value="hard_acceleration">Hard Acceleration</option>
+            <option value="sharp_turn">Sharp Turn</option>
+            <option value="speeding">Speeding</option>
+            <option value="fsd_disengage">FSD Disengagement</option>
+            <option value="fsd_engage">FSD Engagement</option>
+        </select>
+    </div>
+
+    <!-- Map -->
+    <div id="map"></div>
+
+    <!-- Trip Card (bottom-left floating) -->
+    <div class="trip-card" id="tripCard">
+        <div class="trip-card-nav">
+            <button class="trip-nav-btn" id="tripPrev" onclick="cycleTrip(-1)" aria-label="Previous trip">
+                <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-left"></use></svg>
+            </button>
+            <div class="trip-card-info">
+                <div class="trip-card-date" id="tripCardDate">Loading...</div>
+                <div class="trip-card-stats" id="tripCardStats">&mdash;</div>
+            </div>
+            <button class="trip-nav-btn" id="tripNext" onclick="cycleTrip(1)" aria-label="Next trip">
+                <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-right"></use></svg>
+            </button>
         </div>
-
-        <!-- Stats bar -->
-        <div class="stats-bar" id="statsBar">
-            <div class="stat">🛣️ <span class="stat-value" id="statTrips">—</span> trips</div>
-            <div class="stat">📍 <span class="stat-value" id="statWaypoints">—</span> points</div>
-            <div class="stat">⚡ <span class="stat-value" id="statEvents">—</span> events</div>
-            <div class="stat">📏 <span class="stat-value" id="statDistance">—</span> mi</div>
-            <div class="stat">📁 <span class="stat-value" id="statFiles">—</span> indexed</div>
+        <div class="trip-card-indexed" id="tripCardIndexed">
+            <span id="tripIndexedCount">&mdash;</span> indexed
+            <button class="trip-card-all-btn" id="tripAllBtn" onclick="showAllTrips()">All trips</button>
         </div>
+    </div>
 
-        <!-- Indexer status -->
-        <div class="indexer-status" id="indexerStatus" style="display:none"></div>
-
-        <!-- Map -->
-        <div id="map"></div>
-
-        <!-- Legend -->
-        <div class="legend" id="legend" style="display:none">
-            <strong>Events</strong>
-            <div class="legend-item"><span class="legend-dot" style="background:#dc3545"></span> Critical</div>
-            <div class="legend-item"><span class="legend-dot" style="background:#ffc107"></span> Warning</div>
-            <div class="legend-item"><span class="legend-dot" style="background:#17a2b8"></span> Info</div>
-            <div style="margin-top:6px"><strong>FSD</strong></div>
-            <div class="legend-item"><span class="legend-dot fsd-engaged"></span> Engaged</div>
-            <div class="legend-item"><span class="legend-dot fsd-manual"></span> Manual</div>
+    <!-- FAB Group (right-side floating) -->
+    <div class="map-fab-group" id="mapFabs">
+        <button class="map-fab" id="btnEvents" onclick="toggleEvents()" aria-label="Toggle events" title="Events">
+            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use></svg>
+        </button>
+        <div style="position:relative">
+            <button class="map-fab" id="btnFsd" onclick="toggleFsdOverlay()" aria-label="FSD overlay" title="FSD Overlay">
+                <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-layers"></use></svg>
+            </button>
         </div>
+        <button class="map-fab" id="btnHeat" onclick="toggleHeatmap()" aria-label="Heatmap" title="Heatmap">
+            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-thermometer"></use></svg>
+        </button>
+        <button class="map-fab" id="btnIndex" onclick="triggerIndex()" aria-label="Index videos" title="Index Videos">
+            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+        </button>
+        <!-- Event filter dropdown (appears when events FAB is active) -->
+        <div class="event-filter-dropdown" id="eventFilterDropdown" style="display:none">
+            <button class="filter-option active" data-filter="" onclick="selectEventFilter(this)">All Events</button>
+            <button class="filter-option" data-filter="harsh_brake" onclick="selectEventFilter(this)">Harsh Braking</button>
+            <button class="filter-option" data-filter="emergency_brake" onclick="selectEventFilter(this)">Emergency Braking</button>
+            <button class="filter-option" data-filter="hard_acceleration" onclick="selectEventFilter(this)">Hard Acceleration</button>
+            <button class="filter-option" data-filter="sharp_turn" onclick="selectEventFilter(this)">Sharp Turn</button>
+            <button class="filter-option" data-filter="speeding" onclick="selectEventFilter(this)">Speeding</button>
+            <button class="filter-option" data-filter="fsd_disengage" onclick="selectEventFilter(this)">FSD Disengagement</button>
+            <button class="filter-option" data-filter="fsd_engage" onclick="selectEventFilter(this)">FSD Engagement</button>
+        </div>
+    </div>
+
+    <!-- Indexer status (floating, centered top) -->
+    <div class="indexer-status" id="indexerStatus" style="display:none"></div>
+
+    <!-- Legend -->
+    <div class="legend" id="legend" style="display:none">
+        <strong>Events</strong>
+        <div class="legend-item"><span class="legend-dot" style="background:#dc3545"></span> Critical</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#ffc107"></span> Warning</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#17a2b8"></span> Info</div>
+        <div style="margin-top:6px"><strong>FSD</strong></div>
+        <div class="legend-item"><span class="legend-dot fsd-engaged"></span> Engaged</div>
+        <div class="legend-item"><span class="legend-dot fsd-manual"></span> Manual</div>
     </div>
 </div>
 
@@ -211,6 +465,7 @@ let fsdVisible = false;
 let heatVisible = false;
 let allTrips = [];
 let allEvents = [];
+let currentTripIndex = 0;
 
 // Event severity colors
 // Build a deep link to the event player for a video path
@@ -250,11 +505,8 @@ async function loadStats() {
     try {
         const resp = await fetch('/map/api/stats');
         const data = await resp.json();
-        document.getElementById('statTrips').textContent = data.trip_count || 0;
-        document.getElementById('statWaypoints').textContent = (data.waypoint_count || 0).toLocaleString();
-        document.getElementById('statEvents').textContent = data.event_count || 0;
-        document.getElementById('statDistance').textContent = ((data.total_distance_km || 0) * 0.621371).toFixed(1);
-        document.getElementById('statFiles').textContent = data.indexed_file_count || 0;
+        const indexedEl = document.getElementById('tripIndexedCount');
+        if (indexedEl) indexedEl.textContent = (data.indexed_file_count || 0).toLocaleString();
     } catch(e) { console.error('Failed to load stats:', e); }
 }
 
@@ -264,7 +516,7 @@ async function loadTrips() {
         const data = await resp.json();
         allTrips = data.trips || [];
 
-        // Populate trip dropdown
+        // Populate hidden trip dropdown (kept for data reference)
         const sel = document.getElementById('tripFilter');
         sel.replaceChildren();
         const defaultOpt = document.createElement('option');
@@ -281,16 +533,90 @@ async function loadTrips() {
         });
 
         // Default to most recent trip (first in list, sorted by start_time DESC)
-        if (allTrips.length > 0 && !sel.value) {
+        if (allTrips.length > 0) {
+            currentTripIndex = 0;
+            updateTripCard();
             sel.value = allTrips[0].id;
             const saved = allTrips;
             allTrips = [allTrips[0]];
             await renderTrips();
             allTrips = saved;
         } else {
+            updateTripCard();
             await renderTrips();
         }
     } catch(e) { console.error('Failed to load trips:', e); }
+}
+
+// Update trip card display based on currentTripIndex
+function updateTripCard() {
+    const dateEl = document.getElementById('tripCardDate');
+    const statsEl = document.getElementById('tripCardStats');
+    const prevBtn = document.getElementById('tripPrev');
+    const nextBtn = document.getElementById('tripNext');
+
+    if (!allTrips.length) {
+        dateEl.textContent = 'No trips';
+        statsEl.textContent = '\u2014';
+        if (prevBtn) prevBtn.disabled = true;
+        if (nextBtn) nextBtn.disabled = true;
+        return;
+    }
+
+    const trip = allTrips[currentTripIndex];
+    const date = formatLocalTime(trip.start_time);
+    const dist = ((trip.distance_km || 0) * 0.621371).toFixed(1);
+    const dur = Math.round((trip.duration_seconds || 0) / 60);
+    const events = trip.event_count || 0;
+
+    dateEl.textContent = date;
+
+    const statParts = [`${dist} mi`];
+    if (dur > 0) statParts.push(`${dur} min`);
+    if (events > 0) statParts.push(`${events} events`);
+    statsEl.textContent = statParts.join(' \u00B7 ');
+
+    if (prevBtn) prevBtn.disabled = (currentTripIndex >= allTrips.length - 1);
+    if (nextBtn) nextBtn.disabled = (currentTripIndex <= 0);
+}
+
+// Cycle through trips via trip card arrows
+function cycleTrip(direction) {
+    if (!allTrips.length) return;
+    // allTrips is sorted newest-first; -1 = older (higher index), +1 = newer (lower index)
+    const newIndex = currentTripIndex - direction;
+    if (newIndex < 0 || newIndex >= allTrips.length) return;
+
+    currentTripIndex = newIndex;
+    updateTripCard();
+
+    // Show this single trip on the map
+    const trip = allTrips[currentTripIndex];
+    const sel = document.getElementById('tripFilter');
+    sel.value = trip.id;
+    const saved = allTrips;
+    allTrips = [trip];
+    renderTrips().then(() => { allTrips = saved; });
+}
+
+// Show all trips on the map
+function showAllTrips() {
+    if (!allTrips.length) return;
+    const sel = document.getElementById('tripFilter');
+    sel.value = '';
+
+    const dateEl = document.getElementById('tripCardDate');
+    const statsEl = document.getElementById('tripCardStats');
+    dateEl.textContent = `All Trips (${allTrips.length})`;
+    const totalDist = allTrips.reduce((s, t) => s + (t.distance_km || 0), 0) * 0.621371;
+    statsEl.textContent = `${totalDist.toFixed(1)} mi total`;
+
+    const prevBtn = document.getElementById('tripPrev');
+    const nextBtn = document.getElementById('tripNext');
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+
+    renderTrips();
 }
 
 function filterTrips() {
@@ -710,8 +1036,6 @@ let eventsVisible = false;
 
 function showTrips() {
     currentView = 'trips';
-    document.getElementById('btnTrips').classList.add('active');
-    document.getElementById('tripFilter').style.display = '';
     tripLayer.addTo(map);
     loadTrips();
 }
@@ -719,8 +1043,11 @@ function showTrips() {
 function toggleEvents() {
     eventsVisible = !eventsVisible;
     document.getElementById('btnEvents').classList.toggle('active', eventsVisible);
-    document.getElementById('eventFilter').style.display = eventsVisible ? '' : 'none';
     document.getElementById('legend').style.display = eventsVisible ? 'block' : 'none';
+
+    // Show/hide event filter dropdown
+    const dropdown = document.getElementById('eventFilterDropdown');
+    if (dropdown) dropdown.style.display = eventsVisible ? '' : 'none';
 
     if (eventsVisible) {
         eventCluster.addTo(map);
@@ -728,6 +1055,17 @@ function toggleEvents() {
     } else {
         map.removeLayer(eventCluster);
     }
+}
+
+function selectEventFilter(btn) {
+    // Update visual active state
+    document.querySelectorAll('#eventFilterDropdown .filter-option').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    // Sync with hidden select
+    const filterValue = btn.dataset.filter;
+    document.getElementById('eventFilter').value = filterValue;
+    filterEvents();
 }
 
 function filterEvents() {
@@ -797,7 +1135,7 @@ async function toggleHeatmap() {
 async function triggerIndex() {
     const btn = document.getElementById('btnIndex');
     btn.disabled = true;
-    btn.textContent = '⏳ Starting...';
+    btn.classList.add('spinning');
 
     try {
         const resp = await fetch('/map/api/index/trigger', { method: 'POST' });
@@ -807,12 +1145,12 @@ async function triggerIndex() {
         } else {
             alert(data.message || 'Failed to start indexer');
             btn.disabled = false;
-            btn.textContent = '🔄 Index Videos';
+            btn.classList.remove('spinning');
         }
     } catch(e) {
         alert('Failed to start indexer: ' + e.message);
         btn.disabled = false;
-        btn.textContent = '🔄 Index Videos';
+        btn.classList.remove('spinning');
     }
 }
 
@@ -827,23 +1165,23 @@ async function pollIndexer() {
         if (data.running) {
             statusDiv.style.display = 'block';
             statusDiv.className = 'indexer-status running';
-            statusDiv.textContent = `⏳ ${data.progress || 'Indexing...'} (${data.files_done || 0}/${data.files_total || '?'})`;
+            statusDiv.textContent = `Indexing... (${data.files_done || 0}/${data.files_total || '?'})`;
             btn.disabled = true;
-            btn.textContent = '⏳ Indexing...';
+            btn.classList.add('spinning');
             setTimeout(pollIndexer, 2000);
         } else {
             statusDiv.style.display = data.error ? 'block' : 'none';
             if (data.error) {
                 statusDiv.className = 'indexer-status';
-                statusDiv.textContent = `❌ ${data.error}`;
+                statusDiv.textContent = data.error;
             } else if (data.progress) {
                 statusDiv.style.display = 'block';
                 statusDiv.className = 'indexer-status';
-                statusDiv.textContent = `✅ ${data.progress}`;
+                statusDiv.textContent = data.progress;
                 setTimeout(() => { statusDiv.style.display = 'none'; }, 10000);
             }
             btn.disabled = false;
-            btn.textContent = '🔄 Index Videos';
+            btn.classList.remove('spinning');
             // Reload data
             loadStats();
             if (currentView === 'trips') loadTrips();
@@ -851,7 +1189,7 @@ async function pollIndexer() {
         }
     } catch(e) {
         btn.disabled = false;
-        btn.textContent = '🔄 Index Videos';
+        btn.classList.remove('spinning');
     }
 }
 

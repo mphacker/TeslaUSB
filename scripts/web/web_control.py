@@ -84,6 +84,25 @@ if __name__ == "__main__":
     print(f"Gadget directory: {GADGET_DIR}")
     print(f"Access the interface at: http://0.0.0.0:{WEB_PORT}/")
 
+    # Auto-index videos on startup if enabled
+    from config import (
+        MAPPING_ENABLED, MAPPING_INDEX_ON_STARTUP, MAPPING_DB_PATH,
+        MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS, MAPPING_TRIP_GAP_MINUTES,
+    )
+    if MAPPING_ENABLED and MAPPING_INDEX_ON_STARTUP:
+        from services.video_service import get_teslacam_path
+        from services.mapping_service import trigger_auto_index
+        teslacam = get_teslacam_path()
+        if teslacam:
+            print("Auto-indexing videos on startup...")
+            trigger_auto_index(
+                db_path=MAPPING_DB_PATH,
+                teslacam_path=teslacam,
+                sample_rate=MAPPING_SAMPLE_RATE,
+                thresholds=MAPPING_EVENT_THRESHOLDS,
+                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+            )
+
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:
         from waitress import serve

@@ -17,6 +17,30 @@ mode_control_bp = Blueprint('mode_control', __name__, url_prefix='/settings')
 logger = logging.getLogger(__name__)
 
 
+def _trigger_auto_index_after_mode_switch():
+    """Trigger background video indexing after a mode switch if enabled."""
+    try:
+        from config import (
+            MAPPING_ENABLED, MAPPING_INDEX_ON_MODE_SWITCH, MAPPING_DB_PATH,
+            MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS, MAPPING_TRIP_GAP_MINUTES,
+        )
+        if not MAPPING_ENABLED or not MAPPING_INDEX_ON_MODE_SWITCH:
+            return
+        from services.video_service import get_teslacam_path
+        from services.mapping_service import trigger_auto_index
+        teslacam = get_teslacam_path()
+        if teslacam:
+            trigger_auto_index(
+                db_path=MAPPING_DB_PATH,
+                teslacam_path=teslacam,
+                sample_rate=MAPPING_SAMPLE_RATE,
+                thresholds=MAPPING_EVENT_THRESHOLDS,
+                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+            )
+    except Exception as e:
+        logger.warning("Auto-index after mode switch failed: %s", e)
+
+
 @mode_control_bp.route("/")
 def index():
     """Main page with control buttons."""
@@ -96,6 +120,8 @@ def present_usb():
 
         if result.returncode == 0:
             flash("Successfully switched to Present Mode", "success")
+            # Auto-index videos after switching to present mode
+            _trigger_auto_index_after_mode_switch()
         else:
             flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
 
@@ -136,6 +162,8 @@ def edit_usb():
 
         if result.returncode == 0:
             flash("Successfully switched to Edit Mode", "success")
+            # Auto-index videos after switching to edit mode
+            _trigger_auto_index_after_mode_switch()
         else:
             flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
 

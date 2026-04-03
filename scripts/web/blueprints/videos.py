@@ -615,9 +615,40 @@ def delete_event(folder, event_name):
             'error': str(e)
         }), 500
 
+    # Clean up geodata.db entries for deleted front-camera videos
+    if deleted_files:
+        try:
+            from config import MAPPING_ENABLED, MAPPING_DB_PATH
+            if MAPPING_ENABLED:
+                from services.mapping_service import purge_deleted_videos
+                full_paths = [
+                    os.path.join(folder_path, event_name, f) if folder_structure != 'flat'
+                    else os.path.join(folder_path, f)
+                    for f in deleted_files
+                ]
+                purge_deleted_videos(MAPPING_DB_PATH, deleted_paths=full_paths)
+        except Exception as e:
+            logger.warning("Failed to purge geodata for deleted videos: %s", e)
+
     return jsonify({
         'success': True,
         'deleted_count': deleted_count,
         'deleted_files': deleted_files,
         'error_count': error_count
     })
+
+    # Clean up geodata.db entries for deleted front-camera videos
+    if deleted_files:
+        try:
+            from config import MAPPING_ENABLED, MAPPING_DB_PATH
+            if MAPPING_ENABLED:
+                from services.mapping_service import purge_deleted_videos
+                # Build full paths for the deleted files
+                full_paths = [
+                    os.path.join(folder_path, event_name, f) if folder_structure != 'flat'
+                    else os.path.join(folder_path, f)
+                    for f in deleted_files
+                ]
+                purge_deleted_videos(MAPPING_DB_PATH, deleted_paths=full_paths)
+        except Exception as e:
+            logger.warning("Failed to purge geodata for deleted videos: %s", e)

@@ -435,6 +435,17 @@ class CleanupService:
                 logger.error(error_msg)
                 errors.append(error_msg)
 
+        # Purge geodata.db entries for deleted files
+        if not dry_run and deleted_files:
+            try:
+                from config import MAPPING_ENABLED, MAPPING_DB_PATH
+                if MAPPING_ENABLED:
+                    from services.mapping_service import purge_deleted_videos
+                    paths = [f['path'] for f in deleted_files]
+                    purge_deleted_videos(MAPPING_DB_PATH, deleted_paths=paths)
+            except Exception as e:
+                logger.warning("Failed to purge geodata for cleaned-up videos: %s", e)
+
         return {
             'success': len(errors) == 0,
             'deleted_count': deleted_count,
@@ -445,6 +456,17 @@ class CleanupService:
             'dry_run': dry_run,
             'timestamp': datetime.now().isoformat()
         }
+
+        # Purge geodata.db entries for deleted files
+        if not dry_run and deleted_files:
+            try:
+                from config import MAPPING_ENABLED, MAPPING_DB_PATH
+                if MAPPING_ENABLED:
+                    from services.mapping_service import purge_deleted_videos
+                    paths = [f['path'] for f in deleted_files]
+                    purge_deleted_videos(MAPPING_DB_PATH, deleted_paths=paths)
+            except Exception as e:
+                logger.warning("Failed to purge geodata for cleaned-up videos: %s", e)
 
     def run_automatic_cleanup(self, partition_path: Path, dry_run: bool = False) -> Dict:
         """

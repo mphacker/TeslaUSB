@@ -711,6 +711,143 @@ def cancel_indexer() -> Tuple[bool, str]:
     return True, "Cancellation requested"
 
 
+def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
+                         deleted_paths: Optional[List[str]] = None) -> dict:
+    """Remove geodata.db entries for videos that no longer exist on disk.
+
+    Can operate in two modes:
+    - **Targeted**: Pass ``deleted_paths`` (list of absolute or relative video
+      paths) to remove only those specific entries.
+    - **Full scan**: Pass ``teslacam_path`` to scan every ``indexed_files``
+      entry and remove those whose file no longer exists.
+
+    Returns dict with counts of purged rows.
+    """
+    conn = _init_db(db_path)
+    purged_files = 0
+    purged_waypoints = 0
+    purged_events = 0
+    purged_trips = 0
+
+    try:
+        if deleted_paths:
+            # Targeted mode — remove entries matching the given paths
+            for path in deleted_paths:
+                # indexed_files stores absolute paths; also try matching by
+                # video_path column in waypoints which stores relative paths.
+                row = conn.execute(
+                    "SELECT file_path FROM indexed_files WHERE file_path = ? "
+                    "OR file_path LIKE ?",
+                    (path, f'%{os.path.basename(path)}%')
+                ).fetchone()
+                if row:
+                    conn.execute(
+                        "DELETE FROM indexed_files WHERE file_path = ?",
+                        (row['file_path'],)
+                    )
+                    purged_files += 1
+
+            # Build a pattern for waypoint cleanup — match on basename of
+            # front-camera files (all camera angles share the same waypoints
+            # via the front-camera video_path).
+            for path in deleted_paths:
+                basename = os.path.basename(path)
+                # Only front-camera files have waypoints
+                if '-front' not in basename.lower():
+                    continue
+                # waypoints.video_path is relative (e.g. "RecentClips/2026-...")
+                rows = conn.execute(
+                    "SELECT DISTINCT trip_id FROM waypoints "
+                    "WHERE video_path LIKE ?",
+                    (f'%{basename}%',)
+                ).fetchall()
+                trip_ids = [r['trip_id'] for r in rows]
+
+                wc = conn.execute(
+                    "DELETE FROM waypoints WHERE video_path LIKE ?",
+                    (f'%{basename}%',)
+                ).rowcount
+                purged_waypoints += wc
+
+                ec = conn.execute(
+                    "DELETE FROM detected_events WHERE video_path LIKE ?",
+                    (f'%{basename}%',)
+                ).rowcount
+                purged_events += ec
+
+                # Remove trips that now have zero waypoints
+                for tid in trip_ids:
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?",
+                        (tid,)
+                    ).fetchone()[0]
+                    if remaining == 0:
+                        conn.execute("DELETE FROM trips WHERE id = ?", (tid,))
+                        purged_trips += 1
+
+        elif teslacam_path:
+            # Full scan mode — check every indexed file against disk
+            rows = conn.execute(
+                "SELECT file_path FROM indexed_files"
+            ).fetchall()
+            missing = []
+            for row in rows:
+                if not os.path.isfile(row['file_path']):
+                    missing.append(row['file_path'])
+
+            if missing:
+                logger.info("Purging %d missing videos from geodata.db", len(missing))
+                # Recurse with targeted mode for the missing files
+                result = purge_deleted_videos(db_path, deleted_paths=missing)
+                conn.close()
+                return result
+
+        conn.commit()
+        logger.info(
+            "Purged from geodata.db: %d files, %d waypoints, %d events, %d trips",
+            purged_files, purged_waypoints, purged_events, purged_trips,
+        )
+    finally:
+        conn.close()
+
+    return {
+        'purged_files': purged_files,
+        'purged_waypoints': purged_waypoints,
+        'purged_events': purged_events,
+        'purged_trips': purged_trips,
+    }
+
+
+def trigger_auto_index(db_path: str, teslacam_path: str,
+                       sample_rate: int = 30,
+                       thresholds: Optional[dict] = None,
+                       trip_gap_minutes: int = 5) -> None:
+    """Trigger indexing in the background if TeslaCam path is accessible.
+
+    Safe to call from startup or mode-switch hooks. Does nothing if the
+    indexer is already running or the path is not available.
+    """
+    if not teslacam_path or not os.path.isdir(teslacam_path):
+        logger.debug("Auto-index skipped: TeslaCam path not accessible")
+        return
+
+    if _status.get('running'):
+        logger.debug("Auto-index skipped: indexer already running")
+        return
+
+    success, msg = start_indexer(
+        db_path=db_path,
+        teslacam_path=teslacam_path,
+        sample_rate=sample_rate,
+        thresholds=thresholds,
+        trip_gap_minutes=trip_gap_minutes,
+    )
+    if success:
+        logger.info("Auto-index triggered: %s", msg)
+    else:
+        logger.debug("Auto-index not started: %s", msg)
+
+
 def diagnose_video(teslacam_path: str, max_videos: int = 3) -> dict:
     """Diagnose SEI parsing on sample videos for troubleshooting.
 

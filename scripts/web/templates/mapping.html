@@ -174,6 +174,18 @@ if ('serviceWorker' in navigator) {
         .catch(err => console.warn('Tile cache SW failed:', err));
 }
 
+// Format ISO timestamp to local time
+function formatLocalTime(isoStr) {
+    if (!isoStr) return 'Unknown';
+    try {
+        const d = new Date(isoStr.replace(' ', 'T'));
+        return d.toLocaleString(undefined, {
+            month: 'short', day: 'numeric', year: 'numeric',
+            hour: 'numeric', minute: '2-digit', hour12: true
+        });
+    } catch(e) { return isoStr; }
+}
+
 // Fix Leaflet marker icon path for vendored setup
 L.Icon.Default.imagePath = '{{ url_for("static", filename="vendor/leaflet/images/") }}';
 
@@ -255,7 +267,7 @@ async function loadTrips() {
         const sel = document.getElementById('tripFilter');
         sel.innerHTML = '<option value="">All Trips</option>';
         allTrips.forEach(t => {
-            const date = (t.start_time || '').replace('T', ' ').substring(0, 16);
+            const date = formatLocalTime(t.start_time);
             const dist = ((t.distance_km || 0) * 0.621371).toFixed(1);
             sel.innerHTML += `<option value="${t.id}">${date} — ${dist} mi</option>`;
         });
@@ -349,7 +361,7 @@ async function renderTrips() {
                 radius: 8, fillColor: '#28a745', color: '#fff', weight: 2, fillOpacity: 0.9,
             }).bindPopup(
                 `<strong>🟢 Trip #${trip.id}</strong><br>` +
-                `📅 ${trip.start_time || 'Unknown'}<br>` +
+                `📅 ${formatLocalTime(trip.start_time)}<br>` +
                 `📏 ${dist} mi · ⏱ ${dur} min`
             ).addTo(tripLayer);
 
@@ -588,6 +600,34 @@ function navigateClip(direction) {
     updateOverlayTelemetry(clip.firstWaypoint);
 }
 
+async function openEventVideo(tripId, videoPath, frameOffset, lat, lon) {
+    // Close the Leaflet popup
+    map.closePopup();
+
+    const wp = {
+        video_path: videoPath,
+        frame_offset: frameOffset,
+        speed_mps: 0,
+        autopilot_state: 'N/A',
+        lat: lat,
+        lon: lon,
+    };
+
+    // Load trip route waypoints for telemetry + prev/next
+    let wps = [wp];
+    if (tripId) {
+        try {
+            const geojson = await loadTripRoute(tripId);
+            if (geojson && geojson.properties && geojson.properties.waypoints) {
+                wps = geojson.properties.waypoints;
+            }
+        } catch(e) {}
+    }
+
+    // Center the overlay on screen
+    openVideoOverlay(wp, { x: window.innerWidth / 3, y: window.innerHeight / 4 }, wps);
+}
+
 function closeVideoOverlay() {
     const existing = document.getElementById('videoOverlay');
     if (existing) {
@@ -616,10 +656,10 @@ function renderEvents() {
 
         marker.bindPopup(
             `<strong>${icon} ${ev.event_type.replace(/_/g, ' ')}</strong><br>` +
-            `📅 ${ev.timestamp}<br>` +
+            `📅 ${formatLocalTime(ev.timestamp)}<br>` +
             `${ev.description || ''}<br>` +
             (ev.video_path ?
-                `🎥 <a href="${buildVideoLink(ev.video_path, ev.timestamp)}" target="_blank">View Video</a>` : '')
+                `🎥 <a href="#" class="popup-video-link" onclick="event.preventDefault(); openEventVideo(${ev.trip_id || 0}, '${ev.video_path}', ${ev.frame_offset || 0}, ${ev.lat}, ${ev.lon})">View Video</a>` : '')
         );
 
         eventCluster.addLayer(marker);

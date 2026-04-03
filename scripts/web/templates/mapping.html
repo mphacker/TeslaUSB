@@ -5,7 +5,11 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/MarkerCluster.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/MarkerCluster.Default.css') }}">
 <style>
-    .map-container { display: flex; flex-direction: column; height: calc(100vh - 120px); gap: 0; overflow: hidden; }
+    /* Override for full-height map page — no page scroll */
+    html, body { overflow: hidden !important; height: 100vh !important; }
+    .main-content { margin-top: 4px !important; margin-bottom: 0 !important; overflow: hidden !important; }
+
+    .map-container { display: flex; flex-direction: column; height: calc(100vh - 145px); gap: 0; overflow: hidden; }
     #map { flex: 1; min-height: 0; border-radius: 8px; z-index: 1; }
 
     .map-toolbar {
@@ -98,7 +102,7 @@
     .fsd-manual { background: #6c757d; }
 
     @media (max-width: 768px) {
-        .map-container { height: calc(100vh - 100px); }
+        .map-container { height: calc(100vh - 160px); }
         .map-toolbar { padding: 4px 0; gap: 4px; }
         .stats-bar { gap: 6px; font-size: 11px; padding: 4px 8px; }
         .legend { bottom: 20px; right: 5px; }

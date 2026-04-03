@@ -220,6 +220,8 @@
     }
     .legend-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
     .legend-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+    .legend-icon { font-size: 14px; width: 16px; text-align: center; display: inline-block; line-height: 1; }
+    .event-svg-icon { background: none !important; border: none !important; }
 
     /* ── Indexer Status (floating on map) ── */
     .indexer-status {
@@ -339,16 +341,6 @@
         <select id="tripFilter" onchange="filterTrips()">
             <option value="">All Trips</option>
         </select>
-        <select id="eventFilter" onchange="filterEvents()">
-            <option value="">All Events</option>
-            <option value="harsh_brake">Harsh Braking</option>
-            <option value="emergency_brake">Emergency Braking</option>
-            <option value="hard_acceleration">Hard Acceleration</option>
-            <option value="sharp_turn">Sharp Turn</option>
-            <option value="speeding">Speeding</option>
-            <option value="fsd_disengage">FSD Disengagement</option>
-            <option value="fsd_engage">FSD Engagement</option>
-        </select>
     </div>
 
     <!-- Map -->
@@ -376,9 +368,6 @@
 
     <!-- FAB Group (right-side floating) -->
     <div class="map-fab-group" id="mapFabs">
-        <button class="map-fab" id="btnEvents" onclick="toggleEvents()" aria-label="Toggle events" title="Events">
-            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use></svg>
-        </button>
         <div style="position:relative">
             <button class="map-fab" id="btnFsd" onclick="toggleFsdOverlay()" aria-label="FSD overlay" title="FSD Overlay">
                 <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-layers"></use></svg>
@@ -390,32 +379,10 @@
         <button class="map-fab" id="btnIndex" onclick="triggerIndex()" aria-label="Index videos" title="Index Videos">
             <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
         </button>
-        <!-- Event filter dropdown (appears when events FAB is active) -->
-        <div class="event-filter-dropdown" id="eventFilterDropdown" style="display:none">
-            <button class="filter-option active" data-filter="" onclick="selectEventFilter(this)">All Events</button>
-            <button class="filter-option" data-filter="harsh_brake" onclick="selectEventFilter(this)">Harsh Braking</button>
-            <button class="filter-option" data-filter="emergency_brake" onclick="selectEventFilter(this)">Emergency Braking</button>
-            <button class="filter-option" data-filter="hard_acceleration" onclick="selectEventFilter(this)">Hard Acceleration</button>
-            <button class="filter-option" data-filter="sharp_turn" onclick="selectEventFilter(this)">Sharp Turn</button>
-            <button class="filter-option" data-filter="speeding" onclick="selectEventFilter(this)">Speeding</button>
-            <button class="filter-option" data-filter="fsd_disengage" onclick="selectEventFilter(this)">FSD Disengagement</button>
-            <button class="filter-option" data-filter="fsd_engage" onclick="selectEventFilter(this)">FSD Engagement</button>
-        </div>
     </div>
 
     <!-- Indexer status (floating, centered top) -->
     <div class="indexer-status" id="indexerStatus" style="display:none"></div>
-
-    <!-- Legend -->
-    <div class="legend" id="legend" style="display:none">
-        <strong>Events</strong>
-        <div class="legend-item"><span class="legend-dot" style="background:#dc3545"></span> Critical</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#ffc107"></span> Warning</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#17a2b8"></span> Info</div>
-        <div style="margin-top:6px"><strong>FSD</strong></div>
-        <div class="legend-item"><span class="legend-dot fsd-engaged"></span> Engaged</div>
-        <div class="legend-item"><span class="legend-dot fsd-manual"></span> Manual</div>
-    </div>
 </div>
 
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
@@ -456,7 +423,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 // Layer groups
 const tripLayer = L.layerGroup().addTo(map);
 const eventLayer = L.layerGroup();
-const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true });
+const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true }).addTo(map);
 const fsdLayer = L.layerGroup();
 let heatLayer = null;
 
@@ -494,10 +461,104 @@ const severityColors = {
     info: '#17a2b8',
 };
 
+// Balloon-pin marker SVGs: circular colored bubble with white skeuomorphic icon + pointer tail
+// Icons centered at (16,13) inside 32x42 viewBox — designed to look like actual car controls
+const eventMarkerSvgs = {
+    // Brake pedal — rectangular pedal shape pressed down
+    harsh_brake: { color: '#dc3545', icon:
+        '<rect x="11" y="6" width="10" height="5" rx="1.5" fill="#fff"/>' +  // pedal pad
+        '<rect x="14" y="11" width="4" height="7" rx="1" fill="#fff"/>' +    // pedal arm
+        '<line x1="12" y1="20" x2="20" y2="20" stroke="#fff" stroke-width="2" stroke-linecap="round"/>' // floor
+    },
+    // Brake pedal with !! — emergency
+    emergency_brake: { color: '#b91c1c', icon:
+        '<rect x="11" y="6" width="10" height="5" rx="1.5" fill="#fff"/>' +
+        '<rect x="14" y="11" width="4" height="5" rx="1" fill="#fff"/>' +
+        '<line x1="12" y1="18" x2="20" y2="18" stroke="#fff" stroke-width="2" stroke-linecap="round"/>' +
+        '<line x1="16" y1="6.5" x2="16" y2="9" stroke="#b91c1c" stroke-width="2" stroke-linecap="round"/>' + // !
+        '<circle cx="16" cy="10" r="0.8" fill="#b91c1c"/>'
+    },
+    // Gas/accelerator pedal — side profile: thin pedal hinged at floor, tilted forward (pressed)
+    hard_acceleration: { color: '#16a34a', icon:
+        '<path d="M19,6 L15,6 L11,18 L14,18 L17,9 L19,9 Z" fill="#fff"/>' +   // pedal shape (angled thin)
+        '<line x1="11" y1="20" x2="21" y2="20" stroke="#fff" stroke-width="2" stroke-linecap="round"/>' +  // floor
+        '<circle cx="12" cy="18.5" r="1.5" fill="none" stroke="#fff" stroke-width="1.5"/>'  // hinge pivot
+    },
+    // Steering wheel turned — wheel with 3 spokes, rotated
+    sharp_turn: { color: '#f59e0b', icon:
+        '<g transform="rotate(-30,16,13)">' +
+        '<circle cx="16" cy="13" r="7.5" fill="none" stroke="#fff" stroke-width="2.5"/>' +
+        '<circle cx="16" cy="13" r="2" fill="#fff"/>' +
+        '<line x1="16" y1="5.5" x2="16" y2="11" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="9.5" y1="16.5" x2="14.2" y2="14.3" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="22.5" y1="16.5" x2="17.8" y2="14.3" stroke="#fff" stroke-width="2.2"/>' +
+        '</g>'
+    },
+    // Steering wheel with "A" badge — FSD/autopilot engaged
+    fsd_engage: { color: '#3b82f6', icon:
+        '<circle cx="16" cy="13" r="7.5" fill="none" stroke="#fff" stroke-width="2.5"/>' +
+        '<circle cx="16" cy="13" r="2" fill="#fff"/>' +
+        '<line x1="16" y1="5.5" x2="16" y2="11" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="9.5" y1="16.5" x2="14.2" y2="14.3" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="22.5" y1="16.5" x2="17.8" y2="14.3" stroke="#fff" stroke-width="2.2"/>' +
+        '<circle cx="22" cy="7" r="4" fill="#fff"/>' +  // badge bg
+        '<text x="22" y="9.5" text-anchor="middle" font-size="7" font-weight="bold" fill="#3b82f6" font-family="sans-serif">A</text>'
+    },
+    // Hand on wheel — driver takeover
+    fsd_disengage: { color: '#f97316', icon:
+        '<circle cx="16" cy="14" r="7" fill="none" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="16" y1="7" x2="16" y2="11.5" stroke="#fff" stroke-width="2"/>' +
+        '<line x1="10" y1="17.5" x2="14" y2="15.5" stroke="#fff" stroke-width="2"/>' +
+        '<line x1="22" y1="17.5" x2="18" y2="15.5" stroke="#fff" stroke-width="2"/>' +
+        // Hand gripping bottom of wheel
+        '<path d="M11.5,18 Q11.5,21 16,21 Q20.5,21 20.5,18" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>'
+    },
+    // Speedometer — half circle gauge with needle in red zone
+    speeding: { color: '#ec4899', icon:
+        '<path d="M7,18 A9,9 0 1,1 25,18" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>' +
+        '<line x1="16" y1="16" x2="21" y2="9" stroke="#fff" stroke-width="3" stroke-linecap="round"/>' + // needle pointing right (fast)
+        '<circle cx="16" cy="16" r="2" fill="#fff"/>' +
+        // Speed marks
+        '<line x1="9" y1="10" x2="10.5" y2="11.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>' +
+        '<line x1="16" y1="6.5" x2="16" y2="8.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>' +
+        '<line x1="23" y1="10" x2="21.5" y2="11.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>'
+    },
+    // Eye — sentry mode
+    sentry: { color: '#8b5cf6', icon:
+        '<path d="M7,13 Q16,4 25,13 Q16,22 7,13 Z" fill="none" stroke="#fff" stroke-width="2.2"/>' +
+        '<circle cx="16" cy="13" r="3.5" fill="#fff"/>' +
+        '<circle cx="16" cy="13" r="1.8" fill="#8b5cf6"/>'
+    },
+    // Bookmark/flag — saved clip
+    saved: { color: '#007bff', icon:
+        '<path d="M10,6 L22,6 L22,21 L16,17.5 L10,21 Z" fill="none" stroke="#fff" stroke-width="2.5" stroke-linejoin="round"/>'
+    },
+};
+
+function makeEventIcon(eventType) {
+    const cfg = eventMarkerSvgs[eventType] || { color: '#6c757d', icon: '<circle cx="16" cy="13" r="5" fill="#fff"/>' };
+    const id = 'ds_' + eventType;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 42" width="34" height="44">` +
+        `<defs><filter id="${id}"><feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-opacity=".3"/></filter></defs>` +
+        `<g filter="url(#${id})">` +
+        `<circle cx="16" cy="14.5" r="13.5" fill="${cfg.color}" stroke="#fff" stroke-width="2"/>` +
+        `<polygon points="11,26 16,37 21,26" fill="${cfg.color}" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>` +
+        `</g>` +
+        `${cfg.icon}` +
+        `</svg>`;
+    return L.divIcon({
+        html: svg,
+        className: 'event-svg-icon',
+        iconSize: [34, 44],
+        iconAnchor: [17, 43],
+        popupAnchor: [0, -40],
+    });
+}
+
 const eventIcons = {
-    harsh_brake: '🔴', emergency_brake: '🔴', hard_acceleration: '🟢',
-    sharp_turn: '🟡', speeding: '🟡', fsd_disengage: '🟠', fsd_engage: '🔵',
-    sentry: '🟣', saved: '🔵',
+    harsh_brake: '🛑', emergency_brake: '‼️', hard_acceleration: '⚡',
+    sharp_turn: '↻', speeding: '💨', fsd_disengage: '✋', fsd_engage: '🤖',
+    sentry: '👁', saved: '🔖',
 };
 
 // --- Data Loading ---
@@ -666,12 +727,8 @@ async function loadTripRoute(tripId) {
 }
 
 async function loadEvents() {
-    const filter = document.getElementById('eventFilter').value;
-    const params = new URLSearchParams({ limit: 500 });
-    if (filter) params.set('type', filter);
-
     try {
-        const resp = await fetch(`/api/events?${params}`);
+        const resp = await fetch('/api/events?limit=500');
         const data = await resp.json();
         allEvents = data.events || [];
         renderEvents();
@@ -1033,11 +1090,10 @@ function renderEvents() {
 
     allEvents.forEach(ev => {
         if (!ev.lat || !ev.lon) return;
-        const color = severityColors[ev.severity] || '#17a2b8';
         const icon = eventIcons[ev.event_type] || '📍';
 
-        const marker = L.circleMarker([ev.lat, ev.lon], {
-            radius: 8, fillColor: color, color: '#fff', weight: 2, fillOpacity: 0.9,
+        const marker = L.marker([ev.lat, ev.lon], {
+            icon: makeEventIcon(ev.event_type),
         });
 
         marker.bindPopup(
@@ -1054,44 +1110,10 @@ function renderEvents() {
 
 // --- View Switching ---
 
-let eventsVisible = false;
-
 function showTrips() {
     currentView = 'trips';
     tripLayer.addTo(map);
     loadTrips();
-}
-
-function toggleEvents() {
-    eventsVisible = !eventsVisible;
-    document.getElementById('btnEvents').classList.toggle('active', eventsVisible);
-    document.getElementById('legend').style.display = eventsVisible ? 'block' : 'none';
-
-    // Show/hide event filter dropdown
-    const dropdown = document.getElementById('eventFilterDropdown');
-    if (dropdown) dropdown.style.display = eventsVisible ? '' : 'none';
-
-    if (eventsVisible) {
-        eventCluster.addTo(map);
-        loadEvents();
-    } else {
-        map.removeLayer(eventCluster);
-    }
-}
-
-function selectEventFilter(btn) {
-    // Update visual active state
-    document.querySelectorAll('#eventFilterDropdown .filter-option').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-
-    // Sync with hidden select
-    const filterValue = btn.dataset.filter;
-    document.getElementById('eventFilter').value = filterValue;
-    filterEvents();
-}
-
-function filterEvents() {
-    if (eventsVisible) loadEvents();
 }
 
 function toggleFsdOverlay() {
@@ -1214,8 +1236,8 @@ async function pollIndexer() {
             pollIndexer._lastTripRefresh = 0;
             // Reload data after completion
             loadStats();
-            if (currentView === 'trips') loadTrips();
-            else loadEvents();
+            loadTrips();
+            loadEvents();
         }
     } catch(e) {
         btn.disabled = false;
@@ -1226,6 +1248,7 @@ async function pollIndexer() {
 // --- Init ---
 loadStats();
 loadTrips();
+loadEvents();
 
 // Check if indexer is already running on page load
 fetch('/api/index/status')

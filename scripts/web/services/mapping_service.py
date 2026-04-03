@@ -16,7 +16,7 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Generator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -415,7 +415,11 @@ def _index_video(
 
             # Compute absolute timestamp from file timestamp + frame offset
             if file_timestamp:
-                ts = file_timestamp  # Base timestamp from filename
+                try:
+                    base_dt = datetime.fromisoformat(file_timestamp)
+                    ts = (base_dt + timedelta(milliseconds=msg.timestamp_ms)).isoformat()
+                except (ValueError, TypeError):
+                    ts = file_timestamp
             else:
                 ts = datetime.now(timezone.utc).isoformat()
 
@@ -614,8 +618,6 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
                 logger.error("Failed to index %s: %s", rel, e)
                 continue
 
-        conn.close()
-
         _status.update({
             'running': False,
             'files_done': len(to_index),
@@ -630,6 +632,11 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
     except Exception as e:
         logger.error("Geo-indexer failed: %s", e)
         _status.update({'running': False, 'error': str(e)})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

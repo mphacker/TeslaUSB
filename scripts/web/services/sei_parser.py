@@ -235,6 +235,7 @@ def _get_timescale_and_durations(data: bytes) -> tuple:
         logger.warning("Suspicious stts entry_count %d in video, using fallback", entry_count)
         return timescale, []
 
+    MAX_TOTAL_SAMPLES = 10000  # Cap total samples to prevent memory exhaustion
     durations = []
     pos = stts['start'] + 8
     for _ in range(entry_count):
@@ -242,10 +243,12 @@ def _get_timescale_and_durations(data: bytes) -> tuple:
             break
         count = struct.unpack('>I', data[pos:pos + 4])[0]
         delta = struct.unpack('>I', data[pos + 4:pos + 8])[0]
-        # Bound count to prevent memory exhaustion from malicious files
-        if count > 100000:
-            logger.warning("Suspicious stts sample count %d, capping", count)
-            count = 100000
+        remaining = MAX_TOTAL_SAMPLES - len(durations)
+        if remaining <= 0:
+            logger.warning("stts total samples capped at %d", MAX_TOTAL_SAMPLES)
+            break
+        if count > remaining:
+            count = remaining
         duration_ms = (delta / timescale) * 1000
         durations.extend([duration_ms] * count)
         pos += 8
@@ -282,6 +285,13 @@ def extract_sei_messages(
     file_size = os.path.getsize(video_path)
     if file_size < 8:
         raise ValueError(f"File too small to be a valid MP4: {video_path}")
+
+    max_file_size = 150 * 1024 * 1024  # 150 MB
+    if file_size > max_file_size:
+        raise ValueError(
+            f"File too large ({file_size / 1024 / 1024:.0f} MB) — "
+            f"max {max_file_size // 1024 // 1024} MB: {video_path}"
+        )
 
     # Read entire file into memory (Tesla clips are typically 30-60 seconds,
     # ~30-80MB each). For Pi Zero 2 W, process one file at a time.

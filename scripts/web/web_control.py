@@ -55,6 +55,17 @@ app.register_blueprint(fsck_bp)
 # Register captive portal blueprint LAST to avoid conflicting with other routes
 app.register_blueprint(captive_portal_bp)
 
+
+# Serve tile cache service worker from root scope (SW scope must match serving path)
+@app.route('/tile-cache-sw.js')
+def tile_cache_service_worker():
+    from flask import send_from_directory
+    return send_from_directory(
+        app.static_folder, 'tile-cache-sw.js',
+        mimetype='application/javascript',
+        max_age=86400,
+    )
+
 # Add catch-all route for captive portal (must be last)
 @app.route('/<path:path>')
 def wildcard_redirect(path):

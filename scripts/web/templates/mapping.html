@@ -170,7 +170,7 @@
 <script>
 // Register Service Worker for offline tile caching (gap 1)
 if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('{{ url_for("static", filename="tile-cache-sw.js") }}', { scope: '/' })
+    navigator.serviceWorker.register('/tile-cache-sw.js', { scope: '/' })
         .then(reg => console.log('Tile cache SW registered'))
         .catch(err => console.warn('Tile cache SW failed:', err));
 }
@@ -184,7 +184,7 @@ function formatLocalTime(isoStr) {
             month: 'short', day: 'numeric', year: 'numeric',
             hour: 'numeric', minute: '2-digit', hour12: true
         });
-    } catch(e) { return isoStr; }
+    } catch(e) { return 'Invalid Date'; }
 }
 
 // Fix Leaflet marker icon path for vendored setup
@@ -270,7 +270,10 @@ async function loadTrips() {
         allTrips.forEach(t => {
             const date = formatLocalTime(t.start_time);
             const dist = ((t.distance_km || 0) * 0.621371).toFixed(1);
-            sel.innerHTML += `<option value="${t.id}">${date} — ${dist} mi</option>`;
+            const opt = document.createElement('option');
+            opt.value = t.id;
+            opt.textContent = `${date} — ${dist} mi`;
+            sel.appendChild(opt);
         });
 
         // Default to most recent trip (first in list, sorted by start_time DESC)
@@ -466,7 +469,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
 
     overlay.innerHTML = `
         <div class="video-overlay-header">
-            <span id="overlayTitle">🎥 ${filename}</span>
+            <span id="overlayTitle"></span>
             <button class="close-btn" onclick="closeVideoOverlay()">✕</button>
         </div>
         <div class="cam-switcher" id="camSwitcher">${cameraBtns}</div>
@@ -483,6 +486,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
     `;
 
     document.body.appendChild(overlay);
+    document.getElementById('overlayTitle').textContent = '🎥 ' + filename;
 
     // Load the video
     const video = document.getElementById('overlayVideo');
@@ -638,6 +642,21 @@ async function openEventVideo(tripId, videoPath, frameOffset, lat, lon) {
     openVideoOverlay(wp, { x: window.innerWidth / 3, y: window.innerHeight / 4 }, wps);
 }
 
+// Event delegation for popup video links (avoids inline onclick XSS risk)
+document.addEventListener('click', function(e) {
+    const link = e.target.closest('.popup-video-link');
+    if (link) {
+        e.preventDefault();
+        openEventVideo(
+            parseInt(link.dataset.tripId) || 0,
+            link.dataset.videoPath || '',
+            parseInt(link.dataset.frameOffset) || 0,
+            parseFloat(link.dataset.lat) || 0,
+            parseFloat(link.dataset.lon) || 0
+        );
+    }
+});
+
 function closeVideoOverlay() {
     const existing = document.getElementById('videoOverlay');
     if (existing) {
@@ -667,9 +686,9 @@ function renderEvents() {
         marker.bindPopup(
             `<strong>${icon} ${ev.event_type.replace(/_/g, ' ')}</strong><br>` +
             `📅 ${formatLocalTime(ev.timestamp)}<br>` +
-            `${ev.description || ''}<br>` +
+            `${(ev.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}<br>` +
             (ev.video_path ?
-                `🎥 <a href="#" class="popup-video-link" onclick="event.preventDefault(); openEventVideo(${ev.trip_id || 0}, '${ev.video_path}', ${ev.frame_offset || 0}, ${ev.lat}, ${ev.lon})">View Video</a>` : '')
+                `🎥 <a href="#" class="popup-video-link" data-trip-id="${ev.trip_id || 0}" data-video-path="${(ev.video_path || '').replace(/"/g, '&quot;')}" data-frame-offset="${ev.frame_offset || 0}" data-lat="${ev.lat}" data-lon="${ev.lon}">View Video</a>` : '')
         );
 
         eventCluster.addLayer(marker);

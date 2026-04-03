@@ -111,6 +111,22 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - **Port 80 requirement**: Web service must run on port 80 (standard HTTP) for automatic captive portal detection on all devices. No iptables redirects needed.
 - **Automatic trigger**: When devices connect to TeslaUSB WiFi, they detect the captive portal and automatically open the splash screen without user typing any URL.
 
+## UI/UX Design System
+
+All frontend changes **must** follow the design system documented in [`docs/UI_UX_DESIGN_SYSTEM.md`](../docs/UI_UX_DESIGN_SYSTEM.md). Key rules:
+
+- **Progressive disclosure**: Simple by default (Layer 1–2), advanced features behind deliberate actions (Layer 3). Casual users see a clean interface; power users access everything within 2 taps.
+- **No emoji icons**: Use Lucide SVG icons (`map-pin`, `video`, `bell`, `music`, etc.). Emojis render inconsistently and are not accessible.
+- **Color tokens only**: Never hardcode hex values — use CSS custom properties (`--bg-primary`, `--accent-success`, etc.) so dark/light mode works automatically.
+- **Dark and light mode**: Both must work. Test both before merging. Use `[data-theme="dark"]` CSS selectors. Map/video overlays always use dark background.
+- **Touch targets**: Minimum 44×44px for all interactive elements.
+- **Mobile-first**: Bottom tab bar (<1024px), left sidebar rail (≥1024px). Tables convert to card lists on mobile. Test at 375px and 1024px+.
+- **No "Edit Mode" / "Present Mode" in UI**: These are internal implementation details. The user-facing concept is "Network File Sharing" (Samba). All write operations (upload, delete, set active) auto-switch via `quick_edit` transparently. Show a status dot (green = normal, amber = sharing active), not a mode toggle.
+- **Performance**: Bundle fonts locally (Inter WOFF2), no external CDN calls, no JS frameworks, inline critical CSS. This runs on a Pi Zero 2 W with 512MB RAM — every byte matters.
+- **Accessibility**: WCAG AA contrast, visible focus rings, `aria-label` on icon buttons, `prefers-reduced-motion` respected, semantic HTML.
+
+See the full design system for color palettes, typography scale, spacing tokens, component specs, responsive breakpoints, and the pre-merge checklist.
+
 ## Pitfalls to avoid
 - Skipping `nsenter` for mounts (mounts vanish after subprocess exit).
 - Unbinding/mount order wrong when leaving present mode (causes busy unmounts).
@@ -118,3 +134,7 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - Long quick-edit operations holding the lock and leaving LUN unbound on failure; ensure cleanup paths restore RO mount and gadget backing.
 - Modifying AP force mode without persisting to config.sh (state lost on reboot); always use `ap_control.sh` or `ap_service.ap_force()`.
 - Adding a new blueprint route without a `before_request` image guard when the feature depends on a disk image (users hit crashes or empty pages).
+- Using emoji icons in templates or UI elements (use Lucide SVG icons instead).
+- Hardcoding color hex values instead of using CSS custom property tokens.
+- Exposing "Edit Mode" / "Present Mode" terminology to users in the UI.
+- Skipping mobile testing — all pages must work at 375px viewport width.

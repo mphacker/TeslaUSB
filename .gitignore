@@ -1,6 +1,21 @@
 # Playwright MCP browser automation folder
 .playwright-mcp/
 
+# Node.js (Playwright test dependencies)
+node_modules/
+package.json
+package-lock.json
+
+# Test scripts
+test_trips.js
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Screenshots (test artifacts, not app assets)
+screenshots/
+
 # AI tool configs (managed externally, not part of the repo)
 .claude/
 .agent/
@@ -16,4 +31,5 @@
 .trae/
 .windsurf/
 
+# Generated protobuf (compiled on-device by setup_usb.sh)
 scripts/web/services/dashcam_pb2.py

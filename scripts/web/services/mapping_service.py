@@ -37,7 +37,7 @@ def _get_sei_parser():
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS waypoints (
     autopilot_state TEXT,
     steering_angle REAL,
     brake_applied INTEGER DEFAULT 0,
+    blinker_on_left INTEGER DEFAULT 0,
+    blinker_on_right INTEGER DEFAULT 0,
     video_path TEXT,
     frame_offset INTEGER
 );
@@ -128,6 +130,14 @@ def _init_db(db_path: str) -> sqlite3.Connection:
 
     if current < _SCHEMA_VERSION:
         conn.executescript(_SCHEMA_SQL)
+        # Migrations for existing databases
+        if current < 2:
+            # v2: add blinker columns to waypoints
+            for col in ('blinker_on_left', 'blinker_on_right'):
+                try:
+                    conn.execute(f"ALTER TABLE waypoints ADD COLUMN {col} INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
             (_SCHEMA_VERSION,)
@@ -523,6 +533,8 @@ def _index_video(
                 'autopilot_state': msg.autopilot_state,
                 'steering_angle': msg.steering_wheel_angle,
                 'brake_applied': 1 if msg.brake_applied else 0,
+                'blinker_on_left': 1 if msg.blinker_on_left else 0,
+                'blinker_on_right': 1 if msg.blinker_on_right else 0,
                 'video_path': rel_path,
                 'frame_offset': msg.frame_index,
             })
@@ -592,13 +604,15 @@ def _index_video(
            (trip_id, timestamp, lat, lon, heading, speed_mps,
             acceleration_x, acceleration_y, acceleration_z,
             gear, autopilot_state, steering_angle, brake_applied,
+            blinker_on_left, blinker_on_right,
             video_path, frame_offset)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [(trip_id, wp['timestamp'], wp['lat'], wp['lon'], wp['heading'],
           wp['speed_mps'], wp['acceleration_x'], wp['acceleration_y'],
           wp['acceleration_z'], wp['gear'], wp['autopilot_state'],
-          wp['steering_angle'], wp['brake_applied'], wp['video_path'],
-          wp['frame_offset'])
+          wp['steering_angle'], wp['brake_applied'],
+          wp['blinker_on_left'], wp['blinker_on_right'],
+          wp['video_path'], wp['frame_offset'])
          for wp in waypoint_dicts]
     )
 
@@ -1200,7 +1214,8 @@ def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
             """SELECT lat, lon, heading, speed_mps, autopilot_state,
                       video_path, frame_offset, timestamp,
                       steering_angle, brake_applied, gear,
-                      acceleration_x, acceleration_y
+                      acceleration_x, acceleration_y,
+                      blinker_on_left, blinker_on_right
                FROM waypoints WHERE trip_id = ? ORDER BY id""",
             (trip_id,)
         ).fetchall()

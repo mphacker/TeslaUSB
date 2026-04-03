@@ -1109,7 +1109,9 @@ def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
     try:
         rows = conn.execute(
             """SELECT lat, lon, heading, speed_mps, autopilot_state,
-                      video_path, frame_offset, timestamp
+                      video_path, frame_offset, timestamp,
+                      steering_angle, brake_applied, gear,
+                      acceleration_x, acceleration_y
                FROM waypoints WHERE trip_id = ? ORDER BY id""",
             (trip_id,)
         ).fetchall()

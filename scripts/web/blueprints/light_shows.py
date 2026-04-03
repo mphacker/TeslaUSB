@@ -39,7 +39,7 @@ def light_shows():
     if op_status['in_progress']:
         return render_template(
             'light_shows.html',
-            page='shows',
+            page='media',
             **ctx,
             show_groups=[],
             auto_refresh=False,
@@ -99,7 +99,7 @@ def light_shows():
 
     return render_template(
         'light_shows.html',
-        page='shows',
+        page='media',
         **ctx,
         show_groups=show_groups,
         auto_refresh=False,

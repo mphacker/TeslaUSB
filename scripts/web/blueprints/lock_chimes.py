@@ -75,7 +75,7 @@ def lock_chimes():
 
         return render_template(
             'lock_chimes.html',
-            page='chimes',
+            page='media',
             **ctx,
             active_chime=None,
             chime_files=[],
@@ -168,7 +168,7 @@ def lock_chimes():
 
     return render_template(
         'lock_chimes.html',
-        page='chimes',
+        page='media',
         **ctx,
         active_chime=active_chime,
         chime_files=chime_files,

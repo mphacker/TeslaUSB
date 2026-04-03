@@ -13,7 +13,7 @@ from services.video_service import get_teslacam_path
 import logging
 logger = logging.getLogger(__name__)
 
-mapping_bp = Blueprint('mapping', __name__, url_prefix='/map')
+mapping_bp = Blueprint('mapping', __name__, url_prefix='')
 
 
 @mapping_bp.before_request

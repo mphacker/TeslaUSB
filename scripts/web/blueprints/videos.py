@@ -44,7 +44,7 @@ def file_browser():
     if not teslacam_path:
         return render_template(
             'videos.html',
-            page='browser',
+            page='map',
             **ctx,
             teslacam_available=False,
             folders=[],
@@ -114,7 +114,7 @@ def file_browser():
 
     return render_template(
         'videos.html',
-        page='browser',
+        page='map',
         **ctx,
         teslacam_available=True,
         folders=folders,
@@ -179,7 +179,7 @@ def view_event(folder, event_name):
 
         return render_template(
             'event_player.html',
-            page='event',
+            page='map',
             **ctx,
             folder=folder,
             event=event,
@@ -195,7 +195,7 @@ def view_event(folder, event_name):
 
     return render_template(
         'event_player.html',
-        page='event',
+        page='map',
         **ctx,
         folder=folder,
         event=event,
@@ -230,7 +230,7 @@ def view_session(folder, session):
 
     return render_template(
         'session.html',
-        page='session',
+        page='map',
         **ctx,
         folder=folder,
         session_id=session,

@@ -12,7 +12,7 @@ from services.mode_service import mode_display
 from services.ap_service import ap_status, ap_force, get_ap_config, update_ap_config
 from services.wifi_service import get_current_wifi_connection, update_wifi_credentials, get_available_networks, get_wifi_status, clear_wifi_status
 
-mode_control_bp = Blueprint('mode_control', __name__)
+mode_control_bp = Blueprint('mode_control', __name__, url_prefix='/settings')
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def index():
 
     return render_template(
         'index.html',
-        page='control',
+        page='settings',
         **ctx,
         ap_status=ap,
         ap_config=ap_config,

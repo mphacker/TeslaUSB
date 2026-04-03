@@ -55,7 +55,7 @@ def settings():
         policies=policies,
         mode=mode,
         **ctx,
-        page='analytics'  # Show Analytics as active in nav
+        page='settings'  # Show Settings as active in nav
     )
 
 
@@ -142,11 +142,8 @@ def preview():
         impact=impact,
         mode=mode,
         **ctx,
-        page='analytics'
+        page='settings'
     )
-
-
-@cleanup_bp.route('/execute', methods=['POST'])
 def execute():
     """
     Execute cleanup plan - actually delete files
@@ -211,7 +208,7 @@ def report():
         partition_usage=teslacam_usage,
         mode=mode,
         **ctx,
-        page='analytics'
+        page='settings'
     )
 
 

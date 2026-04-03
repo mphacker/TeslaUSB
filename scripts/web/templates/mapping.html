@@ -136,7 +136,7 @@
             <div class="stat">🛣️ <span class="stat-value" id="statTrips">—</span> trips</div>
             <div class="stat">📍 <span class="stat-value" id="statWaypoints">—</span> points</div>
             <div class="stat">⚡ <span class="stat-value" id="statEvents">—</span> events</div>
-            <div class="stat">📏 <span class="stat-value" id="statDistance">—</span> km</div>
+            <div class="stat">📏 <span class="stat-value" id="statDistance">—</span> mi</div>
             <div class="stat">📁 <span class="stat-value" id="statFiles">—</span> indexed</div>
         </div>
 
@@ -236,7 +236,7 @@ async function loadStats() {
         document.getElementById('statTrips').textContent = data.trip_count || 0;
         document.getElementById('statWaypoints').textContent = (data.waypoint_count || 0).toLocaleString();
         document.getElementById('statEvents').textContent = data.event_count || 0;
-        document.getElementById('statDistance').textContent = (data.total_distance_km || 0).toFixed(1);
+        document.getElementById('statDistance').textContent = ((data.total_distance_km || 0) * 0.621371).toFixed(1);
         document.getElementById('statFiles').textContent = data.indexed_file_count || 0;
     } catch(e) { console.error('Failed to load stats:', e); }
 }
@@ -252,8 +252,8 @@ async function loadTrips() {
         sel.innerHTML = '<option value="">All Trips</option>';
         allTrips.forEach(t => {
             const date = (t.start_time || '').replace('T', ' ').substring(0, 16);
-            const dist = (t.distance_km || 0).toFixed(1);
-            sel.innerHTML += `<option value="${t.id}">${date} — ${dist} km</option>`;
+            const dist = ((t.distance_km || 0) * 0.621371).toFixed(1);
+            sel.innerHTML += `<option value="${t.id}">${date} — ${dist} mi</option>`;
         });
 
         await renderTrips();
@@ -339,14 +339,14 @@ async function renderTrips() {
 
         // Start/end markers
         if (latLngs.length > 0) {
-            const dist = (trip.distance_km || 0).toFixed(1);
+            const dist = ((trip.distance_km || 0) * 0.621371).toFixed(1);
             const dur = Math.round((trip.duration_seconds || 0) / 60);
             L.circleMarker(latLngs[0], {
                 radius: 8, fillColor: '#28a745', color: '#fff', weight: 2, fillOpacity: 0.9,
             }).bindPopup(
                 `<strong>🟢 Trip #${trip.id}</strong><br>` +
                 `📅 ${trip.start_time || 'Unknown'}<br>` +
-                `📏 ${dist} km · ⏱ ${dur} min`
+                `📏 ${dist} mi · ⏱ ${dur} min`
             ).addTo(tripLayer);
 
             L.circleMarker(latLngs[latLngs.length - 1], {

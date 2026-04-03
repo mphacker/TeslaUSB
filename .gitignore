@@ -1,4 +1,18 @@
 # Playwright MCP browser automation folder
 .playwright-mcp/
 
+# AI tool configs (only .claude is used — GitHub Copilot)
+.agent/
+.codebuddy/
+.codex/
+.continue/
+.cursor/
+.gemini/
+.kiro/
+.opencode/
+.qoder/
+.roo/
+.trae/
+.windsurf/
+
 scripts/web/services/dashcam_pb2.py

@@ -783,17 +783,13 @@
     }
 }
 
-/* Reduced motion */
+/* Reduced motion — universal */
 @media (prefers-reduced-motion: reduce) {
-    .sidebar-rail,
-    .sidebar-rail .nav-label,
-    .top-bar,
-    .bottom-tabs,
-    .bottom-tabs .tab-item,
-    .theme-toggle-btn,
-    .toast,
-    .status-dot {
-        transition: none !important;
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
     }
 }
 
@@ -805,6 +801,16 @@
     box-sizing: border-box;
 }
 
+/* Global focus indicator for keyboard navigation */
+:focus-visible {
+    outline: 2px solid var(--btn-primary-bg, #3B82F6);
+    outline-offset: 2px;
+}
+
+html, body {
+    overflow-x: hidden;
+}
+
 body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     margin: 0;
@@ -814,6 +820,19 @@ body {
     color: var(--text-primary);
     line-height: 1.6;
     transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Prevent iOS auto-zoom on form inputs (minimum 16px) */
+input[type="text"],
+input[type="password"],
+input[type="email"],
+input[type="number"],
+input[type="search"],
+input[type="tel"],
+input[type="url"],
+select,
+textarea {
+    font-size: 16px;
 }
 
 .navbar {
@@ -1105,8 +1124,8 @@ button:disabled {
 }
 
 .spinner {
-    border: 8px solid #f3f3f3;
-    border-top: 8px solid #007bff;
+    border: 8px solid var(--border-color, #f3f3f3);
+    border-top: 8px solid var(--btn-primary-bg, #007bff);
     border-radius: 50%;
     width: 60px;
     height: 60px;
@@ -1431,7 +1450,7 @@ button:disabled {
     object-fit: cover;
     border-radius: 4px;
     display: block;
-    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+    background: linear-gradient(90deg, var(--bg-tertiary, #f0f0f0) 25%, var(--border-color, #e0e0e0) 50%, var(--bg-tertiary, #f0f0f0) 75%);
     background-size: 200% 100%;
 }
 
@@ -1659,12 +1678,12 @@ button:disabled {
     }
 
     .mobile-card {
-        background: white;
-        border: 1px solid #ddd;
+        background: var(--bg-secondary, white);
+        border: 1px solid var(--border-color, #ddd);
         border-radius: 8px;
         padding: 15px;
         margin-bottom: 15px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        box-shadow: 0 1px 3px var(--shadow, rgba(0,0,0,0.1));
         overflow-wrap: break-word;
         word-wrap: break-word;
         word-break: break-word;
@@ -1672,7 +1691,7 @@ button:disabled {
     }
 
     .mobile-card:hover {
-        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        box-shadow: 0 4px 8px var(--shadow-hover, rgba(0,0,0,0.15));
         transform: translateY(-1px);
     }
 
@@ -1838,12 +1857,12 @@ button:disabled {
 
 /* Operation In Progress Banner */
 .operation-banner {
-    background: linear-gradient(135deg, #ffc107 0%, #ff9800 100%);
-    color: #000;
+    background: linear-gradient(135deg, var(--ds-accent-warning, #ffc107) 0%, var(--accent-warning, #ff9800) 100%);
+    color: var(--bg-primary, #000);
     padding: 15px 20px;
     margin-bottom: 20px;
     border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    box-shadow: 0 2px 8px var(--shadow, rgba(0,0,0,0.15));
     animation: pulse-glow 2s ease-in-out infinite;
     position: sticky;
     top: 0;
@@ -1885,12 +1904,12 @@ button:disabled {
     font-style: italic;
 }
 
-/* Spinner Animation */
-.spinner {
+/* Spinner Animation (operation banner context) */
+.operation-banner .spinner {
     width: 24px;
     height: 24px;
     border: 3px solid rgba(0,0,0,0.1);
-    border-top-color: #000;
+    border-top-color: currentColor;
     border-radius: 50%;
     animation: spin 1s linear infinite;
 }
@@ -1971,8 +1990,8 @@ details summary span:first-of-type {
     appearance: none;
     width: 24px;
     height: 24px;
-    background: white;
-    border: 3px solid #2196F3;
+    background: var(--bg-secondary, white);
+    border: 3px solid var(--btn-primary-bg, #2196F3);
     border-radius: 50%;
     cursor: pointer;
     box-shadow: 0 2px 4px rgba(0,0,0,0.3);
@@ -1987,8 +2006,8 @@ details summary span:first-of-type {
 #target-lufs::-moz-range-thumb {
     width: 24px;
     height: 24px;
-    background: white;
-    border: 3px solid #2196F3;
+    background: var(--bg-secondary, white);
+    border: 3px solid var(--btn-primary-bg, #2196F3);
     border-radius: 50%;
     cursor: pointer;
     box-shadow: 0 2px 4px rgba(0,0,0,0.3);
@@ -2036,7 +2055,7 @@ details summary span:first-of-type {
 .selected-level strong {
     display: block;
     font-size: 15px;
-    color: #2196F3;
+    color: var(--btn-primary-bg, #2196F3);
     margin-bottom: 4px;
 }
 
@@ -2166,7 +2185,7 @@ details summary span:first-of-type {
     display: inline-block;
     width: 50px;
     height: 24px;
-    background-color: #ccc;
+    background-color: var(--text-muted, #ccc);
     border-radius: 24px;
     transition: background-color 0.3s;
 }
@@ -2178,13 +2197,13 @@ details summary span:first-of-type {
     height: 18px;
     left: 3px;
     top: 3px;
-    background-color: white;
+    background-color: var(--bg-secondary, white);
     border-radius: 50%;
     transition: transform 0.3s;
 }
 
 .toggle-switch input[type="checkbox"]:checked + .toggle-slider {
-    background-color: #4CAF50;
+    background-color: var(--btn-success-bg, #4CAF50);
 }
 
 .toggle-switch input[type="checkbox"]:checked + .toggle-slider::after {
@@ -2204,7 +2223,7 @@ details summary span:first-of-type {
 }
 
 .toggle-switch input[type="checkbox"]:disabled:checked + .toggle-slider {
-    background-color: #a5d6a7;
+    background-color: var(--accent-success, #a5d6a7);
     opacity: 0.6;
 }
 
@@ -2765,7 +2784,7 @@ details summary span:first-of-type {
 }
 .media-pill.active {
   background: var(--btn-primary-bg, #3B82F6);
-  color: #fff;
+  color: var(--btn-primary-text, #fff);
   border-color: var(--btn-primary-bg, #3B82F6);
 }
 .media-pill .nav-icon {

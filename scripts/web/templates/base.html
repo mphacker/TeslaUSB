@@ -96,7 +96,7 @@
         </a>
     </nav>
 
-    <div class="main-content{% if expandable %} expandable{% endif %}">
+    <main class="main-content{% if expandable %} expandable{% endif %}" role="main">
         {% if operation_in_progress %}
         <div class="operation-banner" id="operation-banner">
             <div class="operation-content">
@@ -132,7 +132,7 @@
         {% endwith %}
 
         {% block content %}{% endblock %}
-    </div>
+    </main>
 
     <!-- Toast notification container -->
     <div class="toast-container" id="toast-container" aria-live="polite"></div>

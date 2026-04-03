@@ -426,7 +426,7 @@
                         <tr class="music-folder-row" data-dir="{{ d.path }}">
                             <td style="color: var(--text-link);">📁 {{ d.name }}</td>
                             <td style="text-align: right;">
-                                <button class="action-btn btn-danger" data-delete-dir="{{ d.path }}">Delete</button>
+                                <button class="action-btn danger" data-delete-dir="{{ d.path }}">Delete</button>
                             </td>
                         </tr>
                         {% endfor %}
@@ -439,7 +439,7 @@
                 <div class="music-mobile-folder" data-dir="{{ d.path }}">
                     <span class="music-mobile-folder-name">📁 {{ d.name }}</span>
                     <span class="music-mobile-folder-actions">
-                        <button class="action-btn btn-danger" data-delete-dir="{{ d.path }}">Delete</button>
+                        <button class="action-btn danger" data-delete-dir="{{ d.path }}">Delete</button>
                     </span>
                 </div>
                 {% endfor %}
@@ -461,13 +461,13 @@
                             <td style="word-wrap: break-word; overflow-wrap: break-word;">{{ file.name }}</td>
                             <td>{{ format_file_size(file.size) }}</td>
                             <td>
-                                <audio controls preload="none" style="width: 100%; max-width: 200px; height: 30px; margin-bottom: 6px;">
+                                <audio controls preload="none" style="margin-bottom: 6px;">
                                     {% set ext = file.name.lower().rsplit('.', 1)[-1] %}
                                     <source src="{{ url_for('music.play_music', filepath=file.path) }}" type="{{ 'audio/mpeg' if ext == 'mp3' else 'audio/wav' if ext == 'wav' else 'audio/flac' if ext == 'flac' else 'audio/aac' if ext == 'aac' else 'audio/mp4' if ext == 'm4a' else 'application/octet-stream' }}">
                                 </audio>
                                 <div style="display: flex; gap: 6px;">
-                                    <button class="action-btn btn-success" data-move="{{ file.path }}">Move</button>
-                                    <button class="action-btn btn-danger" data-delete="{{ file.path }}">Delete</button>
+                                    <button class="action-btn" data-move="{{ file.path }}">Move</button>
+                                    <button class="action-btn danger" data-delete="{{ file.path }}">Delete</button>
                                 </div>
                             </td>
                         </tr>
@@ -486,8 +486,8 @@
                         <source src="{{ url_for('music.play_music', filepath=file.path) }}" type="{{ 'audio/mpeg' if ext == 'mp3' else 'audio/wav' if ext == 'wav' else 'audio/flac' if ext == 'flac' else 'audio/aac' if ext == 'aac' else 'audio/mp4' if ext == 'm4a' else 'application/octet-stream' }}">
                     </audio>
                     <div class="music-mobile-file-actions">
-                        <button class="action-btn btn-success" data-move="{{ file.path }}">Move</button>
-                        <button class="action-btn btn-danger" data-delete="{{ file.path }}">Delete</button>
+                        <button class="action-btn" data-move="{{ file.path }}">Move</button>
+                        <button class="action-btn danger" data-delete="{{ file.path }}">Delete</button>
                     </div>
                 </div>
                 {% endfor %}
@@ -515,11 +515,11 @@
             <div class="music-file-list" id="fileList"></div>
             <div class="music-folder-input">
                 <input id="folderName" type="text" placeholder="New folder name">
-                <button id="createFolder" class="action-btn btn-success">Create Folder</button>
+                <button id="createFolder" class="action-btn">Create Folder</button>
             </div>
             <div class="music-upload-actions">
-                <button id="startUpload" class="edit-btn" disabled>📤 Upload</button>
-                <button id="clearSelection" class="btn-delete" disabled>✖ Clear</button>
+                <button id="startUpload" class="action-btn" disabled>Upload</button>
+                <button id="clearSelection" class="action-btn danger" disabled>Clear</button>
             </div>
             <div id="uploadStatus" class="music-status"></div>
         </div>

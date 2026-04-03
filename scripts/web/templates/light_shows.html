@@ -30,8 +30,8 @@
                 <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">Selected Files:</h4>
                 <div id="filesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 200px; overflow-y: auto;"></div>
                 <div style="display: flex; gap: 10px; margin-top: 10px;">
-                    <button type="button" class="edit-btn" id="uploadSelectedBtn">📤 Upload All Files</button>
-                    <button type="button" class="btn-delete" id="clearSelectedBtn">✖ Clear All</button>
+                    <button type="button" class="action-btn" id="uploadSelectedBtn">Upload All Files</button>
+                    <button type="button" class="action-btn danger" id="clearSelectedBtn">Clear All</button>
                 </div>
             </div>
         </div>
@@ -45,7 +45,7 @@
             </p>
             <input type="file" name="show_file" id="show_file" accept=".fseq,.mp3,.wav,.zip" required 
                    style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary);">
-            <button type="submit" class="edit-btn" id="showUploadBtn">📤 Upload</button>
+            <button type="submit" class="action-btn" id="showUploadBtn">Upload</button>
         </form>
         <!-- Upload Progress Bar -->
         <div id="showUploadProgress" style="display: none; margin-bottom: 20px;">
@@ -90,7 +90,7 @@
                     <td>
                         {% if group.audio_file %}
                         <div style="margin-bottom: 8px;">
-                            <audio controls preload="none" style="width: 100%; max-width: 200px; height: 30px;">
+                            <audio controls preload="none">
                                 {% if group.audio_file.filename.lower().endswith('.mp3') %}
                                 <source src="{{ url_for('light_shows.play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/mpeg">
                                 {% else %}
@@ -101,12 +101,12 @@
                         {% endif %}
                         <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
                             <a href="{{ url_for('light_shows.download_light_show', partition=group.partition_key, base_name=group.base_name) }}" 
-                               class="edit-btn" style="text-decoration: none; display: inline-flex; align-items: center; justify-content: center; padding: 6px 12px; font-size: 14px; border-radius: 4px;">
-                                📥 Download ZIP
+                               class="action-btn">
+                                Download ZIP
                             </a>
                             <form method="post" action="{{ url_for('light_shows.delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" style="display: inline-block; margin: 0;" 
                                   onsubmit="return confirm('Are you sure you want to delete all files for {{ group.base_name }}?');">
-                                <button type="submit" class="btn-delete">🗑️ Delete</button>
+                                <button type="submit" class="action-btn danger">Delete</button>
                             </form>
                         </div>
                     </td>
@@ -156,13 +156,13 @@
             {% endif %}
             <div class="mobile-card-actions" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch;">
                 <a href="{{ url_for('light_shows.download_light_show', partition=group.partition_key, base_name=group.base_name) }}" 
-                   class="edit-btn" style="text-decoration: none; display: flex; align-items: center; justify-content: center; flex: 1; padding: 6px 12px; border-radius: 4px;">
-                    📥 Download
+                   class="action-btn" style="flex: 1;">
+                    Download
                 </a>
                 <form method="post" action="{{ url_for('light_shows.delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" 
                       onsubmit="return confirm('Are you sure you want to delete all files for {{ group.base_name }}?');"
                       style="flex: 1; margin: 0;">
-                    <button type="submit" class="btn-delete" style="width: 100%; height: 100%;">🗑️ Delete</button>
+                    <button type="submit" class="action-btn danger" style="width: 100%; height: 100%;">Delete</button>
                 </form>
             </div>
         </div>

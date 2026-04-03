@@ -57,7 +57,7 @@
                     <div>${item.file.name}</div>
                     <div class="meta">${formatBytes(item.file.size)} → /${item.targetPath || currentPath || ''}</div>
                 </div>
-                <button class="action-btn btn-danger" data-remove="${idx}">Remove</button>
+                <button class="action-btn danger" data-remove="${idx}">Remove</button>
             `;
             const progress = document.createElement('div');
             progress.className = 'music-progress-bar';

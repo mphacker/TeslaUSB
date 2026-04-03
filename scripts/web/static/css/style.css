@@ -1039,36 +1039,53 @@ button {
     color: var(--btn-success-text);
 }
 
-/* Shared action button styles for consistent sizing between links and buttons */
+/* Unified action buttons for media pages */
 .action-btn {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    padding: 6px 12px;
-    font-size: 14px;
+    gap: 4px;
+    padding: 5px 10px;
+    border: 1px solid var(--border, #333);
+    border-radius: 6px;
+    background: var(--bg-secondary, #1e1e2e);
+    color: var(--text-secondary, #aaa);
+    font-size: 12px;
     font-family: inherit;
-    font-weight: 500;
-    line-height: 1.5;
-    border: none;
-    border-radius: 4px;
     cursor: pointer;
     text-decoration: none;
     box-sizing: border-box;
-    transition: opacity 0.3s ease;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
 }
-
 .action-btn:hover {
+    background: var(--bg-hover, #2a2a3e);
+    color: var(--text-primary, #eee);
+}
+.action-btn.primary {
+    background: var(--accent-color, #007bff);
+    color: #fff;
+    border-color: var(--accent-color, #007bff);
+}
+.action-btn.primary:hover {
     opacity: 0.85;
 }
-
-.action-btn.btn-success {
-    background-color: var(--btn-success-bg);
-    color: var(--btn-success-text);
+.action-btn.danger:hover {
+    background: rgba(220, 53, 69, 0.15);
+    color: #dc3545;
+    border-color: #dc3545;
 }
 
-.action-btn.btn-danger {
-    background-color: var(--btn-danger-bg);
-    color: var(--btn-danger-text);
+/* Audio player dark theme */
+audio {
+    height: 32px;
+    width: 100%;
+    max-width: 280px;
+    border-radius: 6px;
+    filter: invert(1) hue-rotate(180deg);
+}
+[data-theme="light"] audio,
+:root:not([data-theme="dark"]) audio {
+    filter: none;
 }
 
 .set-chime-btn {
@@ -1379,23 +1396,6 @@ button:disabled {
 }
 
 .btn-session:hover {
-    opacity: 0.85;
-}
-
-.btn-delete {
-    background-color: var(--btn-danger-bg);
-    color: var(--btn-danger-text);
-    padding: 6px 12px;
-    border-radius: 4px;
-    text-decoration: none;
-    font-size: 14px;
-    display: inline-block;
-    border: none;
-    cursor: pointer;
-    transition: opacity 0.3s ease;
-}
-
-.btn-delete:hover {
     opacity: 0.85;
 }
 

@@ -30,7 +30,7 @@
                 <strong>{{ active_chime.filename }}</strong><br>
                 <span style="color: var(--text-secondary); font-size: 13px;">{{ active_chime.size_str }}</span>
             </div>
-            <audio controls preload="none" style="flex: 1; max-width: 300px; height: 30px;">
+            <audio controls preload="none" style="flex: 1;">
                 <source src="{{ url_for('lock_chimes.play_active_chime') }}?v={{ active_chime.mtime }}" type="audio/wav">
             </audio>
         </div>
@@ -63,7 +63,7 @@
                     <div style="display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 10px;">
                         <input type="file" name="chime_file" id="chime_file" accept=".wav,.mp3" required 
                                style="padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); flex: 1; min-width: 250px; max-width: 400px; font-size: 14px; color: var(--text-primary);">
-                        <button type="submit" class="edit-btn" id="chimeUploadBtn" style="margin: 0; display: none;">📤 Upload</button>
+                        <button type="submit" class="action-btn" id="chimeUploadBtn" style="display: none;">Upload</button>
                     </div>
                     <p style="margin: 0 0 15px 0; font-size: 12px; color: var(--text-secondary);">
                         WAV or MP3 files - auto-converted to Tesla format (PCM 16-bit, 44.1 kHz, under 1MB)
@@ -104,8 +104,8 @@
                         <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">📋 Selected Files:</h4>
                         <div id="chimeFilesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 200px; overflow-y: auto;"></div>
                         <div style="display: flex; gap: 10px; margin-top: 10px;">
-                            <button type="button" class="edit-btn" id="uploadSelectedChimesBtn">📤 Upload All Files</button>
-                            <button type="button" class="btn-delete" id="clearSelectedChimesBtn">✖ Clear All</button>
+                            <button type="button" class="action-btn" id="uploadSelectedChimesBtn">Upload All Files</button>
+                            <button type="button" class="action-btn danger" id="clearSelectedChimesBtn">Clear All</button>
                         </div>
                     </div>
                 </div>
@@ -115,7 +115,7 @@
                     <label for="chime_file_bulk" style="display: block; margin-bottom: 8px; font-weight: 600;">Select Tesla-ready WAV files:</label>
                     <input type="file" id="chime_file_bulk" accept=".wav" multiple 
                            style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary);">
-                    <button type="button" class="edit-btn" id="uploadBulkBtn" style="display: none;">📤 Upload Files</button>
+                    <button type="button" class="action-btn" id="uploadBulkBtn" style="display: none;">Upload Files</button>
                 </div>
             </div>
             
@@ -430,8 +430,8 @@
                     
                     <!-- Submit Button -->
                     <div>
-                        <button type="submit" id="submit-btn" class="edit-btn" style="margin: 0; padding: 12px 25px;">💾 Save Schedule</button>
-                        <button type="button" id="cancel-btn" class="btn-delete" style="margin-left: 10px; display: none; padding: 12px 25px;" onclick="cancelEdit()">❌ Cancel</button>
+                        <button type="submit" id="submit-btn" class="action-btn primary" style="padding: 12px 25px;">Save Schedule</button>
+                        <button type="button" id="cancel-btn" class="action-btn danger" style="margin-left: 10px; display: none; padding: 12px 25px;" onclick="cancelEdit()">Cancel</button>
                     </div>
                 </div>
             </form>
@@ -462,15 +462,15 @@
                         </div>
                     </div>
                     <div style="display: flex; gap: 5px; flex-wrap: wrap;">
-                        <button type="button" onclick="editSchedule({{ schedule.id }})" class="edit-btn" style="padding: 6px 10px; font-size: 13px; margin: 0;">✏️ Edit</button>
+                        <button type="button" onclick="editSchedule({{ schedule.id }})" class="action-btn">Edit</button>
                         <form method="post" action="{{ url_for('lock_chimes.toggle_schedule', schedule_id=schedule.id) }}" style="display: inline;">
-                            <button type="submit" class="present-btn" style="padding: 6px 10px; font-size: 13px; margin: 0;">
-                                {% if schedule.enabled %}⏸️ Disable{% else %}▶️ Enable{% endif %}
+                            <button type="submit" class="action-btn primary">
+                                {% if schedule.enabled %}Disable{% else %}Enable{% endif %}
                             </button>
                         </form>
                         <form method="post" action="{{ url_for('lock_chimes.delete_schedule', schedule_id=schedule.id) }}" 
                               style="display: inline;" onsubmit="return confirm('Delete schedule \'{{ schedule.name | replace("'", "\\'") }}\'?');">
-                            <button type="submit" class="btn-delete" style="padding: 6px 10px; font-size: 13px; margin: 0;">🗑️</button>
+                            <button type="submit" class="action-btn danger">Delete</button>
                         </form>
                     </div>
                 </div>
@@ -522,7 +522,7 @@
             
             <!-- Add New Group Button -->
             <div style="margin: 20px 0;">
-                <button class="edit-btn" id="createGroupBtn">➕ Create New Group</button>
+                <button class="action-btn" id="createGroupBtn">Create New Group</button>
             </div>
             
             <!-- Groups List -->
@@ -663,20 +663,20 @@
                     </td>
                     <td>
                         <div style="display: flex; flex-direction: column; gap: 8px;">
-                            <audio controls preload="none" style="height: 30px; width: 100%; max-width: 300px;">
+                            <audio controls preload="none">
                                 <source src="{{ url_for('lock_chimes.play_lock_chime', filename=chime.filename) }}?v={{ chime.mtime }}" type="audio/wav">
                             </audio>
                             <div style="display: flex; gap: 5px; flex-wrap: wrap; align-items: center;">
-                                <a href="{{ url_for('lock_chimes.download_lock_chime', filename=chime.filename) }}" class="present-btn" style="text-decoration: none; padding: 6px 12px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; line-height: 1.5; height: 34px; box-sizing: border-box;">⬇️ Download</a>
-                                <button type="button" class="edit-btn" onclick='editChime({{ chime.filename|tojson }})' style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">✏️ Edit</button>
+                                <a href="{{ url_for('lock_chimes.download_lock_chime', filename=chime.filename) }}" class="action-btn">Download</a>
+                                <button type="button" class="action-btn" onclick='editChime({{ chime.filename|tojson }})'>Edit</button>
                                 {% if chime.is_valid %}
                                 <form method="post" action="{{ url_for('lock_chimes.set_as_chime', filename=chime.filename) }}" style="display: inline;" onsubmit="return handleSetChime(this);">
-                                    <button type="submit" class="set-chime-btn" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🔔 Set as Active</button>
+                                    <button type="submit" class="action-btn primary">Set Active</button>
                                 </form>
                                 {% endif %}
                                 <form method="post" action="{{ url_for('lock_chimes.delete_lock_chime', filename=chime.filename) }}" style="display: inline;" 
                                       onsubmit="return confirm('Are you sure you want to delete \'{{ chime.filename | replace("'", "\\'") }}\'?');">
-                                    <button type="submit" class="btn-delete" style="padding: 6px 12px; margin: 0; font-size: 14px; height: 34px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">🗑️ Delete</button>
+                                    <button type="submit" class="action-btn danger">Delete</button>
                                 </form>
                             </div>
                         </div>
@@ -716,16 +716,16 @@
                 </audio>
             </div>
             <div class="mobile-card-actions">
-                <a href="{{ url_for('lock_chimes.download_lock_chime', filename=chime.filename) }}" class="present-btn">⬇️ Download</a>
-                <button type="button" class="edit-btn" onclick='editChime({{ chime.filename|tojson }})'>✏️ Edit</button>
+                <a href="{{ url_for('lock_chimes.download_lock_chime', filename=chime.filename) }}" class="action-btn">Download</a>
+                <button type="button" class="action-btn" onclick='editChime({{ chime.filename|tojson }})'>Edit</button>
                 {% if chime.is_valid %}
                 <form method="post" action="{{ url_for('lock_chimes.set_as_chime', filename=chime.filename) }}" onsubmit="return handleSetChime(this);">
-                    <button type="submit" class="set-chime-btn">🔔 Set as Active</button>
+                    <button type="submit" class="action-btn primary">Set Active</button>
                 </form>
                 {% endif %}
                 <form method="post" action="{{ url_for('lock_chimes.delete_lock_chime', filename=chime.filename) }}" 
                       onsubmit="return confirm('Are you sure you want to delete \'{{ chime.filename | replace("'", "\\'") }}\'?');">
-                    <button type="submit" class="btn-delete">🗑️ Delete</button>
+                    <button type="submit" class="action-btn danger">Delete</button>
                 </form>
             </div>
         </div>

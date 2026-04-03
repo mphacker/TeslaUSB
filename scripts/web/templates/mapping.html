@@ -273,7 +273,16 @@ async function loadTrips() {
             sel.innerHTML += `<option value="${t.id}">${date} — ${dist} mi</option>`;
         });
 
-        await renderTrips();
+        // Default to most recent trip (first in list, sorted by start_time DESC)
+        if (allTrips.length > 0 && !sel.value) {
+            sel.value = allTrips[0].id;
+            const saved = allTrips;
+            allTrips = [allTrips[0]];
+            await renderTrips();
+            allTrips = saved;
+        } else {
+            await renderTrips();
+        }
     } catch(e) { console.error('Failed to load trips:', e); }
 }
 

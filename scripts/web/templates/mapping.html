@@ -466,6 +466,7 @@ let heatVisible = false;
 let allTrips = [];
 let allEvents = [];
 let currentTripIndex = 0;
+let showingAllTrips = false;
 
 // Event severity colors
 // Build a deep link to the event player for a video path
@@ -512,6 +513,9 @@ async function loadStats() {
 
 async function loadTrips() {
     try {
+        // Remember current selection before refresh
+        const prevTripId = allTrips.length > 0 ? allTrips[currentTripIndex]?.id : null;
+
         const resp = await fetch('/api/trips?limit=200');
         const data = await resp.json();
         allTrips = data.trips || [];
@@ -532,13 +536,18 @@ async function loadTrips() {
             sel.appendChild(opt);
         });
 
-        // Default to most recent trip (first in list, sorted by start_time DESC)
         if (allTrips.length > 0) {
-            currentTripIndex = 0;
+            // Restore previous selection if it still exists
+            const restoredIdx = prevTripId != null
+                ? allTrips.findIndex(t => t.id === prevTripId)
+                : -1;
+            currentTripIndex = restoredIdx >= 0 ? restoredIdx : 0;
+
             updateTripCard();
-            sel.value = allTrips[0].id;
+            sel.value = allTrips[currentTripIndex].id;
+            const trip = allTrips[currentTripIndex];
             const saved = allTrips;
-            allTrips = [allTrips[0]];
+            allTrips = [trip];
             await renderTrips();
             allTrips = saved;
         } else {
@@ -583,11 +592,19 @@ function updateTripCard() {
 // Cycle through trips via trip card arrows
 function cycleTrip(direction) {
     if (!allTrips.length) return;
-    // allTrips is sorted newest-first; -1 = older (higher index), +1 = newer (lower index)
-    const newIndex = currentTripIndex - direction;
-    if (newIndex < 0 || newIndex >= allTrips.length) return;
 
-    currentTripIndex = newIndex;
+    // If showing all trips, exit to single-trip view
+    if (showingAllTrips) {
+        showingAllTrips = false;
+        // direction +1 (next/newer) → index 0, direction -1 (prev/older) → last
+        currentTripIndex = direction > 0 ? 0 : allTrips.length - 1;
+    } else {
+        // allTrips is sorted newest-first; -1 = older (higher index), +1 = newer (lower index)
+        const newIndex = currentTripIndex - direction;
+        if (newIndex < 0 || newIndex >= allTrips.length) return;
+        currentTripIndex = newIndex;
+    }
+
     updateTripCard();
 
     // Show this single trip on the map
@@ -601,7 +618,11 @@ function cycleTrip(direction) {
 
 // Show all trips on the map
 function showAllTrips() {
-    if (!allTrips.length) return;
+    if (!allTrips.length) {
+        showToast('No trips available yet. Try indexing videos first.', 'warning');
+        return;
+    }
+    showingAllTrips = true;
     const sel = document.getElementById('tripFilter');
     sel.value = '';
 
@@ -613,8 +634,9 @@ function showAllTrips() {
 
     const prevBtn = document.getElementById('tripPrev');
     const nextBtn = document.getElementById('tripNext');
-    if (prevBtn) prevBtn.disabled = true;
-    if (nextBtn) nextBtn.disabled = true;
+    // Enable arrows so user can exit "all" mode by cycling
+    if (prevBtn) prevBtn.disabled = false;
+    if (nextBtn) nextBtn.disabled = false;
 
     renderTrips();
 }
@@ -1168,6 +1190,13 @@ async function pollIndexer() {
             statusDiv.textContent = `Indexing... (${data.files_done || 0}/${data.files_total || '?'})`;
             btn.disabled = true;
             btn.classList.add('spinning');
+            // Refresh trips periodically while indexer runs (every 10s)
+            if (!pollIndexer._lastTripRefresh ||
+                Date.now() - pollIndexer._lastTripRefresh > 10000) {
+                pollIndexer._lastTripRefresh = Date.now();
+                loadTrips();
+                loadStats();
+            }
             setTimeout(pollIndexer, 2000);
         } else {
             statusDiv.style.display = data.error ? 'block' : 'none';
@@ -1182,7 +1211,8 @@ async function pollIndexer() {
             }
             btn.disabled = false;
             btn.classList.remove('spinning');
-            // Reload data
+            pollIndexer._lastTripRefresh = 0;
+            // Reload data after completion
             loadStats();
             if (currentView === 'trips') loadTrips();
             else loadEvents();

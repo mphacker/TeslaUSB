@@ -31,11 +31,51 @@ _SeiMetadata = None
 
 
 def _get_sei_metadata_class():
-    """Lazy-load the compiled protobuf class."""
+    """Lazy-load the compiled protobuf class, auto-compiling if needed."""
     global _SeiMetadata
-    if _SeiMetadata is None:
+    if _SeiMetadata is not None:
+        return _SeiMetadata
+
+    try:
         from services.dashcam_pb2 import SeiMetadata
         _SeiMetadata = SeiMetadata
+        return _SeiMetadata
+    except ImportError:
+        pass
+
+    # Auto-compile from .proto if dashcam_pb2.py is missing
+    services_dir = os.path.dirname(os.path.abspath(__file__))
+    proto_src = os.path.join(services_dir, '..', 'static', 'dashcam.proto')
+    pb2_dst = os.path.join(services_dir, 'dashcam_pb2.py')
+
+    if not os.path.isfile(proto_src):
+        raise ImportError(
+            f"dashcam_pb2.py not found and source proto missing: {proto_src}. "
+            "Run setup_usb.sh or install protobuf-compiler and compile manually."
+        )
+
+    logger.warning("dashcam_pb2.py missing — auto-compiling from dashcam.proto")
+    import subprocess
+    try:
+        subprocess.run(
+            ['protoc', f'--python_out={services_dir}',
+             f'--proto_path={os.path.dirname(os.path.abspath(proto_src))}',
+             os.path.abspath(proto_src)],
+            check=True, capture_output=True, text=True,
+        )
+        logger.info("dashcam_pb2.py compiled successfully")
+    except FileNotFoundError:
+        raise ImportError(
+            "dashcam_pb2.py not found and 'protoc' compiler not installed. "
+            "Run: sudo apt install -y protobuf-compiler && sudo ./setup_usb.sh"
+        )
+    except subprocess.CalledProcessError as e:
+        raise ImportError(
+            f"Failed to compile dashcam.proto: {e.stderr or e.stdout}"
+        )
+
+    from services.dashcam_pb2 import SeiMetadata
+    _SeiMetadata = SeiMetadata
     return _SeiMetadata
 
 
@@ -198,6 +238,8 @@ def _decode_sei_nal(nal_data: bytes) -> Optional[object]:
 
         SeiMetadata = _get_sei_metadata_class()
         return SeiMetadata.FromString(clean_payload)
+    except ImportError:
+        raise  # Don't silently swallow missing protobuf
     except Exception:
         return None
 

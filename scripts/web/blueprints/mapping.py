@@ -190,6 +190,26 @@ def api_index_cancel():
     return jsonify({'success': success, 'message': message})
 
 
+@mapping_bp.route("/api/index/diagnose")
+def api_index_diagnose():
+    """Diagnose SEI parsing on sample videos for troubleshooting."""
+    from services.mapping_service import diagnose_video
+
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return jsonify({'error': 'TeslaCam not accessible'}), 503
+
+    max_videos = request.args.get('max', 3, type=int)
+    max_videos = min(max_videos, 10)  # Cap at 10
+
+    try:
+        result = diagnose_video(teslacam_path, max_videos=max_videos)
+        return jsonify(result)
+    except Exception as e:
+        logger.error("Diagnosis failed: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
 # ---------------------------------------------------------------------------
 # Driving Stats & Event Analytics APIs
 # ---------------------------------------------------------------------------

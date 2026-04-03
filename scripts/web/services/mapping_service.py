@@ -408,9 +408,13 @@ def _index_video(
 
     # Extract SEI messages
     waypoint_dicts = []
+    sei_count = 0
+    no_gps_count = 0
     try:
         for msg in parser.extract_sei_messages(video_path, sample_rate=sample_rate):
+            sei_count += 1
             if not msg.has_gps:
+                no_gps_count += 1
                 continue
 
             # Compute absolute timestamp from file timestamp + frame offset
@@ -439,11 +443,20 @@ def _index_video(
                 'video_path': rel_path,
                 'frame_offset': msg.frame_index,
             })
+    except ImportError as e:
+        # Protobuf module missing — abort indexer entirely so it's noticed
+        logger.error("SEI parser missing protobuf module: %s", e)
+        raise
     except Exception as e:
         logger.warning("Failed to parse SEI from %s: %s", rel_path, e)
         return 0, 0
 
     if not waypoint_dicts:
+        if sei_count == 0:
+            logger.info("No SEI messages found in %s", rel_path)
+        else:
+            logger.info("%s: %d SEI messages but 0 had GPS (%d checked)",
+                        rel_path, sei_count, no_gps_count)
         return 0, 0
 
     # Determine source folder
@@ -614,6 +627,15 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
                 )
                 conn.commit()
 
+            except ImportError as e:
+                # Protobuf missing — stop indexer, report clearly
+                logger.error("Indexer aborted: %s", e)
+                _status.update({
+                    'running': False,
+                    'error': str(e),
+                    'progress': f'Error: {e}',
+                })
+                return
             except Exception as e:
                 logger.error("Failed to index %s: %s", rel, e)
                 continue
@@ -688,6 +710,224 @@ def cancel_indexer() -> Tuple[bool, str]:
     _indexer_cancel.set()
     return True, "Cancellation requested"
 
+
+def diagnose_video(teslacam_path: str, max_videos: int = 3) -> dict:
+    """Diagnose SEI parsing on sample videos for troubleshooting.
+
+    Tests a few videos in detail, reporting file sizes, MP4 box structure,
+    SEI NAL unit counts, GPS data presence, and any parse errors.
+    Returns a dict with diagnostic info.
+    """
+    import struct as _struct
+
+    parser = _get_sei_parser()
+    results = {
+        'teslacam_path': teslacam_path,
+        'path_exists': os.path.isdir(teslacam_path),
+        'videos': [],
+        'summary': '',
+    }
+
+    if not results['path_exists']:
+        results['summary'] = f'TeslaCam path does not exist: {teslacam_path}'
+        return results
+
+    # List folder structure
+    folders = {}
+    for folder in ('RecentClips', 'SavedClips', 'SentryClips'):
+        fp = os.path.join(teslacam_path, folder)
+        if os.path.isdir(fp):
+            try:
+                entries = os.listdir(fp)
+                folders[folder] = len(entries)
+            except OSError as e:
+                folders[folder] = f'error: {e}'
+        else:
+            folders[folder] = 'not found'
+    results['folders'] = folders
+
+    # Get sample videos
+    videos = list(_find_front_camera_videos(teslacam_path))
+    results['total_front_videos'] = len(videos)
+
+    for vp in videos[:max_videos]:
+        diag = {'path': os.path.relpath(vp, teslacam_path)}
+        try:
+            stat = os.stat(vp)
+            diag['file_size'] = stat.st_size
+            diag['file_size_mb'] = round(stat.st_size / 1024 / 1024, 2)
+
+            if stat.st_size < 8:
+                diag['error'] = 'File too small'
+                results['videos'].append(diag)
+                continue
+
+            with open(vp, 'rb') as f:
+                header = f.read(min(32, stat.st_size))
+
+            # Check MP4 magic bytes
+            diag['first_16_bytes_hex'] = header[:16].hex()
+            has_ftyp = b'ftyp' in header[:12]
+            diag['has_ftyp'] = has_ftyp
+
+            if not has_ftyp:
+                diag['error'] = 'Not a valid MP4 (no ftyp box in first 12 bytes)'
+                results['videos'].append(diag)
+                continue
+
+            # Deep NAL analysis — read the file and scan mdat
+            nal_analysis = _diagnose_nal_structure(vp)
+            diag.update(nal_analysis)
+
+            # Try full SEI extraction with sample_rate=1 for max detail
+            sei_msgs = []
+            gps_msgs = []
+            parse_error = None
+            try:
+                for msg in parser.extract_sei_messages(vp, sample_rate=1):
+                    sei_msgs.append(msg)
+                    if msg.has_gps:
+                        gps_msgs.append(msg)
+                    if len(sei_msgs) >= 10:
+                        break  # Enough for diagnosis
+            except Exception as e:
+                parse_error = str(e)
+
+            diag['sei_messages_sampled'] = len(sei_msgs)
+            diag['gps_messages'] = len(gps_msgs)
+            if parse_error:
+                diag['parse_error'] = parse_error
+
+            # Show first GPS point if found
+            if gps_msgs:
+                first = gps_msgs[0]
+                diag['sample_gps'] = {
+                    'lat': first.latitude_deg,
+                    'lon': first.longitude_deg,
+                    'speed_mph': round(first.speed_mph, 1),
+                    'heading': first.heading_deg,
+                    'gear': first.gear_state,
+                }
+            elif sei_msgs:
+                # Show first SEI to see what data exists
+                first = sei_msgs[0]
+                diag['sample_sei_no_gps'] = {
+                    'lat': first.latitude_deg,
+                    'lon': first.longitude_deg,
+                    'speed_mph': round(first.speed_mph, 1),
+                    'frame': first.frame_index,
+                }
+
+        except Exception as e:
+            diag['error'] = str(e)
+
+        results['videos'].append(diag)
+
+    # Summary
+    total = len(videos)
+    tested = len(results['videos'])
+    gps_found = sum(1 for v in results['videos'] if v.get('gps_messages', 0) > 0)
+    results['summary'] = (
+        f'{total} front-camera videos found, {tested} tested: '
+        f'{gps_found} have GPS data'
+    )
+
+    return results
+
+
+def _diagnose_nal_structure(video_path: str) -> dict:
+    """Deep-scan the NAL unit structure of a video for diagnostics."""
+    import struct as _struct
+
+    result = {}
+    try:
+        file_size = os.path.getsize(video_path)
+        if file_size > 150 * 1024 * 1024:
+            result['nal_error'] = f'File too large for diagnosis ({file_size} bytes)'
+            return result
+
+        with open(video_path, 'rb') as f:
+            data = f.read()
+
+        # Find mdat box
+        from services.sei_parser import _find_box
+        mdat = _find_box(data, 0, len(data), 'mdat')
+        if mdat is None:
+            result['nal_error'] = 'No mdat box found'
+            return result
+
+        result['mdat_size'] = mdat['size']
+        result['mdat_first_32_hex'] = data[mdat['start']:mdat['start'] + 32].hex()
+
+        # Scan NAL units
+        cursor = mdat['start']
+        end = mdat['end']
+        nal_types = {}
+        nal_count = 0
+        sei_type6_count = 0
+        sei_payloads = []
+        bad_lengths = 0
+        max_scan = 5000  # Limit to first 5000 NAL units
+
+        while cursor + 4 <= end and nal_count < max_scan:
+            nal_size = _struct.unpack('>I', data[cursor:cursor + 4])[0]
+            cursor += 4
+
+            if nal_size < 1 or cursor + nal_size > len(data):
+                bad_lengths += 1
+                if bad_lengths > 3:
+                    result['nal_scan_stopped'] = (
+                        f'Too many bad NAL lengths at offset {cursor - 4}'
+                    )
+                    break
+                # Try advancing by 1 to resync
+                cursor -= 3
+                continue
+
+            nal_type = data[cursor] & 0x1F
+            nal_types[nal_type] = nal_types.get(nal_type, 0) + 1
+            nal_count += 1
+
+            if nal_type == 6:
+                sei_type6_count += 1
+                # Record the first few bytes of SEI payload for inspection
+                if len(sei_payloads) < 5:
+                    payload_preview = data[cursor:cursor + min(16, nal_size)].hex()
+                    payload_type_byte = data[cursor + 1] if nal_size >= 2 else -1
+                    sei_payloads.append({
+                        'offset': cursor,
+                        'size': nal_size,
+                        'payload_type_byte': payload_type_byte,
+                        'first_16_hex': payload_preview,
+                    })
+
+            cursor += nal_size
+
+        result['nal_count'] = nal_count
+        result['nal_types'] = {str(k): v for k, v in sorted(nal_types.items())}
+        result['sei_type6_count'] = sei_type6_count
+        result['bad_nal_lengths'] = bad_lengths
+        if sei_payloads:
+            result['sei_payload_samples'] = sei_payloads
+
+        # Provide human-readable NAL type names
+        nal_names = {
+            0: 'Unspecified', 1: 'Non-IDR Slice', 2: 'Slice A',
+            3: 'Slice B', 4: 'Slice C', 5: 'IDR Slice',
+            6: 'SEI', 7: 'SPS', 8: 'PPS', 9: 'AUD',
+            10: 'EndSeq', 11: 'EndStream', 12: 'Filler',
+            19: 'AuxSlice', 32: 'VPS(HEVC)', 33: 'SPS(HEVC)',
+            34: 'PPS(HEVC)',
+        }
+        result['nal_type_names'] = {
+            f'{k} ({nal_names.get(k, "?")})': v
+            for k, v in sorted(nal_types.items())
+        }
+
+    except Exception as e:
+        result['nal_error'] = str(e)
+
+    return result
 
 def get_db_connection(db_path: str) -> sqlite3.Connection:
     """Get a read-only connection to the geo-index database."""

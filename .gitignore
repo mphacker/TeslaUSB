@@ -1,2 +1,4 @@
 # Playwright MCP browser automation folder
 .playwright-mcp/
+
+scripts/web/services/dashcam_pb2.py

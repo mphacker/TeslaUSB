@@ -13,34 +13,37 @@
         align-items: center; font-size: 14px;
     }
     .map-toolbar button, .map-toolbar select {
-        padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border-color, #ccc);
-        background: var(--card-bg, #fff); color: var(--text-color, #333);
+        padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+        background: var(--bg-container); color: var(--text-primary);
         cursor: pointer; font-size: 13px;
     }
     .map-toolbar button:hover { background: var(--accent-color, #007bff); color: #fff; }
     .map-toolbar button.active { background: var(--accent-color, #007bff); color: #fff; }
-    .map-toolbar .separator { border-left: 1px solid var(--border-color, #ccc); height: 24px; }
+    .map-toolbar .separator { border-left: 1px solid var(--border); height: 24px; }
 
     .stats-bar {
         display: flex; gap: 16px; padding: 8px 12px; font-size: 13px;
-        background: var(--card-bg, #f8f9fa); border-radius: 6px;
-        flex-wrap: wrap; align-items: center;
+        background: var(--bg-secondary); color: var(--text-secondary);
+        border-radius: 6px; flex-wrap: wrap; align-items: center;
+        border: 1px solid var(--border);
     }
     .stats-bar .stat { display: flex; align-items: center; gap: 4px; }
-    .stats-bar .stat-value { font-weight: 600; }
+    .stats-bar .stat-value { font-weight: 600; color: var(--text-primary); }
 
     .legend {
         position: absolute; bottom: 30px; right: 10px; z-index: 1000;
-        background: var(--card-bg, #fff); padding: 10px 14px; border-radius: 8px;
+        background: var(--bg-container); color: var(--text-primary);
+        padding: 10px 14px; border-radius: 8px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.15); font-size: 12px;
-        max-width: 200px;
+        max-width: 200px; border: 1px solid var(--border);
     }
     .legend-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
     .legend-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
 
     .indexer-status {
         padding: 8px 12px; border-radius: 6px; font-size: 13px;
-        background: var(--card-bg, #f8f9fa);
+        background: var(--bg-secondary); color: var(--text-primary);
+        border: 1px solid var(--border);
     }
     .indexer-status.running { border-left: 3px solid #f0ad4e; }
 

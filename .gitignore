@@ -1,7 +1,8 @@
 # Playwright MCP browser automation folder
 .playwright-mcp/
 
-# AI tool configs (only .claude is used — GitHub Copilot)
+# AI tool configs (managed externally, not part of the repo)
+.claude/
 .agent/
 .codebuddy/
 .codex/

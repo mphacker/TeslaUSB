@@ -5,12 +5,12 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/MarkerCluster.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/MarkerCluster.Default.css') }}">
 <style>
-    .map-container { display: flex; flex-direction: column; height: calc(100vh - 80px); gap: 0; }
-    #map { flex: 1; min-height: 300px; border-radius: 8px; z-index: 1; }
+    .map-container { display: flex; flex-direction: column; height: calc(100vh - 120px); gap: 0; overflow: hidden; }
+    #map { flex: 1; min-height: 0; border-radius: 8px; z-index: 1; }
 
     .map-toolbar {
-        display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 0;
-        align-items: center; font-size: 14px;
+        display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0;
+        align-items: center; font-size: 13px;
     }
     .map-toolbar button, .map-toolbar select {
         padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
@@ -22,7 +22,7 @@
     .map-toolbar .separator { border-left: 1px solid var(--border); height: 24px; }
 
     .stats-bar {
-        display: flex; gap: 16px; padding: 8px 12px; font-size: 13px;
+        display: flex; gap: 12px; padding: 5px 10px; font-size: 12px;
         background: var(--bg-secondary); color: var(--text-secondary);
         border-radius: 6px; flex-wrap: wrap; align-items: center;
         border: 1px solid var(--border);
@@ -98,9 +98,9 @@
     .fsd-manual { background: #6c757d; }
 
     @media (max-width: 768px) {
-        .map-container { height: calc(100vh - 60px); }
-        .map-toolbar { padding: 6px 0; gap: 4px; }
-        .stats-bar { gap: 8px; font-size: 12px; }
+        .map-container { height: calc(100vh - 100px); }
+        .map-toolbar { padding: 4px 0; gap: 4px; }
+        .stats-bar { gap: 6px; font-size: 11px; padding: 4px 8px; }
         .legend { bottom: 20px; right: 5px; }
     }
 </style>
@@ -110,7 +110,7 @@
         <!-- Toolbar -->
         <div class="map-toolbar">
             <button id="btnTrips" class="active" onclick="showTrips()">🛣️ Trips</button>
-            <select id="tripFilter" onchange="filterTrips()" style="display:none">
+            <select id="tripFilter" onchange="filterTrips()">
                 <option value="">All Trips</option>
             </select>
             <button id="btnEvents" onclick="showEvents()">⚡ Events</button>

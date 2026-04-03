@@ -383,24 +383,39 @@ const CAMERA_LABELS = {
     'left_pillar': '↙️ L Pillar', 'right_pillar': '↘️ R Pillar'
 };
 
-// State for the overlay player
-let overlayWaypoints = [];   // All waypoints for the current trip route
-let overlayClickedIdx = 0;   // Index of the clicked waypoint
+let overlayWaypoints = [];
+let overlayClips = [];
+let overlayClipIdx = 0;
 let overlayCurrentAngle = 'front';
-let overlayTelemetryTimer = null;
+let overlayBasePath = '';
+
+function getBasePath(videoPath) {
+    // "RecentClips/2026-04-02_18-00-10-front.mp4" → "RecentClips/2026-04-02_18-00-10"
+    const angle = CAMERA_ANGLES.find(a => videoPath.includes('-' + a + '.'));
+    return angle ? videoPath.replace(`-${angle}.mp4`, '') : videoPath.replace('.mp4', '');
+}
 
 function openVideoOverlay(waypoint, clickPoint) {
     closeVideoOverlay();
 
     const filename = waypoint.video_path.split('/').pop();
     overlayCurrentAngle = CAMERA_ANGLES.find(a => filename.includes('-' + a + '.')) || 'front';
-    const basePath = waypoint.video_path.replace(`-${overlayCurrentAngle}.mp4`, '');
+    overlayBasePath = getBasePath(waypoint.video_path);
 
-    // Find all waypoints for this trip's route (stored during renderTrips)
-    // and locate previous/next video clips
-    const videoBase = basePath.split('/').pop(); // e.g., "2026-04-02_18-00-10"
+    // Build clip list from overlayWaypoints (set by route click handler)
+    overlayClips = [];
+    const seen = new Set();
+    overlayWaypoints.forEach(wp => {
+        if (!wp.video_path) return;
+        const bp = getBasePath(wp.video_path);
+        if (!seen.has(bp)) {
+            seen.add(bp);
+            overlayClips.push({ basePath: bp, firstWaypoint: wp });
+        }
+    });
+    overlayClipIdx = Math.max(0, overlayClips.findIndex(c => c.basePath === overlayBasePath));
 
-    // Position near click
+    // Position overlay
     const mapEl = document.getElementById('map');
     const mapRect = mapEl.getBoundingClientRect();
     let left = mapRect.left + clickPoint.x + 15;
@@ -427,9 +442,7 @@ function openVideoOverlay(waypoint, clickPoint) {
             <button class="close-btn" onclick="closeVideoOverlay()">✕</button>
         </div>
         <div class="cam-switcher" id="camSwitcher">${cameraBtns}</div>
-        <video id="overlayVideo" controls autoplay muted>
-            <source src="/videos/stream/${waypoint.video_path}" type="video/mp4">
-        </video>
+        <video id="overlayVideo" controls autoplay muted></video>
         <div class="video-overlay-info" id="overlayInfo">
             <span id="olSpeed">🏎️ — mph</span>
             <span id="olAP">🤖 —</span>
@@ -441,10 +454,28 @@ function openVideoOverlay(waypoint, clickPoint) {
         </div>
     `;
 
-    overlay.dataset.basePath = basePath;
     document.body.appendChild(overlay);
 
-    // Make draggable
+    // Load the video
+    const video = document.getElementById('overlayVideo');
+    video.src = `/videos/stream/${waypoint.video_path}`;
+
+    // Seek on load
+    video.addEventListener('loadedmetadata', function onLoad() {
+        const estimatedTime = Math.max(0, (waypoint.frame_offset || 0) / 36 - 2);
+        if (estimatedTime > 0 && estimatedTime < video.duration) {
+            video.currentTime = estimatedTime;
+        }
+        video.removeEventListener('loadedmetadata', onLoad);
+    });
+
+    // Live telemetry on timeupdate
+    video.addEventListener('timeupdate', onOverlayTimeUpdate);
+
+    // Initial telemetry
+    updateOverlayTelemetry(waypoint);
+
+    // Draggable
     let isDragging = false, dragX, dragY;
     const header = overlay.querySelector('.video-overlay-header');
     header.style.cursor = 'grab';
@@ -464,107 +495,23 @@ function openVideoOverlay(waypoint, clickPoint) {
         isDragging = false;
         if (header) header.style.cursor = 'grab';
     });
-
-    // Seek to ~2 seconds before clicked point
-    const video = document.getElementById('overlayVideo');
-    video.addEventListener('loadedmetadata', () => {
-        const estimatedTime = Math.max(0, (waypoint.frame_offset || 0) / 36 - 2);
-        if (estimatedTime > 0 && estimatedTime < video.duration) {
-            video.currentTime = estimatedTime;
-        }
-    });
-
-    // Real-time telemetry updates from the route waypoints
-    updateOverlayTelemetry(waypoint);
-    video.addEventListener('timeupdate', onOverlayTimeUpdate);
-
-    // Build list of unique video clips in this route for prev/next
-    buildClipList(waypoint);
-}
-
-// Find all distinct video clips in the currently loaded route
-let overlayClips = [];   // [{basePath, folder}, ...]
-let overlayClipIdx = 0;
-
-function buildClipList(waypoint) {
-    overlayClips = [];
-    overlayClipIdx = 0;
-    const folder = waypoint.video_path.split('/').slice(0, -1).join('/');
-
-    // Scan overlayWaypoints for unique video files
-    const seen = new Set();
-    overlayWaypoints.forEach(wp => {
-        if (wp.video_path && !seen.has(wp.video_path)) {
-            seen.add(wp.video_path);
-            const fn = wp.video_path.split('/').pop();
-            const angle = CAMERA_ANGLES.find(a => fn.includes('-' + a + '.')) || 'front';
-            const base = wp.video_path.replace(`-${angle}.mp4`, '');
-            overlayClips.push({ basePath: base, firstWaypoint: wp });
-        }
-    });
-
-    // Find current clip index
-    const currentBase = waypoint.video_path.replace(`-${overlayCurrentAngle}.mp4`, '');
-    overlayClipIdx = overlayClips.findIndex(c => c.basePath === currentBase);
-    if (overlayClipIdx < 0) overlayClipIdx = 0;
-}
-
-function navigateClip(direction) {
-    const newIdx = overlayClipIdx + direction;
-    if (newIdx < 0 || newIdx >= overlayClips.length) return;
-
-    const clip = overlayClips[newIdx];
-    overlayClipIdx = newIdx;
-
-    const newPath = `${clip.basePath}-${overlayCurrentAngle}.mp4`;
-    const newFilename = newPath.split('/').pop();
-    const video = document.getElementById('overlayVideo');
-    if (!video) return;
-
-    // Update header
-    const title = document.getElementById('overlayTitle');
-    if (title) title.textContent = `🎥 ${newFilename}`;
-
-    // Update base path
-    const overlay = document.getElementById('videoOverlay');
-    if (overlay) overlay.dataset.basePath = clip.basePath;
-
-    // Update camera buttons with new base path
-    document.querySelectorAll('#camSwitcher .cam-btn').forEach(btn => {
-        btn.setAttribute('onclick', `switchCamera('${btn.dataset.angle}')`);
-    });
-
-    // Switch video
-    video.src = `/videos/stream/${newPath}`;
-    video.load();
-    video.addEventListener('loadedmetadata', function onLoaded() {
-        video.play().catch(() => {});
-        video.removeEventListener('loadedmetadata', onLoaded);
-    }, { once: true });
-
-    updateOverlayTelemetry(clip.firstWaypoint);
 }
 
 function onOverlayTimeUpdate() {
     const video = document.getElementById('overlayVideo');
     if (!video || !overlayWaypoints.length) return;
 
-    // Map video currentTime to a waypoint using frame offsets
-    const currentFrame = Math.round(video.currentTime * 36);
-    const overlay = document.getElementById('videoOverlay');
-    const basePath = overlay ? overlay.dataset.basePath : '';
+    const currentTimeSec = video.currentTime;
+    const currentFrame = Math.round(currentTimeSec * 36);
 
-    // Find nearest waypoint matching this video file and time
+    // Find the nearest waypoint matching the CURRENT clip's base path
     let nearest = null, minDelta = Infinity;
-    overlayWaypoints.forEach(wp => {
-        if (!wp.video_path) return;
-        const fn = wp.video_path.split('/').pop();
-        const angle = CAMERA_ANGLES.find(a => fn.includes('-' + a + '.')) || 'front';
-        const wpBase = wp.video_path.replace(`-${angle}.mp4`, '');
-        if (wpBase !== basePath) return;
+    for (const wp of overlayWaypoints) {
+        if (!wp.video_path) continue;
+        if (getBasePath(wp.video_path) !== overlayBasePath) continue;
         const delta = Math.abs((wp.frame_offset || 0) - currentFrame);
         if (delta < minDelta) { minDelta = delta; nearest = wp; }
-    });
+    }
 
     if (nearest) updateOverlayTelemetry(nearest);
 }
@@ -573,27 +520,25 @@ function updateOverlayTelemetry(wp) {
     const speed = document.getElementById('olSpeed');
     const apEl = document.getElementById('olAP');
     const coords = document.getElementById('olCoords');
-    if (speed) speed.textContent = `🏎️ ${(wp.speed_mps * 2.237).toFixed(0)} mph`;
+    if (speed) speed.textContent = `🏎️ ${((wp.speed_mps || 0) * 2.237).toFixed(0)} mph`;
     if (apEl) {
         const ap = wp.autopilot_state || 'NONE';
-        const apColor = ['SELF_DRIVING', 'AUTOSTEER'].includes(ap) ? '#28a745' : '';
+        const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(ap);
         apEl.textContent = `🤖 ${ap}`;
-        apEl.style.color = apColor;
+        apEl.style.color = engaged ? '#28a745' : '';
     }
-    if (coords) coords.textContent = `📍 ${wp.lat.toFixed(4)}, ${wp.lon.toFixed(4)}`;
+    if (coords) coords.textContent = `📍 ${(wp.lat || 0).toFixed(4)}, ${(wp.lon || 0).toFixed(4)}`;
 }
 
 function switchCamera(angle) {
     const video = document.getElementById('overlayVideo');
-    const overlay = document.getElementById('videoOverlay');
-    if (!video || !overlay) return;
+    if (!video) return;
 
     const currentTime = video.currentTime;
     const wasPaused = video.paused;
     overlayCurrentAngle = angle;
 
-    const basePath = overlay.dataset.basePath;
-    const newPath = `${basePath}-${angle}.mp4`;
+    const newPath = `${overlayBasePath}-${angle}.mp4`;
     const newFilename = newPath.split('/').pop();
 
     document.querySelectorAll('#camSwitcher .cam-btn').forEach(btn => {
@@ -604,12 +549,37 @@ function switchCamera(angle) {
     if (title) title.textContent = `🎥 ${newFilename}`;
 
     video.src = `/videos/stream/${newPath}`;
-    video.load();
-    video.addEventListener('loadedmetadata', function onLoaded() {
+    video.addEventListener('loadedmetadata', function onLoad() {
         video.currentTime = currentTime;
         if (!wasPaused) video.play().catch(() => {});
-        video.removeEventListener('loadedmetadata', onLoaded);
+        video.removeEventListener('loadedmetadata', onLoad);
     }, { once: true });
+}
+
+function navigateClip(direction) {
+    const newIdx = overlayClipIdx + direction;
+    if (newIdx < 0 || newIdx >= overlayClips.length) return;
+
+    overlayClipIdx = newIdx;
+    const clip = overlayClips[newIdx];
+    overlayBasePath = clip.basePath;
+
+    const newPath = `${clip.basePath}-${overlayCurrentAngle}.mp4`;
+    const newFilename = newPath.split('/').pop();
+
+    const title = document.getElementById('overlayTitle');
+    if (title) title.textContent = `🎥 ${newFilename}`;
+
+    const video = document.getElementById('overlayVideo');
+    if (!video) return;
+
+    video.src = `/videos/stream/${newPath}`;
+    video.addEventListener('loadedmetadata', function onLoad() {
+        video.play().catch(() => {});
+        video.removeEventListener('loadedmetadata', onLoad);
+    }, { once: true });
+
+    updateOverlayTelemetry(clip.firstWaypoint);
 }
 
 function closeVideoOverlay() {

@@ -269,14 +269,25 @@ Use spacing tokens consistently. Do not use arbitrary pixel values.
 }
 ```
 
-### Mode Badge
+### Status Indicator
 
-```
-Present Mode:  [● Present] — green dot + green text on dark green background
-Edit Mode:     [● Edit]    — amber dot + amber text on dark amber background
-```
+The underlying Present/Edit mode distinction is an implementation detail — never expose these terms to users.
 
-Compact pill in the nav bar. On mobile: colored dot only (no text).
+**Normal state (USB connected to Tesla):**
+- Small green dot in the nav — no label needed, this is the default happy state
+
+**Network sharing active (Samba/Edit mode):**
+- Amber dot + `"Sharing"` label in the nav
+- Persistent subtle banner: `"Network Sharing active — Tesla USB disconnected"` with a "Reconnect" button
+
+**Error/unknown state:**
+- Red dot + `"Disconnected"` label
+
+**Rules:**
+- Never show "Present Mode" or "Edit Mode" in the UI
+- Write operations (delete, upload) auto-switch modes transparently via `quick_edit` — the user never needs to know
+- The only user-facing mode concept is "Network File Sharing" (enables Samba, found in Settings → Advanced)
+- When network sharing is enabled, clearly warn that the Tesla USB is disconnected
 
 ### Tables
 

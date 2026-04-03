@@ -40,6 +40,7 @@ def music_home():
     return render_template(
         "music.html",
         page="media",
+        media_tab="music",
         **ctx,
         dirs=dirs,
         files=files,

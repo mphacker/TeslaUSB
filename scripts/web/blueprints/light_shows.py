@@ -40,10 +40,10 @@ def light_shows():
         return render_template(
             'light_shows.html',
             page='media',
+            media_tab='shows',
             **ctx,
             show_groups=[],
             auto_refresh=False,
-            operation_in_progress=True,
             lock_age=op_status['lock_age'],
             estimated_completion=op_status['estimated_completion'],
         )
@@ -100,10 +100,10 @@ def light_shows():
     return render_template(
         'light_shows.html',
         page='media',
+        media_tab='shows',
         **ctx,
         show_groups=show_groups,
         auto_refresh=False,
-        operation_in_progress=False,
     )
 
 

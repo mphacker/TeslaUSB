@@ -2565,3 +2565,45 @@ details summary span:first-of-type {
         max-width: 120px;
     }
 }
+
+/* Media Hub Pills */
+.media-pills {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0 16px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.media-pills::-webkit-scrollbar { display: none; }
+
+.media-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  transition: all 200ms ease;
+  cursor: pointer;
+  min-height: 36px;
+}
+.media-pill:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+.media-pill.active {
+  background: var(--btn-primary-bg, #3B82F6);
+  color: #fff;
+  border-color: var(--btn-primary-bg, #3B82F6);
+}
+.media-pill .nav-icon {
+  width: 16px;
+  height: 16px;
+}

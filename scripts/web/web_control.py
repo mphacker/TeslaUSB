@@ -32,6 +32,7 @@ from blueprints import (
     light_shows_bp,
     music_bp,
     wraps_bp,
+    media_bp,
     analytics_bp,
     mapping_bp,
     cleanup_bp,
@@ -48,6 +49,7 @@ app.register_blueprint(lock_chimes_bp)
 app.register_blueprint(light_shows_bp)
 app.register_blueprint(music_bp)
 app.register_blueprint(wraps_bp)
+app.register_blueprint(media_bp)
 app.register_blueprint(analytics_bp)
 app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)

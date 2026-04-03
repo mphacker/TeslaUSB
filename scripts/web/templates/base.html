@@ -59,7 +59,7 @@
         </a>
         {% endif %}
         {% if media_available %}
-        <a href="{% if chimes_available %}{{ url_for('lock_chimes.lock_chimes') }}{% elif music_available %}{{ url_for('music.music_home') }}{% elif shows_available %}{{ url_for('light_shows.light_shows') }}{% else %}{{ url_for('wraps.wraps') }}{% endif %}" class="nav-item{% if page == 'media' %} active{% endif %}" title="Media">
+        <a href="{{ url_for('media.media_home') }}" class="nav-item{% if page == 'media' %} active{% endif %}" title="Media">
             <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use></svg>
             <span class="nav-label">Media</span>
         </a>
@@ -85,7 +85,7 @@
         </a>
         {% endif %}
         {% if media_available %}
-        <a href="{% if chimes_available %}{{ url_for('lock_chimes.lock_chimes') }}{% elif music_available %}{{ url_for('music.music_home') }}{% elif shows_available %}{{ url_for('light_shows.light_shows') }}{% else %}{{ url_for('wraps.wraps') }}{% endif %}" class="tab-item{% if page == 'media' %} active{% endif %}">
+        <a href="{{ url_for('media.media_home') }}" class="tab-item{% if page == 'media' %} active{% endif %}">
             <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use></svg>
             <span class="tab-label">Media</span>
         </a>

@@ -51,6 +51,7 @@ def wraps():
         return render_template(
             'wraps.html',
             page='media',
+            media_tab='wraps',
             **ctx,
             wrap_files=[],
             wrap_count=0,
@@ -86,6 +87,7 @@ def wraps():
     return render_template(
         'wraps.html',
         page='media',
+        media_tab='wraps',
         **ctx,
         wrap_files=wrap_files,
         wrap_count=len(wrap_files),

@@ -347,8 +347,7 @@
 {% block content %}
 <div class="container">
     {% include 'media_hub_nav.html' %}
-    <h2>🎵 Music Library</h2>
-    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    <h2>Music Library</h2>
 
     {% if error %}
     <div class="messages"><div class="error">{{ error }}</div></div>
@@ -500,7 +499,7 @@
 
         <!-- Upload panel -->
         <div class="music-panel">
-            <h3 style="margin-top: 0;">📤 Upload</h3>
+            <h3 style="margin-top: 0;">Upload</h3>
             <p style="margin: 0 0 15px 0; font-size: 13px; color: var(--text-secondary);">
                 Uploads require Edit mode. Files larger than {{ max_upload_chunk_mb }} MiB are sent in chunks.
                 You can drop whole folders to preserve subfolder structure. Target folder:

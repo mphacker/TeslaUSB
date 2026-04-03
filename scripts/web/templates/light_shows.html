@@ -2,8 +2,7 @@
 {% block content %}
 <div class="container">
     {% include 'media_hub_nav.html' %}
-    <h2>💡 Light Shows</h2>
-    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    <h2>Light Shows</h2>
     
     <!-- iOS Safari Warning -->
     <div id="iosWarning" class="ios-warning">
@@ -28,7 +27,7 @@
             
             <!-- Selected Files Preview -->
             <div id="selectedFilesPreview" style="display: none; margin-bottom: 20px;">
-                <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">📋 Selected Files:</h4>
+                <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">Selected Files:</h4>
                 <div id="filesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 200px; overflow-y: auto;"></div>
                 <div style="display: flex; gap: 10px; margin-top: 10px;">
                     <button type="button" class="edit-btn" id="uploadSelectedBtn">📤 Upload All Files</button>
@@ -51,7 +50,7 @@
         <!-- Upload Progress Bar -->
         <div id="showUploadProgress" style="display: none; margin-bottom: 20px;">
             <div style="background: var(--upload-progress-bg); border-radius: 8px; padding: 15px; border: 2px solid var(--btn-purple-bg);">
-                <h4 style="margin: 0 0 10px 0; color: var(--btn-purple-bg);">📤 Uploading Light Show...</h4>
+                <h4 style="margin: 0 0 10px 0; color: var(--btn-purple-bg);">Uploading Light Show...</h4>
                 <div style="background: var(--upload-progress-bar-bg); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
                     <div id="showProgressBar" style="background: linear-gradient(90deg, #6f42c1, #5a32a3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
                         0%

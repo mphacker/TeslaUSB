@@ -7,8 +7,7 @@
 {% block content %}
 <div class="container">
     {% include 'media_hub_nav.html' %}
-    <h2>🔔 Lock Chimes</h2>
-    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    <h2>Lock Chimes</h2>
     
     <!-- Gadget State Indicator -->
     <div id="gadgetStateIndicator" style="display: none; margin: 15px 0; padding: 12px; border-radius: 8px; font-size: 14px;">
@@ -24,8 +23,8 @@
     
     <!-- Active Lock Chime - Moved to top -->
     {% if active_chime %}
-    <div style="background: var(--active-chime-bg); padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid var(--active-chime-border);">
-        <h3 style="margin: 0 0 10px 0; color: var(--active-chime-heading);">🔊 Active Lock Chime</h3>
+    <div style="background: var(--bg-secondary); padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid var(--border-color);">
+        <h3 style="margin: 0 0 10px 0; color: var(--text-primary);">Active Lock Chime</h3>
         <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
             <div>
                 <strong>{{ active_chime.filename }}</strong><br>
@@ -43,12 +42,9 @@
     {% endif %}
     
     <!-- Upload Controls - Collapsible -->
-    <details class="folder-controls" id="chimeUploadControls" style="margin-bottom: 20px;" open>
-        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: var(--collapsible-section-bg); border-radius: 8px; border-left: 4px solid var(--collapsible-section-border); color: var(--collapsible-section-text); font-size: 18px; list-style: none; user-select: none;">
-            <span style="display: inline-block; margin-right: 5px;">▶</span> 📤 Upload New Chime
-        </summary>
-        
-        <div style="background: var(--collapsible-content-bg); padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid var(--collapsible-section-border); border-right: 1px solid var(--collapsible-section-border); border-bottom: 1px solid var(--collapsible-section-border); margin-top: -8px;">
+    <details class="settings-section" id="chimeUploadControls" open>
+        <summary>Upload New Chime</summary>
+        <div class="section-content">
             
             <!-- Upload Mode Toggle -->
             <div style="margin-bottom: 20px;">
@@ -277,12 +273,9 @@
     </div>
     
     <!-- Chime Scheduler -->
-    <details id="scheduler-section" style="margin-bottom: 20px;">
-        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: var(--collapsible-section-bg); border-radius: 8px; border-left: 4px solid var(--collapsible-section-border); color: var(--collapsible-section-text); font-size: 18px; list-style: none;">
-            <span style="display: inline-block; margin-right: 5px;">▶</span> 📅 Chime Scheduler {% if schedules %}({{ schedules|length }} schedule{{ 's' if schedules|length != 1 else '' }}){% endif %}
-        </summary>
-        
-        <div style="background: var(--collapsible-content-bg); padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid var(--collapsible-section-border); border-right: 1px solid var(--collapsible-section-border); border-bottom: 1px solid var(--collapsible-section-border); margin-top: -8px;">
+    <details class="settings-section" id="scheduler-section">
+        <summary>Chime Scheduler {% if schedules %}({{ schedules|length }} schedule{{ 's' if schedules|length != 1 else '' }}){% endif %}</summary>
+        <div class="section-content">
             <!-- Add New Schedule Form -->
             <details {% if not schedules %}open{% endif %} style="margin-bottom: 15px;" id="schedule-form-details">
                 <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: var(--form-input-bg); border-radius: 4px; list-style: none; border: 1px solid var(--border-input);">
@@ -449,7 +442,7 @@
         <div style="margin-top: 15px;">
             <h4 style="margin: 0 0 10px 0;">Active Schedules:</h4>
             {% for schedule in schedules %}
-            <div style="background: var(--form-input-bg); padding: 12px; border-radius: 4px; margin-bottom: 10px; border-left: 4px solid {% if schedule.enabled %}var(--active-chime-border){% else %}var(--text-muted){% endif %}; border: 1px solid var(--border-input);">
+            <div style="background: var(--form-input-bg); padding: 12px; border-radius: 4px; margin-bottom: 10px; border-left: 4px solid {% if schedule.enabled %}var(--btn-success-bg){% else %}var(--text-muted){% endif %}; border: 1px solid var(--border-input);">
                 <div style="display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: 10px;">
                     <div style="flex: 1; min-width: 200px;">
                         <div style="font-weight: 600; margin-bottom: 4px;">
@@ -488,25 +481,22 @@
         <p style="margin: 10px 0 0 0; color: var(--text-secondary); font-size: 14px;">No schedules configured. Add one above to automatically change chimes at specific times.</p>
         {% endif %}
         
-        <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--collapsible-section-border); color: var(--msg-info-text);">
+        <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--border-color); color: var(--msg-info-text);">
             <strong>ℹ️ How it works:</strong> Schedules run automatically every minute. The most recent schedule for each day will be active. Chimes change without interrupting Tesla recording!
         </div>
         </div>
     </details>
     
     <!-- Chime Groups Section -->
-    <details id="groups-section" style="margin-bottom: 20px;">
-        <summary style="cursor: pointer; font-weight: 600; padding: 15px; background: var(--collapsible-section-bg); border-radius: 8px; border-left: 4px solid var(--collapsible-section-border); color: var(--collapsible-section-text); font-size: 18px; list-style: none;">
-            <span style="display: inline-block; margin-right: 5px;">▶</span> 🎲 Random Chime Groups {% if groups %}({{ groups|length }} group{{ 's' if groups|length != 1 else '' }}){% endif %}
-        </summary>
-        
-        <div style="background: var(--collapsible-content-bg); padding: 15px; border-radius: 0 0 8px 8px; border-left: 4px solid var(--collapsible-section-border); border-right: 1px solid var(--collapsible-section-border); border-bottom: 1px solid var(--collapsible-section-border); margin-top: -8px;">
+    <details class="settings-section" id="groups-section">
+        <summary>Random Chime Groups {% if groups %}({{ groups|length }} group{{ 's' if groups|length != 1 else '' }}){% endif %}</summary>
+        <div class="section-content">
             
             <!-- Random Mode Configuration -->
             <div class="random-mode-section {% if random_config.enabled %}active{% endif %}" id="randomModeSection">
                 <div class="random-mode-header">
                     <div class="random-mode-info">
-                        <h3>🎲 Random Mode on Boot</h3>
+                        <h3>Random Mode on Boot</h3>
                         <span class="random-mode-status {% if random_config.enabled %}enabled{% else %}disabled{% endif %}" id="randomModeStatus">
                             {{ '✓ Enabled' if random_config.enabled else '○ Disabled' }}
                         </span>
@@ -545,7 +535,7 @@
                                 <h4 class="group-name">
                                     {{ group.name }}
                                     {% if random_config.enabled and random_config.group_id == group.id %}
-                                    <span style="color: var(--active-chime-heading); font-size: 14px; margin-left: 8px;">🎲 Active</span>
+                                    <span style="color: var(--text-primary); font-size: 14px; margin-left: 8px;">Active</span>
                                     {% endif %}
                                 </h4>
                                 {% if group.description %}
@@ -553,7 +543,7 @@
                                 {% endif %}
                                 <div class="group-meta">
                                     <span class="group-meta-item">
-                                        🔊 {{ group.chime_count }} chime{{ 's' if group.chime_count != 1 else '' }}
+                                        {{ group.chime_count }} chime{{ 's' if group.chime_count != 1 else '' }}
                                     </span>
                                 </div>
                             </div>
@@ -590,7 +580,7 @@
                 {% endif %}
             </div>
             
-            <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--collapsible-section-border); color: var(--msg-info-text);">
+            <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--border-color); color: var(--msg-info-text);">
                 <strong>ℹ️ About Groups:</strong> Create groups to organize your chimes by theme (Holidays, Funny, Seasonal, etc.). Enable random mode to have the system automatically pick a different chime from your selected group each time the device boots.
             </div>
         </div>
@@ -647,7 +637,7 @@
     </div>
     
     <!-- Chime Library -->
-    <h3 style="margin: 20px 0 10px 0;">📚 Chime Library</h3>
+    <h3 style="margin: 20px 0 10px 0;">Chime Library</h3>
     {% if chime_files %}
     <div class="video-table-container">
         <table class="video-table">

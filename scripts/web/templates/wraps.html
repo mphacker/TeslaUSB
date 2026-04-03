@@ -2,8 +2,7 @@
 {% block content %}
 <div class="container">
     {% include 'media_hub_nav.html' %}
-    <h2>🎨 Custom Wraps</h2>
-    <div class="status-label {{ mode_class }}">Current Mode: {{ mode_label }}</div>
+    <h2>Custom Wraps</h2>
 
     <!-- iOS Safari Warning -->
     <div id="iosWarning" class="ios-warning">
@@ -13,7 +12,7 @@
 
     <!-- Tesla Requirements Info -->
     <div class="info-box" style="margin-bottom: 20px;">
-        <p><strong>📋 Tesla Wrap Requirements:</strong></p>
+        <p><strong>Tesla Wrap Requirements:</strong></p>
         <ul style="margin: 10px 0 0 20px; padding: 0; font-size: 13px; color: var(--text-secondary);">
             <li><strong>Format:</strong> PNG only</li>
             <li><strong>Size:</strong> {{ (max_file_size / 1024 / 1024)|round(0)|int }} MB maximum</li>

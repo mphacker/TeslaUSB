@@ -117,7 +117,8 @@
             <select id="tripFilter" onchange="filterTrips()">
                 <option value="">All Trips</option>
             </select>
-            <button id="btnEvents" onclick="showEvents()">⚡ Events</button>
+            <div class="separator"></div>
+            <button id="btnEvents" onclick="toggleEvents()">⚡ Events</button>
             <select id="eventFilter" onchange="filterEvents()" style="display:none">
                 <option value="">All Events</option>
                 <option value="harsh_brake">Harsh Braking</option>
@@ -668,32 +669,32 @@ function renderEvents() {
 
 // --- View Switching ---
 
+let eventsVisible = false;
+
 function showTrips() {
     currentView = 'trips';
     document.getElementById('btnTrips').classList.add('active');
-    document.getElementById('btnEvents').classList.remove('active');
     document.getElementById('tripFilter').style.display = '';
-    document.getElementById('eventFilter').style.display = 'none';
-    document.getElementById('legend').style.display = 'none';
-    map.removeLayer(eventCluster);
     tripLayer.addTo(map);
     loadTrips();
 }
 
-function showEvents() {
-    currentView = 'events';
-    document.getElementById('btnEvents').classList.add('active');
-    document.getElementById('btnTrips').classList.remove('active');
-    document.getElementById('eventFilter').style.display = '';
-    document.getElementById('tripFilter').style.display = 'none';
-    document.getElementById('legend').style.display = 'block';
-    map.removeLayer(tripLayer);
-    eventCluster.addTo(map);
-    loadEvents();
+function toggleEvents() {
+    eventsVisible = !eventsVisible;
+    document.getElementById('btnEvents').classList.toggle('active', eventsVisible);
+    document.getElementById('eventFilter').style.display = eventsVisible ? '' : 'none';
+    document.getElementById('legend').style.display = eventsVisible ? 'block' : 'none';
+
+    if (eventsVisible) {
+        eventCluster.addTo(map);
+        loadEvents();
+    } else {
+        map.removeLayer(eventCluster);
+    }
 }
 
 function filterEvents() {
-    if (currentView === 'events') loadEvents();
+    if (eventsVisible) loadEvents();
 }
 
 function toggleFsdOverlay() {

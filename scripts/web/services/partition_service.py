@@ -22,6 +22,7 @@ from config import (
     IMG_LIGHTSHOW_PATH,
     IMG_MUSIC_PATH,
     MUSIC_ENABLED,
+    MAPPING_ENABLED,
 )
 
 # Import mode service
@@ -42,6 +43,7 @@ def get_feature_availability():
     return {
         'analytics_available': cam_exists,
         'videos_available': cam_exists,
+        'map_available': cam_exists and MAPPING_ENABLED,
         'chimes_available': lightshow_exists,
         'shows_available': lightshow_exists,
         'wraps_available': lightshow_exists,

@@ -78,6 +78,23 @@ LIGHT_SHOW_FOLDER = config['web']['lightshow_folder']
 MAX_UPLOAD_SIZE_MB = int(config['web'].get('max_upload_size_mb', 2048))
 MAX_UPLOAD_CHUNK_MB = int(config['web'].get('max_upload_chunk_mb', 16))
 
+# Mapping & Geo-Indexing Configuration
+_mapping = config.get('mapping', {})
+MAPPING_ENABLED = bool(_mapping.get('enabled', False))
+MAPPING_INDEX_ON_STARTUP = bool(_mapping.get('index_on_startup', False))
+MAPPING_SAMPLE_RATE = int(_mapping.get('sample_rate', 30))
+MAPPING_TRIP_GAP_MINUTES = int(_mapping.get('trip_gap_minutes', 5))
+MAPPING_DB_PATH = os.path.join(GADGET_DIR, 'geodata.db')
+_event_cfg = _mapping.get('event_detection', {})
+MAPPING_EVENT_THRESHOLDS = {
+    'harsh_brake_threshold': float(_event_cfg.get('harsh_brake_threshold', -4.0)),
+    'emergency_brake_threshold': float(_event_cfg.get('emergency_brake_threshold', -7.0)),
+    'hard_accel_threshold': float(_event_cfg.get('hard_accel_threshold', 3.5)),
+    'sharp_turn_lateral_g': float(_event_cfg.get('sharp_turn_lateral_g', 4.0)),
+    'speed_limit_mps': float(_event_cfg.get('speed_limit_mps', 35.76)),
+    'fsd_disengage_detect': bool(_event_cfg.get('fsd_disengage_detect', True)),
+}
+
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)
 # ============================================================================

@@ -567,6 +567,8 @@ REQUIRED_PACKAGES=(
   python3-av
   python3-pil
   python3-yaml
+  python3-protobuf
+  protobuf-compiler
   yq
   samba
   samba-common-bin
@@ -1280,6 +1282,16 @@ chown -R "$TARGET_USER:$TARGET_USER" "$GADGET_DIR/thumbnails"
 # Set permissions on scripts
 chmod +x "$SCRIPTS_DIR"/*.sh "$SCRIPTS_DIR"/*.py 2>/dev/null || true
 chown -R "$TARGET_USER:$TARGET_USER" "$SCRIPTS_DIR"
+
+# Compile protobuf definitions for SEI telemetry parser
+PROTO_SRC="$SCRIPTS_DIR/web/static/dashcam.proto"
+PROTO_OUT="$SCRIPTS_DIR/web/services/dashcam_pb2.py"
+if [ -f "$PROTO_SRC" ]; then
+  echo "Compiling protobuf definition for SEI parser..."
+  protoc --python_out="$SCRIPTS_DIR/web/services/" --proto_path="$SCRIPTS_DIR/web/static" "$PROTO_SRC"
+  chown "$TARGET_USER:$TARGET_USER" "$PROTO_OUT"
+  echo "  ✓ dashcam_pb2.py compiled"
+fi
 
 echo ""
 echo "============================================"

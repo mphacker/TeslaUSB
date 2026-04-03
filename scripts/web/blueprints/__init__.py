@@ -6,6 +6,7 @@ from .lock_chimes import lock_chimes_bp
 from .light_shows import light_shows_bp
 from .wraps import wraps_bp
 from .analytics import analytics_bp
+from .mapping import mapping_bp
 from .cleanup import cleanup_bp
 from .api import api_bp
 from .fsck import fsck_bp
@@ -19,6 +20,7 @@ __all__ = [
     'light_shows_bp',
     'wraps_bp',
     'analytics_bp',
+    'mapping_bp',
     'cleanup_bp',
     'api_bp',
     'fsck_bp',

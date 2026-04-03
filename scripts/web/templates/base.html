@@ -34,6 +34,7 @@
             <div class="nav-links">
                 <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Settings</a>
                 {% if analytics_available %}<a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>{% endif %}
+                {% if map_available %}<a href="{{ url_for('mapping.map_view') }}" {% if page == 'map' %}class="active"{% endif %}>Map</a>{% endif %}
                 {% if videos_available %}<a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>{% endif %}
                 {% if chimes_available %}<a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>{% endif %}
                 {% if music_available %}<a href="{{ url_for('music.music_home') }}" {% if page == 'music' %}class="active"{% endif %}>Music</a>{% endif %}
@@ -54,6 +55,7 @@
         <div class="mobile-menu-close" onclick="toggleMobileMenu()">&times;</div>
         <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Settings</a>
         {% if analytics_available %}<a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>{% endif %}
+        {% if map_available %}<a href="{{ url_for('mapping.map_view') }}" {% if page == 'map' %}class="active"{% endif %}>Map</a>{% endif %}
         {% if videos_available %}<a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>{% endif %}
         {% if chimes_available %}<a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>{% endif %}
         {% if music_available %}<a href="{{ url_for('music.music_home') }}" {% if page == 'music' %}class="active"{% endif %}>Music</a>{% endif %}

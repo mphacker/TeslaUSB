@@ -79,8 +79,8 @@ def index():
 
     try:
         sync_status = get_sync_status()
-        sync_stats = get_sync_stats()
-        sync_history = get_sync_history()
+        sync_stats = get_sync_stats(CLOUD_ARCHIVE_DB_PATH)
+        sync_history = get_sync_history(CLOUD_ARCHIVE_DB_PATH)
     except Exception:
         logger.exception("Failed to load cloud archive data")
         sync_status = {}
@@ -141,10 +141,14 @@ def save_settings():
 def api_sync_now():
     """Trigger a manual cloud sync."""
     from services.cloud_archive_service import start_sync
+    from services.video_service import get_teslacam_path
 
     try:
-        result = start_sync(trigger='manual')
-        return jsonify({"success": True, "message": result})
+        teslacam = get_teslacam_path()
+        if not teslacam:
+            return jsonify({"success": False, "message": "TeslaCam path not available"}), 400
+        ok, msg = start_sync(teslacam, CLOUD_ARCHIVE_DB_PATH, trigger='manual')
+        return jsonify({"success": ok, "message": msg})
     except Exception as exc:
         logger.exception("Failed to start cloud sync")
         return jsonify({"success": False, "message": str(exc)}), 500
@@ -156,8 +160,8 @@ def api_sync_stop():
     from services.cloud_archive_service import stop_sync
 
     try:
-        result = stop_sync()
-        return jsonify({"success": True, "message": result})
+        ok, msg = stop_sync()
+        return jsonify({"success": ok, "message": msg})
     except Exception as exc:
         logger.exception("Failed to stop cloud sync")
         return jsonify({"success": False, "message": str(exc)}), 500
@@ -170,7 +174,7 @@ def api_status():
 
     try:
         status = get_sync_status()
-        stats = get_sync_stats()
+        stats = get_sync_stats(CLOUD_ARCHIVE_DB_PATH)
         return jsonify({"status": status, "stats": stats})
     except Exception as exc:
         logger.exception("Failed to fetch sync status")
@@ -183,7 +187,7 @@ def api_history():
     from services.cloud_archive_service import get_sync_history
 
     try:
-        history = get_sync_history()
+        history = get_sync_history(CLOUD_ARCHIVE_DB_PATH)
         return jsonify({"history": history})
     except Exception as exc:
         logger.exception("Failed to fetch sync history")
@@ -226,8 +230,21 @@ def api_save_provider():
 
     try:
         # Encrypt credentials using the hardware-bound key (same as Tesla tokens)
-        from services.cloud_archive_service import encrypt_credentials
-        encrypt_credentials(credentials, CLOUD_PROVIDER_CREDS_PATH)
+        from services.tesla_api_service import derive_encryption_key
+        from cryptography.fernet import Fernet
+        import json as _json
+
+        key = derive_encryption_key()
+        fernet = Fernet(key)
+        encrypted = fernet.encrypt(_json.dumps(credentials).encode())
+
+        os.makedirs(os.path.dirname(CLOUD_PROVIDER_CREDS_PATH) or '.', exist_ok=True)
+        tmp = CLOUD_PROVIDER_CREDS_PATH + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(encrypted)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, CLOUD_PROVIDER_CREDS_PATH)
 
         _update_config_yaml({'cloud_archive.provider': provider})
 

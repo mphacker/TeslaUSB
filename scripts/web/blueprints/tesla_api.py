@@ -26,6 +26,7 @@ from config import (
     TESLA_API_LOW_BATTERY_THRESHOLD,
     TESLA_API_MAX_AWAKE_MINUTES,
     TESLA_API_MONTHLY_BUDGET,
+    TESLA_API_WAKE_INTERVAL,
     TESLA_TOKENS_PATH,
 )
 from utils import get_base_context

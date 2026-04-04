@@ -118,30 +118,32 @@ class CleanupService:
 
     def detect_teslacam_folders(self, partition_path: Path) -> List[str]:
         """
-        Detect what folders actually exist in TeslaCam directory
+        Detect what folders exist in TeslaCam directory.
+        Always includes standard Tesla folders so policies can be configured
+        before Tesla starts recording.
 
         Args:
             partition_path: Path to partition mount point
 
         Returns:
-            List of folder names that exist
+            List of folder names (always includes RecentClips, SavedClips, SentryClips)
         """
+        # Standard folders Tesla creates — always show in settings
+        standard = {'RecentClips', 'SavedClips', 'SentryClips'}
+        found = set()
+
         teslacam_path = partition_path / 'TeslaCam'
+        if teslacam_path.exists():
+            try:
+                for item in teslacam_path.iterdir():
+                    if item.is_dir() and not item.name.startswith('.'):
+                        found.add(item.name)
+            except Exception as e:
+                logger.error(f"Error detecting TeslaCam folders: {e}")
 
-        if not teslacam_path.exists():
-            logger.warning(f"TeslaCam directory not found: {teslacam_path}")
-            return []
-
-        folders = []
-        try:
-            for item in teslacam_path.iterdir():
-                if item.is_dir() and not item.name.startswith('.'):
-                    folders.append(item.name)
-            logger.info(f"Detected TeslaCam folders: {folders}")
-        except Exception as e:
-            logger.error(f"Error detecting TeslaCam folders: {e}")
-
-        return sorted(folders)
+        all_folders = standard | found
+        logger.info(f"TeslaCam folders (detected: {found}, standard: {standard})")
+        return sorted(all_folders)
 
     def get_policies_for_detected_folders(self, partition_path: Path) -> Dict:
         """

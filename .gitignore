@@ -5,6 +5,9 @@
 __pycache__/
 *.pyc
 
+# USB disk image files (large, device-specific, not source code)
+*.img
+
 # AI tool configs (managed externally, not part of the repo)
 .claude/
 .agent/

@@ -11,8 +11,8 @@
 
 <div class="container">
     <div class="page-header">
-        <a href="{{ url_for('analytics.dashboard') }}" class="btn btn-back">← Back to Analytics</a>
-        <h2>🧹 Auto-Cleanup Settings</h2>
+        <a href="{{ url_for('mode_control.index') }}" class="btn btn-back">← Back to Settings</a>
+        <h2>Auto-Cleanup Settings</h2>
     </div>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -23,32 +23,18 @@
         {% endif %}
     {% endwith %}
 
-    {% if mode != 'edit' %}
-        <div class="alert alert-warning">
-            <strong>⚠️ Edit Mode Required</strong><br>
-            You must be in Edit mode to configure and run cleanup.
-            <a href="{{ url_for('mode_control.index') }}">Switch to Edit mode</a>
-        </div>
-    {% endif %}
-
     <form method="POST" action="{{ url_for('cleanup.save_settings') }}" class="cleanup-form">
         <!-- Dynamic folder settings based on detected folders -->
         {% for folder_name, policy in policies.items() %}
         <div class="cleanup-card folder-card">
             <div class="folder-header">
                 <h2>
-                    {% if folder_name == 'RecentClips' %}🚗
-                    {% elif folder_name == 'SavedClips' %}⭐
-                    {% elif folder_name == 'SentryClips' %}🚨
-                    {% elif folder_name == 'EncryptedClips' %}🔒
-                    {% else %}📁
-                    {% endif %}
                     {{ folder_name }}
                 </h2>
                 <label class="toggle-switch">
                     <input type="checkbox" name="{{ folder_name }}_enabled"
                            {% if policy['enabled'] %}checked{% endif %}
-                           {% if mode != 'edit' %}disabled{% endif %}>
+>
                     <span class="toggle-slider"></span>
                     <span class="toggle-label">
                         Run cleanup on boot
@@ -64,13 +50,13 @@
                     <label class="checkbox-label">
                         <input type="checkbox" name="{{ folder_name }}_age_enabled"
                                {% if policy['age_based']['enabled'] %}checked{% endif %}
-                               {% if mode != 'edit' %}disabled{% endif %}>
+>
                         Age-based: Delete videos older than
                     </label>
                     <input type="number" name="{{ folder_name }}_age_days"
                            value="{{ policy['age_based']['days'] }}"
                            min="1" max="3650" class="number-input"
-                           {% if mode != 'edit' %}disabled{% endif %}> days
+> days
                 </div>
 
                 {% if 'size_based' in policy %}
@@ -78,13 +64,13 @@
                     <label class="checkbox-label">
                         <input type="checkbox" name="{{ folder_name }}_size_enabled"
                                {% if policy['size_based']['enabled'] %}checked{% endif %}
-                               {% if mode != 'edit' %}disabled{% endif %}>
+>
                         Size-based: Keep maximum of
                     </label>
                     <input type="number" name="{{ folder_name }}_size_gb"
                            value="{{ policy['size_based']['max_gb'] }}"
                            min="1" max="1000" class="number-input"
-                           {% if mode != 'edit' %}disabled{% endif %}> GB
+> GB
                 </div>
                 {% endif %}
 
@@ -93,13 +79,13 @@
                     <label class="checkbox-label">
                         <input type="checkbox" name="{{ folder_name }}_count_enabled"
                                {% if policy['count_based']['enabled'] %}checked{% endif %}
-                               {% if mode != 'edit' %}disabled{% endif %}>
+>
                         Count-based: Keep only newest
                     </label>
                     <input type="number" name="{{ folder_name }}_count_videos"
                            value="{{ policy['count_based']['max_videos'] }}"
                            min="1" max="10000" class="number-input"
-                           {% if mode != 'edit' %}disabled{% endif %}> videos
+> videos
                 </div>
                 {% endif %}
             </div>
@@ -108,14 +94,14 @@
 
         <!-- Action Buttons -->
         <div class="button-group">
-            <button type="submit" class="btn btn-primary" {% if mode != 'edit' %}disabled{% endif %}>💾 Save Settings</button>
-            <a href="{{ url_for('cleanup.preview') }}" class="btn btn-secondary {% if mode != 'edit' %}disabled{% endif %}">🔍 Preview Cleanup</a>
+            <button type="submit" class="btn btn-primary">Save Settings</button>
+            <a href="{{ url_for('cleanup.preview') }}" class="btn btn-secondary">Preview Cleanup</a>
         </div>
     </form>
 
     <!-- Help Card -->
     <div class="cleanup-card help-card">
-        <h3>ℹ️ How Auto-Cleanup Works</h3>
+        <h3>How Auto-Cleanup Works</h3>
         <ul>
             <li><strong>Manual Cleanup:</strong> Use "Preview Cleanup" to see what will be deleted, then choose to execute. This works regardless of the "Run cleanup on boot" setting.</li>
             <li><strong>Automatic Cleanup:</strong> When "Run cleanup on boot" is enabled for a folder, the system will automatically delete matching files during the boot sequence, before presenting the USB drive to Tesla.</li>

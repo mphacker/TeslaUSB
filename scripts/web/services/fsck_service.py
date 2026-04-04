@@ -317,7 +317,8 @@ def _run_fsck_background(partition_num: int, mode: str):
         losetup_check = subprocess.run(
             ['sudo', 'losetup', '-a'],
             capture_output=True,
-            text=True
+            text=True,
+            timeout=10
         )
 
         loop_dev = None
@@ -335,7 +336,7 @@ def _run_fsck_background(partition_num: int, mode: str):
             for dev in candidates:
                 probe = subprocess.run(
                     ['sudo', 'blkid', '-o', 'value', '-s', 'TYPE', dev],
-                    capture_output=True, text=True
+                    capture_output=True, text=True, timeout=5
                 )
                 if probe.stdout.strip():
                     loop_dev = dev

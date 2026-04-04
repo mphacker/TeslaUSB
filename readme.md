@@ -548,12 +548,5 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 
 ## Screenshots
 
-All screenshots shown in dark mode.
+Updated screenshots coming soon!
 
-<img src="examples/settings.png" alt="Settings Page" width="400">
-<img src="examples/analytics.png" alt="Analytics Dashboard" width="400">
-<img src="examples/videos-browser.png" alt="Map Video Browser Panel" width="400">
-<img src="examples/session-view.png" alt="Unified Overlay Player with Telemetry HUD" width="400">
-<img src="examples/lock-chimes.png" alt="Media — Lock Chimes" width="400">
-<img src="examples/lock-chime-editor-waveform.png" alt="Lock Chime Audio Editor with Waveform" width="400">
-<img src="examples/light-shows.png" alt="Media — Light Shows" width="400">

@@ -58,6 +58,21 @@ app.register_blueprint(fsck_bp)
 app.register_blueprint(captive_portal_bp)
 
 
+# Global error handler for upload space exhaustion
+@app.errorhandler(OSError)
+def handle_os_error(e):
+    """Catch OSError (e.g., temp space exhaustion during large uploads)."""
+    import errno
+    from flask import request, jsonify, flash, redirect
+    if e.errno == errno.ENOSPC:
+        msg = "Upload too large for available memory. Try uploading fewer or smaller files."
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"success": False, "error": msg}), 413
+        flash(msg, "error")
+        return redirect(request.referrer or '/')
+    raise e  # Re-raise non-space errors
+
+
 # Serve tile cache service worker from root scope (SW scope must match serving path)
 @app.route('/tile-cache-sw.js')
 def tile_cache_service_worker():

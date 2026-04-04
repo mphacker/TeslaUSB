@@ -44,12 +44,15 @@ _TESLA_SCOPES = "openid offline_access vehicle_device_data vehicle_location vehi
 
 @tesla_api_bp.before_request
 def _require_tesla_configured():
-    """Block access if Tesla API client credentials are not configured."""
+    """Allow index and save_credentials unconditionally; gate everything else."""
+    # Always allow the setup/credentials pages
+    if request.endpoint in ('tesla_api.index', 'tesla_api.save_credentials'):
+        return None
     if not TESLA_API_CLIENT_ID:
         if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-            return jsonify({"error": "Tesla API not configured"}), 503
-        flash("Configure Tesla API Client ID in config.yaml first.", "warning")
-        return redirect(url_for('mode_control.index'))
+            return jsonify({"error": "Tesla API not configured. Set Client ID first."}), 503
+        flash("Configure Tesla API credentials first.", "warning")
+        return redirect(url_for('tesla_api.index'))
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +179,10 @@ def index():
                 session['tesla_vin'] = first_vin
 
     ctx = get_base_context()
+    # Mask client secret for display (show first 4 chars + dots)
+    secret = TESLA_API_CLIENT_SECRET
+    secret_masked = (secret[:4] + '•' * 12) if secret and len(secret) > 4 else ''
+
     return render_template(
         'tesla_settings.html',
         page='tesla',
@@ -186,9 +193,12 @@ def index():
         budget=budget,
         audit_log=audit_log,
         wifi_available=wifi,
+        client_id=TESLA_API_CLIENT_ID,
+        client_secret_masked=secret_masked,
         keep_awake_method=TESLA_API_KEEP_AWAKE_METHOD,
         max_awake_minutes=TESLA_API_MAX_AWAKE_MINUTES,
         low_battery_threshold=TESLA_API_LOW_BATTERY_THRESHOLD,
+        wake_interval_seconds=TESLA_API_WAKE_INTERVAL,
         monthly_budget=TESLA_API_MONTHLY_BUDGET,
         **ctx,
     )
@@ -205,17 +215,21 @@ def save_settings():
         keep_awake_method = request.form.get('keep_awake_method', 'wake_only')
         max_awake_minutes = int(request.form.get('max_awake_minutes', 60))
         low_battery_threshold = int(request.form.get('low_battery_threshold', 20))
+        wake_interval = int(request.form.get('wake_interval_seconds', 90))
+        monthly_budget = float(request.form.get('monthly_budget_limit', 10.0))
 
         _update_config_yaml({
             'tesla_api.keep_awake_method': keep_awake_method,
             'tesla_api.max_awake_minutes': max_awake_minutes,
             'tesla_api.low_battery_threshold': low_battery_threshold,
+            'tesla_api.wake_interval_seconds': wake_interval,
+            'tesla_api.monthly_budget_limit': monthly_budget,
         })
 
         flash("Tesla API settings saved.", "success")
         logger.info(
-            "Tesla settings updated: method=%s, max_awake=%dm, battery_threshold=%d%%",
-            keep_awake_method, max_awake_minutes, low_battery_threshold,
+            "Tesla settings updated: method=%s, max_awake=%dm, battery=%d%%, interval=%ds, budget=$%.2f",
+            keep_awake_method, max_awake_minutes, low_battery_threshold, wake_interval, monthly_budget,
         )
     except (ValueError, TypeError) as exc:
         logger.warning("Invalid Tesla settings form data: %s", exc)
@@ -223,6 +237,41 @@ def save_settings():
     except Exception:
         logger.exception("Failed to save Tesla API settings")
         flash("Error saving Tesla API settings.", "danger")
+
+    return redirect(url_for('tesla_api.index'))
+
+
+@tesla_api_bp.route('/credentials', methods=['POST'])
+def save_credentials():
+    """Save Tesla API Client ID and Client Secret from the web UI."""
+    try:
+        client_id = request.form.get('client_id', '').strip()
+        client_secret = request.form.get('client_secret', '').strip()
+
+        if not client_id:
+            flash("Client ID is required.", "warning")
+            return redirect(url_for('tesla_api.index'))
+
+        updates = {
+            'tesla_api.client_id': client_id,
+        }
+        # Only update secret if a new one was provided (not the masked value)
+        if client_secret and not client_secret.startswith('•'):
+            updates['tesla_api.client_secret'] = client_secret
+
+        _update_config_yaml(updates)
+
+        # Update the in-memory config values so the page reflects changes immediately
+        import config as _cfg
+        _cfg.TESLA_API_CLIENT_ID = client_id
+        if client_secret and not client_secret.startswith('•'):
+            _cfg.TESLA_API_CLIENT_SECRET = client_secret
+
+        flash("Tesla API credentials saved. You can now connect your Tesla account.", "success")
+        logger.info("Tesla API credentials updated (client_id=%s…)", client_id[:8] if len(client_id) > 8 else client_id)
+    except Exception:
+        logger.exception("Failed to save Tesla API credentials")
+        flash("Error saving credentials.", "danger")
 
     return redirect(url_for('tesla_api.index'))
 

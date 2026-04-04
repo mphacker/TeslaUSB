@@ -112,7 +112,7 @@ mapping:
 # ============================================================================
 # Auto-sync dashcam footage to cloud storage via rclone
 cloud_archive:
-  enabled: false
+  enabled: true
   # Cloud provider (configured via web UI — credentials stored encrypted, NOT here)
   provider: ""                           # google_drive | onedrive | dropbox | s3 | b2 | wasabi
   remote_path: "TeslaUSB"               # Path/folder on cloud storage

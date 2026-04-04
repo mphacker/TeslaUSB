@@ -65,7 +65,7 @@
         </a>
         {% endif %}
         {% if cloud_archive_available %}
-        <a href="{{ url_for('cloud_archive.cloud_home') }}" class="nav-item{% if page == 'cloud' %} active{% endif %}" title="Cloud">
+        <a href="{{ url_for('cloud_archive.index') }}" class="nav-item{% if page == 'cloud' %} active{% endif %}" title="Cloud">
             <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
             <span class="nav-label">Cloud</span>
         </a>
@@ -97,7 +97,7 @@
         </a>
         {% endif %}
         {% if cloud_archive_available %}
-        <a href="{{ url_for('cloud_archive.cloud_home') }}" class="tab-item{% if page == 'cloud' %} active{% endif %}">
+        <a href="{{ url_for('cloud_archive.index') }}" class="tab-item{% if page == 'cloud' %} active{% endif %}">
             <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
             <span class="tab-label">Cloud</span>
         </a>

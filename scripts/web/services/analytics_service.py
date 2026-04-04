@@ -192,7 +192,7 @@ def get_storage_health():
                     f"{friendly_name}: Filesystem not checked in {int(last_check['age_hours'] / 24)} days"
                 )
                 health['recommendations'].append(
-                    f"Run filesystem check on {friendly_name} drive (Analytics page)"
+                    f"Run filesystem check on {friendly_name} drive (Settings page)"
                 )
         else:
             health['fsck_status'][partition_name] = {
@@ -201,7 +201,7 @@ def get_storage_health():
             }
             # Don't alert on first boot, but note it's available
             health['recommendations'].append(
-                f"Consider running initial filesystem check on {friendly_name} drive (Analytics page)"
+                f"Consider running initial filesystem check on {friendly_name} drive (Settings page)"
             )
 
     # Check each partition for storage space

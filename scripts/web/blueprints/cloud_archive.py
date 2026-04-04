@@ -87,6 +87,9 @@ def index():
         sync_stats = {}
         sync_history = []
 
+    # Check if cloud provider credentials are configured
+    provider_connected = bool(CLOUD_ARCHIVE_PROVIDER) and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)
+
     ctx = get_base_context()
     return render_template(
         'cloud_archive.html',
@@ -95,6 +98,7 @@ def index():
         sync_stats=sync_stats,
         sync_history=sync_history,
         provider=CLOUD_ARCHIVE_PROVIDER,
+        provider_connected=provider_connected,
         sync_folders=CLOUD_ARCHIVE_SYNC_FOLDERS,
         priority_order=CLOUD_ARCHIVE_PRIORITY_ORDER,
         max_upload_mbps=CLOUD_ARCHIVE_MAX_UPLOAD_MBPS,

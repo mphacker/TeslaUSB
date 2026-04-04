@@ -67,7 +67,11 @@
         </div>
         <div style="margin-top: 8px;">
             <button type="button" class="edit-btn" onclick="syncNow()" id="syncNowBtn"
-                    style="padding: 8px 16px; font-size: 14px;">Sync Now</button>
+                    style="padding: 8px 16px; font-size: 14px;"
+                    {% if not provider_connected %}disabled title="Configure a cloud provider first"{% endif %}>Sync Now</button>
+            {% if not provider_connected %}
+            <span style="font-size: var(--text-sm); color: var(--text-secondary); margin-left: 8px;">Set up a cloud provider below to start syncing.</span>
+            {% endif %}
         </div>
         {% endif %}
 
@@ -149,14 +153,28 @@
 
             {# OAuth providers #}
             <div id="oauthSetup" style="display: none;">
-                <div class="info-box">
-                    <strong>OAuth Setup</strong><br>
-                    You will be guided through connecting your <span id="oauthProviderName"></span> account.
-                    This process generates an authorization token stored securely on the device.
+                <div class="info-box" style="margin-bottom: var(--space-3);">
+                    <strong>How to connect <span id="oauthProviderName"></span>:</strong>
+                    <ol style="margin: 8px 0 0; padding-left: 20px; font-size: var(--text-sm);">
+                        <li>On the Pi, run: <code>rclone authorize "<span id="oauthRcloneType"></span>"</code></li>
+                        <li>Or on any computer with rclone installed, run the same command</li>
+                        <li>A browser window will open — log in and grant access</li>
+                        <li>Copy the token JSON that rclone outputs (starts with <code>{"access_token":</code>)</li>
+                        <li>Paste it below and click "Save Token"</li>
+                    </ol>
                 </div>
-                <button type="button" class="edit-btn" onclick="saveProvider()" style="padding: 8px 16px; font-size: 14px;">
-                    Connect
-                </button>
+                <div style="margin-bottom: var(--space-3);">
+                    <label for="oauthToken" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Paste rclone token:</label>
+                    <textarea id="oauthToken" rows="4" placeholder='{"access_token":"...","token_type":"Bearer",...}'
+                              style="width: 100%; max-width: 460px; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button type="button" class="edit-btn" onclick="saveOAuthProvider()" style="padding: 8px 16px; font-size: 14px;">
+                        Save Token
+                    </button>
+                    <button type="button" class="action-btn" onclick="testConnection()" id="testConnBtnOAuth">Test Connection</button>
+                    <span id="testConnResultOAuth" style="font-size: var(--text-sm); color: var(--text-secondary); align-self: center;"></span>
+                </div>
             </div>
 
             {# Key-based providers #}
@@ -234,11 +252,20 @@
                 <div style="margin-bottom: var(--space-4);">
                     <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">Upload priority:</label>
                     <p style="margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary);">
-                        Drag to reorder, or edit the comma-separated list. First item is synced first.
+                        Use the arrows to reorder. Top item is synced first.
                     </p>
-                    <ol id="priorityList" style="margin: 0; padding-left: 24px; color: var(--text-primary);">
+                    <ol id="priorityList" style="margin: 0; padding-left: 0; color: var(--text-primary); list-style: none;">
                         {% for folder in priority_order %}
-                        <li style="padding: 6px 0; font-size: 15px;" data-folder="{{ folder }}">{{ folder }}</li>
+                        <li style="padding: 8px 12px; font-size: 15px; display: flex; align-items: center; gap: 8px; background: var(--bg-secondary); border-radius: 6px; margin-bottom: 4px;" data-folder="{{ folder }}">
+                            <span style="min-width: 20px; color: var(--text-muted); font-weight: 600;">{{ loop.index }}.</span>
+                            <span style="flex: 1;">{{ folder }}</span>
+                            <button type="button" onclick="movePriorityUp(this)" aria-label="Move up"
+                                    style="padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; font-size: 14px; min-width: 32px; min-height: 32px;"
+                                    {% if loop.first %}disabled{% endif %}>&#9650;</button>
+                            <button type="button" onclick="movePriorityDown(this)" aria-label="Move down"
+                                    style="padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; font-size: 14px; min-width: 32px; min-height: 32px;"
+                                    {% if loop.last %}disabled{% endif %}>&#9660;</button>
+                        </li>
                         {% endfor %}
                     </ol>
                     <input type="hidden" name="priority_order" id="priorityOrderInput"
@@ -613,6 +640,7 @@
 
     var oauthProviders = ['google-drive', 'onedrive', 'dropbox'];
     var keyProviders = ['s3', 'b2', 'wasabi'];
+    var rcloneTypeMap = {'google-drive': 'drive', 'onedrive': 'onedrive', 'dropbox': 'dropbox'};
 
     window.onProviderChange = function() {
         var sel = document.getElementById('providerSelect');
@@ -620,11 +648,13 @@
         var oauthDiv = document.getElementById('oauthSetup');
         var keyDiv = document.getElementById('keySetup');
         var oauthName = document.getElementById('oauthProviderName');
+        var oauthType = document.getElementById('oauthRcloneType');
         var endpointGroup = document.getElementById('endpointGroup');
 
         if (oauthDiv) oauthDiv.style.display = oauthProviders.indexOf(val) !== -1 ? 'block' : 'none';
         if (keyDiv) keyDiv.style.display = keyProviders.indexOf(val) !== -1 ? 'block' : 'none';
         if (oauthName) oauthName.textContent = sel.options[sel.selectedIndex].text;
+        if (oauthType) oauthType.textContent = rcloneTypeMap[val] || val;
         /* Show endpoint field for Wasabi/B2, optional for S3 */
         if (endpointGroup) {
             var label = endpointGroup.querySelector('label');
@@ -679,6 +709,46 @@
         }
     };
 
+    window.saveOAuthProvider = async function() {
+        var sel = document.getElementById('providerSelect');
+        var provider = sel ? sel.value : '';
+        if (!provider) { showToast('Please select a provider.', 'warning'); return; }
+
+        var tokenText = (document.getElementById('oauthToken') || {}).value || '';
+        if (!tokenText.trim()) {
+            showToast('Please paste the rclone token.', 'warning');
+            return;
+        }
+
+        /* Validate it looks like JSON */
+        try {
+            JSON.parse(tokenText.trim());
+        } catch (e) {
+            showToast('Token must be valid JSON (starts with {). Copy the full output from rclone authorize.', 'warning');
+            return;
+        }
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_save_provider") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({ provider: provider, credentials: { token: tokenText.trim() } })
+            });
+            var data = await resp.json();
+            if (data.success) {
+                showToast('Provider connected! Reloading\u2026', 'success');
+                setTimeout(function() { window.location.reload(); }, 1000);
+            } else {
+                showToast(data.message || 'Failed to save token.', 'error');
+            }
+        } catch (e) {
+            showToast('Network error.', 'error');
+        }
+    };
+
     window.disconnectProvider = async function() {
         if (!confirm('Disconnect cloud provider? Existing archived files will remain in the cloud.')) return;
         try {
@@ -714,33 +784,43 @@
     };
 
     /* ===================================================================
-       Priority list - simple reorder via click-to-move
+       Priority list - up/down arrow buttons
        =================================================================== */
 
     function updatePriorityInput() {
         var items = document.querySelectorAll('#priorityList li');
         var order = [];
-        items.forEach(function(li) { order.push(li.getAttribute('data-folder')); });
+        items.forEach(function(li, i) {
+            order.push(li.getAttribute('data-folder'));
+            // Update the number label
+            var numSpan = li.querySelector('span:first-child');
+            if (numSpan) numSpan.textContent = (i + 1) + '.';
+            // Enable/disable up/down buttons
+            var btns = li.querySelectorAll('button');
+            if (btns[0]) btns[0].disabled = (i === 0);
+            if (btns[1]) btns[1].disabled = (i === items.length - 1);
+        });
         var input = document.getElementById('priorityOrderInput');
         if (input) input.value = order.join(',');
     }
 
-    (function initPriorityControls() {
-        var list = document.getElementById('priorityList');
-        if (!list) return;
-        var items = list.querySelectorAll('li');
-        items.forEach(function(li) {
-            li.style.cursor = 'pointer';
-            li.title = 'Click to move up';
-            li.addEventListener('click', function() {
-                var prev = li.previousElementSibling;
-                if (prev) {
-                    list.insertBefore(li, prev);
-                    updatePriorityInput();
-                }
-            });
-        });
-    })();
+    window.movePriorityUp = function(btn) {
+        var li = btn.closest('li');
+        var prev = li.previousElementSibling;
+        if (prev) {
+            li.parentNode.insertBefore(li, prev);
+            updatePriorityInput();
+        }
+    };
+
+    window.movePriorityDown = function(btn) {
+        var li = btn.closest('li');
+        var next = li.nextElementSibling;
+        if (next) {
+            li.parentNode.insertBefore(next, li);
+            updatePriorityInput();
+        }
+    };
 
     /* ===================================================================
        Initialization

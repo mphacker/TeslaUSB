@@ -430,11 +430,25 @@
             {% if not connected %}
                 {# ---------- Not connected ---------- #}
                 <div class="setup-instructions">
-                    <strong>Connect your Tesla account to enable vehicle controls.</strong>
-                    <ol>
-                        <li>Register an application at <a href="https://developer.tesla.com" target="_blank" rel="noopener noreferrer">developer.tesla.com</a></li>
-                        <li>Enter your Client ID and Client Secret below</li>
-                        <li>Click <strong>Connect Tesla Account</strong> to authorize</li>
+                    <strong>Connect your Tesla account to enable vehicle controls and smart sync.</strong>
+                    <p style="margin: 8px 0 12px; color: var(--text-secondary); font-size: var(--text-sm);">
+                        Tesla provides a free API with $10/month of credit — enough for daily use.
+                    </p>
+                    <ol style="padding-left: 20px; line-height: 1.8;">
+                        <li>Go to <a href="https://developer.tesla.com" target="_blank" rel="noopener noreferrer">developer.tesla.com</a> and sign in with your Tesla account</li>
+                        <li>Click <strong>Create Application and Access Dashboard</strong></li>
+                        <li>Fill in the registration form:
+                            <ul style="margin: 4px 0; padding-left: 20px; font-size: var(--text-sm); color: var(--text-secondary);">
+                                <li><strong>Application Name:</strong> TeslaUSB (or any name you choose)</li>
+                                <li><strong>Description:</strong> Personal dashcam archive and vehicle management</li>
+                                <li><strong>Purpose:</strong> Personal use</li>
+                                <li><strong>Allowed Origin URL:</strong> <code>http://{{ hostname }}.local</code></li>
+                                <li><strong>Allowed Redirect URI:</strong> <code>http://{{ hostname }}.local/tesla/callback</code></li>
+                                <li><strong>Scopes:</strong> Select <code>vehicle_device_data</code>, <code>vehicle_location</code>, and <code>vehicle_cmds</code></li>
+                            </ul>
+                        </li>
+                        <li>Once approved, copy your <strong>Client ID</strong> and <strong>Client Secret</strong> below</li>
+                        <li>Click <strong>Save Credentials</strong>, then <strong>Connect Tesla Account</strong></li>
                     </ol>
                 </div>
 

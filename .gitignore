@@ -1,6 +1,13 @@
 # Playwright MCP browser automation folder
 .playwright-mcp/
 
+# Python bytecode
+__pycache__/
+*.pyc
+
+# USB disk image files (large, device-specific, not source code)
+*.img
+
 # AI tool configs (managed externally, not part of the repo)
 .claude/
 .agent/
@@ -16,4 +23,5 @@
 .trae/
 .windsurf/
 
+# Generated protobuf (compiled on-device by setup_usb.sh)
 scripts/web/services/dashcam_pb2.py

@@ -4,10 +4,10 @@
 
 /* Trim Editor Container */
 .trim-editor-section {
-    background: var(--collapsible-content-bg);
+    background: var(--bg-secondary);
     padding: 20px;
     border-radius: 8px;
-    border: 2px solid var(--collapsible-section-border);
+    border: 2px solid var(--border-color);
     margin-top: 20px;
     margin-bottom: 20px;
 }
@@ -18,7 +18,7 @@
 
 .trim-editor-header {
     margin: 0 0 15px 0;
-    color: var(--collapsible-section-text);
+    color: var(--text-primary);
     font-size: 18px;
     font-weight: 600;
     display: flex;

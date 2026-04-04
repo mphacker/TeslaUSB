@@ -23,57 +23,86 @@
     {% block head %}{% endblock %}
 </head>
 <body>
-    <div class="navbar">
-        <div class="navbar-content">
-            <div class="hamburger" onclick="toggleMobileMenu()">
-                <span></span>
-                <span></span>
-                <span></span>
-            </div>
-            <h1><a href="{{ url_for('mode_control.index') }}">🚗 Tesla USB Gadget Control - {{ hostname }}</a></h1>
-            <div class="nav-links">
-                <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Settings</a>
-                {% if analytics_available %}<a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>{% endif %}
-                {% if map_available %}<a href="{{ url_for('mapping.map_view') }}" {% if page == 'map' %}class="active"{% endif %}>Map</a>{% endif %}
-                {% if videos_available %}<a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>{% endif %}
-                {% if chimes_available %}<a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>{% endif %}
-                {% if music_available %}<a href="{{ url_for('music.music_home') }}" {% if page == 'music' %}class="active"{% endif %}>Music</a>{% endif %}
-                {% if shows_available %}<a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>{% endif %}
-                {% if wraps_available %}<a href="{{ url_for('wraps.wraps') }}" {% if page == 'wraps' %}class="active"{% endif %}>Wraps</a>{% endif %}
-                <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
-                    <i class="bi bi-moon-stars-fill" id="theme-icon"></i>
-                </button>
-            </div>
+    {# Compute media_available from individual flags #}
+    {% set media_available = chimes_available or music_available or shows_available or wraps_available %}
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="{{ url_for('mapping.map_view') }}" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
         </div>
-    </div>
-
-    <!-- Mobile Menu Overlay -->
-    <div class="mobile-menu-overlay" id="mobileMenuOverlay" onclick="toggleMobileMenu()"></div>
-
-    <!-- Mobile Menu -->
-    <div class="mobile-menu" id="mobileMenu">
-        <div class="mobile-menu-close" onclick="toggleMobileMenu()">&times;</div>
-        <a href="{{ url_for('mode_control.index') }}" {% if page == 'control' %}class="active"{% endif %}>Settings</a>
-        {% if analytics_available %}<a href="{{ url_for('analytics.dashboard') }}" {% if page == 'analytics' %}class="active"{% endif %}>Analytics</a>{% endif %}
-        {% if map_available %}<a href="{{ url_for('mapping.map_view') }}" {% if page == 'map' %}class="active"{% endif %}>Map</a>{% endif %}
-        {% if videos_available %}<a href="{{ url_for('videos.file_browser') }}" {% if page == 'browser' %}class="active"{% endif %}>Videos</a>{% endif %}
-        {% if chimes_available %}<a href="{{ url_for('lock_chimes.lock_chimes') }}" {% if page == 'chimes' %}class="active"{% endif %}>Lock Chimes</a>{% endif %}
-        {% if music_available %}<a href="{{ url_for('music.music_home') }}" {% if page == 'music' %}class="active"{% endif %}>Music</a>{% endif %}
-        {% if shows_available %}<a href="{{ url_for('light_shows.light_shows') }}" {% if page == 'shows' %}class="active"{% endif %}>Light Shows</a>{% endif %}
-        {% if wraps_available %}<a href="{{ url_for('wraps.wraps') }}" {% if page == 'wraps' %}class="active"{% endif %}>Wraps</a>{% endif %}
-        <div class="mobile-theme-toggle">
-            <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
-                <i class="bi bi-moon-stars-fill" id="theme-icon-mobile"></i>
-                <span id="theme-label">Dark Mode</span>
+        <div class="top-bar-right">
+            <span class="status-dot {% if mode_token == 'present' %}status-present{% elif mode_token == 'edit' %}status-edit{% else %}status-unknown{% endif %}" title="{{ mode_label }}"></span>
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-moon"></use>
+                </svg>
             </button>
         </div>
-    </div>
+    </header>
 
-    <div class="main-content{% if expandable %} expandable{% endif %}">
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        {% if map_available %}
+        <a href="{{ url_for('mapping.map_view') }}" class="nav-item{% if page == 'map' %} active{% endif %}" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        {% endif %}
+        {% if analytics_available %}
+        <a href="{{ url_for('analytics.dashboard') }}" class="nav-item{% if page == 'analytics' %} active{% endif %}" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        {% endif %}
+        {% if media_available %}
+        <a href="{{ url_for('media.media_home') }}" class="nav-item{% if page == 'media' %} active{% endif %}" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        {% endif %}
+        <a href="{{ url_for('mode_control.index') }}" class="nav-item{% if page == 'settings' %} active{% endif %}" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        {% if map_available %}
+        <a href="{{ url_for('mapping.map_view') }}" class="tab-item{% if page == 'map' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        {% endif %}
+        {% if analytics_available %}
+        <a href="{{ url_for('analytics.dashboard') }}" class="tab-item{% if page == 'analytics' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        {% endif %}
+        {% if media_available %}
+        <a href="{{ url_for('media.media_home') }}" class="tab-item{% if page == 'media' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        {% endif %}
+        <a href="{{ url_for('mode_control.index') }}" class="tab-item{% if page == 'settings' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content{% if expandable %} expandable{% endif %}" role="main">
         {% if operation_in_progress %}
         <div class="operation-banner" id="operation-banner">
             <div class="operation-content">
-                <div class="operation-icon">⚠️</div>
+                <div class="operation-icon">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                </div>
                 <div class="operation-message">
                     <strong>File operation in progress...</strong>
                     <span id="operation-details">
@@ -92,16 +121,21 @@
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
-                <div class="messages">
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
                     {% for cat, msg in messages %}
-                        <div class="{{cat}}">{{msg}}</div>
+                    showToast('{{ msg|e }}', '{{ cat }}');
                     {% endfor %}
-                </div>
+                });
+            </script>
             {% endif %}
         {% endwith %}
 
         {% block content %}{% endblock %}
-    </div>
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
 
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
     {% if operation_in_progress %}
@@ -111,5 +145,6 @@
         window.lockAge = {{ lock_age|default(0) }};
     </script>
     {% endif %}
+    {% block scripts %}{% endblock %}
 </body>
 </html>

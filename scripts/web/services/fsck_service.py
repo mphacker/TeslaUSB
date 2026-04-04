@@ -310,18 +310,45 @@ def _run_fsck_background(partition_num: int, mode: str):
         status['progress'] = 'Attaching loop device...'
         _save_status(status)
 
-        # Check for existing loop device
+        # Find loop device for this image
+        # Check ALL loop devices (including those for the same backing file path)
+        # because after git clean + truncate, there may be old devices with real
+        # filesystem data and new ones backed by sparse/empty files.
         losetup_check = subprocess.run(
-            ['losetup', '-j', img_path],
+            ['sudo', 'losetup', '-a'],
             capture_output=True,
-            text=True
+            text=True,
+            timeout=10
         )
 
+        loop_dev = None
+        img_basename = os.path.basename(img_path)
+
         if losetup_check.stdout.strip():
-            # Extract loop device name
-            loop_dev = losetup_check.stdout.split(':')[0].strip()
-            logger.info(f"Using existing loop device: {loop_dev}")
-        else:
+            # Collect all loop devices associated with this image
+            candidates = []
+            for line in losetup_check.stdout.strip().split('\n'):
+                if img_basename in line:
+                    dev = line.split(':')[0].strip()
+                    candidates.append(dev)
+
+            # Pick the candidate that blkid recognizes as having a filesystem
+            for dev in candidates:
+                probe = subprocess.run(
+                    ['sudo', 'blkid', '-o', 'value', '-s', 'TYPE', dev],
+                    capture_output=True, text=True, timeout=5
+                )
+                if probe.stdout.strip():
+                    loop_dev = dev
+                    logger.info(f"Using loop device with valid filesystem: {loop_dev} ({probe.stdout.strip()})")
+                    break
+
+            # Fall back to first candidate if none had a detectable FS
+            if not loop_dev and candidates:
+                loop_dev = candidates[0]
+                logger.info(f"Using first loop device (no FS detected): {loop_dev}")
+
+        if not loop_dev:
             # Create new loop device
             loop_result = subprocess.run(
                 ['sudo', 'losetup', '--show', '-f', img_path],
@@ -339,16 +366,22 @@ def _run_fsck_background(partition_num: int, mode: str):
             text=True
         )
         fs_type = fs_type_result.stdout.strip() or 'unknown'
+        logger.info(f"Detected filesystem type on {loop_dev}: {fs_type}")
 
         if fs_type not in ['vfat', 'exfat']:
-            raise FsckError(f"Unsupported filesystem type: {fs_type}")
+            raise FsckError(
+                f"Unsupported filesystem type: {fs_type} on {loop_dev}. "
+                f"Expected vfat or exfat. Is the disk image valid?"
+            )
 
         # Run fsck
         status['progress'] = f'Running filesystem check ({mode})...'
         _save_status(status)
 
         fsck_script = os.path.join(GADGET_DIR, 'scripts', 'fsck_with_swap.sh')
-        fsck_cmd = ['sudo', fsck_script, loop_dev, fs_type, mode]
+        if not os.path.isfile(fsck_script):
+            raise FsckError(f"fsck script not found: {fsck_script}")
+        fsck_cmd = ['sudo', 'bash', fsck_script, loop_dev, fs_type, mode]
 
         # Set environment variable to enable background mode with extended timeouts
         fsck_env = os.environ.copy()
@@ -379,6 +412,12 @@ def _run_fsck_background(partition_num: int, mode: str):
             raise
         finally:
             _fsck_process = None
+
+        logger.info(f"fsck exited with code {fsck_status}, stdout={stdout[:200] if stdout else ''}, stderr={stderr[:200] if stderr else ''}")
+
+        # Detect script execution failures before interpreting fsck exit codes
+        if stderr and ('command not found' in stderr or 'No such file' in stderr):
+            raise FsckError(f"fsck script failed to execute: {stderr.strip()}")
 
         # Check if cancelled
         if _cancel_requested:

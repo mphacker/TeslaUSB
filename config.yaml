@@ -95,7 +95,8 @@ web:
 # ============================================================================
 mapping:
   enabled: true                          # Enable GPS/telemetry indexing of dashcam videos
-  index_on_startup: false                # Auto-start indexer when web app launches
+  index_on_startup: true                 # Auto-start indexer when web app launches
+  index_on_mode_switch: true             # Auto-index after present/edit mode switch
   sample_rate: 30                        # Extract every Nth frame (30 = ~1/sec at 30fps)
   trip_gap_minutes: 5                    # Gap between waypoints to start a new trip
   event_detection:

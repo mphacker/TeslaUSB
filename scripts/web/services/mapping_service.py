@@ -37,7 +37,7 @@ def _get_sei_parser():
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS waypoints (
     autopilot_state TEXT,
     steering_angle REAL,
     brake_applied INTEGER DEFAULT 0,
+    blinker_on_left INTEGER DEFAULT 0,
+    blinker_on_right INTEGER DEFAULT 0,
     video_path TEXT,
     frame_offset INTEGER
 );
@@ -128,6 +130,14 @@ def _init_db(db_path: str) -> sqlite3.Connection:
 
     if current < _SCHEMA_VERSION:
         conn.executescript(_SCHEMA_SQL)
+        # Migrations for existing databases
+        if current < 2:
+            # v2: add blinker columns to waypoints
+            for col in ('blinker_on_left', 'blinker_on_right'):
+                try:
+                    conn.execute(f"ALTER TABLE waypoints ADD COLUMN {col} INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
             (_SCHEMA_VERSION,)
@@ -390,6 +400,89 @@ def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
                 pass
 
 
+def _infer_sentry_event(
+    conn: sqlite3.Connection,
+    rel_path: str,
+    file_timestamp: Optional[str],
+) -> bool:
+    """Create a sentry/saved event at inferred location for clips without GPS.
+
+    Looks up the most recent waypoint before the clip's timestamp to determine
+    where the car was parked when the event occurred.
+
+    Returns True if an event was created, False if location couldn't be inferred.
+    """
+    if not file_timestamp:
+        return False
+
+    # Find the most recent waypoint before this clip's timestamp
+    row = conn.execute(
+        """SELECT lat, lon, trip_id FROM waypoints
+           WHERE timestamp <= ? AND lat != 0 AND lon != 0
+           ORDER BY timestamp DESC LIMIT 1""",
+        (file_timestamp,)
+    ).fetchone()
+
+    if not row:
+        # Try any waypoint at all (clip might predate all trips)
+        row = conn.execute(
+            """SELECT lat, lon, trip_id FROM waypoints
+               WHERE lat != 0 AND lon != 0
+               ORDER BY timestamp ASC LIMIT 1""",
+            ()
+        ).fetchone()
+
+    if not row:
+        logger.info("Cannot infer location for %s — no waypoints in database", rel_path)
+        return False
+
+    # Determine event type from folder
+    event_type = 'sentry' if 'SentryClips' in rel_path else 'saved'
+    folder_name = rel_path.replace('\\', '/').split('/')[0]
+
+    # Extract event folder name for grouping (e.g., "2026-03-13_20-45-25")
+    parts = rel_path.replace('\\', '/').split('/')
+    event_folder = parts[1] if len(parts) > 2 else parts[0]
+
+    # Check if we already have an event for this folder+location
+    existing = conn.execute(
+        """SELECT id FROM detected_events
+           WHERE event_type = ? AND video_path LIKE ? LIMIT 1""",
+        (event_type, f'%{event_folder}%')
+    ).fetchone()
+
+    if existing:
+        return False  # Already created for this event folder
+
+    description = (
+        f"{'Sentry Mode' if event_type == 'sentry' else 'Saved Clip'} event "
+        f"(location inferred from nearest trip)"
+    )
+
+    conn.execute(
+        """INSERT INTO detected_events
+           (trip_id, timestamp, lat, lon, event_type, severity,
+            description, video_path, frame_offset, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            row['trip_id'],
+            file_timestamp,
+            row['lat'],
+            row['lon'],
+            event_type,
+            'info',
+            description,
+            rel_path,
+            0,
+            json.dumps({'inferred_location': True, 'source_folder': folder_name}),
+        )
+    )
+    conn.commit()
+    logger.info("Created inferred %s event for %s at %.4f,%.4f",
+                event_type, event_folder, row['lat'], row['lon'])
+    return True
+
+
 def _index_video(
     conn: sqlite3.Connection,
     video_path: str,
@@ -408,9 +501,13 @@ def _index_video(
 
     # Extract SEI messages
     waypoint_dicts = []
+    sei_count = 0
+    no_gps_count = 0
     try:
         for msg in parser.extract_sei_messages(video_path, sample_rate=sample_rate):
+            sei_count += 1
             if not msg.has_gps:
+                no_gps_count += 1
                 continue
 
             # Compute absolute timestamp from file timestamp + frame offset
@@ -436,14 +533,31 @@ def _index_video(
                 'autopilot_state': msg.autopilot_state,
                 'steering_angle': msg.steering_wheel_angle,
                 'brake_applied': 1 if msg.brake_applied else 0,
+                'blinker_on_left': 1 if msg.blinker_on_left else 0,
+                'blinker_on_right': 1 if msg.blinker_on_right else 0,
                 'video_path': rel_path,
                 'frame_offset': msg.frame_index,
             })
+    except ImportError as e:
+        # Protobuf module missing — abort indexer entirely so it's noticed
+        logger.error("SEI parser missing protobuf module: %s", e)
+        raise
     except Exception as e:
         logger.warning("Failed to parse SEI from %s: %s", rel_path, e)
         return 0, 0
 
     if not waypoint_dicts:
+        if sei_count == 0:
+            logger.info("No SEI messages found in %s", rel_path)
+        else:
+            logger.info("%s: %d SEI messages but 0 had GPS (%d checked)",
+                        rel_path, sei_count, no_gps_count)
+
+        # For Sentry/Saved clips with no GPS, infer location from nearest trip
+        if 'SentryClips' in rel_path or 'SavedClips' in rel_path:
+            inferred = _infer_sentry_event(conn, rel_path, file_timestamp)
+            if inferred:
+                return 0, 1  # 0 waypoints, 1 event
         return 0, 0
 
     # Determine source folder
@@ -490,13 +604,15 @@ def _index_video(
            (trip_id, timestamp, lat, lon, heading, speed_mps,
             acceleration_x, acceleration_y, acceleration_z,
             gear, autopilot_state, steering_angle, brake_applied,
+            blinker_on_left, blinker_on_right,
             video_path, frame_offset)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [(trip_id, wp['timestamp'], wp['lat'], wp['lon'], wp['heading'],
           wp['speed_mps'], wp['acceleration_x'], wp['acceleration_y'],
           wp['acceleration_z'], wp['gear'], wp['autopilot_state'],
-          wp['steering_angle'], wp['brake_applied'], wp['video_path'],
-          wp['frame_offset'])
+          wp['steering_angle'], wp['brake_applied'],
+          wp['blinker_on_left'], wp['blinker_on_right'],
+          wp['video_path'], wp['frame_offset'])
          for wp in waypoint_dicts]
     )
 
@@ -614,6 +730,15 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
                 )
                 conn.commit()
 
+            except ImportError as e:
+                # Protobuf missing — stop indexer, report clearly
+                logger.error("Indexer aborted: %s", e)
+                _status.update({
+                    'running': False,
+                    'error': str(e),
+                    'progress': f'Error: {e}',
+                })
+                return
             except Exception as e:
                 logger.error("Failed to index %s: %s", rel, e)
                 continue
@@ -689,6 +814,361 @@ def cancel_indexer() -> Tuple[bool, str]:
     return True, "Cancellation requested"
 
 
+def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
+                         deleted_paths: Optional[List[str]] = None) -> dict:
+    """Remove geodata.db entries for videos that no longer exist on disk.
+
+    Can operate in two modes:
+    - **Targeted**: Pass ``deleted_paths`` (list of absolute or relative video
+      paths) to remove only those specific entries.
+    - **Full scan**: Pass ``teslacam_path`` to scan every ``indexed_files``
+      entry and remove those whose file no longer exists.
+
+    Returns dict with counts of purged rows.
+    """
+    conn = _init_db(db_path)
+    purged_files = 0
+    purged_waypoints = 0
+    purged_events = 0
+    purged_trips = 0
+
+    try:
+        if deleted_paths:
+            # Targeted mode — remove entries matching the given paths
+            for path in deleted_paths:
+                # indexed_files stores absolute paths; also try matching by
+                # video_path column in waypoints which stores relative paths.
+                row = conn.execute(
+                    "SELECT file_path FROM indexed_files WHERE file_path = ? "
+                    "OR file_path LIKE ?",
+                    (path, f'%{os.path.basename(path)}%')
+                ).fetchone()
+                if row:
+                    conn.execute(
+                        "DELETE FROM indexed_files WHERE file_path = ?",
+                        (row['file_path'],)
+                    )
+                    purged_files += 1
+
+            # Build a pattern for waypoint cleanup — match on basename of
+            # front-camera files (all camera angles share the same waypoints
+            # via the front-camera video_path).
+            for path in deleted_paths:
+                basename = os.path.basename(path)
+                # Only front-camera files have waypoints
+                if '-front' not in basename.lower():
+                    continue
+                # waypoints.video_path is relative (e.g. "RecentClips/2026-...")
+                rows = conn.execute(
+                    "SELECT DISTINCT trip_id FROM waypoints "
+                    "WHERE video_path LIKE ?",
+                    (f'%{basename}%',)
+                ).fetchall()
+                trip_ids = [r['trip_id'] for r in rows]
+
+                wc = conn.execute(
+                    "DELETE FROM waypoints WHERE video_path LIKE ?",
+                    (f'%{basename}%',)
+                ).rowcount
+                purged_waypoints += wc
+
+                ec = conn.execute(
+                    "DELETE FROM detected_events WHERE video_path LIKE ?",
+                    (f'%{basename}%',)
+                ).rowcount
+                purged_events += ec
+
+                # Remove trips that now have zero waypoints
+                for tid in trip_ids:
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?",
+                        (tid,)
+                    ).fetchone()[0]
+                    if remaining == 0:
+                        conn.execute("DELETE FROM trips WHERE id = ?", (tid,))
+                        purged_trips += 1
+
+        elif teslacam_path:
+            # Full scan mode — check every indexed file against disk
+            rows = conn.execute(
+                "SELECT file_path FROM indexed_files"
+            ).fetchall()
+            missing = []
+            for row in rows:
+                if not os.path.isfile(row['file_path']):
+                    missing.append(row['file_path'])
+
+            if missing:
+                logger.info("Purging %d missing videos from geodata.db", len(missing))
+                # Recurse with targeted mode for the missing files
+                result = purge_deleted_videos(db_path, deleted_paths=missing)
+                conn.close()
+                return result
+
+        conn.commit()
+        logger.info(
+            "Purged from geodata.db: %d files, %d waypoints, %d events, %d trips",
+            purged_files, purged_waypoints, purged_events, purged_trips,
+        )
+    finally:
+        conn.close()
+
+    return {
+        'purged_files': purged_files,
+        'purged_waypoints': purged_waypoints,
+        'purged_events': purged_events,
+        'purged_trips': purged_trips,
+    }
+
+
+def trigger_auto_index(db_path: str, teslacam_path: str,
+                       sample_rate: int = 30,
+                       thresholds: Optional[dict] = None,
+                       trip_gap_minutes: int = 5) -> None:
+    """Trigger indexing in the background if TeslaCam path is accessible.
+
+    Safe to call from startup or mode-switch hooks. Does nothing if the
+    indexer is already running or the path is not available.
+    """
+    if not teslacam_path or not os.path.isdir(teslacam_path):
+        logger.debug("Auto-index skipped: TeslaCam path not accessible")
+        return
+
+    if _status.get('running'):
+        logger.debug("Auto-index skipped: indexer already running")
+        return
+
+    success, msg = start_indexer(
+        db_path=db_path,
+        teslacam_path=teslacam_path,
+        sample_rate=sample_rate,
+        thresholds=thresholds,
+        trip_gap_minutes=trip_gap_minutes,
+    )
+    if success:
+        logger.info("Auto-index triggered: %s", msg)
+    else:
+        logger.debug("Auto-index not started: %s", msg)
+
+
+def diagnose_video(teslacam_path: str, max_videos: int = 3) -> dict:
+    """Diagnose SEI parsing on sample videos for troubleshooting.
+
+    Tests a few videos in detail, reporting file sizes, MP4 box structure,
+    SEI NAL unit counts, GPS data presence, and any parse errors.
+    Returns a dict with diagnostic info.
+    """
+    import struct as _struct
+
+    parser = _get_sei_parser()
+    results = {
+        'teslacam_path': teslacam_path,
+        'path_exists': os.path.isdir(teslacam_path),
+        'videos': [],
+        'summary': '',
+    }
+
+    if not results['path_exists']:
+        results['summary'] = f'TeslaCam path does not exist: {teslacam_path}'
+        return results
+
+    # List folder structure
+    folders = {}
+    for folder in ('RecentClips', 'SavedClips', 'SentryClips'):
+        fp = os.path.join(teslacam_path, folder)
+        if os.path.isdir(fp):
+            try:
+                entries = os.listdir(fp)
+                folders[folder] = len(entries)
+            except OSError as e:
+                folders[folder] = f'error: {e}'
+        else:
+            folders[folder] = 'not found'
+    results['folders'] = folders
+
+    # Get sample videos
+    videos = list(_find_front_camera_videos(teslacam_path))
+    results['total_front_videos'] = len(videos)
+
+    for vp in videos[:max_videos]:
+        diag = {'path': os.path.relpath(vp, teslacam_path)}
+        try:
+            stat = os.stat(vp)
+            diag['file_size'] = stat.st_size
+            diag['file_size_mb'] = round(stat.st_size / 1024 / 1024, 2)
+
+            if stat.st_size < 8:
+                diag['error'] = 'File too small'
+                results['videos'].append(diag)
+                continue
+
+            with open(vp, 'rb') as f:
+                header = f.read(min(32, stat.st_size))
+
+            # Check MP4 magic bytes
+            diag['first_16_bytes_hex'] = header[:16].hex()
+            has_ftyp = b'ftyp' in header[:12]
+            diag['has_ftyp'] = has_ftyp
+
+            if not has_ftyp:
+                diag['error'] = 'Not a valid MP4 (no ftyp box in first 12 bytes)'
+                results['videos'].append(diag)
+                continue
+
+            # Deep NAL analysis — read the file and scan mdat
+            nal_analysis = _diagnose_nal_structure(vp)
+            diag.update(nal_analysis)
+
+            # Try full SEI extraction with sample_rate=1 for max detail
+            sei_msgs = []
+            gps_msgs = []
+            parse_error = None
+            try:
+                for msg in parser.extract_sei_messages(vp, sample_rate=1):
+                    sei_msgs.append(msg)
+                    if msg.has_gps:
+                        gps_msgs.append(msg)
+                    if len(sei_msgs) >= 10:
+                        break  # Enough for diagnosis
+            except Exception as e:
+                parse_error = str(e)
+
+            diag['sei_messages_sampled'] = len(sei_msgs)
+            diag['gps_messages'] = len(gps_msgs)
+            if parse_error:
+                diag['parse_error'] = parse_error
+
+            # Show first GPS point if found
+            if gps_msgs:
+                first = gps_msgs[0]
+                diag['sample_gps'] = {
+                    'lat': first.latitude_deg,
+                    'lon': first.longitude_deg,
+                    'speed_mph': round(first.speed_mph, 1),
+                    'heading': first.heading_deg,
+                    'gear': first.gear_state,
+                }
+            elif sei_msgs:
+                # Show first SEI to see what data exists
+                first = sei_msgs[0]
+                diag['sample_sei_no_gps'] = {
+                    'lat': first.latitude_deg,
+                    'lon': first.longitude_deg,
+                    'speed_mph': round(first.speed_mph, 1),
+                    'frame': first.frame_index,
+                }
+
+        except Exception as e:
+            diag['error'] = str(e)
+
+        results['videos'].append(diag)
+
+    # Summary
+    total = len(videos)
+    tested = len(results['videos'])
+    gps_found = sum(1 for v in results['videos'] if v.get('gps_messages', 0) > 0)
+    results['summary'] = (
+        f'{total} front-camera videos found, {tested} tested: '
+        f'{gps_found} have GPS data'
+    )
+
+    return results
+
+
+def _diagnose_nal_structure(video_path: str) -> dict:
+    """Deep-scan the NAL unit structure of a video for diagnostics."""
+    import struct as _struct
+
+    result = {}
+    try:
+        file_size = os.path.getsize(video_path)
+        if file_size > 150 * 1024 * 1024:
+            result['nal_error'] = f'File too large for diagnosis ({file_size} bytes)'
+            return result
+
+        with open(video_path, 'rb') as f:
+            data = f.read()
+
+        # Find mdat box
+        from services.sei_parser import _find_box
+        mdat = _find_box(data, 0, len(data), 'mdat')
+        if mdat is None:
+            result['nal_error'] = 'No mdat box found'
+            return result
+
+        result['mdat_size'] = mdat['size']
+        result['mdat_first_32_hex'] = data[mdat['start']:mdat['start'] + 32].hex()
+
+        # Scan NAL units
+        cursor = mdat['start']
+        end = mdat['end']
+        nal_types = {}
+        nal_count = 0
+        sei_type6_count = 0
+        sei_payloads = []
+        bad_lengths = 0
+        max_scan = 5000  # Limit to first 5000 NAL units
+
+        while cursor + 4 <= end and nal_count < max_scan:
+            nal_size = _struct.unpack('>I', data[cursor:cursor + 4])[0]
+            cursor += 4
+
+            if nal_size < 1 or cursor + nal_size > len(data):
+                bad_lengths += 1
+                if bad_lengths > 3:
+                    result['nal_scan_stopped'] = (
+                        f'Too many bad NAL lengths at offset {cursor - 4}'
+                    )
+                    break
+                # Try advancing by 1 to resync
+                cursor -= 3
+                continue
+
+            nal_type = data[cursor] & 0x1F
+            nal_types[nal_type] = nal_types.get(nal_type, 0) + 1
+            nal_count += 1
+
+            if nal_type == 6:
+                sei_type6_count += 1
+                # Record the first few bytes of SEI payload for inspection
+                if len(sei_payloads) < 5:
+                    payload_preview = data[cursor:cursor + min(16, nal_size)].hex()
+                    payload_type_byte = data[cursor + 1] if nal_size >= 2 else -1
+                    sei_payloads.append({
+                        'offset': cursor,
+                        'size': nal_size,
+                        'payload_type_byte': payload_type_byte,
+                        'first_16_hex': payload_preview,
+                    })
+
+            cursor += nal_size
+
+        result['nal_count'] = nal_count
+        result['nal_types'] = {str(k): v for k, v in sorted(nal_types.items())}
+        result['sei_type6_count'] = sei_type6_count
+        result['bad_nal_lengths'] = bad_lengths
+        if sei_payloads:
+            result['sei_payload_samples'] = sei_payloads
+
+        # Provide human-readable NAL type names
+        nal_names = {
+            0: 'Unspecified', 1: 'Non-IDR Slice', 2: 'Slice A',
+            3: 'Slice B', 4: 'Slice C', 5: 'IDR Slice',
+            6: 'SEI', 7: 'SPS', 8: 'PPS', 9: 'AUD',
+            10: 'EndSeq', 11: 'EndStream', 12: 'Filler',
+            19: 'AuxSlice', 32: 'VPS(HEVC)', 33: 'SPS(HEVC)',
+            34: 'PPS(HEVC)',
+        }
+        result['nal_type_names'] = {
+            f'{k} ({nal_names.get(k, "?")})': v
+            for k, v in sorted(nal_types.items())
+        }
+
+    except Exception as e:
+        result['nal_error'] = str(e)
+
+    return result
+
 def get_db_connection(db_path: str) -> sqlite3.Connection:
     """Get a read-only connection to the geo-index database."""
     conn = _init_db(db_path)
@@ -732,7 +1212,10 @@ def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
     try:
         rows = conn.execute(
             """SELECT lat, lon, heading, speed_mps, autopilot_state,
-                      video_path, frame_offset, timestamp
+                      video_path, frame_offset, timestamp,
+                      steering_angle, brake_applied, gear,
+                      acceleration_x, acceleration_y,
+                      blinker_on_left, blinker_on_right
                FROM waypoints WHERE trip_id = ? ORDER BY id""",
             (trip_id,)
         ).fetchall()

@@ -1279,8 +1279,11 @@ echo "Using GADGET_DIR: $GADGET_DIR (auto-derived from script location)"
 mkdir -p "$GADGET_DIR/thumbnails"
 chown -R "$TARGET_USER:$TARGET_USER" "$GADGET_DIR/thumbnails"
 
-# Set permissions on scripts
+# Set permissions on all scripts
 chmod +x "$SCRIPTS_DIR"/*.sh "$SCRIPTS_DIR"/*.py 2>/dev/null || true
+chmod +x "$SCRIPT_DIR"/*.sh 2>/dev/null || true
+chmod +x "$SCRIPTS_DIR"/web/web_control.py 2>/dev/null || true
+chmod +x "$SCRIPTS_DIR"/web/services/*.py 2>/dev/null || true
 chown -R "$TARGET_USER:$TARGET_USER" "$SCRIPTS_DIR"
 
 # Compile protobuf definitions for SEI telemetry parser
@@ -1322,6 +1325,10 @@ cat > "$SUDOERS_ENTRY" <<EOF
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/present_usb.sh
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/edit_usb.sh
 $TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/ap_control.sh
+$TARGET_USER ALL=(ALL) NOPASSWD: $GADGET_DIR/scripts/fsck_with_swap.sh
+
+# Allow bash invocation of scripts (fallback when execute bit is missing)
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/bash $GADGET_DIR/scripts/*.sh
 
 # Allow all system commands used within the scripts
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl

@@ -2,7 +2,6 @@
 
 // Theme Toggle Functionality
 function initTheme() {
-    // Check for saved theme preference or default to system preference
     const savedTheme = localStorage.getItem('theme');
     const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
 
@@ -19,7 +18,6 @@ function initTheme() {
 
     // Listen for system theme changes
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-        // Only auto-switch if user hasn't set a preference
         if (!localStorage.getItem('theme')) {
             applyTheme(e.matches ? 'dark' : 'light');
         }
@@ -37,75 +35,82 @@ function applyTheme(theme) {
 }
 
 function updateThemeIcon(iconType) {
-    const iconDesktop = document.getElementById('theme-icon');
-    const iconMobile = document.getElementById('theme-icon-mobile');
-    const label = document.getElementById('theme-label');
+    const svgIcon = document.getElementById('theme-icon-svg');
+    if (!svgIcon) return;
+
+    const useEl = svgIcon.querySelector('use');
+    if (!useEl) return;
+
+    // Get the base path from the current href (preserves url_for path)
+    const currentHref = useEl.getAttribute('href') || '';
+    const basePath = currentHref.substring(0, currentHref.lastIndexOf('#'));
 
     if (iconType === 'sun') {
-        // Dark mode active - show sun icon
-        if (iconDesktop) {
-            iconDesktop.className = 'bi bi-sun-fill';
-        }
-        if (iconMobile) {
-            iconMobile.className = 'bi bi-sun-fill';
-        }
-        if (label) {
-            label.textContent = 'Light Mode';
-        }
+        useEl.setAttribute('href', basePath + '#icon-sun');
     } else {
-        // Light mode active - show moon icon
-        if (iconDesktop) {
-            iconDesktop.className = 'bi bi-moon-stars-fill';
-        }
-        if (iconMobile) {
-            iconMobile.className = 'bi bi-moon-stars-fill';
-        }
-        if (label) {
-            label.textContent = 'Dark Mode';
-        }
+        useEl.setAttribute('href', basePath + '#icon-moon');
     }
 }
 
 function toggleTheme() {
     const currentTheme = document.documentElement.getAttribute('data-theme');
     const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-
-    // Save user preference
     localStorage.setItem('theme', newTheme);
-
-    // Apply new theme
     applyTheme(newTheme);
 }
 
 // Initialize theme on page load
 initTheme();
 
-// Mobile menu toggle
-function toggleMobileMenu() {
-    const mobileMenu = document.getElementById('mobileMenu');
-    const overlay = document.getElementById('mobileMenuOverlay');
+// Toast Notification System
+function showToast(message, type) {
+    type = type || 'info';
+    var container = document.getElementById('toast-container');
+    if (!container) return;
 
-    if (mobileMenu && overlay) {
-        mobileMenu.classList.toggle('active');
-        overlay.classList.toggle('active');
-    }
+    var toast = document.createElement('div');
+    toast.className = 'toast toast-' + type;
+    toast.innerHTML = '<span>' + message + '</span><button class="toast-close" onclick="dismissToast(this.parentElement)" aria-label="Dismiss">&times;</button>';
+    container.appendChild(toast);
+
+    // Trigger reflow then add .show for transition
+    toast.offsetHeight;
+    toast.classList.add('show');
+
+    // Auto-dismiss after 5 seconds
+    setTimeout(function() {
+        dismissToast(toast);
+    }, 5000);
 }
 
-// Auto-close mobile menu when navigation links are clicked
+function dismissToast(toast) {
+    if (!toast || !toast.parentElement) return;
+    toast.classList.remove('show');
+    setTimeout(function() {
+        if (toast.parentElement) toast.remove();
+    }, 250);
+}
+
+// Sidebar hover expand/collapse for desktop
 document.addEventListener('DOMContentLoaded', function() {
-    const mobileMenu = document.getElementById('mobileMenu');
-    const overlay = document.getElementById('mobileMenuOverlay');
-    if (mobileMenu && overlay) {
-        // Find all navigation links in the mobile menu (excluding theme toggle button)
-        const navLinks = mobileMenu.querySelectorAll('a[href]');
-        navLinks.forEach(function(link) {
-            link.addEventListener('click', function() {
-                // Force-remove active classes immediately (don't toggle, just remove)
-                mobileMenu.classList.remove('active');
-                overlay.classList.remove('active');
-            });
-        });
-    }
+    const sidebar = document.getElementById('sidebarRail');
+    if (!sidebar) return;
+
+    // Touch devices: toggle expand on tap
+    let touchStarted = false;
+    sidebar.addEventListener('touchstart', function() {
+        touchStarted = true;
+    }, { passive: true });
+
+    sidebar.addEventListener('touchend', function(e) {
+        if (touchStarted) {
+            // Only toggle if tap was on the sidebar itself, not a nav item
+            if (e.target === sidebar || e.target.closest('.nav-item') === null) {
+                sidebar.classList.toggle('expanded');
+            }
+            touchStarted = false;
+        }
+    }, { passive: true });
 });
 
 // Global audio player management: pause all other audio/video when one starts playing

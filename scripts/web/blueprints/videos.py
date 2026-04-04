@@ -44,7 +44,7 @@ def file_browser():
     if not teslacam_path:
         return render_template(
             'videos.html',
-            page='browser',
+            page='map',
             **ctx,
             teslacam_available=False,
             folders=[],
@@ -114,7 +114,7 @@ def file_browser():
 
     return render_template(
         'videos.html',
-        page='browser',
+        page='map',
         **ctx,
         teslacam_available=True,
         folders=folders,
@@ -179,7 +179,7 @@ def view_event(folder, event_name):
 
         return render_template(
             'event_player.html',
-            page='event',
+            page='map',
             **ctx,
             folder=folder,
             event=event,
@@ -195,7 +195,7 @@ def view_event(folder, event_name):
 
     return render_template(
         'event_player.html',
-        page='event',
+        page='map',
         **ctx,
         folder=folder,
         event=event,
@@ -230,7 +230,7 @@ def view_session(folder, session):
 
     return render_template(
         'session.html',
-        page='session',
+        page='map',
         **ctx,
         folder=folder,
         session_id=session,
@@ -614,6 +614,21 @@ def delete_event(folder, event_name):
             'success': False,
             'error': str(e)
         }), 500
+
+    # Clean up geodata.db entries for deleted front-camera videos
+    if deleted_files:
+        try:
+            from config import MAPPING_ENABLED, MAPPING_DB_PATH
+            if MAPPING_ENABLED:
+                from services.mapping_service import purge_deleted_videos
+                full_paths = [
+                    os.path.join(folder_path, event_name, f) if folder_structure != 'flat'
+                    else os.path.join(folder_path, f)
+                    for f in deleted_files
+                ]
+                purge_deleted_videos(MAPPING_DB_PATH, deleted_paths=full_paths)
+        except Exception as e:
+            logger.warning("Failed to purge geodata for deleted videos: %s", e)
 
     return jsonify({
         'success': True,

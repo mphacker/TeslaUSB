@@ -50,7 +50,8 @@ def wraps():
     if op_status['in_progress']:
         return render_template(
             'wraps.html',
-            page='wraps',
+            page='media',
+            media_tab='wraps',
             **ctx,
             wrap_files=[],
             wrap_count=0,
@@ -85,7 +86,8 @@ def wraps():
 
     return render_template(
         'wraps.html',
-        page='wraps',
+        page='media',
+        media_tab='wraps',
         **ctx,
         wrap_files=wrap_files,
         wrap_count=len(wrap_files),

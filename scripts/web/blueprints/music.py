@@ -39,7 +39,8 @@ def music_home():
     dirs, files, error, used_bytes, free_bytes, current_path, total_bytes = list_music_files(current_path)
     return render_template(
         "music.html",
-        page="music",
+        page="media",
+        media_tab="music",
         **ctx,
         dirs=dirs,
         files=files,

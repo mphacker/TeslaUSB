@@ -7,53 +7,247 @@
 <style>
     /* Override for full-height map page — no page scroll */
     html, body { overflow: hidden !important; height: 100vh !important; }
-    .main-content { margin-top: 4px !important; margin-bottom: 0 !important; overflow: hidden !important; }
-
-    .map-container { display: flex; flex-direction: column; height: calc(100vh - 145px); gap: 0; overflow: hidden; }
-    #map { flex: 1; min-height: 0; border-radius: 8px; z-index: 1; }
-
-    .map-toolbar {
-        display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0;
-        align-items: center; font-size: 13px;
+    .main-content {
+        margin: 0 !important; padding: 0 !important;
+        max-width: none !important; overflow: hidden !important;
+        min-height: 0 !important;
+        margin-left: var(--sidebar-collapsed) !important;
     }
-    .map-toolbar button, .map-toolbar select {
-        padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
-        background: var(--bg-container); color: var(--text-primary);
-        cursor: pointer; font-size: 13px;
-    }
-    .map-toolbar button:hover { background: var(--accent-color, #007bff); color: #fff; }
-    .map-toolbar button.active { background: var(--accent-color, #007bff); color: #fff; }
-    .map-toolbar .separator { border-left: 1px solid var(--border); height: 24px; }
 
-    .stats-bar {
-        display: flex; gap: 12px; padding: 5px 10px; font-size: 12px;
-        background: var(--bg-secondary); color: var(--text-secondary);
-        border-radius: 6px; flex-wrap: wrap; align-items: center;
-        border: 1px solid var(--border);
+    /* ── Map Container ── */
+    .map-container {
+        position: relative;
+        height: calc(100vh - var(--topbar-height));
+        overflow: hidden;
     }
-    .stats-bar .stat { display: flex; align-items: center; gap: 4px; }
-    .stats-bar .stat-value { font-weight: 600; color: var(--text-primary); }
+    #map { width: 100%; height: 100%; z-index: 1; }
 
+    /* Hidden selects for trip/event filtering */
+    .map-hidden-controls { display: none; }
+
+    /* ── Trip Card (bottom-left floating) ── */
+    .trip-card {
+        position: absolute;
+        bottom: 12px;
+        left: 12px;
+        z-index: 1000;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-lg, 12px);
+        padding: 10px 12px;
+        min-width: 240px;
+        max-width: 360px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        backdrop-filter: blur(8px);
+    }
+    [data-theme="dark"] .trip-card {
+        background: rgba(30, 41, 59, 0.9);
+        border-color: var(--border-color, #334155);
+    }
+    .trip-card-nav {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .trip-nav-btn {
+        width: 32px; height: 32px;
+        border-radius: 50%;
+        border: 1px solid var(--border-color, var(--border));
+        background: transparent;
+        color: var(--text-secondary);
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer;
+        transition: all 200ms ease;
+        flex-shrink: 0;
+    }
+    .trip-nav-btn:hover { color: var(--text-primary); border-color: var(--accent-primary, #3B82F6); }
+    .trip-nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .trip-nav-btn .nav-icon { width: 16px; height: 16px; }
+    .trip-card-info {
+        flex: 1;
+        min-width: 0;
+        text-align: center;
+    }
+    .trip-card-date {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .trip-card-stats {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .trip-card-indexed {
+        font-size: 0.6875rem;
+        color: var(--text-muted, var(--text-secondary));
+        text-align: center;
+        margin-top: 4px;
+        padding-top: 4px;
+        border-top: 1px solid var(--border-color, var(--border));
+    }
+    .trip-card-all-btn {
+        display: inline-block;
+        font-size: 0.6875rem;
+        color: var(--accent-primary, #3B82F6);
+        cursor: pointer;
+        margin-left: 6px;
+        text-decoration: underline;
+        background: none;
+        border: none;
+        padding: 0;
+    }
+    .trip-card-all-btn:hover { opacity: 0.8; }
+
+    /* ── FAB Group (right-side floating) ── */
+    .map-fab-group {
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    .map-fab {
+        width: 40px; height: 40px;
+        border-radius: 50%;
+        border: 1px solid var(--border-color, var(--border));
+        background: var(--bg-secondary);
+        color: var(--text-secondary);
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer;
+        transition: all 200ms ease;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        backdrop-filter: blur(8px);
+        position: relative;
+    }
+    .map-fab:hover { color: var(--text-primary); border-color: var(--accent-primary, #3B82F6); }
+    .map-fab.active { background: var(--accent-primary, #3B82F6); color: #fff; border-color: var(--accent-primary, #3B82F6); }
+    .map-fab:disabled { opacity: 0.5; cursor: not-allowed; }
+    .map-fab .nav-icon { width: 20px; height: 20px; }
+    .map-fab[title]:hover::after {
+        content: attr(title);
+        position: absolute;
+        right: calc(100% + 8px);
+        top: 50%; transform: translateY(-50%);
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        padding: 4px 8px;
+        border-radius: var(--radius-sm, 4px);
+        font-size: 0.75rem;
+        white-space: nowrap;
+        border: 1px solid var(--border-color, var(--border));
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        pointer-events: none;
+        z-index: 1001;
+    }
+    [data-theme="dark"] .map-fab {
+        background: rgba(30, 41, 59, 0.9);
+        border-color: var(--border-color, #334155);
+    }
+    [data-theme="dark"] .map-fab.active {
+        background: var(--accent-primary, #3B82F6);
+        border-color: var(--accent-primary, #3B82F6);
+    }
+    .map-fab.spinning .nav-icon {
+        animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Event Filter Dropdown ── */
+    .event-filter-dropdown {
+        position: absolute;
+        right: calc(100% + 8px);
+        top: 0;
+        z-index: 1001;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-lg, 12px);
+        padding: 8px 0;
+        min-width: 180px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        backdrop-filter: blur(8px);
+    }
+    [data-theme="dark"] .event-filter-dropdown {
+        background: rgba(30, 41, 59, 0.95);
+        border-color: var(--border-color, #334155);
+    }
+    .event-filter-dropdown .filter-option {
+        display: block; width: 100%;
+        padding: 6px 14px;
+        background: none; border: none;
+        color: var(--text-primary);
+        font-size: 0.8125rem;
+        text-align: left;
+        cursor: pointer;
+        transition: background 150ms ease;
+    }
+    .event-filter-dropdown .filter-option:hover {
+        background: var(--bg-tertiary, var(--bg-primary));
+    }
+    .event-filter-dropdown .filter-option.active {
+        color: var(--accent-primary, #3B82F6);
+        font-weight: 600;
+    }
+
+    /* ── Legend ── */
     .legend {
-        position: absolute; bottom: 30px; right: 10px; z-index: 1000;
-        background: var(--bg-container); color: var(--text-primary);
-        padding: 10px 14px; border-radius: 8px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15); font-size: 12px;
-        max-width: 200px; border: 1px solid var(--border);
+        position: absolute;
+        bottom: 30px;
+        right: 60px;
+        z-index: 1000;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        padding: 10px 14px;
+        border-radius: var(--radius-lg, 12px);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        font-size: 12px;
+        max-width: 200px;
+        border: 1px solid var(--border-color, var(--border));
+        backdrop-filter: blur(8px);
+    }
+    [data-theme="dark"] .legend {
+        background: rgba(30, 41, 59, 0.9);
+        border-color: var(--border-color, #334155);
     }
     .legend-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
     .legend-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+    .legend-icon { font-size: 14px; width: 16px; text-align: center; display: inline-block; line-height: 1; }
+    .event-svg-icon { background: none !important; border: none !important; }
 
+    /* ── Indexer Status (floating on map) ── */
     .indexer-status {
-        padding: 8px 12px; border-radius: 6px; font-size: 13px;
-        background: var(--bg-secondary); color: var(--text-primary);
-        border: 1px solid var(--border);
+        position: absolute;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1000;
+        padding: 8px 16px;
+        border-radius: var(--radius-lg, 12px);
+        font-size: 0.8125rem;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color, var(--border));
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        backdrop-filter: blur(8px);
+        white-space: nowrap;
+    }
+    [data-theme="dark"] .indexer-status {
+        background: rgba(30, 41, 59, 0.9);
     }
     .indexer-status.running { border-left: 3px solid #f0ad4e; }
 
-    .popup-video-link { color: var(--accent-color, #007bff); cursor: pointer; text-decoration: underline; }
+    .popup-video-link { color: var(--accent-primary, #3B82F6); cursor: pointer; text-decoration: underline; }
 
-    /* Video player overlay */
+    /* ── Video Player Overlay (unchanged) ── */
     .video-overlay {
         position: fixed; z-index: 2000;
         background: var(--bg-secondary, #1a1a2e); border-radius: 12px;
@@ -97,69 +291,348 @@
     }
     .nav-btn:hover { background: var(--accent-color, #007bff); color: #fff; }
 
+    /* ── Overlay Telemetry HUD ── */
+    .overlay-hud {
+        position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+        display: grid; grid-template-columns: auto auto 24px 3ch 24px auto auto;
+        grid-template-rows: auto auto;
+        grid-template-areas: "gear brake bL speed bR wheel throttle" ". . ap ap ap . .";
+        gap: 4px 6px; align-items: center;
+        padding: 5px 10px; border-radius: 14px;
+        backdrop-filter: blur(12px); background: rgba(10,10,12,0.45);
+        border: 1px solid rgba(255,255,255,0.12); pointer-events: none;
+        z-index: 10; font-family: system-ui, sans-serif; color: #fff;
+    }
+    .oh-gear { grid-area: gear; font-size: 10px; font-weight: 800; padding: 3px 8px; border-radius: 99px; border: 1px solid rgba(255,255,255,0.15); }
+    .oh-speed { grid-area: speed; text-align: center; line-height: 1; }
+    .oh-speed-val { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .oh-speed-unit { font-size: 9px; opacity: 0.7; }
+    .oh-blinker { width: 24px; height: 18px; display: grid; place-items: center; border-radius: 6px; opacity: 0.3; font-size: 10px; border: 1px solid rgba(255,255,255,0.1); }
+    .oh-blinker.left { grid-area: bL; }
+    .oh-blinker.right { grid-area: bR; }
+    .oh-blinker.active { opacity: 1; background: rgba(120,255,120,0.2); border-color: rgba(120,255,120,0.5); animation: ohBlink 0.55s steps(2,end) infinite; }
+    @keyframes ohBlink { 0%,49%{filter:brightness(1.3)} 50%,100%{filter:brightness(0.7)} }
+    .oh-wheel { grid-area: wheel; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; border: 1px solid rgba(255,255,255,0.15); }
+    .oh-wheel svg { width: 22px; height: 22px; transform: rotate(var(--oh-wheel,0deg)); transition: transform 0.05s linear; }
+    .oh-pedal { grid-area: brake; width: 28px; height: 28px; border-radius: 50%; position: relative; border: 2px solid rgba(255,255,255,0.2); overflow: hidden; display: flex; align-items: center; justify-content: center; }
+    .oh-pedal.oh-brake { --oh-color: rgba(255,90,90,0.75); }
+    .oh-pedal.oh-throttle { grid-area: throttle; --oh-color: rgba(120,255,120,0.7); }
+    .oh-pedal::before { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: rgba(0,0,0,0.4); }
+    .oh-fill { position: absolute; inset: 3px; overflow: hidden; border-radius: 50%; }
+    .oh-fill i { position: absolute; bottom: 0; left: 0; right: 0; height: var(--oh-fill,0%); background: var(--oh-color); }
+    .oh-lbl { position: relative; z-index: 2; font-size: 10px; font-weight: 700; opacity: 0.6; }
+    .oh-ap { grid-area: ap; text-align: center; font-size: 9px; font-weight: 600; color: rgba(52,199,89,1); opacity: 0; transition: opacity 0.2s; }
+    .oh-ap.active { opacity: 1; }
+
     /* FSD legend colors */
     .fsd-engaged { background: #28a745; }
     .fsd-manual { background: #6c757d; }
 
-    @media (max-width: 768px) {
-        .map-container { height: calc(100vh - 160px); }
-        .map-toolbar { padding: 4px 0; gap: 4px; }
-        .stats-bar { gap: 6px; font-size: 11px; padding: 4px 8px; }
-        .legend { bottom: 20px; right: 5px; }
+    /* ── Reduced motion ── */
+    @media (prefers-reduced-motion: reduce) {
+        .map-fab, .trip-nav-btn, .trip-card, .legend, .indexer-status,
+        .event-filter-dropdown .filter-option {
+            transition: none !important;
+        }
+        .map-fab.spinning .nav-icon { animation: none !important; }
+    }
+
+    /* ── Mobile (<1024px): bottom tabs visible ── */
+    @media (max-width: 1023px) {
+        .main-content {
+            margin-left: 0 !important;
+        }
+        .map-container {
+            height: calc(100vh - var(--topbar-height) - var(--bottomtab-height));
+        }
+        .trip-card {
+            left: 8px; right: 8px; bottom: 8px;
+            max-width: none;
+        }
+        .map-fab-group {
+            top: auto; bottom: 140px;
+            right: 8px;
+            transform: none;
+        }
+        .legend {
+            bottom: 200px;
+            right: 8px;
+        }
+        .map-fab[title]:hover::after { display: none; }
+    }
+
+    /* ── Small mobile (<768px) ── */
+    @media (max-width: 767px) {
+        .trip-card { padding: 8px 10px; min-width: 0; }
+        .trip-card-date { font-size: 0.8125rem; }
+    }
+
+    /* ── Video Browser Panel ── */
+    .video-panel {
+        position: absolute;
+        top: 0; right: 0; bottom: 0;
+        width: 340px;
+        z-index: 1500;
+        background: var(--bg-secondary);
+        border-left: 1px solid var(--border-color, var(--border));
+        box-shadow: -4px 0 16px rgba(0,0,0,0.15);
+        display: flex;
+        flex-direction: column;
+        transform: translateX(100%);
+        transition: transform 0.3s ease;
+    }
+    .video-panel.open { transform: translateX(0); }
+    [data-theme="dark"] .video-panel {
+        background: rgba(30, 41, 59, 0.97);
+        border-color: var(--border-color, #334155);
+    }
+    .video-panel-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border-color, var(--border));
+        flex-shrink: 0;
+    }
+    .video-panel-header h3 {
+        margin: 0;
+        font-size: 0.9375rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        white-space: nowrap;
+    }
+    .video-panel-header .close-btn {
+        background: none;
+        border: none;
+        color: var(--text-secondary);
+        font-size: 18px;
+        cursor: pointer;
+        padding: 2px 6px;
+        line-height: 1;
+        border-radius: var(--radius-sm, 4px);
+        flex-shrink: 0;
+    }
+    .video-panel-header .close-btn:hover { color: #dc3545; }
+    .video-panel-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px;
+    }
+    .vp-loading, .vp-empty {
+        text-align: center;
+        padding: 24px 12px;
+        color: var(--text-muted, var(--text-secondary));
+        font-size: 0.8125rem;
+    }
+    .vp-clip {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: var(--radius-sm, 4px);
+        border: 1px solid var(--border-color, var(--border));
+        margin-bottom: 6px;
+        background: var(--bg-primary, #fff);
+        transition: border-color 150ms ease;
+    }
+    .vp-clip:hover { border-color: var(--accent-primary, #3B82F6); }
+    [data-theme="dark"] .vp-clip { background: rgba(15, 23, 42, 0.6); }
+    .vp-clip-info {
+        flex: 1;
+        min-width: 0;
+    }
+    .vp-clip-date {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .vp-clip-meta {
+        font-size: 0.6875rem;
+        color: var(--text-muted, var(--text-secondary));
+        margin-top: 2px;
+    }
+    .vp-clip-reason {
+        font-size: 0.625rem;
+        color: var(--accent-primary, #3B82F6);
+        margin-top: 1px;
+        text-transform: capitalize;
+    }
+    .vp-actions {
+        display: flex;
+        gap: 4px;
+        flex-shrink: 0;
+    }
+    .vp-btn {
+        width: 28px; height: 28px;
+        border-radius: var(--radius-sm, 4px);
+        border: 1px solid var(--border-color, var(--border));
+        background: transparent;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        font-size: 13px;
+        transition: all 150ms ease;
+        padding: 0;
+    }
+    .vp-btn:hover { color: var(--text-primary); border-color: var(--accent-primary, #3B82F6); }
+    .vp-btn-danger:hover { color: #dc3545; border-color: #dc3545; }
+    .vp-load-more {
+        display: block;
+        width: 100%;
+        padding: 8px;
+        margin-top: 4px;
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-sm, 4px);
+        background: transparent;
+        color: var(--accent-primary, #3B82F6);
+        font-size: 0.8125rem;
+        cursor: pointer;
+        transition: all 150ms ease;
+    }
+    .vp-load-more:hover {
+        background: var(--accent-primary, #3B82F6);
+        color: #fff;
+    }
+    /* ── Video Panel Tabs ── */
+    .vp-tabs { display: flex; gap: 2px; flex: 1; min-width: 0; }
+    .vp-tab {
+        flex: 1; padding: 6px; border: none; border-radius: 6px;
+        background: transparent; color: var(--text-secondary);
+        font-size: 12px; font-weight: 600; cursor: pointer;
+        transition: all 150ms ease;
+    }
+    .vp-tab.active { background: var(--accent-primary, #3B82F6); color: #fff; }
+    .vp-tab:hover:not(.active) { background: var(--bg-hover, rgba(255,255,255,0.06)); }
+    .vp-folder-row {
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--border-color, var(--border));
+        flex-shrink: 0;
+    }
+    .vp-folder-row select {
+        width: 100%;
+        padding: 4px 8px;
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-sm, 4px);
+        background: var(--bg-primary, #fff);
+        color: var(--text-primary);
+        font-size: 0.8125rem;
+    }
+    [data-theme="dark"] .vp-folder-row select { background: rgba(15, 23, 42, 0.8); }
+    /* ── Sentry Timeline ── */
+    .sentry-timeline { padding: 12px; }
+    .st-summary {
+        font-size: 13px; color: var(--text-secondary);
+        margin-bottom: 12px; padding-bottom: 8px;
+        border-bottom: 1px solid var(--border-color, var(--border));
+    }
+    .st-event {
+        display: flex; gap: 12px; margin-bottom: 16px;
+        position: relative;
+    }
+    .st-event::before {
+        content: ''; position: absolute;
+        left: 7px; top: 18px; bottom: -16px; width: 2px;
+        background: var(--border-color, #333);
+    }
+    .st-event:last-child::before { display: none; }
+    .st-dot {
+        width: 16px; height: 16px; border-radius: 50%;
+        flex-shrink: 0; margin-top: 2px; z-index: 1;
+    }
+    .st-dot.sentry { background: #8b5cf6; }
+    .st-dot.saved { background: #007bff; }
+    .st-card { flex: 1; min-width: 0; }
+    .st-type { font-weight: 600; font-size: 13px; color: var(--text-primary); }
+    .st-date { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+    .st-meta { font-size: 11px; color: var(--text-muted, var(--text-secondary)); margin-top: 4px; }
+    .st-actions { display: flex; gap: 4px; margin-top: 8px; }
+    .st-actions .vp-btn { width: 28px; height: 28px; font-size: 13px; }
+    @media (max-width: 1023px) {
+        .video-panel {
+            width: 100vw;
+            padding-bottom: var(--bottomtab-height, 56px);
+        }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .video-panel { transition: none !important; }
     }
 </style>
 
-<div class="container" style="max-width: 100%; padding: 0 12px;">
-    <div class="map-container">
-        <!-- Toolbar -->
-        <div class="map-toolbar">
-            <button id="btnTrips" class="active" onclick="showTrips()">🛣️ Trips</button>
-            <select id="tripFilter" onchange="filterTrips()">
-                <option value="">All Trips</option>
-            </select>
-            <div class="separator"></div>
-            <button id="btnEvents" onclick="toggleEvents()">⚡ Events</button>
-            <select id="eventFilter" onchange="filterEvents()" style="display:none">
-                <option value="">All Events</option>
-                <option value="harsh_brake">Harsh Braking</option>
-                <option value="emergency_brake">Emergency Braking</option>
-                <option value="hard_acceleration">Hard Acceleration</option>
-                <option value="sharp_turn">Sharp Turn</option>
-                <option value="speeding">Speeding</option>
-                <option value="fsd_disengage">FSD Disengagement</option>
-                <option value="fsd_engage">FSD Engagement</option>
-            </select>
-            <div class="separator"></div>
-            <button id="btnFsd" onclick="toggleFsdOverlay()">🤖 FSD Overlay</button>
-            <button id="btnHeat" onclick="toggleHeatmap()">🌡️ Heatmap</button>
-            <div style="flex:1"></div>
-            <button id="btnIndex" onclick="triggerIndex()">🔄 Index Videos</button>
+<div class="map-container">
+    <!-- Hidden select controls (kept for data/filtering logic) -->
+    <div class="map-hidden-controls">
+        <select id="tripFilter" onchange="filterTrips()">
+            <option value="">All Trips</option>
+        </select>
+    </div>
+
+    <!-- Map -->
+    <div id="map"></div>
+
+    <!-- Trip Card (bottom-left floating) -->
+    <div class="trip-card" id="tripCard">
+        <div class="trip-card-nav">
+            <button class="trip-nav-btn" id="tripPrev" onclick="cycleTrip(-1)" aria-label="Previous trip">
+                <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-left"></use></svg>
+            </button>
+            <div class="trip-card-info">
+                <div class="trip-card-date" id="tripCardDate">Loading...</div>
+                <div class="trip-card-stats" id="tripCardStats">&mdash;</div>
+            </div>
+            <button class="trip-nav-btn" id="tripNext" onclick="cycleTrip(1)" aria-label="Next trip">
+                <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-right"></use></svg>
+            </button>
         </div>
-
-        <!-- Stats bar -->
-        <div class="stats-bar" id="statsBar">
-            <div class="stat">🛣️ <span class="stat-value" id="statTrips">—</span> trips</div>
-            <div class="stat">📍 <span class="stat-value" id="statWaypoints">—</span> points</div>
-            <div class="stat">⚡ <span class="stat-value" id="statEvents">—</span> events</div>
-            <div class="stat">📏 <span class="stat-value" id="statDistance">—</span> mi</div>
-            <div class="stat">📁 <span class="stat-value" id="statFiles">—</span> indexed</div>
+        <div class="trip-card-indexed" id="tripCardIndexed">
+            <span id="tripIndexedCount">&mdash;</span> clips indexed
+            <button class="trip-card-all-btn" id="tripAllBtn" onclick="showAllTrips()">All trips</button>
         </div>
+    </div>
 
-        <!-- Indexer status -->
-        <div class="indexer-status" id="indexerStatus" style="display:none"></div>
+    <!-- FAB Group (right-side floating) -->
+    <div class="map-fab-group" id="mapFabs">
+        <button class="map-fab" id="btnVideos" onclick="toggleVideoPanel()" aria-label="Video browser" title="Videos">
+            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-video"></use></svg>
+        </button>
+        <div style="position:relative">
+            <button class="map-fab" id="btnFsd" onclick="toggleFsdOverlay()" aria-label="FSD overlay" title="FSD Overlay">
+                <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-layers"></use></svg>
+            </button>
+        </div>
+        <button class="map-fab" id="btnHeat" onclick="toggleHeatmap()" aria-label="Heatmap" title="Heatmap">
+            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-thermometer"></use></svg>
+        </button>
+        <button class="map-fab" id="btnIndex" onclick="triggerIndex()" aria-label="Index videos" title="Index Videos">
+            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+        </button>
+    </div>
 
-        <!-- Map -->
-        <div id="map"></div>
+    <!-- Indexer status (floating, centered top) -->
+    <div class="indexer-status" id="indexerStatus" style="display:none"></div>
 
-        <!-- Legend -->
-        <div class="legend" id="legend" style="display:none">
-            <strong>Events</strong>
-            <div class="legend-item"><span class="legend-dot" style="background:#dc3545"></span> Critical</div>
-            <div class="legend-item"><span class="legend-dot" style="background:#ffc107"></span> Warning</div>
-            <div class="legend-item"><span class="legend-dot" style="background:#17a2b8"></span> Info</div>
-            <div style="margin-top:6px"><strong>FSD</strong></div>
-            <div class="legend-item"><span class="legend-dot fsd-engaged"></span> Engaged</div>
-            <div class="legend-item"><span class="legend-dot fsd-manual"></span> Manual</div>
+    <!-- Video Browser Slide-out Panel -->
+    <div class="video-panel" id="videoPanel">
+        <div class="video-panel-header">
+            <div class="vp-tabs">
+                <button class="vp-tab active" id="vpTabClips" onclick="vpShowClips()">Clips</button>
+                <button class="vp-tab" id="vpTabSentry" onclick="vpShowSentry()">Sentry</button>
+            </div>
+            <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel">✕</button>
+        </div>
+        <div class="vp-folder-row" id="vpFolderRow">
+            <select id="vpFolder" onchange="loadVideoList()">
+                <option value="RecentClips">Recent Clips</option>
+                <option value="SavedClips">Saved Clips</option>
+                <option value="SentryClips">Sentry Clips</option>
+            </select>
+        </div>
+        <div class="video-panel-list" id="vpList">
+            <div class="vp-empty">Open to browse videos</div>
         </div>
     </div>
 </div>
@@ -202,7 +675,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 // Layer groups
 const tripLayer = L.layerGroup().addTo(map);
 const eventLayer = L.layerGroup();
-const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true });
+const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true }).addTo(map);
 const fsdLayer = L.layerGroup();
 let heatLayer = null;
 
@@ -211,6 +684,8 @@ let fsdVisible = false;
 let heatVisible = false;
 let allTrips = [];
 let allEvents = [];
+let currentTripIndex = 0;
+let showingAllTrips = false;
 
 // Event severity colors
 // Build a deep link to the event player for a video path
@@ -238,33 +713,127 @@ const severityColors = {
     info: '#17a2b8',
 };
 
+// Balloon-pin marker SVGs: circular colored bubble with white skeuomorphic icon + pointer tail
+// Icons centered at (16,13) inside 32x42 viewBox — designed to look like actual car controls
+const eventMarkerSvgs = {
+    // Brake pedal — rectangular pedal shape pressed down
+    harsh_brake: { color: '#dc3545', icon:
+        '<rect x="11" y="6" width="10" height="5" rx="1.5" fill="#fff"/>' +  // pedal pad
+        '<rect x="14" y="11" width="4" height="7" rx="1" fill="#fff"/>' +    // pedal arm
+        '<line x1="12" y1="20" x2="20" y2="20" stroke="#fff" stroke-width="2" stroke-linecap="round"/>' // floor
+    },
+    // Brake pedal with !! — emergency
+    emergency_brake: { color: '#b91c1c', icon:
+        '<rect x="11" y="6" width="10" height="5" rx="1.5" fill="#fff"/>' +
+        '<rect x="14" y="11" width="4" height="5" rx="1" fill="#fff"/>' +
+        '<line x1="12" y1="18" x2="20" y2="18" stroke="#fff" stroke-width="2" stroke-linecap="round"/>' +
+        '<line x1="16" y1="6.5" x2="16" y2="9" stroke="#b91c1c" stroke-width="2" stroke-linecap="round"/>' + // !
+        '<circle cx="16" cy="10" r="0.8" fill="#b91c1c"/>'
+    },
+    // Gas/accelerator pedal — side profile: thin pedal hinged at floor, tilted forward (pressed)
+    hard_acceleration: { color: '#16a34a', icon:
+        '<path d="M19,6 L15,6 L11,18 L14,18 L17,9 L19,9 Z" fill="#fff"/>' +   // pedal shape (angled thin)
+        '<line x1="11" y1="20" x2="21" y2="20" stroke="#fff" stroke-width="2" stroke-linecap="round"/>' +  // floor
+        '<circle cx="12" cy="18.5" r="1.5" fill="none" stroke="#fff" stroke-width="1.5"/>'  // hinge pivot
+    },
+    // Steering wheel turned — wheel with 3 spokes, rotated
+    sharp_turn: { color: '#f59e0b', icon:
+        '<g transform="rotate(-30,16,13)">' +
+        '<circle cx="16" cy="13" r="7.5" fill="none" stroke="#fff" stroke-width="2.5"/>' +
+        '<circle cx="16" cy="13" r="2" fill="#fff"/>' +
+        '<line x1="16" y1="5.5" x2="16" y2="11" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="9.5" y1="16.5" x2="14.2" y2="14.3" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="22.5" y1="16.5" x2="17.8" y2="14.3" stroke="#fff" stroke-width="2.2"/>' +
+        '</g>'
+    },
+    // Steering wheel with "A" badge — FSD/autopilot engaged
+    fsd_engage: { color: '#3b82f6', icon:
+        '<circle cx="16" cy="13" r="7.5" fill="none" stroke="#fff" stroke-width="2.5"/>' +
+        '<circle cx="16" cy="13" r="2" fill="#fff"/>' +
+        '<line x1="16" y1="5.5" x2="16" y2="11" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="9.5" y1="16.5" x2="14.2" y2="14.3" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="22.5" y1="16.5" x2="17.8" y2="14.3" stroke="#fff" stroke-width="2.2"/>' +
+        '<circle cx="22" cy="7" r="4" fill="#fff"/>' +  // badge bg
+        '<text x="22" y="9.5" text-anchor="middle" font-size="7" font-weight="bold" fill="#3b82f6" font-family="sans-serif">A</text>'
+    },
+    // Hand on wheel — driver takeover
+    fsd_disengage: { color: '#f97316', icon:
+        '<circle cx="16" cy="14" r="7" fill="none" stroke="#fff" stroke-width="2.2"/>' +
+        '<line x1="16" y1="7" x2="16" y2="11.5" stroke="#fff" stroke-width="2"/>' +
+        '<line x1="10" y1="17.5" x2="14" y2="15.5" stroke="#fff" stroke-width="2"/>' +
+        '<line x1="22" y1="17.5" x2="18" y2="15.5" stroke="#fff" stroke-width="2"/>' +
+        // Hand gripping bottom of wheel
+        '<path d="M11.5,18 Q11.5,21 16,21 Q20.5,21 20.5,18" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>'
+    },
+    // Speedometer — half circle gauge with needle in red zone
+    speeding: { color: '#ec4899', icon:
+        '<path d="M7,18 A9,9 0 1,1 25,18" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>' +
+        '<line x1="16" y1="16" x2="21" y2="9" stroke="#fff" stroke-width="3" stroke-linecap="round"/>' + // needle pointing right (fast)
+        '<circle cx="16" cy="16" r="2" fill="#fff"/>' +
+        // Speed marks
+        '<line x1="9" y1="10" x2="10.5" y2="11.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>' +
+        '<line x1="16" y1="6.5" x2="16" y2="8.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>' +
+        '<line x1="23" y1="10" x2="21.5" y2="11.5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>'
+    },
+    // Eye — sentry mode
+    sentry: { color: '#8b5cf6', icon:
+        '<path d="M7,13 Q16,4 25,13 Q16,22 7,13 Z" fill="none" stroke="#fff" stroke-width="2.2"/>' +
+        '<circle cx="16" cy="13" r="3.5" fill="#fff"/>' +
+        '<circle cx="16" cy="13" r="1.8" fill="#8b5cf6"/>'
+    },
+    // Bookmark/flag — saved clip
+    saved: { color: '#007bff', icon:
+        '<path d="M10,6 L22,6 L22,21 L16,17.5 L10,21 Z" fill="none" stroke="#fff" stroke-width="2.5" stroke-linejoin="round"/>'
+    },
+};
+
+function makeEventIcon(eventType) {
+    const cfg = eventMarkerSvgs[eventType] || { color: '#6c757d', icon: '<circle cx="16" cy="13" r="5" fill="#fff"/>' };
+    const id = 'ds_' + eventType;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 42" width="34" height="44">` +
+        `<defs><filter id="${id}"><feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-opacity=".3"/></filter></defs>` +
+        `<g filter="url(#${id})">` +
+        `<circle cx="16" cy="14.5" r="13.5" fill="${cfg.color}" stroke="#fff" stroke-width="2"/>` +
+        `<polygon points="11,26 16,37 21,26" fill="${cfg.color}" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>` +
+        `</g>` +
+        `${cfg.icon}` +
+        `</svg>`;
+    return L.divIcon({
+        html: svg,
+        className: 'event-svg-icon',
+        iconSize: [34, 44],
+        iconAnchor: [17, 43],
+        popupAnchor: [0, -40],
+    });
+}
+
 const eventIcons = {
-    harsh_brake: '🔴', emergency_brake: '🔴', hard_acceleration: '🟢',
-    sharp_turn: '🟡', speeding: '🟡', fsd_disengage: '🟠', fsd_engage: '🔵',
-    sentry: '🟣', saved: '🔵',
+    harsh_brake: '🛑', emergency_brake: '‼️', hard_acceleration: '⚡',
+    sharp_turn: '↻', speeding: '💨', fsd_disengage: '✋', fsd_engage: '🤖',
+    sentry: '👁', saved: '🔖',
 };
 
 // --- Data Loading ---
 
 async function loadStats() {
     try {
-        const resp = await fetch('/map/api/stats');
+        const resp = await fetch('/api/stats');
         const data = await resp.json();
-        document.getElementById('statTrips').textContent = data.trip_count || 0;
-        document.getElementById('statWaypoints').textContent = (data.waypoint_count || 0).toLocaleString();
-        document.getElementById('statEvents').textContent = data.event_count || 0;
-        document.getElementById('statDistance').textContent = ((data.total_distance_km || 0) * 0.621371).toFixed(1);
-        document.getElementById('statFiles').textContent = data.indexed_file_count || 0;
+        const indexedEl = document.getElementById('tripIndexedCount');
+        if (indexedEl) indexedEl.textContent = (data.indexed_file_count || 0).toLocaleString();
     } catch(e) { console.error('Failed to load stats:', e); }
 }
 
 async function loadTrips() {
     try {
-        const resp = await fetch('/map/api/trips?limit=200');
+        // Remember current selection before refresh
+        const prevTripId = allTrips.length > 0 ? allTrips[currentTripIndex]?.id : null;
+
+        const resp = await fetch('/api/trips?limit=200');
         const data = await resp.json();
         allTrips = data.trips || [];
 
-        // Populate trip dropdown
+        // Populate hidden trip dropdown (kept for data reference)
         const sel = document.getElementById('tripFilter');
         sel.replaceChildren();
         const defaultOpt = document.createElement('option');
@@ -280,17 +849,109 @@ async function loadTrips() {
             sel.appendChild(opt);
         });
 
-        // Default to most recent trip (first in list, sorted by start_time DESC)
-        if (allTrips.length > 0 && !sel.value) {
-            sel.value = allTrips[0].id;
+        if (allTrips.length > 0) {
+            // Restore previous selection if it still exists
+            const restoredIdx = prevTripId != null
+                ? allTrips.findIndex(t => t.id === prevTripId)
+                : -1;
+            currentTripIndex = restoredIdx >= 0 ? restoredIdx : 0;
+
+            updateTripCard();
+            sel.value = allTrips[currentTripIndex].id;
+            const trip = allTrips[currentTripIndex];
             const saved = allTrips;
-            allTrips = [allTrips[0]];
+            allTrips = [trip];
             await renderTrips();
             allTrips = saved;
         } else {
+            updateTripCard();
             await renderTrips();
         }
     } catch(e) { console.error('Failed to load trips:', e); }
+}
+
+// Update trip card display based on currentTripIndex
+function updateTripCard() {
+    const dateEl = document.getElementById('tripCardDate');
+    const statsEl = document.getElementById('tripCardStats');
+    const prevBtn = document.getElementById('tripPrev');
+    const nextBtn = document.getElementById('tripNext');
+
+    if (!allTrips.length) {
+        dateEl.textContent = 'No trips';
+        statsEl.textContent = '\u2014';
+        if (prevBtn) prevBtn.disabled = true;
+        if (nextBtn) nextBtn.disabled = true;
+        return;
+    }
+
+    const trip = allTrips[currentTripIndex];
+    const date = formatLocalTime(trip.start_time);
+    const dist = ((trip.distance_km || 0) * 0.621371).toFixed(1);
+    const dur = Math.round((trip.duration_seconds || 0) / 60);
+    const events = trip.event_count || 0;
+
+    dateEl.textContent = date;
+
+    const statParts = [`${dist} mi`];
+    if (dur > 0) statParts.push(`${dur} min`);
+    if (events > 0) statParts.push(`${events} events`);
+    statsEl.textContent = statParts.join(' \u00B7 ');
+
+    if (prevBtn) prevBtn.disabled = (currentTripIndex >= allTrips.length - 1);
+    if (nextBtn) nextBtn.disabled = (currentTripIndex <= 0);
+}
+
+// Cycle through trips via trip card arrows
+function cycleTrip(direction) {
+    if (!allTrips.length) return;
+
+    // If showing all trips, exit to single-trip view
+    if (showingAllTrips) {
+        showingAllTrips = false;
+        // direction +1 (next/newer) → index 0, direction -1 (prev/older) → last
+        currentTripIndex = direction > 0 ? 0 : allTrips.length - 1;
+    } else {
+        // allTrips is sorted newest-first; -1 = older (higher index), +1 = newer (lower index)
+        const newIndex = currentTripIndex - direction;
+        if (newIndex < 0 || newIndex >= allTrips.length) return;
+        currentTripIndex = newIndex;
+    }
+
+    updateTripCard();
+
+    // Show this single trip on the map
+    const trip = allTrips[currentTripIndex];
+    const sel = document.getElementById('tripFilter');
+    sel.value = trip.id;
+    const saved = allTrips;
+    allTrips = [trip];
+    renderTrips().then(() => { allTrips = saved; });
+}
+
+// Show all trips on the map
+function showAllTrips() {
+    if (!allTrips.length) {
+        showToast('No trips available yet. Try indexing videos first.', 'warning');
+        return;
+    }
+    showingAllTrips = true;
+    const sel = document.getElementById('tripFilter');
+    sel.value = '';
+
+    const dateEl = document.getElementById('tripCardDate');
+    const statsEl = document.getElementById('tripCardStats');
+    dateEl.textContent = `All Trips (${allTrips.length})`;
+    const totalDist = allTrips.reduce((s, t) => s + (t.distance_km || 0), 0) * 0.621371;
+    statsEl.textContent = `${totalDist.toFixed(1)} mi total`;
+
+    const prevBtn = document.getElementById('tripPrev');
+    const nextBtn = document.getElementById('tripNext');
+    // Enable arrows so user can exit "all" mode by cycling
+    if (prevBtn) prevBtn.disabled = false;
+    if (nextBtn) nextBtn.disabled = false;
+
+    renderTrips();
 }
 
 function filterTrips() {
@@ -309,7 +970,7 @@ function filterTrips() {
 
 async function loadTripRoute(tripId) {
     try {
-        const resp = await fetch(`/map/api/trip/${tripId}/route`);
+        const resp = await fetch(`/api/trip/${tripId}/route`);
         return await resp.json();
     } catch(e) {
         console.error('Failed to load route:', e);
@@ -318,12 +979,8 @@ async function loadTripRoute(tripId) {
 }
 
 async function loadEvents() {
-    const filter = document.getElementById('eventFilter').value;
-    const params = new URLSearchParams({ limit: 500 });
-    if (filter) params.set('type', filter);
-
     try {
-        const resp = await fetch(`/map/api/events?${params}`);
+        const resp = await fetch('/api/events?limit=500');
         const data = await resp.json();
         allEvents = data.events || [];
         renderEvents();
@@ -477,14 +1134,26 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
             <button class="close-btn" onclick="closeVideoOverlay()">✕</button>
         </div>
         <div class="cam-switcher" id="camSwitcher">${cameraBtns}</div>
-        <video id="overlayVideo" controls autoplay muted></video>
+        <div style="position:relative">
+            <video id="overlayVideo" controls autoplay muted></video>
+            <div class="overlay-hud" id="overlayHud">
+                <div class="oh-gear" id="olGear">P</div>
+                <div class="oh-pedal oh-brake" id="olBrake"><span class="oh-fill"><i></i></span><span class="oh-lbl">B</span></div>
+                <span class="oh-blinker left" id="olBlinkerL">◀</span>
+                <div class="oh-speed"><span class="oh-speed-val" id="olSpeedVal">0</span><span class="oh-speed-unit">mph</span></div>
+                <span class="oh-blinker right" id="olBlinkerR">▶</span>
+                <div class="oh-wheel" id="olWheel"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8" stroke="#fff" stroke-width="1.4"/><path d="M6.8 9.8H17.2" stroke="#fff" stroke-width="2" stroke-linecap="round"/><path d="M12 9.8V16.8" stroke="#fff" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.8" stroke="#fff" stroke-width="1.4"/></svg></div>
+                <div class="oh-pedal oh-throttle" id="olThrottle"><span class="oh-fill"><i></i></span><span class="oh-lbl">A</span></div>
+                <div class="oh-ap" id="olAP2"></div>
+            </div>
+        </div>
         <div class="video-overlay-info" id="overlayInfo">
-            <span id="olSpeed">🏎️ — mph</span>
-            <span id="olAP">🤖 —</span>
             <span id="olCoords">📍 —</span>
             <div style="margin-left:auto; display:flex; gap:4px;">
                 <button class="nav-btn" onclick="navigateClip(-1)" title="Previous clip">⏮</button>
                 <button class="nav-btn" onclick="navigateClip(1)" title="Next clip">⏭</button>
+                <button class="nav-btn" onclick="overlayDownload()" title="Download ZIP">⬇</button>
+                <button class="nav-btn" onclick="overlayDelete()" title="Delete" style="color:#dc3545">🗑</button>
             </div>
         </div>
     `;
@@ -508,8 +1177,16 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
     // Live telemetry on timeupdate
     video.addEventListener('timeupdate', onOverlayTimeUpdate);
 
+    // Show/hide HUD based on telemetry availability
+    const hud = document.getElementById('overlayHud');
+    if (hud) {
+        hud.style.display = overlayWaypoints.length > 0 ? '' : 'none';
+    }
+
     // Initial telemetry
-    updateOverlayTelemetry(waypoint);
+    if (overlayWaypoints.length > 0) {
+        updateOverlayTelemetry(waypoint);
+    }
 
     // Draggable
     let isDragging = false, dragX, dragY;
@@ -553,17 +1230,50 @@ function onOverlayTimeUpdate() {
 }
 
 function updateOverlayTelemetry(wp) {
-    const speed = document.getElementById('olSpeed');
-    const apEl = document.getElementById('olAP');
     const coords = document.getElementById('olCoords');
-    if (speed) speed.textContent = `🏎️ ${Math.round(Math.abs((wp.speed_mps || 0) * 2.237))} mph`;
-    if (apEl) {
-        const ap = wp.autopilot_state || 'NONE';
-        const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(ap);
-        apEl.textContent = `🤖 ${ap}`;
-        apEl.style.color = engaged ? '#28a745' : '';
-    }
     if (coords) coords.textContent = `📍 ${(wp.lat || 0).toFixed(4)}, ${(wp.lon || 0).toFixed(4)}`;
+
+    // Speed
+    const speedVal = document.getElementById('olSpeedVal');
+    if (speedVal) speedVal.textContent = Math.round(Math.abs((wp.speed_mps || 0) * 2.237));
+
+    // Gear
+    const gear = document.getElementById('olGear');
+    if (gear) {
+        const g = (wp.gear || 'PARK').replace('GEAR_', '');
+        gear.textContent = g.charAt(0);
+    }
+
+    // Steering wheel
+    const wheel = document.getElementById('olWheel');
+    if (wheel) wheel.style.setProperty('--oh-wheel', `${wp.steering_angle || 0}deg`);
+
+    // Brake
+    const brake = document.getElementById('olBrake');
+    if (brake) brake.style.setProperty('--oh-fill', wp.brake_applied ? '100%' : '0%');
+
+    // Throttle (acceleration_x as proxy — positive = accelerating)
+    const throttle = document.getElementById('olThrottle');
+    if (throttle) {
+        const accel = Math.max(0, (wp.acceleration_x || 0));
+        const pct = Math.min(100, accel * 15); // scale: 6.5 m/s² = 100%
+        throttle.style.setProperty('--oh-fill', `${pct}%`);
+    }
+
+    // Blinkers (not in waypoints currently, but ready)
+    const bL = document.getElementById('olBlinkerL');
+    const bR = document.getElementById('olBlinkerR');
+    if (bL) bL.classList.toggle('active', !!wp.blinker_on_left);
+    if (bR) bR.classList.toggle('active', !!wp.blinker_on_right);
+
+    // Autopilot
+    const ap = document.getElementById('olAP2');
+    if (ap) {
+        const state = wp.autopilot_state || 'NONE';
+        const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(state);
+        ap.textContent = engaged ? state.replace('_', ' ') : '';
+        ap.classList.toggle('active', engaged);
+    }
 }
 
 function switchCamera(angle) {
@@ -680,16 +1390,52 @@ function closeVideoOverlay() {
     overlayClips = [];
 }
 
+function overlayDownload() {
+    const overlay = document.getElementById('videoOverlay');
+    if (!overlay) return;
+    const folder = overlay.dataset.folder;
+    const evt = overlay.dataset.event;
+    if (folder && evt) {
+        window.location.href = '/videos/download_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(evt);
+    } else if (overlayBasePath) {
+        // Fall back to downloading the current single file
+        window.location.href = '/videos/download/' + encodeURIComponent(overlayBasePath + '-' + overlayCurrentAngle + '.mp4');
+    }
+}
+
+async function overlayDelete() {
+    const overlay = document.getElementById('videoOverlay');
+    if (!overlay) return;
+    const folder = overlay.dataset.folder;
+    const evt = overlay.dataset.event;
+    if (!folder || !evt) {
+        if (typeof showToast === 'function') showToast('Cannot determine clip to delete', 'warning');
+        return;
+    }
+    if (!confirm('Delete "' + evt + '" and all camera angles?')) return;
+    try {
+        const resp = await fetch('/videos/delete_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(evt), { method: 'POST' });
+        const data = await resp.json();
+        if (data.success) {
+            closeVideoOverlay();
+            if (typeof showToast === 'function') showToast('Deleted ' + data.deleted_count + ' files', 'success');
+        } else {
+            if (typeof showToast === 'function') showToast(data.error || 'Delete failed', 'error');
+        }
+    } catch(e) {
+        if (typeof showToast === 'function') showToast('Delete failed: ' + e.message, 'error');
+    }
+}
+
 function renderEvents() {
     eventCluster.clearLayers();
 
     allEvents.forEach(ev => {
         if (!ev.lat || !ev.lon) return;
-        const color = severityColors[ev.severity] || '#17a2b8';
         const icon = eventIcons[ev.event_type] || '📍';
 
-        const marker = L.circleMarker([ev.lat, ev.lon], {
-            radius: 8, fillColor: color, color: '#fff', weight: 2, fillOpacity: 0.9,
+        const marker = L.marker([ev.lat, ev.lon], {
+            icon: makeEventIcon(ev.event_type),
         });
 
         marker.bindPopup(
@@ -706,32 +1452,10 @@ function renderEvents() {
 
 // --- View Switching ---
 
-let eventsVisible = false;
-
 function showTrips() {
     currentView = 'trips';
-    document.getElementById('btnTrips').classList.add('active');
-    document.getElementById('tripFilter').style.display = '';
     tripLayer.addTo(map);
     loadTrips();
-}
-
-function toggleEvents() {
-    eventsVisible = !eventsVisible;
-    document.getElementById('btnEvents').classList.toggle('active', eventsVisible);
-    document.getElementById('eventFilter').style.display = eventsVisible ? '' : 'none';
-    document.getElementById('legend').style.display = eventsVisible ? 'block' : 'none';
-
-    if (eventsVisible) {
-        eventCluster.addTo(map);
-        loadEvents();
-    } else {
-        map.removeLayer(eventCluster);
-    }
-}
-
-function filterEvents() {
-    if (eventsVisible) loadEvents();
 }
 
 function toggleFsdOverlay() {
@@ -756,7 +1480,7 @@ async function toggleHeatmap() {
     // Build heatmap from all trip waypoints
     if (!heatLayer) {
         try {
-            const resp = await fetch('/map/api/trips?limit=500');
+            const resp = await fetch('/api/trips?limit=500');
             const data = await resp.json();
             const heatPoints = [];
 
@@ -769,7 +1493,7 @@ async function toggleHeatmap() {
             }
 
             // Also add event locations with higher intensity
-            const evResp = await fetch('/map/api/events?limit=1000');
+            const evResp = await fetch('/api/events?limit=1000');
             const evData = await evResp.json();
             for (const ev of (evData.events || [])) {
                 if (!ev.lat || !ev.lon) continue;
@@ -797,22 +1521,22 @@ async function toggleHeatmap() {
 async function triggerIndex() {
     const btn = document.getElementById('btnIndex');
     btn.disabled = true;
-    btn.textContent = '⏳ Starting...';
+    btn.classList.add('spinning');
 
     try {
-        const resp = await fetch('/map/api/index/trigger', { method: 'POST' });
+        const resp = await fetch('/api/index/trigger', { method: 'POST' });
         const data = await resp.json();
         if (data.success) {
             pollIndexer();
         } else {
             alert(data.message || 'Failed to start indexer');
             btn.disabled = false;
-            btn.textContent = '🔄 Index Videos';
+            btn.classList.remove('spinning');
         }
     } catch(e) {
         alert('Failed to start indexer: ' + e.message);
         btn.disabled = false;
-        btn.textContent = '🔄 Index Videos';
+        btn.classList.remove('spinning');
     }
 }
 
@@ -821,46 +1545,343 @@ async function pollIndexer() {
     const btn = document.getElementById('btnIndex');
 
     try {
-        const resp = await fetch('/map/api/index/status');
+        const resp = await fetch('/api/index/status');
         const data = await resp.json();
 
         if (data.running) {
             statusDiv.style.display = 'block';
             statusDiv.className = 'indexer-status running';
-            statusDiv.textContent = `⏳ ${data.progress || 'Indexing...'} (${data.files_done || 0}/${data.files_total || '?'})`;
+            statusDiv.textContent = `Indexing... (${data.files_done || 0}/${data.files_total || '?'})`;
             btn.disabled = true;
-            btn.textContent = '⏳ Indexing...';
+            btn.classList.add('spinning');
+            // Refresh trips periodically while indexer runs (every 10s)
+            if (!pollIndexer._lastTripRefresh ||
+                Date.now() - pollIndexer._lastTripRefresh > 10000) {
+                pollIndexer._lastTripRefresh = Date.now();
+                loadTrips();
+                loadStats();
+            }
             setTimeout(pollIndexer, 2000);
         } else {
             statusDiv.style.display = data.error ? 'block' : 'none';
             if (data.error) {
                 statusDiv.className = 'indexer-status';
-                statusDiv.textContent = `❌ ${data.error}`;
+                statusDiv.textContent = data.error;
             } else if (data.progress) {
                 statusDiv.style.display = 'block';
                 statusDiv.className = 'indexer-status';
-                statusDiv.textContent = `✅ ${data.progress}`;
+                statusDiv.textContent = data.progress;
                 setTimeout(() => { statusDiv.style.display = 'none'; }, 10000);
             }
             btn.disabled = false;
-            btn.textContent = '🔄 Index Videos';
-            // Reload data
+            btn.classList.remove('spinning');
+            pollIndexer._lastTripRefresh = 0;
+            // Reload data after completion
             loadStats();
-            if (currentView === 'trips') loadTrips();
-            else loadEvents();
+            loadTrips();
+            loadEvents();
         }
     } catch(e) {
         btn.disabled = false;
-        btn.textContent = '🔄 Index Videos';
+        btn.classList.remove('spinning');
     }
 }
+
+// --- Video Browser Panel ---
+let videoPanelOpen = false;
+let vpPage = 1;
+let vpHasNext = false;
+let vpFolderStructure = 'events';
+let vpCurrentTab = 'clips';
+
+function toggleVideoPanel() {
+    videoPanelOpen = !videoPanelOpen;
+    document.getElementById('videoPanel').classList.toggle('open', videoPanelOpen);
+    document.getElementById('btnVideos').classList.toggle('active', videoPanelOpen);
+    if (videoPanelOpen) {
+        if (vpCurrentTab === 'clips') { vpPage = 1; loadVideoList(); }
+        else { loadSentryTimeline(); }
+    }
+}
+
+function vpShowClips() {
+    vpCurrentTab = 'clips';
+    document.getElementById('vpTabClips').classList.add('active');
+    document.getElementById('vpTabSentry').classList.remove('active');
+    document.getElementById('vpFolderRow').style.display = '';
+    vpPage = 1;
+    loadVideoList();
+}
+
+function vpShowSentry() {
+    vpCurrentTab = 'sentry';
+    document.getElementById('vpTabSentry').classList.add('active');
+    document.getElementById('vpTabClips').classList.remove('active');
+    document.getElementById('vpFolderRow').style.display = 'none';
+    loadSentryTimeline();
+}
+
+async function loadSentryTimeline() {
+    const list = document.getElementById('vpList');
+    list.innerHTML = '<div class="vp-loading">Loading\u2026</div>';
+
+    try {
+        const resp = await fetch('/api/sentry-events');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+
+        if (!data.events || data.events.length === 0) {
+            list.innerHTML = '<div class="vp-empty">No Sentry or Saved events</div>';
+            return;
+        }
+
+        const events = data.events;
+        // Build date range for summary
+        const first = events[events.length - 1];
+        const last = events[0];
+        const fmtShort = function(iso) {
+            if (!iso) return '';
+            try {
+                var d = new Date(iso.replace(' ', 'T'));
+                return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+            } catch(e) { return ''; }
+        };
+        const rangeStr = events.length > 1
+            ? fmtShort(first.timestamp) + ' \u2013 ' + fmtShort(last.timestamp)
+            : fmtShort(last.timestamp);
+
+        let html = '<div class="sentry-timeline">';
+        html += '<div class="st-summary"><strong>' + events.length + ' Event' + (events.length !== 1 ? 's' : '') + '</strong> \u00b7 <span>' + rangeStr + '</span></div>';
+
+        events.forEach(function(ev) {
+            const isSentry = ev.event_type === 'sentry';
+            const dotClass = isSentry ? 'sentry' : 'saved';
+            const typeLabel = isSentry ? '\uD83D\uDFE3 Sentry Mode' : '\uD83D\uDD35 Saved Clip';
+            const dateStr = formatLocalTime(ev.timestamp);
+            const folder = (ev.event_folder || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const sourceFolder = (ev.source_folder || (isSentry ? 'SentryClips' : 'SavedClips')).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+            const clips = ev.clip_count != null ? ev.clip_count : '?';
+            const cams = ev.camera_count != null ? ev.camera_count : '?';
+            const sizePart = ev.size_mb ? Math.round(ev.size_mb) + ' MB' : '';
+            const metaParts = [clips + ' clips', cams + ' cameras'];
+            if (sizePart) metaParts.push(sizePart);
+
+            const hasCoords = ev.lat != null && ev.lon != null && (ev.lat !== 0 || ev.lon !== 0);
+
+            html += '<div class="st-event" data-folder="' + sourceFolder + '" data-name="' + folder + '">';
+            html += '<div class="st-dot ' + dotClass + '"></div>';
+            html += '<div class="st-card">';
+            html += '<div class="st-type">' + typeLabel + '</div>';
+            html += '<div class="st-date">' + dateStr + '</div>';
+            html += '<div class="st-meta">' + metaParts.join(' \u00b7 ') + '</div>';
+            html += '<div class="st-actions">';
+            html += '<button class="vp-btn st-btn-play" title="Play">&#9654;</button>';
+            html += '<button class="vp-btn st-btn-dl" title="Download ZIP">&#11015;</button>';
+            if (hasCoords) {
+                html += '<button class="vp-btn st-btn-map" title="Show on Map" data-lat="' + ev.lat + '" data-lon="' + ev.lon + '">&#128205;</button>';
+            }
+            html += '<button class="vp-btn vp-btn-danger st-btn-del" title="Delete">&#128465;</button>';
+            html += '</div></div></div>';
+        });
+
+        html += '</div>';
+        list.innerHTML = html;
+    } catch(e) {
+        console.error('Failed to load sentry timeline:', e);
+        list.innerHTML = '<div class="vp-empty">Failed to load events</div>';
+    }
+}
+
+async function loadVideoList(append) {
+    const folder = document.getElementById('vpFolder').value;
+    const list = document.getElementById('vpList');
+    if (!append) { list.innerHTML = '<div class="vp-loading">Loading\u2026</div>'; vpPage = 1; }
+
+    try {
+        const resp = await fetch('/videos/?folder=' + encodeURIComponent(folder) + '&page=' + vpPage, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        vpHasNext = data.has_next;
+        vpFolderStructure = data.folder_structure || 'events';
+
+        if (!append) list.innerHTML = '';
+        if (!data.events || data.events.length === 0) {
+            if (!append) list.innerHTML = '<div class="vp-empty">No videos in this folder</div>';
+            return;
+        }
+
+        data.events.forEach(function(ev) {
+            const card = document.createElement('div');
+            card.className = 'vp-clip';
+
+            const name = ev.name || 'Unknown';
+            const safeName = name.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const dateStr = name.replace(/_/g, ' ').substring(0, 16);
+            const safeDateStr = dateStr.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            const sizeMb = ev.size_mb || 0;
+            const cameras = Object.keys(ev.camera_videos || {}).length;
+            const reason = ev.reason || '';
+            const safeReason = reason.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+            card.innerHTML =
+                '<div class="vp-clip-info">' +
+                    '<div class="vp-clip-date">' + safeDateStr + '</div>' +
+                    '<div class="vp-clip-meta">' + cameras + ' cam\u00b7 ' + sizeMb.toFixed(0) + ' MB</div>' +
+                    (reason ? '<div class="vp-clip-reason">' + safeReason + '</div>' : '') +
+                '</div>' +
+                '<div class="vp-actions">' +
+                    '<button class="vp-btn vp-btn-play" title="Play">&#9654;</button>' +
+                    '<button class="vp-btn vp-btn-dl" title="Download ZIP">&#11015;</button>' +
+                    '<button class="vp-btn vp-btn-danger vp-btn-del" title="Delete">&#128465;</button>' +
+                '</div>';
+
+            // Store data attributes for event delegation (safe from XSS)
+            card.dataset.folder = folder;
+            card.dataset.name = name;
+            card.dataset.structure = vpFolderStructure;
+            list.appendChild(card);
+        });
+
+        // Remove existing load-more button
+        var existingMore = list.querySelector('.vp-load-more');
+        if (existingMore) existingMore.remove();
+
+        if (vpHasNext) {
+            var more = document.createElement('button');
+            more.className = 'vp-load-more';
+            more.textContent = 'Load More';
+            more.onclick = function() { vpPage++; more.remove(); loadVideoList(true); };
+            list.appendChild(more);
+        }
+    } catch(e) {
+        console.error('Failed to load videos:', e);
+        if (!append) list.innerHTML = '<div class="vp-empty">Failed to load videos</div>';
+    }
+}
+
+function vpPlay(folder, name, structure) {
+    openVideoFromPanel(folder, name);
+}
+
+async function openVideoFromPanel(folder, eventName) {
+    // Close the video panel to see the map
+    if (videoPanelOpen) toggleVideoPanel();
+
+    try {
+        // Fetch actual clip paths from the server
+        const resp = await fetch(`/api/event-clips/${encodeURIComponent(folder)}/${encodeURIComponent(eventName)}`);
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        const frontClips = data.front_clips || [];
+        if (frontClips.length === 0) {
+            if (typeof showToast === 'function') showToast('No video clips found', 'warning');
+            return;
+        }
+
+        // Look up waypoints for this clip directly from the DB
+        const firstPath = frontClips[0];
+        let waypoints = [];
+        try {
+            const wpResp = await fetch(`/api/waypoints-for-clip?path=${encodeURIComponent(firstPath)}`);
+            const wpData = await wpResp.json();
+            waypoints = wpData.waypoints || [];
+        } catch(e) {
+            console.warn('Waypoint lookup failed:', e);
+        }
+
+        // Open overlay with the first front clip
+        const wp = waypoints.length > 0
+            ? (waypoints.find(w => w.video_path && firstPath.includes(getBasePath(w.video_path))) || waypoints[0])
+            : { video_path: firstPath, frame_offset: 0 };
+        // Ensure video_path points to the actual clip
+        wp.video_path = firstPath;
+
+        const clickPoint = { x: window.innerWidth / 3, y: window.innerHeight / 4 };
+        openVideoOverlay(wp, clickPoint, waypoints);
+
+        // Store folder/event for download/delete
+        const overlay = document.getElementById('videoOverlay');
+        if (overlay) {
+            overlay.dataset.folder = folder;
+            overlay.dataset.event = eventName;
+        }
+    } catch(e) {
+        console.error('Failed to open video:', e);
+        if (typeof showToast === 'function') showToast('Failed to open video: ' + e.message, 'error');
+    }
+}
+
+function vpDownload(folder, name) {
+    window.location.href = '/videos/download_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name);
+}
+
+async function vpDelete(folder, name) {
+    if (!confirm('Delete "' + name + '" and all its camera angles?')) return;
+    try {
+        var resp = await fetch('/videos/delete_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name), { method: 'POST' });
+        var data = await resp.json();
+        if (data.success) {
+            if (typeof showToast === 'function') showToast('Deleted ' + data.deleted_count + ' files', 'success');
+            loadVideoList();
+        } else {
+            if (typeof showToast === 'function') showToast(data.error || 'Delete failed', 'error');
+        }
+    } catch(e) {
+        if (typeof showToast === 'function') showToast('Delete failed: ' + e.message, 'error');
+    }
+}
+
+// Event delegation for video panel buttons (prevents XSS from inline onclick)
+document.getElementById('vpList').addEventListener('click', function(e) {
+    var btn = e.target.closest('.vp-btn');
+    if (!btn) return;
+
+    // Sentry timeline event buttons
+    var stEvent = btn.closest('.st-event');
+    if (stEvent) {
+        var folder = stEvent.dataset.folder;
+        var name = stEvent.dataset.name;
+        if (btn.classList.contains('st-btn-play')) {
+            openVideoFromPanel(folder, name);
+        } else if (btn.classList.contains('st-btn-dl')) {
+            window.location.href = '/videos/download_event/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name);
+        } else if (btn.classList.contains('st-btn-map')) {
+            var lat = parseFloat(btn.dataset.lat);
+            var lon = parseFloat(btn.dataset.lon);
+            if (!isNaN(lat) && !isNaN(lon)) {
+                map.setView([lat, lon], 16);
+                toggleVideoPanel();
+            }
+        } else if (btn.classList.contains('st-btn-del')) {
+            vpDelete(folder, name).then(function() {
+                if (vpCurrentTab === 'sentry') loadSentryTimeline();
+            });
+        }
+        return;
+    }
+
+    // Clips tab buttons
+    var clip = btn.closest('.vp-clip');
+    if (!clip) return;
+    var folder = clip.dataset.folder;
+    var name = clip.dataset.name;
+    var structure = clip.dataset.structure;
+    if (btn.classList.contains('vp-btn-play')) vpPlay(folder, name, structure);
+    else if (btn.classList.contains('vp-btn-dl')) vpDownload(folder, name);
+    else if (btn.classList.contains('vp-btn-del')) vpDelete(folder, name);
+});
 
 // --- Init ---
 loadStats();
 loadTrips();
+loadEvents();
 
 // Check if indexer is already running on page load
-fetch('/map/api/index/status')
+fetch('/api/index/status')
     .then(r => r.json())
     .then(data => { if (data.running) pollIndexer(); });
 </script>

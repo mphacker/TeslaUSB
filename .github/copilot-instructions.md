@@ -138,3 +138,11 @@ See the full design system for color palettes, typography scale, spacing tokens,
 - Hardcoding color hex values instead of using CSS custom property tokens.
 - Exposing "Edit Mode" / "Present Mode" terminology to users in the UI.
 - Skipping mobile testing — all pages must work at 375px viewport width.
+- **Installing dependencies or files into the git repo** that are not part of the application (see below).
+
+## AI & Testing Workspace Rules
+- **Never install packages, dependencies, or node_modules inside the git repo.** Test tooling (Playwright, npm packages, debug scripts) must live **outside** the repository — use `../playwright-test/` or another folder above the repo root.
+- **Never create temporary test scripts, debug files, or scratch files inside the repo.** If you need a test script, put it in the parent directory or a temp folder.
+- **The git working tree must stay clean.** After any task, `git status` should show only intentional changes. No untracked test artifacts, no `package.json`, no `node_modules/`, no screenshot dumps.
+- **Playwright MCP artifacts** (`.playwright-mcp/`) are already gitignored but should also be cleaned up at end of session.
+- **Python `__pycache__/`** directories are gitignored — never commit `.pyc` files.

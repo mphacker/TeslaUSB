@@ -32,6 +32,7 @@ from blueprints import (
     light_shows_bp,
     music_bp,
     wraps_bp,
+    media_bp,
     analytics_bp,
     mapping_bp,
     cleanup_bp,
@@ -41,19 +42,35 @@ from blueprints import (
     catch_all_redirect
 )
 
+app.register_blueprint(mapping_bp)
 app.register_blueprint(mode_control_bp)
 app.register_blueprint(videos_bp)
 app.register_blueprint(lock_chimes_bp)
 app.register_blueprint(light_shows_bp)
 app.register_blueprint(music_bp)
 app.register_blueprint(wraps_bp)
+app.register_blueprint(media_bp)
 app.register_blueprint(analytics_bp)
-app.register_blueprint(mapping_bp)
 app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)
 app.register_blueprint(fsck_bp)
 # Register captive portal blueprint LAST to avoid conflicting with other routes
 app.register_blueprint(captive_portal_bp)
+
+
+# Global error handler for upload space exhaustion
+@app.errorhandler(OSError)
+def handle_os_error(e):
+    """Catch OSError (e.g., temp space exhaustion during large uploads)."""
+    import errno
+    from flask import request, jsonify, flash, redirect
+    if e.errno == errno.ENOSPC:
+        msg = "Upload too large for available memory. Try uploading fewer or smaller files."
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({"success": False, "error": msg}), 413
+        flash(msg, "error")
+        return redirect(request.referrer or '/')
+    raise e  # Re-raise non-space errors
 
 
 # Serve tile cache service worker from root scope (SW scope must match serving path)
@@ -81,6 +98,25 @@ if __name__ == "__main__":
     print(f"Starting Tesla USB Gadget Web Control")
     print(f"Gadget directory: {GADGET_DIR}")
     print(f"Access the interface at: http://0.0.0.0:{WEB_PORT}/")
+
+    # Auto-index videos on startup if enabled
+    from config import (
+        MAPPING_ENABLED, MAPPING_INDEX_ON_STARTUP, MAPPING_DB_PATH,
+        MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS, MAPPING_TRIP_GAP_MINUTES,
+    )
+    if MAPPING_ENABLED and MAPPING_INDEX_ON_STARTUP:
+        from services.video_service import get_teslacam_path
+        from services.mapping_service import trigger_auto_index
+        teslacam = get_teslacam_path()
+        if teslacam:
+            print("Auto-indexing videos on startup...")
+            trigger_auto_index(
+                db_path=MAPPING_DB_PATH,
+                teslacam_path=teslacam,
+                sample_rate=MAPPING_SAMPLE_RATE,
+                thresholds=MAPPING_EVENT_THRESHOLDS,
+                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+            )
 
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:

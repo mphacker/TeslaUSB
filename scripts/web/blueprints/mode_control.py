@@ -12,9 +12,123 @@ from services.mode_service import mode_display
 from services.ap_service import ap_status, ap_force, get_ap_config, update_ap_config
 from services.wifi_service import get_current_wifi_connection, update_wifi_credentials, get_available_networks, get_wifi_status, clear_wifi_status
 
-mode_control_bp = Blueprint('mode_control', __name__)
+mode_control_bp = Blueprint('mode_control', __name__, url_prefix='/settings')
 
 logger = logging.getLogger(__name__)
+
+
+def _trigger_auto_index_after_mode_switch():
+    """Trigger background video indexing after a mode switch if enabled."""
+    try:
+        from config import (
+            MAPPING_ENABLED, MAPPING_INDEX_ON_MODE_SWITCH, MAPPING_DB_PATH,
+            MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS, MAPPING_TRIP_GAP_MINUTES,
+        )
+        if not MAPPING_ENABLED or not MAPPING_INDEX_ON_MODE_SWITCH:
+            return
+        from services.video_service import get_teslacam_path
+        from services.mapping_service import trigger_auto_index
+        teslacam = get_teslacam_path()
+        if teslacam:
+            trigger_auto_index(
+                db_path=MAPPING_DB_PATH,
+                teslacam_path=teslacam,
+                sample_rate=MAPPING_SAMPLE_RATE,
+                thresholds=MAPPING_EVENT_THRESHOLDS,
+                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+            )
+    except Exception as e:
+        logger.warning("Auto-index after mode switch failed: %s", e)
+
+
+def _get_system_info():
+    """Gather device information for the System settings section."""
+    import socket
+    import platform
+
+    info = {
+        'hostname': socket.gethostname(),
+        'platform': platform.machine(),
+        'python': platform.python_version(),
+    }
+
+    # IP addresses
+    try:
+        result = subprocess.run(
+            ['hostname', '-I'], capture_output=True, text=True, timeout=3
+        )
+        info['ip_addresses'] = result.stdout.strip().split() if result.returncode == 0 else []
+    except Exception:
+        info['ip_addresses'] = []
+
+    # Uptime
+    try:
+        with open('/proc/uptime', 'r') as f:
+            secs = float(f.read().split()[0])
+        days, rem = divmod(int(secs), 86400)
+        hours, rem = divmod(rem, 3600)
+        mins = rem // 60
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0:
+            parts.append(f"{hours}h")
+        parts.append(f"{mins}m")
+        info['uptime'] = ' '.join(parts)
+    except Exception:
+        info['uptime'] = 'unknown'
+
+    # Disk image sizes
+    from config import IMG_CAM_PATH, IMG_LIGHTSHOW_PATH, IMG_MUSIC_PATH, MUSIC_ENABLED
+    images = [
+        ('TeslaCam', IMG_CAM_PATH),
+        ('LightShow', IMG_LIGHTSHOW_PATH),
+    ]
+    if MUSIC_ENABLED:
+        images.append(('Music', IMG_MUSIC_PATH))
+    info['disk_images'] = []
+    for label, path in images:
+        try:
+            size = os.path.getsize(path)
+            info['disk_images'].append({
+                'label': label,
+                'size_gb': round(size / (1024 ** 3), 1),
+            })
+        except OSError:
+            pass
+
+    # Git version
+    try:
+        result = subprocess.run(
+            ['git', '-c', f'safe.directory={GADGET_DIR}',
+             '--no-pager', 'log', '--oneline', '-1'],
+            capture_output=True, text=True, timeout=3,
+            cwd=GADGET_DIR,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            info['version'] = result.stdout.strip()
+        else:
+            info['version'] = 'unknown'
+    except Exception:
+        info['version'] = 'unknown'
+
+    # Memory
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = {}
+            for line in f:
+                k, _, v = line.partition(':')
+                if v:
+                    meminfo[k.strip()] = v.strip()
+            total_kb = int(meminfo.get('MemTotal', '0').split()[0])
+            avail_kb = int(meminfo.get('MemAvailable', '0').split()[0])
+            info['mem_total_mb'] = round(total_kb / 1024)
+            info['mem_avail_mb'] = round(avail_kb / 1024)
+    except Exception:
+        info['mem_total_mb'] = 0
+        info['mem_avail_mb'] = 0
+
+    return info
 
 
 @mode_control_bp.route("/")
@@ -58,12 +172,13 @@ def index():
 
     return render_template(
         'index.html',
-        page='control',
+        page='settings',
         **ctx,
         ap_status=ap,
         ap_config=ap_config,
         wifi_status=wifi_status,
         wifi_change_status=wifi_change_status,
+        system_info=_get_system_info(),
         auto_refresh=False,
     )
 
@@ -74,10 +189,9 @@ def present_usb():
     log_path = os.path.join(GADGET_DIR, "present_usb_web.log")
 
     try:
-        # Run the script directly with sudo (script has #!/bin/bash shebang)
         with open(log_path, "w") as log:
             result = subprocess.run(
-                ["sudo", "-n", script_path],
+                ["sudo", "-n", "bash", script_path],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 cwd=GADGET_DIR,
@@ -96,6 +210,8 @@ def present_usb():
 
         if result.returncode == 0:
             flash("Successfully switched to Present Mode", "success")
+            # Auto-index videos after switching to present mode
+            _trigger_auto_index_after_mode_switch()
         else:
             flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
 
@@ -114,10 +230,9 @@ def edit_usb():
     log_path = os.path.join(GADGET_DIR, "edit_usb_web.log")
 
     try:
-        # Run the script directly with sudo (script has #!/bin/bash shebang)
         with open(log_path, "w") as log:
             result = subprocess.run(
-                ["sudo", "-n", script_path],
+                ["sudo", "-n", "bash", script_path],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 cwd=GADGET_DIR,
@@ -136,6 +251,8 @@ def edit_usb():
 
         if result.returncode == 0:
             flash("Successfully switched to Edit Mode", "success")
+            # Auto-index videos after switching to edit mode
+            _trigger_auto_index_after_mode_switch()
         else:
             flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
 

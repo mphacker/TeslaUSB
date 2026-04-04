@@ -1,0 +1,12 @@
+[Unit]
+Description=TeslaUSB Cloud Archive Periodic Sync
+Requires=cloud_archive_sync.service
+
+[Timer]
+# Run every 6 hours after the last successful run
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

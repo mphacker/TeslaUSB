@@ -41,6 +41,21 @@ def _trigger_auto_index_after_mode_switch():
         logger.warning("Auto-index after mode switch failed: %s", e)
 
 
+def _trigger_cloud_sync_after_mode_switch():
+    """Trigger cloud archive sync after a mode switch if enabled."""
+    try:
+        from config import CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_DB_PATH
+        if not CLOUD_ARCHIVE_ENABLED:
+            return
+        from services.video_service import get_teslacam_path
+        from services.cloud_archive_service import trigger_auto_sync
+        teslacam = get_teslacam_path()
+        if teslacam:
+            trigger_auto_sync(teslacam, CLOUD_ARCHIVE_DB_PATH)
+    except Exception as e:
+        logger.warning("Cloud sync after mode switch failed: %s", e)
+
+
 def _get_system_info():
     """Gather device information for the System settings section."""
     import socket
@@ -212,6 +227,8 @@ def present_usb():
             flash("Successfully switched to Present Mode", "success")
             # Auto-index videos after switching to present mode
             _trigger_auto_index_after_mode_switch()
+            # Trigger cloud archive sync (reads from RO mount)
+            _trigger_cloud_sync_after_mode_switch()
         else:
             flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
 
@@ -253,6 +270,8 @@ def edit_usb():
             flash("Successfully switched to Edit Mode", "success")
             # Auto-index videos after switching to edit mode
             _trigger_auto_index_after_mode_switch()
+            # Trigger cloud archive sync
+            _trigger_cloud_sync_after_mode_switch()
         else:
             flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
 

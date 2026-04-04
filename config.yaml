@@ -106,3 +106,40 @@ mapping:
     sharp_turn_lateral_g: 4.0            # m/s² lateral
     speed_limit_mps: 35.76              # ~80 mph speed alert threshold (0 = disabled)
     fsd_disengage_detect: true           # Detect FSD engagement/disengagement events
+
+# ============================================================================
+# Cloud Archive Configuration
+# ============================================================================
+# Auto-sync dashcam footage to cloud storage via rclone
+cloud_archive:
+  enabled: false
+  # Cloud provider (configured via web UI — credentials stored encrypted, NOT here)
+  provider: ""                           # google_drive | onedrive | dropbox | s3 | b2 | wasabi
+  remote_path: "TeslaUSB"               # Path/folder on cloud storage
+  # Sync behavior
+  sync_folders:                          # Which TeslaCam subfolders to sync
+    - SentryClips
+    - SavedClips
+    - RecentClips
+  priority_order:                        # Sync priority (first = highest, user-configurable)
+    - SentryClips
+    - SavedClips
+    - RecentClips
+  max_upload_mbps: 5                     # Bandwidth limit (Pi has limited upload)
+  keep_local_after_upload: true          # Keep local files after uploading to cloud
+
+# ============================================================================
+# Tesla Fleet API Configuration (optional)
+# ============================================================================
+# Connects to Tesla's Fleet API for vehicle keep-awake during sync, vehicle
+# status, Sentry Mode toggle, and other bonus features.
+# Register at developer.tesla.com — TeslaUSB does NOT ship with credentials.
+tesla_api:
+  client_id: ""                          # Your Tesla Developer app Client ID
+  client_secret: ""                      # Your Tesla Developer app Client Secret
+  # OAuth tokens stored in encrypted file (tesla_tokens.enc), NOT here
+  keep_awake_method: wake_only           # wake_only | sentry_mode
+  max_awake_minutes: 60                  # Safety cap to prevent battery drain
+  wake_interval_seconds: 90              # How often to send wake_up
+  monthly_budget_limit: 10.00            # $ limit (Tesla provides $10/month free)
+  low_battery_threshold: 20              # Don't keep-awake below this battery %

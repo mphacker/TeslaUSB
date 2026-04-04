@@ -568,8 +568,10 @@ REQUIRED_PACKAGES=(
   python3-pil
   python3-yaml
   python3-protobuf
+  python3-cryptography
   protobuf-compiler
   yq
+  rclone
   samba
   samba-common-bin
   ffmpeg
@@ -587,6 +589,8 @@ REQUIRED_PACKAGES=(
 # - python3-av: PyAV for instant thumbnail generation
 # - python3-pil: PIL/Pillow for image resizing
 # - ffmpeg: Used by lock chime service for audio validation and re-encoding
+# - rclone: Cloud storage sync engine for cloud archive feature
+# - python3-cryptography: Fernet encryption for Tesla API token security
 
 # Lightweight apt helpers (reduce OOM risk on Pi Zero/2W)
 apt_update_safe() {
@@ -1436,6 +1440,14 @@ configure_service "$TEMPLATES_DIR/chime_scheduler.service" "$CHIME_SCHEDULER_SER
 CHIME_SCHEDULER_TIMER="/etc/systemd/system/chime_scheduler.timer"
 configure_service "$TEMPLATES_DIR/chime_scheduler.timer" "$CHIME_SCHEDULER_TIMER"
 
+# Cloud archive sync service (oneshot — triggered by timer or web UI)
+CLOUD_SYNC_SERVICE="/etc/systemd/system/cloud_archive_sync.service"
+configure_service "$TEMPLATES_DIR/cloud_archive_sync.service" "$CLOUD_SYNC_SERVICE"
+
+# Cloud archive sync timer (periodic — every 6 hours)
+CLOUD_SYNC_TIMER="/etc/systemd/system/cloud_archive_sync.timer"
+configure_service "$TEMPLATES_DIR/cloud_archive_sync.timer" "$CLOUD_SYNC_TIMER"
+
 # WiFi monitor service
 WIFI_MONITOR_SERVICE="/etc/systemd/system/wifi-monitor.service"
 configure_service "$TEMPLATES_DIR/wifi-monitor.service" "$WIFI_MONITOR_SERVICE"
@@ -1465,6 +1477,15 @@ systemctl enable present_usb_on_boot.service || true
 # Enable and start chime scheduler timer
 systemctl enable --now chime_scheduler.timer || systemctl restart chime_scheduler.timer
 
+# Enable cloud archive sync timer (only if cloud archive is enabled in config)
+if [ "$CLOUD_ARCHIVE_ENABLED" = "true" ]; then
+  echo "Cloud archive enabled — starting sync timer"
+  systemctl enable --now cloud_archive_sync.timer || systemctl restart cloud_archive_sync.timer
+else
+  echo "Cloud archive not enabled — sync timer disabled (enable in config.yaml)"
+  systemctl disable cloud_archive_sync.timer 2>/dev/null || true
+fi
+
 # Enable and start WiFi monitoring service
 systemctl enable --now wifi-monitor.service || systemctl restart wifi-monitor.service
 
@@ -1473,6 +1494,10 @@ systemctl enable network-optimizations.service || true
 
 # Ensure the web service picks up the latest code changes
 systemctl restart gadget_web.service || true
+
+# Create tmpfs directory for temporary rclone config (never persisted to SD card)
+mkdir -p /run/teslausb
+chmod 700 /run/teslausb
 
 # ===== Configure System Reliability Features =====
 echo

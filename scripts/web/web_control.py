@@ -39,7 +39,9 @@ from blueprints import (
     api_bp,
     fsck_bp,
     captive_portal_bp,
-    catch_all_redirect
+    catch_all_redirect,
+    cloud_archive_bp,
+    tesla_api_bp,
 )
 
 app.register_blueprint(mapping_bp)
@@ -54,6 +56,8 @@ app.register_blueprint(analytics_bp)
 app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)
 app.register_blueprint(fsck_bp)
+app.register_blueprint(cloud_archive_bp)
+app.register_blueprint(tesla_api_bp)
 # Register captive portal blueprint LAST to avoid conflicting with other routes
 app.register_blueprint(captive_portal_bp)
 

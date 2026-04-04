@@ -13,6 +13,8 @@ from .fsck import fsck_bp
 from .music import music_bp
 from .media import media_bp
 from .captive_portal import captive_portal_bp, catch_all_redirect
+from .cloud_archive import cloud_archive_bp
+from .tesla_api import tesla_api_bp
 
 __all__ = [
     'mode_control_bp',
@@ -28,5 +30,7 @@ __all__ = [
     'music_bp',
     'media_bp',
     'captive_portal_bp',
-    'catch_all_redirect'
+    'catch_all_redirect',
+    'cloud_archive_bp',
+    'tesla_api_bp',
 ]

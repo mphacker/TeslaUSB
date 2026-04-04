@@ -96,6 +96,30 @@ MAPPING_EVENT_THRESHOLDS = {
     'fsd_disengage_detect': bool(_event_cfg.get('fsd_disengage_detect', True)),
 }
 
+# Cloud Archive Configuration
+_cloud = config.get('cloud_archive', {})
+CLOUD_ARCHIVE_ENABLED = bool(_cloud.get('enabled', False))
+CLOUD_ARCHIVE_PROVIDER = _cloud.get('provider', '')
+CLOUD_ARCHIVE_REMOTE_PATH = _cloud.get('remote_path', 'TeslaUSB')
+CLOUD_ARCHIVE_SYNC_FOLDERS = _cloud.get('sync_folders', ['SentryClips', 'SavedClips', 'RecentClips'])
+CLOUD_ARCHIVE_PRIORITY_ORDER = _cloud.get('priority_order', ['SentryClips', 'SavedClips', 'RecentClips'])
+CLOUD_ARCHIVE_MAX_UPLOAD_MBPS = int(_cloud.get('max_upload_mbps', 5))
+CLOUD_ARCHIVE_KEEP_LOCAL = bool(_cloud.get('keep_local_after_upload', True))
+CLOUD_ARCHIVE_DB_PATH = os.path.join(GADGET_DIR, 'cloud_sync.db')
+
+# Tesla Fleet API Configuration
+_tesla = config.get('tesla_api', {})
+TESLA_API_CLIENT_ID = _tesla.get('client_id', '')
+TESLA_API_CLIENT_SECRET = _tesla.get('client_secret', '')
+TESLA_API_KEEP_AWAKE_METHOD = _tesla.get('keep_awake_method', 'wake_only')
+TESLA_API_MAX_AWAKE_MINUTES = int(_tesla.get('max_awake_minutes', 60))
+TESLA_API_WAKE_INTERVAL = int(_tesla.get('wake_interval_seconds', 90))
+TESLA_API_MONTHLY_BUDGET = float(_tesla.get('monthly_budget_limit', 10.00))
+TESLA_API_LOW_BATTERY_THRESHOLD = int(_tesla.get('low_battery_threshold', 20))
+TESLA_TOKENS_PATH = os.path.join(GADGET_DIR, 'tesla_tokens.enc')
+TESLA_API_DB_PATH = os.path.join(GADGET_DIR, 'tesla_api.db')
+CLOUD_PROVIDER_CREDS_PATH = os.path.join(GADGET_DIR, 'cloud_provider.enc')
+
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)
 # ============================================================================

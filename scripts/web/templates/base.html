@@ -64,6 +64,12 @@
             <span class="nav-label">Media</span>
         </a>
         {% endif %}
+        {% if cloud_archive_available %}
+        <a href="{{ url_for('cloud_archive.cloud_home') }}" class="nav-item{% if page == 'cloud' %} active{% endif %}" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        {% endif %}
         <a href="{{ url_for('mode_control.index') }}" class="nav-item{% if page == 'settings' %} active{% endif %}" title="Settings">
             <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-settings"></use></svg>
             <span class="nav-label">Settings</span>
@@ -88,6 +94,12 @@
         <a href="{{ url_for('media.media_home') }}" class="tab-item{% if page == 'media' %} active{% endif %}">
             <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use></svg>
             <span class="tab-label">Media</span>
+        </a>
+        {% endif %}
+        {% if cloud_archive_available %}
+        <a href="{{ url_for('cloud_archive.cloud_home') }}" class="tab-item{% if page == 'cloud' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
         </a>
         {% endif %}
         <a href="{{ url_for('mode_control.index') }}" class="tab-item{% if page == 'settings' %} active{% endif %}">

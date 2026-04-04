@@ -1,0 +1,1110 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+    /* Tesla Settings Page Styles */
+    .tesla-status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 12px;
+        border-radius: var(--radius-full);
+        font-size: var(--text-sm);
+        font-weight: 600;
+        white-space: nowrap;
+    }
+    .tesla-status-badge.connected {
+        background: var(--status-present-bg);
+        color: var(--status-present-text);
+    }
+    .tesla-status-badge.disconnected {
+        background: var(--msg-error-bg);
+        color: var(--msg-error-text);
+    }
+    .tesla-status-badge.offline {
+        background: var(--msg-warning-bg);
+        color: var(--msg-warning-text);
+    }
+
+    .tesla-vehicle-info {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+        flex-wrap: wrap;
+    }
+    .tesla-vehicle-name {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+    .tesla-vehicle-vin {
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+        font-family: monospace;
+    }
+
+    .tesla-form-group {
+        margin-bottom: var(--space-4);
+    }
+    .tesla-form-group label {
+        display: block;
+        font-size: var(--text-sm);
+        font-weight: 500;
+        color: var(--text-primary);
+        margin-bottom: var(--space-1);
+    }
+    .tesla-form-group input[type="text"],
+    .tesla-form-group input[type="password"],
+    .tesla-form-group input[type="number"],
+    .tesla-form-group select {
+        width: 100%;
+        max-width: 400px;
+        padding: 10px 12px;
+        font-size: var(--text-base);
+        border: 1px solid var(--border-input);
+        border-radius: var(--radius-md);
+        background: var(--form-input-bg);
+        color: var(--text-primary);
+        box-sizing: border-box;
+    }
+    .tesla-form-group input:focus,
+    .tesla-form-group select:focus {
+        outline: 2px solid var(--btn-primary-bg);
+        outline-offset: -1px;
+        border-color: var(--btn-primary-bg);
+    }
+    .tesla-form-hint {
+        font-size: var(--text-xs);
+        color: var(--text-secondary);
+        margin-top: var(--space-1);
+    }
+
+    /* Battery bar */
+    .battery-bar-container {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+    }
+    .battery-bar {
+        flex: 1;
+        max-width: 300px;
+        height: 24px;
+        background: var(--bg-info);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        border: 1px solid var(--border-color);
+    }
+    .battery-bar-fill {
+        height: 100%;
+        border-radius: var(--radius-md);
+        transition: width var(--transition-slow), background-color var(--transition-slow);
+    }
+    .battery-bar-fill.level-high { background-color: var(--ds-accent-success); }
+    .battery-bar-fill.level-mid { background-color: var(--ds-accent-warning); }
+    .battery-bar-fill.level-low { background-color: var(--ds-accent-danger); }
+    .battery-pct {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--text-primary);
+        min-width: 48px;
+    }
+
+    /* Budget bar */
+    .budget-bar {
+        width: 100%;
+        height: 20px;
+        background: var(--bg-info);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        border: 1px solid var(--border-color);
+        margin-bottom: var(--space-2);
+    }
+    .budget-bar-fill {
+        height: 100%;
+        border-radius: var(--radius-md);
+        transition: width var(--transition-slow), background-color var(--transition-slow);
+    }
+    .budget-bar-fill.budget-ok { background-color: var(--ds-accent-success); }
+    .budget-bar-fill.budget-warn { background-color: var(--ds-accent-warning); }
+    .budget-bar-fill.budget-danger { background-color: var(--ds-accent-danger); }
+
+    .budget-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+        margin-bottom: var(--space-1);
+    }
+    .budget-breakdown {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: var(--text-sm);
+        margin-top: var(--space-3);
+    }
+    .budget-breakdown td {
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--border-color);
+        color: var(--text-primary);
+    }
+    .budget-breakdown td:last-child {
+        text-align: right;
+        font-family: monospace;
+    }
+    .budget-warning {
+        padding: var(--space-3);
+        border-radius: var(--radius-md);
+        font-size: var(--text-sm);
+        font-weight: 500;
+        margin-top: var(--space-3);
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+    }
+    .budget-warning.warn {
+        background: var(--msg-warning-bg);
+        color: var(--msg-warning-text);
+    }
+    .budget-warning.critical {
+        background: var(--msg-error-bg);
+        color: var(--msg-error-text);
+    }
+
+    /* Status row */
+    .status-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: var(--space-3) 0;
+        border-bottom: 1px solid var(--border-color);
+        gap: var(--space-3);
+        flex-wrap: wrap;
+    }
+    .status-row:last-child { border-bottom: none; }
+    .status-row-label {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        font-size: var(--text-sm);
+        font-weight: 500;
+        color: var(--text-primary);
+    }
+    .status-row-label .nav-icon {
+        width: 18px;
+        height: 18px;
+        color: var(--text-secondary);
+        flex-shrink: 0;
+    }
+    .status-row-value {
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+    }
+
+    /* Charge state label */
+    .charge-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border-radius: var(--radius-sm);
+        font-size: var(--text-xs);
+        font-weight: 600;
+    }
+    .charge-label.charging {
+        background: var(--status-present-bg);
+        color: var(--status-present-text);
+    }
+    .charge-label.not-charging {
+        background: var(--bg-info);
+        color: var(--text-secondary);
+    }
+    .charge-label.complete {
+        background: var(--msg-info-bg);
+        color: var(--msg-info-text);
+    }
+
+    /* Radio group */
+    .radio-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+    }
+    .radio-option {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-2);
+        cursor: pointer;
+        padding: var(--space-2);
+        border-radius: var(--radius-md);
+        transition: background var(--transition-fast);
+    }
+    .radio-option:hover {
+        background: var(--bg-info);
+    }
+    .radio-option input[type="radio"] {
+        margin-top: 3px;
+        flex-shrink: 0;
+        accent-color: var(--btn-primary-bg);
+        width: 18px;
+        height: 18px;
+    }
+    .radio-option-text {
+        display: flex;
+        flex-direction: column;
+    }
+    .radio-option-label {
+        font-size: var(--text-sm);
+        font-weight: 500;
+        color: var(--text-primary);
+    }
+    .radio-option-desc {
+        font-size: var(--text-xs);
+        color: var(--text-secondary);
+        margin-top: 2px;
+    }
+
+    /* Audit log */
+    .audit-log-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: var(--text-sm);
+    }
+    .audit-log-table th {
+        text-align: left;
+        padding: 8px 12px;
+        font-weight: 600;
+        color: var(--text-table-header);
+        background: var(--bg-table-header);
+        border-bottom: 2px solid var(--border-table);
+    }
+    .audit-log-table td {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border-table);
+        color: var(--text-primary);
+        vertical-align: middle;
+    }
+    .audit-log-table tr:hover td {
+        background: var(--bg-table-hover);
+    }
+    .audit-log-scroll {
+        max-height: 320px;
+        overflow-y: auto;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+    }
+    .audit-status-icon {
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+    }
+    .audit-status-icon.success { color: var(--success-text); }
+    .audit-status-icon.failure { color: var(--error-text); }
+
+    /* Offline overlay */
+    .offline-overlay {
+        position: relative;
+    }
+    .offline-overlay::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: var(--bg-overlay);
+        border-radius: var(--radius-lg);
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity var(--transition-normal);
+    }
+    .offline-overlay.is-offline::after {
+        opacity: 0.5;
+        pointer-events: auto;
+    }
+    .offline-message {
+        text-align: center;
+        padding: var(--space-6);
+        color: var(--text-secondary);
+        font-size: var(--text-sm);
+    }
+    .offline-message .nav-icon {
+        width: 32px;
+        height: 32px;
+        margin-bottom: var(--space-2);
+        opacity: 0.5;
+    }
+
+    /* Setup instructions */
+    .setup-instructions {
+        background: var(--bg-info);
+        border-radius: var(--radius-md);
+        padding: var(--space-4);
+        margin-bottom: var(--space-4);
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+        line-height: 1.6;
+    }
+    .setup-instructions a {
+        color: var(--text-link);
+        text-decoration: underline;
+    }
+    .setup-instructions ol {
+        margin: var(--space-2) 0 0;
+        padding-left: 20px;
+    }
+    .setup-instructions li {
+        margin-bottom: var(--space-1);
+    }
+
+    /* Action button row */
+    .btn-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        flex-wrap: wrap;
+        margin-top: var(--space-4);
+    }
+
+    /* Inline badge next to status */
+    .badge-inline {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin-left: var(--space-2);
+    }
+
+    /* Disconnect button */
+    .btn-danger {
+        background-color: var(--btn-danger-bg);
+        color: var(--btn-danger-text);
+    }
+
+    /* Last-updated text */
+    .last-updated {
+        font-size: var(--text-xs);
+        color: var(--text-muted);
+        margin-top: var(--space-3);
+        display: flex;
+        align-items: center;
+        gap: var(--space-1);
+    }
+    .last-updated .nav-icon {
+        width: 14px;
+        height: 14px;
+    }
+
+    /* Empty state */
+    .empty-state {
+        text-align: center;
+        padding: var(--space-6) var(--space-4);
+        color: var(--text-muted);
+        font-size: var(--text-sm);
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 600px) {
+        .battery-bar-container { flex-direction: column; align-items: stretch; }
+        .battery-bar { max-width: 100%; }
+        .status-row { flex-direction: column; align-items: flex-start; }
+        .tesla-vehicle-info { flex-direction: column; align-items: flex-start; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+    <h2 style="margin: 0 0 var(--space-4);">
+        <svg class="nav-icon" aria-hidden="true" style="width: 24px; height: 24px; vertical-align: middle; margin-right: var(--space-2);">
+            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-car"></use>
+        </svg>
+        Tesla Vehicle
+    </h2>
+
+    {# ================================================================
+       Section 1: Tesla Account
+       ================================================================ #}
+    <details class="settings-section" open>
+        <summary>
+            <svg class="nav-icon" aria-hidden="true" style="width: 18px; height: 18px;">
+                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-shield"></use>
+            </svg>
+            Tesla Account
+        </summary>
+        <div class="section-content">
+
+            {% if not connected %}
+                {# ---------- Not connected ---------- #}
+                <div class="setup-instructions">
+                    <strong>Connect your Tesla account to enable vehicle controls.</strong>
+                    <ol>
+                        <li>Register an application at <a href="https://developer.tesla.com" target="_blank" rel="noopener noreferrer">developer.tesla.com</a></li>
+                        <li>Enter your Client ID and Client Secret below</li>
+                        <li>Click <strong>Connect Tesla Account</strong> to authorize</li>
+                    </ol>
+                </div>
+
+                <form method="post" action="{{ url_for('tesla_api.save_credentials') }}" id="credentialsForm">
+                    <div class="tesla-form-group">
+                        <label for="clientId">Client ID</label>
+                        <input type="text" id="clientId" name="client_id"
+                               value="{{ client_id|default('', true) }}"
+                               placeholder="Enter your Tesla API Client ID"
+                               autocomplete="off">
+                    </div>
+                    <div class="tesla-form-group">
+                        <label for="clientSecret">Client Secret</label>
+                        <input type="password" id="clientSecret" name="client_secret"
+                               value="{{ client_secret_masked|default('', true) }}"
+                               placeholder="Enter your Tesla API Client Secret"
+                               autocomplete="off">
+                        <div class="tesla-form-hint">Your credentials are stored locally and never sent to third parties.</div>
+                    </div>
+                    <div class="btn-row">
+                        <button type="submit" class="present-btn">
+                            <svg class="nav-icon" aria-hidden="true" style="width: 16px; height: 16px;">
+                                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use>
+                            </svg>
+                            Save Credentials
+                        </button>
+                    </div>
+                </form>
+
+                {% if tesla_api_configured %}
+                <div class="btn-row" style="margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border-color);">
+                    <a href="{{ url_for('tesla_api.auth') }}" class="edit-btn" style="display: inline-flex; align-items: center; gap: 6px; text-decoration: none;"
+                       {% if not wifi_available %}onclick="return false;" aria-disabled="true" style="opacity: 0.5; pointer-events: none;"{% endif %}>
+                        <svg class="nav-icon" aria-hidden="true" style="width: 16px; height: 16px;">
+                            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use>
+                        </svg>
+                        Connect Tesla Account
+                    </a>
+                    {% if not wifi_available %}
+                    <span class="tesla-status-badge offline">
+                        <svg class="nav-icon" aria-hidden="true" style="width: 14px; height: 14px;">
+                            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-wifi"></use>
+                        </svg>
+                        Offline
+                    </span>
+                    {% endif %}
+                </div>
+                {% endif %}
+
+            {% else %}
+                {# ---------- Connected ---------- #}
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-4);">
+                    <div class="tesla-vehicle-info">
+                        <span class="tesla-status-badge connected">
+                            <svg class="nav-icon" aria-hidden="true" style="width: 14px; height: 14px;">
+                                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use>
+                            </svg>
+                            Connected
+                        </span>
+                        {% if not wifi_available %}
+                        <span class="tesla-status-badge offline">
+                            <svg class="nav-icon" aria-hidden="true" style="width: 14px; height: 14px;">
+                                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-wifi"></use>
+                            </svg>
+                            Offline
+                        </span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                {% if vehicle %}
+                <div style="margin-bottom: var(--space-4);">
+                    <span class="tesla-vehicle-name">{{ vehicle.display_name|default('Tesla Vehicle', true) }}</span>
+                    <span class="tesla-vehicle-vin">&mdash; ****{{ vehicle.vin[-3:] if vehicle.vin and vehicle.vin|length >= 3 else '***' }}</span>
+                </div>
+                {% endif %}
+
+                {% if vehicles and vehicles|length > 1 %}
+                <form method="post" action="{{ url_for('tesla_api.select_vehicle') }}" style="margin-bottom: var(--space-4);">
+                    <div class="tesla-form-group">
+                        <label for="vehicleSelect">Select Vehicle</label>
+                        <select id="vehicleSelect" name="vin" onchange="this.form.submit()">
+                            {% for v in vehicles %}
+                            <option value="{{ v.vin }}" {% if selected_vin == v.vin %}selected{% endif %}>
+                                {{ v.display_name|default(v.vin, true) }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </form>
+                {% endif %}
+
+                <form method="post" action="{{ url_for('tesla_api.disconnect') }}" id="disconnectForm">
+                    <button type="button" class="btn-danger" onclick="confirmDisconnect()" style="min-height: 44px;">
+                        <svg class="nav-icon" aria-hidden="true" style="width: 16px; height: 16px;">
+                            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-x-circle"></use>
+                        </svg>
+                        Disconnect
+                    </button>
+                </form>
+            {% endif %}
+        </div>
+    </details>
+
+    {% if connected %}
+    {# ================================================================
+       Section 2: Vehicle Status
+       ================================================================ #}
+    <details class="settings-section" open>
+        <summary>
+            <svg class="nav-icon" aria-hidden="true" style="width: 18px; height: 18px;">
+                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-battery"></use>
+            </svg>
+            Vehicle Status
+        </summary>
+        <div class="section-content">
+            {% if not wifi_available %}
+            <div class="offline-message">
+                <svg class="nav-icon" aria-hidden="true" style="display: block; margin: 0 auto var(--space-2);">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-wifi"></use>
+                </svg>
+                Connect to WiFi to view live vehicle status
+            </div>
+            {% else %}
+            {# Battery level #}
+            <div class="status-row">
+                <div class="status-row-label">
+                    <svg class="nav-icon" aria-hidden="true">
+                        <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-battery"></use>
+                    </svg>
+                    Battery
+                </div>
+                <div class="battery-bar-container">
+                    <div class="battery-bar">
+                        <div class="battery-bar-fill {% if battery_level|default(0) > 50 %}level-high{% elif battery_level|default(0) > 20 %}level-mid{% else %}level-low{% endif %}"
+                             id="batteryBarFill"
+                             style="width: {{ battery_level|default(0) }}%;"
+                             role="progressbar"
+                             aria-valuenow="{{ battery_level|default(0) }}"
+                             aria-valuemin="0"
+                             aria-valuemax="100"
+                             aria-label="Battery level {{ battery_level|default(0) }}%">
+                        </div>
+                    </div>
+                    <span class="battery-pct" id="batteryPct">{{ battery_level|default(0) }}%</span>
+                </div>
+            </div>
+
+            {# Charge state #}
+            <div class="status-row">
+                <div class="status-row-label">
+                    <svg class="nav-icon" aria-hidden="true">
+                        <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use>
+                    </svg>
+                    Charge State
+                </div>
+                <div class="status-row-value">
+                    {% set cs = charge_state|default('Unknown') %}
+                    <span class="charge-label {% if cs == 'Charging' %}charging{% elif cs == 'Complete' %}complete{% else %}not-charging{% endif %}" id="chargeStateLabel">
+                        {{ cs }}
+                    </span>
+                </div>
+            </div>
+
+            {# Sentry Mode toggle #}
+            <div class="status-row">
+                <div class="status-row-label">
+                    <svg class="nav-icon" aria-hidden="true">
+                        <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-eye"></use>
+                    </svg>
+                    Sentry Mode
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="sentryToggle"
+                           {% if sentry_mode|default(false) %}checked{% endif %}
+                           {% if not wifi_available or (budget and budget.remaining is defined and budget.remaining <= 0) %}disabled{% endif %}
+                           onchange="toggleSentry(this.checked)">
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label" id="sentryLabel">{{ 'On' if sentry_mode|default(false) else 'Off' }}</span>
+                </label>
+            </div>
+
+            {# Climate toggle #}
+            <div class="status-row">
+                <div class="status-row-label">
+                    <svg class="nav-icon" aria-hidden="true">
+                        <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-thermometer"></use>
+                    </svg>
+                    Climate
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="climateToggle"
+                           {% if climate_on|default(false) %}checked{% endif %}
+                           {% if not wifi_available or (budget and budget.remaining is defined and budget.remaining <= 0) %}disabled{% endif %}
+                           onchange="toggleClimate(this.checked)">
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label" id="climateLabel">{{ 'On' if climate_on|default(false) else 'Off' }}</span>
+                </label>
+            </div>
+
+            <div class="last-updated" id="lastUpdated">
+                <svg class="nav-icon" aria-hidden="true">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-clock"></use>
+                </svg>
+                <span id="lastUpdatedText">{{ last_updated|default('Never') }}</span>
+            </div>
+
+            <div class="btn-row">
+                <button type="button" id="refreshBtn" class="present-btn"
+                        {% if not wifi_available %}disabled{% endif %}
+                        onclick="refreshStatus()" style="min-height: 44px;">
+                    <svg class="nav-icon" aria-hidden="true" style="width: 16px; height: 16px;">
+                        <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use>
+                    </svg>
+                    Refresh
+                </button>
+                {% if not wifi_available %}
+                <span class="tesla-status-badge offline">
+                    <svg class="nav-icon" aria-hidden="true" style="width: 14px; height: 14px;">
+                        <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-wifi"></use>
+                    </svg>
+                    Offline
+                </span>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </details>
+
+    {# ================================================================
+       Section 3: Keep-Awake Settings
+       ================================================================ #}
+    <details class="settings-section">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true" style="width: 18px; height: 18px;">
+                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use>
+            </svg>
+            Keep-Awake Settings
+        </summary>
+        <div class="section-content">
+            <form method="post" action="{{ url_for('tesla_api.save_settings') }}" id="keepAwakeForm">
+                <div class="tesla-form-group">
+                    <label>Method</label>
+                    <div class="radio-group">
+                        <label class="radio-option">
+                            <input type="radio" name="keep_awake_method" value="wake_only"
+                                   {% if keep_awake_method|default('wake_only') == 'wake_only' %}checked{% endif %}>
+                            <div class="radio-option-text">
+                                <span class="radio-option-label">Wake only</span>
+                                <span class="radio-option-desc">Safe &mdash; sends wake commands without enabling any features</span>
+                            </div>
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="keep_awake_method" value="sentry"
+                                   {% if keep_awake_method|default('wake_only') == 'sentry' %}checked{% endif %}>
+                            <div class="radio-option-text">
+                                <span class="radio-option-label">Sentry Mode</span>
+                                <span class="radio-option-desc">Reliable &mdash; enables Sentry Mode to keep the vehicle awake</span>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="tesla-form-group">
+                    <label for="maxAwakeMinutes">Max awake time (minutes)</label>
+                    <input type="number" id="maxAwakeMinutes" name="max_awake_minutes"
+                           value="{{ max_awake_minutes|default(60) }}"
+                           min="5" max="480" step="5"
+                           style="max-width: 160px;">
+                    <div class="tesla-form-hint">Vehicle will be allowed to sleep after this duration.</div>
+                </div>
+
+                <div class="tesla-form-group">
+                    <label for="lowBatteryThreshold">Low battery threshold (%)</label>
+                    <input type="number" id="lowBatteryThreshold" name="low_battery_threshold"
+                           value="{{ low_battery_threshold|default(20) }}"
+                           min="5" max="80" step="5"
+                           style="max-width: 160px;">
+                    <div class="tesla-form-hint">Keep-awake stops when battery falls below this level.</div>
+                </div>
+
+                <div class="btn-row">
+                    <button type="submit" class="present-btn" style="min-height: 44px;">
+                        <svg class="nav-icon" aria-hidden="true" style="width: 16px; height: 16px;">
+                            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use>
+                        </svg>
+                        Save
+                    </button>
+                </div>
+            </form>
+        </div>
+    </details>
+
+    {# ================================================================
+       Section 4: API Budget
+       ================================================================ #}
+    <details class="settings-section">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true" style="width: 18px; height: 18px;">
+                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use>
+            </svg>
+            API Budget
+        </summary>
+        <div class="section-content">
+            {% if budget %}
+            {% set spent = budget.total|default(0) %}
+            {% set limit = budget.budget_limit|default(10.0) %}
+            {% set pct = ((spent / limit) * 100) if limit > 0 else 0 %}
+            {% set remaining = budget.remaining|default(limit - spent) %}
+
+            <div class="budget-label">
+                <span>${{ '%.2f'|format(spent) }} used</span>
+                <span>${{ '%.2f'|format(limit) }} limit</span>
+            </div>
+            <div class="budget-bar">
+                <div class="budget-bar-fill {% if spent < 6 %}budget-ok{% elif spent < 8 %}budget-warn{% else %}budget-danger{% endif %}"
+                     style="width: {{ [pct, 100]|min }}%;"
+                     role="progressbar"
+                     aria-valuenow="{{ '%.2f'|format(spent) }}"
+                     aria-valuemin="0"
+                     aria-valuemax="{{ '%.2f'|format(limit) }}"
+                     aria-label="API budget {{ '%.2f'|format(spent) }} of {{ '%.2f'|format(limit) }}">
+                </div>
+            </div>
+
+            {% if budget.by_type %}
+            <table class="budget-breakdown">
+                {% for type_name, cost in budget.by_type.items() %}
+                <tr>
+                    <td>{{ type_name|capitalize }}</td>
+                    <td>${{ '%.2f'|format(cost) }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+
+            {% if spent >= 8 %}
+            <div class="budget-warning {% if spent >= 9.5 %}critical{% else %}warn{% endif %}">
+                <svg class="nav-icon" aria-hidden="true" style="width: 18px; height: 18px; flex-shrink: 0;">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use>
+                </svg>
+                {% if spent >= 9.5 %}
+                All non-essential API calls paused
+                {% else %}
+                Auto keep-awake disabled to conserve budget
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="last-updated" style="margin-top: var(--space-3);">
+                <svg class="nav-icon" aria-hidden="true">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-clock"></use>
+                </svg>
+                {% set now = None %}
+                {% if budget.reset_month %}
+                Resets on {{ budget.reset_month }} 1st
+                {% else %}
+                Resets on the 1st of next month
+                {% endif %}
+            </div>
+            {% else %}
+            <div class="empty-state">No budget data available.</div>
+            {% endif %}
+        </div>
+    </details>
+
+    {# ================================================================
+       Section 5: Audit Log
+       ================================================================ #}
+    <details class="settings-section">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true" style="width: 18px; height: 18px;">
+                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-list"></use>
+            </svg>
+            Audit Log
+        </summary>
+        <div class="section-content">
+            {% if audit_log and audit_log|length > 0 %}
+            <div class="audit-log-scroll">
+                <table class="audit-log-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px;" aria-label="Status"></th>
+                            <th>Time</th>
+                            <th>Action</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody id="auditLogBody">
+                        {% for entry in audit_log %}
+                        <tr>
+                            <td>
+                                {% if entry.success|default(true) %}
+                                <svg class="audit-status-icon success" aria-label="Success">
+                                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use>
+                                </svg>
+                                {% else %}
+                                <svg class="audit-status-icon failure" aria-label="Failed">
+                                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-x-circle"></use>
+                                </svg>
+                                {% endif %}
+                            </td>
+                            <td style="white-space: nowrap;">{{ entry.time|default('') }}</td>
+                            <td>{{ entry.action|default('') }}</td>
+                            <td>{{ entry.result|default('') }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="btn-row">
+                <button type="button" class="action-btn" id="loadMoreBtn" onclick="loadMoreAuditLog()" style="min-height: 44px;">
+                    Load more
+                </button>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <svg class="nav-icon" aria-hidden="true" style="width: 24px; height: 24px; display: block; margin: 0 auto var(--space-2); opacity: 0.4;">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-list"></use>
+                </svg>
+                No API calls recorded yet
+            </div>
+            {% endif %}
+        </div>
+    </details>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    'use strict';
+
+    /* ----------------------------------------------------------------
+       Refresh vehicle status
+       ---------------------------------------------------------------- */
+    window.refreshStatus = async function refreshStatus() {
+        var btn = document.getElementById('refreshBtn');
+        if (!btn) return;
+        btn.disabled = true;
+
+        try {
+            var resp = await fetch('{{ url_for("tesla_api.api_status") }}', {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+
+            if (data.offline) {
+                showOfflineBadge();
+                return;
+            }
+
+            if (data.battery_level !== undefined) {
+                updateBatteryBar(data.battery_level);
+            }
+            if (data.charge_state !== undefined) {
+                updateChargeState(data.charge_state);
+            }
+            if (data.sentry_mode !== undefined) {
+                updateSentryToggle(data.sentry_mode);
+            }
+            if (data.climate_on !== undefined) {
+                updateClimateToggle(data.climate_on);
+            }
+            if (data.last_updated) {
+                var el = document.getElementById('lastUpdatedText');
+                if (el) el.textContent = data.last_updated;
+            }
+
+            if (typeof showToast === 'function') {
+                showToast('Vehicle status updated', 'success');
+            }
+        } catch (err) {
+            if (typeof showToast === 'function') {
+                showToast('Failed to refresh status', 'error');
+            }
+        } finally {
+            btn.disabled = false;
+        }
+    };
+
+    function updateBatteryBar(level) {
+        var fill = document.getElementById('batteryBarFill');
+        var pct = document.getElementById('batteryPct');
+        if (fill) {
+            fill.style.width = level + '%';
+            fill.setAttribute('aria-valuenow', level);
+            fill.className = 'battery-bar-fill ' +
+                (level > 50 ? 'level-high' : level > 20 ? 'level-mid' : 'level-low');
+        }
+        if (pct) pct.textContent = level + '%';
+    }
+
+    function updateChargeState(state) {
+        var el = document.getElementById('chargeStateLabel');
+        if (!el) return;
+        el.textContent = state;
+        el.className = 'charge-label ' +
+            (state === 'Charging' ? 'charging' : state === 'Complete' ? 'complete' : 'not-charging');
+    }
+
+    function updateSentryToggle(on) {
+        var toggle = document.getElementById('sentryToggle');
+        var label = document.getElementById('sentryLabel');
+        if (toggle) toggle.checked = on;
+        if (label) label.textContent = on ? 'On' : 'Off';
+    }
+
+    function updateClimateToggle(on) {
+        var toggle = document.getElementById('climateToggle');
+        var label = document.getElementById('climateLabel');
+        if (toggle) toggle.checked = on;
+        if (label) label.textContent = on ? 'On' : 'Off';
+    }
+
+    function showOfflineBadge() {
+        if (typeof showToast === 'function') {
+            showToast('Vehicle is offline', 'warning');
+        }
+    }
+
+    /* ----------------------------------------------------------------
+       Toggle Sentry Mode
+       ---------------------------------------------------------------- */
+    window.toggleSentry = async function toggleSentry(on) {
+        var toggle = document.getElementById('sentryToggle');
+        var label = document.getElementById('sentryLabel');
+        toggle.disabled = true;
+
+        try {
+            var resp = await fetch('{{ url_for("tesla_api.api_sentry") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({ enabled: on })
+            });
+            var data = await resp.json();
+
+            if (data.success) {
+                if (label) label.textContent = on ? 'On' : 'Off';
+                if (typeof showToast === 'function') {
+                    showToast('Sentry Mode ' + (on ? 'enabled' : 'disabled'), 'success');
+                }
+            } else {
+                toggle.checked = !on;
+                if (typeof showToast === 'function') {
+                    showToast(data.error || 'Failed to toggle Sentry Mode', 'error');
+                }
+            }
+        } catch (err) {
+            toggle.checked = !on;
+            if (typeof showToast === 'function') {
+                showToast('Failed to toggle Sentry Mode', 'error');
+            }
+        } finally {
+            toggle.disabled = false;
+        }
+    };
+
+    /* ----------------------------------------------------------------
+       Toggle Climate
+       ---------------------------------------------------------------- */
+    window.toggleClimate = async function toggleClimate(on) {
+        var toggle = document.getElementById('climateToggle');
+        var label = document.getElementById('climateLabel');
+        toggle.disabled = true;
+
+        try {
+            var resp = await fetch('{{ url_for("tesla_api.api_climate") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({ enabled: on })
+            });
+            var data = await resp.json();
+
+            if (data.success) {
+                if (label) label.textContent = on ? 'On' : 'Off';
+                if (typeof showToast === 'function') {
+                    showToast('Climate ' + (on ? 'started' : 'stopped'), 'success');
+                }
+            } else {
+                toggle.checked = !on;
+                if (typeof showToast === 'function') {
+                    showToast(data.error || 'Failed to toggle Climate', 'error');
+                }
+            }
+        } catch (err) {
+            toggle.checked = !on;
+            if (typeof showToast === 'function') {
+                showToast('Failed to toggle Climate', 'error');
+            }
+        } finally {
+            toggle.disabled = false;
+        }
+    };
+
+    /* ----------------------------------------------------------------
+       Disconnect confirmation
+       ---------------------------------------------------------------- */
+    window.confirmDisconnect = function confirmDisconnect() {
+        if (confirm('Disconnect Tesla account? This will securely delete all stored tokens.')) {
+            document.getElementById('disconnectForm').submit();
+        }
+    };
+
+    /* ----------------------------------------------------------------
+       Load more audit log entries
+       ---------------------------------------------------------------- */
+    var auditOffset = {{ (audit_log|length) if audit_log else 0 }};
+
+    window.loadMoreAuditLog = async function loadMoreAuditLog() {
+        var btn = document.getElementById('loadMoreBtn');
+        if (!btn) return;
+        btn.disabled = true;
+        btn.textContent = 'Loading...';
+
+        try {
+            var resp = await fetch('{{ url_for("tesla_api.api_audit") }}?offset=' + auditOffset, {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+
+            if (data.entries && data.entries.length > 0) {
+                var tbody = document.getElementById('auditLogBody');
+                var spriteUrl = '{{ url_for("static", filename="icons/lucide-sprite.svg") }}';
+
+                data.entries.forEach(function(entry) {
+                    var tr = document.createElement('tr');
+                    var iconId = entry.success ? 'icon-check-circle' : 'icon-x-circle';
+                    var iconClass = entry.success ? 'success' : 'failure';
+                    var ariaLabel = entry.success ? 'Success' : 'Failed';
+
+                    tr.innerHTML =
+                        '<td><svg class="audit-status-icon ' + iconClass + '" aria-label="' + ariaLabel + '">' +
+                        '<use href="' + spriteUrl + '#' + iconId + '"></use></svg></td>' +
+                        '<td style="white-space:nowrap;">' + escapeHtml(entry.time || '') + '</td>' +
+                        '<td>' + escapeHtml(entry.action || '') + '</td>' +
+                        '<td>' + escapeHtml(entry.result || '') + '</td>';
+                    tbody.appendChild(tr);
+                });
+
+                auditOffset += data.entries.length;
+
+                if (!data.has_more) {
+                    btn.style.display = 'none';
+                }
+            } else {
+                btn.style.display = 'none';
+            }
+        } catch (err) {
+            if (typeof showToast === 'function') {
+                showToast('Failed to load audit log', 'error');
+            }
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Load more';
+        }
+    };
+
+    function escapeHtml(str) {
+        var div = document.createElement('div');
+        div.appendChild(document.createTextNode(str));
+        return div.innerHTML;
+    }
+})();
+</script>
+{% endblock %}

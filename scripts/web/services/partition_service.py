@@ -23,6 +23,8 @@ from config import (
     IMG_MUSIC_PATH,
     MUSIC_ENABLED,
     MAPPING_ENABLED,
+    CLOUD_ARCHIVE_ENABLED,
+    TESLA_API_CLIENT_ID,
 )
 
 # Import mode service
@@ -48,6 +50,8 @@ def get_feature_availability():
         'shows_available': lightshow_exists,
         'wraps_available': lightshow_exists,
         'music_available': music_exists,
+        'cloud_archive_available': CLOUD_ARCHIVE_ENABLED,
+        'tesla_api_configured': bool(TESLA_API_CLIENT_ID),
     }
 
 

@@ -70,7 +70,10 @@ eval "$(yq -r '
   "OFFLINE_AP_VIRTUAL_IF=\"" + .offline_ap.virtual_interface + "\"",
   "OFFLINE_AP_FORCE_MODE=\"" + .offline_ap.force_mode + "\"",
   "CONFIG_FILE=\"" + .system.config_file + "\"",
-  "SMB_CONF=\"" + .system.samba_conf + "\""
+  "SMB_CONF=\"" + .system.samba_conf + "\"",
+  "CLOUD_ARCHIVE_ENABLED=\"" + (.cloud_archive.enabled // false | tostring) + "\"",
+  "CLOUD_ARCHIVE_PROVIDER=\"" + (.cloud_archive.provider // "") + "\"",
+  "TESLA_API_CLIENT_ID=\"" + (.tesla_api.client_id // "") + "\""
 ' "$CONFIG_YAML")"
 
 # ============================================================================

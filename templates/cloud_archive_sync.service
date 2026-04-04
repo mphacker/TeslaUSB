@@ -1,0 +1,25 @@
+[Unit]
+Description=TeslaUSB Cloud Archive Sync
+After=network-online.target gadget_web.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=__GADGET_DIR__/scripts/web
+ExecStart=/usr/bin/python3 -c "from services.cloud_archive_service import trigger_auto_sync; from services.video_service import get_teslacam_path; from config import CLOUD_ARCHIVE_DB_PATH; p = get_teslacam_path(); trigger_auto_sync(p, CLOUD_ARCHIVE_DB_PATH) if p else None"
+TimeoutStartSec=3600
+Nice=15
+MemoryMax=100M
+
+StandardOutput=journal
+StandardError=journal
+
+# Restart on transient failures (network hiccups)
+Restart=on-failure
+RestartSec=60
+StartLimitBurst=3
+StartLimitIntervalSec=600
+
+[Install]
+WantedBy=multi-user.target

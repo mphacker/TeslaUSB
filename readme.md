@@ -373,12 +373,26 @@ sudo systemctl restart wifi-monitor.service  # For offline AP changes
 
 ### Upgrade to Latest Version
 
+> **⚠️ BACK UP YOUR DISK IMAGES BEFORE UPGRADING**
+>
+> Your USB drive images (`usb_cam.img`, `usb_lightshow.img`, `usb_music.img`) contain all your dashcam videos, lock chimes, light shows, music, and wraps. These files can be **hundreds of gigabytes** and are not recoverable if lost.
+>
+> Before running any upgrade or `git pull`:
+> 1. **Switch to Edit Mode** (or use "Enable Network Sharing" in Settings)
+> 2. **Copy the `.img` files** to a safe location (external drive, NAS, or computer):
+>    ```bash
+>    scp pi@<hostname>.local:~/TeslaUSB/*.img /path/to/backup/
+>    ```
+> 3. Then proceed with the upgrade
+>
+> The `.img` files are listed in `.gitignore` and should not be affected by git operations, but backing up protects against accidental deletion, SD card corruption, or any unexpected issues during upgrade.
+
 ```bash
 cd ~/TeslaUSB
 ./upgrade.sh
 ```
 
-Upgrades to the latest version from GitHub. Supports both git-cloned installs (`git pull`) and manual installs (tarball download with automatic backup/restore on error). After updating code, prompts to re-run `setup_usb.sh`. Disk images and configuration are preserved. If you were in Edit mode before upgrading, you'll be prompted to restore it.
+Upgrades to the latest version from GitHub. Supports both git-cloned installs (`git pull`) and manual installs (tarball download with automatic backup/restore on error). After updating code, prompts to re-run `setup_usb.sh`. Disk images and configuration are preserved.
 
 ### Uninstall
 

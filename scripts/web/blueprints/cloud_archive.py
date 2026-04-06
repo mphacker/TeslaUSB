@@ -87,17 +87,37 @@ def index():
         sync_stats = {}
         sync_history = []
 
-    # Check if cloud provider credentials are configured
-    # Re-read provider from config.yaml since it may have been updated at runtime
+    # Re-read dynamic settings from config.yaml (may have been updated at runtime)
     import yaml
     _provider = CLOUD_ARCHIVE_PROVIDER
+    _sync_folders = CLOUD_ARCHIVE_SYNC_FOLDERS
+    _priority_order = CLOUD_ARCHIVE_PRIORITY_ORDER
+    _max_upload_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
+    _remote_path = CLOUD_ARCHIVE_REMOTE_PATH
+    _keep_local = CLOUD_ARCHIVE_KEEP_LOCAL
     try:
         with open(CONFIG_YAML, 'r') as f:
             _cfg = yaml.safe_load(f) or {}
-        _provider = _cfg.get('cloud_archive', {}).get('provider', '') or _provider
+        _cloud = _cfg.get('cloud_archive', {})
+        _provider = _cloud.get('provider', '') or _provider
+        _sync_folders = _cloud.get('sync_folders', _sync_folders)
+        _priority_order = _cloud.get('priority_order', _priority_order)
+        _max_upload_mbps = int(_cloud.get('max_upload_mbps', _max_upload_mbps))
+        _remote_path = _cloud.get('remote_path', _remote_path)
+        _keep_local = bool(_cloud.get('keep_local_after_upload', _keep_local))
     except Exception:
         pass
     provider_connected = bool(_provider) and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)
+
+    # Get token expiry for connected providers
+    _token_expiry = None
+    if provider_connected:
+        try:
+            from services.cloud_rclone_service import get_connection_status
+            _conn = get_connection_status()
+            _token_expiry = _conn.get("token_expiry")
+        except Exception:
+            pass
 
     ctx = get_base_context()
     return render_template(
@@ -108,11 +128,12 @@ def index():
         sync_history=sync_history,
         provider=_provider,
         provider_connected=provider_connected,
-        sync_folders=CLOUD_ARCHIVE_SYNC_FOLDERS,
-        priority_order=CLOUD_ARCHIVE_PRIORITY_ORDER,
-        max_upload_mbps=CLOUD_ARCHIVE_MAX_UPLOAD_MBPS,
-        remote_path=CLOUD_ARCHIVE_REMOTE_PATH,
-        keep_local=CLOUD_ARCHIVE_KEEP_LOCAL,
+        token_expiry=_token_expiry,
+        sync_folders=_sync_folders,
+        priority_order=_priority_order,
+        max_upload_mbps=_max_upload_mbps,
+        remote_path=_remote_path,
+        keep_local=_keep_local,
         **ctx,
     )
 

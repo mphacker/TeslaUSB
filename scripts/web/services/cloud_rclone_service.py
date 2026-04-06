@@ -194,7 +194,8 @@ def remove_credentials() -> None:
 def get_connection_status() -> Dict:
     """Check current cloud provider connection status.
 
-    Returns dict with 'connected' bool, 'provider' name, and any errors.
+    Returns dict with 'connected' bool, 'provider' name, token expiry info,
+    and any errors.
     """
     from config import CLOUD_ARCHIVE_PROVIDER
 
@@ -206,10 +207,22 @@ def get_connection_status() -> Dict:
                 "error": "No credentials stored"}
 
     meta = PROVIDERS.get(CLOUD_ARCHIVE_PROVIDER, {})
+
+    # Extract token expiry from stored credentials
+    token_expiry = None
+    creds = _load_creds()
+    if creds and "token" in creds:
+        try:
+            token_dict = json.loads(creds["token"])
+            token_expiry = token_dict.get("expiry")
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     return {
         "connected": True,
         "provider": CLOUD_ARCHIVE_PROVIDER,
         "label": meta.get("label", CLOUD_ARCHIVE_PROVIDER),
+        "token_expiry": token_expiry,
     }
 
 

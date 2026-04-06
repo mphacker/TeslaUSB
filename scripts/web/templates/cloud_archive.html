@@ -131,6 +131,24 @@
                 <span id="testConnResult" style="font-size: var(--text-sm); margin-left: var(--space-2);"></span>
             </div>
 
+            {# ---- Token expiry info ---- #}
+            {% if token_expiry %}
+            <div style="margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-tertiary);">
+                <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:3px;opacity:0.6;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Access token expires: <span id="tokenExpiryDate" data-expiry="{{ token_expiry }}"></span>
+                {% if provider in ('onedrive',) %}
+                <br><span style="color: var(--text-tertiary); font-size: var(--text-xs);">
+                    Refresh token stays valid for 90 days of inactivity. The system refreshes automatically when WiFi is connected.
+                    If the device cannot reach the cloud for 90 days, you will need to reconnect manually.
+                </span>
+                {% elif provider in ('google-drive', 'dropbox') %}
+                <br><span style="color: var(--text-tertiary); font-size: var(--text-xs);">
+                    Refresh token is valid indefinitely unless you revoke access in your account settings.
+                </span>
+                {% endif %}
+            </div>
+            {% endif %}
+
             {# ---- Sync destination folder ---- #}
             <div style="margin-top: var(--space-4); border-top: 1px solid var(--border-primary); padding-top: var(--space-3);">
                 <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-2);">
@@ -499,6 +517,28 @@
         if (i >= units.length) i = units.length - 1;
         return (bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
     }
+
+    /* Format token expiry date on page load */
+    (function() {
+        var el = document.getElementById('tokenExpiryDate');
+        if (!el) return;
+        var raw = el.getAttribute('data-expiry');
+        if (!raw) return;
+        try {
+            var d = new Date(raw);
+            if (isNaN(d.getTime())) { el.textContent = 'unknown'; return; }
+            var now = new Date();
+            var diffMs = d - now;
+            var diffHours = Math.round(diffMs / (1000 * 60 * 60));
+            if (diffMs < 0) {
+                el.innerHTML = '<span style="color:var(--error-text);">expired (will refresh on next sync)</span>';
+            } else if (diffHours < 2) {
+                el.textContent = 'in ' + Math.max(1, Math.round(diffMs / 60000)) + ' minutes (auto-refreshes)';
+            } else {
+                el.textContent = d.toLocaleString() + ' (auto-refreshes)';
+            }
+        } catch (e) { el.textContent = raw; }
+    })();
 
     function timeAgo(dateStr) {
         if (!dateStr) return '';

@@ -6,8 +6,18 @@ A Flask web application for controlling USB gadget modes.
 Organized using blueprints for better maintainability.
 """
 
+import logging
+import sys
+
 from flask import Flask
 import os
+
+# Configure logging to stderr (captured by systemd journal)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s:%(name)s:%(message)s',
+    stream=sys.stderr,
+)
 
 # Import configuration
 from config import SECRET_KEY, WEB_PORT, GADGET_DIR, MAX_UPLOAD_SIZE_MB, MAX_UPLOAD_CHUNK_MB

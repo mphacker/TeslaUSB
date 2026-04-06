@@ -256,14 +256,9 @@ def _remove_temp_conf() -> None:
 
 
 def _capture_refreshed_token(original_creds: dict) -> None:
-    """Read the temp rclone.conf after a command and persist any token updates.
-
-    rclone silently refreshes expired access tokens using the refresh_token
-    and writes the updated token back to its config file.  For providers
-    like OneDrive where refresh tokens rotate, we must capture the new
-    token and re-encrypt it — otherwise the next operation will fail.
-    """
+    """Read the temp rclone.conf after a command and persist any token updates."""
     if not os.path.isfile(_RCLONE_CONF_PATH):
+        logger.debug("capture_token: no temp conf file")
         return
 
     try:
@@ -279,10 +274,12 @@ def _capture_refreshed_token(original_creds: dict) -> None:
                 break
 
         if not new_token_str:
+            logger.debug("capture_token: no token line in conf")
             return
 
         old_token_str = original_creds.get("token", "")
         if new_token_str == old_token_str:
+            logger.debug("capture_token: token unchanged")
             return  # No change
 
         # Token was refreshed — re-encrypt and persist
@@ -552,26 +549,32 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
     try:
         from config import CLOUD_ARCHIVE_REMOTE_PATH, CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
 
+        logger.info("Archive starting: %s (%d files, %d bytes, is_event_dir=%s)",
+                     rel_path, len(files), total_size, is_event_dir)
+
         conf_path = _write_temp_conf(creds)
         remote_base = f"{RCLONE_REMOTE_NAME}:{CLOUD_ARCHIVE_REMOTE_PATH}"
         max_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
 
-        # Force a token refresh before uploading — rclone about is lightweight
-        # and ensures the access token in the conf file is fresh
-        subprocess.run(
+        # Force a token refresh before uploading
+        logger.info("Archive: refreshing token before upload...")
+        about_result = subprocess.run(
             ["rclone", "about", "--config", conf_path,
              f"{RCLONE_REMOTE_NAME}:", "--json"],
             capture_output=True, text=True, timeout=30,
         )
+        if about_result.returncode != 0:
+            logger.warning("Archive: token refresh (rclone about) failed: %s",
+                          about_result.stderr.strip()[:200])
+        else:
+            logger.info("Archive: token refresh OK")
         _capture_refreshed_token(creds)
         creds = _load_creds() or creds
         _write_temp_conf(creds)
 
         if is_event_dir:
-            # Event directory: rclone copy preserves internal structure
-            # local: /mnt/.../SentryClips/2026-01-01_12-00-00/
-            # remote: teslausb:TeslaUSB/SentryClips/2026-01-01_12-00-00/
             remote_dest = f"{remote_base}/{rel_path}"
+            logger.info("Archive: rclone copy %s → %s", local_path, remote_dest)
             result = subprocess.run(
                 [
                     "rclone", "copy",
@@ -584,17 +587,21 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                 ],
                 capture_output=True, text=True, timeout=3600,
             )
+            logger.info("Archive: rclone copy exit=%d", result.returncode)
+            if result.stderr.strip():
+                logger.warning("Archive: rclone stderr: %s", result.stderr.strip()[:500])
         else:
-            # Flat structure: copy individual files one by one
-            # local: /mnt/.../RecentClips/filename.mp4
-            # remote: teslausb:TeslaUSB/RecentClips/filename.mp4
             remote_folder = f"{remote_base}/{os.path.dirname(rel_path)}"
             all_ok = True
-            for f in files:
+            for i, f in enumerate(files):
                 if _archive_cancel.is_set():
+                    logger.info("Archive: cancelled at file %d/%d", i, len(files))
                     break
                 src = os.path.join(local_path, f)
                 dst = f"{remote_folder}/{f}"
+                src_size = os.path.getsize(src) if os.path.isfile(src) else 0
+                logger.info("Archive: [%d/%d] %s (%d bytes) → %s",
+                           i + 1, len(files), f, src_size, dst)
                 r = subprocess.run(
                     [
                         "rclone", "copyto",
@@ -606,17 +613,18 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                     ],
                     capture_output=True, text=True, timeout=3600,
                 )
-                # Capture refreshed token after each file (rclone may have
-                # refreshed the access token and written it back to conf)
+                if r.returncode == 0:
+                    logger.info("Archive: [%d/%d] %s OK", i + 1, len(files), f)
+                else:
+                    all_ok = False
+                    logger.error("Archive: [%d/%d] %s FAILED (exit=%d): %s",
+                                i + 1, len(files), f, r.returncode,
+                                r.stderr.strip()[:300])
+
                 _capture_refreshed_token(creds)
-                # Re-load creds in case token was refreshed and re-write conf
                 creds = _load_creds() or creds
                 _write_temp_conf(creds)
 
-                if r.returncode != 0:
-                    all_ok = False
-                    logger.error("Failed to copy %s: %s", f, r.stderr.strip()[:200])
-            # Build a result-like object for the common status-update code below
             result = type('R', (), {'returncode': 0 if all_ok else 1,
                                      'stderr': '' if all_ok else 'Some files failed to copy'})()
 
@@ -624,6 +632,7 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
 
         if _archive_cancel.is_set():
             _archive_status.update({"running": False, "error": "Cancelled"})
+            logger.info("Archive: cancelled")
             return
 
         if result.returncode == 0:
@@ -632,8 +641,8 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                 "completed": True,
                 "bytes_transferred": total_size,
             })
-            logger.info("Archived event to cloud: %s (%d files)",
-                        rel_path, len(files))
+            logger.info("Archive COMPLETE: %s (%d files, %d bytes)",
+                        rel_path, len(files), total_size)
         else:
             err = result.stderr.strip()[:300]
             _archive_status.update({

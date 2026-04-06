@@ -556,6 +556,17 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
         remote_base = f"{RCLONE_REMOTE_NAME}:{CLOUD_ARCHIVE_REMOTE_PATH}"
         max_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
 
+        # Force a token refresh before uploading — rclone about is lightweight
+        # and ensures the access token in the conf file is fresh
+        subprocess.run(
+            ["rclone", "about", "--config", conf_path,
+             f"{RCLONE_REMOTE_NAME}:", "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        _capture_refreshed_token(creds)
+        creds = _load_creds() or creds
+        _write_temp_conf(creds)
+
         if is_event_dir:
             # Event directory: rclone copy preserves internal structure
             # local: /mnt/.../SentryClips/2026-01-01_12-00-00/

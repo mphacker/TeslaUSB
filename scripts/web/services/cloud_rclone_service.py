@@ -459,8 +459,10 @@ _archive_status: Dict = {
     "event_name": "",
     "folder": "",
     "file_count": 0,
+    "files_done": 0,
+    "current_file": "",
     "total_size": 0,
-    "bytes_transferred": 0,
+    "bytes_done": 0,       # Actual bytes of completed files
     "started_at": None,
     "error": None,
     "completed": False,
@@ -539,8 +541,10 @@ def archive_event(folder: str, event_name: str, teslacam_base: str) -> Tuple[boo
             "event_name": event_name,
             "folder": folder,
             "file_count": len(files),
+            "files_done": 0,
+            "current_file": "",
             "total_size": total_size,
-            "bytes_transferred": 0,
+            "bytes_done": 0,
             "started_at": _time.time(),
             "error": None,
             "completed": False,
@@ -625,6 +629,7 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                 src = os.path.join(local_path, f)
                 dst = f"{remote_folder}/{f}"
                 src_size = os.path.getsize(src) if os.path.isfile(src) else 0
+                _archive_status["current_file"] = f
                 logger.info("Archive: [%d/%d] %s (%d bytes)",
                            i + 1, len(files), f, src_size)
                 r = subprocess.run(
@@ -641,6 +646,8 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                 )
                 if r.returncode == 0:
                     logger.info("Archive: [%d/%d] %s OK", i + 1, len(files), f)
+                    _archive_status["files_done"] = i + 1
+                    _archive_status["bytes_done"] = _archive_status.get("bytes_done", 0) + src_size
                 else:
                     all_ok = False
                     logger.error("Archive: [%d/%d] %s FAILED (exit=%d): %s",
@@ -664,7 +671,7 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
             _archive_status.update({
                 "running": False,
                 "completed": True,
-                "bytes_transferred": total_size,
+                "bytes_done": total_size,
             })
             logger.info("Archive COMPLETE: %s (%d files, %d bytes)",
                         rel_path, len(files), total_size)
@@ -691,22 +698,22 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
 
 
 def get_archive_status() -> Dict:
-    """Return current archive status with ETA."""
+    """Return current archive status with real file-level progress."""
     status = dict(_archive_status)
 
-    if status.get("running") and status.get("started_at") and status.get("total_size", 0) > 0:
+    # Calculate ETA from actual completed file throughput
+    if status.get("running") and status.get("started_at") and status.get("bytes_done", 0) > 0:
         elapsed = _time.time() - status["started_at"]
-        from config import CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
-        bps_limit = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS * 1024 * 1024 / 8
-        estimated_transferred = min(elapsed * bps_limit, status["total_size"])
-        status["bytes_transferred"] = int(estimated_transferred)
-        remaining = status["total_size"] - estimated_transferred
-        if bps_limit > 0 and remaining > 0:
-            status["eta_seconds"] = int(remaining / bps_limit)
-        else:
-            status["eta_seconds"] = 0
+        bps = status["bytes_done"] / elapsed if elapsed > 0 else 0
+        remaining = status.get("total_size", 0) - status.get("bytes_done", 0)
+        status["eta_seconds"] = int(remaining / bps) if bps > 0 and remaining > 0 else 0
+    elif status.get("running"):
+        status["eta_seconds"] = None  # Not enough data yet
     else:
         status["eta_seconds"] = None
+
+    # For API compatibility
+    status["bytes_transferred"] = status.get("bytes_done", 0)
 
     return status
 

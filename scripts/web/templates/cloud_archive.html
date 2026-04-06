@@ -1345,7 +1345,7 @@
                     if (title) title.textContent = 'Archiving ' + (st.event_name || '') + '...';
 
                     var sub = document.getElementById('archiveSubtitle');
-                    if (sub) sub.textContent = st.file_count + ' files \u2014 ' + formatBytes(st.bytes_transferred || 0) + ' / ' + formatBytes(st.total_size || 0);
+                    if (sub) sub.textContent = (st.files_done || 0) + ' of ' + st.file_count + ' files \u2014 ' + formatBytes(st.bytes_transferred || 0) + ' / ' + formatBytes(st.total_size || 0) + (st.current_file ? ' \u2014 ' + st.current_file : '');
 
                     var etaText = '';
                     if (st.eta_seconds != null && st.eta_seconds > 0) {

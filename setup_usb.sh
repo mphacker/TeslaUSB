@@ -1499,6 +1499,12 @@ systemctl restart gadget_web.service || true
 mkdir -p /run/teslausb
 chmod 700 /run/teslausb
 
+# Deploy cloud token refresh dispatcher (keeps OAuth tokens alive on WiFi connect)
+CLOUD_REFRESH_DISPATCHER="/etc/NetworkManager/dispatcher.d/99-teslausb-cloud-refresh"
+configure_service "$TEMPLATES_DIR/99-teslausb-cloud-refresh" "$CLOUD_REFRESH_DISPATCHER"
+chmod +x "$CLOUD_REFRESH_DISPATCHER" 2>/dev/null || true
+chmod +x "$SCRIPT_DIR/scripts/web/helpers/refresh_cloud_token.py" 2>/dev/null || true
+
 # ===== Configure System Reliability Features =====
 echo
 echo "Configuring system reliability features..."

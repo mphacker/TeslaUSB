@@ -1,0 +1,29 @@
+#!/bin/bash
+# NetworkManager dispatcher script for TeslaUSB cloud token refresh.
+#
+# Called automatically by NetworkManager on network state changes.
+# When WiFi connects, runs a lightweight rclone operation to keep the
+# OAuth refresh token alive (critical for OneDrive which rotates tokens).
+#
+# Deployed to: /etc/NetworkManager/dispatcher.d/99-teslausb-cloud-refresh
+# Must be executable: chmod +x
+
+INTERFACE="$1"
+ACTION="$2"
+
+# Only act on wlan0 coming up
+[ "$INTERFACE" = "wlan0" ] || exit 0
+[ "$ACTION" = "up" ] || exit 0
+
+# Only if cloud archive is configured
+GADGET_DIR="__GADGET_DIR__"
+CREDS_FILE="$GADGET_DIR/cloud_provider.enc"
+[ -f "$CREDS_FILE" ] || exit 0
+
+# Delay briefly to let the network stabilize
+sleep 5
+
+# Run the token refresh helper (non-blocking, low priority)
+nice -n 19 python3 "$GADGET_DIR/scripts/web/helpers/refresh_cloud_token.py" &
+
+exit 0

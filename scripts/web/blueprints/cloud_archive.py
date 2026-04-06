@@ -2,7 +2,6 @@
 
 import os
 import logging
-import subprocess
 
 from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify
 
@@ -89,7 +88,16 @@ def index():
         sync_history = []
 
     # Check if cloud provider credentials are configured
-    provider_connected = bool(CLOUD_ARCHIVE_PROVIDER) and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)
+    # Re-read provider from config.yaml since it may have been updated at runtime
+    import yaml
+    _provider = CLOUD_ARCHIVE_PROVIDER
+    try:
+        with open(CONFIG_YAML, 'r') as f:
+            _cfg = yaml.safe_load(f) or {}
+        _provider = _cfg.get('cloud_archive', {}).get('provider', '') or _provider
+    except Exception:
+        pass
+    provider_connected = bool(_provider) and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)
 
     ctx = get_base_context()
     return render_template(
@@ -98,7 +106,7 @@ def index():
         sync_status=sync_status,
         sync_stats=sync_stats,
         sync_history=sync_history,
-        provider=CLOUD_ARCHIVE_PROVIDER,
+        provider=_provider,
         provider_connected=provider_connected,
         sync_folders=CLOUD_ARCHIVE_SYNC_FOLDERS,
         priority_order=CLOUD_ARCHIVE_PRIORITY_ORDER,
@@ -199,221 +207,158 @@ def api_history():
         return jsonify({"error": str(exc)}), 500
 
 
+
+@cloud_archive_bp.route('/api/provider', methods=['POST'])
+def api_save_provider():
+    """Save cloud provider selection to config.yaml."""
+    data = request.get_json(silent=True)
+    if not data or 'provider' not in data:
+        return jsonify({"success": False, "message": "Missing provider."}), 400
+
+    provider = data['provider']
+    try:
+        _update_config_yaml({'cloud_archive.provider': provider})
+        logger.info("Cloud provider set to %s", provider)
+        return jsonify({"success": True})
+    except Exception as exc:
+        logger.exception("Failed to save provider selection")
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# rclone authorize token paste endpoints
+# ---------------------------------------------------------------------------
+
+@cloud_archive_bp.route('/api/connect', methods=['POST'])
+def api_connect_provider():
+    """Save rclone authorize token for a cloud provider.
+
+    Expects JSON: { "provider": "onedrive", "token": "<pasted blob>" }
+    """
+    from services.cloud_rclone_service import (
+        parse_rclone_token, save_credentials, PROVIDERS,
+    )
+
+    data = request.get_json(silent=True) or {}
+    provider = data.get('provider', '')
+    token_raw = data.get('token', '')
+
+    if not provider or not token_raw:
+        return jsonify({"success": False,
+                        "message": "Missing provider or token."}), 400
+
+    if provider not in PROVIDERS:
+        return jsonify({"success": False,
+                        "message": f"Unknown provider: {provider}"}), 400
+
+    try:
+        token = parse_rclone_token(token_raw)
+    except ValueError as e:
+        return jsonify({"success": False, "message": str(e)}), 400
+
+    try:
+        save_credentials(provider, token)
+        _update_config_yaml({'cloud_archive.provider': provider})
+        return jsonify({"success": True, "message": "Connected successfully."})
+    except Exception as exc:
+        logger.exception("Failed to save cloud credentials for %s", provider)
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/disconnect', methods=['POST'])
+def api_disconnect_provider():
+    """Remove stored cloud credentials."""
+    from services.cloud_rclone_service import remove_credentials
+
+    try:
+        remove_credentials()
+        _update_config_yaml({'cloud_archive.provider': ''})
+        return jsonify({"success": True})
+    except Exception as exc:
+        logger.exception("Failed to disconnect cloud provider")
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
 @cloud_archive_bp.route('/api/test_connection', methods=['POST'])
 def api_test_connection():
-    """Test connectivity to the configured rclone remote."""
+    """Test connectivity to the configured cloud provider."""
+    from services.cloud_rclone_service import test_connection
+
     try:
-        rclone_conf = os.path.join(GADGET_DIR, 'rclone.conf')
-        result = subprocess.run(
-            ['rclone', 'lsd', '--config', rclone_conf, 'teslausb:'],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
+        ok, msg = test_connection()
+        if ok:
             logger.info("Cloud connection test succeeded")
-            return jsonify({"success": True, "message": "Connection successful."})
-        logger.warning("Cloud connection test failed: %s", result.stderr.strip())
-        return jsonify({"success": False, "message": result.stderr.strip()}), 400
-    except subprocess.TimeoutExpired:
-        logger.warning("Cloud connection test timed out")
-        return jsonify({"success": False, "message": "Connection timed out."}), 504
+            return jsonify({"success": True, "message": msg})
+        logger.warning("Cloud connection test failed: %s", msg)
+        return jsonify({"success": False, "message": msg}), 400
     except Exception as exc:
         logger.exception("Cloud connection test error")
         return jsonify({"success": False, "message": str(exc)}), 500
 
 
-@cloud_archive_bp.route('/api/provider', methods=['POST'])
-def api_save_provider():
-    """Save cloud provider credentials (encrypted)."""
-    import json
-
-    data = request.get_json(silent=True)
-    if not data or 'provider' not in data or 'credentials' not in data:
-        return jsonify({"success": False, "message": "Missing provider or credentials."}), 400
-
-    provider = data['provider']
-    credentials = data['credentials']
+@cloud_archive_bp.route('/api/connection_status')
+def api_connection_status():
+    """Return current provider connection status."""
+    from services.cloud_rclone_service import get_connection_status
 
     try:
-        # Encrypt credentials using the hardware-bound key (same as Tesla tokens)
-        from services.tesla_api_service import derive_encryption_key
-        from cryptography.fernet import Fernet
-        import json as _json
-
-        key = derive_encryption_key()
-        fernet = Fernet(key)
-        encrypted = fernet.encrypt(_json.dumps(credentials).encode())
-
-        os.makedirs(os.path.dirname(CLOUD_PROVIDER_CREDS_PATH) or '.', exist_ok=True)
-        tmp = CLOUD_PROVIDER_CREDS_PATH + '.tmp'
-        with open(tmp, 'wb') as f:
-            f.write(encrypted)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, CLOUD_PROVIDER_CREDS_PATH)
-
-        _update_config_yaml({'cloud_archive.provider': provider})
-
-        logger.info("Cloud provider updated to %s", provider)
-        return jsonify({"success": True})
+        return jsonify(get_connection_status())
     except Exception as exc:
-        logger.exception("Failed to save cloud provider credentials")
-        return jsonify({"success": False, "message": str(exc)}), 500
+        logger.exception("Failed to get connection status")
+        return jsonify({"connected": False, "error": str(exc)}), 500
 
 
 # ---------------------------------------------------------------------------
-# OAuth API endpoints (Tier 1-2 cloud provider authentication)
+# Folder browsing & creation
 # ---------------------------------------------------------------------------
 
-def _save_oauth_credentials(provider: str, credentials: dict) -> None:
-    """Encrypt and persist OAuth credentials, update config.yaml."""
-    from services.tesla_api_service import derive_encryption_key
-    from cryptography.fernet import Fernet
-    import json as _json
+@cloud_archive_bp.route('/api/browse')
+def api_browse_folders():
+    """List folders at a given path on the connected cloud provider."""
+    from services.cloud_rclone_service import list_folders
 
-    key = derive_encryption_key()
-    fernet = Fernet(key)
-    encrypted = fernet.encrypt(_json.dumps(credentials).encode())
-
-    os.makedirs(os.path.dirname(CLOUD_PROVIDER_CREDS_PATH) or '.', exist_ok=True)
-    tmp = CLOUD_PROVIDER_CREDS_PATH + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(encrypted)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, CLOUD_PROVIDER_CREDS_PATH)
-
-    _update_config_yaml({'cloud_archive.provider': provider})
-
-
-@cloud_archive_bp.route('/api/oauth/start', methods=['POST'])
-def api_oauth_start():
-    """Start OAuth flow for a cloud provider (auto-tier selection)."""
-    from services.cloud_oauth_service import start_oauth
-
-    data = request.get_json(silent=True) or {}
-    provider = data.get('provider', '')
-    if not provider:
-        return jsonify({"success": False, "message": "Missing provider."}), 400
-
-    valid_providers = ('google-drive', 'onedrive', 'dropbox')
-    if provider not in valid_providers:
-        return jsonify({"success": False,
-                        "message": f"Invalid provider. Use: {', '.join(valid_providers)}"}), 400
+    path = request.args.get('path', '')
 
     try:
-        result = start_oauth(provider)
-        return jsonify({"success": True, **result})
+        ok, data = list_folders(path)
+        if ok:
+            return jsonify({"success": True, "folders": data, "path": path})
+        return jsonify({"success": False, "message": data}), 400
     except Exception as exc:
-        logger.exception("Failed to start OAuth for %s", provider)
+        logger.exception("Folder browse error")
         return jsonify({"success": False, "message": str(exc)}), 500
 
 
-@cloud_archive_bp.route('/api/oauth/status')
-def api_oauth_status():
-    """Poll OAuth flow status (device code polling or browser check)."""
-    from services.cloud_oauth_service import poll_oauth
-
-    session_id = request.args.get('session_id', '')
-    if not session_id:
-        return jsonify({"state": "error", "error": "Missing session_id"}), 400
-
-    try:
-        result = poll_oauth(session_id)
-
-        # Auto-save credentials on completion
-        if result.get("state") == "completed" and result.get("token"):
-            try:
-                from services.cloud_oauth_service import get_session_info
-                info = get_session_info()
-                provider = info["provider"] if info else ""
-                _save_oauth_credentials(provider, result["token"])
-                logger.info("OAuth credentials saved for %s", provider)
-            except Exception:
-                logger.exception("Failed to save OAuth credentials")
-                result["save_error"] = "Token obtained but failed to save"
-
-        return jsonify(result)
-    except Exception as exc:
-        logger.exception("OAuth status check failed")
-        return jsonify({"state": "error", "error": str(exc)}), 500
-
-
-@cloud_archive_bp.route('/api/oauth/code', methods=['POST'])
-def api_oauth_submit_code():
-    """Submit authorization code (for PKCE flow — any provider)."""
-    from services.cloud_oauth_service import pkce_exchange, get_session_info
+@cloud_archive_bp.route('/api/mkdir', methods=['POST'])
+def api_create_folder():
+    """Create a new folder on the connected cloud provider."""
+    from services.cloud_rclone_service import create_folder
 
     data = request.get_json(silent=True) or {}
-    session_id = data.get('session_id', '')
-    code = data.get('code', '')
-
-    if not session_id or not code:
-        return jsonify({"success": False, "message": "Missing session_id or code."}), 400
+    path = data.get('path', '')
+    if not path:
+        return jsonify({"success": False, "message": "Folder path required."}), 400
 
     try:
-        result = pkce_exchange(session_id, code)
-
-        if result.get("state") == "completed" and result.get("token"):
-            try:
-                info = get_session_info()
-                provider = info["provider"] if info else ""
-                _save_oauth_credentials(provider, result["token"])
-                logger.info("OAuth credentials saved for %s", provider)
-            except Exception:
-                logger.exception("Failed to save OAuth credentials")
-                result["save_error"] = "Token obtained but failed to save"
-
-        return jsonify({"success": result.get("state") == "completed", **result})
+        ok, msg = create_folder(path)
+        if ok:
+            return jsonify({"success": True, "message": msg})
+        return jsonify({"success": False, "message": msg}), 400
     except Exception as exc:
-        logger.exception("PKCE code exchange failed")
+        logger.exception("Folder creation error")
         return jsonify({"success": False, "message": str(exc)}), 500
 
 
-@cloud_archive_bp.route('/api/oauth/cancel', methods=['POST'])
-def api_oauth_cancel():
-    """Cancel an in-progress OAuth flow."""
-    from services.cloud_oauth_service import cancel_auth
-
+@cloud_archive_bp.route('/api/set_remote_path', methods=['POST'])
+def api_set_remote_path():
+    """Set the cloud sync destination folder path."""
     data = request.get_json(silent=True) or {}
-    session_id = data.get('session_id', '')
+    path = data.get('path', '')
 
-    if not session_id:
-        return jsonify({"success": False, "message": "Missing session_id."}), 400
-
-    ok = cancel_auth(session_id)
-    return jsonify({"success": ok})
-
-
-@cloud_archive_bp.route('/api/oauth/screenshot')
-def api_oauth_screenshot():
-    """Get current browser viewport screenshot (for embedded browser flow)."""
-    from services.cloud_oauth_service import browser_get_screenshot
-
-    session_id = request.args.get('session_id', '')
-    if not session_id:
-        return '', 404
-
-    png_data = browser_get_screenshot(session_id)
-    if not png_data:
-        return '', 404
-
-    from flask import Response
-    return Response(png_data, mimetype='image/png',
-                    headers={'Cache-Control': 'no-store'})
-
-
-@cloud_archive_bp.route('/api/oauth/input', methods=['POST'])
-def api_oauth_input():
-    """Send keyboard/mouse input to embedded browser."""
-    from services.cloud_oauth_service import browser_send_input
-
-    data = request.get_json(silent=True) or {}
-    session_id = data.get('session_id', '')
-    input_type = data.get('type', '')  # 'key', 'text', 'click'
-    input_data = data.get('data', {})
-
-    if not session_id or not input_type:
-        return jsonify({"success": False}), 400
-
-    ok = browser_send_input(session_id, input_type, input_data)
-    return jsonify({"success": ok})
+    try:
+        _update_config_yaml({'cloud_archive.remote_path': path or 'TeslaUSB'})
+        logger.info("Cloud remote path set to: %s", path or 'TeslaUSB')
+        return jsonify({"success": True, "path": path or 'TeslaUSB'})
+    except Exception as exc:
+        logger.exception("Failed to set remote path")
+        return jsonify({"success": False, "message": str(exc)}), 500

@@ -79,13 +79,13 @@ _PKCE_ENDPOINTS = {
     "onedrive": {
         "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
         "token_url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-        # Microsoft supports native client redirect for public clients
-        "redirect_uri": "https://login.microsoftonline.com/common/oauth2/nativeclient",
+        # Must match rclone's registered redirect URI for this client_id
+        "redirect_uri": "http://localhost:53682/",
     },
     "google-drive": {
         "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
         "token_url": "https://oauth2.googleapis.com/token",
-        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+        "redirect_uri": "http://localhost:53682/",
     },
     "dropbox": {
         "auth_url": "https://www.dropbox.com/oauth2/authorize",
@@ -645,12 +645,34 @@ def pkce_auth_start(provider: str) -> Dict:
     }
 
 
+def _extract_code_from_input(raw: str) -> str:
+    """Extract authorization code from user input.
+
+    Accepts either a bare code string or a full redirect URL like
+    ``http://localhost:53682/?code=AUTH_CODE&state=...``.
+    """
+    raw = raw.strip()
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        qs = parse_qs(parsed.query)
+        codes = qs.get("code", [])
+        if codes:
+            return codes[0]
+    return raw
+
+
 def pkce_exchange(session_id: str, code: str) -> Dict:
     """Exchange an authorization code for tokens (any PKCE provider).
+
+    ``code`` may be a bare authorization code or a full redirect URL
+    containing a ``code`` query parameter.
 
     Returns dict with 'state' and optionally 'token'.
     """
     global _auth_session
+
+    # Accept bare code or full redirect URL
+    code = _extract_code_from_input(code)
 
     with _auth_lock:
         sess = _auth_session

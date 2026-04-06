@@ -1,0 +1,354 @@
+"""
+TeslaUSB Cloud rclone Configuration Service.
+
+Wraps rclone's headless authorization flow for the web UI.
+The user runs ``rclone authorize "<backend>"`` on a machine with a browser
+and pastes the resulting token blob here.  We validate it, encrypt it via
+the hardware-bound key, and persist it for the sync service to use.
+
+No custom OAuth logic — rclone handles all provider-specific auth.
+"""
+
+import json
+import logging
+import os
+import re
+import subprocess
+from typing import Dict, Optional, Tuple
+
+from config import (
+    GADGET_DIR,
+    CLOUD_PROVIDER_CREDS_PATH,
+)
+
+logger = logging.getLogger(__name__)
+
+# Remote name used in rclone config
+RCLONE_REMOTE_NAME = "teslausb"
+
+# Temporary rclone.conf lives on tmpfs (RAM) for security
+_RCLONE_TMPFS_DIR = "/run/teslausb"
+_RCLONE_CONF_PATH = os.path.join(_RCLONE_TMPFS_DIR, "rclone.conf")
+
+# ---------------------------------------------------------------------------
+# Provider metadata (display labels and rclone backend types)
+# ---------------------------------------------------------------------------
+
+PROVIDERS = {
+    "onedrive": {
+        "label": "OneDrive",
+        "rclone_type": "onedrive",
+        "authorize_cmd": 'rclone authorize "onedrive"',
+    },
+    "google-drive": {
+        "label": "Google Drive",
+        "rclone_type": "drive",
+        "authorize_cmd": 'rclone authorize "drive"',
+    },
+    "dropbox": {
+        "label": "Dropbox",
+        "rclone_type": "dropbox",
+        "authorize_cmd": 'rclone authorize "dropbox"',
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Token parsing
+# ---------------------------------------------------------------------------
+
+def parse_rclone_token(raw_input: str) -> Dict:
+    """Parse a token blob pasted from ``rclone authorize`` output.
+
+    Accepts either:
+    - The raw JSON object: ``{"access_token":"...", ...}``
+    - The full rclone output containing ``---> ... <---End paste``
+
+    Returns the parsed token dict.
+    Raises ValueError if the input cannot be parsed.
+    """
+    raw_input = raw_input.strip()
+
+    # Try extracting from rclone's paste markers first
+    match = re.search(r'--->\s*(.*?)\s*<---End paste', raw_input, re.DOTALL)
+    if match:
+        raw_input = match.group(1).strip()
+
+    # Try parsing as JSON directly
+    try:
+        token = json.loads(raw_input)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError(
+            "Could not parse the token. Make sure you copied the entire "
+            "output from 'rclone authorize', including the curly braces."
+        ) from e
+
+    if not isinstance(token, dict):
+        raise ValueError("Token must be a JSON object.")
+
+    # Validate minimum required fields
+    if "access_token" not in token:
+        raise ValueError(
+            "Token is missing 'access_token'. Make sure you copied the "
+            "complete output from 'rclone authorize'."
+        )
+
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Credential storage (encrypted, hardware-bound)
+# ---------------------------------------------------------------------------
+
+def save_credentials(provider: str, token: dict) -> None:
+    """Encrypt and persist rclone credentials.
+
+    Args:
+        provider: Provider key (e.g. 'onedrive').
+        token: Parsed token dict from rclone authorize output.
+    """
+    from services.tesla_api_service import derive_encryption_key
+    from cryptography.fernet import Fernet
+
+    rclone_type = PROVIDERS.get(provider, {}).get("rclone_type", provider)
+
+    # Build rclone-compatible credential dict
+    creds = {
+        "type": rclone_type,
+        "token": json.dumps(token),
+    }
+
+    # Add provider-specific fields rclone expects
+    if provider == "onedrive":
+        creds["drive_type"] = "personal"
+        drive_id = _discover_onedrive_id(token)
+        if drive_id:
+            creds["drive_id"] = drive_id
+
+    key = derive_encryption_key()
+    fernet = Fernet(key)
+    encrypted = fernet.encrypt(json.dumps(creds).encode())
+
+    os.makedirs(os.path.dirname(CLOUD_PROVIDER_CREDS_PATH) or '.', exist_ok=True)
+    tmp = CLOUD_PROVIDER_CREDS_PATH + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(encrypted)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CLOUD_PROVIDER_CREDS_PATH)
+
+    logger.info("Cloud credentials saved for provider: %s", provider)
+
+
+def _discover_onedrive_id(token: dict) -> Optional[str]:
+    """Query Microsoft Graph API to get the user's default drive ID.
+
+    This is required by rclone for OneDrive to function.
+    """
+    access_token = token.get("access_token", "")
+    if not access_token:
+        return None
+
+    try:
+        from urllib.request import Request, urlopen
+        req = Request("https://graph.microsoft.com/v1.0/me/drive",
+                      headers={"Authorization": f"Bearer {access_token}"})
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+        drive_id = data.get("id", "")
+        if drive_id:
+            logger.info("Discovered OneDrive drive_id: %s", drive_id[:8] + "...")
+        return drive_id
+    except Exception as e:
+        logger.warning("Could not discover OneDrive drive_id: %s", e)
+        return None
+
+
+def remove_credentials() -> None:
+    """Remove stored cloud credentials."""
+    try:
+        os.remove(CLOUD_PROVIDER_CREDS_PATH)
+        logger.info("Cloud credentials removed")
+    except FileNotFoundError:
+        pass
+
+
+def get_connection_status() -> Dict:
+    """Check current cloud provider connection status.
+
+    Returns dict with 'connected' bool, 'provider' name, and any errors.
+    """
+    from config import CLOUD_ARCHIVE_PROVIDER
+
+    if not CLOUD_ARCHIVE_PROVIDER:
+        return {"connected": False, "provider": None, "error": "No provider configured"}
+
+    if not os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
+        return {"connected": False, "provider": CLOUD_ARCHIVE_PROVIDER,
+                "error": "No credentials stored"}
+
+    meta = PROVIDERS.get(CLOUD_ARCHIVE_PROVIDER, {})
+    return {
+        "connected": True,
+        "provider": CLOUD_ARCHIVE_PROVIDER,
+        "label": meta.get("label", CLOUD_ARCHIVE_PROVIDER),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Connection test via rclone
+# ---------------------------------------------------------------------------
+
+def _write_temp_conf(creds: dict) -> str:
+    """Write a temporary rclone.conf to tmpfs and return its path."""
+    os.makedirs(_RCLONE_TMPFS_DIR, exist_ok=True)
+
+    lines = [f"[{RCLONE_REMOTE_NAME}]"]
+    for key, value in creds.items():
+        lines.append(f"{key} = {value}")
+
+    fd = os.open(_RCLONE_CONF_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, "\n".join(lines).encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return _RCLONE_CONF_PATH
+
+
+def _remove_temp_conf() -> None:
+    """Delete the tmpfs rclone config if it exists."""
+    try:
+        os.remove(_RCLONE_CONF_PATH)
+    except FileNotFoundError:
+        pass
+
+
+def _load_creds() -> dict:
+    """Load and decrypt stored credentials. Returns empty dict on failure."""
+    if not os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
+        return {}
+    try:
+        from services.tesla_api_service import derive_encryption_key
+        from cryptography.fernet import Fernet
+
+        key = derive_encryption_key()
+        fernet = Fernet(key)
+
+        with open(CLOUD_PROVIDER_CREDS_PATH, 'rb') as f:
+            encrypted = f.read()
+
+        decrypted = fernet.decrypt(encrypted).decode()
+        creds = json.loads(decrypted)
+        return creds if isinstance(creds, dict) else {}
+    except Exception as e:
+        logger.error("Failed to load cloud credentials: %s", e)
+        return {}
+
+
+def test_connection() -> Tuple[bool, str]:
+    """Test the cloud connection using stored credentials.
+
+    Returns (success: bool, message: str).
+    """
+    creds = _load_creds()
+    if not creds:
+        return False, "No credentials configured. Please connect a provider first."
+
+    try:
+        conf_path = _write_temp_conf(creds)
+        result = subprocess.run(
+            ["rclone", "lsd", "--config", conf_path, f"{RCLONE_REMOTE_NAME}:"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return True, "Connection successful."
+        return False, result.stderr.strip() or "Connection failed."
+    except subprocess.TimeoutExpired:
+        return False, "Connection timed out after 30 seconds."
+    except Exception as e:
+        logger.exception("Connection test error")
+        return False, str(e)
+    finally:
+        _remove_temp_conf()
+
+
+# ---------------------------------------------------------------------------
+# Folder browsing & creation
+# ---------------------------------------------------------------------------
+
+def list_folders(path: str = "") -> Tuple[bool, object]:
+    """List folders at the given remote path.
+
+    Returns (success, data) where data is a list of folder dicts on success
+    or an error string on failure.  Each folder dict has 'name' and 'path'.
+    """
+    creds = _load_creds()
+    if not creds:
+        return False, "No credentials configured."
+
+    remote_path = f"{RCLONE_REMOTE_NAME}:{path}"
+    try:
+        conf_path = _write_temp_conf(creds)
+        result = subprocess.run(
+            ["rclone", "lsjson", "--config", conf_path,
+             "--dirs-only", "--no-modtime", remote_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip()
+            # Treat empty directory as success with empty list
+            if "directory not found" in err.lower():
+                return True, []
+            return False, err or "Failed to list folders."
+
+        items = json.loads(result.stdout) if result.stdout.strip() else []
+        folders = []
+        for item in items:
+            name = item.get("Name", "")
+            if name:
+                folder_path = f"{path}/{name}".lstrip("/")
+                folders.append({"name": name, "path": folder_path})
+        folders.sort(key=lambda f: f["name"].lower())
+        return True, folders
+    except subprocess.TimeoutExpired:
+        return False, "Request timed out."
+    except json.JSONDecodeError:
+        return False, "Invalid response from cloud provider."
+    except Exception as e:
+        logger.exception("Folder listing error")
+        return False, str(e)
+    finally:
+        _remove_temp_conf()
+
+
+def create_folder(path: str) -> Tuple[bool, str]:
+    """Create a folder at the given remote path.
+
+    Returns (success, message).
+    """
+    if not path or not path.strip("/"):
+        return False, "Folder path is required."
+
+    creds = _load_creds()
+    if not creds:
+        return False, "No credentials configured."
+
+    remote_path = f"{RCLONE_REMOTE_NAME}:{path}"
+    try:
+        conf_path = _write_temp_conf(creds)
+        result = subprocess.run(
+            ["rclone", "mkdir", "--config", conf_path, remote_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            logger.info("Created cloud folder: %s", path)
+            return True, f"Created folder: {path}"
+        return False, result.stderr.strip() or "Failed to create folder."
+    except subprocess.TimeoutExpired:
+        return False, "Request timed out."
+    except Exception as e:
+        logger.exception("Folder creation error")
+        return False, str(e)
+    finally:
+        _remove_temp_conf()

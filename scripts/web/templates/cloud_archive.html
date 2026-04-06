@@ -131,6 +131,43 @@
                 <span id="testConnResult" style="font-size: var(--text-sm); margin-left: var(--space-2);"></span>
             </div>
 
+            {# ---- Sync destination folder ---- #}
+            <div style="margin-top: var(--space-4); border-top: 1px solid var(--border-primary); padding-top: var(--space-3);">
+                <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-2);">
+                    <strong style="color: var(--text-primary); font-size: var(--text-sm);">Sync destination:</strong>
+                    <code id="currentRemotePath" style="font-size: var(--text-sm); color: var(--accent-info); background: var(--bg-tertiary); padding: 2px 8px; border-radius: var(--radius-sm);">{{ remote_path or 'TeslaUSB' }}</code>
+                    <button type="button" class="action-btn" onclick="openFolderBrowser()" id="browseFolderBtn"
+                            style="font-size: 13px; padding: 4px 12px;">
+                        <svg style="width:14px;height:14px;vertical-align:-2px;margin-right:3px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        Choose Folder
+                    </button>
+                </div>
+
+                {# ---- Folder browser (hidden by default) ---- #}
+                <div id="folderBrowser" style="display: none; border: 1px solid var(--border-primary); border-radius: var(--radius-md); background: var(--bg-secondary); overflow: hidden; max-width: 500px;">
+                    {# Breadcrumb bar #}
+                    <div id="folderBreadcrumbs" style="padding: 8px 12px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary); font-size: 13px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-height: 36px;">
+                        <span style="color: var(--text-tertiary);">Loading&hellip;</span>
+                    </div>
+                    {# Folder list #}
+                    <div id="folderList" style="max-height: 280px; overflow-y: auto; min-height: 60px;">
+                        <div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">Loading&hellip;</div>
+                    </div>
+                    {# Action bar #}
+                    <div style="padding: 8px 12px; border-top: 1px solid var(--border-primary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <button type="button" class="action-btn" onclick="createNewFolder()" style="font-size: 13px; padding: 4px 10px;">
+                            <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            New Folder
+                        </button>
+                        <span style="flex: 1;"></span>
+                        <button type="button" class="action-btn" onclick="closeFolderBrowser()" style="font-size: 13px; padding: 4px 10px;">Cancel</button>
+                        <button type="button" class="edit-btn" onclick="selectCurrentFolder()" id="selectFolderBtn" style="font-size: 13px; padding: 4px 14px;">
+                            Select This Folder
+                        </button>
+                    </div>
+                </div>
+            </div>
+
             {% else %}
             {# ---- Not connected state ---- #}
             <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
@@ -151,137 +188,38 @@
                 </select>
             </div>
 
-            {# OAuth providers — Interactive wizard #}
-            <div id="oauthSetup" style="display: none;">
-                {# ---- Idle state: Connect button ---- #}
-                <div id="oauthIdle">
-                    <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
-                        Click below to securely connect <strong id="oauthProviderName"></strong>.
-                        No extra software needed — everything happens in your browser.
-                    </p>
-                    <button type="button" class="edit-btn" onclick="startOAuth()" id="oauthStartBtn"
-                            style="padding: 10px 24px; font-size: 15px;">
-                        <svg class="nav-icon" style="width:16px;height:16px;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-link"></use></svg>
+            {# rclone-based providers — Token paste wizard #}
+            <div id="rcloneSetup" style="display: none;">
+                <div class="info-box" style="margin-bottom: var(--space-3);">
+                    <strong>How to connect <span id="rcloneProviderName">your cloud storage</span>:</strong>
+                    <ol style="margin: 8px 0 0; padding-left: 20px; font-size: var(--text-sm); line-height: 1.7;">
+                        <li>Install <a href="https://rclone.org/downloads/" target="_blank" rel="noopener" style="color: var(--link-color);">rclone</a> on a computer with a web browser</li>
+                        <li>Open a terminal and run:
+                            <div style="margin: 6px 0; padding: 8px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px; display: inline-flex; align-items: center; gap: 8px; max-width: 100%; overflow-x: auto;">
+                                <code id="rcloneCmd" style="white-space: nowrap;">rclone authorize "onedrive"</code>
+                                <button type="button" onclick="copyRcloneCmd()" title="Copy command"
+                                        style="background: none; border: none; cursor: pointer; padding: 2px; color: var(--text-secondary); flex-shrink: 0;">
+                                    <svg style="width:16px;height:16px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                </button>
+                            </div>
+                        </li>
+                        <li>Sign in and grant access in your browser</li>
+                        <li>Copy the token output and paste it below</li>
+                    </ol>
+                </div>
+
+                <div style="margin-bottom: var(--space-3);">
+                    <label for="rcloneTokenInput" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Paste rclone token:</label>
+                    <textarea id="rcloneTokenInput" rows="5" placeholder='Paste the entire JSON token here, e.g.: {"access_token":"...","token_type":"Bearer",...}'
+                              style="width: 100%; max-width: 480px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                    <button type="button" class="edit-btn" onclick="submitRcloneToken()" id="rcloneSubmitBtn"
+                            style="padding: 10px 20px; font-size: 14px;">
                         Connect
                     </button>
+                    <span id="rcloneResult" style="font-size: var(--text-sm);"></span>
                 </div>
-
-                {# ---- Device code state (OneDrive / Google if supported) ---- #}
-                <div id="oauthDeviceCode" style="display: none;">
-                    <div class="info-box" style="margin-bottom: var(--space-3); text-align: center;">
-                        <p style="margin: 0 0 8px; color: var(--text-secondary); font-size: var(--text-sm);">
-                            Open this link and enter the code:
-                        </p>
-                        <a id="dcVerifyUrl" href="#" target="_blank" rel="noopener"
-                           style="display: inline-block; margin-bottom: 12px; color: var(--link-color); font-size: 15px; word-break: break-all;"></a>
-                        <div id="dcQrCode" style="margin: 8px auto; width: 160px; height: 160px; background: var(--bg-secondary); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; overflow: hidden;">
-                            <canvas id="dcQrCanvas" width="160" height="160"></canvas>
-                        </div>
-                        <div style="font-size: 32px; font-weight: 700; letter-spacing: 6px; color: var(--text-primary); font-family: monospace; margin: 12px 0 4px;"
-                             id="dcUserCode"></div>
-                        <p style="margin: 4px 0 0; font-size: var(--text-sm); color: var(--text-secondary);" id="dcExpiry">
-                            Expires in <span id="dcCountdown">--:--</span>
-                        </p>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 8px; justify-content: center;">
-                        <span class="status-dot status-edit" style="animation: pulse 1.5s ease-in-out infinite;"></span>
-                        <span style="font-size: var(--text-sm); color: var(--text-secondary);">Waiting for authorization&hellip;</span>
-                    </div>
-                    <div style="margin-top: var(--space-3); text-align: center;">
-                        <button type="button" class="action-btn" onclick="cancelOAuth()" style="padding: 6px 16px; font-size: 13px;">Cancel</button>
-                    </div>
-                </div>
-
-                {# ---- Browser stream state (Google Drive fallback) ---- #}
-                <div id="oauthBrowser" style="display: none;">
-                    <div style="text-align: center; margin-bottom: 8px;">
-                        <span style="font-size: var(--text-sm); color: var(--text-secondary);">
-                            <svg class="nav-icon" style="width:14px;height:14px;vertical-align:-2px;margin-right:2px;" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-lock"></use></svg>
-                            Secure browser session running on your Pi
-                        </span>
-                    </div>
-                    <div id="browserViewport" style="width: 100%; max-width: 480px; margin: 0 auto; border: 1px solid var(--border-primary); border-radius: var(--radius-md); overflow: hidden; background: #fff; position: relative; cursor: pointer;"
-                         tabindex="0">
-                        <img id="browserFrame" alt="Browser" style="width: 100%; display: block;"
-                             src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
-                        <div id="browserLoading" style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-secondary);">
-                            <span style="color: var(--text-secondary);">Loading browser&hellip;</span>
-                        </div>
-                    </div>
-                    <div style="margin-top: var(--space-2); text-align: center;">
-                        <span style="font-size: var(--text-xs); color: var(--text-tertiary);">Click the browser area and type to interact with the login page</span>
-                    </div>
-                    <div style="margin-top: var(--space-3); text-align: center;">
-                        <button type="button" class="action-btn" onclick="cancelOAuth()" style="padding: 6px 16px; font-size: 13px;">Cancel</button>
-                    </div>
-                </div>
-
-                {# ---- PKCE state (all providers) ---- #}
-                <div id="oauthPkce" style="display: none;">
-                    <div class="info-box" style="margin-bottom: var(--space-3);">
-                        <strong id="pkceTitle">Connect cloud provider:</strong>
-                        <ol id="pkceSteps" style="margin: 8px 0 0; padding-left: 20px; font-size: var(--text-sm);">
-                            <li>Click the button below to open the sign-in page</li>
-                            <li>Log in and grant access</li>
-                            <li>Copy the authorization code shown after sign-in</li>
-                            <li>Paste the code below</li>
-                        </ol>
-                        <p id="pkceHint" style="margin: 8px 0 0; font-size: var(--text-xs); color: var(--text-tertiary); display: none;"></p>
-                    </div>
-                    <div style="margin-bottom: var(--space-3);">
-                        <a id="pkceAuthLink" href="#" target="_blank" rel="noopener" class="edit-btn"
-                           style="display: inline-block; padding: 10px 20px; font-size: 14px; text-decoration: none;">
-                            Open Authorization Page &rarr;
-                        </a>
-                    </div>
-                    <div style="margin-bottom: var(--space-3);">
-                        <label for="pkceCodeInput" id="pkceCodeLabel" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Enter authorization code:</label>
-                        <div style="display: flex; gap: 8px; max-width: 360px;">
-                            <input type="text" id="pkceCodeInput" autocomplete="off" placeholder="Paste code here"
-                                   style="flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 15px; font-family: monospace;">
-                            <button type="button" class="edit-btn" onclick="submitPkceCode()" id="pkceSubmitBtn"
-                                    style="padding: 10px 16px; font-size: 14px;">Connect</button>
-                        </div>
-                    </div>
-                    <div style="text-align: left;">
-                        <button type="button" class="action-btn" onclick="cancelOAuth()" style="padding: 6px 16px; font-size: 13px;">Cancel</button>
-                    </div>
-                </div>
-
-                {# ---- Success state ---- #}
-                <div id="oauthSuccess" style="display: none; text-align: center; padding: var(--space-4) 0;">
-                    <div style="font-size: 48px; margin-bottom: 8px;">&#10003;</div>
-                    <strong style="color: var(--success-text); font-size: 18px;">Connected!</strong>
-                    <p style="color: var(--text-secondary); margin-top: 8px;">Reloading&hellip;</p>
-                </div>
-
-                {# ---- Error state ---- #}
-                <div id="oauthError" style="display: none;">
-                    <div class="info-box" style="border-color: var(--error-text); margin-bottom: var(--space-3);">
-                        <strong style="color: var(--error-text);">Connection failed</strong>
-                        <p id="oauthErrorMsg" style="margin: 4px 0 0; font-size: var(--text-sm); color: var(--text-secondary);"></p>
-                    </div>
-                    <button type="button" class="edit-btn" onclick="resetOAuth()" style="padding: 8px 16px; font-size: 14px;">Try Again</button>
-                </div>
-
-                {# ---- Advanced: manual token paste (legacy fallback) ---- #}
-                <details style="margin-top: var(--space-4);">
-                    <summary style="cursor: pointer; font-size: var(--text-sm); color: var(--text-tertiary);">
-                        Advanced: Paste rclone token manually
-                    </summary>
-                    <div style="margin-top: var(--space-2);">
-                        <div style="margin-bottom: var(--space-3);">
-                            <label for="oauthToken" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Paste rclone token:</label>
-                            <textarea id="oauthToken" rows="4" placeholder='{"access_token":"...","token_type":"Bearer",...}'
-                                      style="width: 100%; max-width: 460px; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
-                        </div>
-                        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                            <button type="button" class="edit-btn" onclick="saveOAuthProvider()" style="padding: 8px 16px; font-size: 14px;">
-                                Save Token
-                            </button>
-                        </div>
-                    </div>
-                </details>
             </div>
 
             {# Key-based providers #}
@@ -745,32 +683,41 @@
        Provider setup
        =================================================================== */
 
-    var oauthProviders = ['google-drive', 'onedrive', 'dropbox'];
+    var rcloneProviders = ['google-drive', 'onedrive', 'dropbox'];
     var keyProviders = ['s3', 'b2', 'wasabi'];
-    var rcloneTypeMap = {'google-drive': 'drive', 'onedrive': 'onedrive', 'dropbox': 'dropbox'};
-
-    /* Current OAuth session state */
-    var _oauthSession = null;
-    var _oauthPollTimer = null;
-    var _browserFrameTimer = null;
-    var _dcCountdownTimer = null;
+    var rcloneCmds = {
+        'google-drive': 'rclone authorize "drive"',
+        'onedrive':     'rclone authorize "onedrive"',
+        'dropbox':      'rclone authorize "dropbox"',
+    };
+    var providerNames = {
+        'google-drive': 'Google Drive',
+        'onedrive':     'OneDrive',
+        'dropbox':      'Dropbox',
+    };
 
     window.onProviderChange = function() {
         var sel = document.getElementById('providerSelect');
         var val = sel ? sel.value : '';
-        var oauthDiv = document.getElementById('oauthSetup');
+        var rcloneDiv = document.getElementById('rcloneSetup');
         var keyDiv = document.getElementById('keySetup');
-        var oauthName = document.getElementById('oauthProviderName');
         var endpointGroup = document.getElementById('endpointGroup');
 
-        if (oauthDiv) oauthDiv.style.display = oauthProviders.indexOf(val) !== -1 ? 'block' : 'none';
+        if (rcloneDiv) rcloneDiv.style.display = rcloneProviders.indexOf(val) !== -1 ? 'block' : 'none';
         if (keyDiv) keyDiv.style.display = keyProviders.indexOf(val) !== -1 ? 'block' : 'none';
-        if (oauthName) oauthName.textContent = sel.options[sel.selectedIndex].text;
 
-        /* Reset OAuth wizard to idle state when provider changes */
-        if (oauthProviders.indexOf(val) !== -1) {
-            resetOAuth();
+        /* Update rclone command and provider name */
+        if (rcloneProviders.indexOf(val) !== -1) {
+            var cmdEl = document.getElementById('rcloneCmd');
+            if (cmdEl) cmdEl.textContent = rcloneCmds[val] || '';
+            var nameEl = document.getElementById('rcloneProviderName');
+            if (nameEl) nameEl.textContent = providerNames[val] || val;
+            var resultEl = document.getElementById('rcloneResult');
+            if (resultEl) resultEl.textContent = '';
+            var textarea = document.getElementById('rcloneTokenInput');
+            if (textarea) textarea.value = '';
         }
+
         /* Show endpoint field for Wasabi/B2, optional for S3 */
         if (endpointGroup) {
             var label = endpointGroup.querySelector('label');
@@ -783,6 +730,68 @@
             } else {
                 endpointGroup.style.display = 'none';
             }
+        }
+    };
+
+    window.copyRcloneCmd = function() {
+        var cmdEl = document.getElementById('rcloneCmd');
+        if (cmdEl) {
+            navigator.clipboard.writeText(cmdEl.textContent).then(function() {
+                showToast('Command copied!', 'success');
+            }).catch(function() {
+                /* Fallback for older browsers */
+                var range = document.createRange();
+                range.selectNodeContents(cmdEl);
+                var sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                showToast('Command selected — press Ctrl+C to copy.', 'info');
+            });
+        }
+    };
+
+    window.submitRcloneToken = async function() {
+        var sel = document.getElementById('providerSelect');
+        var provider = sel ? sel.value : '';
+        if (!provider || rcloneProviders.indexOf(provider) === -1) {
+            showToast('Please select a cloud provider.', 'warning');
+            return;
+        }
+        var tokenText = (document.getElementById('rcloneTokenInput') || {}).value || '';
+        if (!tokenText.trim()) {
+            showToast('Please paste the token from rclone authorize.', 'warning');
+            return;
+        }
+
+        var btn = document.getElementById('rcloneSubmitBtn');
+        var resultEl = document.getElementById('rcloneResult');
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
+        if (resultEl) resultEl.textContent = '';
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({ provider: provider, token: tokenText.trim() })
+            });
+            var data = await resp.json();
+            if (data.success) {
+                showToast('Connected! Reloading\u2026', 'success');
+                setTimeout(function() { window.location.reload(); }, 1500);
+            } else {
+                showToast(data.message || 'Failed to connect.', 'error');
+                if (resultEl) {
+                    resultEl.textContent = data.message || 'Failed';
+                    resultEl.style.color = 'var(--error-text)';
+                }
+                if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+            }
+        } catch (e) {
+            showToast('Network error.', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
         }
     };
 
@@ -825,345 +834,15 @@
         }
     };
 
-    /* ===================================================================
-       OAuth Wizard — Device Code / Browser / PKCE flows
-       =================================================================== */
-
-    function _showOAuthPanel(panelId) {
-        ['oauthIdle', 'oauthDeviceCode', 'oauthBrowser', 'oauthPkce', 'oauthSuccess', 'oauthError'].forEach(function(id) {
-            var el = document.getElementById(id);
-            if (el) el.style.display = id === panelId ? 'block' : 'none';
-        });
-    }
-
-    window.resetOAuth = function() {
-        _clearOAuthTimers();
-        _oauthSession = null;
-        _showOAuthPanel('oauthIdle');
-    };
-
-    function _clearOAuthTimers() {
-        if (_oauthPollTimer) { clearInterval(_oauthPollTimer); _oauthPollTimer = null; }
-        if (_browserFrameTimer) { clearInterval(_browserFrameTimer); _browserFrameTimer = null; }
-        if (_dcCountdownTimer) { clearInterval(_dcCountdownTimer); _dcCountdownTimer = null; }
-    }
-
-    window.startOAuth = async function() {
-        var sel = document.getElementById('providerSelect');
-        var provider = sel ? sel.value : '';
-        if (!provider || oauthProviders.indexOf(provider) === -1) {
-            showToast('Please select a cloud provider.', 'warning');
-            return;
-        }
-        var btn = document.getElementById('oauthStartBtn');
-        if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
-
-        try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_oauth_start") }}', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ provider: provider })
-            });
-            var data = await resp.json();
-            if (!data.success) {
-                showToast(data.message || 'Failed to start authentication.', 'error');
-                if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
-                return;
-            }
-
-            _oauthSession = { sessionId: data.session_id, method: data.method, provider: provider };
-
-            if (data.method === 'device_code') {
-                _showDeviceCode(data);
-            } else if (data.method === 'browser') {
-                _showBrowserAuth(data);
-            } else if (data.method === 'pkce') {
-                _showPkceAuth(data);
-            } else {
-                showToast('Unknown auth method: ' + data.method, 'error');
-                resetOAuth();
-            }
-        } catch (e) {
-            showToast('Network error starting authentication.', 'error');
-            if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
-        }
-    };
-
-    /* ---- Device Code UI ---- */
-    function _showDeviceCode(data) {
-        _showOAuthPanel('oauthDeviceCode');
-        document.getElementById('dcUserCode').textContent = data.user_code || '';
-        var urlEl = document.getElementById('dcVerifyUrl');
-        urlEl.href = data.verification_uri || '#';
-        urlEl.textContent = data.verification_uri || '';
-        _drawQrPlaceholder(data.verification_uri || '');
-
-        /* Countdown */
-        var expiresIn = data.expires_in || 900;
-        var deadline = Date.now() + expiresIn * 1000;
-        _dcCountdownTimer = setInterval(function() {
-            var remain = Math.max(0, Math.floor((deadline - Date.now()) / 1000));
-            var m = Math.floor(remain / 60), s = remain % 60;
-            var el = document.getElementById('dcCountdown');
-            if (el) el.textContent = m + ':' + (s < 10 ? '0' : '') + s;
-            if (remain <= 0) { clearInterval(_dcCountdownTimer); }
-        }, 1000);
-
-        /* Poll for completion */
-        var interval = (data.interval || 5) * 1000;
-        _oauthPollTimer = setInterval(function() { _pollOAuthStatus(); }, interval);
-    }
-
-    /* ---- Browser Auth UI ---- */
-    function _showBrowserAuth(data) {
-        _showOAuthPanel('oauthBrowser');
-        var loading = document.getElementById('browserLoading');
-        if (loading) loading.style.display = 'flex';
-
-        /* Poll for screenshots */
-        _browserFrameTimer = setInterval(function() {
-            if (!_oauthSession) return;
-            var img = document.getElementById('browserFrame');
-            var ts = Date.now();
-            var url = '{{ url_for("cloud_archive.api_oauth_screenshot") }}?session_id=' +
-                      encodeURIComponent(_oauthSession.sessionId) + '&t=' + ts;
-            var tmp = new Image();
-            tmp.onload = function() {
-                img.src = tmp.src;
-                var ld = document.getElementById('browserLoading');
-                if (ld) ld.style.display = 'none';
-            };
-            tmp.src = url;
-        }, 2000);
-
-        /* Poll for completion */
-        _oauthPollTimer = setInterval(function() { _pollOAuthStatus(); }, 3000);
-
-        /* Keyboard input relay */
-        var viewport = document.getElementById('browserViewport');
-        if (viewport) {
-            viewport.addEventListener('keydown', function(e) {
-                e.preventDefault();
-                if (!_oauthSession) return;
-                var payload = { session_id: _oauthSession.sessionId, type: 'key',
-                                data: { key: e.key, code: e.code, keyCode: e.keyCode } };
-                fetch('{{ url_for("cloud_archive.api_oauth_input") }}', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                    body: JSON.stringify(payload)
-                }).catch(function() {});
-            });
-            viewport.addEventListener('keypress', function(e) {
-                e.preventDefault();
-                if (!_oauthSession || !e.key || e.key.length !== 1) return;
-                fetch('{{ url_for("cloud_archive.api_oauth_input") }}', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                    body: JSON.stringify({ session_id: _oauthSession.sessionId, type: 'text', data: { text: e.key } })
-                }).catch(function() {});
-            });
-            viewport.addEventListener('click', function(e) {
-                viewport.focus();
-                if (!_oauthSession) return;
-                var rect = viewport.getBoundingClientRect();
-                var imgEl = document.getElementById('browserFrame');
-                var scaleX = 480 / rect.width, scaleY = 640 / rect.height;
-                var x = Math.round((e.clientX - rect.left) * scaleX);
-                var y = Math.round((e.clientY - rect.top) * scaleY);
-                fetch('{{ url_for("cloud_archive.api_oauth_input") }}', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                    body: JSON.stringify({ session_id: _oauthSession.sessionId, type: 'click', data: { x: x, y: y } })
-                }).catch(function() {});
-            });
-        }
-    }
-
-    /* ---- PKCE UI (all providers) ---- */
-    var _providerLabels = {
-        'onedrive': { name: 'OneDrive', hint: 'After signing in, Microsoft will show the code in your browser address bar or on the page. Copy the entire code.' },
-        'google-drive': { name: 'Google Drive', hint: 'After granting access, Google will display an authorization code. Copy it.' },
-        'dropbox': { name: 'Dropbox', hint: 'After clicking "Allow", Dropbox will show you a code. Copy it.' },
-    };
-
-    function _showPkceAuth(data) {
-        _showOAuthPanel('oauthPkce');
-        var provider = (_oauthSession && _oauthSession.provider) || '';
-        var labels = _providerLabels[provider] || { name: 'cloud provider', hint: '' };
-
-        var title = document.getElementById('pkceTitle');
-        if (title) title.textContent = 'Connect ' + labels.name + ':';
-
-        var linkBtn = document.getElementById('pkceAuthLink');
-        if (linkBtn) {
-            linkBtn.href = data.auth_url || '#';
-            linkBtn.textContent = 'Open ' + labels.name + ' Authorization \u2192';
-        }
-
-        var label = document.getElementById('pkceCodeLabel');
-        if (label) label.textContent = 'Enter code from ' + labels.name + ':';
-
-        var hint = document.getElementById('pkceHint');
-        if (hint && labels.hint) {
-            hint.textContent = labels.hint;
-            hint.style.display = 'block';
-        }
-
-        var input = document.getElementById('pkceCodeInput');
-        if (input) {
-            input.value = '';
-            input.focus();
-            input.addEventListener('keydown', function(e) {
-                if (e.key === 'Enter') { e.preventDefault(); submitPkceCode(); }
-            });
-        }
-    }
-
-    window.submitPkceCode = async function() {
-        if (!_oauthSession || _oauthSession.method !== 'pkce') return;
-        var code = (document.getElementById('pkceCodeInput') || {}).value || '';
-        if (!code.trim()) { showToast('Please enter the authorization code.', 'warning'); return; }
-
-        var btn = document.getElementById('pkceSubmitBtn');
-        if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
-
-        try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_oauth_submit_code") }}', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ session_id: _oauthSession.sessionId, code: code.trim() })
-            });
-            var data = await resp.json();
-            if (data.state === 'completed') {
-                _onOAuthSuccess();
-            } else {
-                showToast(data.error || 'Code exchange failed.', 'error');
-                if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
-            }
-        } catch (e) {
-            showToast('Network error.', 'error');
-            if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
-        }
-    };
-
-    /* ---- Polling ---- */
-    async function _pollOAuthStatus() {
-        if (!_oauthSession) return;
-        try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_oauth_status") }}?session_id=' +
-                                   encodeURIComponent(_oauthSession.sessionId), {
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            });
-            var data = await resp.json();
-            if (data.state === 'completed') {
-                _onOAuthSuccess();
-            } else if (data.state === 'expired') {
-                _clearOAuthTimers();
-                _showOAuthPanel('oauthError');
-                document.getElementById('oauthErrorMsg').textContent = data.error || 'Authorization expired. Please try again.';
-            } else if (data.state === 'error') {
-                _clearOAuthTimers();
-                _showOAuthPanel('oauthError');
-                document.getElementById('oauthErrorMsg').textContent = data.error || 'An error occurred.';
-            }
-            /* 'pending' — keep polling */
-        } catch (e) { /* network blip — keep polling */ }
-    }
-
-    function _onOAuthSuccess() {
-        _clearOAuthTimers();
-        _showOAuthPanel('oauthSuccess');
-        showToast('Cloud provider connected!', 'success');
-        setTimeout(function() { window.location.reload(); }, 1500);
-    }
-
-    window.cancelOAuth = async function() {
-        if (_oauthSession) {
-            try {
-                await fetch('{{ url_for("cloud_archive.api_oauth_cancel") }}', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                    body: JSON.stringify({ session_id: _oauthSession.sessionId })
-                });
-            } catch (e) { /* ignore */ }
-        }
-        resetOAuth();
-        var btn = document.getElementById('oauthStartBtn');
-        if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
-    };
-
-    /* Minimal QR code placeholder (shows URL text; real QR via lightweight lib if added) */
-    function _drawQrPlaceholder(url) {
-        var canvas = document.getElementById('dcQrCanvas');
-        if (!canvas) return;
-        var ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, 160, 160);
-        ctx.fillStyle = '#333333';
-        ctx.font = '11px monospace';
-        ctx.textAlign = 'center';
-        /* Simple text rendering as placeholder */
-        var words = url.replace('https://', '').split('/');
-        var y = 60;
-        words.forEach(function(w) {
-            if (w) { ctx.fillText(w, 80, y); y += 16; }
-        });
-        ctx.font = '9px sans-serif';
-        ctx.fillStyle = '#999999';
-        ctx.fillText('Scan or click link above', 80, 145);
-    }
-
-    /* Legacy manual token paste (unchanged) */
-    window.saveOAuthProvider = async function() {
-        var sel = document.getElementById('providerSelect');
-        var provider = sel ? sel.value : '';
-        if (!provider) { showToast('Please select a provider.', 'warning'); return; }
-
-        var tokenText = (document.getElementById('oauthToken') || {}).value || '';
-        if (!tokenText.trim()) {
-            showToast('Please paste the rclone token.', 'warning');
-            return;
-        }
-
-        /* Validate it looks like JSON */
-        try {
-            JSON.parse(tokenText.trim());
-        } catch (e) {
-            showToast('Token must be valid JSON (starts with {). Copy the full output from rclone authorize.', 'warning');
-            return;
-        }
-
-        try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_save_provider") }}', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                body: JSON.stringify({ provider: provider, credentials: { token: tokenText.trim() } })
-            });
-            var data = await resp.json();
-            if (data.success) {
-                showToast('Provider connected! Reloading\u2026', 'success');
-                setTimeout(function() { window.location.reload(); }, 1000);
-            } else {
-                showToast(data.message || 'Failed to save token.', 'error');
-            }
-        } catch (e) {
-            showToast('Network error.', 'error');
-        }
-    };
-
     window.disconnectProvider = async function() {
         if (!confirm('Disconnect cloud provider? Existing archived files will remain in the cloud.')) return;
         try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_save_provider") }}', {
+            var resp = await fetch('{{ url_for("cloud_archive.api_disconnect_provider") }}', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-Requested-With': 'XMLHttpRequest'
                 },
-                body: JSON.stringify({ provider: '', credentials: {} })
             });
             var data = await resp.json();
             if (data.success) {
@@ -1176,6 +855,173 @@
             showToast('Network error.', 'error');
         }
     };
+
+    /* ===================================================================
+       Folder Browser
+       =================================================================== */
+
+    var _currentBrowsePath = '';
+
+    window.openFolderBrowser = function() {
+        var browser = document.getElementById('folderBrowser');
+        if (browser) {
+            browser.style.display = 'block';
+            _currentBrowsePath = '';
+            _loadFolders('');
+        }
+    };
+
+    window.closeFolderBrowser = function() {
+        var browser = document.getElementById('folderBrowser');
+        if (browser) browser.style.display = 'none';
+    };
+
+    function _renderBreadcrumbs(path) {
+        var el = document.getElementById('folderBreadcrumbs');
+        if (!el) return;
+
+        var parts = path ? path.split('/').filter(Boolean) : [];
+        var html = '<a href="#" onclick="_navigateFolder(\'\'); return false;" style="color: var(--link-color); text-decoration: none; font-weight: 500;">';
+        html += '<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+        html += ' Root</a>';
+
+        var cumulative = '';
+        for (var i = 0; i < parts.length; i++) {
+            cumulative += (cumulative ? '/' : '') + parts[i];
+            html += '<span style="color: var(--text-tertiary); margin: 0 2px;">/</span>';
+            if (i === parts.length - 1) {
+                html += '<strong style="color: var(--text-primary);">' + _escapeHtml(parts[i]) + '</strong>';
+            } else {
+                html += '<a href="#" onclick="_navigateFolder(\'' + _escapeAttr(cumulative) + '\'); return false;" style="color: var(--link-color); text-decoration: none;">' + _escapeHtml(parts[i]) + '</a>';
+            }
+        }
+        el.innerHTML = html;
+    }
+
+    function _renderFolderList(folders, path) {
+        var el = document.getElementById('folderList');
+        if (!el) return;
+
+        if (folders.length === 0 && !path) {
+            el.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">No folders found. Click &ldquo;New Folder&rdquo; to create one.</div>';
+            return;
+        }
+
+        var html = '';
+
+        /* Parent directory link */
+        if (path) {
+            var parent = path.split('/').slice(0, -1).join('/');
+            html += '<div onclick="_navigateFolder(\'' + _escapeAttr(parent) + '\')" style="padding: 10px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-primary);" onmouseover="this.style.background=\'var(--bg-tertiary)\'" onmouseout="this.style.background=\'\'">';
+            html += '<svg style="width:16px;height:16px;color:var(--text-tertiary);flex-shrink:0;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+            html += '<span style="color: var(--text-secondary); font-size: var(--text-sm);">..</span>';
+            html += '</div>';
+        }
+
+        if (folders.length === 0 && path) {
+            html += '<div style="padding: 16px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">Empty folder</div>';
+        }
+
+        for (var i = 0; i < folders.length; i++) {
+            var f = folders[i];
+            html += '<div onclick="_navigateFolder(\'' + _escapeAttr(f.path) + '\')" style="padding: 10px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-primary);" onmouseover="this.style.background=\'var(--bg-tertiary)\'" onmouseout="this.style.background=\'\'">';
+            html += '<svg style="width:16px;height:16px;color:var(--accent-warning);flex-shrink:0;" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M2 6a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6z"/></svg>';
+            html += '<span style="color: var(--text-primary); font-size: var(--text-sm);">' + _escapeHtml(f.name) + '</span>';
+            html += '<svg style="width:14px;height:14px;color:var(--text-tertiary);margin-left:auto;flex-shrink:0;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+            html += '</div>';
+        }
+
+        el.innerHTML = html;
+    }
+
+    window._navigateFolder = async function(path) {
+        _currentBrowsePath = path;
+        _renderBreadcrumbs(path);
+
+        var listEl = document.getElementById('folderList');
+        if (listEl) listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">Loading&hellip;</div>';
+
+        await _loadFolders(path);
+    };
+
+    async function _loadFolders(path) {
+        try {
+            var url = '{{ url_for("cloud_archive.api_browse_folders") }}?path=' + encodeURIComponent(path);
+            var resp = await fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            var data = await resp.json();
+
+            _renderBreadcrumbs(path);
+
+            if (data.success) {
+                _renderFolderList(data.folders, path);
+            } else {
+                var listEl = document.getElementById('folderList');
+                if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--error-text); font-size: var(--text-sm);">' + _escapeHtml(data.message || 'Failed to load folders.') + '</div>';
+            }
+        } catch (e) {
+            var listEl = document.getElementById('folderList');
+            if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--error-text); font-size: var(--text-sm);">Network error loading folders.</div>';
+        }
+    }
+
+    window.createNewFolder = async function() {
+        var name = prompt('Enter new folder name:');
+        if (!name || !name.trim()) return;
+        name = name.trim().replace(/[\/\\]/g, '');
+        if (!name) { showToast('Invalid folder name.', 'warning'); return; }
+
+        var fullPath = _currentBrowsePath ? _currentBrowsePath + '/' + name : name;
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_create_folder") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ path: fullPath })
+            });
+            var data = await resp.json();
+            if (data.success) {
+                showToast('Folder created.', 'success');
+                _navigateFolder(fullPath);
+            } else {
+                showToast(data.message || 'Failed to create folder.', 'error');
+            }
+        } catch (e) {
+            showToast('Network error.', 'error');
+        }
+    };
+
+    window.selectCurrentFolder = async function() {
+        var path = _currentBrowsePath || '';
+        var displayPath = path || '(root)';
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_set_remote_path") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ path: path })
+            });
+            var data = await resp.json();
+            if (data.success) {
+                var pathEl = document.getElementById('currentRemotePath');
+                if (pathEl) pathEl.textContent = data.path;
+                closeFolderBrowser();
+                showToast('Sync destination set to: ' + data.path, 'success');
+            } else {
+                showToast(data.message || 'Failed to set path.', 'error');
+            }
+        } catch (e) {
+            showToast('Network error.', 'error');
+        }
+    };
+
+    function _escapeHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+    function _escapeAttr(s) {
+        return s.replace(/'/g, "\\'").replace(/\\/g, '\\\\');
+    }
 
     window.toggleCredSecret = function(btn) {
         var field = document.getElementById('credSecret');

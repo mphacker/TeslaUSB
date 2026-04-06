@@ -99,6 +99,7 @@ MAPPING_EVENT_THRESHOLDS = {
 # Cloud Archive Configuration
 _cloud = config.get('cloud_archive', {})
 CLOUD_ARCHIVE_ENABLED = bool(_cloud.get('enabled', False))
+CLOUD_ARCHIVE_SYNC_ENABLED = bool(_cloud.get('sync_enabled', True))  # auto-sync on/off (separate from page access)
 CLOUD_ARCHIVE_PROVIDER = _cloud.get('provider', '')
 CLOUD_ARCHIVE_REMOTE_PATH = _cloud.get('remote_path', 'TeslaUSB')
 CLOUD_ARCHIVE_SYNC_FOLDERS = _cloud.get('sync_folders', ['SentryClips', 'SavedClips', 'RecentClips'])

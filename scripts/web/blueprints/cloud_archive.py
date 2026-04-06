@@ -105,7 +105,9 @@ def index():
         _max_upload_mbps = int(_cloud.get('max_upload_mbps', _max_upload_mbps))
         _remote_path = _cloud.get('remote_path', _remote_path)
         _keep_local = bool(_cloud.get('keep_local_after_upload', _keep_local))
+        _sync_enabled = bool(_cloud.get('sync_enabled', True))
     except Exception:
+        _sync_enabled = True
         pass
     provider_connected = bool(_provider) and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)
 
@@ -129,6 +131,7 @@ def index():
         provider=_provider,
         provider_connected=provider_connected,
         token_expiry=_token_expiry,
+        sync_enabled=_sync_enabled,
         sync_folders=_sync_folders,
         priority_order=_priority_order,
         max_upload_mbps=_max_upload_mbps,
@@ -395,4 +398,19 @@ def api_set_remote_path():
         return jsonify({"success": True, "path": path or 'TeslaUSB'})
     except Exception as exc:
         logger.exception("Failed to set remote path")
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/toggle_sync', methods=['POST'])
+def api_toggle_sync():
+    """Enable or disable automatic cloud sync."""
+    data = request.get_json(silent=True) or {}
+    enabled = data.get('enabled', True)
+
+    try:
+        _update_config_yaml({'cloud_archive.sync_enabled': bool(enabled)})
+        logger.info("Cloud sync %s", "enabled" if enabled else "disabled")
+        return jsonify({"success": True, "sync_enabled": bool(enabled)})
+    except Exception as exc:
+        logger.exception("Failed to toggle sync")
         return jsonify({"success": False, "message": str(exc)}), 500

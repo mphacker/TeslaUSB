@@ -149,8 +149,23 @@
             </div>
             {% endif %}
 
-            {# ---- Sync destination folder ---- #}
+            {# ---- Auto-sync toggle ---- #}
             <div style="margin-top: var(--space-4); border-top: 1px solid var(--border-primary); padding-top: var(--space-3);">
+                <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
+                    <strong style="color: var(--text-primary); font-size: var(--text-sm);">Automatic sync:</strong>
+                    <label style="display: inline-flex; align-items: center; cursor: pointer; gap: 8px;">
+                        <input type="checkbox" id="syncEnabledToggle" {% if sync_enabled %}checked{% endif %}
+                               onchange="toggleSyncEnabled(this.checked)"
+                               style="width: 18px; height: 18px; accent-color: var(--accent-success);">
+                        <span id="syncEnabledLabel" style="font-size: var(--text-sm); color: var(--text-secondary);">
+                            {{ 'Enabled — syncs every 6 hours when WiFi connected' if sync_enabled else 'Disabled — provider stays connected, no auto-sync' }}
+                        </span>
+                    </label>
+                </div>
+            </div>
+
+            {# ---- Sync destination folder ---- #}
+            <div style="margin-top: var(--space-3);">
                 <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-2);">
                     <strong style="color: var(--text-primary); font-size: var(--text-sm);">Sync destination:</strong>
                     <code id="currentRemotePath" style="font-size: var(--text-sm); color: var(--accent-info); background: var(--bg-tertiary); padding: 2px 8px; border-radius: var(--radius-sm);">{{ remote_path or 'TeslaUSB' }}</code>
@@ -292,6 +307,21 @@
             Sync Settings
         </summary>
         <div class="section-content">
+            {# ---- How sync works ---- #}
+            <div class="info-box" style="margin-bottom: var(--space-4); font-size: var(--text-sm); line-height: 1.6; color: var(--text-secondary);">
+                <strong style="color: var(--text-primary);">How sync works:</strong>
+                <ul style="margin: 6px 0 0; padding-left: 18px;">
+                    <li><strong>Automatic:</strong> Every 6 hours when WiFi is connected (configurable)</li>
+                    <li><strong>On USB mode switch:</strong> Syncs after switching between gadget and file sharing modes</li>
+                    <li><strong>Manual:</strong> Click &ldquo;Sync Now&rdquo; at any time</li>
+                </ul>
+                <p style="margin: 8px 0 0;">
+                    Files are synced <strong>newest first</strong> in the priority order below.
+                    Sync only runs when parked on WiFi &mdash; not while driving.
+                    You can continue browsing the web interface during sync.
+                </p>
+            </div>
+
             <form method="post" action="{{ url_for('cloud_archive.save_settings') }}" id="syncSettingsForm">
 
                 {# Folder selection #}
@@ -1186,6 +1216,33 @@
     function _escapeAttr(s) {
         return s.replace(/'/g, "\\'").replace(/\\/g, '\\\\');
     }
+
+    window.toggleSyncEnabled = async function(enabled) {
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_toggle_sync") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ enabled: enabled })
+            });
+            var data = await resp.json();
+            if (data.success) {
+                var label = document.getElementById('syncEnabledLabel');
+                if (label) label.textContent = enabled
+                    ? 'Enabled \u2014 syncs every 6 hours when WiFi connected'
+                    : 'Disabled \u2014 provider stays connected, no auto-sync';
+                showToast('Auto-sync ' + (enabled ? 'enabled' : 'disabled') + '.', 'success');
+            } else {
+                showToast(data.message || 'Failed to update.', 'error');
+                /* Revert checkbox */
+                var cb = document.getElementById('syncEnabledToggle');
+                if (cb) cb.checked = !enabled;
+            }
+        } catch (e) {
+            showToast('Network error.', 'error');
+            var cb = document.getElementById('syncEnabledToggle');
+            if (cb) cb.checked = !enabled;
+        }
+    };
 
     window.toggleCredSecret = function(btn) {
         var field = document.getElementById('credSecret');

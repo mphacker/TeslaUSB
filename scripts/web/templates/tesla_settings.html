@@ -439,16 +439,19 @@
                         <li>Click <strong>Create Application and Access Dashboard</strong></li>
                         <li>Fill in the registration form:
                             <ul style="margin: 4px 0; padding-left: 20px; font-size: var(--text-sm); color: var(--text-secondary);">
-                                <li><strong>Application Name:</strong> TeslaUSB (or any name you choose)</li>
+                                <li><strong>Application Name:</strong> USB Gadget Control <span style="color: var(--text-tertiary);">(do not use &ldquo;Tesla&rdquo; in the name)</span></li>
                                 <li><strong>Description:</strong> Personal dashcam archive and vehicle management</li>
                                 <li><strong>Purpose:</strong> Personal use</li>
-                                <li><strong>Allowed Origin URL:</strong> <code>http://{{ hostname }}.local</code></li>
-                                <li><strong>Allowed Redirect URI:</strong> <code>http://{{ hostname }}.local/tesla/callback</code></li>
+                                <li><strong>Allowed Origin:</strong> <code>http://localhost</code></li>
+                                <li><strong>Allowed Redirect URI:</strong> <code>http://localhost/tesla/callback</code></li>
                                 <li><strong>Scopes:</strong> Select <code>vehicle_device_data</code>, <code>vehicle_location</code>, and <code>vehicle_cmds</code></li>
                             </ul>
                         </li>
                         <li>Once approved, copy your <strong>Client ID</strong> and <strong>Client Secret</strong> below</li>
                         <li>Click <strong>Save Credentials</strong>, then <strong>Connect Tesla Account</strong></li>
+                        <li>A Tesla login page will open — sign in and grant access</li>
+                        <li>Your browser will redirect to a page that won&rsquo;t load (this is normal)</li>
+                        <li>Copy the <strong>full URL</strong> from your browser&rsquo;s address bar and paste it back here</li>
                     </ol>
                 </div>
 
@@ -479,8 +482,9 @@
                 </form>
 
                 {% if tesla_api_configured %}
-                <div class="btn-row" style="margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border-color);">
-                    <a href="{{ url_for('tesla_api.auth') }}" class="edit-btn" style="display: inline-flex; align-items: center; gap: 6px; text-decoration: none;"
+                <div style="margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border-color);">
+                    {# Step 1: Generate auth URL #}
+                    <a href="{{ url_for('tesla_api.auth') }}" class="edit-btn" style="display: inline-flex; align-items: center; gap: 6px; text-decoration: none; margin-bottom: var(--space-3);"
                        {% if not wifi_available %}onclick="return false;" aria-disabled="true" style="opacity: 0.5; pointer-events: none;"{% endif %}>
                         <svg class="nav-icon" aria-hidden="true" style="width: 16px; height: 16px;">
                             <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use>
@@ -488,12 +492,29 @@
                         Connect Tesla Account
                     </a>
                     {% if not wifi_available %}
-                    <span class="tesla-status-badge offline">
-                        <svg class="nav-icon" aria-hidden="true" style="width: 14px; height: 14px;">
-                            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-wifi"></use>
-                        </svg>
-                        Offline
-                    </span>
+                    <span class="tesla-status-badge offline">Offline</span>
+                    {% endif %}
+
+                    {# Step 2: Show auth URL + paste box (after clicking Connect) #}
+                    {% if session.get('tesla_auth_url') %}
+                    <div class="info-box" style="margin-top: var(--space-3);">
+                        <strong>Step 1:</strong> Open this link in a browser and sign in to Tesla:
+                        <div style="margin: 8px 0;">
+                            <a href="{{ session['tesla_auth_url'] }}" target="_blank" rel="noopener" class="edit-btn"
+                               style="display: inline-block; padding: 8px 16px; font-size: 14px; text-decoration: none;">
+                                Open Tesla Login &rarr;
+                            </a>
+                        </div>
+                        <strong>Step 2:</strong> After signing in, your browser will redirect to a page that won&rsquo;t load. Copy the <strong>full URL</strong> from your browser&rsquo;s address bar and paste it below:
+                        <form method="post" action="{{ url_for('tesla_api.auth_complete') }}" style="margin-top: 8px;">
+                            <div style="display: flex; gap: 8px; flex-wrap: wrap; max-width: 500px;">
+                                <input type="text" name="redirect_url" placeholder="Paste the full URL here (http://localhost/tesla/callback?code=...)"
+                                       style="flex: 1; min-width: 200px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace;"
+                                       autocomplete="off">
+                                <button type="submit" class="edit-btn" style="padding: 10px 16px; font-size: 14px;">Connect</button>
+                            </div>
+                        </form>
+                    </div>
                     {% endif %}
                 </div>
                 {% endif %}

@@ -291,71 +291,100 @@ def select_vehicle():
 
 
 # ---------------------------------------------------------------------------
-# OAuth flow
+# OAuth flow (URL paste — Tesla only allows http://localhost redirect)
 # ---------------------------------------------------------------------------
+
+# Must match what's registered in the Tesla developer portal
+_TESLA_REDIRECT_URI = "http://localhost/tesla/callback"
+
 
 @tesla_api_bp.route('/auth')
 def auth():
-    """Initiate Tesla OAuth flow — redirect user to Tesla login."""
-    redirect_uri = request.host_url.rstrip('/') + url_for('tesla_api.callback')
-
+    """Generate Tesla OAuth URL for the user to open in their browser."""
     state = base64.urlsafe_b64encode(os.urandom(16)).decode()
     session['tesla_oauth_state'] = state
 
     params = {
         'client_id': TESLA_API_CLIENT_ID,
-        'redirect_uri': redirect_uri,
+        'redirect_uri': _TESLA_REDIRECT_URI,
         'response_type': 'code',
         'scope': _TESLA_SCOPES,
         'state': state,
     }
     auth_url = f"{_TESLA_AUTH_URL}?{urlencode(params)}"
 
-    logger.info("Initiating Tesla OAuth flow (redirect_uri=%s)", redirect_uri)
-    return redirect(auth_url)
+    logger.info("Generated Tesla OAuth URL")
+    session['tesla_auth_url'] = auth_url
+    flash("Open the link below in a browser, sign in to Tesla, then paste the redirect URL back here.", "info")
+    return redirect(url_for('tesla_api.index'))
 
 
-@tesla_api_bp.route('/callback')
-def callback():
-    """Handle Tesla OAuth callback — exchange code for tokens."""
-    error = request.args.get('error')
+@tesla_api_bp.route('/auth/complete', methods=['POST'])
+def auth_complete():
+    """Accept the pasted redirect URL and exchange the code for tokens.
+
+    The user pastes the full URL from their browser's address bar after
+    Tesla redirects to http://localhost/tesla/callback?code=...&state=...
+    """
+    from urllib.parse import urlparse, parse_qs
+
+    pasted_url = request.form.get('redirect_url', '').strip()
+    if not pasted_url:
+        flash("Please paste the full URL from your browser's address bar.", "warning")
+        return redirect(url_for('tesla_api.index'))
+
+    # Extract code and state from the pasted URL
+    try:
+        parsed = urlparse(pasted_url)
+        qs = parse_qs(parsed.query)
+    except Exception:
+        flash("Could not parse the URL. Make sure you copied the entire URL.", "danger")
+        return redirect(url_for('tesla_api.index'))
+
+    error = qs.get('error', [None])[0]
     if error:
-        desc = request.args.get('error_description', error)
-        logger.warning("Tesla OAuth error: %s", desc)
+        desc = qs.get('error_description', [error])[0]
         flash(f"Tesla login failed: {desc}", "danger")
         return redirect(url_for('tesla_api.index'))
 
-    code = request.args.get('code')
-    state = request.args.get('state')
+    code = qs.get('code', [None])[0]
+    state = qs.get('state', [None])[0]
 
     expected_state = session.pop('tesla_oauth_state', None)
-    if not state or state != expected_state:
-        logger.warning("Tesla OAuth state mismatch (CSRF check failed)")
-        flash("Authentication failed — invalid state. Please try again.", "danger")
+    if expected_state and state != expected_state:
+        logger.warning("Tesla OAuth state mismatch")
+        flash("Authentication failed — state mismatch. Please try again.", "danger")
         return redirect(url_for('tesla_api.index'))
 
     if not code:
-        flash("No authorization code received from Tesla.", "danger")
+        flash("No authorization code found in the URL. Make sure you copied the full URL.", "danger")
         return redirect(url_for('tesla_api.index'))
 
-    redirect_uri = request.host_url.rstrip('/') + url_for('tesla_api.callback')
     pin = session.get('tesla_pin', '')
 
     try:
         from services.tesla_api_service import exchange_code
-        result = exchange_code(code, redirect_uri, pin)
+        result = exchange_code(code, _TESLA_REDIRECT_URI, pin)
     except Exception as exc:
-        logger.exception("Tesla OAuth code exchange raised an exception")
+        logger.exception("Tesla OAuth code exchange failed")
         flash(f"Failed to connect Tesla account: {exc}", "danger")
         return redirect(url_for('tesla_api.index'))
 
     if result:
-        flash("Tesla account connected successfully.", "success")
+        flash("Tesla account connected successfully!", "success")
         logger.info("Tesla OAuth completed — tokens saved")
+        session.pop('tesla_auth_url', None)
     else:
         flash("Failed to exchange authorization code. Please try again.", "danger")
         logger.error("Tesla OAuth code exchange returned None")
 
+    return redirect(url_for('tesla_api.index'))
+
+
+@tesla_api_bp.route('/callback')
+def callback():
+    """Legacy callback route — redirects to index with instructions."""
+    flash("Copy the full URL from your browser's address bar and paste it into the Tesla settings page.", "info")
     return redirect(url_for('tesla_api.index'))
 
 

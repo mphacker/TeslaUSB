@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import sqlite3
+import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -367,6 +368,49 @@ def _timestamp_from_filename(filename: str) -> Optional[str]:
     return None
 
 
+def _refresh_ro_mount(teslacam_path: str) -> None:
+    """Cycle the read-only mount to refresh exFAT filesystem cache.
+
+    When in present mode, Tesla writes to the USB image through the gadget
+    while the Pi has a read-only mount of the same image.  exFAT caches
+    directory entries and won't see new/changed files until the mount is
+    refreshed.  A quick umount + mount cycle (~200ms) fixes this.
+    """
+    from services.mode_service import current_mode
+    if current_mode() != 'present':
+        return  # Only needed in present mode
+
+    mount_point = os.path.dirname(teslacam_path)  # e.g. /mnt/gadget/part1-ro
+    if not os.path.ismount(mount_point):
+        return
+
+    try:
+        # Find the loop device backing this mount
+        result = subprocess.run(
+            ["sudo", "nsenter", "--mount=/proc/1/ns/mnt",
+             "findmnt", "-n", "-o", "SOURCE", mount_point],
+            capture_output=True, text=True, timeout=5,
+        )
+        source = result.stdout.strip()
+        if not source:
+            return
+
+        # Umount and remount
+        subprocess.run(
+            ["sudo", "nsenter", "--mount=/proc/1/ns/mnt",
+             "umount", mount_point],
+            capture_output=True, timeout=10,
+        )
+        subprocess.run(
+            ["sudo", "nsenter", "--mount=/proc/1/ns/mnt",
+             "mount", "-o", "ro", source, mount_point],
+            capture_output=True, timeout=10,
+        )
+        logger.info("Refreshed RO mount at %s", mount_point)
+    except Exception as e:
+        logger.warning("Failed to refresh RO mount (non-fatal): %s", e)
+
+
 def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
     """Find all front-camera MP4 files in TeslaCam folders.
 
@@ -665,6 +709,11 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
     })
 
     try:
+        # Refresh the RO mount to see Tesla's latest writes.
+        # In present mode, exFAT caches filesystem metadata and won't see
+        # new/changed files until the mount is cycled.
+        _refresh_ro_mount(teslacam_path)
+
         conn = _init_db(db_path)
 
         # Find all front-camera videos
@@ -682,11 +731,13 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
             try:
                 stat = os.stat(vp)
                 row = conn.execute(
-                    "SELECT file_size, file_mtime FROM indexed_files WHERE file_path = ?",
+                    "SELECT file_size, file_mtime, waypoint_count FROM indexed_files WHERE file_path = ?",
                     (vp,)
                 ).fetchone()
                 if row and row['file_size'] == stat.st_size and row['file_mtime'] == stat.st_mtime:
-                    continue  # Already indexed and unchanged
+                    # Skip if already indexed with waypoints; re-try if 0 waypoints
+                    if row['waypoint_count'] and row['waypoint_count'] > 0:
+                        continue
                 to_index.append((vp, stat.st_size, stat.st_mtime))
             except OSError:
                 continue
@@ -712,6 +763,11 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
             })
 
             try:
+                # Skip files still being written by Tesla (mtime < 2 min ago)
+                if (time.time() - fmtime) < 120:
+                    logger.debug("Skipping %s (still being written)", rel)
+                    continue
+
                 wc, ec = _index_video(
                     conn, vp, teslacam_path, sample_rate, thresholds,
                     trip_gap_minutes,
@@ -719,16 +775,18 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
                 total_waypoints += wc
                 total_events += ec
 
-                # Record in indexed_files
-                conn.execute(
-                    """INSERT OR REPLACE INTO indexed_files
-                       (file_path, file_size, file_mtime, indexed_at,
-                        waypoint_count, event_count)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (vp, fsize, fmtime,
-                     datetime.now(timezone.utc).isoformat(), wc, ec)
-                )
-                conn.commit()
+                # Record in indexed_files (only if we got data, or it's an
+                # older file unlikely to change — skip incomplete recordings)
+                if wc > 0 or ec > 0 or (time.time() - fmtime) > 300:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO indexed_files
+                           (file_path, file_size, file_mtime, indexed_at,
+                            waypoint_count, event_count)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (vp, fsize, fmtime,
+                         datetime.now(timezone.utc).isoformat(), wc, ec)
+                    )
+                    conn.commit()
 
             except ImportError as e:
                 # Protobuf missing — stop indexer, report clearly

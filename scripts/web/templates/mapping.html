@@ -1146,6 +1146,14 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
     const video = document.getElementById('overlayVideo');
     video.src = `/videos/stream/${waypoint.video_path}`;
 
+    // Handle video load error (file may no longer exist)
+    video.addEventListener('error', function onError() {
+        video.removeEventListener('error', onError);
+        if (typeof showToast === 'function') {
+            showToast('Video file not found — Tesla may have overwritten it. Try re-indexing.', 'warning');
+        }
+    }, { once: true });
+
     // Seek on load
     video.addEventListener('loadedmetadata', function onLoad() {
         const estimatedTime = Math.max(0, (waypoint.frame_offset || 0) / 36 - 2);

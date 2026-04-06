@@ -82,6 +82,25 @@
         </div>
     </div>
 
+    {# ---- Archive Status Card (single-file archive from video panel) ---- #}
+    <div id="archiveStatusCard" style="display: none; margin-bottom: var(--space-4);">
+        <div class="device-status-card device-status-edit" id="archiveCardInner">
+            <div class="device-status-header">
+                <span class="status-dot status-edit" style="animation: pulse 1.5s ease-in-out infinite;"></span>
+                <div class="device-status-info">
+                    <strong id="archiveTitle">Archiving&hellip;</strong>
+                    <p id="archiveSubtitle" style="font-size: var(--text-sm); color: var(--text-secondary);"></p>
+                </div>
+            </div>
+            <div class="progress-container" style="margin: 12px 0 4px;">
+                <div class="progress-bar progress-normal" id="archiveProgressBar" style="width: 0%; transition: width 0.5s ease;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px;">
+                <span id="archiveDetail" style="font-size: var(--text-xs); color: var(--text-tertiary);"></span>
+            </div>
+        </div>
+    </div>
+
     <!-- Sync statistics summary -->
     {% if sync_stats %}
     <div style="display: flex; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-4);">
@@ -1298,9 +1317,91 @@
        Initialization
        =================================================================== */
 
+    /* ===================================================================
+       Archive Status Polling (single-file archive from video panel)
+       =================================================================== */
+
+    var _archiveCloudPollTimer = null;
+
+    function startArchivePoll() {
+        if (_archiveCloudPollTimer) return;
+        _archiveCloudPollTimer = setInterval(async function() {
+            try {
+                var resp = await fetch('{{ url_for("cloud_archive.api_archive_status") }}', {
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                var st = await resp.json();
+                var card = document.getElementById('archiveStatusCard');
+                var inner = document.getElementById('archiveCardInner');
+
+                if (st.running) {
+                    if (card) card.style.display = 'block';
+                    var pct = st.total_size > 0
+                        ? Math.min(99, Math.round((st.bytes_transferred || 0) / st.total_size * 100)) : 0;
+                    var bar = document.getElementById('archiveProgressBar');
+                    if (bar) bar.style.width = pct + '%';
+
+                    var title = document.getElementById('archiveTitle');
+                    if (title) title.textContent = 'Archiving ' + (st.event_name || '') + '...';
+
+                    var sub = document.getElementById('archiveSubtitle');
+                    if (sub) sub.textContent = st.file_count + ' files \u2014 ' + formatBytes(st.bytes_transferred || 0) + ' / ' + formatBytes(st.total_size || 0);
+
+                    var etaText = '';
+                    if (st.eta_seconds != null && st.eta_seconds > 0) {
+                        var m = Math.floor(st.eta_seconds / 60);
+                        var s = st.eta_seconds % 60;
+                        etaText = m > 0 ? m + 'm ' + s + 's remaining' : s + 's remaining';
+                    }
+                    var detail = document.getElementById('archiveDetail');
+                    if (detail) detail.textContent = pct + '%' + (etaText ? ' \u2014 ' + etaText : '');
+                } else if (st.completed) {
+                    if (card) card.style.display = 'block';
+                    if (inner) inner.className = 'device-status-card device-status-present';
+                    var title = document.getElementById('archiveTitle');
+                    if (title) title.textContent = '\u2713 Archived ' + (st.event_name || '');
+                    var sub = document.getElementById('archiveSubtitle');
+                    if (sub) sub.textContent = st.file_count + ' files \u2014 ' + formatBytes(st.total_size || 0);
+                    var bar = document.getElementById('archiveProgressBar');
+                    if (bar) bar.style.width = '100%';
+                    var detail = document.getElementById('archiveDetail');
+                    if (detail) detail.textContent = 'Complete';
+                    stopArchivePoll();
+                    setTimeout(function() { if (card) card.style.display = 'none'; }, 10000);
+                } else if (st.error) {
+                    if (card) card.style.display = 'block';
+                    if (inner) inner.className = 'device-status-card device-status-unknown';
+                    var title = document.getElementById('archiveTitle');
+                    if (title) title.textContent = 'Archive Failed';
+                    var sub = document.getElementById('archiveSubtitle');
+                    if (sub) { sub.textContent = st.error; sub.style.color = 'var(--error-text)'; }
+                    var bar = document.getElementById('archiveProgressBar');
+                    if (bar) bar.style.width = '0%';
+                    var detail = document.getElementById('archiveDetail');
+                    if (detail) detail.textContent = '';
+                    stopArchivePoll();
+                    setTimeout(function() { if (card) card.style.display = 'none'; }, 15000);
+                } else {
+                    if (card) card.style.display = 'none';
+                    stopArchivePoll();
+                }
+            } catch (e) { /* keep polling */ }
+        }, 3000);
+    }
+
+    function stopArchivePoll() {
+        if (_archiveCloudPollTimer) { clearInterval(_archiveCloudPollTimer); _archiveCloudPollTimer = null; }
+    }
+
+    /* ===================================================================
+       Init
+       =================================================================== */
+
     document.addEventListener('DOMContentLoaded', function() {
         formatTimestamps();
         if (isSyncing) startPolling();
+        // Start archive polling to pick up in-progress archives from video panel
+        startArchivePoll();
     });
 
 })();

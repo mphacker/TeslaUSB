@@ -487,6 +487,14 @@ def archive_event(folder: str, event_name: str, teslacam_base: str) -> Tuple[boo
         if _archive_status["running"]:
             return False, "Another archive is already in progress."
 
+    # Don't start if a bulk sync is running (shared network/resource constraint)
+    try:
+        from services.cloud_archive_service import get_sync_status
+        if get_sync_status().get("running"):
+            return False, "A cloud sync is in progress. Please wait for it to finish."
+    except Exception:
+        pass
+
     creds = _load_creds()
     if not creds:
         return False, "No cloud provider configured."

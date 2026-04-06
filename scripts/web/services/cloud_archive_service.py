@@ -638,6 +638,14 @@ def start_sync(
         if _sync_status.get("running"):
             return False, "Sync already running"
 
+        # Don't start if a single-file archive is running (shared resource)
+        try:
+            from services.cloud_rclone_service import get_archive_status
+            if get_archive_status().get("running"):
+                return False, "A file archive is in progress. Please wait for it to finish."
+        except Exception:
+            pass
+
         _sync_cancel.clear()
         _sync_thread = threading.Thread(
             target=_run_sync,

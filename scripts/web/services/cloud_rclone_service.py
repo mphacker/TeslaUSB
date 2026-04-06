@@ -574,26 +574,40 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                 capture_output=True, text=True, timeout=3600,
             )
         else:
-            # Flat structure: copy individual files with --include filter
-            # local: /mnt/.../RecentClips/
-            # remote: teslausb:TeslaUSB/RecentClips/
-            remote_dest = f"{remote_base}/{os.path.dirname(rel_path)}"
-            include_args = []
+            # Flat structure: copy individual files one by one
+            # local: /mnt/.../RecentClips/filename.mp4
+            # remote: teslausb:TeslaUSB/RecentClips/filename.mp4
+            remote_folder = f"{remote_base}/{os.path.dirname(rel_path)}"
+            all_ok = True
             for f in files:
-                include_args.extend(["--include", f])
-            result = subprocess.run(
-                [
-                    "rclone", "copy",
-                    "--config", conf_path,
-                    "--bwlimit", f"{max_mbps}M",
-                    "--stats", "0",
-                    "--log-level", "ERROR",
-                    *include_args,
-                    local_path,
-                    remote_dest,
-                ],
-                capture_output=True, text=True, timeout=3600,
-            )
+                if _archive_cancel.is_set():
+                    break
+                src = os.path.join(local_path, f)
+                dst = f"{remote_folder}/{f}"
+                r = subprocess.run(
+                    [
+                        "rclone", "copyto",
+                        "--config", conf_path,
+                        "--bwlimit", f"{max_mbps}M",
+                        "--stats", "0",
+                        "--log-level", "ERROR",
+                        src, dst,
+                    ],
+                    capture_output=True, text=True, timeout=3600,
+                )
+                # Capture refreshed token after each file (rclone may have
+                # refreshed the access token and written it back to conf)
+                _capture_refreshed_token(creds)
+                # Re-load creds in case token was refreshed and re-write conf
+                creds = _load_creds() or creds
+                _write_temp_conf(creds)
+
+                if r.returncode != 0:
+                    all_ok = False
+                    logger.error("Failed to copy %s: %s", f, r.stderr.strip()[:200])
+            # Build a result-like object for the common status-update code below
+            result = type('R', (), {'returncode': 0 if all_ok else 1,
+                                     'stderr': '' if all_ok else 'Some files failed to copy'})()
 
         _capture_refreshed_token(creds)
 
@@ -625,6 +639,9 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
         _archive_status.update({"running": False, "error": str(e)[:200]})
         logger.exception("Archive worker error")
     finally:
+        # Always ensure running is cleared even if an unexpected error occurred
+        if _archive_status.get("running"):
+            _archive_status["running"] = False
         _remove_temp_conf()
 
 

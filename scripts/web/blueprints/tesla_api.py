@@ -295,7 +295,7 @@ def select_vehicle():
 # ---------------------------------------------------------------------------
 
 # Must match what's registered in the Tesla developer portal
-_TESLA_REDIRECT_URI = "http://localhost/tesla/callback"
+_TESLA_REDIRECT_URI = "http://127.0.0.1/tesla/callback"
 
 
 @tesla_api_bp.route('/auth')

@@ -442,8 +442,8 @@
                                 <li><strong>Application Name:</strong> USB Gadget Control <span style="color: var(--text-tertiary);">(do not use &ldquo;Tesla&rdquo; in the name)</span></li>
                                 <li><strong>Description:</strong> Personal dashcam archive and vehicle management</li>
                                 <li><strong>Purpose:</strong> Personal use</li>
-                                <li><strong>Allowed Origin:</strong> <code>http://localhost</code></li>
-                                <li><strong>Allowed Redirect URI:</strong> <code>http://localhost/tesla/callback</code></li>
+                                <li><strong>Allowed Origin:</strong> <code>http://127.0.0.1</code></li>
+                                <li><strong>Allowed Redirect URI:</strong> <code>http://127.0.0.1/tesla/callback</code></li>
                                 <li><strong>Scopes:</strong> Select <code>vehicle_device_data</code>, <code>vehicle_location</code>, and <code>vehicle_cmds</code></li>
                             </ul>
                         </li>
@@ -508,7 +508,7 @@
                         <strong>Step 2:</strong> After signing in, your browser will redirect to a page that won&rsquo;t load. Copy the <strong>full URL</strong> from your browser&rsquo;s address bar and paste it below:
                         <form method="post" action="{{ url_for('tesla_api.auth_complete') }}" style="margin-top: 8px;">
                             <div style="display: flex; gap: 8px; flex-wrap: wrap; max-width: 500px;">
-                                <input type="text" name="redirect_url" placeholder="Paste the full URL here (http://localhost/tesla/callback?code=...)"
+                                <input type="text" name="redirect_url" placeholder="Paste the full URL here (http://127.0.0.1/tesla/callback?code=...)"
                                        style="flex: 1; min-width: 200px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace;"
                                        autocomplete="off">
                                 <button type="submit" class="edit-btn" style="padding: 10px 16px; font-size: 14px;">Connect</button>

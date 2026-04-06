@@ -263,37 +263,6 @@
         </div>
     </details>
 
-    <!-- Tesla Account -->
-    <details class="settings-section">
-        <summary>Tesla Account</summary>
-        <div class="section-content">
-            <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
-                <svg style="width:20px;height:20px;flex-shrink:0;" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-car"></use></svg>
-                <div>
-                    <strong>Tesla Fleet API</strong>
-                    <p style="color:var(--text-secondary); margin:4px 0 0; font-size:0.85rem;">
-                        Connect your Tesla account for vehicle keep-awake during cloud sync, vehicle status, Sentry Mode control, and more.
-                    </p>
-                </div>
-            </div>
-            {% if tesla_api_configured %}
-            <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
-                <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent-success);"></span>
-                <span style="font-size:0.9rem;">API Configured</span>
-            </div>
-            {% else %}
-            <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
-                <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--text-muted);"></span>
-                <span style="font-size:0.9rem; color:var(--text-secondary);">Not configured</span>
-            </div>
-            {% endif %}
-            <a href="{{ url_for('tesla_api.index') }}" class="edit-btn" style="display:inline-flex; align-items:center; gap:6px; text-decoration:none;">
-                <svg style="width:16px;height:16px;" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-settings"></use></svg>
-                Tesla Settings
-            </a>
-        </div>
-    </details>
-
     <!-- System -->
     <details class="settings-section">
         <summary>System</summary>

@@ -380,26 +380,6 @@
                     </div>
                 </div>
 
-                {# ---- Sentry Mode during sync (requires Tesla API) ---- #}
-                {% if tesla_api_configured %}
-                <div style="margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--border-primary);">
-                    <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
-                        <strong style="color: var(--text-primary); font-size: var(--text-sm);">Sentry Mode during sync:</strong>
-                        <label style="display: inline-flex; align-items: center; cursor: pointer; gap: 8px;">
-                            <input type="checkbox" name="sentry_during_sync"
-                                   {% if sentry_during_sync %}checked{% endif %}
-                                   style="width: 18px; height: 18px; accent-color: var(--accent-success);">
-                            <span style="font-size: var(--text-sm); color: var(--text-secondary);">
-                                Enable Sentry Mode when syncing to keep the car awake for WiFi
-                            </span>
-                        </label>
-                    </div>
-                    <p style="margin: 4px 0 0; font-size: var(--text-xs); color: var(--text-tertiary);">
-                        Sentry Mode is automatically disabled when sync completes. Requires Tesla API credentials and VIN in config.yaml.
-                    </p>
-                </div>
-                {% endif %}
-
                 <button type="submit" class="edit-btn" style="padding: 8px 20px; font-size: 14px; margin-top: var(--space-3);">Save Settings</button>
             </form>
         </div>

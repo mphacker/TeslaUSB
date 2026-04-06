@@ -330,19 +330,9 @@ def _load_provider_creds() -> dict:
 
     Returns a dict of rclone config keys, or empty dict on failure.
     """
-    if not os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
-        logger.warning("Cloud provider credentials file not found: %s",
-                        CLOUD_PROVIDER_CREDS_PATH)
-        return {}
-
     try:
-        # Lazy import to avoid circular dependency and startup cost
-        import json
-        from services.tesla_api_service import decrypt_credentials
-        raw = decrypt_credentials(CLOUD_PROVIDER_CREDS_PATH)
-        if isinstance(raw, dict):
-            return raw
-        return json.loads(raw) if raw else {}
+        from services.cloud_rclone_service import _load_creds
+        return _load_creds()
     except Exception as e:
         logger.error("Failed to load cloud provider credentials: %s", e)
         return {}
@@ -407,7 +397,6 @@ def _run_sync(
     session_id: Optional[int] = None
     files_synced = 0
     bytes_transferred = 0
-    sentry_was_enabled = False  # Track if we enabled Sentry for this sync
 
     try:
         conn = _init_cloud_tables(db_path)
@@ -460,24 +449,6 @@ def _run_sync(
         provider = CLOUD_ARCHIVE_PROVIDER
         remote_path = CLOUD_ARCHIVE_REMOTE_PATH
         max_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
-
-        # Enable Sentry Mode during sync if configured (keeps car awake for WiFi)
-        try:
-            from config import CLOUD_ARCHIVE_SENTRY_DURING_SYNC, TESLA_API_CLIENT_ID, TESLA_API_VIN
-            if CLOUD_ARCHIVE_SENTRY_DURING_SYNC and TESLA_API_CLIENT_ID and TESLA_API_VIN:
-                from services.tesla_api_service import wake_up, set_sentry_mode
-                vin = TESLA_API_VIN
-                logger.info("Enabling Sentry Mode for cloud sync")
-                _sync_status["progress"] = "Waking vehicle for sync…"
-                wake_up(vin)
-                result = set_sentry_mode(vin, on=True)
-                if result:
-                    sentry_was_enabled = True
-                    logger.info("Sentry Mode enabled for sync")
-                else:
-                    logger.warning("Could not enable Sentry Mode — continuing sync anyway")
-        except Exception as e:
-            logger.warning("Sentry Mode setup failed (non-fatal): %s", e)
 
         for idx, (fpath, fsize, fmtime) in enumerate(to_sync):
             if cancel_event.is_set():
@@ -632,17 +603,6 @@ def _run_sync(
                 conn.close()
             except Exception:
                 pass
-
-        # Disable Sentry Mode if we enabled it for this sync
-        if sentry_was_enabled:
-            try:
-                from config import TESLA_API_VIN
-                from services.tesla_api_service import set_sentry_mode
-                if TESLA_API_VIN:
-                    logger.info("Disabling Sentry Mode after sync")
-                    set_sentry_mode(TESLA_API_VIN, on=False)
-            except Exception as e:
-                logger.warning("Failed to disable Sentry Mode after sync: %s", e)
 
         _remove_rclone_conf()
 

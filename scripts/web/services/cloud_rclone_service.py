@@ -125,7 +125,7 @@ def save_credentials(provider: str, token: dict) -> None:
         provider: Provider key (e.g. 'onedrive').
         token: Parsed token dict from rclone authorize output.
     """
-    from services.tesla_api_service import derive_encryption_key
+    from services.crypto_utils import derive_encryption_key
     from cryptography.fernet import Fernet
 
     rclone_type = PROVIDERS.get(provider, {}).get("rclone_type", provider)
@@ -290,7 +290,7 @@ def _capture_refreshed_token(original_creds: dict) -> None:
         updated_creds = dict(original_creds)
         updated_creds["token"] = new_token_str
 
-        from services.tesla_api_service import derive_encryption_key
+        from services.crypto_utils import derive_encryption_key
         from cryptography.fernet import Fernet
 
         key = derive_encryption_key()
@@ -312,7 +312,7 @@ def _load_creds() -> dict:
     if not os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
         return {}
     try:
-        from services.tesla_api_service import derive_encryption_key
+        from services.crypto_utils import derive_encryption_key
         from cryptography.fernet import Fernet
 
         key = derive_encryption_key()

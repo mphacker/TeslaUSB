@@ -30,6 +30,24 @@ RCLONE_REMOTE_NAME = "teslausb"
 _RCLONE_TMPFS_DIR = "/run/teslausb"
 _RCLONE_CONF_PATH = os.path.join(_RCLONE_TMPFS_DIR, "rclone.conf")
 
+# Patterns in rclone stderr that indicate the token is stale/revoked
+_AUTH_ERROR_PATTERNS = (
+    "invalid_grant",
+    "token expired",
+    "token has been expired",
+    "token has been revoked",
+    "couldn't fetch token",
+    "failed to refresh token",
+    "unauthorized",
+    "401",
+)
+
+
+def is_auth_error(stderr: str) -> bool:
+    """Check if rclone stderr indicates an authentication/token error."""
+    lower = stderr.lower()
+    return any(p in lower for p in _AUTH_ERROR_PATTERNS)
+
 # ---------------------------------------------------------------------------
 # Provider metadata (display labels and rclone backend types)
 # ---------------------------------------------------------------------------
@@ -302,6 +320,8 @@ def test_connection() -> Tuple[bool, str]:
     """Test the cloud connection using stored credentials.
 
     Returns (success: bool, message: str).
+    If the token is stale, the message starts with "AUTH_ERROR:" so the
+    UI can offer re-authorization.
     """
     creds = _load_creds()
     if not creds:
@@ -316,7 +336,12 @@ def test_connection() -> Tuple[bool, str]:
         _capture_refreshed_token(creds)
         if result.returncode == 0:
             return True, "Connection successful."
-        return False, result.stderr.strip() or "Connection failed."
+        err = result.stderr.strip() or "Connection failed."
+        if is_auth_error(err):
+            logger.warning("Cloud auth error detected: %s", err[:200])
+            return False, ("AUTH_ERROR: Your cloud authorization has expired. "
+                           "Please disconnect and reconnect with a new token.")
+        return False, err
     except subprocess.TimeoutExpired:
         return False, "Connection timed out after 30 seconds."
     except Exception as e:
@@ -351,9 +376,11 @@ def list_folders(path: str = "") -> Tuple[bool, object]:
         _capture_refreshed_token(creds)
         if result.returncode != 0:
             err = result.stderr.strip()
-            # Treat empty directory as success with empty list
             if "directory not found" in err.lower():
                 return True, []
+            if is_auth_error(err):
+                return False, ("AUTH_ERROR: Your cloud authorization has expired. "
+                               "Please disconnect and reconnect with a new token.")
             return False, err or "Failed to list folders."
 
         items = json.loads(result.stdout) if result.stdout.strip() else []

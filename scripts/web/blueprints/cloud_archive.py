@@ -286,11 +286,14 @@ def api_test_connection():
 
     try:
         ok, msg = test_connection()
+        auth_error = msg.startswith("AUTH_ERROR:") if not ok else False
+        display_msg = msg.replace("AUTH_ERROR: ", "") if auth_error else msg
         if ok:
             logger.info("Cloud connection test succeeded")
-            return jsonify({"success": True, "message": msg})
+            return jsonify({"success": True, "message": display_msg})
         logger.warning("Cloud connection test failed: %s", msg)
-        return jsonify({"success": False, "message": msg}), 400
+        return jsonify({"success": False, "message": display_msg,
+                        "auth_error": auth_error}), 400
     except Exception as exc:
         logger.exception("Cloud connection test error")
         return jsonify({"success": False, "message": str(exc)}), 500
@@ -323,7 +326,10 @@ def api_browse_folders():
         ok, data = list_folders(path)
         if ok:
             return jsonify({"success": True, "folders": data, "path": path})
-        return jsonify({"success": False, "message": data}), 400
+        auth_error = isinstance(data, str) and data.startswith("AUTH_ERROR:")
+        display_msg = data.replace("AUTH_ERROR: ", "") if auth_error else data
+        return jsonify({"success": False, "message": display_msg,
+                        "auth_error": auth_error}), 400
     except Exception as exc:
         logger.exception("Folder browse error")
         return jsonify({"success": False, "message": str(exc)}), 500

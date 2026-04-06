@@ -695,7 +695,11 @@
                 result.textContent = data.message || (data.success ? 'Connected!' : 'Failed');
                 result.style.color = data.success ? 'var(--success-text)' : 'var(--error-text)';
             }
-            showToast(data.message || (data.success ? 'Connection successful.' : 'Connection failed.'), data.success ? 'success' : 'error');
+            if (data.auth_error) {
+                showToast('Authorization expired. Please disconnect and reconnect.', 'error');
+            } else {
+                showToast(data.message || (data.success ? 'Connection successful.' : 'Connection failed.'), data.success ? 'success' : 'error');
+            }
         } catch (e) {
             if (result) { result.textContent = 'Network error'; result.style.color = 'var(--error-text)'; }
             showToast('Network error.', 'error');
@@ -990,7 +994,11 @@
                 _renderFolderList(data.folders, path);
             } else {
                 var listEl = document.getElementById('folderList');
-                if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--error-text); font-size: var(--text-sm);">' + _escapeHtml(data.message || 'Failed to load folders.') + '</div>';
+                if (data.auth_error) {
+                    if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; font-size: var(--text-sm);"><div style="color: var(--error-text); margin-bottom: 8px;">' + _escapeHtml(data.message) + '</div><button onclick="closeFolderBrowser(); disconnectProvider();" class="action-btn danger" style="font-size:13px;padding:6px 14px;">Disconnect &amp; Reconnect</button></div>';
+                } else {
+                    if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--error-text); font-size: var(--text-sm);">' + _escapeHtml(data.message || 'Failed to load folders.') + '</div>';
+                }
             }
         } catch (e) {
             var listEl = document.getElementById('folderList');

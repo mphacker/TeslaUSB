@@ -561,16 +561,31 @@ def exchange_code(
     """
     requests = _get_requests()
 
+    # Read credentials fresh from config (may have been saved at runtime)
+    _cid = TESLA_API_CLIENT_ID
+    _csec = TESLA_API_CLIENT_SECRET
+    try:
+        import yaml as _yaml
+        with open(os.path.join(os.path.dirname(__file__), '..', 'config.yaml'), 'r') as _f:
+            _tcfg = (_yaml.safe_load(_f) or {}).get('tesla_api', {})
+        _cid = _tcfg.get('client_id', '') or _cid
+        _csec = _tcfg.get('client_secret', '') or _csec
+    except Exception:
+        pass
+
     payload = {
         'grant_type': 'authorization_code',
-        'client_id': TESLA_API_CLIENT_ID,
-        'client_secret': TESLA_API_CLIENT_SECRET,
+        'client_id': _cid,
+        'client_secret': _csec,
         'code': code,
         'redirect_uri': redirect_uri,
     }
 
     try:
         resp = requests.post(TESLA_TOKEN_URL, json=payload, timeout=API_TIMEOUT)
+        if resp.status_code != 200:
+            logger.error("Tesla token exchange failed (%d): %s",
+                        resp.status_code, resp.text[:500])
         resp.raise_for_status()
         data = resp.json()
 

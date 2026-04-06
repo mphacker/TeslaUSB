@@ -272,8 +272,8 @@ def save_credentials():
         updates = {
             'tesla_api.client_id': client_id,
         }
-        # Only update secret if a new one was provided (not the masked value)
-        if client_secret and not client_secret.startswith('•'):
+        # Only update secret if a new one was provided (not the masked display value)
+        if client_secret and '•' not in client_secret:
             updates['tesla_api.client_secret'] = client_secret
 
         _update_config_yaml(updates)

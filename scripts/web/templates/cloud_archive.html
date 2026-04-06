@@ -441,7 +441,19 @@
     </details>
 </div>
 
+<!-- Busy overlay for cloud operations -->
+<div id="cloudBusyOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 9999; justify-content: center; align-items: center;">
+    <div style="text-align: center; color: white; padding: 24px;">
+        <div style="border: 6px solid rgba(255,255,255,0.2); border-top: 6px solid #fff; border-radius: 50%; width: 48px; height: 48px; animation: cloud-spin 1s linear infinite; margin: 0 auto 16px;"></div>
+        <div id="cloudBusyMsg" style="font-size: 16px; font-weight: 500;">Working&hellip;</div>
+    </div>
+</div>
+
 <style>
+    @keyframes cloud-spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
     @keyframes pulse {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.5; }
@@ -467,6 +479,18 @@
     /* ===================================================================
        Utility helpers
        =================================================================== */
+
+    function _showBusy(msg) {
+        var overlay = document.getElementById('cloudBusyOverlay');
+        var msgEl = document.getElementById('cloudBusyMsg');
+        if (msgEl) msgEl.textContent = msg || 'Working\u2026';
+        if (overlay) overlay.style.display = 'flex';
+    }
+
+    function _hideBusy() {
+        var overlay = document.getElementById('cloudBusyOverlay');
+        if (overlay) overlay.style.display = 'none';
+    }
 
     function formatBytes(bytes) {
         if (!bytes || bytes === 0) return '0 B';
@@ -660,6 +684,7 @@
         var result = document.getElementById('testConnResult') || document.getElementById('testConnResultSetup');
         if (btn) { btn.disabled = true; btn.textContent = 'Testing\u2026'; }
         if (result) { result.textContent = ''; result.style.color = 'var(--text-secondary)'; }
+        _showBusy('Testing cloud connection\u2026');
         try {
             var resp = await fetch('{{ url_for("cloud_archive.api_test_connection") }}', {
                 method: 'POST',
@@ -675,6 +700,7 @@
             if (result) { result.textContent = 'Network error'; result.style.color = 'var(--error-text)'; }
             showToast('Network error.', 'error');
         } finally {
+            _hideBusy();
             if (btn) { btn.disabled = false; btn.textContent = 'Test Connection'; }
         }
     };
@@ -767,6 +793,7 @@
         var resultEl = document.getElementById('rcloneResult');
         if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
         if (resultEl) resultEl.textContent = '';
+        _showBusy('Connecting to cloud provider\u2026');
 
         try {
             var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
@@ -779,9 +806,11 @@
             });
             var data = await resp.json();
             if (data.success) {
+                _hideBusy();
                 showToast('Connected! Reloading\u2026', 'success');
                 setTimeout(function() { window.location.reload(); }, 1500);
             } else {
+                _hideBusy();
                 showToast(data.message || 'Failed to connect.', 'error');
                 if (resultEl) {
                     resultEl.textContent = data.message || 'Failed';
@@ -790,6 +819,7 @@
                 if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
             }
         } catch (e) {
+            _hideBusy();
             showToast('Network error.', 'error');
             if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
         }
@@ -836,6 +866,7 @@
 
     window.disconnectProvider = async function() {
         if (!confirm('Disconnect cloud provider? Existing archived files will remain in the cloud.')) return;
+        _showBusy('Disconnecting\u2026');
         try {
             var resp = await fetch('{{ url_for("cloud_archive.api_disconnect_provider") }}', {
                 method: 'POST',
@@ -849,9 +880,11 @@
                 showToast('Provider disconnected.', 'info');
                 setTimeout(function() { window.location.reload(); }, 1000);
             } else {
+                _hideBusy();
                 showToast(data.message || 'Failed to disconnect.', 'error');
             }
         } catch (e) {
+            _hideBusy();
             showToast('Network error.', 'error');
         }
     };
@@ -945,6 +978,7 @@
     };
 
     async function _loadFolders(path) {
+        _showBusy('Loading folders\u2026');
         try {
             var url = '{{ url_for("cloud_archive.api_browse_folders") }}?path=' + encodeURIComponent(path);
             var resp = await fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
@@ -961,6 +995,8 @@
         } catch (e) {
             var listEl = document.getElementById('folderList');
             if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--error-text); font-size: var(--text-sm);">Network error loading folders.</div>';
+        } finally {
+            _hideBusy();
         }
     }
 
@@ -971,6 +1007,7 @@
         if (!name) { showToast('Invalid folder name.', 'warning'); return; }
 
         var fullPath = _currentBrowsePath ? _currentBrowsePath + '/' + name : name;
+        _showBusy('Creating folder\u2026');
 
         try {
             var resp = await fetch('{{ url_for("cloud_archive.api_create_folder") }}', {
@@ -979,6 +1016,7 @@
                 body: JSON.stringify({ path: fullPath })
             });
             var data = await resp.json();
+            _hideBusy();
             if (data.success) {
                 showToast('Folder created.', 'success');
                 _navigateFolder(fullPath);
@@ -986,13 +1024,14 @@
                 showToast(data.message || 'Failed to create folder.', 'error');
             }
         } catch (e) {
+            _hideBusy();
             showToast('Network error.', 'error');
         }
     };
 
     window.selectCurrentFolder = async function() {
         var path = _currentBrowsePath || '';
-        var displayPath = path || '(root)';
+        _showBusy('Saving destination\u2026');
 
         try {
             var resp = await fetch('{{ url_for("cloud_archive.api_set_remote_path") }}', {
@@ -1001,6 +1040,7 @@
                 body: JSON.stringify({ path: path })
             });
             var data = await resp.json();
+            _hideBusy();
             if (data.success) {
                 var pathEl = document.getElementById('currentRemotePath');
                 if (pathEl) pathEl.textContent = data.path;
@@ -1010,6 +1050,7 @@
                 showToast(data.message || 'Failed to set path.', 'error');
             }
         } catch (e) {
+            _hideBusy();
             showToast('Network error.', 'error');
         }
     };

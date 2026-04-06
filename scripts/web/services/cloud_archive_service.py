@@ -496,6 +496,13 @@ def _run_sync(
                     cmd, capture_output=True, text=True, timeout=3600,
                 )
 
+                # Persist any refreshed token before deleting temp conf
+                try:
+                    from services.cloud_rclone_service import _capture_refreshed_token
+                    _capture_refreshed_token(creds)
+                except Exception:
+                    pass  # Non-critical — sync continues even if token capture fails
+
                 if result.returncode == 0:
                     conn.execute(
                         "UPDATE cloud_synced_files SET status = 'synced', "

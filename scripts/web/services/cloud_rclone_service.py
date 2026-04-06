@@ -224,6 +224,58 @@ def _remove_temp_conf() -> None:
         pass
 
 
+def _capture_refreshed_token(original_creds: dict) -> None:
+    """Read the temp rclone.conf after a command and persist any token updates.
+
+    rclone silently refreshes expired access tokens using the refresh_token
+    and writes the updated token back to its config file.  For providers
+    like OneDrive where refresh tokens rotate, we must capture the new
+    token and re-encrypt it — otherwise the next operation will fail.
+    """
+    if not os.path.isfile(_RCLONE_CONF_PATH):
+        return
+
+    try:
+        with open(_RCLONE_CONF_PATH, 'r') as f:
+            new_conf = f.read()
+
+        # Parse the token line from the rclone conf
+        new_token_str = None
+        for line in new_conf.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("token = "):
+                new_token_str = stripped[len("token = "):]
+                break
+
+        if not new_token_str:
+            return
+
+        old_token_str = original_creds.get("token", "")
+        if new_token_str == old_token_str:
+            return  # No change
+
+        # Token was refreshed — re-encrypt and persist
+        logger.info("Detected refreshed token from rclone, persisting update")
+        updated_creds = dict(original_creds)
+        updated_creds["token"] = new_token_str
+
+        from services.tesla_api_service import derive_encryption_key
+        from cryptography.fernet import Fernet
+
+        key = derive_encryption_key()
+        fernet = Fernet(key)
+        encrypted = fernet.encrypt(json.dumps(updated_creds).encode())
+
+        tmp = CLOUD_PROVIDER_CREDS_PATH + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(encrypted)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, CLOUD_PROVIDER_CREDS_PATH)
+    except Exception as e:
+        logger.warning("Failed to capture refreshed token: %s", e)
+
+
 def _load_creds() -> dict:
     """Load and decrypt stored credentials. Returns empty dict on failure."""
     if not os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
@@ -261,6 +313,7 @@ def test_connection() -> Tuple[bool, str]:
             ["rclone", "lsd", "--config", conf_path, f"{RCLONE_REMOTE_NAME}:"],
             capture_output=True, text=True, timeout=30,
         )
+        _capture_refreshed_token(creds)
         if result.returncode == 0:
             return True, "Connection successful."
         return False, result.stderr.strip() or "Connection failed."
@@ -295,6 +348,7 @@ def list_folders(path: str = "") -> Tuple[bool, object]:
              "--dirs-only", "--no-modtime", remote_path],
             capture_output=True, text=True, timeout=30,
         )
+        _capture_refreshed_token(creds)
         if result.returncode != 0:
             err = result.stderr.strip()
             # Treat empty directory as success with empty list
@@ -341,6 +395,7 @@ def create_folder(path: str) -> Tuple[bool, str]:
             ["rclone", "mkdir", "--config", conf_path, remote_path],
             capture_output=True, text=True, timeout=30,
         )
+        _capture_refreshed_token(creds)
         if result.returncode == 0:
             logger.info("Created cloud folder: %s", path)
             return True, f"Created folder: {path}"

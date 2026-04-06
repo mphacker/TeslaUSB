@@ -491,6 +491,13 @@ def archive_event(folder: str, event_name: str, teslacam_base: str) -> Tuple[boo
     if not creds:
         return False, "No cloud provider configured."
 
+    # Refresh the RO mount to see latest files (exFAT cache may be stale)
+    try:
+        from services.mapping_service import _refresh_ro_mount
+        _refresh_ro_mount(teslacam_base)
+    except Exception:
+        pass
+
     # Determine local path and collect files
     event_dir = os.path.join(teslacam_base, folder, event_name)
     if os.path.isdir(event_dir):
@@ -556,7 +563,16 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
         remote_base = f"{RCLONE_REMOTE_NAME}:{CLOUD_ARCHIVE_REMOTE_PATH}"
         max_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
 
-        # Force a token refresh before uploading
+        # Memory-constrained flags for Pi Zero 2W (512MB RAM)
+        _mem_flags = [
+            "--buffer-size", "0",
+            "--transfers", "1",
+            "--checkers", "1",
+            "--low-level-retries", "3",
+        ]
+
+        # Force a token refresh before uploading — rclone about writes
+        # the refreshed token back to the conf file automatically
         logger.info("Archive: refreshing token before upload...")
         about_result = subprocess.run(
             ["rclone", "about", "--config", conf_path,
@@ -564,13 +580,13 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
             capture_output=True, text=True, timeout=30,
         )
         if about_result.returncode != 0:
-            logger.warning("Archive: token refresh (rclone about) failed: %s",
+            logger.warning("Archive: token refresh failed: %s",
                           about_result.stderr.strip()[:200])
         else:
             logger.info("Archive: token refresh OK")
+        # Persist the refreshed token to encrypted store (for next time)
+        # but do NOT re-write the conf — rclone already updated it
         _capture_refreshed_token(creds)
-        creds = _load_creds() or creds
-        _write_temp_conf(creds)
 
         if is_event_dir:
             remote_dest = f"{remote_base}/{rel_path}"
@@ -582,6 +598,7 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                     "--bwlimit", f"{max_mbps}M",
                     "--stats", "0",
                     "--log-level", "ERROR",
+                    *_mem_flags,
                     local_path,
                     remote_dest,
                 ],
@@ -600,8 +617,8 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                 src = os.path.join(local_path, f)
                 dst = f"{remote_folder}/{f}"
                 src_size = os.path.getsize(src) if os.path.isfile(src) else 0
-                logger.info("Archive: [%d/%d] %s (%d bytes) → %s",
-                           i + 1, len(files), f, src_size, dst)
+                logger.info("Archive: [%d/%d] %s (%d bytes)",
+                           i + 1, len(files), f, src_size)
                 r = subprocess.run(
                     [
                         "rclone", "copyto",
@@ -609,6 +626,7 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                         "--bwlimit", f"{max_mbps}M",
                         "--stats", "0",
                         "--log-level", "ERROR",
+                        *_mem_flags,
                         src, dst,
                     ],
                     capture_output=True, text=True, timeout=3600,
@@ -621,9 +639,8 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                                 i + 1, len(files), f, r.returncode,
                                 r.stderr.strip()[:300])
 
+                # Persist any token refresh (don't re-write conf — rclone keeps it fresh)
                 _capture_refreshed_token(creds)
-                creds = _load_creds() or creds
-                _write_temp_conf(creds)
 
             result = type('R', (), {'returncode': 0 if all_ok else 1,
                                      'stderr': '' if all_ok else 'Some files failed to copy'})()

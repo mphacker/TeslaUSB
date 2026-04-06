@@ -571,7 +571,6 @@ REQUIRED_PACKAGES=(
   python3-cryptography
   protobuf-compiler
   yq
-  rclone
   samba
   samba-common-bin
   ffmpeg
@@ -589,8 +588,8 @@ REQUIRED_PACKAGES=(
 # - python3-av: PyAV for instant thumbnail generation
 # - python3-pil: PIL/Pillow for image resizing
 # - ffmpeg: Used by lock chime service for audio validation and re-encoding
-# - rclone: Cloud storage sync engine for cloud archive feature
-# - python3-cryptography: Fernet encryption for Tesla API token security
+# - rclone: Installed separately via official script (distro version is too old for OneDrive)
+# - python3-cryptography: Fernet encryption for credential security
 
 # Lightweight apt helpers (reduce OOM risk on Pi Zero/2W)
 apt_update_safe() {
@@ -819,6 +818,20 @@ if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
   echo "  ✓ Orphaned packages removed"
 else
   echo "All required packages already installed; skipping apt install."
+fi
+
+# Install rclone from official source (distro version is too old for OneDrive)
+RCLONE_MIN_VERSION="1.65.0"
+RCLONE_CURRENT=$(rclone version 2>/dev/null | head -1 | grep -oP 'v\K[0-9.]+' || echo "0.0.0")
+if [ "$(printf '%s\n' "$RCLONE_MIN_VERSION" "$RCLONE_CURRENT" | sort -V | head -1)" != "$RCLONE_MIN_VERSION" ]; then
+  echo "Installing rclone from official source (current: v${RCLONE_CURRENT}, need >= v${RCLONE_MIN_VERSION})..."
+  curl -sL https://rclone.org/install.sh | bash 2>/dev/null || {
+    echo "Warning: rclone install from official source failed, falling back to apt"
+    apt-get install -y rclone 2>/dev/null || true
+  }
+  echo "  ✓ rclone $(rclone version 2>/dev/null | head -1 | grep -oP 'v[0-9.]+' || echo 'installed')"
+else
+  echo "rclone v${RCLONE_CURRENT} already meets minimum v${RCLONE_MIN_VERSION}"
 fi
 
 # Ensure hostapd/dnsmasq don't auto-start outside our controller

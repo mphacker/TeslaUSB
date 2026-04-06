@@ -295,7 +295,7 @@ def select_vehicle():
 # ---------------------------------------------------------------------------
 
 # Must match what's registered in the Tesla developer portal
-_TESLA_REDIRECT_URI = "http://127.0.0.1/tesla/callback"
+_TESLA_REDIRECT_URI = "https://mphacker.github.io/TeslaUSB/auth/callback/"
 
 
 @tesla_api_bp.route('/auth')
@@ -321,37 +321,42 @@ def auth():
 
 @tesla_api_bp.route('/auth/complete', methods=['POST'])
 def auth_complete():
-    """Accept the pasted redirect URL and exchange the code for tokens.
+    """Accept the pasted authorization code and exchange it for tokens.
 
-    The user pastes the full URL from their browser's address bar after
-    Tesla redirects to http://localhost/tesla/callback?code=...&state=...
+    The user copies the code from the GitHub Pages callback page and
+    pastes it here. Also accepts a full redirect URL as fallback.
     """
     from urllib.parse import urlparse, parse_qs
 
-    pasted_url = request.form.get('redirect_url', '').strip()
-    if not pasted_url:
-        flash("Please paste the full URL from your browser's address bar.", "warning")
+    pasted = request.form.get('redirect_url', '').strip()
+    if not pasted:
+        flash("Please paste the authorization code.", "warning")
         return redirect(url_for('tesla_api.index'))
 
-    # Extract code and state from the pasted URL
-    try:
-        parsed = urlparse(pasted_url)
-        qs = parse_qs(parsed.query)
-    except Exception:
-        flash("Could not parse the URL. Make sure you copied the entire URL.", "danger")
-        return redirect(url_for('tesla_api.index'))
+    # Detect if it's a full URL or a bare code
+    if pasted.startswith('http://') or pasted.startswith('https://'):
+        try:
+            parsed = urlparse(pasted)
+            qs = parse_qs(parsed.query)
+        except Exception:
+            flash("Could not parse the URL.", "danger")
+            return redirect(url_for('tesla_api.index'))
 
-    error = qs.get('error', [None])[0]
-    if error:
-        desc = qs.get('error_description', [error])[0]
-        flash(f"Tesla login failed: {desc}", "danger")
-        return redirect(url_for('tesla_api.index'))
+        error = qs.get('error', [None])[0]
+        if error:
+            desc = qs.get('error_description', [error])[0]
+            flash(f"Tesla login failed: {desc}", "danger")
+            return redirect(url_for('tesla_api.index'))
 
-    code = qs.get('code', [None])[0]
-    state = qs.get('state', [None])[0]
+        code = qs.get('code', [None])[0]
+        state = qs.get('state', [None])[0]
+    else:
+        # Bare authorization code
+        code = pasted
+        state = None
 
     expected_state = session.pop('tesla_oauth_state', None)
-    if expected_state and state != expected_state:
+    if expected_state and state and state != expected_state:
         logger.warning("Tesla OAuth state mismatch")
         flash("Authentication failed — state mismatch. Please try again.", "danger")
         return redirect(url_for('tesla_api.index'))

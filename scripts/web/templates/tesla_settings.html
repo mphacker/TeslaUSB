@@ -442,16 +442,16 @@
                                 <li><strong>Application Name:</strong> USB Gadget Control <span style="color: var(--text-tertiary);">(do not use &ldquo;Tesla&rdquo; in the name)</span></li>
                                 <li><strong>Description:</strong> Personal dashcam archive and vehicle management</li>
                                 <li><strong>Purpose:</strong> Personal use</li>
-                                <li><strong>Allowed Origin:</strong> <code>http://127.0.0.1</code></li>
-                                <li><strong>Allowed Redirect URI:</strong> <code>http://127.0.0.1/tesla/callback</code></li>
+                                <li><strong>Allowed Origin:</strong> <code>https://mphacker.github.io</code></li>
+                                <li><strong>Allowed Redirect URI:</strong> <code>https://mphacker.github.io/TeslaUSB/auth/callback/</code></li>
                                 <li><strong>Scopes:</strong> Select <code>vehicle_device_data</code>, <code>vehicle_location</code>, and <code>vehicle_cmds</code></li>
                             </ul>
                         </li>
                         <li>Once approved, copy your <strong>Client ID</strong> and <strong>Client Secret</strong> below</li>
                         <li>Click <strong>Save Credentials</strong>, then <strong>Connect Tesla Account</strong></li>
-                        <li>A Tesla login page will open — sign in and grant access</li>
-                        <li>Your browser will redirect to a page that won&rsquo;t load (this is normal)</li>
-                        <li>Copy the <strong>full URL</strong> from your browser&rsquo;s address bar and paste it back here</li>
+                        <li>A Tesla login page will open &mdash; sign in and grant access</li>
+                        <li>You&rsquo;ll be redirected to a page showing your authorization code</li>
+                        <li>Copy the code and paste it back here</li>
                     </ol>
                 </div>
 
@@ -505,10 +505,10 @@
                                 Open Tesla Login &rarr;
                             </a>
                         </div>
-                        <strong>Step 2:</strong> After signing in, your browser will redirect to a page that won&rsquo;t load. Copy the <strong>full URL</strong> from your browser&rsquo;s address bar and paste it below:
+                        <strong>Step 2:</strong> After signing in, you&rsquo;ll see a page with your authorization code. Copy it and paste it below:
                         <form method="post" action="{{ url_for('tesla_api.auth_complete') }}" style="margin-top: 8px;">
                             <div style="display: flex; gap: 8px; flex-wrap: wrap; max-width: 500px;">
-                                <input type="text" name="redirect_url" placeholder="Paste the full URL here (http://127.0.0.1/tesla/callback?code=...)"
+                                <input type="text" name="redirect_url" placeholder="Paste the authorization code here"
                                        style="flex: 1; min-width: 200px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace;"
                                        autocomplete="off">
                                 <button type="submit" class="edit-btn" style="padding: 10px 16px; font-size: 14px;">Connect</button>

@@ -106,8 +106,10 @@ def index():
         _remote_path = _cloud.get('remote_path', _remote_path)
         _keep_local = bool(_cloud.get('keep_local_after_upload', _keep_local))
         _sync_enabled = bool(_cloud.get('sync_enabled', True))
+        _sentry_during_sync = bool(_cloud.get('sentry_during_sync', False))
     except Exception:
         _sync_enabled = True
+        _sentry_during_sync = False
         pass
     provider_connected = bool(_provider) and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)
 
@@ -137,6 +139,7 @@ def index():
         max_upload_mbps=_max_upload_mbps,
         remote_path=_remote_path,
         keep_local=_keep_local,
+        sentry_during_sync=_sentry_during_sync,
         **ctx,
     )
 
@@ -153,11 +156,13 @@ def save_settings():
         priority_raw = request.form.get('priority_order', '')
         priority_order = [p.strip() for p in priority_raw.split(',') if p.strip()]
         max_upload_mbps = int(request.form.get('max_upload_mbps', 5))
+        sentry_during_sync = 'sentry_during_sync' in request.form
 
         _update_config_yaml({
             'cloud_archive.sync_folders': sync_folders,
             'cloud_archive.priority_order': priority_order,
             'cloud_archive.max_upload_mbps': max_upload_mbps,
+            'cloud_archive.sentry_during_sync': sentry_during_sync,
         })
 
         flash("Cloud sync settings saved.", "success")

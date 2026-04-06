@@ -609,26 +609,55 @@
         var card = document.getElementById('syncStatusCard');
         if (!card) return;
 
+        /* Lock/unlock settings during sync */
+        _setSyncSettingsLocked(!!status.running);
+
         if (status.running) {
+            var pct = 0;
+            if (status.total_bytes > 0) {
+                pct = Math.min(100, Math.round(status.bytes_transferred / status.total_bytes * 100));
+            } else if (status.files_total > 0) {
+                pct = Math.round(status.files_done / status.files_total * 100);
+            }
+
+            var etaText = '';
+            if (status.eta_seconds != null && status.eta_seconds > 0) {
+                var m = Math.floor(status.eta_seconds / 60);
+                var s = status.eta_seconds % 60;
+                etaText = m > 0 ? m + 'm ' + s + 's remaining' : s + 's remaining';
+            }
+
+            var throughputText = '';
+            if (status.throughput_bps > 0) {
+                throughputText = formatBytes(status.throughput_bps) + '/s';
+            }
+
             card.className = 'device-status-card device-status-edit';
             card.innerHTML =
                 '<div class="device-status-header">' +
-                    '<span class="status-dot status-edit"></span>' +
+                    '<span class="status-dot status-edit" style="animation:pulse 1.5s ease-in-out infinite;"></span>' +
                     '<div class="device-status-info">' +
                         '<strong>Syncing to {{ provider or "Cloud" }}</strong>' +
                         '<p>' + (status.files_done || 0) + ' of ' + (status.files_total || '?') + ' files' +
-                            (status.bytes_transferred ? ' &mdash; ' + formatBytes(status.bytes_transferred) : '') +
+                            (status.bytes_transferred ? ' \u2014 ' + formatBytes(status.bytes_transferred) : '') +
+                            (status.total_bytes ? ' / ' + formatBytes(status.total_bytes) : '') +
                         '</p>' +
                     '</div>' +
                 '</div>' +
-                '<div class="progress-container" style="margin:12px 0 8px;">' +
-                    '<div class="progress-bar progress-normal" style="width:' + (status.progress || 0) + '%;transition:width 0.5s ease;"></div>' +
+                '<div class="progress-container" style="margin:12px 0 4px;">' +
+                    '<div class="progress-bar progress-normal" style="width:' + pct + '%;transition:width 0.5s ease;"></div>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px;margin-bottom:8px;">' +
+                    '<span style="font-size:var(--text-xs);color:var(--text-tertiary);">' + pct + '%' +
+                        (throughputText ? ' \u2014 ' + throughputText : '') +
+                        (etaText ? ' \u2014 ' + etaText : '') +
+                    '</span>' +
                 '</div>' +
                 '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
                     '<span style="font-size:var(--text-sm);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%;">' +
-                        (status.current_file || '') +
+                        escapeHtml(status.current_file || '') +
                     '</span>' +
-                    '<button type="button" class="present-btn" onclick="syncStop()" style="padding:8px 16px;font-size:14px;">Stop Sync</button>' +
+                    '<button type="button" class="present-btn" onclick="cancelSync()" style="padding:8px 16px;font-size:14px;">Cancel</button>' +
                 '</div>';
             isSyncing = true;
         } else if (status.error) {
@@ -648,7 +677,7 @@
         } else {
             card.className = 'device-status-card device-status-present';
             var lastRun = status.last_run ? 'Last sync: ' + timeAgo(status.last_run) : 'No syncs yet';
-            var pending = (stats.total_pending) ? ' &mdash; ' + stats.total_pending + ' file' + (stats.total_pending !== 1 ? 's' : '') + ' pending' : '';
+            var pending = (stats.total_pending) ? ' \u2014 ' + stats.total_pending + ' file' + (stats.total_pending !== 1 ? 's' : '') + ' pending' : '';
             card.innerHTML =
                 '<div class="device-status-header">' +
                     '<span class="status-dot status-present"></span>' +
@@ -662,6 +691,23 @@
                 '</div>';
             isSyncing = false;
         }
+    }
+
+    /* Lock/unlock sync settings controls during active sync */
+    function _setSyncSettingsLocked(locked) {
+        var ids = ['providerSelect', 'rcloneSubmitBtn', 'browseFolderBtn'];
+        ids.forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.disabled = locked;
+        });
+        /* Disable all inputs/buttons in Sync Settings section */
+        var settingsForm = document.querySelector('#syncSettingsForm');
+        if (settingsForm) {
+            var inputs = settingsForm.querySelectorAll('input, button, select');
+            inputs.forEach(function(el) { el.disabled = locked; });
+        }
+        var disconnectBtns = document.querySelectorAll('[onclick*="disconnectProvider"]');
+        disconnectBtns.forEach(function(el) { el.disabled = locked; });
     }
 
     function escapeHtml(str) {
@@ -696,23 +742,52 @@
         }
     };
 
-    window.syncStop = async function() {
-        var btn = document.getElementById('syncStopBtn');
-        if (btn) { btn.disabled = true; btn.textContent = 'Stopping\u2026'; }
+    window.syncStop = async function(graceful) {
+        _showBusy(graceful ? 'Finishing current file\u2026' : 'Stopping sync\u2026');
         try {
             var resp = await fetch('{{ url_for("cloud_archive.api_sync_stop") }}', {
                 method: 'POST',
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ graceful: !!graceful })
             });
             var data = await resp.json();
+            _hideBusy();
             if (data.success) {
-                showToast('Sync stopped.', 'info');
+                showToast(data.message, 'info');
             } else {
                 showToast(data.message || 'Failed to stop sync.', 'error');
             }
         } catch (e) {
+            _hideBusy();
             showToast('Network error.', 'error');
         }
+    };
+
+    window.cancelSync = function() {
+        /* Show a two-option cancel dialog */
+        var dialog = document.createElement('div');
+        dialog.id = 'cancelSyncDialog';
+        dialog.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;justify-content:center;align-items:center;';
+        dialog.innerHTML =
+            '<div style="background:var(--bg-primary);border:1px solid var(--border-primary);border-radius:var(--radius-lg);padding:24px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);">' +
+                '<h3 style="margin:0 0 12px;color:var(--text-primary);font-size:16px;">Cancel Sync</h3>' +
+                '<p style="margin:0 0 20px;color:var(--text-secondary);font-size:var(--text-sm);line-height:1.5;">How would you like to stop the sync?</p>' +
+                '<div style="display:flex;flex-direction:column;gap:10px;">' +
+                    '<button onclick="document.getElementById(\'cancelSyncDialog\').remove(); syncStop(true);" class="action-btn" style="padding:12px;font-size:14px;text-align:left;">' +
+                        '<strong>Finish current file</strong><br>' +
+                        '<span style="font-size:12px;color:var(--text-tertiary);">Completes the file being uploaded, then stops. No partial files.</span>' +
+                    '</button>' +
+                    '<button onclick="document.getElementById(\'cancelSyncDialog\').remove(); syncStop(false);" class="action-btn danger" style="padding:12px;font-size:14px;text-align:left;">' +
+                        '<strong>Stop immediately</strong><br>' +
+                        '<span style="font-size:12px;color:var(--text-tertiary);">Kills the upload now. The current file may be incomplete in the cloud.</span>' +
+                    '</button>' +
+                    '<button onclick="document.getElementById(\'cancelSyncDialog\').remove();" class="action-btn" style="padding:10px;font-size:13px;">Never mind</button>' +
+                '</div>' +
+            '</div>';
+        document.body.appendChild(dialog);
+        dialog.addEventListener('click', function(e) {
+            if (e.target === dialog) dialog.remove();
+        });
     };
 
     /* ===================================================================

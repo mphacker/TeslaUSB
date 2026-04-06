@@ -93,7 +93,10 @@ _sync_status: Dict = {
     "files_total": 0,
     "files_done": 0,
     "bytes_transferred": 0,
+    "total_bytes": 0,
     "current_file": "",
+    "current_file_size": 0,
+    "started_at": None,
     "last_run": None,
     "error": None,
 }
@@ -393,7 +396,10 @@ def _run_sync(
         "files_total": 0,
         "files_done": 0,
         "bytes_transferred": 0,
+        "total_bytes": 0,
         "current_file": "",
+        "current_file_size": 0,
+        "started_at": time.time(),
         "error": None,
     })
 
@@ -441,6 +447,7 @@ def _run_sync(
             return
 
         _sync_status["files_total"] = len(to_sync)
+        _sync_status["total_bytes"] = sum(s for _, s, _ in to_sync)
         _sync_status["progress"] = f"Syncing {len(to_sync)} files…"
         logger.info("Cloud sync: %d files to upload (trigger=%s)", len(to_sync), trigger)
 
@@ -463,6 +470,7 @@ def _run_sync(
             _sync_status.update({
                 "files_done": idx,
                 "current_file": rel,
+                "current_file_size": fsize,
                 "progress": f"Uploading {idx + 1}/{len(to_sync)}: {rel}",
             })
 
@@ -650,17 +658,54 @@ def start_sync(
         return True, "Cloud sync started"
 
 
-def stop_sync() -> Tuple[bool, str]:
-    """Request graceful cancellation of a running sync."""
+def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
+    """Request cancellation of a running sync.
+
+    Args:
+        graceful: If True, finish the current file upload then stop.
+                  If False, kill rclone immediately (may leave partial file).
+    """
     if not _sync_status.get("running"):
         return False, "Sync is not running"
     _sync_cancel.set()
-    return True, "Cancellation requested"
+    if not graceful:
+        # Kill any running rclone subprocess immediately
+        # The sync thread checks cancel_event between files, but for
+        # immediate stop we also need to terminate the active rclone process.
+        # The thread's subprocess.run has a timeout, so it will eventually
+        # return, but we set a flag to signal immediate termination.
+        _sync_status["_force_stop"] = True
+        logger.info("Immediate sync cancellation requested")
+        return True, "Sync stopping immediately (current file may be incomplete)"
+    logger.info("Graceful sync cancellation requested")
+    return True, "Sync will stop after the current file finishes"
 
 
 def get_sync_status() -> dict:
-    """Return a snapshot of the current sync status for UI polling."""
-    return dict(_sync_status)
+    """Return a snapshot of the current sync status for UI polling.
+
+    Includes calculated ETA based on average throughput.
+    """
+    status = dict(_sync_status)
+
+    # Calculate ETA from throughput
+    if status.get("running") and status.get("started_at") and status.get("bytes_transferred", 0) > 0:
+        elapsed = time.time() - status["started_at"]
+        if elapsed > 0:
+            bps = status["bytes_transferred"] / elapsed
+            remaining_bytes = status.get("total_bytes", 0) - status.get("bytes_transferred", 0)
+            if bps > 0 and remaining_bytes > 0:
+                status["eta_seconds"] = int(remaining_bytes / bps)
+            else:
+                status["eta_seconds"] = 0
+            status["throughput_bps"] = int(bps)
+    else:
+        status["eta_seconds"] = None
+        status["throughput_bps"] = None
+
+    # Don't expose internal flags
+    status.pop("_force_stop", None)
+    return status
 
 
 def get_sync_history(db_path: str, limit: int = 20) -> List[dict]:

@@ -190,11 +190,18 @@ def api_sync_now():
 
 @cloud_archive_bp.route('/api/sync_stop', methods=['POST'])
 def api_sync_stop():
-    """Stop a running cloud sync."""
+    """Stop a running cloud sync.
+
+    Accepts JSON: { "graceful": true } (default) or { "graceful": false }.
+    Graceful=true finishes the current file; false kills immediately.
+    """
     from services.cloud_archive_service import stop_sync
 
+    data = request.get_json(silent=True) or {}
+    graceful = data.get('graceful', True)
+
     try:
-        ok, msg = stop_sync()
+        ok, msg = stop_sync(graceful=graceful)
         return jsonify({"success": ok, "message": msg})
     except Exception as exc:
         logger.exception("Failed to stop cloud sync")

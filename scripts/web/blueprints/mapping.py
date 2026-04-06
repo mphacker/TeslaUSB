@@ -373,6 +373,15 @@ def api_event_clips(folder, event_name):
         })
 
     # Flat folder (RecentClips) — session-based
+    flat_file = os.path.join(folder_path, f'{event_name}-front.mp4')
+    if not os.path.isfile(flat_file):
+        return jsonify({
+            'error': 'Video file no longer exists. Tesla may have overwritten it. Try re-indexing.',
+            'folder': folder,
+            'event': event_name,
+            'front_clips': [],
+        }), 404
+
     clip_path = f'{folder}/{event_name}-front.mp4'
     return jsonify({
         'folder': folder,

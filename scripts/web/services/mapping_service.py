@@ -754,6 +754,18 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
         logger.info("Geo-indexer complete: %d waypoints, %d events from %d videos",
                      total_waypoints, total_events, len(to_index))
 
+        # Purge stale entries — remove DB records for files that no longer exist
+        try:
+            purge_result = purge_deleted_videos(db_path, teslacam_path=teslacam_path)
+            if purge_result.get('purged_files', 0) > 0:
+                logger.info("Purged stale data: %d files, %d waypoints, %d events, %d trips",
+                            purge_result.get('purged_files', 0),
+                            purge_result.get('purged_waypoints', 0),
+                            purge_result.get('purged_events', 0),
+                            purge_result.get('purged_trips', 0))
+        except Exception as e:
+            logger.warning("Stale data purge failed (non-fatal): %s", e)
+
     except Exception as e:
         logger.error("Geo-indexer failed: %s", e)
         _status.update({'running': False, 'error': str(e)})

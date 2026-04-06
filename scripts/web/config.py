@@ -81,7 +81,7 @@ MAX_UPLOAD_CHUNK_MB = int(config['web'].get('max_upload_chunk_mb', 16))
 # Mapping & Geo-Indexing Configuration
 _mapping = config.get('mapping', {})
 MAPPING_ENABLED = bool(_mapping.get('enabled', False))
-MAPPING_INDEX_ON_STARTUP = bool(_mapping.get('index_on_startup', False))
+MAPPING_INDEX_ON_STARTUP = bool(_mapping.get('index_on_startup', True))
 MAPPING_INDEX_ON_MODE_SWITCH = bool(_mapping.get('index_on_mode_switch', True))
 MAPPING_SAMPLE_RATE = int(_mapping.get('sample_rate', 30))
 MAPPING_TRIP_GAP_MINUTES = int(_mapping.get('trip_gap_minutes', 5))

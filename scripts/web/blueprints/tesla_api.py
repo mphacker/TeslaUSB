@@ -180,9 +180,24 @@ def index():
                 session['tesla_vin'] = first_vin
 
     ctx = get_base_context()
+    # Override stale module-level value with fresh config read
+    ctx.pop('tesla_api_configured', None)
+
+    # Re-read client credentials from config.yaml (may have just been saved)
+    import yaml
+    _client_id = TESLA_API_CLIENT_ID
+    _client_secret = TESLA_API_CLIENT_SECRET
+    try:
+        with open(CONFIG_YAML, 'r') as f:
+            _cfg = yaml.safe_load(f) or {}
+        _tesla_cfg = _cfg.get('tesla_api', {})
+        _client_id = _tesla_cfg.get('client_id', '') or _client_id
+        _client_secret = _tesla_cfg.get('client_secret', '') or _client_secret
+    except Exception:
+        pass
+
     # Mask client secret for display (show first 4 chars + dots)
-    secret = TESLA_API_CLIENT_SECRET
-    secret_masked = (secret[:4] + '•' * 12) if secret and len(secret) > 4 else ''
+    secret_masked = (_client_secret[:4] + '•' * 12) if _client_secret and len(_client_secret) > 4 else ''
 
     return render_template(
         'tesla_settings.html',
@@ -194,8 +209,9 @@ def index():
         budget=budget,
         audit_log=audit_log,
         wifi_available=wifi,
-        client_id=TESLA_API_CLIENT_ID,
+        client_id=_client_id,
         client_secret_masked=secret_masked,
+        tesla_api_configured=bool(_client_id),
         keep_awake_method=TESLA_API_KEEP_AWAKE_METHOD,
         max_awake_minutes=TESLA_API_MAX_AWAKE_MINUTES,
         low_battery_threshold=TESLA_API_LOW_BATTERY_THRESHOLD,

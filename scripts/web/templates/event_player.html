@@ -428,6 +428,22 @@
         color: rgba(52, 199, 89, 1);
     }
 
+    /* Archive to Cloud Button */
+    .archive-option {
+        border-color: rgba(50, 173, 230, 0.6);
+        background: rgba(20, 50, 80, 0.8);
+    }
+
+    .archive-option:hover {
+        border-color: rgba(50, 173, 230, 1);
+        background: rgba(25, 60, 95, 0.9);
+        transform: translateY(-4px);
+    }
+
+    .archive-option .camera-icon {
+        color: rgba(50, 173, 230, 1);
+    }
+
     /* Delete Event Button */
     .delete-option {
         border-color: rgba(255, 59, 48, 0.6);
@@ -917,6 +933,19 @@
             <i class="bi bi-download camera-icon" id="downloadIcon"></i>
             <div class="camera-label" id="downloadLabel">Download All</div>
         </div>
+
+        <!-- Archive to Cloud Button -->
+        {% if cloud_provider_connected %}
+        <div class="camera-option archive-option" id="archiveButton" onclick="archiveToCloud()">
+            <i class="bi bi-cloud-arrow-up camera-icon" id="archiveIcon"></i>
+            <div class="camera-label" id="archiveLabel">Archive</div>
+        </div>
+        {% elif cloud_archive_available %}
+        <div class="camera-option archive-option disabled" id="archiveButton" title="Connect a cloud provider in Cloud settings to archive videos" style="opacity:0.4;cursor:not-allowed;">
+            <i class="bi bi-cloud-arrow-up camera-icon" id="archiveIcon"></i>
+            <div class="camera-label" id="archiveLabel">Archive</div>
+        </div>
+        {% endif %}
 
         <!-- Delete Event Button -->
         {% if mode_token == 'edit' %}
@@ -1803,6 +1832,107 @@
                 button.style.opacity = '';
             }, 2000);
         });
+    }
+
+    /* Archive to Cloud */
+    let archiveInProgress = false;
+    let archivePollTimer = null;
+
+    function archiveToCloud() {
+        if (archiveInProgress) return;
+        archiveInProgress = true;
+
+        const button = document.getElementById('archiveButton');
+        const icon = document.getElementById('archiveIcon');
+        const label = document.getElementById('archiveLabel');
+
+        button.style.pointerEvents = 'none';
+        button.style.opacity = '0.5';
+        icon.className = 'bi bi-hourglass-split camera-icon';
+        label.textContent = 'Uploading...';
+
+        fetch('/cloud/api/archive_file', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({
+                folder: folder,
+                event: eventName,
+            })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                _startArchivePoll();
+            } else {
+                throw new Error(data.message || 'Archive failed');
+            }
+        })
+        .catch(err => {
+            icon.className = 'bi bi-exclamation-triangle camera-icon';
+            label.textContent = 'Error';
+            console.error('Archive error:', err);
+            setTimeout(() => {
+                _resetArchiveButton();
+            }, 3000);
+        });
+    }
+
+    function _startArchivePoll() {
+        archivePollTimer = setInterval(() => {
+            fetch('/cloud/api/archive_status', {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            })
+            .then(r => r.json())
+            .then(status => {
+                const icon = document.getElementById('archiveIcon');
+                const label = document.getElementById('archiveLabel');
+
+                if (status.completed) {
+                    _stopArchivePoll();
+                    icon.className = 'bi bi-cloud-check camera-icon';
+                    label.textContent = 'Archived!';
+                    setTimeout(() => _resetArchiveButton(), 4000);
+                } else if (status.error) {
+                    _stopArchivePoll();
+                    icon.className = 'bi bi-exclamation-triangle camera-icon';
+                    label.textContent = 'Failed';
+                    console.error('Archive error:', status.error);
+                    setTimeout(() => _resetArchiveButton(), 4000);
+                } else if (status.running) {
+                    /* Show progress */
+                    let pct = 0;
+                    if (status.file_size > 0 && status.bytes_transferred > 0) {
+                        pct = Math.min(99, Math.round(status.bytes_transferred / status.file_size * 100));
+                    }
+                    let etaText = '';
+                    if (status.eta_seconds != null && status.eta_seconds > 0) {
+                        const m = Math.floor(status.eta_seconds / 60);
+                        const s = status.eta_seconds % 60;
+                        etaText = m > 0 ? ` ${m}m${s}s` : ` ${s}s`;
+                    }
+                    label.textContent = pct + '%' + etaText;
+                }
+            })
+            .catch(() => { /* keep polling */ });
+        }, 2000);
+    }
+
+    function _stopArchivePoll() {
+        if (archivePollTimer) { clearInterval(archivePollTimer); archivePollTimer = null; }
+        archiveInProgress = false;
+    }
+
+    function _resetArchiveButton() {
+        const button = document.getElementById('archiveButton');
+        const icon = document.getElementById('archiveIcon');
+        const label = document.getElementById('archiveLabel');
+        if (button) { button.style.pointerEvents = ''; button.style.opacity = ''; }
+        if (icon) icon.className = 'bi bi-cloud-arrow-up camera-icon';
+        if (label) label.textContent = 'Archive';
+        archiveInProgress = false;
     }
 
     // Keyboard controls

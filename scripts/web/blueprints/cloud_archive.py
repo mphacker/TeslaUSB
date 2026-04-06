@@ -414,3 +414,84 @@ def api_toggle_sync():
     except Exception as exc:
         logger.exception("Failed to toggle sync")
         return jsonify({"success": False, "message": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Single-file archive (from video panel)
+# ---------------------------------------------------------------------------
+
+@cloud_archive_bp.route('/api/archive_file', methods=['POST'])
+def api_archive_file():
+    """Archive a single video file/event to the cloud."""
+    from services.cloud_rclone_service import archive_file
+    from services.video_service import get_teslacam_path
+
+    data = request.get_json(silent=True) or {}
+    folder = data.get('folder', '')  # e.g. "SentryClips"
+    event_name = data.get('event', '')  # e.g. "2025-01-15_14-30-45"
+    filename = data.get('filename', '')  # specific file, or empty for whole event
+
+    if not folder or not event_name:
+        return jsonify({"success": False, "message": "Missing folder or event."}), 400
+
+    teslacam = get_teslacam_path()
+    if not teslacam:
+        return jsonify({"success": False, "message": "TeslaCam path not available."}), 400
+
+    if filename:
+        local_path = os.path.join(teslacam, folder, event_name, filename)
+    else:
+        # Archive the whole event folder — pick the front camera as primary
+        event_dir = os.path.join(teslacam, folder, event_name)
+        if not os.path.isdir(event_dir):
+            # Flat structure
+            local_path = os.path.join(teslacam, folder, event_name)
+        else:
+            local_path = event_dir
+
+    # For directories, we need a different approach — archive each file
+    if os.path.isdir(local_path):
+        # Find all video files in the event
+        files = [f for f in os.listdir(local_path)
+                 if f.lower().endswith(('.mp4', '.ts'))]
+        if not files:
+            return jsonify({"success": False, "message": "No video files found."}), 400
+        # Archive the first file (front camera typically), user can archive more
+        local_path = os.path.join(local_path, files[0])
+
+    if not os.path.isfile(local_path):
+        return jsonify({"success": False, "message": "File not found."}), 404
+
+    try:
+        ok, msg = archive_file(local_path, teslacam)
+        if ok:
+            return jsonify({"success": True, "message": msg})
+        return jsonify({"success": False, "message": msg}), 400
+    except Exception as exc:
+        logger.exception("Failed to start archive")
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/archive_status')
+def api_archive_status():
+    """Return current single-file archive status."""
+    from services.cloud_rclone_service import get_archive_status
+
+    try:
+        return jsonify(get_archive_status())
+    except Exception as exc:
+        logger.exception("Failed to get archive status")
+        return jsonify({"running": False, "error": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/archive_cancel', methods=['POST'])
+def api_archive_cancel():
+    """Cancel an in-progress single-file archive."""
+    from services.cloud_rclone_service import cancel_archive
+
+    try:
+        ok, msg = cancel_archive()
+        return jsonify({"success": ok, "message": msg})
+    except Exception as exc:
+        logger.exception("Failed to cancel archive")
+        return jsonify({"success": False, "message": str(exc)}), 500

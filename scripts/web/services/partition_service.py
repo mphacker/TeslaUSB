@@ -24,6 +24,8 @@ from config import (
     MUSIC_ENABLED,
     MAPPING_ENABLED,
     CLOUD_ARCHIVE_ENABLED,
+    CLOUD_ARCHIVE_PROVIDER,
+    CLOUD_PROVIDER_CREDS_PATH,
     TESLA_API_CLIENT_ID,
 )
 
@@ -51,6 +53,8 @@ def get_feature_availability():
         'wraps_available': lightshow_exists,
         'music_available': music_exists,
         'cloud_archive_available': CLOUD_ARCHIVE_ENABLED,
+        'cloud_provider_connected': CLOUD_ARCHIVE_ENABLED and bool(CLOUD_ARCHIVE_PROVIDER)
+                                    and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH),
         'tesla_api_configured': bool(TESLA_API_CLIENT_ID),
     }
 

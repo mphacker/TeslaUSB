@@ -447,3 +447,161 @@ def create_folder(path: str) -> Tuple[bool, str]:
         return False, str(e)
     finally:
         _remove_temp_conf()
+
+
+# ---------------------------------------------------------------------------
+# Single-file archive (for "Archive to Cloud" from video panel)
+# ---------------------------------------------------------------------------
+
+import threading
+import time as _time
+
+_archive_lock = threading.Lock()
+_archive_status: Dict = {
+    "running": False,
+    "file_path": "",
+    "file_name": "",
+    "file_size": 0,
+    "bytes_transferred": 0,
+    "started_at": None,
+    "error": None,
+    "completed": False,
+}
+_archive_cancel = threading.Event()
+
+
+def archive_file(local_path: str, teslacam_base: str) -> Tuple[bool, str]:
+    """Archive a single file to the cloud in a background thread.
+
+    Args:
+        local_path: Absolute path to the file on the Pi.
+        teslacam_base: Base TeslaCam directory for computing relative path.
+
+    Returns (success, message).
+    """
+    global _archive_status
+
+    if not os.path.isfile(local_path):
+        return False, "File not found."
+
+    with _archive_lock:
+        if _archive_status["running"]:
+            return False, "Another archive is already in progress."
+
+    creds = _load_creds()
+    if not creds:
+        return False, "No cloud provider configured."
+
+    file_size = os.path.getsize(local_path)
+    file_name = os.path.basename(local_path)
+    rel_path = os.path.relpath(local_path, teslacam_base)
+
+    with _archive_lock:
+        _archive_cancel.clear()
+        _archive_status.update({
+            "running": True,
+            "file_path": local_path,
+            "file_name": file_name,
+            "file_size": file_size,
+            "bytes_transferred": 0,
+            "started_at": _time.time(),
+            "error": None,
+            "completed": False,
+        })
+
+    thread = threading.Thread(
+        target=_archive_worker,
+        args=(local_path, rel_path, file_size, creds),
+        daemon=True,
+    )
+    thread.start()
+    return True, f"Archiving {file_name}..."
+
+
+def _archive_worker(local_path: str, rel_path: str, file_size: int,
+                    creds: dict):
+    """Background thread for single-file archive."""
+    global _archive_status
+
+    try:
+        from config import CLOUD_ARCHIVE_REMOTE_PATH, CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
+
+        conf_path = _write_temp_conf(creds)
+        remote_dest = f"{RCLONE_REMOTE_NAME}:{CLOUD_ARCHIVE_REMOTE_PATH}/{rel_path}"
+        max_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
+
+        result = subprocess.run(
+            [
+                "rclone", "copyto",
+                "--config", conf_path,
+                "--bwlimit", f"{max_mbps}M",
+                "--stats", "0",
+                "--log-level", "ERROR",
+                local_path,
+                remote_dest,
+            ],
+            capture_output=True, text=True, timeout=3600,
+        )
+        _capture_refreshed_token(creds)
+
+        if _archive_cancel.is_set():
+            _archive_status.update({
+                "running": False, "error": "Cancelled",
+            })
+            return
+
+        if result.returncode == 0:
+            _archive_status.update({
+                "running": False,
+                "completed": True,
+                "bytes_transferred": file_size,
+            })
+            logger.info("Archived file to cloud: %s", rel_path)
+        else:
+            err = result.stderr.strip()[:300]
+            _archive_status.update({
+                "running": False,
+                "error": err if not is_auth_error(err) else
+                    "Authorization expired. Please reconnect your cloud provider.",
+            })
+            logger.error("Archive failed for %s: %s", rel_path, err[:200])
+    except subprocess.TimeoutExpired:
+        _archive_status.update({
+            "running": False, "error": "Upload timed out (1 hour limit).",
+        })
+    except Exception as e:
+        _archive_status.update({
+            "running": False, "error": str(e)[:200],
+        })
+        logger.exception("Archive worker error")
+    finally:
+        _remove_temp_conf()
+
+
+def get_archive_status() -> Dict:
+    """Return current single-file archive status with ETA."""
+    status = dict(_archive_status)
+
+    if status.get("running") and status.get("started_at") and status.get("file_size", 0) > 0:
+        elapsed = _time.time() - status["started_at"]
+        from config import CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
+        bps_limit = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS * 1024 * 1024 / 8
+        estimated_transferred = min(elapsed * bps_limit, status["file_size"])
+        status["bytes_transferred"] = int(estimated_transferred)
+        remaining = status["file_size"] - estimated_transferred
+        if bps_limit > 0 and remaining > 0:
+            status["eta_seconds"] = int(remaining / bps_limit)
+        else:
+            status["eta_seconds"] = 0
+    else:
+        status["eta_seconds"] = None
+
+    return status
+
+
+def cancel_archive() -> Tuple[bool, str]:
+    """Cancel an in-progress single-file archive."""
+    if not _archive_status.get("running"):
+        return False, "No archive in progress."
+    _archive_cancel.set()
+    return True, "Archive cancellation requested."

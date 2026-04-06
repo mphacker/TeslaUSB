@@ -151,30 +151,137 @@
                 </select>
             </div>
 
-            {# OAuth providers #}
+            {# OAuth providers — Interactive wizard #}
             <div id="oauthSetup" style="display: none;">
-                <div class="info-box" style="margin-bottom: var(--space-3);">
-                    <strong>How to connect <span id="oauthProviderName"></span>:</strong>
-                    <ol style="margin: 8px 0 0; padding-left: 20px; font-size: var(--text-sm);">
-                        <li>On the Pi, run: <code>rclone authorize "<span id="oauthRcloneType"></span>"</code></li>
-                        <li>Or on any computer with rclone installed, run the same command</li>
-                        <li>A browser window will open — log in and grant access</li>
-                        <li>Copy the token JSON that rclone outputs (starts with <code>{"access_token":</code>)</li>
-                        <li>Paste it below and click "Save Token"</li>
-                    </ol>
-                </div>
-                <div style="margin-bottom: var(--space-3);">
-                    <label for="oauthToken" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Paste rclone token:</label>
-                    <textarea id="oauthToken" rows="4" placeholder='{"access_token":"...","token_type":"Bearer",...}'
-                              style="width: 100%; max-width: 460px; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
-                </div>
-                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                    <button type="button" class="edit-btn" onclick="saveOAuthProvider()" style="padding: 8px 16px; font-size: 14px;">
-                        Save Token
+                {# ---- Idle state: Connect button ---- #}
+                <div id="oauthIdle">
+                    <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
+                        Click below to securely connect <strong id="oauthProviderName"></strong>.
+                        No extra software needed — everything happens in your browser.
+                    </p>
+                    <button type="button" class="edit-btn" onclick="startOAuth()" id="oauthStartBtn"
+                            style="padding: 10px 24px; font-size: 15px;">
+                        <svg class="nav-icon" style="width:16px;height:16px;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-link"></use></svg>
+                        Connect
                     </button>
-                    <button type="button" class="action-btn" onclick="testConnection()" id="testConnBtnOAuth">Test Connection</button>
-                    <span id="testConnResultOAuth" style="font-size: var(--text-sm); color: var(--text-secondary); align-self: center;"></span>
                 </div>
+
+                {# ---- Device code state (OneDrive / Google if supported) ---- #}
+                <div id="oauthDeviceCode" style="display: none;">
+                    <div class="info-box" style="margin-bottom: var(--space-3); text-align: center;">
+                        <p style="margin: 0 0 8px; color: var(--text-secondary); font-size: var(--text-sm);">
+                            Open this link and enter the code:
+                        </p>
+                        <a id="dcVerifyUrl" href="#" target="_blank" rel="noopener"
+                           style="display: inline-block; margin-bottom: 12px; color: var(--link-color); font-size: 15px; word-break: break-all;"></a>
+                        <div id="dcQrCode" style="margin: 8px auto; width: 160px; height: 160px; background: var(--bg-secondary); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; overflow: hidden;">
+                            <canvas id="dcQrCanvas" width="160" height="160"></canvas>
+                        </div>
+                        <div style="font-size: 32px; font-weight: 700; letter-spacing: 6px; color: var(--text-primary); font-family: monospace; margin: 12px 0 4px;"
+                             id="dcUserCode"></div>
+                        <p style="margin: 4px 0 0; font-size: var(--text-sm); color: var(--text-secondary);" id="dcExpiry">
+                            Expires in <span id="dcCountdown">--:--</span>
+                        </p>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; justify-content: center;">
+                        <span class="status-dot status-edit" style="animation: pulse 1.5s ease-in-out infinite;"></span>
+                        <span style="font-size: var(--text-sm); color: var(--text-secondary);">Waiting for authorization&hellip;</span>
+                    </div>
+                    <div style="margin-top: var(--space-3); text-align: center;">
+                        <button type="button" class="action-btn" onclick="cancelOAuth()" style="padding: 6px 16px; font-size: 13px;">Cancel</button>
+                    </div>
+                </div>
+
+                {# ---- Browser stream state (Google Drive fallback) ---- #}
+                <div id="oauthBrowser" style="display: none;">
+                    <div style="text-align: center; margin-bottom: 8px;">
+                        <span style="font-size: var(--text-sm); color: var(--text-secondary);">
+                            <svg class="nav-icon" style="width:14px;height:14px;vertical-align:-2px;margin-right:2px;" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-lock"></use></svg>
+                            Secure browser session running on your Pi
+                        </span>
+                    </div>
+                    <div id="browserViewport" style="width: 100%; max-width: 480px; margin: 0 auto; border: 1px solid var(--border-primary); border-radius: var(--radius-md); overflow: hidden; background: #fff; position: relative; cursor: pointer;"
+                         tabindex="0">
+                        <img id="browserFrame" alt="Browser" style="width: 100%; display: block;"
+                             src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
+                        <div id="browserLoading" style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-secondary);">
+                            <span style="color: var(--text-secondary);">Loading browser&hellip;</span>
+                        </div>
+                    </div>
+                    <div style="margin-top: var(--space-2); text-align: center;">
+                        <span style="font-size: var(--text-xs); color: var(--text-tertiary);">Click the browser area and type to interact with the login page</span>
+                    </div>
+                    <div style="margin-top: var(--space-3); text-align: center;">
+                        <button type="button" class="action-btn" onclick="cancelOAuth()" style="padding: 6px 16px; font-size: 13px;">Cancel</button>
+                    </div>
+                </div>
+
+                {# ---- PKCE state (all providers) ---- #}
+                <div id="oauthPkce" style="display: none;">
+                    <div class="info-box" style="margin-bottom: var(--space-3);">
+                        <strong id="pkceTitle">Connect cloud provider:</strong>
+                        <ol id="pkceSteps" style="margin: 8px 0 0; padding-left: 20px; font-size: var(--text-sm);">
+                            <li>Click the button below to open the sign-in page</li>
+                            <li>Log in and grant access</li>
+                            <li>Copy the authorization code shown after sign-in</li>
+                            <li>Paste the code below</li>
+                        </ol>
+                        <p id="pkceHint" style="margin: 8px 0 0; font-size: var(--text-xs); color: var(--text-tertiary); display: none;"></p>
+                    </div>
+                    <div style="margin-bottom: var(--space-3);">
+                        <a id="pkceAuthLink" href="#" target="_blank" rel="noopener" class="edit-btn"
+                           style="display: inline-block; padding: 10px 20px; font-size: 14px; text-decoration: none;">
+                            Open Authorization Page &rarr;
+                        </a>
+                    </div>
+                    <div style="margin-bottom: var(--space-3);">
+                        <label for="pkceCodeInput" id="pkceCodeLabel" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Enter authorization code:</label>
+                        <div style="display: flex; gap: 8px; max-width: 360px;">
+                            <input type="text" id="pkceCodeInput" autocomplete="off" placeholder="Paste code here"
+                                   style="flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 15px; font-family: monospace;">
+                            <button type="button" class="edit-btn" onclick="submitPkceCode()" id="pkceSubmitBtn"
+                                    style="padding: 10px 16px; font-size: 14px;">Connect</button>
+                        </div>
+                    </div>
+                    <div style="text-align: left;">
+                        <button type="button" class="action-btn" onclick="cancelOAuth()" style="padding: 6px 16px; font-size: 13px;">Cancel</button>
+                    </div>
+                </div>
+
+                {# ---- Success state ---- #}
+                <div id="oauthSuccess" style="display: none; text-align: center; padding: var(--space-4) 0;">
+                    <div style="font-size: 48px; margin-bottom: 8px;">&#10003;</div>
+                    <strong style="color: var(--success-text); font-size: 18px;">Connected!</strong>
+                    <p style="color: var(--text-secondary); margin-top: 8px;">Reloading&hellip;</p>
+                </div>
+
+                {# ---- Error state ---- #}
+                <div id="oauthError" style="display: none;">
+                    <div class="info-box" style="border-color: var(--error-text); margin-bottom: var(--space-3);">
+                        <strong style="color: var(--error-text);">Connection failed</strong>
+                        <p id="oauthErrorMsg" style="margin: 4px 0 0; font-size: var(--text-sm); color: var(--text-secondary);"></p>
+                    </div>
+                    <button type="button" class="edit-btn" onclick="resetOAuth()" style="padding: 8px 16px; font-size: 14px;">Try Again</button>
+                </div>
+
+                {# ---- Advanced: manual token paste (legacy fallback) ---- #}
+                <details style="margin-top: var(--space-4);">
+                    <summary style="cursor: pointer; font-size: var(--text-sm); color: var(--text-tertiary);">
+                        Advanced: Paste rclone token manually
+                    </summary>
+                    <div style="margin-top: var(--space-2);">
+                        <div style="margin-bottom: var(--space-3);">
+                            <label for="oauthToken" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Paste rclone token:</label>
+                            <textarea id="oauthToken" rows="4" placeholder='{"access_token":"...","token_type":"Bearer",...}'
+                                      style="width: 100%; max-width: 460px; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
+                        </div>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                            <button type="button" class="edit-btn" onclick="saveOAuthProvider()" style="padding: 8px 16px; font-size: 14px;">
+                                Save Token
+                            </button>
+                        </div>
+                    </div>
+                </details>
             </div>
 
             {# Key-based providers #}
@@ -642,19 +749,28 @@
     var keyProviders = ['s3', 'b2', 'wasabi'];
     var rcloneTypeMap = {'google-drive': 'drive', 'onedrive': 'onedrive', 'dropbox': 'dropbox'};
 
+    /* Current OAuth session state */
+    var _oauthSession = null;
+    var _oauthPollTimer = null;
+    var _browserFrameTimer = null;
+    var _dcCountdownTimer = null;
+
     window.onProviderChange = function() {
         var sel = document.getElementById('providerSelect');
         var val = sel ? sel.value : '';
         var oauthDiv = document.getElementById('oauthSetup');
         var keyDiv = document.getElementById('keySetup');
         var oauthName = document.getElementById('oauthProviderName');
-        var oauthType = document.getElementById('oauthRcloneType');
         var endpointGroup = document.getElementById('endpointGroup');
 
         if (oauthDiv) oauthDiv.style.display = oauthProviders.indexOf(val) !== -1 ? 'block' : 'none';
         if (keyDiv) keyDiv.style.display = keyProviders.indexOf(val) !== -1 ? 'block' : 'none';
         if (oauthName) oauthName.textContent = sel.options[sel.selectedIndex].text;
-        if (oauthType) oauthType.textContent = rcloneTypeMap[val] || val;
+
+        /* Reset OAuth wizard to idle state when provider changes */
+        if (oauthProviders.indexOf(val) !== -1) {
+            resetOAuth();
+        }
         /* Show endpoint field for Wasabi/B2, optional for S3 */
         if (endpointGroup) {
             var label = endpointGroup.querySelector('label');
@@ -709,6 +825,295 @@
         }
     };
 
+    /* ===================================================================
+       OAuth Wizard — Device Code / Browser / PKCE flows
+       =================================================================== */
+
+    function _showOAuthPanel(panelId) {
+        ['oauthIdle', 'oauthDeviceCode', 'oauthBrowser', 'oauthPkce', 'oauthSuccess', 'oauthError'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.style.display = id === panelId ? 'block' : 'none';
+        });
+    }
+
+    window.resetOAuth = function() {
+        _clearOAuthTimers();
+        _oauthSession = null;
+        _showOAuthPanel('oauthIdle');
+    };
+
+    function _clearOAuthTimers() {
+        if (_oauthPollTimer) { clearInterval(_oauthPollTimer); _oauthPollTimer = null; }
+        if (_browserFrameTimer) { clearInterval(_browserFrameTimer); _browserFrameTimer = null; }
+        if (_dcCountdownTimer) { clearInterval(_dcCountdownTimer); _dcCountdownTimer = null; }
+    }
+
+    window.startOAuth = async function() {
+        var sel = document.getElementById('providerSelect');
+        var provider = sel ? sel.value : '';
+        if (!provider || oauthProviders.indexOf(provider) === -1) {
+            showToast('Please select a cloud provider.', 'warning');
+            return;
+        }
+        var btn = document.getElementById('oauthStartBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_oauth_start") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ provider: provider })
+            });
+            var data = await resp.json();
+            if (!data.success) {
+                showToast(data.message || 'Failed to start authentication.', 'error');
+                if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+                return;
+            }
+
+            _oauthSession = { sessionId: data.session_id, method: data.method, provider: provider };
+
+            if (data.method === 'device_code') {
+                _showDeviceCode(data);
+            } else if (data.method === 'browser') {
+                _showBrowserAuth(data);
+            } else if (data.method === 'pkce') {
+                _showPkceAuth(data);
+            } else {
+                showToast('Unknown auth method: ' + data.method, 'error');
+                resetOAuth();
+            }
+        } catch (e) {
+            showToast('Network error starting authentication.', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+        }
+    };
+
+    /* ---- Device Code UI ---- */
+    function _showDeviceCode(data) {
+        _showOAuthPanel('oauthDeviceCode');
+        document.getElementById('dcUserCode').textContent = data.user_code || '';
+        var urlEl = document.getElementById('dcVerifyUrl');
+        urlEl.href = data.verification_uri || '#';
+        urlEl.textContent = data.verification_uri || '';
+        _drawQrPlaceholder(data.verification_uri || '');
+
+        /* Countdown */
+        var expiresIn = data.expires_in || 900;
+        var deadline = Date.now() + expiresIn * 1000;
+        _dcCountdownTimer = setInterval(function() {
+            var remain = Math.max(0, Math.floor((deadline - Date.now()) / 1000));
+            var m = Math.floor(remain / 60), s = remain % 60;
+            var el = document.getElementById('dcCountdown');
+            if (el) el.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+            if (remain <= 0) { clearInterval(_dcCountdownTimer); }
+        }, 1000);
+
+        /* Poll for completion */
+        var interval = (data.interval || 5) * 1000;
+        _oauthPollTimer = setInterval(function() { _pollOAuthStatus(); }, interval);
+    }
+
+    /* ---- Browser Auth UI ---- */
+    function _showBrowserAuth(data) {
+        _showOAuthPanel('oauthBrowser');
+        var loading = document.getElementById('browserLoading');
+        if (loading) loading.style.display = 'flex';
+
+        /* Poll for screenshots */
+        _browserFrameTimer = setInterval(function() {
+            if (!_oauthSession) return;
+            var img = document.getElementById('browserFrame');
+            var ts = Date.now();
+            var url = '{{ url_for("cloud_archive.api_oauth_screenshot") }}?session_id=' +
+                      encodeURIComponent(_oauthSession.sessionId) + '&t=' + ts;
+            var tmp = new Image();
+            tmp.onload = function() {
+                img.src = tmp.src;
+                var ld = document.getElementById('browserLoading');
+                if (ld) ld.style.display = 'none';
+            };
+            tmp.src = url;
+        }, 2000);
+
+        /* Poll for completion */
+        _oauthPollTimer = setInterval(function() { _pollOAuthStatus(); }, 3000);
+
+        /* Keyboard input relay */
+        var viewport = document.getElementById('browserViewport');
+        if (viewport) {
+            viewport.addEventListener('keydown', function(e) {
+                e.preventDefault();
+                if (!_oauthSession) return;
+                var payload = { session_id: _oauthSession.sessionId, type: 'key',
+                                data: { key: e.key, code: e.code, keyCode: e.keyCode } };
+                fetch('{{ url_for("cloud_archive.api_oauth_input") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify(payload)
+                }).catch(function() {});
+            });
+            viewport.addEventListener('keypress', function(e) {
+                e.preventDefault();
+                if (!_oauthSession || !e.key || e.key.length !== 1) return;
+                fetch('{{ url_for("cloud_archive.api_oauth_input") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify({ session_id: _oauthSession.sessionId, type: 'text', data: { text: e.key } })
+                }).catch(function() {});
+            });
+            viewport.addEventListener('click', function(e) {
+                viewport.focus();
+                if (!_oauthSession) return;
+                var rect = viewport.getBoundingClientRect();
+                var imgEl = document.getElementById('browserFrame');
+                var scaleX = 480 / rect.width, scaleY = 640 / rect.height;
+                var x = Math.round((e.clientX - rect.left) * scaleX);
+                var y = Math.round((e.clientY - rect.top) * scaleY);
+                fetch('{{ url_for("cloud_archive.api_oauth_input") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify({ session_id: _oauthSession.sessionId, type: 'click', data: { x: x, y: y } })
+                }).catch(function() {});
+            });
+        }
+    }
+
+    /* ---- PKCE UI (all providers) ---- */
+    var _providerLabels = {
+        'onedrive': { name: 'OneDrive', hint: 'After signing in, Microsoft will show the code in your browser address bar or on the page. Copy the entire code.' },
+        'google-drive': { name: 'Google Drive', hint: 'After granting access, Google will display an authorization code. Copy it.' },
+        'dropbox': { name: 'Dropbox', hint: 'After clicking "Allow", Dropbox will show you a code. Copy it.' },
+    };
+
+    function _showPkceAuth(data) {
+        _showOAuthPanel('oauthPkce');
+        var provider = (_oauthSession && _oauthSession.provider) || '';
+        var labels = _providerLabels[provider] || { name: 'cloud provider', hint: '' };
+
+        var title = document.getElementById('pkceTitle');
+        if (title) title.textContent = 'Connect ' + labels.name + ':';
+
+        var linkBtn = document.getElementById('pkceAuthLink');
+        if (linkBtn) {
+            linkBtn.href = data.auth_url || '#';
+            linkBtn.textContent = 'Open ' + labels.name + ' Authorization \u2192';
+        }
+
+        var label = document.getElementById('pkceCodeLabel');
+        if (label) label.textContent = 'Enter code from ' + labels.name + ':';
+
+        var hint = document.getElementById('pkceHint');
+        if (hint && labels.hint) {
+            hint.textContent = labels.hint;
+            hint.style.display = 'block';
+        }
+
+        var input = document.getElementById('pkceCodeInput');
+        if (input) {
+            input.value = '';
+            input.focus();
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') { e.preventDefault(); submitPkceCode(); }
+            });
+        }
+    }
+
+    window.submitPkceCode = async function() {
+        if (!_oauthSession || _oauthSession.method !== 'pkce') return;
+        var code = (document.getElementById('pkceCodeInput') || {}).value || '';
+        if (!code.trim()) { showToast('Please enter the authorization code.', 'warning'); return; }
+
+        var btn = document.getElementById('pkceSubmitBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_oauth_submit_code") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ session_id: _oauthSession.sessionId, code: code.trim() })
+            });
+            var data = await resp.json();
+            if (data.state === 'completed') {
+                _onOAuthSuccess();
+            } else {
+                showToast(data.error || 'Code exchange failed.', 'error');
+                if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+            }
+        } catch (e) {
+            showToast('Network error.', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+        }
+    };
+
+    /* ---- Polling ---- */
+    async function _pollOAuthStatus() {
+        if (!_oauthSession) return;
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_oauth_status") }}?session_id=' +
+                                   encodeURIComponent(_oauthSession.sessionId), {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+            if (data.state === 'completed') {
+                _onOAuthSuccess();
+            } else if (data.state === 'expired') {
+                _clearOAuthTimers();
+                _showOAuthPanel('oauthError');
+                document.getElementById('oauthErrorMsg').textContent = data.error || 'Authorization expired. Please try again.';
+            } else if (data.state === 'error') {
+                _clearOAuthTimers();
+                _showOAuthPanel('oauthError');
+                document.getElementById('oauthErrorMsg').textContent = data.error || 'An error occurred.';
+            }
+            /* 'pending' — keep polling */
+        } catch (e) { /* network blip — keep polling */ }
+    }
+
+    function _onOAuthSuccess() {
+        _clearOAuthTimers();
+        _showOAuthPanel('oauthSuccess');
+        showToast('Cloud provider connected!', 'success');
+        setTimeout(function() { window.location.reload(); }, 1500);
+    }
+
+    window.cancelOAuth = async function() {
+        if (_oauthSession) {
+            try {
+                await fetch('{{ url_for("cloud_archive.api_oauth_cancel") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify({ session_id: _oauthSession.sessionId })
+                });
+            } catch (e) { /* ignore */ }
+        }
+        resetOAuth();
+        var btn = document.getElementById('oauthStartBtn');
+        if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+    };
+
+    /* Minimal QR code placeholder (shows URL text; real QR via lightweight lib if added) */
+    function _drawQrPlaceholder(url) {
+        var canvas = document.getElementById('dcQrCanvas');
+        if (!canvas) return;
+        var ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, 160, 160);
+        ctx.fillStyle = '#333333';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'center';
+        /* Simple text rendering as placeholder */
+        var words = url.replace('https://', '').split('/');
+        var y = 60;
+        words.forEach(function(w) {
+            if (w) { ctx.fillText(w, 80, y); y += 16; }
+        });
+        ctx.font = '9px sans-serif';
+        ctx.fillStyle = '#999999';
+        ctx.fillText('Scan or click link above', 80, 145);
+    }
+
+    /* Legacy manual token paste (unchanged) */
     window.saveOAuthProvider = async function() {
         var sel = document.getElementById('providerSelect');
         var provider = sel ? sel.value : '';

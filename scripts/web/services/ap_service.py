@@ -22,13 +22,17 @@ def ap_status():
     if not os.path.isfile(path):
         return {"error": "missing_script"}
 
-    result = subprocess.run(
-        ["sudo", "-n", "bash", path, "status"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=5,
-    )
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "bash", path, "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("ap_control.sh status timed out")
+        return {"error": "timeout", "ap_active": False}
 
     if result.returncode != 0:
         return {"error": "status_failed", "stderr": result.stderr}

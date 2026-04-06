@@ -16,6 +16,7 @@ from config import (
     CLOUD_ARCHIVE_PRIORITY_ORDER,
     CLOUD_ARCHIVE_MAX_UPLOAD_MBPS,
     CLOUD_ARCHIVE_KEEP_LOCAL,
+    CLOUD_ARCHIVE_DB_PATH,
     CLOUD_PROVIDER_CREDS_PATH,
 )
 from utils import get_base_context
@@ -257,3 +258,162 @@ def api_save_provider():
     except Exception as exc:
         logger.exception("Failed to save cloud provider credentials")
         return jsonify({"success": False, "message": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# OAuth API endpoints (Tier 1-2 cloud provider authentication)
+# ---------------------------------------------------------------------------
+
+def _save_oauth_credentials(provider: str, credentials: dict) -> None:
+    """Encrypt and persist OAuth credentials, update config.yaml."""
+    from services.tesla_api_service import derive_encryption_key
+    from cryptography.fernet import Fernet
+    import json as _json
+
+    key = derive_encryption_key()
+    fernet = Fernet(key)
+    encrypted = fernet.encrypt(_json.dumps(credentials).encode())
+
+    os.makedirs(os.path.dirname(CLOUD_PROVIDER_CREDS_PATH) or '.', exist_ok=True)
+    tmp = CLOUD_PROVIDER_CREDS_PATH + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(encrypted)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CLOUD_PROVIDER_CREDS_PATH)
+
+    _update_config_yaml({'cloud_archive.provider': provider})
+
+
+@cloud_archive_bp.route('/api/oauth/start', methods=['POST'])
+def api_oauth_start():
+    """Start OAuth flow for a cloud provider (auto-tier selection)."""
+    from services.cloud_oauth_service import start_oauth
+
+    data = request.get_json(silent=True) or {}
+    provider = data.get('provider', '')
+    if not provider:
+        return jsonify({"success": False, "message": "Missing provider."}), 400
+
+    valid_providers = ('google-drive', 'onedrive', 'dropbox')
+    if provider not in valid_providers:
+        return jsonify({"success": False,
+                        "message": f"Invalid provider. Use: {', '.join(valid_providers)}"}), 400
+
+    try:
+        result = start_oauth(provider)
+        return jsonify({"success": True, **result})
+    except Exception as exc:
+        logger.exception("Failed to start OAuth for %s", provider)
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/oauth/status')
+def api_oauth_status():
+    """Poll OAuth flow status (device code polling or browser check)."""
+    from services.cloud_oauth_service import poll_oauth
+
+    session_id = request.args.get('session_id', '')
+    if not session_id:
+        return jsonify({"state": "error", "error": "Missing session_id"}), 400
+
+    try:
+        result = poll_oauth(session_id)
+
+        # Auto-save credentials on completion
+        if result.get("state") == "completed" and result.get("token"):
+            try:
+                from services.cloud_oauth_service import get_session_info
+                info = get_session_info()
+                provider = info["provider"] if info else ""
+                _save_oauth_credentials(provider, result["token"])
+                logger.info("OAuth credentials saved for %s", provider)
+            except Exception:
+                logger.exception("Failed to save OAuth credentials")
+                result["save_error"] = "Token obtained but failed to save"
+
+        return jsonify(result)
+    except Exception as exc:
+        logger.exception("OAuth status check failed")
+        return jsonify({"state": "error", "error": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/oauth/code', methods=['POST'])
+def api_oauth_submit_code():
+    """Submit authorization code (for PKCE flow — any provider)."""
+    from services.cloud_oauth_service import pkce_exchange, get_session_info
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id', '')
+    code = data.get('code', '')
+
+    if not session_id or not code:
+        return jsonify({"success": False, "message": "Missing session_id or code."}), 400
+
+    try:
+        result = pkce_exchange(session_id, code)
+
+        if result.get("state") == "completed" and result.get("token"):
+            try:
+                info = get_session_info()
+                provider = info["provider"] if info else ""
+                _save_oauth_credentials(provider, result["token"])
+                logger.info("OAuth credentials saved for %s", provider)
+            except Exception:
+                logger.exception("Failed to save OAuth credentials")
+                result["save_error"] = "Token obtained but failed to save"
+
+        return jsonify({"success": result.get("state") == "completed", **result})
+    except Exception as exc:
+        logger.exception("PKCE code exchange failed")
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/oauth/cancel', methods=['POST'])
+def api_oauth_cancel():
+    """Cancel an in-progress OAuth flow."""
+    from services.cloud_oauth_service import cancel_auth
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id', '')
+
+    if not session_id:
+        return jsonify({"success": False, "message": "Missing session_id."}), 400
+
+    ok = cancel_auth(session_id)
+    return jsonify({"success": ok})
+
+
+@cloud_archive_bp.route('/api/oauth/screenshot')
+def api_oauth_screenshot():
+    """Get current browser viewport screenshot (for embedded browser flow)."""
+    from services.cloud_oauth_service import browser_get_screenshot
+
+    session_id = request.args.get('session_id', '')
+    if not session_id:
+        return '', 404
+
+    png_data = browser_get_screenshot(session_id)
+    if not png_data:
+        return '', 404
+
+    from flask import Response
+    return Response(png_data, mimetype='image/png',
+                    headers={'Cache-Control': 'no-store'})
+
+
+@cloud_archive_bp.route('/api/oauth/input', methods=['POST'])
+def api_oauth_input():
+    """Send keyboard/mouse input to embedded browser."""
+    from services.cloud_oauth_service import browser_send_input
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id', '')
+    input_type = data.get('type', '')  # 'key', 'text', 'click'
+    input_data = data.get('data', {})
+
+    if not session_id or not input_type:
+        return jsonify({"success": False}), 400
+
+    ok = browser_send_input(session_id, input_type, input_data)
+    return jsonify({"success": ok})

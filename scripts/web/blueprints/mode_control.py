@@ -227,8 +227,6 @@ def present_usb():
             flash("Successfully switched to Present Mode", "success")
             # Auto-index videos after switching to present mode
             _trigger_auto_index_after_mode_switch()
-            # Trigger cloud archive sync (reads from RO mount)
-            _trigger_cloud_sync_after_mode_switch()
         else:
             flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
 
@@ -270,8 +268,6 @@ def edit_usb():
             flash("Successfully switched to Edit Mode", "success")
             # Auto-index videos after switching to edit mode
             _trigger_auto_index_after_mode_switch()
-            # Trigger cloud archive sync
-            _trigger_cloud_sync_after_mode_switch()
         else:
             flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
 

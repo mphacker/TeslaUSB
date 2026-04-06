@@ -427,14 +427,17 @@ def api_toggle_sync():
 
 @cloud_archive_bp.route('/api/archive_file', methods=['POST'])
 def api_archive_file():
-    """Archive a single video file/event to the cloud."""
-    from services.cloud_rclone_service import archive_file
+    """Archive all camera views for a video event to the cloud.
+
+    Preserves the USB folder structure on the remote:
+    remote_path/SentryClips/2026-01-01_12-00-00/...
+    """
+    from services.cloud_rclone_service import archive_event
     from services.video_service import get_teslacam_path
 
     data = request.get_json(silent=True) or {}
     folder = data.get('folder', '')  # e.g. "SentryClips"
-    event_name = data.get('event', '')  # e.g. "2025-01-15_14-30-45"
-    filename = data.get('filename', '')  # specific file, or empty for whole event
+    event_name = data.get('event', '')  # e.g. "2026-01-15_14-30-45"
 
     if not folder or not event_name:
         return jsonify({"success": False, "message": "Missing folder or event."}), 400
@@ -443,32 +446,8 @@ def api_archive_file():
     if not teslacam:
         return jsonify({"success": False, "message": "TeslaCam path not available."}), 400
 
-    if filename:
-        local_path = os.path.join(teslacam, folder, event_name, filename)
-    else:
-        # Archive the whole event folder — pick the front camera as primary
-        event_dir = os.path.join(teslacam, folder, event_name)
-        if not os.path.isdir(event_dir):
-            # Flat structure
-            local_path = os.path.join(teslacam, folder, event_name)
-        else:
-            local_path = event_dir
-
-    # For directories, we need a different approach — archive each file
-    if os.path.isdir(local_path):
-        # Find all video files in the event
-        files = [f for f in os.listdir(local_path)
-                 if f.lower().endswith(('.mp4', '.ts'))]
-        if not files:
-            return jsonify({"success": False, "message": "No video files found."}), 400
-        # Archive the first file (front camera typically), user can archive more
-        local_path = os.path.join(local_path, files[0])
-
-    if not os.path.isfile(local_path):
-        return jsonify({"success": False, "message": "File not found."}), 404
-
     try:
-        ok, msg = archive_file(local_path, teslacam)
+        ok, msg = archive_event(folder, event_name, teslacam)
         if ok:
             return jsonify({"success": True, "message": msg})
         return jsonify({"success": False, "message": msg}), 400

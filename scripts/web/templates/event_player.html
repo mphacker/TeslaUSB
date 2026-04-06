@@ -1904,8 +1904,8 @@
                 } else if (status.running) {
                     /* Show progress */
                     let pct = 0;
-                    if (status.file_size > 0 && status.bytes_transferred > 0) {
-                        pct = Math.min(99, Math.round(status.bytes_transferred / status.file_size * 100));
+                    if (status.total_size > 0 && status.bytes_transferred > 0) {
+                        pct = Math.min(99, Math.round(status.bytes_transferred / status.total_size * 100));
                     }
                     let etaText = '';
                     if (status.eta_seconds != null && status.eta_seconds > 0) {

@@ -4,9 +4,9 @@ import os
 import logging
 import tempfile
 import zipfile
-from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify, Response, after_this_request
+from flask import Blueprint, request, redirect, url_for, flash, send_file, jsonify, Response, after_this_request
 
-from config import THUMBNAIL_CACHE_DIR, empty_camera_videos, empty_encrypted_flags, IMG_CAM_PATH
+from config import THUMBNAIL_CACHE_DIR, IMG_CAM_PATH
 from utils import generate_thumbnail_hash, get_base_context
 from services.mode_service import current_mode
 from services.video_service import (
@@ -37,25 +37,24 @@ def _require_cam_image():
 
 @videos_bp.route("/")
 def file_browser():
-    """Event list page for TeslaCam videos - shows list of events by folder."""
+    """Video listing API for the map video panel.
+
+    AJAX requests get JSON (used by map's loadVideoList).
+    Browser requests redirect to the map page.
+    """
+    # Browser requests → redirect to map
+    if request.headers.get('X-Requested-With') != 'XMLHttpRequest':
+        return redirect(url_for('mapping.map_view'))
+
     ctx = get_base_context()
     teslacam_path = get_teslacam_path()
 
     if not teslacam_path:
-        return render_template(
-            'videos.html',
-            page='map',
-            **ctx,
-            teslacam_available=False,
-            folders=[],
-            events=[],
-            current_folder=None,
-        )
+        return jsonify({'events': [], 'has_next': False, 'folder_structure': 'events'})
 
     folders = get_teslacam_folders()
     current_folder = request.args.get('folder', folders[0]['name'] if folders else None)
 
-    # Pagination parameters
     try:
         page_num = int(request.args.get('page', 1))
     except ValueError:
@@ -64,178 +63,55 @@ def file_browser():
 
     events = []
     total_events = 0
-    folder_structure = 'events'  # Default to event-based structure
+    folder_structure = 'events'
 
     if current_folder:
         folder_path = os.path.join(teslacam_path, current_folder)
         if os.path.isdir(folder_path):
-            # Determine folder structure type
             folder_info = next((f for f in folders if f['name'] == current_folder), None)
             folder_structure = folder_info['structure'] if folder_info else 'events'
 
-            # Get events/sessions based on folder structure
             if folder_structure == 'flat':
-                # RecentClips: Group flat files by session
                 events, total_events = group_videos_by_session(folder_path, page=page_num, per_page=per_page)
             else:
-                # SavedClips/SentryClips: Get event subfolders
                 events, total_events = get_events(folder_path, page=page_num, per_page=per_page)
 
-    # Check if this is an AJAX request for infinite scroll
-    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-        # Send compact JSON - only include non-null camera_videos to reduce payload
-        compact_events = []
-        for event in events:
-            compact_event = {
-                'name': event['name'],
-                'datetime': event['datetime'],
-                'size_mb': event['size_mb'],
-                'has_thumbnail': event.get('has_thumbnail', False),
-                # Only include non-null values to reduce payload size
-                'camera_videos': {k: v for k, v in event.get('camera_videos', {}).items() if v},
-            }
-            # Only add optional fields if they have values
-            if event.get('city'):
-                compact_event['city'] = event['city']
-            if event.get('reason'):
-                compact_event['reason'] = event['reason']
-            # Only include encrypted_videos with True values
-            encrypted = {k: v for k, v in event.get('encrypted_videos', {}).items() if v}
-            if encrypted:
-                compact_event['encrypted_videos'] = encrypted
-            compact_events.append(compact_event)
+    compact_events = []
+    for event in events:
+        compact_event = {
+            'name': event['name'],
+            'datetime': event['datetime'],
+            'size_mb': event['size_mb'],
+            'has_thumbnail': event.get('has_thumbnail', False),
+            'camera_videos': {k: v for k, v in event.get('camera_videos', {}).items() if v},
+        }
+        if event.get('city'):
+            compact_event['city'] = event['city']
+        if event.get('reason'):
+            compact_event['reason'] = event['reason']
+        encrypted = {k: v for k, v in event.get('encrypted_videos', {}).items() if v}
+        if encrypted:
+            compact_event['encrypted_videos'] = encrypted
+        compact_events.append(compact_event)
 
-        return jsonify({
-            'events': compact_events,
-            'has_next': (page_num * per_page) < total_events,
-            'next_page': page_num + 1,
-            'folder_structure': folder_structure
-        })
-
-    return render_template(
-        'videos.html',
-        page='map',
-        **ctx,
-        teslacam_available=True,
-        folders=folders,
-        events=events,
-        current_folder=current_folder,
-        folder_structure=folder_structure,
-        current_page=page_num,
-        has_next=(page_num * per_page) < total_events
-    )
+    return jsonify({
+        'events': compact_events,
+        'has_next': (page_num * per_page) < total_events,
+        'next_page': page_num + 1,
+        'folder_structure': folder_structure
+    })
 
 
 @videos_bp.route("/event/<folder>/<event_name>")
 def view_event(folder, event_name):
-    """View a Tesla event in Tesla-style multi-camera player."""
-    ctx = get_base_context()
-    teslacam_path = get_teslacam_path()
-
-    if not teslacam_path:
-        flash("TeslaCam path is not accessible", "error")
-        return redirect(url_for("videos.file_browser"))
-
-    # Sanitize inputs
-    folder = os.path.basename(folder)
-    folder_path = os.path.join(teslacam_path, folder)
-
-    if not os.path.isdir(folder_path):
-        flash(f"Folder not found: {folder}", "error")
-        return redirect(url_for("videos.file_browser"))
-
-    # Check folder structure type
-    folders = get_teslacam_folders()
-    folder_info = next((f for f in folders if f['name'] == folder), None)
-    folder_structure = folder_info['structure'] if folder_info else 'events'
-
-    if folder_structure == 'flat':
-        # For flat structure (RecentClips), build event-like object from session videos
-        session_videos = get_session_videos(folder_path, event_name)
-
-        if not session_videos:
-            flash(f"Session not found: {event_name}", "error")
-            return redirect(url_for("videos.file_browser", folder=folder))
-
-        # Build event object matching event structure
-        event = {
-            'name': event_name,
-            'datetime': session_videos[0]['modified'] if session_videos else event_name,
-            'city': '',  # Flat structure doesn't have location metadata
-            'reason': '',
-            'camera_videos': empty_camera_videos(),
-            'encrypted_videos': empty_encrypted_flags(),
-            'has_thumbnail': False,
-        }
-
-        # Map videos to camera angles and check for encryption
-        for video in session_videos:
-            camera = video.get('camera', '').lower()
-            if camera in event['camera_videos']:
-                event['camera_videos'][camera] = video['name']
-                # Check if video has valid MP4 headers
-                if not is_valid_mp4(video['path']):
-                    event['encrypted_videos'][camera] = True
-
-        return render_template(
-            'event_player.html',
-            page='map',
-            **ctx,
-            folder=folder,
-            event=event,
-            folder_structure=folder_structure,  # Pass structure type to template
-        )
-
-    # Get event details (for event-based structure)
-    event = get_event_details(folder_path, event_name)
-
-    if not event:
-        flash(f"Event not found: {event_name}", "error")
-        return redirect(url_for("videos.file_browser", folder=folder))
-
-    return render_template(
-        'event_player.html',
-        page='map',
-        **ctx,
-        folder=folder,
-        event=event,
-        folder_structure=folder_structure,  # Pass structure type to template
-    )
+    """Redirect to map page — video playback is now in the map overlay."""
+    return redirect(url_for("mapping.map_view"))
 
 
 @videos_bp.route("/session/<folder>/<session>")
 def view_session(folder, session):
-    """View all videos from a recording session in synchronized multi-camera view."""
-    ctx = get_base_context()
-    teslacam_path = get_teslacam_path()
-
-    if not teslacam_path:
-        flash("TeslaCam path is not accessible", "error")
-        return redirect(url_for("videos.file_browser"))
-
-    # Sanitize inputs
-    folder = os.path.basename(folder)
-    folder_path = os.path.join(teslacam_path, folder)
-
-    if not os.path.isdir(folder_path):
-        flash(f"Folder not found: {folder}", "error")
-        return redirect(url_for("videos.file_browser"))
-
-    # Get all videos for this session
-    session_videos = get_session_videos(folder_path, session)
-
-    if not session_videos:
-        flash(f"No videos found for session: {session}", "error")
-        return redirect(url_for("videos.file_browser", folder=folder))
-
-    return render_template(
-        'session.html',
-        page='map',
-        **ctx,
-        folder=folder,
-        session_id=session,
-        videos=session_videos,
-    )
+    """Redirect to map page — video playback is now in the map overlay."""
+    return redirect(url_for("mapping.map_view"))
 
 
 def _iter_file_range(path, start, end, chunk_size=256 * 1024):

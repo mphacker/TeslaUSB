@@ -459,9 +459,10 @@ import time as _time
 _archive_lock = threading.Lock()
 _archive_status: Dict = {
     "running": False,
-    "file_path": "",
-    "file_name": "",
-    "file_size": 0,
+    "event_name": "",
+    "folder": "",
+    "file_count": 0,
+    "total_size": 0,
     "bytes_transferred": 0,
     "started_at": None,
     "error": None,
@@ -470,19 +471,20 @@ _archive_status: Dict = {
 _archive_cancel = threading.Event()
 
 
-def archive_file(local_path: str, teslacam_base: str) -> Tuple[bool, str]:
-    """Archive a single file to the cloud in a background thread.
+def archive_event(folder: str, event_name: str, teslacam_base: str) -> Tuple[bool, str]:
+    """Archive an entire event (all camera angles) to the cloud.
+
+    Uses ``rclone copy`` which preserves directory structure, creating
+    the folder hierarchy on the remote automatically.
 
     Args:
-        local_path: Absolute path to the file on the Pi.
-        teslacam_base: Base TeslaCam directory for computing relative path.
+        folder: TeslaCam subfolder (e.g. 'SentryClips', 'RecentClips').
+        event_name: Event folder or session name.
+        teslacam_base: Base TeslaCam directory.
 
     Returns (success, message).
     """
     global _archive_status
-
-    if not os.path.isfile(local_path):
-        return False, "File not found."
 
     with _archive_lock:
         if _archive_status["running"]:
@@ -492,17 +494,40 @@ def archive_file(local_path: str, teslacam_base: str) -> Tuple[bool, str]:
     if not creds:
         return False, "No cloud provider configured."
 
-    file_size = os.path.getsize(local_path)
-    file_name = os.path.basename(local_path)
-    rel_path = os.path.relpath(local_path, teslacam_base)
+    # Determine local path and collect files
+    event_dir = os.path.join(teslacam_base, folder, event_name)
+    if os.path.isdir(event_dir):
+        # Event-based structure (SentryClips, SavedClips)
+        local_path = event_dir
+        files = [f for f in os.listdir(event_dir)
+                 if f.lower().endswith(('.mp4', '.ts'))]
+        total_size = sum(os.path.getsize(os.path.join(event_dir, f))
+                         for f in files)
+    else:
+        # Flat structure (RecentClips) — find matching session files
+        folder_dir = os.path.join(teslacam_base, folder)
+        files = [f for f in os.listdir(folder_dir)
+                 if f.startswith(event_name) and f.lower().endswith(('.mp4', '.ts'))]
+        if not files:
+            return False, "No video files found for this event."
+        total_size = sum(os.path.getsize(os.path.join(folder_dir, f))
+                         for f in files)
+        local_path = folder_dir
+
+    if not files:
+        return False, "No video files found."
+
+    # Relative path for cloud destination: folder/event_name/
+    rel_path = f"{folder}/{event_name}"
 
     with _archive_lock:
         _archive_cancel.clear()
         _archive_status.update({
             "running": True,
-            "file_path": local_path,
-            "file_name": file_name,
-            "file_size": file_size,
+            "event_name": event_name,
+            "folder": folder,
+            "file_count": len(files),
+            "total_size": total_size,
             "bytes_transferred": 0,
             "started_at": _time.time(),
             "error": None,
@@ -511,52 +536,79 @@ def archive_file(local_path: str, teslacam_base: str) -> Tuple[bool, str]:
 
     thread = threading.Thread(
         target=_archive_worker,
-        args=(local_path, rel_path, file_size, creds),
+        args=(local_path, rel_path, files, total_size, creds,
+              os.path.isdir(event_dir)),
         daemon=True,
     )
     thread.start()
-    return True, f"Archiving {file_name}..."
+    return True, f"Archiving {len(files)} files from {event_name}..."
 
 
-def _archive_worker(local_path: str, rel_path: str, file_size: int,
-                    creds: dict):
-    """Background thread for single-file archive."""
+def _archive_worker(local_path: str, rel_path: str, files: list,
+                    total_size: int, creds: dict, is_event_dir: bool):
+    """Background thread for event archive."""
     global _archive_status
 
     try:
         from config import CLOUD_ARCHIVE_REMOTE_PATH, CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
 
         conf_path = _write_temp_conf(creds)
-        remote_dest = f"{RCLONE_REMOTE_NAME}:{CLOUD_ARCHIVE_REMOTE_PATH}/{rel_path}"
+        remote_base = f"{RCLONE_REMOTE_NAME}:{CLOUD_ARCHIVE_REMOTE_PATH}"
         max_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
 
-        result = subprocess.run(
-            [
-                "rclone", "copyto",
-                "--config", conf_path,
-                "--bwlimit", f"{max_mbps}M",
-                "--stats", "0",
-                "--log-level", "ERROR",
-                local_path,
-                remote_dest,
-            ],
-            capture_output=True, text=True, timeout=3600,
-        )
+        if is_event_dir:
+            # Event directory: rclone copy preserves internal structure
+            # local: /mnt/.../SentryClips/2026-01-01_12-00-00/
+            # remote: teslausb:TeslaUSB/SentryClips/2026-01-01_12-00-00/
+            remote_dest = f"{remote_base}/{rel_path}"
+            result = subprocess.run(
+                [
+                    "rclone", "copy",
+                    "--config", conf_path,
+                    "--bwlimit", f"{max_mbps}M",
+                    "--stats", "0",
+                    "--log-level", "ERROR",
+                    local_path,
+                    remote_dest,
+                ],
+                capture_output=True, text=True, timeout=3600,
+            )
+        else:
+            # Flat structure: copy individual files with --include filter
+            # local: /mnt/.../RecentClips/
+            # remote: teslausb:TeslaUSB/RecentClips/
+            remote_dest = f"{remote_base}/{os.path.dirname(rel_path)}"
+            include_args = []
+            for f in files:
+                include_args.extend(["--include", f])
+            result = subprocess.run(
+                [
+                    "rclone", "copy",
+                    "--config", conf_path,
+                    "--bwlimit", f"{max_mbps}M",
+                    "--stats", "0",
+                    "--log-level", "ERROR",
+                    *include_args,
+                    local_path,
+                    remote_dest,
+                ],
+                capture_output=True, text=True, timeout=3600,
+            )
+
         _capture_refreshed_token(creds)
 
         if _archive_cancel.is_set():
-            _archive_status.update({
-                "running": False, "error": "Cancelled",
-            })
+            _archive_status.update({"running": False, "error": "Cancelled"})
             return
 
         if result.returncode == 0:
             _archive_status.update({
                 "running": False,
                 "completed": True,
-                "bytes_transferred": file_size,
+                "bytes_transferred": total_size,
             })
-            logger.info("Archived file to cloud: %s", rel_path)
+            logger.info("Archived event to cloud: %s (%d files)",
+                        rel_path, len(files))
         else:
             err = result.stderr.strip()[:300]
             _archive_status.update({
@@ -570,25 +622,23 @@ def _archive_worker(local_path: str, rel_path: str, file_size: int,
             "running": False, "error": "Upload timed out (1 hour limit).",
         })
     except Exception as e:
-        _archive_status.update({
-            "running": False, "error": str(e)[:200],
-        })
+        _archive_status.update({"running": False, "error": str(e)[:200]})
         logger.exception("Archive worker error")
     finally:
         _remove_temp_conf()
 
 
 def get_archive_status() -> Dict:
-    """Return current single-file archive status with ETA."""
+    """Return current archive status with ETA."""
     status = dict(_archive_status)
 
-    if status.get("running") and status.get("started_at") and status.get("file_size", 0) > 0:
+    if status.get("running") and status.get("started_at") and status.get("total_size", 0) > 0:
         elapsed = _time.time() - status["started_at"]
         from config import CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
         bps_limit = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS * 1024 * 1024 / 8
-        estimated_transferred = min(elapsed * bps_limit, status["file_size"])
+        estimated_transferred = min(elapsed * bps_limit, status["total_size"])
         status["bytes_transferred"] = int(estimated_transferred)
-        remaining = status["file_size"] - estimated_transferred
+        remaining = status["total_size"] - estimated_transferred
         if bps_limit > 0 and remaining > 0:
             status["eta_seconds"] = int(remaining / bps_limit)
         else:
@@ -600,7 +650,7 @@ def get_archive_status() -> Dict:
 
 
 def cancel_archive() -> Tuple[bool, str]:
-    """Cancel an in-progress single-file archive."""
+    """Cancel an in-progress archive."""
     if not _archive_status.get("running"):
         return False, "No archive in progress."
     _archive_cancel.set()

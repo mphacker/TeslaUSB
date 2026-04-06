@@ -687,26 +687,6 @@ let allEvents = [];
 let currentTripIndex = 0;
 let showingAllTrips = false;
 
-// Event severity colors
-// Build a deep link to the event player for a video path
-// video_path format: "RecentClips/2025-11-08_08-15-44-front.mp4"
-//                 or "SavedClips/2025-11-08_08-15-44/2025-11-08_08-15-44-front.mp4"
-function buildVideoLink(videoPath, timestamp) {
-    const parts = videoPath.replace(/\\/g, '/').split('/');
-    if (parts.length >= 3) {
-        // Event structure: folder/event_name/filename → /videos/event/folder/event_name
-        return `/videos/event/${parts[0]}/${parts[1]}`;
-    } else if (parts.length === 2) {
-        // Flat structure: folder/filename → /videos/session/folder/session_id
-        const filename = parts[1];
-        // Extract session timestamp: 2025-11-08_08-15-44 from 2025-11-08_08-15-44-front.mp4
-        const match = filename.match(/^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})/);
-        if (match) return `/videos/session/${parts[0]}/${match[1]}`;
-    }
-    // Fallback: stream the raw file
-    return `/videos/stream/${videoPath}`;
-}
-
 const severityColors = {
     critical: '#dc3545',
     warning: '#ffc107',
@@ -1153,6 +1133,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
                 <button class="nav-btn" onclick="navigateClip(-1)" title="Previous clip">⏮</button>
                 <button class="nav-btn" onclick="navigateClip(1)" title="Next clip">⏭</button>
                 <button class="nav-btn" onclick="overlayDownload()" title="Download ZIP">⬇</button>
+                {% if cloud_provider_connected %}<button class="nav-btn" id="archiveNavBtn" onclick="overlayArchive()" title="Archive to Cloud" style="color:#32ADE6">☁</button>{% endif %}
                 <button class="nav-btn" onclick="overlayDelete()" title="Delete" style="color:#dc3545">🗑</button>
             </div>
         </div>
@@ -1425,6 +1406,69 @@ async function overlayDelete() {
     } catch(e) {
         if (typeof showToast === 'function') showToast('Delete failed: ' + e.message, 'error');
     }
+}
+
+let _archivePollTimer = null;
+
+async function overlayArchive() {
+    const overlay = document.getElementById('videoOverlay');
+    if (!overlay) return;
+    const folder = overlay.dataset.folder;
+    const evt = overlay.dataset.event;
+    if (!folder || !evt) {
+        if (typeof showToast === 'function') showToast('Cannot determine clip to archive', 'warning');
+        return;
+    }
+    const btn = document.getElementById('archiveNavBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; btn.title = 'Archiving...'; }
+
+    try {
+        const resp = await fetch('/cloud/api/archive_file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ folder: folder, event: evt })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            if (typeof showToast === 'function') showToast(data.message, 'success');
+            _startArchiveNavPoll(btn);
+        } else {
+            if (typeof showToast === 'function') showToast(data.message || 'Archive failed', 'error');
+            _resetArchiveNavBtn(btn);
+        }
+    } catch(e) {
+        if (typeof showToast === 'function') showToast('Archive failed: ' + e.message, 'error');
+        _resetArchiveNavBtn(btn);
+    }
+}
+
+function _startArchiveNavPoll(btn) {
+    _archivePollTimer = setInterval(async () => {
+        try {
+            const resp = await fetch('/cloud/api/archive_status', {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            const st = await resp.json();
+            if (st.completed) {
+                clearInterval(_archivePollTimer); _archivePollTimer = null;
+                if (btn) { btn.textContent = '✓'; btn.style.color = '#34C759'; btn.title = 'Archived!'; }
+                if (typeof showToast === 'function') showToast('Archived to cloud!', 'success');
+                setTimeout(() => _resetArchiveNavBtn(btn), 4000);
+            } else if (st.error) {
+                clearInterval(_archivePollTimer); _archivePollTimer = null;
+                if (typeof showToast === 'function') showToast(st.error, 'error');
+                _resetArchiveNavBtn(btn);
+            } else if (st.running && btn) {
+                let pct = st.total_size > 0 ? Math.min(99, Math.round((st.bytes_transferred || 0) / st.total_size * 100)) : 0;
+                btn.textContent = pct + '%';
+                btn.title = 'Archiving ' + (st.file_count || '') + ' files...';
+            }
+        } catch(e) { /* keep polling */ }
+    }, 2000);
+}
+
+function _resetArchiveNavBtn(btn) {
+    if (btn) { btn.disabled = false; btn.textContent = '☁'; btn.style.color = '#32ADE6'; btn.title = 'Archive to Cloud'; }
 }
 
 function renderEvents() {
@@ -1735,6 +1779,7 @@ async function loadVideoList(append) {
                 '<div class="vp-actions">' +
                     '<button class="vp-btn vp-btn-play" title="Play">&#9654;</button>' +
                     '<button class="vp-btn vp-btn-dl" title="Download ZIP">&#11015;</button>' +
+                    {% if cloud_provider_connected %}'<button class="vp-btn vp-btn-archive" title="Archive to Cloud" style="color:#32ADE6">&#9729;</button>' +{% endif %}
                     '<button class="vp-btn vp-btn-danger vp-btn-del" title="Delete">&#128465;</button>' +
                 '</div>';
 
@@ -1835,6 +1880,50 @@ async function vpDelete(folder, name) {
     }
 }
 
+async function vpArchive(folder, name, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+    try {
+        var resp = await fetch('/cloud/api/archive_file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ folder: folder, event: name })
+        });
+        var data = await resp.json();
+        if (data.success) {
+            if (typeof showToast === 'function') showToast(data.message, 'success');
+            _vpArchivePoll(btn);
+        } else {
+            if (typeof showToast === 'function') showToast(data.message || 'Archive failed', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = '☁'; }
+        }
+    } catch(e) {
+        if (typeof showToast === 'function') showToast('Archive failed: ' + e.message, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '☁'; }
+    }
+}
+
+function _vpArchivePoll(btn) {
+    var timer = setInterval(async function() {
+        try {
+            var resp = await fetch('/cloud/api/archive_status', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            var st = await resp.json();
+            if (st.completed) {
+                clearInterval(timer);
+                if (btn) { btn.textContent = '✓'; btn.style.color = '#34C759'; }
+                if (typeof showToast === 'function') showToast('Archived to cloud!', 'success');
+                setTimeout(function() { if (btn) { btn.disabled = false; btn.textContent = '☁'; btn.style.color = '#32ADE6'; } }, 4000);
+            } else if (st.error) {
+                clearInterval(timer);
+                if (typeof showToast === 'function') showToast(st.error, 'error');
+                if (btn) { btn.disabled = false; btn.textContent = '☁'; btn.style.color = '#32ADE6'; }
+            } else if (st.running && btn) {
+                var pct = st.total_size > 0 ? Math.min(99, Math.round((st.bytes_transferred || 0) / st.total_size * 100)) : 0;
+                btn.textContent = pct + '%';
+            }
+        } catch(e) { /* keep polling */ }
+    }, 2000);
+}
+
 // Event delegation for video panel buttons (prevents XSS from inline onclick)
 document.getElementById('vpList').addEventListener('click', function(e) {
     var btn = e.target.closest('.vp-btn');
@@ -1872,6 +1961,7 @@ document.getElementById('vpList').addEventListener('click', function(e) {
     var structure = clip.dataset.structure;
     if (btn.classList.contains('vp-btn-play')) vpPlay(folder, name, structure);
     else if (btn.classList.contains('vp-btn-dl')) vpDownload(folder, name);
+    else if (btn.classList.contains('vp-btn-archive')) vpArchive(folder, name, btn);
     else if (btn.classList.contains('vp-btn-del')) vpDelete(folder, name);
 });
 

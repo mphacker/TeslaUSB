@@ -1148,9 +1148,11 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
 
     // Handle video load error (file may no longer exist)
     video.addEventListener('error', function onError() {
-        video.removeEventListener('error', onError);
-        if (typeof showToast === 'function') {
-            showToast('Video file not found — Tesla may have overwritten it. Try re-indexing.', 'warning');
+        // Only show error if video has a real src (not cleared by closeVideoOverlay)
+        if (video.src && !video.src.endsWith('/')) {
+            if (typeof showToast === 'function') {
+                showToast('Video file not found — Tesla may have overwritten it. Try re-indexing.', 'warning');
+            }
         }
     }, { once: true });
 

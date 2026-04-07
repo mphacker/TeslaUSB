@@ -77,6 +77,13 @@ def api_trip_route(trip_id):
         if not waypoints:
             return jsonify({'error': 'Trip not found'}), 404
 
+        # Normalize video_path for archived clips
+        for wp in waypoints:
+            vp = wp.get('video_path', '')
+            if vp and 'ArchivedClips' in vp:
+                basename = vp.rsplit('/', 1)[-1] if '/' in vp else vp
+                wp['video_path'] = f'ArchivedClips/{basename}'
+
         # Build GeoJSON LineString
         coordinates = [[wp['lon'], wp['lat']] for wp in waypoints]
         properties = {
@@ -305,13 +312,24 @@ def api_sentry_events():
         enriched = []
         for ev in events:
             vp = ev.get('video_path', '')
-            parts = vp.replace('\\', '/').split('/')
-            source_folder = parts[0] if parts else ''
-            event_folder = parts[1] if len(parts) > 2 else ''
+            # Normalize path: handle both relative (RecentClips/...) and
+            # absolute-like (../../../../home/pi/ArchivedClips/...) paths
+            if 'ArchivedClips' in vp:
+                basename = vp.rsplit('/', 1)[-1] if '/' in vp else vp
+                source_folder = 'ArchivedClips'
+                event_folder = ''
+            else:
+                parts = vp.replace('\\', '/').split('/')
+                source_folder = parts[0] if parts else ''
+                event_folder = parts[1] if len(parts) > 2 else ''
 
             result = dict(ev)
             result['event_folder'] = event_folder
             result['source_folder'] = source_folder
+            # Provide a clean video_path for the frontend
+            if source_folder == 'ArchivedClips':
+                basename = vp.rsplit('/', 1)[-1] if '/' in vp else vp
+                result['video_path'] = f'ArchivedClips/{basename}'
 
             if teslacam and event_folder:
                 folder_path = os.path.join(teslacam, source_folder)

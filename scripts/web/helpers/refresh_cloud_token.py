@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Cloud token refresh + auto-sync on WiFi connect.
+"""WiFi connect handler — index videos + sync to cloud.
 
 Called by the NetworkManager dispatcher (99-teslausb-cloud-refresh)
-whenever wlan0 comes up.  Refreshes the OAuth token, then triggers
-an automatic cloud sync of event clips if sync is enabled.
+whenever wlan0 comes up.  This is the "car arrived home" trigger:
 
-Runs as a low-priority background task.
+1. Refresh the RO mount (see Tesla's latest writes)
+2. Index new videos (build trips, detect events)
+3. Sync event clips to cloud (if configured)
+
+The user parks at home, WiFi connects, and within ~60 seconds
+everything is fresh — no manual action needed.
 """
 
 import os
@@ -18,36 +22,67 @@ import logging
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [cloud-sync] %(message)s",
+    format="%(asctime)s [wifi-handler] %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 
 def main():
-    from config import CLOUD_PROVIDER_CREDS_PATH, CLOUD_ARCHIVE_ENABLED
+    from services.video_service import get_teslacam_path
 
-    if not os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
-        logger.info("No cloud credentials — skipping")
+    teslacam = get_teslacam_path()
+    if not teslacam:
+        logger.info("TeslaCam path not available — skipping")
         return 0
 
-    if not CLOUD_ARCHIVE_ENABLED:
-        logger.info("Cloud archive disabled — skipping")
-        return 0
-
-    # Trigger auto-sync (checks sync_enabled, WiFi, not-already-running)
+    # Step 1: Refresh the RO mount so we see Tesla's latest files
     try:
-        from config import CLOUD_ARCHIVE_DB_PATH
-        from services.video_service import get_teslacam_path
-        from services.cloud_archive_service import trigger_auto_sync
+        from services.mapping_service import _refresh_ro_mount
+        _refresh_ro_mount(teslacam)
+        logger.info("RO mount refreshed")
+    except Exception as e:
+        logger.warning("Mount refresh failed (non-fatal): %s", e)
 
-        teslacam = get_teslacam_path()
-        if teslacam:
-            logger.info("WiFi connected — triggering cloud sync")
+    # Step 2: Index new videos (builds trips, detects events)
+    try:
+        from config import (
+            MAPPING_ENABLED, MAPPING_DB_PATH,
+            MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS,
+            MAPPING_TRIP_GAP_MINUTES,
+        )
+        if MAPPING_ENABLED:
+            from services.mapping_service import trigger_auto_index
+            logger.info("Indexing new videos...")
+            trigger_auto_index(
+                db_path=MAPPING_DB_PATH,
+                teslacam_path=teslacam,
+                sample_rate=MAPPING_SAMPLE_RATE,
+                thresholds=MAPPING_EVENT_THRESHOLDS,
+                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+            )
+            # Wait for indexing to complete before syncing
+            # (so newly indexed events can be synced)
+            import time
+            from services.mapping_service import get_indexer_status
+            for _ in range(120):  # max 10 minutes
+                if not get_indexer_status().get('running'):
+                    break
+                time.sleep(5)
+            logger.info("Video indexing complete")
+    except Exception as e:
+        logger.warning("Video indexing failed (non-fatal): %s", e)
+
+    # Step 3: Sync event clips to cloud (if configured)
+    try:
+        from config import CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_DB_PATH, CLOUD_PROVIDER_CREDS_PATH
+        if CLOUD_ARCHIVE_ENABLED and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
+            from services.cloud_archive_service import trigger_auto_sync
+            logger.info("Triggering cloud sync...")
             trigger_auto_sync(teslacam, CLOUD_ARCHIVE_DB_PATH)
         else:
-            logger.info("TeslaCam path not available — skipping sync")
+            logger.info("Cloud archive not configured — skipping sync")
     except Exception as e:
-        logger.warning("Auto-sync trigger failed (non-fatal): %s", e)
+        logger.warning("Cloud sync trigger failed (non-fatal): %s", e)
 
     return 0
 

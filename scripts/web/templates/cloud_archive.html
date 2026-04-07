@@ -177,7 +177,7 @@
                                onchange="toggleSyncEnabled(this.checked)"
                                style="width: 18px; height: 18px; accent-color: var(--accent-success);">
                         <span id="syncEnabledLabel" style="font-size: var(--text-sm); color: var(--text-secondary);">
-                            {{ 'Enabled — syncs every 6 hours when WiFi connected' if sync_enabled else 'Disabled — provider stays connected, no auto-sync' }}
+                            {{ 'Enabled — syncs automatically when WiFi connects' if sync_enabled else 'Disabled — provider stays connected, no auto-sync' }}
                         </span>
                     </label>
                 </div>
@@ -1248,7 +1248,7 @@
             if (data.success) {
                 var label = document.getElementById('syncEnabledLabel');
                 if (label) label.textContent = enabled
-                    ? 'Enabled \u2014 syncs every 6 hours when WiFi connected'
+                    ? 'Enabled \u2014 syncs automatically when WiFi connects'
                     : 'Disabled \u2014 provider stays connected, no auto-sync';
                 showToast('Auto-sync ' + (enabled ? 'enabled' : 'disabled') + '.', 'success');
             } else {

@@ -116,19 +116,23 @@ if __name__ == "__main__":
         MAPPING_ENABLED, MAPPING_INDEX_ON_STARTUP, MAPPING_DB_PATH,
         MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS, MAPPING_TRIP_GAP_MINUTES,
     )
+    # Delay auto-indexing so it doesn't compete with boot-critical USB presentation
     if MAPPING_ENABLED and MAPPING_INDEX_ON_STARTUP:
-        from services.video_service import get_teslacam_path
-        from services.mapping_service import trigger_auto_index
-        teslacam = get_teslacam_path()
-        if teslacam:
-            print("Auto-indexing videos on startup...")
-            trigger_auto_index(
-                db_path=MAPPING_DB_PATH,
-                teslacam_path=teslacam,
-                sample_rate=MAPPING_SAMPLE_RATE,
-                thresholds=MAPPING_EVENT_THRESHOLDS,
-                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
-            )
+        import threading
+        def _deferred_index():
+            from services.video_service import get_teslacam_path
+            from services.mapping_service import trigger_auto_index
+            teslacam = get_teslacam_path()
+            if teslacam:
+                trigger_auto_index(
+                    db_path=MAPPING_DB_PATH,
+                    teslacam_path=teslacam,
+                    sample_rate=MAPPING_SAMPLE_RATE,
+                    thresholds=MAPPING_EVENT_THRESHOLDS,
+                    trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+                )
+        threading.Timer(60, _deferred_index).start()
+        print("Video indexing will start in 60 seconds")
 
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:

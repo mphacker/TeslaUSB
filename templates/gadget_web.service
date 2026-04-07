@@ -1,6 +1,6 @@
 [Unit]
 Description=USB Gadget Web Control Interface
-After=network.target
+After=network.target present_usb_on_boot.service
 Wants=network.target
 StartLimitBurst=5
 StartLimitIntervalSec=300

@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=__GADGET_DIR__/scripts/optimize_network.sh
+ExecStart=/bin/bash __GADGET_DIR__/scripts/optimize_network.sh
 
 [Install]
 WantedBy=multi-user.target

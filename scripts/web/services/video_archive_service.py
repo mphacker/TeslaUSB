@@ -44,11 +44,17 @@ _MIN_FILE_AGE_SECONDS = 300  # 5 minutes
 # Buffered copy chunk size — keeps memory usage predictable on Pi Zero 2 W
 _COPY_CHUNK_SIZE = 65536  # 64 KB
 
+# I/O throttle: max bytes per second during copy. The archive reads from
+# the same SD card that the USB gadget uses for Tesla. Copying too fast
+# starves the gadget (endpoint stalls) and can trigger a watchdog reboot.
+# 2 MB/s leaves ample bandwidth for the gadget (~20-30 MB/s SD card).
+_MAX_COPY_BYTES_PER_SEC = 2 * 1024 * 1024  # 2 MB/s
+
 # Minimum available RAM+swap (bytes) to continue archiving
 _MIN_MEMORY_BYTES = 50 * 1024 * 1024  # 50 MB
 
-# Pause between file copies to yield CPU to the web service
-_INTER_FILE_SLEEP = 0.1  # 100 ms
+# Pause between file copies to let the system breathe
+_INTER_FILE_SLEEP = 2.0  # 2 seconds
 
 # ---------------------------------------------------------------------------
 # Background Thread State
@@ -146,8 +152,20 @@ def _archive_timer_loop() -> None:
     """Periodically run archive + retention."""
     interval = ARCHIVE_INTERVAL_MINUTES * 60
 
+    # Set lowest I/O priority so archive doesn't starve the USB gadget.
+    # The gadget shares the same SD card I/O bus.
+    try:
+        import subprocess
+        subprocess.run(
+            ["ionice", "-c", "3", "-p", str(os.getpid())],
+            timeout=5, capture_output=True,
+        )
+        logger.info("Archive thread set to idle I/O priority (ionice -c 3)")
+    except Exception:
+        pass  # ionice not available — rate limiting still protects us
+
     # Initial delay — let boot finish and other services settle
-    for _ in range(60):
+    for _ in range(120):  # 2 minutes
         if _archive_cancel.is_set():
             return
         time.sleep(1)
@@ -342,15 +360,34 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
 
 
 def _buffered_copy(src: str, dst: str) -> None:
-    """Copy a file using small buffered reads (64 KB chunks).
+    """Copy a file using rate-limited buffered reads.
 
-    This keeps memory usage predictable on a 512 MB Pi Zero 2 W,
-    unlike shutil.copy2 which may use large buffers.
+    Throttled to _MAX_COPY_BYTES_PER_SEC to avoid saturating the SD card
+    I/O bus. The USB gadget shares the same bus — unthrottled copies cause
+    endpoint stalls (dwc2 ep1in stalled) and can trigger watchdog reboots.
     """
     dst_tmp = dst + ".tmp"
     try:
+        bytes_this_second = 0
+        second_start = time.monotonic()
+
         with open(src, "rb") as fin, open(dst_tmp, "wb") as fout:
-            shutil.copyfileobj(fin, fout, length=_COPY_CHUNK_SIZE)
+            while True:
+                chunk = fin.read(_COPY_CHUNK_SIZE)
+                if not chunk:
+                    break
+                fout.write(chunk)
+                bytes_this_second += len(chunk)
+
+                # Rate limiting: sleep if we've exceeded the budget for this second
+                elapsed = time.monotonic() - second_start
+                if bytes_this_second >= _MAX_COPY_BYTES_PER_SEC:
+                    sleep_for = 1.0 - elapsed
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+                    bytes_this_second = 0
+                    second_start = time.monotonic()
+
             fout.flush()
             os.fsync(fout.fileno())
         os.replace(dst_tmp, dst)

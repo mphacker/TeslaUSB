@@ -25,10 +25,11 @@ logger = logging.getLogger(__name__)
 videos_bp = Blueprint('videos', __name__, url_prefix='/videos')
 
 
-def _check_archive_fallback(filename: str):
+def _check_archive_fallback(filename: str, folder_hint: str = None):
     """Check if a video file exists in ArchivedClips on the SD card.
 
     Returns the archive path if found, None otherwise.
+    If folder_hint is 'ArchivedClips', goes directly to the archive dir.
     """
     try:
         from config import ARCHIVE_DIR, ARCHIVE_ENABLED
@@ -158,13 +159,18 @@ def stream_video(filepath):
     # Sanitize and build path
     parts = filepath.split('/')
     sanitized_parts = [os.path.basename(p) for p in parts]
-    video_path = os.path.join(teslacam_path, *sanitized_parts)
 
-    if not os.path.isfile(video_path):
-        # Fallback: check ArchivedClips on SD card (Tesla may have deleted from RecentClips)
-        video_path = _check_archive_fallback(sanitized_parts[-1]) if sanitized_parts else None
+    # Direct archive path: if first segment is ArchivedClips, serve from SD card
+    if sanitized_parts and sanitized_parts[0] == 'ArchivedClips':
+        video_path = _check_archive_fallback(sanitized_parts[-1])
         if not video_path:
             return "Video not found", 404
+    else:
+        video_path = os.path.join(teslacam_path, *sanitized_parts)
+        if not os.path.isfile(video_path):
+            video_path = _check_archive_fallback(sanitized_parts[-1]) if sanitized_parts else None
+            if not video_path:
+                return "Video not found", 404
 
     file_size = os.path.getsize(video_path)
     range_header = request.headers.get('Range')
@@ -232,11 +238,17 @@ def fetch_video_for_sei(filepath):
     # Sanitize and build path
     parts = filepath.split('/')
     sanitized_parts = [os.path.basename(p) for p in parts]
-    video_path = os.path.join(teslacam_path, *sanitized_parts)
 
-    if not os.path.isfile(video_path):
-        video_path = _check_archive_fallback(sanitized_parts[-1]) if sanitized_parts else None
+    if sanitized_parts and sanitized_parts[0] == 'ArchivedClips':
+        video_path = _check_archive_fallback(sanitized_parts[-1])
         if not video_path:
+            return "Video not found", 404
+    else:
+        video_path = os.path.join(teslacam_path, *sanitized_parts)
+        if not os.path.isfile(video_path):
+            video_path = _check_archive_fallback(sanitized_parts[-1]) if sanitized_parts else None
+            if not video_path:
+                return "Video not found", 404
             return "Video not found", 404
 
     # Send complete file with proper headers for in-browser processing
@@ -266,11 +278,18 @@ def download_video(filepath):
     # Sanitize and build path
     parts = filepath.split('/')
     sanitized_parts = [os.path.basename(p) for p in parts]
-    video_path = os.path.join(teslacam_path, *sanitized_parts)
     filename = sanitized_parts[-1]
 
-    if not os.path.isfile(video_path):
-        video_path = _check_archive_fallback(filename) if filename else None
+    if sanitized_parts and sanitized_parts[0] == 'ArchivedClips':
+        video_path = _check_archive_fallback(filename)
+        if not video_path:
+            return "Video not found", 404
+    else:
+        video_path = os.path.join(teslacam_path, *sanitized_parts)
+        if not os.path.isfile(video_path):
+            video_path = _check_archive_fallback(filename) if filename else None
+            if not video_path:
+                return "Video not found", 404
         if not video_path:
             return "Video not found", 404
 

@@ -304,6 +304,11 @@ def _run_archive() -> None:
                 copied += 1
                 _status["bytes_copied"] += src_stat.st_size
 
+                # Update geodata DB to point at the archived copy.
+                # This avoids expensive re-indexing — the GPS data is
+                # already extracted, we just change the file path.
+                _update_geodata_paths(src_path, dst_path, rel_path)
+
             except OSError as e:
                 logger.warning("Failed to copy %s: %s", rel_path, e)
                 continue
@@ -635,6 +640,76 @@ def _get_archived_files_sorted() -> List[Tuple[str, int, float]]:
 
     files.sort(key=lambda x: x[2])  # oldest first
     return files
+
+
+# ---------------------------------------------------------------------------
+# Geodata DB Path Updates
+# ---------------------------------------------------------------------------
+
+
+def _update_geodata_paths(old_abs: str, new_abs: str, filename: str) -> None:
+    """Update geodata.db to point at the archived copy of a video.
+
+    When a RecentClips file is archived to the SD card, we update the DB
+    paths rather than re-indexing (the GPS data is already extracted).
+
+    - indexed_files.file_path: absolute path (primary key — requires delete+insert)
+    - waypoints.video_path: relative path (e.g. "RecentClips/...-front.mp4")
+    - detected_events.video_path: same relative format
+    """
+    try:
+        import sqlite3
+        from config import MAPPING_DB_PATH
+
+        if not os.path.isfile(MAPPING_DB_PATH):
+            return
+
+        conn = sqlite3.connect(MAPPING_DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+
+        try:
+            # Build the old and new relative paths for waypoints/events
+            # Old: "RecentClips/2026-...-front.mp4"
+            # New: use a synthetic "ArchivedClips/..." relative path
+            basename = os.path.basename(filename)
+            old_rel_pattern = f"%{basename}"
+            new_rel = f"ArchivedClips/{basename}"
+
+            # Update indexed_files (file_path is PRIMARY KEY, so delete+insert)
+            row = conn.execute(
+                "SELECT * FROM indexed_files WHERE file_path = ?",
+                (old_abs,)
+            ).fetchone()
+
+            if row:
+                conn.execute("DELETE FROM indexed_files WHERE file_path = ?", (old_abs,))
+                conn.execute(
+                    "INSERT INTO indexed_files (file_path, file_size, file_mtime, waypoint_count, event_count) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (new_abs, row['file_size'], row['file_mtime'],
+                     row['waypoint_count'], row['event_count']),
+                )
+
+            # Update waypoints.video_path
+            conn.execute(
+                "UPDATE waypoints SET video_path = ? WHERE video_path LIKE ?",
+                (new_rel, old_rel_pattern),
+            )
+
+            # Update detected_events.video_path
+            conn.execute(
+                "UPDATE detected_events SET video_path = ? WHERE video_path LIKE ?",
+                (new_rel, old_rel_pattern),
+            )
+
+            conn.commit()
+        finally:
+            conn.close()
+
+    except Exception as e:
+        # Non-fatal — the file is archived even if DB update fails.
+        # The purge logic will fix paths on the next full scan.
+        logger.debug("Failed to update geodata paths for %s: %s", filename, e)
 
 
 # ---------------------------------------------------------------------------

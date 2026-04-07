@@ -1,6 +1,6 @@
 [Unit]
 Description=USB Gadget Web Control Interface
-After=network.target present_usb_on_boot.service
+After=network.target
 Wants=network.target
 StartLimitBurst=5
 StartLimitIntervalSec=300
@@ -12,7 +12,7 @@ User=root
 Group=__TARGET_USER__
 WorkingDirectory=__GADGET_DIR__/scripts/web
 ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/web/web_control.py
-Restart=on-failure
+Restart=always
 RestartSec=10
 TimeoutStopSec=10
 

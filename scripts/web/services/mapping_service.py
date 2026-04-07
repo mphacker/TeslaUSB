@@ -412,10 +412,11 @@ def _refresh_ro_mount(teslacam_path: str) -> None:
 
 
 def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
-    """Find all front-camera MP4 files in TeslaCam folders.
+    """Find all front-camera MP4 files in TeslaCam folders and ArchivedClips.
 
     Only indexes front camera since all cameras share the same GPS data.
-    Yields absolute file paths.
+    Yields absolute file paths. Also scans the SD card archive directory
+    for clips that Tesla may have already deleted from RecentClips.
     """
     for folder in ('RecentClips', 'SavedClips', 'SentryClips'):
         folder_path = os.path.join(teslacam_path, folder)
@@ -442,6 +443,31 @@ def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
                             yield os.path.join(event_path, f)
             except OSError:
                 pass
+
+    # Also scan ArchivedClips on SD card (flat structure, same as RecentClips)
+    try:
+        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+        if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
+            # Track filenames already yielded from RecentClips to avoid duplicates
+            seen_names = set()
+            for folder in ('RecentClips',):
+                fp = os.path.join(teslacam_path, folder)
+                if os.path.isdir(fp):
+                    try:
+                        for f in os.listdir(fp):
+                            seen_names.add(f)
+                    except OSError:
+                        pass
+
+            try:
+                for f in sorted(os.listdir(ARCHIVE_DIR)):
+                    if f.lower().endswith('.mp4') and '-front' in f.lower():
+                        if f not in seen_names:
+                            yield os.path.join(ARCHIVE_DIR, f)
+            except OSError:
+                pass
+    except ImportError:
+        pass
 
 
 def _infer_sentry_event(
@@ -959,14 +985,34 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
                         purged_trips += 1
 
         elif teslacam_path:
-            # Full scan mode — check every indexed file against disk
+            # Full scan mode — check every indexed file against disk.
+            # Also check ArchivedClips on SD card before marking as missing.
+            try:
+                from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+                archive_dir = ARCHIVE_DIR if ARCHIVE_ENABLED else None
+            except ImportError:
+                archive_dir = None
+
             rows = conn.execute(
                 "SELECT file_path FROM indexed_files"
             ).fetchall()
             missing = []
             for row in rows:
-                if not os.path.isfile(row['file_path']):
-                    missing.append(row['file_path'])
+                fp = row['file_path']
+                if os.path.isfile(fp):
+                    continue
+                # Check if file exists in ArchivedClips (by filename)
+                if archive_dir and os.path.isdir(archive_dir):
+                    basename = os.path.basename(fp)
+                    archive_path = os.path.join(archive_dir, basename)
+                    if os.path.isfile(archive_path):
+                        # Update indexed path to point to archive
+                        conn.execute(
+                            "UPDATE indexed_files SET file_path = ? WHERE file_path = ?",
+                            (archive_path, fp)
+                        )
+                        continue
+                missing.append(fp)
 
             if missing:
                 logger.info("Purging %d missing videos from geodata.db", len(missing))

@@ -219,11 +219,12 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
 def _discover_events(
     teslacam_path: str,
 ) -> List[Tuple[str, str, int]]:
-    """Find event directories to sync (SentryClips/SavedClips only).
+    """Find event directories and archived clips to sync.
 
-    Only syncs event subdirectories — not flat files in RecentClips.
-    Returns a list of ``(event_dir_path, relative_path, total_size)``
-    sorted **oldest-first** so the most at-risk clips get preserved first.
+    Syncs event subdirectories from SentryClips/SavedClips plus flat files
+    from ArchivedClips on the SD card. Returns a list of
+    ``(event_dir_path, relative_path, total_size)`` sorted **oldest-first**
+    so the most at-risk clips get preserved first.
     """
     events: List[Tuple[str, str, int]] = []
 
@@ -261,6 +262,22 @@ def _discover_events(
 
             rel_path = f"{folder}/{entry}"
             events.append((event_dir, rel_path, total_size))
+
+    # Also include ArchivedClips from SD card as a virtual "event" per file
+    try:
+        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+        if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
+            try:
+                for f in sorted(os.listdir(ARCHIVE_DIR)):
+                    fpath = os.path.join(ARCHIVE_DIR, f)
+                    if os.path.isfile(fpath) and f.lower().endswith(('.mp4', '.ts')):
+                        fsize = os.path.getsize(fpath)
+                        # Use ARCHIVE_DIR as the "event dir" and ArchivedClips/filename as rel
+                        events.append((ARCHIVE_DIR, f"ArchivedClips/{f}", fsize))
+            except OSError:
+                pass
+    except ImportError:
+        pass
 
     # Sort oldest-first (event names are timestamps: 2026-01-01_12-00-00)
     events.sort(key=lambda t: t[1])

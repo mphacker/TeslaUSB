@@ -51,6 +51,7 @@ eval "$(yq -r '
   "PART2_SIZE=\"" + .setup.part2_size + "\"",
   "PART3_SIZE=\"" + (.setup.part3_size // "") + "\"",
   "RESERVE_SIZE=\"" + .setup.reserve_size + "\"",
+  "ARCHIVE_RESERVE_SIZE=\"" + (.setup.archive_reserve_size // "50G") + "\"",
   "SAMBA_PASS=\"" + .network.samba_password + "\"",
   "WEB_PORT=\"" + (.network.web_port | tostring) + "\"",
   "OFFLINE_AP_ENABLED=\"" + (.offline_ap.enabled | tostring) + "\"",

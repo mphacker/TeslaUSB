@@ -108,6 +108,18 @@ CLOUD_ARCHIVE_MAX_UPLOAD_MBPS = int(_cloud.get('max_upload_mbps', 5))
 CLOUD_ARCHIVE_DB_PATH = os.path.join(GADGET_DIR, 'cloud_sync.db')
 CLOUD_PROVIDER_CREDS_PATH = os.path.join(GADGET_DIR, 'cloud_provider.enc')
 
+# RecentClips Archive Configuration
+_archive = config.get('archive', {})
+ARCHIVE_ENABLED = bool(_archive.get('enabled', True))
+ARCHIVE_INTERVAL_MINUTES = int(_archive.get('interval_minutes', 5))
+ARCHIVE_RETENTION_DAYS = int(_archive.get('retention_days', 30))
+ARCHIVE_MIN_FREE_SPACE_GB = int(_archive.get('min_free_space_gb', 10))
+ARCHIVE_MAX_SIZE_GB = int(_archive.get('max_size_gb', 50))
+_archive_path = _archive.get('path', '')
+ARCHIVE_DIR = _archive_path if _archive_path else os.path.join(
+    os.path.expanduser(f"~{TARGET_USER}"), 'ArchivedClips'
+)
+
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)
 # ============================================================================
@@ -129,9 +141,6 @@ PART_LABEL_MAP = {
     "part2": "gadget_part2",
     **({"part3": "gadget_part3"} if MUSIC_ENABLED else {}),
 }
-
-# Thumbnail configuration
-THUMBNAIL_CACHE_DIR = os.path.join(GADGET_DIR, "thumbnails")
 
 # Mode display configuration
 MODE_DISPLAY = {

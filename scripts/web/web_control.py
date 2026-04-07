@@ -114,6 +114,13 @@ if __name__ == "__main__":
     # Video indexing is triggered by WiFi connect (NetworkManager dispatcher)
     # No boot-time indexing needed — the dispatcher handles it automatically
 
+    # Start RecentClips archive timer (copies clips to SD card before Tesla deletes them)
+    try:
+        from services.video_archive_service import start_archive_timer
+        start_archive_timer()
+    except Exception as e:
+        print(f"Warning: Failed to start archive timer: {e}")
+
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:
         from waitress import serve

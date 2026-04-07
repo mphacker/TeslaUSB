@@ -36,6 +36,7 @@ setup:
   part2_size: "" # LightShow drive size (e.g., "10G" or leave empty for interactive)
   part3_size: "" # Music drive size (e.g., "32G" or leave empty to skip/interactive)
   reserve_size: "" # Headroom to leave free on Pi filesystem (default: 5G)
+  archive_reserve_size: "50G" # Space reserved for RecentClips archive on SD card
 
 # ============================================================================
 # Network & Security
@@ -129,17 +130,14 @@ cloud_archive:
   keep_local_after_upload: true          # Keep local files after uploading to cloud
 
 # ============================================================================
-# Tesla Fleet API Configuration (optional)
+# RecentClips Archive Configuration
 # ============================================================================
-# Connects to Tesla's Fleet API for vehicle keep-awake during sync, vehicle
-# status, Sentry Mode toggle, and other bonus features.
-# Register at developer.tesla.com — TeslaUSB does NOT ship with credentials.
-tesla_api:
-  client_id: ""                          # Your Tesla Developer app Client ID
-  client_secret: ""                      # Your Tesla Developer app Client Secret
-  # OAuth tokens stored in encrypted file (tesla_tokens.enc), NOT here
-  keep_awake_method: wake_only           # wake_only | sentry_mode
-  max_awake_minutes: 60                  # Safety cap to prevent battery drain
-  wake_interval_seconds: 90              # How often to send wake_up
-  monthly_budget_limit: 10.00            # $ limit (Tesla provides $10/month free)
-  low_battery_threshold: 20              # Don't keep-awake below this battery %
+# Automatically copies RecentClips from the USB image (RO mount) to the Pi's
+# SD card before Tesla's 1-hour circular buffer deletes them. Zero USB disruption.
+archive:
+  enabled: true                          # Enable RecentClips archival
+  interval_minutes: 5                    # How often to check for new clips
+  retention_days: 30                     # Delete archived clips older than this
+  min_free_space_gb: 10                  # Hard floor — stop archiving if SD card < this free
+  max_size_gb: 50                        # Cap on total archive folder size
+  path: ""                               # Archive path (default: ~/ArchivedClips, set by web app)

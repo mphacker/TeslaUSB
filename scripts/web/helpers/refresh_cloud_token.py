@@ -43,6 +43,18 @@ def main():
     except Exception as e:
         logger.warning("Mount refresh failed (non-fatal): %s", e)
 
+    # Step 1.5: Archive RecentClips to SD card (before Tesla deletes them)
+    try:
+        from config import ARCHIVE_ENABLED
+        if ARCHIVE_ENABLED:
+            from services.video_archive_service import trigger_archive_now
+            logger.info("Archiving RecentClips...")
+            trigger_archive_now()
+            # Don't wait for completion — it runs in background
+            logger.info("RecentClips archive triggered")
+    except Exception as e:
+        logger.warning("RecentClips archive failed (non-fatal): %s", e)
+
     # Step 2: Index new videos (builds trips, detects events)
     try:
         from config import (

@@ -51,10 +51,11 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Design System**: Dark/light mode with CSS design tokens, Inter variable font (bundled offline), Lucide SVG icon sprite, and glassmorphic overlay HUD
 
 ### Video Management
-- **Map-integrated video browser**: Slide-out panel on the Map page with Clips tab and Sentry Timeline tab — no separate video pages
+- **Map-integrated video browser**: Slide-out panel on the Map page with Events tab (default) and All Clips tab — no separate video pages
 - **Unified overlay player**: Full-screen video playback launched from the map with camera angle switching (front/back/left/right/pillars)
 - **Telemetry HUD**: Glassmorphic overlay showing real-time steering wheel angle, brake/gas pedal positions, speed, gear (P/R/N/D), turn signals, and Autopilot status — powered by pre-indexed server-side waypoint data (instant, no full video download needed)
-- **Auto-indexing**: GPS and telemetry data from dashcam SEI metadata indexed on startup (configurable) and after mode switches; sentry events placed on map using inferred location from nearest trip
+- **Auto-indexing**: GPS and telemetry data from dashcam SEI metadata indexed on WiFi connect; sentry events placed on map using inferred location from nearest trip
+- **RecentClips Archive**: Automatically copies RecentClips to the Pi's SD card every 5 minutes before Tesla's 1-hour circular buffer deletes them — zero USB disruption, videos preserved for 30 days
 - **Skeuomorphic event markers**: Balloon-pin map markers — brake pedal, gas pedal, steering wheel, speedometer, eye (sentry) — always visible on the map
 - **Trip navigation**: Floating trip card with prev/next navigation; FSD overlay and heatmap toggles
 - Download all camera views for an event as a zip file
@@ -89,7 +90,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 ### Automatic Maintenance
 - **Storage Cleanup**: Age, size, or count-based policies per folder
 - **Boot Cleanup**: Optional automatic cleanup before presenting to Tesla
-- **On-Demand Thumbnails**: Instant generation via PyAV as you browse (cached for 7 days)
+- **RecentClips Archive**: Automatic background archival with 3-tier retention (free space floor, size cap, age limit)
 - **Chime Scheduler**: Checks every 60 seconds for scheduled changes
 - **Hardware Watchdog**: Automatic system recovery on hangs or crashes
 
@@ -316,6 +317,7 @@ setup:
   part2_size: ""                     # LightShow drive size (e.g., "10G")
   part3_size: ""                     # Music drive size (e.g., "32G")
   reserve_size: ""                   # Free space headroom (default: 5G)
+  archive_reserve_size: "50G"        # Space reserved for RecentClips archive
 
 # ============================================================================
 # Network & Security
@@ -343,6 +345,16 @@ web:
   max_lock_chime_duration: 10.0      # 10 seconds
   max_upload_size_mb: 2048           # Max upload size for music/lightshow (MiB)
   max_upload_chunk_mb: 16            # Chunk size for streaming uploads (MiB)
+
+# ============================================================================
+# RecentClips Archive
+# ============================================================================
+archive:
+  enabled: true                      # Enable RecentClips archival to SD card
+  interval_minutes: 5                # How often to check for new clips
+  retention_days: 30                 # Delete archived clips older than this
+  min_free_space_gb: 10              # Stop archiving if SD card < this free
+  max_size_gb: 50                    # Cap on total archive folder size
 ```
 
 **Important settings to change before first use:**

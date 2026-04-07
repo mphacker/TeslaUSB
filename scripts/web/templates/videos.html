@@ -35,27 +35,6 @@
     <div class="events-grid" id="eventsGrid">
         {% for event in events %}
         <div class="event-card" onclick="window.location.href='{{ url_for('videos.view_event', folder=current_folder, event_name=event.name) }}'">
-            <div class="event-thumbnail">
-                {% if event.has_thumbnail %}
-                    {% if folder_structure == 'flat' %}
-                    <img data-src="{{ url_for('videos.get_session_thumbnail', folder=current_folder, session_name=event.name) }}"
-                         class="lazy-thumbnail"
-                         alt="Session thumbnail"
-                         src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
-                         onerror="this.parentElement.innerHTML='<div class=\'event-thumbnail-placeholder\'><i class=\'bi bi-camera-video\' style=\'font-size: 3em;\'></i></div>';">
-                    {% else %}
-                    <img data-src="{{ url_for('videos.get_event_thumbnail', folder=current_folder, event_name=event.name) }}"
-                         class="lazy-thumbnail"
-                         alt="Event thumbnail"
-                         src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
-                         onerror="this.parentElement.innerHTML='<div class=\'event-thumbnail-placeholder\'><i class=\'bi bi-camera-video\' style=\'font-size: 3em;\'></i></div>';">
-                    {% endif %}
-                {% else %}
-                <div class="event-thumbnail-placeholder">
-                    <i class="bi bi-camera-video" style="font-size: 3em;"></i>
-                </div>
-                {% endif %}
-            </div>
             <div class="event-info">
                 <div class="event-datetime">{{ event.datetime }}</div>
                 {% if event.city %}
@@ -126,48 +105,6 @@
     transform: translateY(-4px);
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     border-color: var(--primary);
-}
-
-.event-thumbnail {
-    width: 100%;
-    aspect-ratio: 16 / 9;
-    background: #000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    position: relative;
-}
-
-.event-thumbnail img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    opacity: 0;
-    transition: opacity 0.3s ease-in;
-}
-
-.event-thumbnail img.loaded {
-    opacity: 1;
-}
-
-.event-thumbnail.loading::before {
-    content: '';
-    position: absolute;
-    width: 40px;
-    height: 40px;
-    border: 3px solid rgba(255, 255, 255, 0.3);
-    border-top-color: rgba(255, 255, 255, 0.8);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-    to { transform: rotate(360deg); }
-}
-
-.event-thumbnail-placeholder {
-    color: rgba(255,255,255,0.5);
 }
 
 .event-info {
@@ -292,7 +229,7 @@
 </style>
 
 <script>
-// Video Browser - AJAX folder switching, infinite scroll, and thumbnail queue
+// Video Browser - AJAX folder switching and infinite scroll
 (function() {
     'use strict';
 
@@ -311,112 +248,13 @@
     const endOfList = document.getElementById('end-of-list');
     const folderSelect = document.getElementById('folderSelect');
 
-    // Thumbnail Queue System - limits concurrent loads to prevent CPU saturation
-    const thumbnailQueue = {
-        queue: [],
-        processing: false,
-        loadedSet: new Set(),
-        activeRequests: new Map(),
-
-        add(img) {
-            if (!this.loadedSet.has(img) && !this.queue.includes(img)) {
-                this.queue.push(img);
-                this.process();
-            }
-        },
-
-        clear() {
-            // Cancel all active requests
-            this.activeRequests.forEach((controller) => controller.abort());
-            this.activeRequests.clear();
-            this.queue.length = 0;
-            this.processing = false;
-            this.loadedSet.clear();
-        },
-
-        process() {
-            if (this.processing || this.queue.length === 0) return;
-
-            this.processing = true;
-            const img = this.queue.shift();
-            this.loadedSet.add(img);
-
-            const src = img.dataset.src;
-            if (!src) {
-                this.processing = false;
-                this.process();
-                return;
-            }
-
-            const controller = new AbortController();
-            this.activeRequests.set(img, controller);
-
-            const container = img.closest('.event-thumbnail');
-            if (container) container.classList.add('loading');
-
-            fetch(src, { signal: controller.signal })
-                .then(response => {
-                    if (!response.ok) throw new Error('Failed');
-                    return response.blob();
-                })
-                .then(blob => {
-                    img.src = URL.createObjectURL(blob);
-                    img.classList.add('loaded');
-                })
-                .catch(err => {
-                    if (err.name !== 'AbortError' && img.onerror) {
-                        img.onerror.call(img);
-                    }
-                })
-                .finally(() => {
-                    this.activeRequests.delete(img);
-                    if (container) container.classList.remove('loading');
-                    this.processing = false;
-                    this.process();
-                });
-        }
-    };
-
-    // Intersection Observer for lazy loading thumbnails
-    const thumbnailObserver = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                thumbnailQueue.add(entry.target);
-                thumbnailObserver.unobserve(entry.target);
-            }
-        });
-    }, { rootMargin: '100px', threshold: 0.01 });
-
-    // Observe all lazy thumbnails in a container
-    function observeThumbnails(container) {
-        container.querySelectorAll('.lazy-thumbnail').forEach(img => {
-            if (!img.classList.contains('loaded')) {
-                thumbnailObserver.observe(img);
-            }
-        });
-    }
-
     // Create event card HTML
     function createEventCard(event) {
         const card = document.createElement('div');
         card.className = 'event-card';
         card.onclick = () => {
-            thumbnailQueue.clear();
             window.location.href = `/videos/event/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`;
         };
-
-        // Thumbnail
-        let thumbnailHtml;
-        if (event.has_thumbnail) {
-            const thumbUrl = folderStructure === 'flat'
-                ? `/videos/session_thumbnail/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`
-                : `/videos/event_thumbnail/${encodeURIComponent(currentFolder)}/${encodeURIComponent(event.name)}`;
-            thumbnailHtml = `<img data-src="${thumbUrl}" class="lazy-thumbnail" alt="Thumbnail"
-                src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
-                onerror="this.parentElement.innerHTML='<div class=\\'event-thumbnail-placeholder\\'><i class=\\'bi bi-camera-video\\' style=\\'font-size: 3em;\\'></i></div>';">`;
-        } else {
-            thumbnailHtml = `<div class="event-thumbnail-placeholder"><i class="bi bi-camera-video" style="font-size: 3em;"></i></div>`;
-        }
 
         // Camera badges (works with both full and compact camera_videos)
         const cams = event.camera_videos || {};
@@ -429,7 +267,6 @@
         if (cams.right_pillar) camerasHtml += '<span class="camera-badge">R-Pillar</span>';
 
         card.innerHTML = `
-            <div class="event-thumbnail">${thumbnailHtml}</div>
             <div class="event-info">
                 <div class="event-datetime">${event.datetime}</div>
                 ${event.city ? `<div class="event-location">📍 ${event.city}</div>` : ''}
@@ -452,7 +289,6 @@
         history.pushState({ folder: folderName }, '', newUrl);
 
         // Clear state and show loading
-        thumbnailQueue.clear();
         isLoading = true;
         currentFolder = folderName;
         currentPage = 1;
@@ -505,9 +341,6 @@
                         grid.appendChild(createEventCard(event));
                     });
 
-                    // Start observing thumbnails
-                    observeThumbnails(grid);
-
                     // Show end indicator if no more
                     const endList = document.getElementById('end-of-list');
                     if (endList) endList.style.display = hasNext ? 'none' : 'block';
@@ -559,7 +392,6 @@
                     data.events.forEach(event => {
                         grid.appendChild(createEventCard(event));
                     });
-                    observeThumbnails(grid);
                 }
                 currentPage = data.next_page;
                 hasNext = data.has_next;
@@ -585,11 +417,6 @@
             history.replaceState({ folder: currentFolder }, '', window.location.href);
         }
 
-        // Observe initial thumbnails
-        if (eventsGrid) {
-            observeThumbnails(eventsGrid);
-        }
-
         // Infinite scroll
         window.addEventListener('scroll', () => {
             if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
@@ -597,11 +424,10 @@
             }
         });
 
-        // Handle clicks on initial event cards (clear thumbnail queue before navigation)
+        // Handle clicks on initial event cards
         document.querySelectorAll('.event-card').forEach(card => {
             const originalOnclick = card.onclick;
             card.onclick = function(e) {
-                thumbnailQueue.clear();
                 if (originalOnclick) originalOnclick.call(this, e);
             };
         });

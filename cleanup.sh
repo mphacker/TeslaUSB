@@ -283,12 +283,6 @@ cleanup_gadget_files() {
     rm -f "$GADGET_DIR/state.txt"
   fi
 
-  # Remove thumbnail cache directory
-  if [ -d "$GADGET_DIR/thumbnails" ]; then
-    echo "  Removing thumbnail cache directory"
-    rm -rf "$GADGET_DIR/thumbnails"
-  fi
-
   # Remove any backup files or logs
   echo "  Removing backup and temporary files..."
   rm -f "$GADGET_DIR"/*.bak "$GADGET_DIR"/*.tmp "$GADGET_DIR"/*.log 2>/dev/null || true

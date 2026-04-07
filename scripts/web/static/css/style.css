@@ -1428,38 +1428,6 @@ button:disabled {
     margin-bottom: 10px;
 }
 
-.video-thumbnail {
-    width: 80px;
-    height: 45px;
-    object-fit: cover;
-    border-radius: 4px;
-    display: block;
-    background: linear-gradient(90deg, var(--bg-tertiary, #f0f0f0) 25%, var(--border-color, #e0e0e0) 50%, var(--bg-tertiary, #f0f0f0) 75%);
-    background-size: 200% 100%;
-}
-
-.video-thumbnail[src*=".jpg"],
-.video-thumbnail[src*=".jpeg"],
-.video-thumbnail[src*=".png"] {
-    animation: none;
-}
-
-.video-thumbnail:not([src]),
-.video-thumbnail[src=""],
-.video-thumbnail[src*="data:image/png;base64"] {
-    animation: shimmer 1.5s infinite;
-}
-
-@keyframes shimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-}
-
-.thumbnail-cell {
-    text-align: center;
-    width: 90px;
-}
-
 #videoPlayer {
     width: 100%;
     max-width: 100%;
@@ -2644,50 +2612,6 @@ details summary span:first-of-type {
    Custom Wraps Styles
    ================================================ */
 
-/* Wrap thumbnail container - desktop table view */
-.wrap-thumbnail-container {
-    width: 80px;
-    height: 80px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--bg-video-player);
-    border-radius: 4px;
-    overflow: hidden;
-    border: 1px solid var(--border-light);
-}
-
-.wrap-thumbnail {
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
-    object-fit: contain;
-}
-
-/* Wrap thumbnail container - mobile card view */
-.wrap-thumbnail-container-mobile {
-    width: 100%;
-    aspect-ratio: 1 / 1;
-    max-width: 200px;
-    margin: 0 auto 15px auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--bg-video-player);
-    border-radius: 8px;
-    overflow: hidden;
-    border: 1px solid var(--border-light);
-}
-
-.wrap-thumbnail-mobile {
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
-    object-fit: contain;
-}
-
 /* Wrap card styling - extends mobile-card */
 .wrap-card {
     text-align: center;
@@ -2700,38 +2624,6 @@ details summary span:first-of-type {
 
 .wrap-card .mobile-card-info {
     text-align: left;
-}
-
-/* Hover effect for thumbnails */
-.wrap-thumbnail-container:hover,
-.wrap-thumbnail-container-mobile:hover {
-    border-color: var(--btn-purple-bg);
-    box-shadow: 0 2px 8px var(--shadow);
-}
-
-/* Dark mode adjustments for wrap thumbnails */
-[data-theme="dark"] .wrap-thumbnail-container,
-[data-theme="dark"] .wrap-thumbnail-container-mobile {
-    background: var(--bg-video-player);
-    border-color: var(--border-color);
-}
-
-[data-theme="dark"] .wrap-thumbnail-container:hover,
-[data-theme="dark"] .wrap-thumbnail-container-mobile:hover {
-    border-color: var(--btn-purple-bg);
-}
-
-/* Responsive adjustments for wrap page */
-@media (max-width: 768px) {
-    .wrap-thumbnail-container-mobile {
-        max-width: 150px;
-    }
-}
-
-@media (max-width: 480px) {
-    .wrap-thumbnail-container-mobile {
-        max-width: 120px;
-    }
 }
 
 /* Media Hub Pills */

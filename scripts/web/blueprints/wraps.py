@@ -102,28 +102,6 @@ def wraps():
     )
 
 
-@wraps_bp.route("/thumbnail/<partition>/<filename>")
-def wrap_thumbnail(partition, filename):
-    """Serve a wrap PNG file as a thumbnail."""
-    if partition not in USB_PARTITIONS:
-        flash("Invalid partition", "error")
-        return redirect(url_for("wraps.wraps"))
-
-    mount_path = get_mount_path(partition)
-    if not mount_path:
-        flash("Partition not mounted", "error")
-        return redirect(url_for("wraps.wraps"))
-
-    wraps_dir = os.path.join(mount_path, WRAPS_FOLDER)
-    file_path = os.path.join(wraps_dir, filename)
-
-    if not os.path.isfile(file_path) or not filename.lower().endswith('.png'):
-        flash("File not found", "error")
-        return redirect(url_for("wraps.wraps"))
-
-    return send_file(file_path, mimetype="image/png")
-
-
 @wraps_bp.route("/download/<partition>/<filename>")
 def download_wrap(partition, filename):
     """Download a wrap PNG file."""

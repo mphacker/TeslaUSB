@@ -8,7 +8,6 @@ web_control.py application.
 """
 
 import os
-import hashlib
 import re
 import socket
 
@@ -59,13 +58,3 @@ def parse_session_from_filename(filename):
             'camera': match.group(2)
         }
     return None
-
-
-def generate_thumbnail_hash(video_path):
-    """Generate a unique hash for a video file based on path and modification time."""
-    try:
-        stat_info = os.stat(video_path)
-        unique_string = f"{video_path}_{stat_info.st_mtime}_{stat_info.st_size}"
-        return hashlib.md5(unique_string.encode()).hexdigest()
-    except OSError:
-        return None

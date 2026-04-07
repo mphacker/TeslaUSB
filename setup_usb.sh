@@ -132,7 +132,14 @@ show_image_dashboard() {
   # Add the configured safety headroom (default 5G)
   local safety_bytes=$(( 5 * 1024 * 1024 * 1024 ))
   local os_reserve_display=$(( os_reserve_bytes + safety_bytes ))
-  free_for_images_bytes=$(( fs_total_bytes - os_reserve_display - total_logical ))
+  # Archive reserve for RecentClips backup
+  local archive_reserve_str="${ARCHIVE_RESERVE_SIZE:-50G}"
+  local archive_reserve_bytes=0
+  if [[ "$archive_reserve_str" =~ ^([0-9]+)([Gg])$ ]]; then
+    archive_reserve_bytes=$(( ${BASH_REMATCH[1]} * 1024 * 1024 * 1024 ))
+  fi
+
+  free_for_images_bytes=$(( fs_total_bytes - os_reserve_display - archive_reserve_bytes - total_logical ))
   if [ "$free_for_images_bytes" -lt 0 ]; then
     free_for_images_bytes=0
   fi
@@ -144,6 +151,7 @@ show_image_dashboard() {
   echo ""
   printf "  Total storage:        %s\n" "$(bytes_to_human $fs_total_bytes)"
   printf "  OS reserve:           %s  (OS + 5 GiB headroom)\n" "$(bytes_to_human $os_reserve_display)"
+  printf "  Archive reserve:      %s  (RecentClips backup)\n" "$(bytes_to_human $archive_reserve_bytes)"
   echo "  ────────────────────────────────────────"
   printf "%b" "$image_lines"
   echo "  ────────────────────────────────────────"
@@ -331,15 +339,22 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2
 
   RESERVE_BYTES="$(size_to_bytes "$RESERVE_SIZE")"
 
-  if [ "$FS_AVAIL_BYTES" -le "$RESERVE_BYTES" ]; then
+  # Archive reserve: space set aside for RecentClips archival on SD card
+  ARCHIVE_RESERVE_STR="${ARCHIVE_RESERVE_SIZE:-50G}"
+  ARCHIVE_RESERVE_BYTES="$(size_to_bytes "$ARCHIVE_RESERVE_STR")"
+
+  TOTAL_RESERVE_BYTES=$(( RESERVE_BYTES + ARCHIVE_RESERVE_BYTES ))
+
+  if [ "$FS_AVAIL_BYTES" -le "$TOTAL_RESERVE_BYTES" ]; then
     echo "ERROR: Not enough free space to safely create image files under $GADGET_DIR."
-    echo "Free:    $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
-    echo "OS reserve: $RESERVE_SIZE ($((RESERVE_BYTES / 1024 / 1024)) MiB)"
+    echo "Free:          $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
+    echo "OS reserve:    $RESERVE_SIZE ($((RESERVE_BYTES / 1024 / 1024)) MiB)"
+    echo "Archive reserve: $ARCHIVE_RESERVE_STR ($((ARCHIVE_RESERVE_BYTES / 1024 / 1024)) MiB)"
     echo "Free up space or move GADGET_DIR to a larger filesystem."
     exit 1
   fi
 
-  USABLE_BYTES=$(( FS_AVAIL_BYTES - RESERVE_BYTES ))
+  USABLE_BYTES=$(( FS_AVAIL_BYTES - TOTAL_RESERVE_BYTES ))
   USABLE_MIB=$(( USABLE_BYTES / 1024 / 1024 ))
 
   # Default sizes: Lightshow 10G, Music 32G (if enabled), remaining to TeslaCam
@@ -407,9 +422,10 @@ if [ "$SKIP_IMAGE_CREATION" = "0" ] && { [ -z "${PART1_SIZE}" ] || [ -z "${PART2
   echo "TeslaUSB image sizing"
   echo "============================================"
   echo "Images will be created under: $GADGET_DIR"
-  echo "Filesystem free space: $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
-  echo "OS reserve:            $((RESERVE_BYTES / 1024 / 1024)) MiB"
-  echo "Usable for images:     ${USABLE_MIB} MiB"
+  echo "Filesystem free space:  $((FS_AVAIL_BYTES / 1024 / 1024)) MiB"
+  echo "OS reserve:             $((RESERVE_BYTES / 1024 / 1024)) MiB"
+  echo "Archive reserve:        $((ARCHIVE_RESERVE_BYTES / 1024 / 1024)) MiB  (RecentClips backup)"
+  echo "Usable for images:      ${USABLE_MIB} MiB"
   echo ""
   echo "Recommended sizes (safe, leaves headroom for Raspberry Pi OS):"
   [ "$NEED_LIGHTSHOW_IMAGE" = "1" ] && echo "  Lightshow (PART2_SIZE): $SUG_P2_STR"
@@ -517,7 +533,7 @@ if [ "${NEED_SIZE_VALIDATION:-0}" = "1" ] && [ "$SKIP_IMAGE_CREATION" = "0" ]; t
   [ "$NEED_MUSIC_IMAGE" = "1" ] && TOTAL_MIB=$(( TOTAL_MIB + P3_MB ))
   if [ "$TOTAL_MIB" -gt "$USABLE_MIB" ]; then
     echo "ERROR: Selected sizes exceed safe usable space under $GADGET_DIR."
-    echo "Usable:  ${USABLE_MIB} MiB (after OS reserve)"
+    echo "Usable:  ${USABLE_MIB} MiB (after OS + archive reserve)"
     echo "Chosen:  ${TOTAL_MIB} MiB (only counting images being created)"
     echo "Reduce TeslaCam, Lightshow, and/or Music sizes."
     exit 1
@@ -585,7 +601,7 @@ REQUIRED_PACKAGES=(
 # - python3-yaml: YAML parser for config.yaml (shared config file)
 # - yq: Command-line YAML processor for bash scripts (reads config.yaml)
 # - python3-waitress: Production WSGI server (10-20x faster than Flask dev server)
-# - python3-av: PyAV for instant thumbnail generation
+# - python3-av: PyAV for video frame extraction
 # - python3-pil: PIL/Pillow for image resizing
 # - ffmpeg: Used by lock chime service for audio validation and re-encoding
 # - rclone: Installed separately via official script (distro version is too old for OneDrive)
@@ -1185,12 +1201,12 @@ if [ $MUSIC_REQUIRED -eq 1 ]; then
   chmod 775 "$MNT_DIR/part3"
 fi
 
-# Create thumbnail cache directory in persistent location
-THUMBNAIL_CACHE_DIR="$GADGET_DIR/thumbnails"
-mkdir -p "$THUMBNAIL_CACHE_DIR"
-chown "$TARGET_USER:$TARGET_USER" "$THUMBNAIL_CACHE_DIR"
-chmod 775 "$THUMBNAIL_CACHE_DIR"
-echo "Thumbnail cache directory at: $THUMBNAIL_CACHE_DIR"
+# ===== Create ArchivedClips directory for RecentClips backup =====
+ARCHIVE_DIR="/home/$TARGET_USER/ArchivedClips"
+mkdir -p "$ARCHIVE_DIR"
+chown "$TARGET_USER:$TARGET_USER" "$ARCHIVE_DIR"
+chmod 775 "$ARCHIVE_DIR"
+echo "Archive directory at: $ARCHIVE_DIR"
 
 # ===== Configure Samba for authenticated user =====
 # Add user to Samba with configured password
@@ -1293,8 +1309,6 @@ fi
 echo "Using GADGET_DIR: $GADGET_DIR (auto-derived from script location)"
 
 # Create runtime directories
-mkdir -p "$GADGET_DIR/thumbnails"
-chown -R "$TARGET_USER:$TARGET_USER" "$GADGET_DIR/thumbnails"
 
 # Set permissions on all scripts
 chmod +x "$SCRIPTS_DIR"/*.sh "$SCRIPTS_DIR"/*.py 2>/dev/null || true
@@ -1393,35 +1407,6 @@ if [ ! -f "$STATE_FILE" ]; then
   echo "unknown" > "$STATE_FILE"
   chown "$TARGET_USER:$TARGET_USER" "$STATE_FILE"
 fi
-
-# ===== Clean up deprecated thumbnail system =====
-echo "Cleaning up deprecated thumbnail generation system..."
-
-# Stop and disable old thumbnail services
-if systemctl is-enabled thumbnail_generator.service 2>/dev/null; then
-  systemctl stop thumbnail_generator.service 2>/dev/null || true
-  systemctl disable thumbnail_generator.service 2>/dev/null || true
-fi
-
-if systemctl is-enabled thumbnail_generator.timer 2>/dev/null; then
-  systemctl stop thumbnail_generator.timer 2>/dev/null || true
-  systemctl disable thumbnail_generator.timer 2>/dev/null || true
-fi
-
-# Remove systemd service files
-rm -f /etc/systemd/system/thumbnail_generator.service 2>/dev/null || true
-rm -f /etc/systemd/system/thumbnail_generator.timer 2>/dev/null || true
-
-# Remove thumbnail service Python file
-rm -f "$GADGET_DIR/scripts/web/services/thumbnail_service.py" 2>/dev/null || true
-
-# Remove thumbnail cache directory
-if [ -d "$GADGET_DIR/thumbnails" ]; then
-  echo "  Removing thumbnail cache directory..."
-  rm -rf "$GADGET_DIR/thumbnails" 2>/dev/null || true
-fi
-
-echo "Deprecated thumbnail system cleanup complete."
 
 # ===== Systemd services =====
 echo "Installing systemd services..."

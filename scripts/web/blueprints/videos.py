@@ -6,8 +6,8 @@ import tempfile
 import zipfile
 from flask import Blueprint, request, redirect, url_for, flash, send_file, jsonify, Response, after_this_request
 
-from config import THUMBNAIL_CACHE_DIR, IMG_CAM_PATH
-from utils import generate_thumbnail_hash, get_base_context
+from config import IMG_CAM_PATH
+from utils import get_base_context
 from services.mode_service import current_mode
 from services.video_service import (
     get_teslacam_path,
@@ -17,13 +17,28 @@ from services.video_service import (
     get_events,
     get_event_details,
     group_videos_by_session,
-    generate_video_thumbnail,
     is_valid_mp4,
 )
 
 logger = logging.getLogger(__name__)
 
 videos_bp = Blueprint('videos', __name__, url_prefix='/videos')
+
+
+def _check_archive_fallback(filename: str):
+    """Check if a video file exists in ArchivedClips on the SD card.
+
+    Returns the archive path if found, None otherwise.
+    """
+    try:
+        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+        if ARCHIVE_ENABLED and filename:
+            archive_path = os.path.join(ARCHIVE_DIR, os.path.basename(filename))
+            if os.path.isfile(archive_path):
+                return archive_path
+    except ImportError:
+        pass
+    return None
 
 
 @videos_bp.before_request
@@ -82,7 +97,6 @@ def file_browser():
             'name': event['name'],
             'datetime': event['datetime'],
             'size_mb': event['size_mb'],
-            'has_thumbnail': event.get('has_thumbnail', False),
             'camera_videos': {k: v for k, v in event.get('camera_videos', {}).items() if v},
         }
         if event.get('city'):
@@ -147,7 +161,10 @@ def stream_video(filepath):
     video_path = os.path.join(teslacam_path, *sanitized_parts)
 
     if not os.path.isfile(video_path):
-        return "Video not found", 404
+        # Fallback: check ArchivedClips on SD card (Tesla may have deleted from RecentClips)
+        video_path = _check_archive_fallback(sanitized_parts[-1]) if sanitized_parts else None
+        if not video_path:
+            return "Video not found", 404
 
     file_size = os.path.getsize(video_path)
     range_header = request.headers.get('Range')
@@ -218,7 +235,9 @@ def fetch_video_for_sei(filepath):
     video_path = os.path.join(teslacam_path, *sanitized_parts)
 
     if not os.path.isfile(video_path):
-        return "Video not found", 404
+        video_path = _check_archive_fallback(sanitized_parts[-1]) if sanitized_parts else None
+        if not video_path:
+            return "Video not found", 404
 
     # Send complete file with proper headers for in-browser processing
     response = send_file(
@@ -251,7 +270,9 @@ def download_video(filepath):
     filename = sanitized_parts[-1]
 
     if not os.path.isfile(video_path):
-        return "Video not found", 404
+        video_path = _check_archive_fallback(filename) if filename else None
+        if not video_path:
+            return "Video not found", 404
 
     return send_file(video_path, as_attachment=True, download_name=filename)
 
@@ -332,82 +353,6 @@ def download_event(folder, event_name):
         download_name=f"{event_name}.zip",
         mimetype='application/zip'
     )
-
-
-@videos_bp.route("/event_thumbnail/<folder>/<event_name>")
-def get_event_thumbnail(folder, event_name):
-    """Get the Tesla-generated thumbnail for an event (SavedClips/SentryClips)."""
-    teslacam_path = get_teslacam_path()
-    if not teslacam_path:
-        return "TeslaCam not accessible", 404
-
-    # Sanitize inputs
-    folder = os.path.basename(folder)
-    event_name = os.path.basename(event_name)
-
-    thumb_path = os.path.join(teslacam_path, folder, event_name, 'thumb.png')
-
-    if not os.path.isfile(thumb_path):
-        # Return a placeholder or 404
-        return "Thumbnail not found", 404
-
-    # Return with 7-day cache header for better performance
-    return send_file(thumb_path, mimetype='image/png',
-                    max_age=604800, conditional=True)
-
-
-@videos_bp.route("/session_thumbnail/<folder>/<session_name>")
-def get_session_thumbnail(folder, session_name):
-    """Generate/retrieve thumbnail for a session (RecentClips) from front camera video."""
-    teslacam_path = get_teslacam_path()
-    if not teslacam_path:
-        return "TeslaCam not accessible", 404
-
-    # Sanitize inputs
-    folder = os.path.basename(folder)
-    session_name = os.path.basename(session_name)
-
-    # Find front camera video for this session
-    folder_path = os.path.join(teslacam_path, folder)
-    front_video = None
-
-    try:
-        with os.scandir(folder_path) as entries:
-            for entry in entries:
-                if (entry.is_file() and
-                    entry.name.startswith(session_name) and
-                    'front' in entry.name.lower() and
-                    entry.name.lower().endswith(('.mp4', '.avi', '.mov'))):
-                    front_video = entry.path
-                    break
-    except OSError:
-        return "Video not found", 404
-
-    if not front_video:
-        return "Front camera video not found", 404
-
-    # Generate cache key based on video path and modification time
-    cache_key = generate_thumbnail_hash(front_video)
-    if not cache_key:
-        return "Failed to generate cache key", 500
-
-    # Check cache
-    cache_path = os.path.join(THUMBNAIL_CACHE_DIR, f"{cache_key}.png")
-
-    if os.path.isfile(cache_path):
-        # Return cached thumbnail with 7-day cache header
-        return send_file(cache_path, mimetype='image/png',
-                        max_age=604800, conditional=True)
-
-    # Generate thumbnail (1-3 seconds on Pi Zero 2 W)
-    # May fail for encrypted/incomplete RecentClips videos - return 404 not 500
-    if generate_video_thumbnail(front_video, cache_path):
-        return send_file(cache_path, mimetype='image/png',
-                        max_age=604800, conditional=True)
-    else:
-        # Video exists but can't generate thumbnail (likely encrypted)
-        # Return 404 so browser onerror handler shows placeholder
-        return "Thumbnail unavailable", 404
 
 
 @videos_bp.route("/delete_event/<folder>/<event_name>", methods=["POST"])

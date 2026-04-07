@@ -14,24 +14,17 @@ import os
 import json
 from datetime import datetime
 import logging
-from threading import Semaphore
 
 # Import configuration
 from config import (
     MNT_DIR,
     RO_MNT_DIR,
     VIDEO_EXTENSIONS,
-    THUMBNAIL_CACHE_DIR,
     empty_camera_videos,
     empty_encrypted_flags,
 )
 
 logger = logging.getLogger(__name__)
-
-# Semaphore to limit concurrent thumbnail generation
-# Pi Zero 2 W has 4 cores but limited RAM/thermal headroom
-# Limit to 1 concurrent generation to prevent CPU starvation for other requests
-thumbnail_semaphore = Semaphore(1)
 
 # Import other services
 from services.mode_service import current_mode
@@ -218,10 +211,6 @@ def _parse_event_folder_lightweight(event_path, event_name):
             except (OSError, json.JSONDecodeError):
                 pass
 
-        # Check for thumb.png
-        thumb_path = os.path.join(event_path, 'thumb.png')
-        has_thumbnail = os.path.exists(thumb_path)
-
         # Quick scan for video files - just get names and sizes, no file opens
         camera_videos = empty_camera_videos()
         total_size = 0
@@ -268,7 +257,6 @@ def _parse_event_folder_lightweight(event_path, event_name):
             'timestamp': event_timestamp,
             'datetime': datetime.fromtimestamp(event_timestamp).strftime('%Y-%m-%d %I:%M:%S %p'),
             'size_mb': round(total_size / (1024 * 1024), 2),
-            'has_thumbnail': has_thumbnail,
             'camera_videos': camera_videos,
             'city': event_metadata.get('city', ''),
             'reason': event_metadata.get('reason', ''),
@@ -366,10 +354,6 @@ def _parse_event_folder(event_path, event_name):
             except (OSError, json.JSONDecodeError):
                 pass
 
-        # Check for thumb.png
-        thumb_path = os.path.join(event_path, 'thumb.png')
-        has_thumbnail = os.path.exists(thumb_path)
-
         # Parse clips from event folder (for SavedClips with multiple timestamps)
         clips = _parse_clips_from_event(event_path)
 
@@ -451,7 +435,6 @@ def _parse_event_folder(event_path, event_name):
             'datetime': datetime.fromtimestamp(event_timestamp).strftime('%Y-%m-%d %I:%M:%S %p'),
             'size': total_size,
             'size_mb': round(total_size / (1024 * 1024), 2),
-            'has_thumbnail': has_thumbnail,
             'camera_videos': camera_videos,
             'encrypted_videos': encrypted_videos,  # Track which videos are encrypted
             'metadata': event_metadata,
@@ -564,7 +547,6 @@ def group_videos_by_session(folder_path, page=1, per_page=12):
         'size': 0,
         'camera_videos': empty_camera_videos(),
         'encrypted_videos': empty_encrypted_flags(),
-        'has_thumbnail': True,  # Generated on-demand
         'metadata': {},
         'city': '',
         'reason': '',
@@ -608,62 +590,6 @@ def group_videos_by_session(folder_path, page=1, per_page=12):
         result.append(session_data)
 
     return result, total_count
-
-
-def generate_video_thumbnail(video_path, output_path, size=(80, 45)):
-    """
-    Generate thumbnail from first frame of video using PyAV.
-
-    Args:
-        video_path: Path to source video file
-        output_path: Path to save thumbnail PNG
-        size: Tuple of (width, height) for thumbnail, default 80x45px
-
-    Returns:
-        bool: True if successful, False otherwise
-
-    Optimized for Pi Zero 2 W memory constraints.
-    Uses a semaphore to prevent concurrent CPU saturation.
-    """
-    # Acquire semaphore to limit concurrency
-    if not thumbnail_semaphore.acquire(blocking=True, timeout=10):
-        logger.warning(f"Timeout waiting for thumbnail semaphore: {video_path}")
-        return False
-
-    try:
-        # Lazy import heavy libraries only when needed (saves ~10MB baseline memory)
-        import av
-        from PIL import Image
-
-        # Open video container
-        container = av.open(video_path)
-
-        # Get first video frame
-        for frame in container.decode(video=0):
-            # Convert to PIL Image
-            img = frame.to_image()
-
-            # Resize to thumbnail size
-            img.thumbnail(size, Image.Resampling.LANCZOS)
-
-            # Ensure output directory exists
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            # Save as PNG
-            img.save(output_path, 'PNG', optimize=True)
-
-            # Close container and return after first frame
-            container.close()
-            return True
-
-    except Exception as e:
-        logger.error(f"Failed to generate thumbnail for {video_path}: {e}")
-        return False
-    finally:
-        # Always release the semaphore
-        thumbnail_semaphore.release()
-
-    return False
 
 
 def get_teslacam_folders():

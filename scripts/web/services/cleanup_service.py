@@ -502,52 +502,6 @@ class CleanupService:
         logger.info(f"Automatic cleanup: Processing {cleanup_plan['total_count']} files")
         return self.execute_cleanup(cleanup_plan, dry_run=dry_run)
 
-    def cleanup_orphaned_thumbnails(self, thumbnail_dir: Path, video_paths: set) -> Dict:
-        """
-        Remove thumbnails for videos that no longer exist
-
-        Args:
-            thumbnail_dir: Path to thumbnail directory
-            video_paths: Set of existing video file paths
-
-        Returns:
-            Dictionary with cleanup results
-        """
-        if not thumbnail_dir.exists():
-            return {'removed': 0, 'errors': []}
-
-        removed = 0
-        errors = []
-
-        # Build set of valid thumbnail hashes from existing videos
-        from utils import generate_thumbnail_hash
-        valid_hashes = set()
-        for video_path in video_paths:
-            hash_key = generate_thumbnail_hash(str(video_path))
-            if hash_key:
-                valid_hashes.add(f"{hash_key}.png")
-
-        # Remove orphaned thumbnails
-        try:
-            for thumb_file in thumbnail_dir.glob("*.png"):
-                if thumb_file.name not in valid_hashes:
-                    try:
-                        thumb_file.unlink()
-                        removed += 1
-                        logger.info(f"Removed orphaned thumbnail: {thumb_file.name}")
-                    except OSError as e:
-                        errors.append(f"Failed to remove {thumb_file.name}: {e}")
-                        logger.error(f"Failed to remove thumbnail {thumb_file.name}: {e}")
-        except Exception as e:
-            errors.append(f"Failed to scan thumbnail directory: {e}")
-            logger.error(f"Failed to scan thumbnail directory: {e}")
-
-        return {
-            'removed': removed,
-            'errors': errors
-        }
-
-
 def get_cleanup_service(gadget_dir: str) -> CleanupService:
     """
     Factory function to create CleanupService instance

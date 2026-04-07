@@ -290,17 +290,15 @@ def api_event_charts():
 
 @mapping_bp.route("/api/sentry-events")
 def api_sentry_events():
-    """Get sentry and saved events enriched with filesystem details."""
+    """Get all detected events (sentry, saved, and driving events) enriched with filesystem details."""
     from services.mapping_service import query_events
     from services.video_service import get_event_details
 
     try:
-        # Fetch sentry events
-        sentry = query_events(MAPPING_DB_PATH, limit=100, event_type='sentry')
-        # Fetch saved events
-        saved = query_events(MAPPING_DB_PATH, limit=100, event_type='saved')
-        events = sentry + saved
-        # Sort combined list by timestamp descending
+        # Fetch ALL detected events — sentry, saved, and driving events
+        # (hard_acceleration, sharp_turn, fsd_disengage, harsh_brake, etc.)
+        events = query_events(MAPPING_DB_PATH, limit=200)
+        # Sort by timestamp descending (most recent first)
         events.sort(key=lambda e: e.get('timestamp', ''), reverse=True)
 
         teslacam = get_teslacam_path()

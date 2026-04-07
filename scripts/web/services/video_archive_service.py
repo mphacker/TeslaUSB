@@ -230,6 +230,18 @@ def _run_archive() -> None:
         # Ensure archive directory exists
         os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
+        # Clean up stale .tmp files from interrupted copies
+        try:
+            for name in os.listdir(ARCHIVE_DIR):
+                if name.endswith('.tmp'):
+                    os.unlink(os.path.join(ARCHIVE_DIR, name))
+        except OSError:
+            pass
+
+        # Remove any corrupt archived files (incomplete MP4s from prior runs)
+        _status["progress"] = "Checking existing archives..."
+        _purge_corrupt_archives()
+
         # Discover files to copy
         _status["progress"] = "Scanning RecentClips..."
         to_copy = list(_discover_new_files(recent_clips))
@@ -279,6 +291,15 @@ def _run_archive() -> None:
                 # Preserve original modification time
                 src_stat = os.stat(src_path)
                 os.utime(dst_path, (src_stat.st_atime, src_stat.st_mtime))
+
+                # Post-copy validation: verify the copy is a complete MP4
+                if dst_path.lower().endswith('.mp4') and not _is_complete_mp4(dst_path):
+                    logger.warning("Archived file incomplete (no moov), removing: %s", rel_path)
+                    try:
+                        os.unlink(dst_path)
+                    except OSError:
+                        pass
+                    continue
 
                 copied += 1
                 _status["bytes_copied"] += src_stat.st_size
@@ -350,6 +371,10 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
         if stat.st_size == 0:
             continue
 
+        # Skip incomplete MP4s (Tesla still writing — moov box not yet finalized)
+        if name.lower().endswith('.mp4') and not _is_complete_mp4(src):
+            continue
+
         # Check if already archived (same name and size)
         dst = os.path.join(ARCHIVE_DIR, name)
         if os.path.isfile(dst):
@@ -361,6 +386,48 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
                 pass
 
         yield (src, name)
+
+
+# ---------------------------------------------------------------------------
+# MP4 Validation
+# ---------------------------------------------------------------------------
+
+
+def _is_complete_mp4(filepath: str) -> bool:
+    """Check if an MP4 file has both ftyp and moov boxes (is complete).
+
+    Tesla writes the moov atom at the END of the file. If the file was
+    copied while Tesla was still recording, the moov box will be missing
+    and the file is unplayable.
+    """
+    try:
+        with open(filepath, 'rb') as f:
+            header = f.read(12)
+            if len(header) < 12 or b'ftyp' not in header:
+                return False
+
+            # Scan for moov box — read box headers sequentially
+            f.seek(0)
+            file_size = os.path.getsize(filepath)
+            pos = 0
+            while pos < file_size - 8:
+                f.seek(pos)
+                box_header = f.read(8)
+                if len(box_header) < 8:
+                    break
+                box_size = int.from_bytes(box_header[:4], 'big')
+                box_type = box_header[4:8]
+
+                if box_type == b'moov':
+                    return True
+
+                if box_size < 8:
+                    break  # Invalid box
+                pos += box_size
+
+            return False  # moov not found
+    except (OSError, IOError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +474,42 @@ def _buffered_copy(src: str, dst: str) -> None:
         except OSError:
             pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# Corrupt File Cleanup
+# ---------------------------------------------------------------------------
+
+
+def _purge_corrupt_archives() -> int:
+    """Remove archived MP4 files that are incomplete (no moov box).
+
+    These result from copying files that Tesla was still writing.
+    Returns the count of files removed.
+    """
+    if not os.path.isdir(ARCHIVE_DIR):
+        return 0
+
+    removed = 0
+    try:
+        for name in os.listdir(ARCHIVE_DIR):
+            if not name.lower().endswith('.mp4'):
+                continue
+            fpath = os.path.join(ARCHIVE_DIR, name)
+            if not os.path.isfile(fpath):
+                continue
+            if not _is_complete_mp4(fpath):
+                try:
+                    os.unlink(fpath)
+                    removed += 1
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+    if removed:
+        logger.info("Purged %d corrupt/incomplete archived files", removed)
+    return removed
 
 
 # ---------------------------------------------------------------------------

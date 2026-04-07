@@ -14,7 +14,6 @@ from config import (
     CLOUD_ARCHIVE_SYNC_FOLDERS,
     CLOUD_ARCHIVE_PRIORITY_ORDER,
     CLOUD_ARCHIVE_MAX_UPLOAD_MBPS,
-    CLOUD_ARCHIVE_KEEP_LOCAL,
     CLOUD_ARCHIVE_DB_PATH,
     CLOUD_PROVIDER_CREDS_PATH,
 )
@@ -94,7 +93,6 @@ def index():
     _priority_order = CLOUD_ARCHIVE_PRIORITY_ORDER
     _max_upload_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
     _remote_path = CLOUD_ARCHIVE_REMOTE_PATH
-    _keep_local = CLOUD_ARCHIVE_KEEP_LOCAL
     try:
         with open(CONFIG_YAML, 'r') as f:
             _cfg = yaml.safe_load(f) or {}
@@ -104,7 +102,6 @@ def index():
         _priority_order = _cloud.get('priority_order', _priority_order)
         _max_upload_mbps = int(_cloud.get('max_upload_mbps', _max_upload_mbps))
         _remote_path = _cloud.get('remote_path', _remote_path)
-        _keep_local = bool(_cloud.get('keep_local_after_upload', _keep_local))
         _sync_enabled = bool(_cloud.get('sync_enabled', True))
     except Exception:
         _sync_enabled = True
@@ -136,7 +133,6 @@ def index():
         priority_order=_priority_order,
         max_upload_mbps=_max_upload_mbps,
         remote_path=_remote_path,
-        keep_local=_keep_local,
         **ctx,
     )
 
@@ -340,6 +336,18 @@ def api_connection_status():
     except Exception as exc:
         logger.exception("Failed to get connection status")
         return jsonify({"connected": False, "error": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/storage_usage')
+def api_storage_usage():
+    """Return cloud storage quota and usage."""
+    from services.cloud_rclone_service import get_storage_usage
+
+    try:
+        return jsonify(get_storage_usage())
+    except Exception as exc:
+        logger.exception("Failed to get storage usage")
+        return jsonify({}), 500
 
 
 # ---------------------------------------------------------------------------

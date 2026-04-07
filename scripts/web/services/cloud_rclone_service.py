@@ -361,9 +361,31 @@ def test_connection() -> Tuple[bool, str]:
         _remove_temp_conf()
 
 
-# ---------------------------------------------------------------------------
-# Folder browsing & creation
-# ---------------------------------------------------------------------------
+def get_storage_usage() -> Dict:
+    """Get cloud storage quota/usage via rclone about.
+
+    Returns dict with 'total', 'used', 'free' (in bytes), or empty on failure.
+    """
+    creds = _load_creds()
+    if not creds:
+        return {}
+
+    try:
+        conf_path = _write_temp_conf(creds)
+        result = subprocess.run(
+            ["rclone", "about", "--config", conf_path,
+             f"{RCLONE_REMOTE_NAME}:", "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        _capture_refreshed_token(creds)
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout)
+        return {}
+    except Exception as e:
+        logger.warning("Storage usage check failed: %s", e)
+        return {}
+    finally:
+        _remove_temp_conf()
 
 def list_folders(path: str = "") -> Tuple[bool, object]:
     """List folders at the given remote path.

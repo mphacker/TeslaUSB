@@ -150,6 +150,12 @@
                 <span id="testConnResult" style="font-size: var(--text-sm); margin-left: var(--space-2);"></span>
             </div>
 
+            {# ---- Storage usage ---- #}
+            <div id="storageUsageRow" style="margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-tertiary); display: none;">
+                <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:3px;opacity:0.6;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+                Storage: <span id="storageUsageText"></span>
+            </div>
+
             {# ---- Token expiry info ---- #}
             {% if token_expiry %}
             <div style="margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-tertiary);">
@@ -1401,9 +1407,30 @@
     document.addEventListener('DOMContentLoaded', function() {
         formatTimestamps();
         if (isSyncing) startPolling();
-        // Start archive polling to pick up in-progress archives from video panel
         startArchivePoll();
+        loadStorageUsage();
     });
+
+    /* Load cloud storage usage */
+    async function loadStorageUsage() {
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_storage_usage") }}', {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+            if (data.total || data.used) {
+                var row = document.getElementById('storageUsageRow');
+                var text = document.getElementById('storageUsageText');
+                if (row && text) {
+                    var used = formatBytes(data.used || 0);
+                    var total = data.total ? formatBytes(data.total) : 'unlimited';
+                    var free = data.free ? formatBytes(data.free) : '';
+                    text.textContent = used + ' used' + (data.total ? ' of ' + total : '') + (free ? ' (' + free + ' free)' : '');
+                    row.style.display = '';
+                }
+            }
+        } catch (e) { /* non-critical */ }
+    }
 
 })();
 </script>

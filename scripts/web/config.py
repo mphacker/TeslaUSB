@@ -105,7 +105,6 @@ CLOUD_ARCHIVE_REMOTE_PATH = _cloud.get('remote_path', 'TeslaUSB')
 CLOUD_ARCHIVE_SYNC_FOLDERS = _cloud.get('sync_folders', ['SentryClips', 'SavedClips'])
 CLOUD_ARCHIVE_PRIORITY_ORDER = _cloud.get('priority_order', ['SentryClips', 'SavedClips'])
 CLOUD_ARCHIVE_MAX_UPLOAD_MBPS = int(_cloud.get('max_upload_mbps', 5))
-CLOUD_ARCHIVE_KEEP_LOCAL = bool(_cloud.get('keep_local_after_upload', True))
 CLOUD_ARCHIVE_DB_PATH = os.path.join(GADGET_DIR, 'cloud_sync.db')
 CLOUD_PROVIDER_CREDS_PATH = os.path.join(GADGET_DIR, 'cloud_provider.enc')
 

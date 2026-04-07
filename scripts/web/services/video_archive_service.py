@@ -195,6 +195,15 @@ def _run_archive() -> None:
     if _status.get("running"):
         return
 
+    # Don't archive while cloud sync is running — both compete for SD card I/O
+    try:
+        from services.cloud_archive_service import get_sync_status
+        if get_sync_status().get("running"):
+            logger.info("Archive skipped: cloud sync is active")
+            return
+    except Exception:
+        pass
+
     _status.update({
         "running": True,
         "progress": "Starting...",

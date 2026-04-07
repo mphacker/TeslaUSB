@@ -471,6 +471,10 @@ def _run_sync(
         # Memory-safe flags for Pi Zero 2W
         mem_flags = ["--buffer-size", "0", "--transfers", "1", "--checkers", "1"]
 
+        # I/O throttle: pause between event uploads to avoid saturating
+        # the SD card (shared with USB gadget and archive service)
+        _INTER_UPLOAD_SLEEP = 2.0  # seconds
+
         for idx, (event_dir, rel_path, event_size) in enumerate(to_sync):
             if cancel_event.is_set():
                 _sync_status["progress"] = "Cancelled"
@@ -491,8 +495,11 @@ def _run_sync(
                         idx + 1, len(to_sync), rel_path, event_size)
 
             try:
+                # Use ionice to give rclone lowest I/O priority so the USB
+                # gadget and web service stay responsive during uploads
                 result = subprocess.run(
                     [
+                        "ionice", "-c", "3",
                         "rclone", "copy",
                         "--config", conf_path,
                         "--bwlimit", f"{max_mbps}M",
@@ -521,6 +528,9 @@ def _run_sync(
                 logger.error("Sync: %s timed out", rel_path)
             except Exception as e:
                 logger.error("Sync: %s error: %s", rel_path, e)
+
+            # Pause between uploads to let the system breathe
+            time.sleep(_INTER_UPLOAD_SLEEP)
 
         # Determine final session status
         if cancel_event.is_set():

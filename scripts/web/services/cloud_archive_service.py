@@ -217,77 +217,56 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
 # File Discovery
 # ---------------------------------------------------------------------------
 
-def _discover_files(
+def _discover_events(
     teslacam_path: str,
-    db_path: str,
-) -> List[Tuple[str, int, float]]:
-    """Scan TeslaCam folders and return files not yet synced or changed.
+) -> List[Tuple[str, str, int]]:
+    """Find event directories to sync (SentryClips/SavedClips only).
 
-    Returns a list of ``(absolute_path, file_size, file_mtime)`` tuples
-    sorted by priority order then newest-first within each folder.
+    Only syncs event subdirectories — not flat files in RecentClips.
+    Returns a list of ``(event_dir_path, relative_path, total_size)``
+    sorted **oldest-first** so the most at-risk clips get preserved first.
     """
-    conn = _init_cloud_tables(db_path)
-    try:
-        results_by_folder: Dict[str, List[Tuple[str, int, float]]] = {
-            f: [] for f in CLOUD_ARCHIVE_PRIORITY_ORDER
-        }
+    events: List[Tuple[str, str, int]] = []
 
-        for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
-            folder_path = os.path.join(teslacam_path, folder)
-            if not os.path.isdir(folder_path):
+    for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
+        folder_path = os.path.join(teslacam_path, folder)
+        if not os.path.isdir(folder_path):
+            continue
+
+        # Only process event-based folders (with subdirectories)
+        try:
+            entries = sorted(os.listdir(folder_path))
+        except OSError:
+            continue
+
+        for entry in entries:
+            event_dir = os.path.join(folder_path, entry)
+            if not os.path.isdir(event_dir):
+                continue  # Skip flat files — events only
+
+            # Calculate total size of all files in this event
+            total_size = 0
+            has_video = False
+            try:
+                for f in os.listdir(event_dir):
+                    fpath = os.path.join(event_dir, f)
+                    if os.path.isfile(fpath):
+                        total_size += os.path.getsize(fpath)
+                        if f.lower().endswith(('.mp4', '.ts')):
+                            has_video = True
+            except OSError:
                 continue
 
-            for dirpath, _dirs, filenames in os.walk(folder_path):
-                for fname in filenames:
-                    fpath = os.path.join(dirpath, fname)
-                    try:
-                        stat = os.stat(fpath)
-                    except OSError:
-                        continue
+            if not has_video:
+                continue  # Skip empty or non-video event dirs
 
-                    row = conn.execute(
-                        "SELECT file_size, file_mtime, status "
-                        "FROM cloud_synced_files WHERE file_path = ?",
-                        (fpath,),
-                    ).fetchone()
+            rel_path = f"{folder}/{entry}"
+            events.append((event_dir, rel_path, total_size))
 
-                    if row:
-                        # Already synced and unchanged → skip
-                        if (
-                            row["status"] == "synced"
-                            and row["file_size"] == stat.st_size
-                            and row["file_mtime"] == stat.st_mtime
-                        ):
-                            continue
-                        # Failed too many times → skip (max 5 retries)
-                        if row["status"] == "failed" and row["retry_count"] >= 5:
-                            continue
+    # Sort oldest-first (event names are timestamps: 2026-01-01_12-00-00)
+    events.sort(key=lambda t: t[1])
 
-                    bucket = folder if folder in results_by_folder else None
-                    if bucket is None:
-                        # Folder not in priority list — append at end
-                        results_by_folder.setdefault(folder, [])
-                        bucket = folder
-                    results_by_folder[bucket].append(
-                        (fpath, stat.st_size, stat.st_mtime)
-                    )
-
-        # Sort each folder newest-first, then concatenate by priority order
-        ordered: List[Tuple[str, int, float]] = []
-        for folder in CLOUD_ARCHIVE_PRIORITY_ORDER:
-            items = results_by_folder.get(folder, [])
-            items.sort(key=lambda t: t[2], reverse=True)
-            ordered.extend(items)
-
-        # Append remaining folders not in priority list
-        for folder, items in results_by_folder.items():
-            if folder not in CLOUD_ARCHIVE_PRIORITY_ORDER:
-                items.sort(key=lambda t: t[2], reverse=True)
-                ordered.extend(items)
-
-        return ordered
-    finally:
-        conn.close()
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -418,14 +397,22 @@ def _run_sync(
         session_id = cur.lastrowid
         conn.commit()
 
-        # Discover files to upload
-        _sync_status["progress"] = "Scanning for new files…"
-        to_sync = _discover_files(teslacam_path, db_path)
+        # Discover event directories to sync
+        _sync_status["progress"] = "Scanning for events…"
+
+        # Refresh RO mount to see Tesla's latest writes
+        try:
+            from services.mapping_service import _refresh_ro_mount
+            _refresh_ro_mount(teslacam_path)
+        except Exception:
+            pass
+
+        to_sync = _discover_events(teslacam_path)
 
         if not to_sync:
             _sync_status.update({
                 "running": False,
-                "progress": "No new files to sync",
+                "progress": "No events to sync",
             })
             if session_id is not None:
                 conn.execute(
@@ -437,117 +424,87 @@ def _run_sync(
             return
 
         _sync_status["files_total"] = len(to_sync)
-        _sync_status["total_bytes"] = sum(s for _, s, _ in to_sync)
-        _sync_status["progress"] = f"Syncing {len(to_sync)} files…"
-        logger.info("Cloud sync: %d files to upload (trigger=%s)", len(to_sync), trigger)
+        _sync_status["total_bytes"] = sum(s for _, _, s in to_sync)
+        _sync_status["progress"] = f"Syncing {len(to_sync)} events…"
+        logger.info("Cloud sync: %d events to upload (trigger=%s)", len(to_sync), trigger)
 
-        # Load credentials and write rclone.conf once up front to validate
+        # Load credentials
         creds = _load_provider_creds()
         if not creds:
             raise RuntimeError("Cloud provider credentials unavailable")
 
-        provider = CLOUD_ARCHIVE_PROVIDER
         remote_path = CLOUD_ARCHIVE_REMOTE_PATH
         max_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
 
-        for idx, (fpath, fsize, fmtime) in enumerate(to_sync):
+        # Write rclone conf and refresh token once up front
+        conf_path = _write_rclone_conf(CLOUD_ARCHIVE_PROVIDER, creds)
+        try:
+            # Force token refresh before starting
+            subprocess.run(
+                ["rclone", "about", "--config", conf_path, "teslausb:", "--json"],
+                capture_output=True, text=True, timeout=30,
+            )
+            try:
+                from services.cloud_rclone_service import _capture_refreshed_token
+                _capture_refreshed_token(creds)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Memory-safe flags for Pi Zero 2W
+        mem_flags = ["--buffer-size", "0", "--transfers", "1", "--checkers", "1"]
+
+        for idx, (event_dir, rel_path, event_size) in enumerate(to_sync):
             if cancel_event.is_set():
                 _sync_status["progress"] = "Cancelled"
-                logger.info("Cloud sync cancelled after %d files", files_synced)
+                logger.info("Cloud sync cancelled after %d events", files_synced)
                 break
 
-            rel = os.path.relpath(fpath, teslacam_path)
             _sync_status.update({
                 "files_done": idx,
-                "current_file": rel,
-                "current_file_size": fsize,
-                "progress": f"Uploading {idx + 1}/{len(to_sync)}: {rel}",
+                "current_file": rel_path,
+                "current_file_size": event_size,
+                "progress": f"Uploading {idx + 1}/{len(to_sync)}: {rel_path}",
             })
 
-            # Upsert file record as 'uploading'
-            conn.execute(
-                "INSERT INTO cloud_synced_files "
-                "(file_path, file_size, file_mtime, remote_path, status) "
-                "VALUES (?, ?, ?, ?, 'uploading') "
-                "ON CONFLICT(file_path) DO UPDATE SET "
-                "status = 'uploading', file_size = excluded.file_size, "
-                "file_mtime = excluded.file_mtime, "
-                "remote_path = excluded.remote_path",
-                (fpath, fsize, fmtime, f"{remote_path}/{rel}"),
-            )
-            conn.commit()
+            # Use rclone copy --ignore-existing on the entire event directory
+            # This copies all camera angles and skips files already on the remote
+            remote_dest = f"teslausb:{remote_path}/{rel_path}"
+            logger.info("Sync: [%d/%d] %s (%d bytes)",
+                        idx + 1, len(to_sync), rel_path, event_size)
 
-            # Write temporary rclone.conf
-            conf_path = _write_rclone_conf(provider, creds)
             try:
-                remote_dest = f"teslausb:{remote_path}/{rel}"
-                cmd = [
-                    "rclone", "copyto",
-                    "--config", conf_path,
-                    "--bwlimit", f"{max_mbps}M",
-                    "--stats", "0",
-                    "--log-level", "ERROR",
-                    fpath,
-                    remote_dest,
-                ]
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=3600,
+                    [
+                        "rclone", "copy",
+                        "--config", conf_path,
+                        "--bwlimit", f"{max_mbps}M",
+                        "--ignore-existing",
+                        "--stats", "0",
+                        "--log-level", "ERROR",
+                        *mem_flags,
+                        event_dir,
+                        remote_dest,
+                    ],
+                    capture_output=True, text=True, timeout=3600,
                 )
-
-                # Persist any refreshed token before deleting temp conf
-                try:
-                    from services.cloud_rclone_service import _capture_refreshed_token
-                    _capture_refreshed_token(creds)
-                except Exception:
-                    pass  # Non-critical — sync continues even if token capture fails
 
                 if result.returncode == 0:
-                    conn.execute(
-                        "UPDATE cloud_synced_files SET status = 'synced', "
-                        "synced_at = ?, last_error = NULL WHERE file_path = ?",
-                        (datetime.now(timezone.utc).isoformat(), fpath),
-                    )
-                    conn.commit()
-                    # WAL checkpoint to persist data against power loss
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-
                     files_synced += 1
-                    bytes_transferred += fsize
+                    bytes_transferred += event_size
                     _sync_status["bytes_transferred"] = bytes_transferred
+                    logger.info("Sync: [%d/%d] %s OK", idx + 1, len(to_sync), rel_path)
                 else:
-                    err_msg = result.stderr.strip()[:500] if result.stderr else "Unknown rclone error"
-                    logger.error("rclone failed for %s (exit %d): %s",
-                                 rel, result.returncode, err_msg)
-                    conn.execute(
-                        "UPDATE cloud_synced_files SET status = 'failed', "
-                        "retry_count = retry_count + 1, last_error = ? "
-                        "WHERE file_path = ?",
-                        (err_msg, fpath),
-                    )
-                    conn.commit()
+                    err_msg = result.stderr.strip()[:500]
+                    logger.error("Sync: [%d/%d] %s FAILED (exit %d): %s",
+                                idx + 1, len(to_sync), rel_path,
+                                result.returncode, err_msg[:200])
 
             except subprocess.TimeoutExpired:
-                logger.error("rclone timed out for %s", rel)
-                conn.execute(
-                    "UPDATE cloud_synced_files SET status = 'failed', "
-                    "retry_count = retry_count + 1, last_error = 'Upload timed out (1h)' "
-                    "WHERE file_path = ?",
-                    (fpath,),
-                )
-                conn.commit()
-
+                logger.error("Sync: %s timed out", rel_path)
             except Exception as e:
-                logger.error("Upload error for %s: %s", rel, e)
-                conn.execute(
-                    "UPDATE cloud_synced_files SET status = 'failed', "
-                    "retry_count = retry_count + 1, last_error = ? "
-                    "WHERE file_path = ?",
-                    (str(e)[:500], fpath),
-                )
-                conn.commit()
-
-            finally:
-                _remove_rclone_conf()
+                logger.error("Sync: %s error: %s", rel_path, e)
 
         # Determine final session status
         if cancel_event.is_set():

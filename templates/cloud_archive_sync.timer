@@ -1,11 +1,12 @@
 [Unit]
-Description=TeslaUSB Cloud Archive Periodic Sync
+Description=TeslaUSB Cloud Archive Safety Sync
 Requires=cloud_archive_sync.service
 
 [Timer]
-# Run every 6 hours after the last successful run
-OnBootSec=5min
-OnUnitActiveSec=6h
+# Safety fallback — primary trigger is WiFi connect (NetworkManager dispatcher)
+# This just ensures sync runs at least once every 24 hours if WiFi stays connected
+OnBootSec=10min
+OnUnitActiveSec=24h
 Persistent=true
 
 [Install]

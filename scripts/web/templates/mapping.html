@@ -619,12 +619,12 @@
     <div class="video-panel" id="videoPanel">
         <div class="video-panel-header">
             <div class="vp-tabs">
-                <button class="vp-tab active" id="vpTabClips" onclick="vpShowClips()">Clips</button>
-                <button class="vp-tab" id="vpTabSentry" onclick="vpShowSentry()">Sentry</button>
+                <button class="vp-tab" id="vpTabClips" onclick="vpShowClips()">All Clips</button>
+                <button class="vp-tab active" id="vpTabSentry" onclick="vpShowSentry()">Events</button>
             </div>
             <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel">✕</button>
         </div>
-        <div class="vp-folder-row" id="vpFolderRow">
+        <div class="vp-folder-row" id="vpFolderRow" style="display: none;">
             <select id="vpFolder" onchange="loadVideoList()">
                 <option value="RecentClips">Recent Clips</option>
                 <option value="SavedClips">Saved Clips</option>
@@ -632,7 +632,7 @@
             </select>
         </div>
         <div class="video-panel-list" id="vpList">
-            <div class="vp-empty">Open to browse videos</div>
+            <div class="vp-empty">Loading events&hellip;</div>
         </div>
     </div>
 </div>
@@ -1644,7 +1644,7 @@ let videoPanelOpen = false;
 let vpPage = 1;
 let vpHasNext = false;
 let vpFolderStructure = 'events';
-let vpCurrentTab = 'clips';
+let vpCurrentTab = 'sentry';
 
 function toggleVideoPanel() {
     videoPanelOpen = !videoPanelOpen;

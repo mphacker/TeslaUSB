@@ -1,6 +1,7 @@
 [Unit]
 Description=TeslaUSB Chime Scheduler Check
-After=present_usb_on_boot.service
+After=present_usb_on_boot.service teslausb-safe-mode.service
+ConditionPathExists=!/run/teslausb-safe-mode
 
 [Service]
 Type=oneshot

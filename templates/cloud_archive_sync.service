@@ -1,7 +1,8 @@
 [Unit]
 Description=TeslaUSB Cloud Archive Sync
-After=network-online.target gadget_web.service
+After=network-online.target gadget_web.service teslausb-safe-mode.service
 Wants=network-online.target
+ConditionPathExists=!/run/teslausb-safe-mode
 
 [Service]
 Type=oneshot

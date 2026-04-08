@@ -418,9 +418,14 @@ def delete_event(folder, event_name):
     try:
         if folder_structure == 'flat':
             # RecentClips: Delete all videos matching the session timestamp
+            from services.file_safety import is_protected_file
             session_videos = get_session_videos(folder_path, event_name)
             for video in session_videos:
                 try:
+                    if is_protected_file(video['path']):
+                        logger.error("BLOCKED deletion of protected file: %s", video['path'])
+                        error_count += 1
+                        continue
                     os.remove(video['path'])
                     deleted_count += 1
                     deleted_files.append(video['name'])
@@ -445,8 +450,13 @@ def delete_event(folder, event_name):
                         deleted_count += 1
                         deleted_files.append(entry.name)
 
-            # Delete the entire folder
-            shutil.rmtree(event_path)
+            # Delete the entire folder (with IMG protection)
+            from services.file_safety import safe_rmtree
+            if not safe_rmtree(event_path):
+                return jsonify({
+                    'success': False,
+                    'error': 'Refused: folder contains protected files'
+                }), 403
 
     except Exception as e:
         logger.error(f"Error deleting event {event_name}: {e}")

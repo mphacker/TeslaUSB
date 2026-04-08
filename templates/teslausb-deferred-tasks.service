@@ -1,0 +1,26 @@
+[Unit]
+Description=TeslaUSB Deferred Boot Tasks (cleanup, chime selection)
+After=present_usb_on_boot.service teslausb-safe-mode.service
+Requires=present_usb_on_boot.service
+# Skip in safe mode
+ConditionPathExists=!/run/teslausb-safe-mode
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash __GADGET_DIR__/scripts/boot_deferred_tasks.sh
+RemainAfterExit=yes
+User=root
+
+# These tasks are non-critical — don't fail the boot if they error
+Restart=no
+TimeoutStartSec=300
+
+# Low priority — USB gadget is already serving Tesla
+Nice=10
+MemoryMax=150M
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

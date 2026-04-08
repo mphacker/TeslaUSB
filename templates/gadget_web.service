@@ -1,7 +1,9 @@
 [Unit]
 Description=USB Gadget Web Control Interface
-After=network.target
+After=network.target teslausb-safe-mode.service
 Wants=network.target
+# Skip in safe mode (3+ reboots in 10 min)
+ConditionPathExists=!/run/teslausb-safe-mode
 StartLimitBurst=5
 StartLimitIntervalSec=300
 
@@ -12,8 +14,8 @@ User=root
 Group=__TARGET_USER__
 WorkingDirectory=__GADGET_DIR__/scripts/web
 ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/web/web_control.py
-Restart=always
-RestartSec=10
+Restart=on-failure
+RestartSec=30
 TimeoutStopSec=10
 
 # Memory limits for Flask app (prevent runaway memory usage)

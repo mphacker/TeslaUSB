@@ -352,6 +352,47 @@ if ! iw dev "$WIFI_IF" info >/dev/null 2>&1; then
 fi
 log_timing "WiFi interface verified"
 
+# ── Boot-time STA connect attempt ──
+# Try to connect to a saved network BEFORE entering the main loop.
+# The Pi Zero 2 W has a single-radio chip — running the AP (hostapd on uap0)
+# locks the radio to one channel and prevents STA association on other channels.
+# So we attempt STA first while the radio is free.
+log_timing "Attempting initial WiFi connection"
+BOOT_CONNECTED=0
+if [ "$(get_force_mode)" != "force_on" ]; then
+    # Give NetworkManager up to 30 seconds to auto-connect
+    for attempt in 1 2 3 4 5 6; do
+        if check_wifi; then
+            log "WiFi connected at boot (attempt $attempt)"
+            BOOT_CONNECTED=1
+            break
+        fi
+        sleep 5
+    done
+
+    if [ $BOOT_CONNECTED -eq 0 ]; then
+        # NetworkManager didn't auto-connect — try highest-priority saved connection
+        log "Auto-connect failed after 30s, trying explicit connect..."
+        BEST_CONN=$(nmcli -t -f NAME,TYPE,AUTOCONNECT-PRIORITY connection show 2>/dev/null \
+            | grep ':.*wireless' \
+            | sort -t: -k3 -rn \
+            | head -1 \
+            | cut -d: -f1)
+        if [ -n "$BEST_CONN" ]; then
+            log "  Trying: $BEST_CONN"
+            nmcli --wait 20 connection up "$BEST_CONN" 2>/dev/null
+            sleep 5
+            if check_wifi; then
+                log "Connected to $BEST_CONN at boot"
+                BOOT_CONNECTED=1
+            else
+                log "Explicit connect to $BEST_CONN failed"
+            fi
+        fi
+    fi
+fi
+log_timing "Initial WiFi attempt complete (connected=$BOOT_CONNECTED)"
+
 log_timing "WiFi monitor initialization complete (total: $(($(date +%s%3N) - WIFI_MONITOR_START_MS))ms)"
 log "WiFi monitor started (interval ${CHECK_INTERVAL}s, AP fallback ${AP_ENABLED})"
 
@@ -378,7 +419,7 @@ while true; do
     fi
 
     if ap_active; then
-        # In auto mode, check if WiFi is healthy and stop AP
+        # AP is running. Check if WiFi STA came back (NM may auto-reconnect).
         if check_wifi; then
             rssi=$(current_rssi)
             if [ -n "$rssi" ] && [ "$rssi" -ge "$MIN_RSSI" ]; then
@@ -388,7 +429,32 @@ while true; do
                 continue
             fi
         fi
-        # WiFi still unhealthy, keep AP running
+
+        # WiFi still down while AP is active.
+        # Periodically stop AP and attempt STA reconnect (~every 5 min).
+        # Pi Zero 2 W single-radio can't scan/associate while AP holds the channel.
+        STA_RETRY_COUNTER=${STA_RETRY_COUNTER:-0}
+        STA_RETRY_COUNTER=$((STA_RETRY_COUNTER + 1))
+        if [ $STA_RETRY_COUNTER -ge 15 ]; then
+            STA_RETRY_COUNTER=0
+            log "Periodic STA retry: stopping AP to attempt home WiFi"
+            stop_ap
+            sleep 5
+
+            # Let NetworkManager try to auto-connect (radio is now free)
+            nmcli device wifi rescan 2>/dev/null
+            sleep 10
+
+            if check_wifi; then
+                log "STA reconnected — AP stays off"
+                FAILURE_COUNT=0
+                LAST_GOOD_TS=$(date +%s)
+            else
+                log "STA retry failed — restarting AP"
+                start_ap || log "AP restart failed"
+            fi
+        fi
+
         sleep_interval
         continue
     fi

@@ -425,6 +425,95 @@ def api_toggle_sync():
 
 
 # ---------------------------------------------------------------------------
+# Sync queue & batch status endpoints
+# ---------------------------------------------------------------------------
+
+@cloud_archive_bp.route('/api/sync_status_batch', methods=['POST'])
+def api_sync_status_batch():
+    """Check cloud sync status for multiple events."""
+    from services.cloud_archive_service import get_sync_status_for_events
+    data = request.get_json(silent=True) or {}
+    events = data.get('events', [])
+    try:
+        statuses = get_sync_status_for_events(events)
+        return jsonify({"statuses": statuses})
+    except Exception as exc:
+        logger.exception("Failed to fetch batch sync statuses")
+        return jsonify({"statuses": {}})
+
+
+@cloud_archive_bp.route('/api/queue_event', methods=['POST'])
+def api_queue_event():
+    """Add an event to the cloud sync queue with optional priority."""
+    data = request.get_json(silent=True) or {}
+    folder = data.get('folder', '')
+    event_name = data.get('event', '')
+    priority = data.get('priority', False)
+
+    if not folder or not event_name:
+        return jsonify({"success": False, "message": "Missing folder or event"}), 400
+
+    from services.cloud_archive_service import queue_event_for_sync
+    try:
+        ok, msg = queue_event_for_sync(folder, event_name, priority=priority)
+        return jsonify({"success": ok, "message": msg})
+    except Exception as exc:
+        logger.exception("Failed to queue event for sync")
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/queue')
+def api_queue():
+    """Return current sync queue."""
+    from services.cloud_archive_service import get_sync_queue
+    try:
+        return jsonify(get_sync_queue())
+    except Exception as exc:
+        logger.exception("Failed to fetch sync queue")
+        return jsonify({"queue": [], "error": str(exc)})
+
+
+@cloud_archive_bp.route('/api/queue/remove', methods=['POST'])
+def api_queue_remove():
+    """Remove an item from the sync queue."""
+    data = request.get_json(silent=True) or {}
+    file_path = data.get('file_path', '')
+    if not file_path:
+        return jsonify({"success": False, "message": "No file path"})
+    from services.cloud_archive_service import remove_from_queue
+    try:
+        ok, msg = remove_from_queue(file_path)
+        return jsonify({"success": ok, "message": msg})
+    except Exception as exc:
+        logger.exception("Failed to remove item from queue")
+        return jsonify({"success": False, "message": str(exc)})
+
+
+@cloud_archive_bp.route('/api/queue/clear', methods=['POST'])
+def api_queue_clear():
+    """Clear all queued items."""
+    from services.cloud_archive_service import clear_queue
+    try:
+        ok, msg = clear_queue()
+        return jsonify({"success": ok, "message": msg})
+    except Exception as exc:
+        logger.exception("Failed to clear sync queue")
+        return jsonify({"success": False, "message": str(exc)})
+
+
+@cloud_archive_bp.route('/api/archive_cleanup', methods=['POST'])
+def api_archive_cleanup():
+    """Manually trigger smart archive cleanup."""
+    from services.video_archive_service import trigger_archive_cleanup
+    try:
+        result = trigger_archive_cleanup()
+        return jsonify({"success": True, "result": result})
+    except Exception as exc:
+        logger.exception("Failed to run archive cleanup")
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
 # Single-file archive (from video panel)
 # ---------------------------------------------------------------------------
 

@@ -176,6 +176,12 @@ def _archive_timer_loop() -> None:
         except Exception:
             logger.exception("Archive run failed unexpectedly")
 
+        # Run smart cleanup after each archive cycle
+        try:
+            smart_cleanup_archive(ARCHIVE_DIR, ARCHIVE_MIN_FREE_SPACE_GB, ARCHIVE_MAX_SIZE_GB)
+        except Exception:
+            logger.exception("Smart archive cleanup failed")
+
         # Sleep in 1-second ticks so cancel is responsive
         for _ in range(interval):
             if _archive_cancel.is_set():
@@ -797,3 +803,198 @@ def _get_teslacam_ro_path() -> Optional[str]:
         if os.path.isdir(rw_path):
             return rw_path
     return None
+
+
+# ---------------------------------------------------------------------------
+# Smart Archive Cleanup
+# ---------------------------------------------------------------------------
+
+
+def smart_cleanup_archive(
+    archive_dir: str,
+    min_free_gb: float = 10.0,
+    max_size_gb: float = 50.0,
+) -> dict:
+    """Smart cleanup of ArchivedClips when SD card space is low.
+
+    Priority order for deletion:
+    1. Videos without events AND without GPS coordinates (least valuable)
+    2. Oldest videos (by file modification time)
+    Never: Delete videos that are queued for or currently syncing to cloud.
+
+    Returns dict with deleted_count, freed_bytes, and details.
+    """
+    import sqlite3
+    from services.file_safety import safe_remove
+
+    result = {
+        "deleted_count": 0,
+        "freed_bytes": 0,
+        "skipped_cloud_queue": 0,
+        "details": [],
+    }
+
+    if not os.path.isdir(archive_dir):
+        return result
+
+    # Check if cleanup is needed
+    try:
+        usage = shutil.disk_usage(archive_dir)
+    except OSError:
+        logger.warning("Smart cleanup: cannot read disk usage for %s", archive_dir)
+        return result
+
+    free_gb = usage.free / (1024 ** 3)
+    archive_size = _get_archive_size()
+    archive_gb = archive_size / (1024 ** 3)
+
+    if free_gb >= min_free_gb and archive_gb <= max_size_gb:
+        logger.debug("Smart cleanup: no action needed (%.1f GB free, %.1f GB archive)", free_gb, archive_gb)
+        return result
+
+    logger.info(
+        "Smart cleanup: starting (%.1f GB free < %.1f GB min, or %.1f GB archive > %.1f GB max)",
+        free_gb, min_free_gb, archive_gb, max_size_gb,
+    )
+
+    # Scan all .mp4 files
+    files_to_score = []
+    try:
+        for entry in os.scandir(archive_dir):
+            if not entry.name.lower().endswith('.mp4'):
+                continue
+            try:
+                st = entry.stat()
+                files_to_score.append({
+                    "path": entry.path,
+                    "name": entry.name,
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                })
+            except OSError:
+                continue
+    except OSError:
+        logger.warning("Smart cleanup: cannot scan %s", archive_dir)
+        return result
+
+    if not files_to_score:
+        return result
+
+    # Check geodata.db for GPS data and events
+    geo_db_path = None
+    try:
+        from config import MAPPING_DB_PATH
+        if os.path.isfile(MAPPING_DB_PATH):
+            geo_db_path = MAPPING_DB_PATH
+    except Exception:
+        pass
+
+    files_with_gps = set()
+    files_with_events = set()
+    if geo_db_path:
+        try:
+            conn = sqlite3.connect(geo_db_path, timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                for f in files_to_score:
+                    row = conn.execute(
+                        "SELECT 1 FROM waypoints WHERE video_path LIKE ? LIMIT 1",
+                        ('%' + f["name"] + '%',)
+                    ).fetchone()
+                    if row:
+                        files_with_gps.add(f["name"])
+            except sqlite3.OperationalError:
+                pass  # Table may not exist
+
+            try:
+                for f in files_to_score:
+                    row = conn.execute(
+                        "SELECT 1 FROM detected_events WHERE video_path LIKE ? LIMIT 1",
+                        ('%' + f["name"] + '%',)
+                    ).fetchone()
+                    if row:
+                        files_with_events.add(f["name"])
+            except sqlite3.OperationalError:
+                pass  # Table may not exist
+            conn.close()
+        except Exception:
+            logger.debug("Smart cleanup: could not query geodata.db")
+
+    # Check cloud sync status - skip files queued/uploading
+    cloud_queued_files = set()
+    try:
+        from config import CLOUD_ARCHIVE_DB_PATH
+        if os.path.isfile(CLOUD_ARCHIVE_DB_PATH):
+            cconn = sqlite3.connect(CLOUD_ARCHIVE_DB_PATH, timeout=5)
+            cconn.row_factory = sqlite3.Row
+            try:
+                for f in files_to_score:
+                    row = cconn.execute(
+                        "SELECT status FROM cloud_synced_files WHERE file_path LIKE ? AND status IN ('queued', 'uploading', 'pending') LIMIT 1",
+                        ('%' + f["name"] + '%',)
+                    ).fetchone()
+                    if row:
+                        cloud_queued_files.add(f["name"])
+            except sqlite3.OperationalError:
+                pass
+            cconn.close()
+    except Exception:
+        pass
+
+    # Assign scores and filter out cloud-queued files
+    scored = []
+    for f in files_to_score:
+        name = f["name"]
+        if name in cloud_queued_files:
+            result["skipped_cloud_queue"] += 1
+            continue
+
+        has_gps = name in files_with_gps
+        has_events = name in files_with_events
+        score = 0
+        if has_gps:
+            score += 50
+        if has_events:
+            score += 50
+        scored.append((score, f["mtime"], f))
+
+    # Sort: lowest score first, then oldest first within same score
+    scored.sort(key=lambda x: (x[0], x[1]))
+
+    # Delete files until space constraints are met
+    min_free_bytes = int(min_free_gb * 1024 ** 3)
+    max_archive_bytes = int(max_size_gb * 1024 ** 3)
+
+    for _score, _mtime, f in scored:
+        # Recheck conditions
+        try:
+            current_usage = shutil.disk_usage(archive_dir)
+            current_free = current_usage.free
+        except OSError:
+            break
+
+        current_archive_size = archive_size - result["freed_bytes"]
+        if current_free >= min_free_bytes and current_archive_size <= max_archive_bytes:
+            break
+
+        if safe_remove(f["path"]):
+            result["deleted_count"] += 1
+            result["freed_bytes"] += f["size"]
+            result["details"].append(f["name"])
+            logger.info("Smart cleanup: deleted %s (score=%d, size=%d)", f["name"], _score, f["size"])
+
+    if result["deleted_count"]:
+        logger.info(
+            "Smart cleanup: deleted %d files, freed %.1f MB (skipped %d cloud-queued)",
+            result["deleted_count"],
+            result["freed_bytes"] / (1024 * 1024),
+            result["skipped_cloud_queue"],
+        )
+        _update_archive_size()
+
+    return result
+
+
+def trigger_archive_cleanup() -> dict:
+    """Manually trigger archive cleanup. Returns result."""
+    return smart_cleanup_archive(ARCHIVE_DIR, ARCHIVE_MIN_FREE_SPACE_GB, ARCHIVE_MAX_SIZE_GB)

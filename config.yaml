@@ -129,6 +129,9 @@ cloud_archive:
   max_upload_mbps: 5                     # Bandwidth limit (Pi has limited upload)
   keep_local_after_upload: true          # Keep local files after uploading to cloud
   sync_non_event_videos: false          # Opt-in: sync videos without events or geolocation
+  cloud_auto_cleanup: false              # Auto-delete old cloud videos when storage is low
+  cloud_cleanup_threshold_pct: 90        # Delete when cloud usage exceeds this %
+  cloud_min_retention_days: 30           # Keep at least this many days of videos
 
 # ============================================================================
 # RecentClips Archive Configuration

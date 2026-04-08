@@ -106,6 +106,9 @@ CLOUD_ARCHIVE_SYNC_FOLDERS = _cloud.get('sync_folders', ['SentryClips', 'SavedCl
 CLOUD_ARCHIVE_PRIORITY_ORDER = _cloud.get('priority_order', ['SentryClips', 'SavedClips'])
 CLOUD_ARCHIVE_MAX_UPLOAD_MBPS = int(_cloud.get('max_upload_mbps', 5))
 CLOUD_ARCHIVE_SYNC_NON_EVENT = bool(_cloud.get('sync_non_event_videos', False))
+CLOUD_AUTO_CLEANUP = bool(_cloud.get('cloud_auto_cleanup', False))
+CLOUD_CLEANUP_THRESHOLD_PCT = int(_cloud.get('cloud_cleanup_threshold_pct', 90))
+CLOUD_MIN_RETENTION_DAYS = int(_cloud.get('cloud_min_retention_days', 30))
 CLOUD_ARCHIVE_DB_PATH = os.path.join(GADGET_DIR, 'cloud_sync.db')
 CLOUD_PROVIDER_CREDS_PATH = os.path.join(GADGET_DIR, 'cloud_provider.enc')
 

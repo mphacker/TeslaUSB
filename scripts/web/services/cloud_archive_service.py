@@ -252,9 +252,11 @@ def _score_event_priority(event_dir: str) -> int:
             if MAPPING_ENABLED:
                 from services.mapping_service import get_db_connection
                 conn = get_db_connection(MAPPING_DB_PATH)
+                # Escape LIKE wildcards in dir_name to prevent unintended matches
+                safe_name = dir_name.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
                 row = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM waypoints WHERE video_path LIKE ?",
-                    (f'%{dir_name}%',)
+                    "SELECT COUNT(*) as cnt FROM waypoints WHERE video_path LIKE ? ESCAPE '\\'",
+                    (f'%{safe_name}%',)
                 ).fetchone()
                 conn.close()
                 if row and row['cnt'] > 0:

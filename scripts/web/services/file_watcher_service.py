@@ -23,6 +23,12 @@ _POLL_INTERVAL_SECONDS = 300  # 5 minutes
 # actively written by Tesla
 _MIN_FILE_AGE_SECONDS = 60
 
+# Maximum known_files set size before pruning (prevents unbounded memory growth)
+_MAX_KNOWN_FILES = 10000
+
+# How often to prune the known_files set (every N scans)
+_PRUNE_EVERY_N_SCANS = 12  # ~1 hour at 5-min polling
+
 # ---------------------------------------------------------------------------
 # Background Thread State
 # ---------------------------------------------------------------------------
@@ -246,6 +252,7 @@ def _watcher_loop():
     """Main watcher loop — tries inotify, falls back to polling."""
     paths = _status["watch_paths"]
     known_files: Set[str] = set()
+    scan_count = 0
 
     # Initial scan to build known file set (don't trigger callbacks for existing files)
     _scan_for_new_files(paths, known_files)
@@ -271,5 +278,16 @@ def _watcher_loop():
             logger.info("Polling detected %d new files", len(new_files))
             _notify_callbacks(new_files)
         _status["last_scan"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Periodically prune known_files to prevent unbounded memory growth
+        scan_count += 1
+        if scan_count >= _PRUNE_EVERY_N_SCANS or len(known_files) > _MAX_KNOWN_FILES:
+            before = len(known_files)
+            known_files = {f for f in known_files if os.path.isfile(f)}
+            pruned = before - len(known_files)
+            if pruned > 0:
+                logger.info("Pruned %d stale entries from known_files (now %d)",
+                            pruned, len(known_files))
+            scan_count = 0
 
     _status["running"] = False

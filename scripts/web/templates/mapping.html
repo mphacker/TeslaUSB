@@ -2099,6 +2099,28 @@ function _vpArchivePoll(btn) {
     }, 2000);
 }
 
+async function vpQueueForSync(folder, name, btn) {
+    if (btn) { btn.disabled = true; }
+    try {
+        var resp = await fetch('/cloud/api/queue_event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ folder: folder, event: name })
+        });
+        var data = await resp.json();
+        if (data.success) {
+            if (typeof showToast === 'function') showToast(data.message, 'success');
+            if (btn) { btn.style.color = 'var(--accent-success, #30D158)'; btn.textContent = '✓Q'; }
+        } else {
+            if (typeof showToast === 'function') showToast(data.message || 'Queue failed', 'error');
+        }
+    } catch(e) {
+        if (typeof showToast === 'function') showToast('Queue failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; }
+    }
+}
+
 // Event delegation for video panel buttons (prevents XSS from inline onclick)
 document.getElementById('vpList').addEventListener('click', function(e) {
     var btn = e.target.closest('.vp-btn');

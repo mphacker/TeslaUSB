@@ -155,6 +155,7 @@
                 <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:3px;opacity:0.6;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
                 Storage: <span id="storageUsageText"></span>
             </div>
+            <div id="storageWarning" style="display: none; margin-top: var(--space-2); padding: 8px 12px; border-radius: var(--radius-md); font-size: var(--text-sm); font-weight: 500;"></div>
 
             {# ---- Token expiry info ---- #}
             {% if token_expiry %}
@@ -408,6 +409,26 @@
 
                 <button type="submit" class="edit-btn" style="padding: 8px 20px; font-size: 14px; margin-top: var(--space-3);">Save Settings</button>
             </form>
+        </div>
+    </details>
+
+    <!-- ================================================================
+         Section 3.5: Sync Queue
+         ================================================================ -->
+    <details class="settings-section" id="syncQueueSection">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-list"></use></svg>
+            Sync Queue
+            <span id="queueBadge" style="display: none; margin-left: 8px; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-info-bg); color: var(--msg-info-text);"></span>
+        </summary>
+        <div class="section-content">
+            <div id="queueContent" style="min-height: 60px;">
+                <div style="text-align: center; padding: var(--space-4); color: var(--text-muted);">Loading queue&hellip;</div>
+            </div>
+            <div style="margin-top: var(--space-3); display: flex; gap: var(--space-2); flex-wrap: wrap;">
+                <button type="button" class="action-btn" onclick="refreshQueue()" style="padding: 6px 14px; font-size: 13px;">Refresh</button>
+                <button type="button" class="action-btn danger" onclick="clearQueue()" id="clearQueueBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Clear Queue</button>
+            </div>
         </div>
     </details>
 
@@ -1409,6 +1430,7 @@
         if (isSyncing) startPolling();
         startArchivePoll();
         loadStorageUsage();
+        refreshQueue();
     });
 
     /* Load cloud storage usage */
@@ -1428,8 +1450,107 @@
                     text.textContent = used + ' used' + (data.total ? ' of ' + total : '') + (free ? ' (' + free + ' free)' : '');
                     row.style.display = '';
                 }
+
+                // Storage warning banners
+                var warn = document.getElementById('storageWarning');
+                if (warn && data.total && data.used) {
+                    var pct = Math.round(data.used / data.total * 100);
+                    if (pct >= 95) {
+                        warn.style.display = '';
+                        warn.style.background = 'var(--msg-error-bg)';
+                        warn.style.color = 'var(--msg-error-text)';
+                        warn.textContent = '\u26a0 Critical: Cloud storage is ' + pct + '% full. Uploads may fail.';
+                    } else if (pct >= 80) {
+                        warn.style.display = '';
+                        warn.style.background = 'var(--msg-warning-bg)';
+                        warn.style.color = 'var(--msg-warning-text)';
+                        warn.textContent = '\u26a0 Warning: Cloud storage is ' + pct + '% full. Consider freeing space.';
+                    }
+                }
             }
         } catch (e) { /* non-critical */ }
+    }
+
+    /* ===================================================================
+       Sync Queue
+       =================================================================== */
+
+    async function refreshQueue() {
+        var content = document.getElementById('queueContent');
+        var badge = document.getElementById('queueBadge');
+        var clearBtn = document.getElementById('clearQueueBtn');
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_queue") }}', {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+            var queue = data.queue || [];
+
+            if (badge) {
+                if (queue.length > 0) {
+                    badge.textContent = queue.length;
+                    badge.style.display = '';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+            if (clearBtn) {
+                clearBtn.style.display = queue.length > 0 ? '' : 'none';
+            }
+
+            if (queue.length === 0) {
+                content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--text-muted);">No files in sync queue</div>';
+                return;
+            }
+
+            var html = '<div style="display: flex; flex-direction: column; gap: var(--space-2);">';
+            queue.forEach(function(item) {
+                var fname = item.file_path.split('/').pop();
+                var safeName = fname.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                var size = item.file_size ? formatBytes(item.file_size) : '';
+                var statusLabel = item.status || 'queued';
+                var statusColor = statusLabel === 'uploading' ? 'var(--msg-info-text)' : 'var(--text-secondary)';
+                html += '<div style="display: flex; align-items: center; gap: var(--space-2); padding: 8px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">' +
+                    '<div style="flex: 1; min-width: 0;">' +
+                        '<div style="font-size: var(--text-sm); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + safeName + '</div>' +
+                        '<div style="font-size: var(--text-xs); color: var(--text-muted);">' + size + ' &middot; <span style="color:' + statusColor + ';">' + statusLabel + '</span>' +
+                        (item.retry_count > 0 ? ' &middot; retries: ' + item.retry_count : '') + '</div>' +
+                    '</div>';
+                if (statusLabel === 'queued' || statusLabel === 'pending') {
+                    html += '<button type="button" class="action-btn danger" style="padding: 4px 10px; font-size: 12px; flex-shrink: 0;" ' +
+                        'onclick="removeFromQueue(\'' + item.file_path.replace(/'/g, "\\'") + '\')">&times;</button>';
+                }
+                html += '</div>';
+            });
+            html += '</div>';
+            content.innerHTML = html;
+        } catch(e) {
+            content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--error-text);">Failed to load queue</div>';
+        }
+    }
+
+    async function removeFromQueue(filePath) {
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_queue_remove") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ file_path: filePath })
+            });
+            await resp.json();
+            refreshQueue();
+        } catch(e) { /* retry on next refresh */ }
+    }
+
+    async function clearQueue() {
+        if (!confirm('Remove all queued files from the sync queue?')) return;
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_queue_clear") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            await resp.json();
+            refreshQueue();
+        } catch(e) { /* ignore */ }
     }
 
 })();

@@ -845,3 +845,115 @@ def recover_interrupted_uploads(db_path: str) -> int:
         return affected
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Sync Status & Queue Management
+# ---------------------------------------------------------------------------
+
+
+def get_sync_status_for_events(event_names: list) -> dict:
+    """Check sync status for a list of event names.
+
+    Returns dict mapping event_name -> status ('synced', 'queued', 'uploading', None).
+    """
+    if not event_names:
+        return {}
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        statuses = {}
+        for name in event_names:
+            row = conn.execute(
+                "SELECT status FROM cloud_synced_files WHERE file_path LIKE ? ORDER BY synced_at DESC LIMIT 1",
+                ('%' + name + '%',)
+            ).fetchone()
+            statuses[name] = row['status'] if row else None
+        return statuses
+    finally:
+        conn.close()
+
+
+def queue_event_for_sync(folder: str, event_name: str, priority: bool = False) -> Tuple[bool, str]:
+    """Add an event's files to the sync queue.
+
+    Returns (success, message).
+    """
+    from services.video_service import get_teslacam_path
+    teslacam = get_teslacam_path()
+    if not teslacam:
+        return False, "TeslaCam not accessible"
+
+    event_dir = os.path.join(teslacam, folder, event_name)
+    if not os.path.isdir(event_dir):
+        # Might be a flat file (RecentClips/ArchivedClips)
+        event_dir = os.path.join(teslacam, folder)
+
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        queued = 0
+        for entry in os.scandir(event_dir):
+            if entry.name.lower().endswith('.mp4') and event_name in entry.name:
+                # Check if already synced or uploading
+                existing = conn.execute(
+                    "SELECT status FROM cloud_synced_files WHERE file_path = ?",
+                    (entry.path,)
+                ).fetchone()
+                if existing and existing['status'] in ('synced', 'uploading'):
+                    continue
+
+                stat = entry.stat()
+                conn.execute(
+                    """INSERT OR REPLACE INTO cloud_synced_files
+                       (file_path, file_size, file_mtime, status, retry_count)
+                       VALUES (?, ?, ?, 'queued', 0)""",
+                    (entry.path, stat.st_size, stat.st_mtime)
+                )
+                queued += 1
+
+        conn.commit()
+        if queued:
+            return True, "Added {} files to sync queue".format(queued)
+        return True, "All files already synced or queued"
+    finally:
+        conn.close()
+
+
+def get_sync_queue() -> dict:
+    """Return the current sync queue (queued/pending/uploading files)."""
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT file_path, file_size, status, retry_count FROM cloud_synced_files "
+            "WHERE status IN ('queued', 'pending', 'uploading') ORDER BY id"
+        ).fetchall()
+        queue = [dict(r) for r in rows]
+        return {"queue": queue, "total": len(queue)}
+    finally:
+        conn.close()
+
+
+def remove_from_queue(file_path: str) -> Tuple[bool, str]:
+    """Remove a single item from the sync queue."""
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        conn.execute(
+            "DELETE FROM cloud_synced_files WHERE file_path = ? AND status IN ('queued', 'pending')",
+            (file_path,),
+        )
+        conn.commit()
+        return True, "Removed from queue"
+    finally:
+        conn.close()
+
+
+def clear_queue() -> Tuple[bool, str]:
+    """Clear all queued/pending items from the sync queue."""
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        result = conn.execute(
+            "DELETE FROM cloud_synced_files WHERE status IN ('queued', 'pending')"
+        )
+        conn.commit()
+        return True, "Cleared {} items from queue".format(result.rowcount)
+    finally:
+        conn.close()

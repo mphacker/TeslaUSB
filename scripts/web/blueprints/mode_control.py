@@ -4,13 +4,13 @@ import os
 import subprocess
 import time
 import logging
-from flask import Blueprint, render_template, request, redirect, url_for, flash
+from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify
 
 from config import GADGET_DIR
 from utils import get_base_context
 from services.mode_service import mode_display
 from services.ap_service import ap_status, ap_force, get_ap_config, update_ap_config
-from services.wifi_service import get_current_wifi_connection, update_wifi_credentials, get_available_networks, get_wifi_status, clear_wifi_status
+from services.wifi_service import get_current_wifi_connection, update_wifi_credentials, get_available_networks, get_wifi_status, clear_wifi_status, get_saved_networks, forget_network, reorder_networks
 
 mode_control_bp = Blueprint('mode_control', __name__, url_prefix='/settings')
 
@@ -393,3 +393,49 @@ def dismiss_wifi_status():
     """Dismiss the WiFi change status alert."""
     clear_wifi_status()
     return {"success": True}
+
+
+@mode_control_bp.route("/api/wifi/saved")
+def api_wifi_saved():
+    """List saved WiFi networks with signal and priority."""
+    try:
+        return jsonify(get_saved_networks())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@mode_control_bp.route("/api/wifi/reorder", methods=["POST"])
+def api_wifi_reorder():
+    """Reorder WiFi network priorities."""
+    data = request.get_json(silent=True) or {}
+    networks = data.get("networks", [])
+    if not networks:
+        return jsonify({"success": False, "message": "No networks provided"}), 400
+    try:
+        result = reorder_networks(networks)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@mode_control_bp.route("/api/wifi/forget", methods=["POST"])
+def api_wifi_forget():
+    """Forget a saved WiFi network."""
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", "")
+    if not name:
+        return jsonify({"success": False, "message": "No network name provided"}), 400
+    try:
+        result = forget_network(name)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@mode_control_bp.route("/api/wifi/scan")
+def api_wifi_scan():
+    """Scan for available WiFi networks (JSON API)."""
+    try:
+        return jsonify(get_available_networks(rescan=True))
+    except Exception:
+        return jsonify([])

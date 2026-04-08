@@ -549,6 +549,7 @@
     .st-dot.driving { background: #f59e0b; }
     .st-dot.driving-critical { background: #ef4444; }
     .st-dot.fsd { background: #22c55e; }
+    .st-dot.trip { background: #3b82f6; }
     .st-card { flex: 1; min-width: 0; }
     .st-type { font-weight: 600; font-size: 13px; color: var(--text-primary); }
     .st-date { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
@@ -622,7 +623,8 @@
     <div class="video-panel" id="videoPanel">
         <div class="video-panel-header">
             <div class="vp-tabs">
-                <button class="vp-tab active" id="vpTabSentry" onclick="vpShowSentry()">Recent Events</button>
+                <button class="vp-tab active" id="vpTabSentry" onclick="vpShowSentry()">Events</button>
+                <button class="vp-tab" id="vpTabTrips" onclick="vpShowTrips()">Trips</button>
                 <button class="vp-tab" id="vpTabClips" onclick="vpShowClips()">All Clips</button>
             </div>
             <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel">✕</button>
@@ -950,6 +952,35 @@ function filterTrips() {
     } else {
         renderTrips();
     }
+}
+
+function selectTripById(tripId) {
+    // Find trip in allTrips and navigate to it
+    const idx = allTrips.findIndex(t => t.id === tripId);
+    if (idx >= 0) {
+        currentTripIndex = idx;
+        showingAllTrips = false;
+        updateTripCard();
+        const trip = allTrips[idx];
+        const sel = document.getElementById('tripFilter');
+        sel.value = trip.id;
+        const saved = allTrips;
+        allTrips = [trip];
+        renderTrips().then(() => { allTrips = saved; });
+    } else {
+        // Trip not in loaded set — load route directly
+        loadTripRoute(tripId).then(function(geojson) {
+            if (geojson && geojson.geometry) {
+                const coords = geojson.geometry.coordinates;
+                if (coords.length > 0) {
+                    const bounds = L.latLngBounds(coords.map(c => [c[1], c[0]]));
+                    map.fitBounds(bounds, { padding: [40, 40] });
+                }
+            }
+        });
+    }
+    // Close the video panel so the map is visible
+    if (videoPanelOpen) toggleVideoPanel();
 }
 
 async function loadTripRoute(tripId) {
@@ -1658,6 +1689,7 @@ function toggleVideoPanel() {
     document.getElementById('btnVideos').classList.toggle('active', videoPanelOpen);
     if (videoPanelOpen) {
         if (vpCurrentTab === 'clips') { vpPage = 1; loadVideoList(); }
+        else if (vpCurrentTab === 'trips') { loadTripsTimeline(); }
         else { loadSentryTimeline(); }
     }
 }
@@ -1666,6 +1698,7 @@ function vpShowClips() {
     vpCurrentTab = 'clips';
     document.getElementById('vpTabClips').classList.add('active');
     document.getElementById('vpTabSentry').classList.remove('active');
+    document.getElementById('vpTabTrips').classList.remove('active');
     document.getElementById('vpFolderRow').style.display = '';
     vpPage = 1;
     loadVideoList();
@@ -1675,8 +1708,18 @@ function vpShowSentry() {
     vpCurrentTab = 'sentry';
     document.getElementById('vpTabSentry').classList.add('active');
     document.getElementById('vpTabClips').classList.remove('active');
+    document.getElementById('vpTabTrips').classList.remove('active');
     document.getElementById('vpFolderRow').style.display = 'none';
     loadSentryTimeline();
+}
+
+function vpShowTrips() {
+    vpCurrentTab = 'trips';
+    document.getElementById('vpTabTrips').classList.add('active');
+    document.getElementById('vpTabSentry').classList.remove('active');
+    document.getElementById('vpTabClips').classList.remove('active');
+    document.getElementById('vpFolderRow').style.display = 'none';
+    loadTripsTimeline();
 }
 
 async function loadSentryTimeline() {
@@ -1784,6 +1827,76 @@ async function loadSentryTimeline() {
     } catch(e) {
         console.error('Failed to load sentry timeline:', e);
         list.innerHTML = '<div class="vp-empty">Failed to load events</div>';
+    }
+}
+
+async function loadTripsTimeline() {
+    const list = document.getElementById('vpList');
+    list.innerHTML = '<div class="vp-loading">Loading\u2026</div>';
+
+    try {
+        const resp = await fetch('/api/trips?limit=50');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+
+        if (!data.trips || data.trips.length === 0) {
+            list.innerHTML = '<div class="vp-empty">No trips indexed yet.<br><small>Trips are detected from dashcam GPS data when videos are indexed.</small></div>';
+            return;
+        }
+
+        const trips = data.trips;
+        let html = '<div class="sentry-timeline">';
+        html += '<div class="st-summary"><strong>' + trips.length + ' Trip' + (trips.length !== 1 ? 's' : '') + '</strong></div>';
+
+        trips.forEach(function(trip) {
+            const dateStr = formatLocalTime(trip.start_time);
+            const dist = trip.distance_km != null ? (trip.distance_km * 0.621371).toFixed(1) + ' mi' : '';
+            const durMin = trip.duration_seconds != null ? Math.round(trip.duration_seconds / 60) : 0;
+            const durStr = durMin > 0 ? durMin + ' min' : '';
+            const evCount = trip.event_count || 0;
+            const metaParts = [];
+            if (dist) metaParts.push(dist);
+            if (durStr) metaParts.push(durStr);
+            if (evCount > 0) metaParts.push(evCount + ' event' + (evCount !== 1 ? 's' : ''));
+            const metaHtml = metaParts.join(' \u00b7 ');
+
+            const hasCoords = trip.start_lat != null && trip.start_lon != null;
+
+            html += '<div class="st-event" data-trip-id="' + trip.id + '"';
+            if (hasCoords) html += ' data-lat="' + trip.start_lat + '" data-lon="' + trip.start_lon + '"';
+            html += '>';
+            html += '<div class="st-dot trip"></div>';
+            html += '<div class="st-card">';
+            html += '<div class="st-type">' + (evCount > 0 ? '\u26A0 Trip with Events' : 'Trip') + '</div>';
+            html += '<div class="st-date">' + dateStr + '</div>';
+            html += '<div class="st-meta">' + metaHtml + '</div>';
+            html += '<div class="st-actions">';
+            if (hasCoords) {
+                html += '<button class="vp-btn st-btn-map" title="Show on Map" data-lat="' + trip.start_lat + '" data-lon="' + trip.start_lon + '" data-trip-id="' + trip.id + '">&#128205;</button>';
+            }
+            html += '</div></div></div>';
+        });
+
+        html += '</div>';
+        list.innerHTML = html;
+
+        // Click handler: show trip route on map
+        list.querySelectorAll('.st-event[data-trip-id]').forEach(function(el) {
+            el.addEventListener('click', function(e) {
+                if (e.target.closest('.vp-btn')) return;
+                const tripId = el.dataset.tripId;
+                if (tripId) selectTripById(parseInt(tripId));
+            });
+        });
+        list.querySelectorAll('.st-btn-map[data-trip-id]').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                const tripId = btn.dataset.tripId;
+                if (tripId) selectTripById(parseInt(tripId));
+            });
+        });
+    } catch(e) {
+        console.error('Failed to load trips:', e);
+        list.innerHTML = '<div class="vp-empty">Failed to load trips</div>';
     }
 }
 

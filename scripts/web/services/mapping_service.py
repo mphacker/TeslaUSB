@@ -1317,7 +1317,17 @@ def query_trips(db_path: str, limit: int = 50, offset: int = 0,
         params.extend([limit, offset])
 
         rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        trips = [dict(r) for r in rows]
+
+        # Enrich trips with event counts
+        for trip in trips:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM detected_events WHERE trip_id = ?",
+                (trip['id'],)
+            ).fetchone()
+            trip['event_count'] = row['cnt'] if row else 0
+
+        return trips
     finally:
         conn.close()
 

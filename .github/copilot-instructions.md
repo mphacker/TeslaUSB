@@ -56,13 +56,6 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - **Adding a new gated feature**: Add the image path check to `get_feature_availability()`, wrap the nav link in `base.html`, and add a `@bp.before_request` guard in the blueprint.
 - **fsck.py is not gated** — it's API-only with no nav link and handles missing images internally.
 
-## Thumbnail System
-- **On-demand generation**: Thumbnails generated via PyAV when requested (80x45px, 1-3s generation time).
-- **Queue-based loading**: Client-side queue with max 3 concurrent checks, 1-at-a-time generation to prevent memory exhaustion.
-- **7-day browser cache**: `Cache-Control: public, max-age=604800, immutable` for generated thumbnails.
-- **Placeholder handling**: `Cache-Control: no-store` prevents caching of transparent PNG placeholders.
-- **Memory optimization**: Tuned for Pi Zero 2 W (512MB RAM) - small thumbnails, concurrency limits, request abort on navigation.
-
 ## Memory Management (Pi Zero 2 W)
 - **Desktop services disabled**: pipewire, wireplumber, colord masked (saves ~30MB RAM).
 - **Persistent swap**: 1GB swap file at `/var/swap/fsck.swap` in /etc/fstab.

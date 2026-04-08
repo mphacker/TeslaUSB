@@ -136,7 +136,7 @@ cloud_archive:
 # SD card before Tesla's 1-hour circular buffer deletes them. Zero USB disruption.
 archive:
   enabled: true                          # Enable RecentClips archival
-  interval_minutes: 5                    # How often to check for new clips
+  interval_minutes: 5                    # How often to check for new clips (tighter = less data loss)
   retention_days: 30                     # Delete archived clips older than this
   min_free_space_gb: 10                  # Hard floor — stop archiving if SD card < this free
   max_size_gb: 50                        # Cap on total archive folder size

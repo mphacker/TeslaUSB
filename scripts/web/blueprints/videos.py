@@ -11,7 +11,6 @@ from utils import get_base_context
 from services.mode_service import current_mode
 from services.video_service import (
     get_teslacam_path,
-    get_video_files,
     get_session_videos,
     get_teslacam_folders,
     get_events,
@@ -56,7 +55,7 @@ def file_browser():
     """Video listing API for the map video panel.
 
     AJAX requests get JSON (used by map's loadVideoList).
-    Browser requests redirect to the map page.
+    Browser requests redirect to the map page (videos.html no longer exists).
     """
     # Browser requests → redirect to map
     if request.headers.get('X-Requested-With') != 'XMLHttpRequest':
@@ -116,17 +115,6 @@ def file_browser():
         'folder_structure': folder_structure
     })
 
-
-@videos_bp.route("/event/<folder>/<event_name>")
-def view_event(folder, event_name):
-    """Redirect to map page — video playback is now in the map overlay."""
-    return redirect(url_for("mapping.map_view"))
-
-
-@videos_bp.route("/session/<folder>/<session>")
-def view_session(folder, session):
-    """Redirect to map page — video playback is now in the map overlay."""
-    return redirect(url_for("mapping.map_view"))
 
 
 def _iter_file_range(path, start, end, chunk_size=256 * 1024):

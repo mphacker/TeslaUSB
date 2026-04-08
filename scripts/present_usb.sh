@@ -87,23 +87,34 @@ fi
 
 log_timing "Lock check completed"
 
+# Boot mode detection: skip Samba/unmount/loop cleanup when called at boot
+# (nothing is mounted yet — saves ~2-3 seconds)
+BOOT_MODE=0
+if [ "${1:-}" = "--boot" ]; then
+  BOOT_MODE=1
+  echo "Boot mode: skipping Samba/unmount/loop cleanup (nothing mounted yet)"
+  log_timing "Boot mode — skipping cleanup"
+fi
+
 echo "Switching to USB gadget presentation mode..."
 
-# Ask Samba to drop any open handles before shutting it down
-echo "Closing Samba shares..."
-sudo smbcontrol all close-share gadget_part1 2>/dev/null || true
-sudo smbcontrol all close-share gadget_part2 2>/dev/null || true
+if [ $BOOT_MODE -eq 0 ]; then
+  # Ask Samba to drop any open handles before shutting it down
+  echo "Closing Samba shares..."
+  sudo smbcontrol all close-share gadget_part1 2>/dev/null || true
+  sudo smbcontrol all close-share gadget_part2 2>/dev/null || true
 
 # Stop Samba so nothing can reopen the image while we transition
-echo "Stopping Samba services..."
-sudo systemctl stop smbd || true
-sudo systemctl stop nmbd || true
+  echo "Stopping Samba services..."
+  sudo systemctl stop smbd || true
+  sudo systemctl stop nmbd || true
 
-# Force all buffered data to disk before unmounting
-echo "Flushing buffered writes to disk..."
-sync
-# Brief pause to ensure filesystem metadata is stable (reduced from 1s)
-sleep 0.3
+  # Force all buffered data to disk before unmounting
+  echo "Flushing buffered writes to disk..."
+  sync
+  # Brief pause to ensure filesystem metadata is stable (reduced from 1s)
+  sleep 0.3
+fi # end BOOT_MODE check
 
 # Helper to unmount even if Samba clients are still attached
 unmount_with_retry() {
@@ -139,7 +150,8 @@ unmount_with_retry() {
   return 0
 }
 
-# Unmount drives if mounted
+# Unmount drives if mounted (skip at boot — nothing is mounted)
+if [ $BOOT_MODE -eq 0 ]; then
 log_timing "Starting unmount sequence"
 echo "Unmounting drives..."
 UNMOUNT_TARGETS=("$MNT_DIR/part1" "$MNT_DIR/part2")
@@ -196,6 +208,7 @@ done
 # Brief pause for loop device cleanup to complete
 sleep 0.2
 log_timing "Loop devices cleaned up"
+fi # end BOOT_MODE unmount/cleanup skip
 
 # ============================================================================
 # Boot-time filesystem check and repair (optional, ~1 second total)
@@ -205,8 +218,14 @@ LOOP_CAM=""
 LOOP_LIGHTSHOW=""
 LOOP_MUSIC=""
 
-if [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
-  echo "Running boot-time filesystem check and repair..."
+# Skip fsck at boot — USB gadget presentation is #1 priority.
+# fsck runs on edit→present transitions (non-boot mode) to catch corruption.
+# At boot, the images were either: (a) freshly created, or (b) previously fsck'd.
+if [ $BOOT_MODE -eq 1 ]; then
+  echo "Boot mode: deferring fsck (USB presentation is priority)"
+  log_timing "fsck deferred (boot mode)"
+elif [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
+  echo "Running filesystem check and repair (parallel)..."
 
   # Create loop devices for fsck (will be reused for local mounts too)
   LOOP_CAM=$(create_loop "$IMG_CAM")
@@ -222,59 +241,41 @@ if [ "${BOOT_FSCK_ENABLED:-false}" = "true" ]; then
     FS_TYPE_MUSIC=$(sudo blkid -o value -s TYPE "$LOOP_MUSIC" 2>/dev/null || echo "vfat")
   fi
 
-  # Run fsck on TeslaCam (part1)
-  echo "  Checking TeslaCam ($FS_TYPE_CAM)..."
-  if [ "$FS_TYPE_CAM" = "exfat" ]; then
-    if sudo fsck.exfat -p "$LOOP_CAM" 2>&1; then
-      echo "    ✓ TeslaCam: clean"
+  # Helper to run fsck on a single partition
+  run_fsck() {
+    local label="$1" fs_type="$2" loop="$3"
+    if [ "$fs_type" = "exfat" ]; then
+      sudo fsck.exfat -p "$loop" >/dev/null 2>&1
     else
-      echo "    ⚠ TeslaCam: repaired or has issues"
+      sudo fsck.vfat -p "$loop" >/dev/null 2>&1
     fi
-  else
-    if sudo fsck.vfat -p "$LOOP_CAM" 2>&1; then
-      echo "    ✓ TeslaCam: clean"
+    local rc=$?
+    if [ $rc -eq 0 ]; then
+      echo "    ✓ $label: clean"
     else
-      echo "    ⚠ TeslaCam: repaired or has issues"
+      echo "    ⚠ $label: repaired or has issues (rc=$rc)"
     fi
-  fi
+  }
 
-  # Run fsck on LightShow (part2)
-  echo "  Checking LightShow ($FS_TYPE_LIGHTSHOW)..."
-  if [ "$FS_TYPE_LIGHTSHOW" = "exfat" ]; then
-    if sudo fsck.exfat -p "$LOOP_LIGHTSHOW" 2>&1; then
-      echo "    ✓ LightShow: clean"
-    else
-      echo "    ⚠ LightShow: repaired or has issues"
-    fi
-  else
-    if sudo fsck.vfat -p "$LOOP_LIGHTSHOW" 2>&1; then
-      echo "    ✓ LightShow: clean"
-    else
-      echo "    ⚠ LightShow: repaired or has issues"
-    fi
-  fi
-
+  # Run all fsck operations in parallel for speed
+  run_fsck "TeslaCam" "$FS_TYPE_CAM" "$LOOP_CAM" &
+  FSCK_PID1=$!
+  run_fsck "LightShow" "$FS_TYPE_LIGHTSHOW" "$LOOP_LIGHTSHOW" &
+  FSCK_PID2=$!
   if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
-    echo "  Checking Music ($FS_TYPE_MUSIC)..."
-    if [ "$FS_TYPE_MUSIC" = "exfat" ]; then
-      if sudo fsck.exfat -p "$LOOP_MUSIC" 2>&1; then
-        echo "    ✓ Music: clean"
-      else
-        echo "    ⚠ Music: repaired or has issues"
-      fi
-    else
-      if sudo fsck.vfat -p "$LOOP_MUSIC" 2>&1; then
-        echo "    ✓ Music: clean"
-      else
-        echo "    ⚠ Music: repaired or has issues"
-      fi
-    fi
+    run_fsck "Music" "$FS_TYPE_MUSIC" "$LOOP_MUSIC" &
+    FSCK_PID3=$!
   fi
 
-  # Note: Loop devices (LOOP_CAM, LOOP_LIGHTSHOW, LOOP_MUSIC) preserved for later reuse in local mounts
-  echo "  Loop devices preserved for local mount reuse"
+  # Wait for all fsck jobs to complete
+  wait $FSCK_PID1 || true
+  wait $FSCK_PID2 || true
+  if [ $MUSIC_ENABLED_BOOL -eq 1 ]; then
+    wait $FSCK_PID3 || true
+  fi
 
-  log_timing "Boot fsck completed"
+  echo "  Loop devices preserved for local mount reuse"
+  log_timing "Boot fsck completed (parallel)"
 else
   echo "Boot-time fsck disabled (set disk_images.boot_fsck_enabled: true to enable)"
 fi

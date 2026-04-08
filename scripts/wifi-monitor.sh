@@ -79,7 +79,12 @@ trap "WAKE_SIGNAL=1" USR1
 
 sleep_interval() {
     WAKE_SIGNAL=0
-    sleep "$CHECK_INTERVAL" 2>/dev/null || true
+    # Adaptive interval: faster when disconnected (searching), slower when connected
+    local interval="$CHECK_INTERVAL"
+    if ! link_up 2>/dev/null; then
+        interval=$((CHECK_INTERVAL < 20 ? CHECK_INTERVAL : 20))
+    fi
+    sleep "$interval" 2>/dev/null || true
 }
 
 ensure_runtime_dir() {
@@ -409,7 +414,22 @@ while true; do
                 FAILURE_COUNT=0
                 LAST_GOOD_TS=$(date +%s)
             else
-                log "Recovery attempts failed"
+                # Last resort: try explicit nmcli reconnect to configured connection
+                log "Standard recovery failed; trying explicit nmcli reconnect"
+                local active_conn
+                active_conn=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep ':.*wireless' | head -1 | cut -d: -f1)
+                if [ -n "$active_conn" ]; then
+                    nmcli connection up "$active_conn" 2>/dev/null && sleep 5
+                    if check_wifi; then
+                        log "Recovery successful after explicit nmcli reconnect"
+                        FAILURE_COUNT=0
+                        LAST_GOOD_TS=$(date +%s)
+                    else
+                        log "All recovery attempts failed"
+                    fi
+                else
+                    log "No wireless connection profile found for reconnect"
+                fi
             fi
         fi
 

@@ -4,7 +4,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/analytics.css') }}">
 
 <div class="container">
-    <h2>📊 Storage Analytics Dashboard</h2>
+    <h2><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use></svg> Storage Analytics Dashboard</h2>
 
     <!-- Storage Health Status -->
     {% set health = analytics.storage_health %}

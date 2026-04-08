@@ -289,11 +289,14 @@ cleanup_gadget_files() {
 }
 
 # Function to remove image files (optional)
+# WARNING: This is a destructive operation. IMG files contain user data.
+# Only used during full uninstall — never during normal operation.
 cleanup_images() {
   local remove_images="$1"
 
   if [ "$remove_images" = "yes" ]; then
-    echo "Removing disk image files..."
+    echo "⚠️  Removing disk image files (user explicitly requested full cleanup)..."
+    echo "  This will PERMANENTLY DELETE all TeslaCam footage and LightShow data."
 
     if [ -f "$IMG_CAM_PATH" ]; then
       echo "  Removing TeslaCam image: $IMG_CAM_PATH"
@@ -305,7 +308,7 @@ cleanup_images() {
       rm -f "$IMG_LIGHTSHOW_PATH"
     fi
   else
-    echo "Preserving disk image files:"
+    echo "✓ Preserving disk image files (protected):"
     [ -f "$IMG_CAM_PATH" ] && echo "  - $IMG_CAM_PATH"
     [ -f "$IMG_LIGHTSHOW_PATH" ] && echo "  - $IMG_LIGHTSHOW_PATH"
   fi

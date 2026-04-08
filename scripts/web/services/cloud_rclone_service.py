@@ -627,6 +627,7 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
             logger.info("Archive: rclone copy %s → %s", local_path, remote_dest)
             result = subprocess.run(
                 [
+                    "nice", "-n", "19", "ionice", "-c", "3",
                     "rclone", "copy",
                     "--config", conf_path,
                     "--bwlimit", f"{max_mbps}M",
@@ -656,6 +657,7 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
                            i + 1, len(files), f, src_size)
                 r = subprocess.run(
                     [
+                        "nice", "-n", "19", "ionice", "-c", "3",
                         "rclone", "copyto",
                         "--config", conf_path,
                         "--bwlimit", f"{max_mbps}M",

@@ -1,11 +1,14 @@
 [Unit]
-Description=Present USB gadget at boot (with optional cleanup)
-After=multi-user.target
+Description=Present USB gadget at boot
+After=teslausb-safe-mode.service multi-user.target
 Wants=multi-user.target
+# Skip in safe mode (3+ reboots in 10 min)
+ConditionPathExists=!/run/teslausb-safe-mode
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash __GADGET_DIR__/scripts/boot_present_with_cleanup.sh
+# Present USB FIRST — no cleanup wrapper. Deferred tasks run separately.
+ExecStart=/bin/bash __GADGET_DIR__/scripts/present_usb.sh --boot
 RemainAfterExit=yes
 User=root
 

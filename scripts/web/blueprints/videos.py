@@ -11,7 +11,6 @@ from utils import get_base_context
 from services.mode_service import current_mode
 from services.video_service import (
     get_teslacam_path,
-    get_video_files,
     get_session_videos,
     get_teslacam_folders,
     get_events,
@@ -56,7 +55,7 @@ def file_browser():
     """Video listing API for the map video panel.
 
     AJAX requests get JSON (used by map's loadVideoList).
-    Browser requests redirect to the map page.
+    Browser requests redirect to the map page (videos.html no longer exists).
     """
     # Browser requests → redirect to map
     if request.headers.get('X-Requested-With') != 'XMLHttpRequest':
@@ -82,10 +81,24 @@ def file_browser():
     folder_structure = 'events'
 
     if current_folder:
-        folder_path = os.path.join(teslacam_path, current_folder)
+        # Handle ArchivedClips (SD card, not on USB image)
+        if current_folder == 'ArchivedClips':
+            try:
+                from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+                if ARCHIVE_ENABLED:
+                    folder_path = ARCHIVE_DIR
+                else:
+                    return jsonify({'events': [], 'has_next': False, 'folder_structure': 'flat'})
+            except ImportError:
+                return jsonify({'events': [], 'has_next': False, 'folder_structure': 'flat'})
+        else:
+            folder_path = os.path.join(teslacam_path, current_folder)
         if os.path.isdir(folder_path):
             folder_info = next((f for f in folders if f['name'] == current_folder), None)
-            folder_structure = folder_info['structure'] if folder_info else 'events'
+            if current_folder == 'ArchivedClips':
+                folder_structure = 'flat'
+            else:
+                folder_structure = folder_info['structure'] if folder_info else 'events'
 
             if folder_structure == 'flat':
                 events, total_events = group_videos_by_session(folder_path, page=page_num, per_page=per_page)
@@ -116,17 +129,6 @@ def file_browser():
         'folder_structure': folder_structure
     })
 
-
-@videos_bp.route("/event/<folder>/<event_name>")
-def view_event(folder, event_name):
-    """Redirect to map page — video playback is now in the map overlay."""
-    return redirect(url_for("mapping.map_view"))
-
-
-@videos_bp.route("/session/<folder>/<session>")
-def view_session(folder, session):
-    """Redirect to map page — video playback is now in the map overlay."""
-    return redirect(url_for("mapping.map_view"))
 
 
 def _iter_file_range(path, start, end, chunk_size=256 * 1024):
@@ -418,9 +420,14 @@ def delete_event(folder, event_name):
     try:
         if folder_structure == 'flat':
             # RecentClips: Delete all videos matching the session timestamp
+            from services.file_safety import is_protected_file
             session_videos = get_session_videos(folder_path, event_name)
             for video in session_videos:
                 try:
+                    if is_protected_file(video['path']):
+                        logger.error("BLOCKED deletion of protected file: %s", video['path'])
+                        error_count += 1
+                        continue
                     os.remove(video['path'])
                     deleted_count += 1
                     deleted_files.append(video['name'])
@@ -445,8 +452,13 @@ def delete_event(folder, event_name):
                         deleted_count += 1
                         deleted_files.append(entry.name)
 
-            # Delete the entire folder
-            shutil.rmtree(event_path)
+            # Delete the entire folder (with IMG protection)
+            from services.file_safety import safe_rmtree
+            if not safe_rmtree(event_path):
+                return jsonify({
+                    'success': False,
+                    'error': 'Refused: folder contains protected files'
+                }), 403
 
     except Exception as e:
         logger.error(f"Error deleting event {event_name}: {e}")

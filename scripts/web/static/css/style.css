@@ -2667,3 +2667,18 @@ details summary span:first-of-type {
   width: 16px;
   height: 16px;
 }
+
+/* ── Button Components ── */
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: var(--radius-md, 8px); font-size: 0.875rem; font-weight: 500; border: 1px solid transparent; cursor: pointer; transition: all 150ms ease; text-decoration: none; line-height: 1.4; min-height: 44px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: var(--accent-primary, #3B82F6); color: #fff; border-color: var(--accent-primary, #3B82F6); }
+.btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
+.btn-secondary { background: transparent; color: var(--text-primary); border-color: var(--border-color, var(--border)); }
+.btn-secondary:hover:not(:disabled) { background: var(--bg-secondary); }
+.btn-danger { background: var(--accent-danger, #EF4444); color: #fff; border-color: var(--accent-danger, #EF4444); }
+.btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
+.btn-ghost { background: transparent; color: var(--text-secondary); border: none; padding: 8px; }
+.btn-ghost:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-secondary); }
+.btn-sm { padding: 4px 10px; font-size: 0.8125rem; min-height: 36px; }
+.btn-icon { padding: 8px; min-width: 44px; min-height: 44px; justify-content: center; }
+.btn .nav-icon { width: 16px; height: 16px; flex-shrink: 0; }

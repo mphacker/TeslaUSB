@@ -33,6 +33,7 @@ from config import (
     CLOUD_ARCHIVE_MAX_UPLOAD_MBPS,
     CLOUD_ARCHIVE_DB_PATH,
     CLOUD_PROVIDER_CREDS_PATH,
+    CLOUD_ARCHIVE_SYNC_NON_EVENT,
 )
 
 # ---------------------------------------------------------------------------
@@ -213,6 +214,70 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
+# Priority Scoring
+# ---------------------------------------------------------------------------
+
+def _score_event_priority(event_dir: str) -> int:
+    """Score an event directory for sync priority (lower = higher priority).
+
+    Priority order:
+    1. Events with event.json containing sentry/save triggers (score 0-99)
+    2. Events with geolocation data in geodata.db (score 100-199)
+    3. Other events (score 200+)
+
+    Within each tier: older events get lower scores (synced first).
+    """
+    import json
+    from datetime import datetime as _dt
+
+    score = 200  # Default: lowest priority
+    dir_name = os.path.basename(event_dir)
+
+    # Check for event.json (Tesla's event metadata)
+    event_json = os.path.join(event_dir, 'event.json')
+    if os.path.isfile(event_json):
+        try:
+            with open(event_json, 'r') as f:
+                data = json.load(f)
+            reason = data.get('reason', '')
+            if reason:
+                score = 0  # Has a Tesla event trigger — highest priority
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Check geodata.db for geolocation
+    if score >= 200:
+        try:
+            from config import MAPPING_ENABLED, MAPPING_DB_PATH
+            if MAPPING_ENABLED:
+                from services.mapping_service import get_db_connection
+                conn = get_db_connection(MAPPING_DB_PATH)
+                # Escape LIKE wildcards in dir_name to prevent unintended matches
+                safe_name = dir_name.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM waypoints WHERE video_path LIKE ? ESCAPE '\\'",
+                    (f'%{safe_name}%',)
+                ).fetchone()
+                conn.close()
+                if row and row['cnt'] > 0:
+                    score = 100  # Has geolocation — medium priority
+        except Exception:
+            pass
+
+    # Add age-based sub-score (older = lower number = higher priority)
+    try:
+        # Parse timestamp from directory name (e.g., "2026-01-15_14-30-45")
+        ts = _dt.strptime(dir_name[:19], '%Y-%m-%d_%H-%M-%S')
+        # Days old (capped at 99 to stay within tier)
+        days_old = min(99, (_dt.now() - ts).days)
+        score += (99 - days_old)  # Older = lower score within tier
+    except (ValueError, TypeError):
+        score += 50  # Can't parse date — middle of tier
+
+    return score
+
+
+# ---------------------------------------------------------------------------
 # File Discovery
 # ---------------------------------------------------------------------------
 
@@ -279,8 +344,8 @@ def _discover_events(
     except ImportError:
         pass
 
-    # Sort oldest-first (event names are timestamps: 2026-01-01_12-00-00)
-    events.sort(key=lambda t: t[1])
+    # Sort by priority (lower score = sync first)
+    events.sort(key=lambda t: _score_event_priority(t[0]))
 
     return events
 
@@ -499,6 +564,7 @@ def _run_sync(
                 # gadget and web service stay responsive during uploads
                 result = subprocess.run(
                     [
+                        "nice", "-n", "19",
                         "ionice", "-c", "3",
                         "rclone", "copy",
                         "--config", conf_path,

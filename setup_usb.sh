@@ -1430,6 +1430,24 @@ configure_service "$TEMPLATES_DIR/gadget_web.service" "$SERVICE_FILE"
 AUTO_SERVICE="/etc/systemd/system/present_usb_on_boot.service"
 configure_service "$TEMPLATES_DIR/present_usb_on_boot.service" "$AUTO_SERVICE"
 
+# Safe-mode boot detection service
+SAFE_MODE_SERVICE="/etc/systemd/system/teslausb-safe-mode.service"
+configure_service "$TEMPLATES_DIR/teslausb-safe-mode.service" "$SAFE_MODE_SERVICE"
+
+# Deferred boot tasks (cleanup, chime selection — runs AFTER USB is presented)
+DEFERRED_SERVICE="/etc/systemd/system/teslausb-deferred-tasks.service"
+configure_service "$TEMPLATES_DIR/teslausb-deferred-tasks.service" "$DEFERRED_SERVICE"
+
+# SSH protection drop-in (prevents sshd from being stopped/masked)
+for sshd_name in ssh sshd; do
+  SSHD_DROPIN_DIR="/etc/systemd/system/${sshd_name}.service.d"
+  if systemctl list-unit-files "${sshd_name}.service" >/dev/null 2>&1; then
+    mkdir -p "$SSHD_DROPIN_DIR"
+    cp "$TEMPLATES_DIR/sshd-protect.conf" "$SSHD_DROPIN_DIR/teslausb-protect.conf"
+    echo "  Installed SSH protection drop-in for ${sshd_name}.service"
+  fi
+done
+
 # Chime scheduler service
 CHIME_SCHEDULER_SERVICE="/etc/systemd/system/chime_scheduler.service"
 configure_service "$TEMPLATES_DIR/chime_scheduler.service" "$CHIME_SCHEDULER_SERVICE"
@@ -1471,6 +1489,15 @@ systemctl enable --now gadget_web.service || systemctl restart gadget_web.servic
 
 systemctl daemon-reload
 systemctl enable present_usb_on_boot.service || true
+
+# Enable safe-mode boot detection (must run before all other TeslaUSB services)
+systemctl enable teslausb-safe-mode.service || true
+
+# Enable deferred tasks (runs after USB is presented)
+systemctl enable teslausb-deferred-tasks.service || true
+
+# Ensure boot_deferred_tasks.sh is executable
+chmod +x "$SCRIPT_DIR/scripts/boot_deferred_tasks.sh"
 
 # Enable and start chime scheduler timer
 systemctl enable --now chime_scheduler.timer || systemctl restart chime_scheduler.timer

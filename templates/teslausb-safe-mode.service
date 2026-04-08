@@ -1,0 +1,26 @@
+[Unit]
+Description=TeslaUSB Safe Mode Boot Check
+DefaultDependencies=no
+Before=present_usb_on_boot.service gadget_web.service wifi-monitor.service chime_scheduler.timer cloud_archive_sync.timer network-optimizations.service
+After=local-fs.target
+StartLimitBurst=3
+StartLimitIntervalSec=600
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/web/helpers/safe_mode.py check
+# After successful boot check, start the stability timer in the background
+ExecStartPost=-/bin/sh -c '/usr/bin/python3 __GADGET_DIR__/scripts/web/helpers/safe_mode.py clear &'
+
+# If safe_mode.py check returns exit code 2, safe mode is active.
+# SuccessExitStatus makes systemd treat exit code 2 as success (service starts)
+# but the /run/teslausb-safe-mode flag file tells dependent services to skip.
+SuccessExitStatus=2
+
+# Restart policy — only on failure, with backoff
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

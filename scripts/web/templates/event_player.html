@@ -943,7 +943,7 @@
             <div class="camera-label" id="deleteLabel">Delete</div>
         </div>
         {% else %}
-        <div class="camera-option delete-option disabled" id="deleteButton" title="Switch to Edit Mode to delete videos">
+        <div class="camera-option delete-option disabled" id="deleteButton" title="Enable Network Sharing to delete videos">
             <i class="bi bi-trash camera-icon" id="deleteIcon"></i>
             <div class="camera-label" id="deleteLabel">Delete</div>
         </div>
@@ -1764,7 +1764,7 @@
 
         // Check if disabled (not in edit mode)
         if (button.classList.contains('disabled')) {
-            alert('Switch to Edit Mode to delete videos');
+            alert('Enable Network Sharing to delete videos');
             return;
         }
 

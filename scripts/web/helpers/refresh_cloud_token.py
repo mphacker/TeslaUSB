@@ -81,6 +81,26 @@ def main():
                     break
                 time.sleep(5)
             logger.info("Video indexing complete")
+
+            # Step 2.5: Index ArchivedClips on SD card (if enabled)
+            try:
+                from config import ARCHIVE_ENABLED, ARCHIVE_DIR
+                if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
+                    logger.info("Indexing ArchivedClips at %s...", ARCHIVE_DIR)
+                    trigger_auto_index(
+                        db_path=MAPPING_DB_PATH,
+                        teslacam_path=ARCHIVE_DIR,
+                        sample_rate=MAPPING_SAMPLE_RATE,
+                        thresholds=MAPPING_EVENT_THRESHOLDS,
+                        trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+                    )
+                    for _ in range(120):
+                        if not get_indexer_status().get('running'):
+                            break
+                        time.sleep(5)
+                    logger.info("ArchivedClips indexing complete")
+            except Exception as e:
+                logger.warning("ArchivedClips indexing failed (non-fatal): %s", e)
     except Exception as e:
         logger.warning("Video indexing failed (non-fatal): %s", e)
 

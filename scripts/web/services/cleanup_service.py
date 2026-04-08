@@ -418,6 +418,10 @@ class CleanupService:
         for video in cleanup_plan['files']:
             try:
                 if not dry_run:
+                    from services.file_safety import is_protected_file
+                    if is_protected_file(video['path']):
+                        errors.append(f"BLOCKED: {video['path']} is a protected file")
+                        continue
                     os.remove(video['path'])
                     logger.info(f"Deleted: {video['path']}")
                 else:

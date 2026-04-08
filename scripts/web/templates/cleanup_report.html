@@ -9,16 +9,16 @@
 {% block content %}
 <div class="cleanup-container">
     {% if dry_run %}
-        <h1>🧪 Test Run Complete</h1>
+        <h1><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use></svg> Test Run Complete</h1>
         <div class="alert alert-info">
-            <h2>ℹ️ Dry Run Mode</h2>
+            <h2><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg> Dry Run Mode</h2>
             <p>This was a test run - no files were actually deleted.</p>
             <p>The results below show what <em>would have</em> been deleted in a real cleanup.</p>
         </div>
     {% else %}
-        <h1>✅ Cleanup Complete</h1>
+        <h1><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg> Cleanup Complete</h1>
         <div class="alert alert-success">
-            <h2>🎉 Files Successfully Deleted</h2>
+            <h2><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-sparkles"></use></svg> Files Successfully Deleted</h2>
             <p>Your cleanup operation completed successfully.</p>
         </div>
     {% endif %}
@@ -26,7 +26,7 @@
     <!-- Summary -->
     <div class="report-summary">
         <div class="summary-card">
-            <div class="summary-icon">🗑️</div>
+            <div class="summary-icon"><svg class="nav-icon" style="width:20px;height:20px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg></div>
             <div class="summary-content">
                 <h3>{{ deleted_count }}</h3>
                 <p>Videos {% if dry_run %}Would Be {% endif %}Deleted</p>
@@ -34,7 +34,7 @@
         </div>
 
         <div class="summary-card">
-            <div class="summary-icon">💾</div>
+            <div class="summary-icon"><svg class="nav-icon" style="width:20px;height:20px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-hard-drive"></use></svg></div>
             <div class="summary-content">
                 <h3>{{ deleted_size_gb }} GB</h3>
                 <p>Space {% if dry_run %}Would Be {% endif %}Freed</p>
@@ -45,9 +45,9 @@
     {% if not dry_run and partition_usage %}
     <!-- Updated Storage Status -->
     <div class="storage-update">
-        <h2>📊 Updated Storage Status</h2>
+        <h2><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use></svg> Updated Storage Status</h2>
         <div class="partition-card">
-            <h3>🚗 TeslaCam Drive</h3>
+            <h3><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-car"></use></svg> TeslaCam Drive</h3>
             <div class="storage-stat">
                 <span class="stat-label">Total Space:</span>
                 <span class="stat-value">{{ partition_usage['total_gb'] }} GB</span>
@@ -72,24 +72,24 @@
     <!-- Action Buttons -->
     <div class="button-group">
         <a href="{{ url_for('analytics.dashboard') }}" class="btn btn-primary">
-            📊 View Analytics
+            <svg class="nav-icon" style="width:16px;height:16px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use></svg> View Analytics
         </a>
-        <a href="{{ url_for('videos.file_browser') }}" class="btn btn-secondary">
-            🎥 Browse Videos
+        <a href="{{ url_for('mapping.map_view') }}" class="btn btn-secondary">
+            <svg class="nav-icon" style="width:16px;height:16px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-video"></use></svg> Browse Videos
         </a>
         <a href="{{ url_for('cleanup.settings') }}" class="btn btn-secondary">
-            ⚙️ Cleanup Settings
+            <svg class="nav-icon" style="width:16px;height:16px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-settings"></use></svg> Cleanup Settings
         </a>
         {% if dry_run %}
         <a href="{{ url_for('cleanup.preview') }}" class="btn btn-danger">
-            ▶️ Run Real Cleanup
+            <svg class="nav-icon" style="width:16px;height:16px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-play"></use></svg> Run Real Cleanup
         </a>
         {% endif %}
     </div>
 
     {% if not dry_run %}
     <div class="help-text">
-        <h3>ℹ️ What's Next?</h3>
+        <h3><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg> What's Next?</h3>
         <ul>
             <li>Check the <strong>Analytics</strong> dashboard to see your updated storage usage</li>
             <li>Browse your <strong>Videos</strong> to verify the correct files were removed</li>

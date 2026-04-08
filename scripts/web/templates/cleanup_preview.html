@@ -8,7 +8,7 @@
 
 {% block content %}
 <div class="cleanup-container">
-    <h1>🔍 Cleanup Preview</h1>
+    <h1><svg class="nav-icon" style="width:20px;height:20px;vertical-align:middle;margin-right:4px" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-search"></use></svg> Cleanup Preview</h1>
     
     {% if cleanup_plan['total_count'] == 0 %}
         <div class="alert alert-success">

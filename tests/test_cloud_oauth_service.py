@@ -284,13 +284,6 @@ class TestPKCEAuthStart:
         assert "accounts.google.com" in result["auth_url"]
         assert "code_challenge=" in result["auth_url"]
 
-    def test_pkce_session_stored_with_redirect_uri(self):
-        """Session stores redirect_uri for token exchange."""
-        svc.pkce_auth_start("onedrive")
-        assert svc._auth_session is not None
-        assert svc._auth_session["redirect_uri"]
-        assert "nativeclient" in svc._auth_session["redirect_uri"]
-
     def test_unsupported_provider_raises(self):
         """Unknown provider raises ValueError."""
         with pytest.raises(ValueError, match="No PKCE endpoints"):

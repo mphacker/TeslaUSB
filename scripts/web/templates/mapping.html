@@ -1920,6 +1920,14 @@ async function loadVideoList(append) {
             return;
         }
 
+        // Show summary count on first page load
+        if (!append && data.total_count) {
+            const summary = document.createElement('div');
+            summary.className = 'st-summary';
+            summary.innerHTML = '<strong>' + data.total_count + ' Clip' + (data.total_count !== 1 ? 's' : '') + '</strong>';
+            list.appendChild(summary);
+        }
+
         data.events.forEach(function(ev) {
             const card = document.createElement('div');
             card.className = 'vp-clip';

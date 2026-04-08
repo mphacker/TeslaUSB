@@ -126,6 +126,7 @@ def file_browser():
         'events': compact_events,
         'has_next': (page_num * per_page) < total_events,
         'next_page': page_num + 1,
+        'total_count': total_events,
         'folder_structure': folder_structure
     })
 

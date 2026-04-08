@@ -622,7 +622,7 @@
     <div class="video-panel" id="videoPanel">
         <div class="video-panel-header">
             <div class="vp-tabs">
-                <button class="vp-tab active" id="vpTabSentry" onclick="vpShowSentry()">Events</button>
+                <button class="vp-tab active" id="vpTabSentry" onclick="vpShowSentry()">Recent Events</button>
                 <button class="vp-tab" id="vpTabClips" onclick="vpShowClips()">All Clips</button>
             </div>
             <button class="close-btn" onclick="toggleVideoPanel()" aria-label="Close video panel">✕</button>
@@ -632,6 +632,7 @@
                 <option value="RecentClips">Recent Clips</option>
                 <option value="SavedClips">Saved Clips</option>
                 <option value="SentryClips">Sentry Clips</option>
+                <option value="ArchivedClips">Archived Clips</option>
             </select>
         </div>
         <div class="video-panel-list" id="vpList">
@@ -1761,14 +1762,16 @@ async function loadSentryTimeline() {
             html += '<div class="st-date">' + dateStr + '</div>';
             html += '<div class="st-meta">' + metaHtml + '</div>';
             html += '<div class="st-actions">';
-            if (isFolderEvent || videoPath) {
-                html += '<button class="vp-btn st-btn-play" title="Play">&#9654;</button>';
-            }
             if (isFolderEvent) {
+                // Sentry/saved events — always have a play button
+                html += '<button class="vp-btn st-btn-play" title="Play">&#9654;</button>';
                 html += '<button class="vp-btn st-btn-dl" title="Download ZIP">&#11015;</button>';
-            }
-            if (hasCoords) {
+            } else if (hasCoords) {
+                // Driving events with coordinates — show on map instead of play
                 html += '<button class="vp-btn st-btn-map" title="Show on Map" data-lat="' + ev.lat + '" data-lon="' + ev.lon + '">&#128205;</button>';
+            } else if (videoPath) {
+                // Driving events without coordinates — play button as fallback
+                html += '<button class="vp-btn st-btn-play" title="Play">&#9654;</button>';
             }
             if (isFolderEvent) {
                 html += '<button class="vp-btn vp-btn-danger st-btn-del" title="Delete">&#128465;</button>';
@@ -1824,7 +1827,9 @@ async function loadVideoList(append) {
                     (reason ? '<div class="vp-clip-reason">' + safeReason + '</div>' : '') +
                 '</div>' +
                 '<div class="vp-actions">' +
-                    '<button class="vp-btn vp-btn-play" title="Play">&#9654;</button>' +
+                    (ev.city
+                        ? '<button class="vp-btn vp-btn-map" title="Show on Map">&#128205;</button>'
+                        : '<button class="vp-btn vp-btn-play" title="Play">&#9654;</button>') +
                     '<button class="vp-btn vp-btn-dl" title="Download ZIP">&#11015;</button>' +
                     {% if cloud_provider_connected %}'<button class="vp-btn vp-btn-archive" title="Archive to Cloud" style="color:#32ADE6">&#9729;</button>' +{% endif %}
                     '<button class="vp-btn vp-btn-danger vp-btn-del" title="Delete">&#128465;</button>' +
@@ -2020,6 +2025,7 @@ document.getElementById('vpList').addEventListener('click', function(e) {
     var name = clip.dataset.name;
     var structure = clip.dataset.structure;
     if (btn.classList.contains('vp-btn-play')) vpPlay(folder, name, structure);
+    else if (btn.classList.contains('vp-btn-map')) vpPlay(folder, name, structure);
     else if (btn.classList.contains('vp-btn-dl')) vpDownload(folder, name);
     else if (btn.classList.contains('vp-btn-archive')) vpArchive(folder, name, btn);
     else if (btn.classList.contains('vp-btn-del')) vpDelete(folder, name);

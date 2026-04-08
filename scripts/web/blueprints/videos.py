@@ -81,10 +81,24 @@ def file_browser():
     folder_structure = 'events'
 
     if current_folder:
-        folder_path = os.path.join(teslacam_path, current_folder)
+        # Handle ArchivedClips (SD card, not on USB image)
+        if current_folder == 'ArchivedClips':
+            try:
+                from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+                if ARCHIVE_ENABLED:
+                    folder_path = ARCHIVE_DIR
+                else:
+                    return jsonify({'events': [], 'has_next': False, 'folder_structure': 'flat'})
+            except ImportError:
+                return jsonify({'events': [], 'has_next': False, 'folder_structure': 'flat'})
+        else:
+            folder_path = os.path.join(teslacam_path, current_folder)
         if os.path.isdir(folder_path):
             folder_info = next((f for f in folders if f['name'] == current_folder), None)
-            folder_structure = folder_info['structure'] if folder_info else 'events'
+            if current_folder == 'ArchivedClips':
+                folder_structure = 'flat'
+            else:
+                folder_structure = folder_info['structure'] if folder_info else 'events'
 
             if folder_structure == 'flat':
                 events, total_events = group_videos_by_session(folder_path, page=page_num, per_page=per_page)

@@ -121,6 +121,28 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Warning: Failed to start archive timer: {e}")
 
+    # Start file watcher for new video detection (triggers indexing + cloud sync)
+    try:
+        from services.file_watcher_service import start_watcher, register_callback
+        watch_paths = []
+        # Watch TeslaCam on USB (RO mount)
+        from config import RO_MNT_DIR
+        teslacam_ro = os.path.join(RO_MNT_DIR, 'part1-ro', 'TeslaCam')
+        if os.path.isdir(teslacam_ro):
+            watch_paths.append(teslacam_ro)
+        # Watch ArchivedClips on SD card
+        try:
+            from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+            if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
+                watch_paths.append(ARCHIVE_DIR)
+        except ImportError:
+            pass
+        if watch_paths:
+            start_watcher(watch_paths)
+            print(f"File watcher started for {len(watch_paths)} paths")
+    except Exception as e:
+        print(f"Warning: Failed to start file watcher: {e}")
+
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:
         from waitress import serve

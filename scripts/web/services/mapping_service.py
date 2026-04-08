@@ -1319,13 +1319,19 @@ def query_trips(db_path: str, limit: int = 50, offset: int = 0,
         rows = conn.execute(sql, params).fetchall()
         trips = [dict(r) for r in rows]
 
-        # Enrich trips with event counts
+        # Enrich trips with event counts and video counts
         for trip in trips:
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM detected_events WHERE trip_id = ?",
                 (trip['id'],)
             ).fetchone()
             trip['event_count'] = row['cnt'] if row else 0
+
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT video_path) as cnt FROM waypoints WHERE trip_id = ? AND video_path IS NOT NULL",
+                (trip['id'],)
+            ).fetchone()
+            trip['video_count'] = row['cnt'] if row else 0
 
         return trips
     finally:

@@ -1846,7 +1846,8 @@ async function loadTripsTimeline() {
 
         const trips = data.trips;
         let html = '<div class="sentry-timeline">';
-        html += '<div class="st-summary"><strong>' + trips.length + ' Trip' + (trips.length !== 1 ? 's' : '') + '</strong></div>';
+        const totalVideos = trips.reduce(function(s, t) { return s + (t.video_count || 0); }, 0);
+        html += '<div class="st-summary"><strong>' + trips.length + ' Trip' + (trips.length !== 1 ? 's' : '') + '</strong>' + (totalVideos > 0 ? ' \u00b7 <span>' + totalVideos + ' video' + (totalVideos !== 1 ? 's' : '') + '</span>' : '') + '</div>';
 
         trips.forEach(function(trip) {
             const dateStr = formatLocalTime(trip.start_time);
@@ -1922,9 +1923,10 @@ async function loadVideoList(append) {
 
         // Show summary count on first page load
         if (!append && data.total_count) {
+            const totalVids = data.total_video_count || 0;
             const summary = document.createElement('div');
             summary.className = 'st-summary';
-            summary.innerHTML = '<strong>' + data.total_count + ' Clip' + (data.total_count !== 1 ? 's' : '') + '</strong>';
+            summary.innerHTML = '<strong>' + data.total_count + ' Clip' + (data.total_count !== 1 ? 's' : '') + '</strong>' + (totalVids > 0 ? ' \u00b7 <span>' + totalVids + ' video' + (totalVids !== 1 ? 's' : '') + '</span>' : '');
             list.appendChild(summary);
         }
 

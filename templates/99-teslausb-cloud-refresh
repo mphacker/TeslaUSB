@@ -1,7 +1,7 @@
 #!/bin/bash
 # NetworkManager dispatcher — "car arrived home" handler.
 #
-# Called automatically by NetworkManager when WiFi connects.
+# Called automatically by NetworkManager when WiFi connects or reconnects.
 # Triggers: video indexing → cloud sync (in background).
 #
 # This is the main automation trigger — the user parks at home,
@@ -13,16 +13,43 @@
 INTERFACE="$1"
 ACTION="$2"
 
-# Only act on wlan0 coming up
+# Only act on wlan0 events
 [ "$INTERFACE" = "wlan0" ] || exit 0
-[ "$ACTION" = "up" ] || exit 0
+
+# Trigger on initial connect and on connectivity restoration
+case "$ACTION" in
+    up|connectivity-change)
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+# For connectivity-change, only act when we have full connectivity
+if [ "$ACTION" = "connectivity-change" ]; then
+    CONNECTIVITY="${CONNECTIVITY_STATE:-unknown}"
+    [ "$CONNECTIVITY" = "FULL" ] || exit 0
+fi
 
 GADGET_DIR="__GADGET_DIR__"
+LOCK="/run/teslausb-wifi-handler.lock"
+
+# Prevent multiple concurrent runs
+if [ -f "$LOCK" ]; then
+    LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) ))
+    # Only skip if lock is fresh (< 5 minutes)
+    [ "$LOCK_AGE" -lt 300 ] && exit 0
+fi
+touch "$LOCK"
 
 # Delay briefly to let the network stabilize
 sleep 10
 
 # Run the WiFi handler (indexes videos + syncs to cloud, non-blocking)
 nice -n 19 /usr/bin/python3 "$GADGET_DIR/scripts/web/helpers/refresh_cloud_token.py" &
+
+# Clean up lock after handler finishes (background)
+HANDLER_PID=$!
+(wait $HANDLER_PID 2>/dev/null; rm -f "$LOCK") &
 
 exit 0

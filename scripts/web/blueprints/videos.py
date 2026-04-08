@@ -122,11 +122,26 @@ def file_browser():
             compact_event['encrypted_videos'] = encrypted
         compact_events.append(compact_event)
 
+    # Count total video files across all events in this folder
+    total_video_files = 0
+    if current_folder and folder_path and os.path.isdir(folder_path):
+        try:
+            for entry in os.scandir(folder_path):
+                if entry.is_dir(follow_symlinks=False):
+                    for sub in os.scandir(entry.path):
+                        if sub.name.lower().endswith('.mp4'):
+                            total_video_files += 1
+                elif entry.name.lower().endswith('.mp4'):
+                    total_video_files += 1
+        except (PermissionError, OSError):
+            pass
+
     return jsonify({
         'events': compact_events,
         'has_next': (page_num * per_page) < total_events,
         'next_page': page_num + 1,
         'total_count': total_events,
+        'total_video_count': total_video_files,
         'folder_structure': folder_structure
     })
 

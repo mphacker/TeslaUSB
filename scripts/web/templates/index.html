@@ -57,9 +57,9 @@
     </div>
     {% endif %}
 
-    <!-- WiFi Configuration -->
+    <!-- WiFi Networks -->
     <details class="settings-section" open>
-        <summary>WiFi Configuration</summary>
+        <summary>WiFi Networks</summary>
         <div class="section-content">
             {% if wifi_change_status %}
             <div id="wifiStatusAlert" style="margin: 0 0 12px; padding: 12px; border-radius: 6px; position: relative;
@@ -95,48 +95,29 @@
             </div>
             {% endif %}
 
-            <div style="margin-bottom: 12px;">
-                {% if wifi_status.connected %}
-                    <span style="color: var(--success-text);">✓ Connected to: <code>{{ wifi_status.current_ssid }}</code></span>
-                    {% if wifi_status.signal and wifi_status.signal != 'Unknown' %}
-                        <span style="margin-left: 8px; font-size: 0.9em; color: var(--text-secondary);">(Signal: {{ wifi_status.signal }}%)</span>
-                    {% endif %}
-                {% else %}
-                    <span style="color: var(--ds-accent-warning);">⚠ Not connected to WiFi</span>
-                {% endif %}
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                <p style="font-size:0.85em;color:var(--text-secondary);margin:0">Networks higher in the list are preferred when multiple are in range.</p>
+                <button class="edit-btn" onclick="scanAndRefreshNetworks()" id="btnWifiScan" style="padding:4px 10px;font-size:0.85em;white-space:nowrap">Scan</button>
             </div>
-
-            <div style="padding: 12px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: var(--radius-md, 8px);">
-                <strong style="color: var(--text-primary);">Update WiFi Credentials:</strong>
-                <form method="post" action="{{ url_for('mode_control.configure_wifi') }}" id="wifiConfigForm" style="margin-top: 8px;">
-                    <div style="margin-bottom: 8px;">
-                        <label for="wifi_ssid_select" style="display: inline-block; width: 120px; color: var(--text-primary);">Network Name:</label>
-                        <div style="display: inline-flex; align-items: center; gap: 4px;">
-                            <select id="wifi_ssid_select"
-                                    style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                                <option value="">-- Select Network --</option>
-                                <option value="__hidden__">Enter hidden SSID...</option>
-                            </select>
-                            <button type="button" id="scanWifiBtn" onclick="scanWifiNetworks()"
-                                    style="padding: 4px 8px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer; white-space: nowrap;"
-                                    title="Scan for available networks">🔄 Scan</button>
-                        </div>
-                        <label for="wifi_ssid" class="sr-only" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0;">Hidden SSID</label>
-                        <input type="text" id="wifi_ssid" name="wifi_ssid" maxlength="32" required
-                               placeholder="Enter WiFi SSID"
-                               style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px; margin-left: 124px; margin-top: 4px; display: none;">
-                        <span id="wifi_ssid_hint" style="font-size: 0.85em; color: var(--text-secondary); display: none;">(1-32 chars)</span>
-                    </div>
-                    <div id="wifi_password_row" style="margin-bottom: 8px;">
-                        <label for="wifi_password" style="display: inline-block; width: 120px; color: var(--text-primary);">Password:</label>
-                        <input type="password" id="wifi_password" name="wifi_password" minlength="8" maxlength="63"
-                               placeholder="Enter WiFi password"
-                               style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                        <button type="button" onclick="toggleWifiPassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
-                        <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
-                    </div>
-                    <button type="submit" class="edit-btn" id="updateWifiBtn" onclick="return confirmWifiUpdate()">Update WiFi Credentials</button>
-                </form>
+            <div id="savedNetworksList">
+                <div style="text-align:center;padding:12px;color:var(--text-secondary)">Loading...</div>
+            </div>
+            <div style="margin-top:12px">
+                <button class="edit-btn" onclick="toggleAddNetwork()" id="btnAddNetwork" style="padding:4px 10px;font-size:0.85em">+ Add Network</button>
+            </div>
+            <div id="addNetworkPanel" style="display:none;margin-top:12px;padding:12px;background-color:var(--bg-info);border:1px solid var(--border-color);border-radius:var(--radius-md,8px)">
+                <div style="margin-bottom:8px">
+                    <label for="newWifiSSID" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">SSID</label>
+                    <input type="text" id="newWifiSSID" maxlength="32" placeholder="Network name" list="wifiScanResults"
+                           style="width:100%;max-width:300px;padding:4px;background-color:var(--form-input-bg);color:var(--text-primary);border:1px solid var(--border-input);border-radius:3px">
+                    <datalist id="wifiScanResults"></datalist>
+                </div>
+                <div style="margin-bottom:8px">
+                    <label for="newWifiPassword" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">Password</label>
+                    <input type="password" id="newWifiPassword" minlength="8" maxlength="63" placeholder="Password (empty for open)"
+                           style="width:100%;max-width:300px;padding:4px;background-color:var(--form-input-bg);color:var(--text-primary);border:1px solid var(--border-input);border-radius:3px">
+                </div>
+                <button class="edit-btn" onclick="addWifiNetwork()" id="addWifiBtn" style="padding:4px 10px;font-size:0.85em">Connect</button>
             </div>
 
             <div style="margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);">
@@ -321,7 +302,7 @@ function togglePassword(btn) {
 }
 
 function toggleWifiPassword(btn) {
-    const passField = document.getElementById('wifi_password');
+    const passField = document.getElementById('newWifiPassword');
     if (passField.type === 'password') {
         passField.type = 'text';
         btn.textContent = 'Hide';
@@ -329,6 +310,123 @@ function toggleWifiPassword(btn) {
         passField.type = 'password';
         btn.textContent = 'Show';
     }
+}
+
+// --- WiFi Network Management ---
+function loadSavedNetworks() {
+    fetch('{{ url_for("mode_control.api_wifi_saved") }}')
+    .then(r => r.json())
+    .then(networks => {
+        const el = document.getElementById('savedNetworksList');
+        if (!networks.length || networks.error) {
+            el.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text-secondary)">No saved networks</div>';
+            return;
+        }
+        let html = '';
+        networks.forEach((net, idx) => {
+            const dot = net.active ? '<span style="color:var(--success-text, #22c55e);margin-right:6px">●</span>' : '<span style="margin-right:14px"></span>';
+            const signal = net.in_range ? '<span style="font-size:0.8em;color:var(--text-secondary)">' + getSignalIcon(net.signal) + ' ' + net.signal + '%</span>' : '<span style="font-size:0.8em;color:var(--text-secondary)">Not in range</span>';
+            const name = (net.ssid || net.name).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const escapedName = net.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            html += '<div style="display:flex;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border-color, var(--border));gap:6px">';
+            html += dot;
+            html += '<span style="flex:1;font-size:0.875rem;font-weight:' + (net.active ? '600' : '400') + '">' + name + '</span>';
+            html += signal;
+            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',-1)" title="Move up" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === 0 ? ' disabled' : '') + '>▲</button>';
+            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',1)" title="Move down" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === networks.length - 1 ? ' disabled' : '') + '>▼</button>';
+            html += '<button class="present-btn" onclick="forgetNetwork(\'' + escapedName + '\')" title="Forget" style="padding:2px 6px;font-size:0.8em;min-height:auto">✕</button>';
+            html += '</div>';
+        });
+        el.innerHTML = html;
+        el._networks = networks;
+    })
+    .catch(e => {
+        document.getElementById('savedNetworksList').innerHTML = '<div style="color:var(--error-text)">Failed to load networks</div>';
+    });
+}
+
+function moveNetwork(name, direction) {
+    const el = document.getElementById('savedNetworksList');
+    const nets = el._networks;
+    if (!nets) return;
+    const idx = nets.findIndex(n => n.name === name);
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= nets.length) return;
+    [nets[idx], nets[newIdx]] = [nets[newIdx], nets[idx]];
+    const ordered = nets.map(n => n.name);
+    fetch('{{ url_for("mode_control.api_wifi_reorder") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({networks: ordered})
+    }).then(r => r.json()).then(data => {
+        if (data.success) loadSavedNetworks();
+        else alert(data.message || 'Reorder failed');
+    });
+}
+
+function forgetNetwork(name) {
+    if (!confirm('Forget network "' + name + '"?')) return;
+    fetch('{{ url_for("mode_control.api_wifi_forget") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name})
+    }).then(r => r.json()).then(data => {
+        if (data.message) alert(data.message);
+        loadSavedNetworks();
+    });
+}
+
+function toggleAddNetwork() {
+    const panel = document.getElementById('addNetworkPanel');
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+function addWifiNetwork() {
+    const ssid = document.getElementById('newWifiSSID').value.trim();
+    const password = document.getElementById('newWifiPassword').value;
+    if (!ssid) { alert('Please enter an SSID'); return; }
+    const btn = document.getElementById('addWifiBtn');
+    btn.disabled = true; btn.textContent = 'Connecting...';
+
+    const formData = new FormData();
+    formData.append('wifi_ssid', ssid);
+    formData.append('wifi_password', password);
+
+    fetch('{{ url_for("mode_control.configure_wifi") }}', {
+        method: 'POST',
+        body: formData
+    }).then(response => {
+        if (response.redirected) {
+            window.location.href = response.url;
+        } else {
+            btn.disabled = false; btn.textContent = 'Connect';
+            loadSavedNetworks();
+            document.getElementById('newWifiSSID').value = '';
+            document.getElementById('newWifiPassword').value = '';
+            document.getElementById('addNetworkPanel').style.display = 'none';
+        }
+    }).catch(() => {
+        btn.disabled = false; btn.textContent = 'Connect';
+        alert('Error connecting to network');
+    });
+}
+
+function scanAndRefreshNetworks() {
+    const btn = document.getElementById('btnWifiScan');
+    btn.disabled = true; btn.textContent = 'Scanning...';
+    fetch('{{ url_for("mode_control.api_wifi_scan") }}')
+    .then(r => r.json())
+    .then(networks => {
+        btn.disabled = false; btn.textContent = 'Scan';
+        // Update datalist for add-network panel
+        const dl = document.getElementById('wifiScanResults');
+        if (dl && networks.length) {
+            dl.innerHTML = networks.map(n => '<option value="' + n.ssid.replace(/"/g, '&quot;') + '">' + n.signal + '% ' + (n.secured ? '🔒' : '') + '</option>').join('');
+        }
+        // Refresh the saved networks list (now with updated signal info)
+        loadSavedNetworks();
+    })
+    .catch(() => { btn.disabled = false; btn.textContent = 'Scan'; });
 }
 
 function confirmWifiUpdate() {
@@ -438,130 +536,10 @@ if (stopApForm) {
     });
 }
 
-// WiFi form elements
-const wifiConfigForm = document.getElementById('wifiConfigForm');
-const updateWifiBtn = document.getElementById('updateWifiBtn');
-
-if (wifiConfigForm) {
-    wifiConfigForm.addEventListener('submit', function(e) {
-        if (updateWifiBtn && updateWifiBtn.disabled) { e.preventDefault(); return false; }
-        const ssidInput = document.getElementById('wifi_ssid');
-        if (!ssidInput.value.trim()) {
-            e.preventDefault();
-            alert('Please select a network or enter a hidden SSID');
-            return false;
-        }
-        updateWifiBtn.disabled = true;
-        updateWifiBtn.style.opacity = '0.5';
-        updateWifiBtn.style.cursor = 'not-allowed';
-        updateWifiBtn.textContent = 'Connecting...';
-    });
-}
-
-// WiFi network scanning functionality
-const wifiSsidSelect = document.getElementById('wifi_ssid_select');
-const wifiSsidInput = document.getElementById('wifi_ssid');
-const wifiSsidHint = document.getElementById('wifi_ssid_hint');
-const wifiPasswordRow = document.getElementById('wifi_password_row');
-const wifiPasswordInput = document.getElementById('wifi_password');
-const scanWifiBtn = document.getElementById('scanWifiBtn');
-
-function updatePasswordVisibility(secured) {
-    if (secured) {
-        wifiPasswordRow.style.display = 'block';
-        wifiPasswordInput.required = true;
-    } else {
-        wifiPasswordRow.style.display = 'none';
-        wifiPasswordInput.required = false;
-        wifiPasswordInput.value = '';
-    }
-}
-
-if (wifiSsidSelect) {
-    wifiSsidSelect.addEventListener('change', function() {
-        const value = this.value;
-        const selectedOption = this.options[this.selectedIndex];
-        const isSecured = selectedOption.dataset.secured !== 'false';
-
-        if (value === '__hidden__') {
-            wifiSsidInput.style.display = 'block';
-            wifiSsidHint.style.display = 'inline';
-            wifiSsidInput.value = '';
-            wifiSsidInput.focus();
-            wifiSsidInput.required = true;
-            updatePasswordVisibility(true);
-        } else if (value) {
-            wifiSsidInput.style.display = 'none';
-            wifiSsidHint.style.display = 'none';
-            wifiSsidInput.value = value;
-            wifiSsidInput.required = true;
-            updatePasswordVisibility(isSecured);
-        } else {
-            wifiSsidInput.style.display = 'none';
-            wifiSsidHint.style.display = 'none';
-            wifiSsidInput.value = '';
-            updatePasswordVisibility(true);
-        }
-    });
-}
-
-function scanWifiNetworks() {
-    scanWifiBtn.disabled = true;
-    scanWifiBtn.innerHTML = '⏳ Scanning...';
-    scanWifiBtn.style.opacity = '0.7';
-
-    fetch('{{ url_for("mode_control.scan_wifi_networks") }}')
-        .then(response => response.json())
-        .then(data => {
-            const currentValue = wifiSsidSelect.value;
-            const currentHiddenValue = (currentValue === '__hidden__') ? wifiSsidInput.value : '';
-
-            while (wifiSsidSelect.options.length > 2) {
-                wifiSsidSelect.remove(2);
-            }
-
-            if (data.success && data.networks && data.networks.length > 0) {
-                const separator = document.createElement('option');
-                separator.disabled = true;
-                separator.textContent = '─── Available Networks ───';
-                wifiSsidSelect.appendChild(separator);
-
-                data.networks.forEach(network => {
-                    const option = document.createElement('option');
-                    option.value = network.ssid;
-                    option.dataset.secured = network.secured ? 'true' : 'false';
-                    const signalIcon = getSignalIcon(network.signal);
-                    const lockIcon = network.secured ? '🔒' : '';
-                    const signalPct = network.signal ? ` (${network.signal}%)` : '';
-                    option.textContent = `${signalIcon} ${network.ssid}${signalPct} ${lockIcon}`;
-                    wifiSsidSelect.appendChild(option);
-                });
-
-                if (currentValue === '__hidden__') {
-                    wifiSsidSelect.value = '__hidden__';
-                    wifiSsidInput.value = currentHiddenValue;
-                } else if (currentValue) {
-                    const exists = Array.from(wifiSsidSelect.options).some(opt => opt.value === currentValue);
-                    if (exists) {
-                        wifiSsidSelect.value = currentValue;
-                    }
-                }
-            } else {
-                const noNetworks = document.createElement('option');
-                noNetworks.disabled = true;
-                noNetworks.textContent = '─── No networks found ───';
-                wifiSsidSelect.appendChild(noNetworks);
-            }
-        })
-        .catch(error => {
-            console.error('Error scanning networks:', error);
-        })
-        .finally(() => {
-            scanWifiBtn.disabled = false;
-            scanWifiBtn.innerHTML = '🔄 Scan';
-            scanWifiBtn.style.opacity = '1';
-        });
-}
+// Load saved networks on page init
+loadSavedNetworks();
+// Auto-scan after short delay
+setTimeout(function() { scanAndRefreshNetworks(); }, 500);
 
 function getSignalIcon(signal) {
     const signalNum = parseInt(signal) || 0;
@@ -585,11 +563,6 @@ function dismissWifiStatus() {
         console.error('Error dismissing WiFi status:', error);
     });
 }
-
-// Auto-scan networks on page load
-setTimeout(function() {
-    scanWifiNetworks();
-}, 500);
 
 // --- Filesystem Health Check ---
 let fsckCheckInterval = null;

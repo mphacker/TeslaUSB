@@ -145,6 +145,38 @@ def _activate_connection(connection_name: str, timeout: int = 30):
         return False
 
 
+def _promote_new_connection(connection_name: str):
+    """Set connection_name to priority 100 and decrement all other wireless connections by 10."""
+    try:
+        # Set new connection to highest priority
+        subprocess.run(
+            ["sudo", "-n", "nmcli", "connection", "modify", connection_name,
+             "connection.autoconnect-priority", "100"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        # Get all wireless connections and decrement others
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,TYPE,AUTOCONNECT-PRIORITY", "connection", "show"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 3 and "wireless" in parts[1].lower() and parts[0] != connection_name:
+                    try:
+                        old_pri = int(parts[2]) if parts[2] else 0
+                    except ValueError:
+                        old_pri = 0
+                    new_pri = max(0, old_pri - 10)
+                    subprocess.run(
+                        ["sudo", "-n", "nmcli", "connection", "modify", parts[0],
+                         "connection.autoconnect-priority", str(new_pri)],
+                        capture_output=True, text=True, check=False, timeout=5,
+                    )
+    except Exception as e:
+        logger.warning("Failed to promote connection priority: %s", e)
+
+
 def _start_fallback_ap():
     """Start the fallback AP when WiFi connection fails."""
     try:
@@ -185,16 +217,28 @@ def update_wifi_credentials(ssid: str, password: str):
     connection_name = f"WiFi-{ssid}"
 
     try:
-        # Check if connection already exists
+        # Check for existing connection with same SSID (may have different name)
+        existing_conn = None
         check_result = subprocess.run(
-            ["nmcli", "-t", "-f", "NAME", "connection", "show"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
+            ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"],
+            capture_output=True, text=True, check=False, timeout=5,
         )
+        if check_result.returncode == 0:
+            for line in check_result.stdout.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 2 and "wireless" in parts[1].lower():
+                    ssid_check = subprocess.run(
+                        ["nmcli", "-t", "-f", "802-11-wireless.ssid", "connection", "show", parts[0]],
+                        capture_output=True, text=True, check=False, timeout=5,
+                    )
+                    if ssid_check.returncode == 0 and ssid in ssid_check.stdout:
+                        existing_conn = parts[0]
+                        break
 
-        connection_exists = connection_name in check_result.stdout.splitlines()
+        connection_exists = existing_conn is not None
+        if existing_conn:
+            connection_name = existing_conn
+
         initial_error = None  # Track initial errors for failsafe messages
 
         if connection_exists:
@@ -282,7 +326,8 @@ def update_wifi_credentials(ssid: str, password: str):
         current = get_current_wifi_connection()
 
         if current.get("connected") and current.get("current_ssid") == ssid:
-            # Success! New connection is working
+            # Success! Set this as highest priority, decrement others
+            _promote_new_connection(connection_name)
             status = {
                 "success": True,
                 "message": f"Successfully connected to '{ssid}'",
@@ -302,6 +347,7 @@ def update_wifi_credentials(ssid: str, password: str):
 
                 # Check if we've connected to the NEW network (late success)
                 if current.get("connected") and current_connected_ssid == ssid:
+                    _promote_new_connection(connection_name)
                     status = {
                         "success": True,
                         "message": f"Successfully connected to '{ssid}'",
@@ -449,6 +495,182 @@ def update_wifi_credentials(ssid: str, password: str):
         raise e
     except Exception as e:
         raise RuntimeError(f"Unexpected error updating WiFi: {str(e)}")
+
+
+def get_saved_networks():
+    """Get all saved WiFi networks with SSID, priority, signal, and active status.
+
+    Returns list of dicts sorted by priority (highest first):
+    [{"name": "WiFi-Trez_EXT", "ssid": "Trez_EXT", "priority": 100, "active": True, "signal": "67", "in_range": True}, ...]
+    """
+    try:
+        # 1. Get all wireless connections with priority
+        conn_result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,TYPE,AUTOCONNECT-PRIORITY", "connection", "show"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        if conn_result.returncode != 0:
+            return []
+
+        wireless_conns = []
+        for line in conn_result.stdout.splitlines():
+            parts = line.split(":")
+            if len(parts) >= 3 and "wireless" in parts[1].lower():
+                try:
+                    priority = int(parts[2]) if parts[2] else 0
+                except ValueError:
+                    priority = 0
+                wireless_conns.append({"name": parts[0], "priority": priority})
+
+        if not wireless_conns:
+            return []
+
+        # 2. Get visible networks with signal strength
+        scan_result = subprocess.run(
+            ["nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi", "list"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        visible = {}
+        if scan_result.returncode == 0:
+            for line in scan_result.stdout.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 3 and parts[1]:
+                    ssid = parts[1]
+                    signal = parts[2]
+                    # Keep the strongest signal if duplicates
+                    if ssid not in visible or int(signal or 0) > int(visible[ssid] or 0):
+                        visible[ssid] = signal
+
+        # 3. Get current active connection on wlan0
+        active_result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        active_name = None
+        if active_result.returncode == 0:
+            for line in active_result.stdout.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 2 and parts[1] == "wlan0":
+                    active_name = parts[0]
+                    break
+
+        # 4. For each connection, get its SSID
+        networks = []
+        for conn in wireless_conns:
+            ssid_result = subprocess.run(
+                ["nmcli", "-t", "-f", "802-11-wireless.ssid", "connection", "show", conn["name"]],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            ssid = ""
+            if ssid_result.returncode == 0:
+                for line in ssid_result.stdout.splitlines():
+                    if ":" in line:
+                        ssid = line.split(":", 1)[1].strip()
+                        break
+
+            in_range = ssid in visible
+            signal = visible.get(ssid, "0") if in_range else "0"
+
+            networks.append({
+                "name": conn["name"],
+                "ssid": ssid or conn["name"],
+                "priority": conn["priority"],
+                "active": conn["name"] == active_name,
+                "signal": signal,
+                "in_range": in_range,
+            })
+
+        # 5. Sort by priority descending
+        networks.sort(key=lambda n: n["priority"], reverse=True)
+        return networks
+
+    except Exception as e:
+        logger.error("Error getting saved networks: %s", e)
+        return []
+
+
+def forget_network(connection_name: str) -> dict:
+    """Remove a saved WiFi network.
+
+    Safety guards:
+    - Refuse to delete the only saved network
+    - If deleting the active connection, connect to next-priority first
+    - If all else fails, start AP fallback
+
+    Returns dict with success, message, and any failover actions.
+    """
+    import time as _time
+
+    # 1. Count total wireless connections
+    saved = get_saved_networks()
+    if len(saved) <= 1:
+        return {"success": False, "message": "Cannot forget the only saved network"}
+
+    # 2. Check if this is the active connection
+    target = next((n for n in saved if n["name"] == connection_name), None)
+    if target is None:
+        return {"success": False, "message": f"Network '{connection_name}' not found"}
+
+    is_active = target.get("active", False)
+
+    # 3. If active, switch to next-priority network first
+    if is_active:
+        alternatives = [n for n in saved if n["name"] != connection_name]
+        switched = False
+        for alt in alternatives:
+            if _activate_connection(alt["name"], timeout=15):
+                switched = True
+                break
+            _time.sleep(1)
+
+        if not switched:
+            # Start AP fallback
+            _start_fallback_ap()
+
+    # 4. Delete the connection
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "nmcli", "connection", "delete", connection_name],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if result.returncode != 0:
+            return {"success": False, "message": f"Failed to delete: {result.stderr.strip()}"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "message": "Delete command timed out"}
+
+    msg = f"Network '{connection_name}' forgotten"
+    if is_active:
+        msg += " (switched to alternate network)"
+    return {"success": True, "message": msg}
+
+
+def reorder_networks(ordered_names: list) -> dict:
+    """Set priorities based on list order (first = highest priority).
+
+    Args:
+        ordered_names: List of connection names in desired priority order.
+
+    Returns dict with success and message.
+    """
+    errors = []
+    for idx, name in enumerate(ordered_names):
+        priority = 100 - (idx * 10)
+        if priority < 0:
+            priority = 0
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "nmcli", "connection", "modify", name,
+                 "connection.autoconnect-priority", str(priority)],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            if result.returncode != 0:
+                errors.append(f"{name}: {result.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            errors.append(f"{name}: timed out")
+
+    if errors:
+        return {"success": False, "message": "Some networks failed: " + "; ".join(errors)}
+    return {"success": True, "message": "Network priorities updated"}
 
 
 def get_available_networks(rescan: bool = True):

@@ -127,6 +127,39 @@ All frontend changes **must** follow the design system documented in [`docs/UI_U
 
 See the full design system for color palettes, typography scale, spacing tokens, component specs, responsive breakpoints, and the pre-merge checklist.
 
+## Boot Priority
+- **USB gadget presentation is the #1 priority at boot.** Tesla must see the USB drive within ~3 seconds. All other tasks (cleanup, chime selection, indexing, cloud sync) are deferred to background services that run AFTER the gadget is bound.
+- `present_usb_on_boot.service` calls `present_usb.sh` directly — no cleanup wrapper.
+- `teslausb-deferred-tasks.service` handles post-boot tasks (cleanup via quick_edit, chime selection, indexing, cloud sync). These tasks may temporarily unbind/rebind the gadget (quick_edit pattern), but only after Tesla has had time to initialize the drive.
+- Never add blocking work before the UDC bind in `present_usb.sh`. Even RO local mounts happen AFTER the gadget is presented to Tesla.
+
+## Video Panel (Map-Integrated)
+- **There is no standalone Videos page.** All video browsing happens in the map page (`mapping.html`) via a slide-out side panel with two tabs: "Recent Events" and "All Clips".
+- **Recent Events tab**: Shows trips with events and sentry clips, sorted most-recent-first. Trip entries have NO play button (user plays from the map route). Sentry entries HAVE a play button (no map route for stationary events).
+- **All Clips tab**: Unified list of every trip, sentry event, and clip. If geolocation data exists, show on map and play from there (no play button in list). If no geolocation, show play button in the list entry.
+- **All sources included**: TeslaCam USB folders (SentryClips, SavedClips, RecentClips) AND ArchivedClips on the SD card.
+- **No thumbnails**: Thumbnail generation code has been removed. Video entries show metadata (date, event type, duration, cameras) but no preview images.
+
+## Cloud Sync Architecture
+- **Queue-based continuous sync**: A persistent sync queue (SQLite) is populated by the inotify file watcher, WiFi connect handler, and manual "Archive to Cloud" actions. A sync worker thread processes items one at a time.
+- **Priority order (default)**: (1) Oldest videos with Tesla events (from event.json), (2) Oldest trip videos with geolocation (from geodata.db), (3) Non-event/non-geo videos (opt-in, disabled by default via `cloud_archive.sync_non_event_videos: false`).
+- **Detection**: event.json for folder-level classification + SEI telemetry for fine-grained event detection.
+- **Power-loss safe**: File marked as `synced` only after rclone confirms upload + DB commit + fsync. Partially uploaded files detected on restart and re-queued.
+- **Low impact**: `nice -n 19` + `ionice -c3` on rclone, bandwidth limit (`max_upload_mbps`), one file at a time, inter-file sleep. Web UI must remain responsive during sync.
+- **Keeps going**: Sync worker idles only when queue is empty AND inotify reports no new files. On WiFi reconnect, immediately re-checks queue.
+
+## File Watcher (inotify)
+- `file_watcher_service.py` monitors USB RO mount + ArchivedClips using `watchdog` library.
+- On new file: queues for indexing + cloud sync.
+- Falls back to 5-minute polling if inotify unavailable (mount changes, etc.).
+- Must be memory-efficient: watch directory-level events only (IN_CREATE, IN_MOVED_TO).
+
+## Safety & Stability
+- **SSH is sacred**: sshd has a systemd drop-in preventing it from being stopped or masked. Safe-mode boot detection skips TeslaUSB services after 3+ reboots in 10 minutes.
+- **IMG files are never deleted**: `is_protected_file()` guard in all code paths that delete files. `*.img` files in GADGET_DIR are always refused deletion.
+- **RecentClips preservation**: Archive timer runs every 5 minutes regardless of WiFi state, copying clips to SD card before Tesla's circular buffer overwrites them.
+- **WiFi always reconnects**: wifi-monitor.sh uses adaptive check intervals (20s when searching, 60s when connected), always tries to rejoin configured SSID even when AP is active.
+
 ## Pitfalls to avoid
 - Skipping `nsenter` for mounts (mounts vanish after subprocess exit).
 - Unbinding/mount order wrong when leaving present mode (causes busy unmounts).
@@ -139,6 +172,12 @@ See the full design system for color palettes, typography scale, spacing tokens,
 - Exposing "Edit Mode" / "Present Mode" terminology to users in the UI.
 - Skipping mobile testing — all pages must work at 375px viewport width.
 - **Installing dependencies or files into the git repo** that are not part of the application (see below).
+- Adding blocking work before UDC bind in `present_usb.sh` (delays USB presentation to Tesla).
+- Generating or referencing video thumbnails (thumbnail system has been removed).
+- Creating a standalone Videos page (all video browsing is in the map page panel).
+- Deleting or overwriting `*.img` files in GADGET_DIR from any code path.
+- Running rclone without `nice`/`ionice` (starves the web server and gadget).
+- Marking a file as `synced` in the cloud database before rclone confirms the upload completed.
 
 ## AI & Testing Workspace Rules
 - **Never install packages, dependencies, or node_modules inside the git repo.** Test tooling (Playwright, npm packages, debug scripts) must live **outside** the repository — use `../playwright-test/` or another folder above the repo root.

@@ -106,11 +106,11 @@
     <div style="display: flex; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-4);">
         <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
             <div style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_synced|default(0) }}</div>
-            <div style="font-size: var(--text-sm); color: var(--text-secondary);">Synced</div>
+            <div style="font-size: var(--text-sm); color: var(--text-secondary);">Events Synced</div>
         </div>
         <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
             <div style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_pending|default(0) }}</div>
-            <div style="font-size: var(--text-sm); color: var(--text-secondary);">Pending</div>
+            <div style="font-size: var(--text-sm); color: var(--text-secondary);">Events Pending</div>
         </div>
         <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
             <div style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_failed|default(0) }}</div>
@@ -123,6 +123,7 @@
             <div style="font-size: var(--text-sm); color: var(--text-secondary);">Transferred</div>
         </div>
     </div>
+    <p style="font-size: var(--text-xs); color: var(--text-muted); margin: -8px 0 var(--space-4); text-align: center;">Each event contains multiple camera files (up to 6 angles per clip)</p>
     {% endif %}
 
     <!-- ================================================================
@@ -746,7 +747,7 @@
                     '<span class="status-dot status-edit" style="animation:pulse 1.5s ease-in-out infinite;"></span>' +
                     '<div class="device-status-info">' +
                         '<strong>Syncing to {{ provider or "Cloud" }}</strong>' +
-                        '<p>' + (status.files_done || 0) + ' of ' + (status.files_total || '?') + ' files' +
+                        '<p>' + (status.files_done || 0) + ' of ' + (status.files_total || '?') + ' events' +
                             (status.bytes_transferred ? ' \u2014 ' + formatBytes(status.bytes_transferred) : '') +
                             (status.total_bytes ? ' / ' + formatBytes(status.total_bytes) : '') +
                         '</p>' +
@@ -785,7 +786,7 @@
         } else {
             card.className = 'device-status-card device-status-present';
             var lastRun = status.last_run ? 'Last sync: ' + timeAgo(status.last_run) : 'No syncs yet';
-            var pending = (stats.total_pending) ? ' \u2014 ' + stats.total_pending + ' file' + (stats.total_pending !== 1 ? 's' : '') + ' pending' : '';
+            var pending = (stats.total_pending) ? ' \u2014 ' + stats.total_pending + ' event' + (stats.total_pending !== 1 ? 's' : '') + ' pending' : '';
             card.innerHTML =
                 '<div class="device-status-header">' +
                     '<span class="status-dot status-present"></span>' +

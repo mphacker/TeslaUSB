@@ -566,7 +566,18 @@ def _index_video(
     Returns (waypoint_count, event_count).
     """
     parser = _get_sei_parser()
-    rel_path = os.path.relpath(video_path, teslacam_root)
+
+    # Compute a clean relative path for the DB.  ArchivedClips live outside
+    # the TeslaCam tree, so os.path.relpath() produces a mangled "../../../"
+    # traversal.  Detect that case and use "ArchivedClips/<filename>" instead.
+    try:
+        from config import ARCHIVE_DIR
+        if ARCHIVE_DIR and os.path.abspath(video_path).startswith(os.path.abspath(ARCHIVE_DIR)):
+            rel_path = f"ArchivedClips/{os.path.basename(video_path)}"
+        else:
+            rel_path = os.path.relpath(video_path, teslacam_root)
+    except ImportError:
+        rel_path = os.path.relpath(video_path, teslacam_root)
     file_timestamp = _timestamp_from_filename(video_path)
 
     # Extract SEI messages

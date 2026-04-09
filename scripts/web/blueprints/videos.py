@@ -267,7 +267,6 @@ def fetch_video_for_sei(filepath):
             video_path = _check_archive_fallback(sanitized_parts[-1]) if sanitized_parts else None
             if not video_path:
                 return "Video not found", 404
-            return "Video not found", 404
 
     # Send complete file with proper headers for in-browser processing
     response = send_file(

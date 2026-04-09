@@ -144,5 +144,5 @@ archive:
   interval_minutes: 5                    # How often to check for new clips (tighter = less data loss)
   retention_days: 30                     # Delete archived clips older than this
   min_free_space_gb: 10                  # Hard floor — stop archiving if SD card < this free
-  max_size_gb: 50                        # Cap on total archive folder size
+  max_size_gb: 0                         # 0 = auto (use all available space minus reserved)
   path: ""                               # Archive path (default: ~/ArchivedClips, set by web app)

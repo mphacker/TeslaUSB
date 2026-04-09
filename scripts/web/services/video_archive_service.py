@@ -266,6 +266,14 @@ def _run_archive() -> None:
         _status["progress"] = f"Copying {len(to_copy)} files..."
         logger.info("Archive: %d new files to copy from RecentClips", len(to_copy))
 
+        # Run retention FIRST to make room for new files.
+        # Without this, the copy loop hits the size cap immediately when
+        # the archive is full, copies only 1 file, then retention runs
+        # and deletes 1 file — a death spiral of 1-file-per-cycle.
+        if not _check_disk_space():
+            _status["progress"] = "Retention cleanup (making room)..."
+            _enforce_retention()
+
         copied = 0
         for idx, (src_path, rel_path) in enumerate(to_copy):
             if _archive_cancel.is_set():
@@ -278,11 +286,13 @@ def _run_archive() -> None:
                 _status["progress"] = "Paused (low memory)"
                 break
 
-            # Disk space check
+            # Disk space check — if full, try retention again mid-loop
             if not _check_disk_space():
-                logger.info("Archive stopped: disk space limits reached")
-                _status["progress"] = "Stopped (disk space)"
-                break
+                _enforce_retention()
+                if not _check_disk_space():
+                    logger.info("Archive stopped: disk space limits reached")
+                    _status["progress"] = "Stopped (disk space)"
+                    break
 
             _status.update({
                 "files_done": idx,
@@ -544,9 +554,10 @@ def _enforce_retention() -> None:
         cutoff = time.time() - (ARCHIVE_RETENTION_DAYS * 86400)
         _delete_files_older_than(cutoff)
 
-    # Size-based cleanup
-    max_bytes = ARCHIVE_MAX_SIZE_GB * 1024 * 1024 * 1024
-    _trim_archive_to_size(max_bytes)
+    # Size-based cleanup (only when a hard cap is set)
+    if ARCHIVE_MAX_SIZE_GB > 0:
+        max_bytes = ARCHIVE_MAX_SIZE_GB * 1024 * 1024 * 1024
+        _trim_archive_to_size(max_bytes)
 
     # Free-space floor
     min_free_bytes = ARCHIVE_MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
@@ -739,8 +750,14 @@ def _check_memory() -> bool:
 
 
 def _check_disk_space() -> bool:
-    """Return True if archive can continue (space and size limits OK)."""
-    # Check SD card free space
+    """Return True if archive can continue (space limits OK).
+
+    When ``ARCHIVE_MAX_SIZE_GB`` is 0 (the default), the archive grows
+    freely — the only constraint is ``ARCHIVE_MIN_FREE_SPACE_GB`` which
+    reserves space for the OS and other services.  A non-zero value
+    imposes a hard cap on the archive folder itself.
+    """
+    # Check SD card free space (always enforced)
     try:
         usage = shutil.disk_usage(ARCHIVE_DIR)
         min_free = ARCHIVE_MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
@@ -749,11 +766,12 @@ def _check_disk_space() -> bool:
     except OSError:
         return False
 
-    # Check archive folder size cap
-    max_bytes = ARCHIVE_MAX_SIZE_GB * 1024 * 1024 * 1024
-    archive_size = _get_archive_size()
-    if archive_size >= max_bytes:
-        return False
+    # Optional hard cap on archive folder size (0 = no cap)
+    if ARCHIVE_MAX_SIZE_GB > 0:
+        max_bytes = ARCHIVE_MAX_SIZE_GB * 1024 * 1024 * 1024
+        archive_size = _get_archive_size()
+        if archive_size >= max_bytes:
+            return False
 
     return True
 
@@ -848,7 +866,7 @@ def smart_cleanup_archive(
     archive_size = _get_archive_size()
     archive_gb = archive_size / (1024 ** 3)
 
-    if free_gb >= min_free_gb and archive_gb <= max_size_gb:
+    if free_gb >= min_free_gb and (max_size_gb <= 0 or archive_gb <= max_size_gb):
         logger.debug("Smart cleanup: no action needed (%.1f GB free, %.1f GB archive)", free_gb, archive_gb)
         return result
 
@@ -963,7 +981,7 @@ def smart_cleanup_archive(
 
     # Delete files until space constraints are met
     min_free_bytes = int(min_free_gb * 1024 ** 3)
-    max_archive_bytes = int(max_size_gb * 1024 ** 3)
+    max_archive_bytes = int(max_size_gb * 1024 ** 3) if max_size_gb > 0 else 0
 
     for _score, _mtime, f in scored:
         # Recheck conditions
@@ -974,7 +992,8 @@ def smart_cleanup_archive(
             break
 
         current_archive_size = archive_size - result["freed_bytes"]
-        if current_free >= min_free_bytes and current_archive_size <= max_archive_bytes:
+        size_ok = (max_archive_bytes <= 0) or (current_archive_size <= max_archive_bytes)
+        if current_free >= min_free_bytes and size_ok:
             break
 
         if safe_remove(f["path"]):

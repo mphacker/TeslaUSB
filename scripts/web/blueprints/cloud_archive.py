@@ -40,6 +40,30 @@ def _update_config_yaml(updates: dict):
     """Atomically update config.yaml — delegates to shared helper."""
     from helpers.config_updater import update_config_yaml
     update_config_yaml(updates)
+    # Invalidate cached config
+    _cloud_config_cache.clear()
+
+
+# Cache for config.yaml reads (avoids disk I/O on every page load)
+_cloud_config_cache: dict = {}
+
+
+def _get_cloud_config_cached() -> dict:
+    """Return cloud_archive section from config.yaml, cached for 30s."""
+    import time
+    now = time.time()
+    if _cloud_config_cache.get('ts', 0) + 30 > now:
+        return _cloud_config_cache.get('data', {})
+    import yaml
+    try:
+        with open(CONFIG_YAML, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        data = cfg.get('cloud_archive', {})
+        _cloud_config_cache['data'] = data
+        _cloud_config_cache['ts'] = now
+        return data
+    except Exception:
+        return _cloud_config_cache.get('data', {})
 
 
 # ---------------------------------------------------------------------------
@@ -65,17 +89,16 @@ def index():
         sync_stats = {}
         sync_history = []
 
-    # Re-read dynamic settings from config.yaml (may have been updated at runtime)
+    # Re-read dynamic settings from config.yaml (cached for 30s to reduce I/O)
     import yaml
     _provider = CLOUD_ARCHIVE_PROVIDER
     _sync_folders = CLOUD_ARCHIVE_SYNC_FOLDERS
     _priority_order = CLOUD_ARCHIVE_PRIORITY_ORDER
     _max_upload_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
     _remote_path = CLOUD_ARCHIVE_REMOTE_PATH
+    _sync_enabled = True
     try:
-        with open(CONFIG_YAML, 'r') as f:
-            _cfg = yaml.safe_load(f) or {}
-        _cloud = _cfg.get('cloud_archive', {})
+        _cloud = _get_cloud_config_cached()
         _provider = _cloud.get('provider', '') or _provider
         _sync_folders = _cloud.get('sync_folders', _sync_folders)
         _priority_order = _cloud.get('priority_order', _priority_order)
@@ -83,7 +106,6 @@ def index():
         _remote_path = _cloud.get('remote_path', _remote_path)
         _sync_enabled = bool(_cloud.get('sync_enabled', True))
     except Exception:
-        _sync_enabled = True
         pass
     provider_connected = bool(_provider) and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)
 

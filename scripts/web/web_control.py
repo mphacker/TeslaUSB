@@ -166,8 +166,8 @@ if __name__ == "__main__":
     try:
         from waitress import serve
         print("Using Waitress production server")
-        # 3 threads optimal for Pi Zero 2 W (4 cores, 512MB RAM) - saves memory vs 6 threads
-        serve(app, host="0.0.0.0", port=WEB_PORT, threads=3, channel_timeout=300,
+        # 4 threads for Pi Zero 2 W — one extra for API polling while sync runs
+        serve(app, host="0.0.0.0", port=WEB_PORT, threads=4, channel_timeout=120,
               send_bytes=4194304)  # 4MB send buffer for better video streaming
     except ImportError:
         print("Waitress not available, using Flask development server")

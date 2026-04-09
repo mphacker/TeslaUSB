@@ -281,8 +281,23 @@ def _score_event_priority(event_dir: str) -> int:
 # File Discovery
 # ---------------------------------------------------------------------------
 
+def _fsync_db(conn: sqlite3.Connection) -> None:
+    """Commit and fsync the database to ensure durability after power loss."""
+    conn.commit()
+    try:
+        fd = os.open(conn.execute("PRAGMA database_list").fetchone()[2],
+                     os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except (OSError, TypeError):
+        pass  # Best-effort; WAL mode provides crash safety regardless
+
+
 def _discover_events(
     teslacam_path: str,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> List[Tuple[str, str, int]]:
     """Find event directories and archived clips to sync.
 
@@ -290,7 +305,21 @@ def _discover_events(
     from ArchivedClips on the SD card. Returns a list of
     ``(event_dir_path, relative_path, total_size)`` sorted **oldest-first**
     so the most at-risk clips get preserved first.
+
+    If *conn* is provided, events already marked ``synced`` in the
+    database are excluded.
     """
+    # Build set of already-synced event paths for fast lookup
+    synced_paths: set = set()
+    if conn is not None:
+        try:
+            rows = conn.execute(
+                "SELECT file_path FROM cloud_synced_files WHERE status = 'synced'"
+            ).fetchall()
+            synced_paths = {r["file_path"] for r in rows}
+        except Exception:
+            pass
+
     events: List[Tuple[str, str, int]] = []
 
     for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
@@ -309,6 +338,12 @@ def _discover_events(
             if not os.path.isdir(event_dir):
                 continue  # Skip flat files — events only
 
+            rel_path = f"{folder}/{entry}"
+
+            # Skip events already confirmed synced
+            if rel_path in synced_paths:
+                continue
+
             # Calculate total size of all files in this event
             total_size = 0
             has_video = False
@@ -325,10 +360,9 @@ def _discover_events(
             if not has_video:
                 continue  # Skip empty or non-video event dirs
 
-            rel_path = f"{folder}/{entry}"
             events.append((event_dir, rel_path, total_size))
 
-    # Also include ArchivedClips from SD card as a virtual "event" per file
+    # Also include ArchivedClips from SD card (individual files)
     try:
         from config import ARCHIVE_DIR, ARCHIVE_ENABLED
         if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
@@ -336,9 +370,13 @@ def _discover_events(
                 for f in sorted(os.listdir(ARCHIVE_DIR)):
                     fpath = os.path.join(ARCHIVE_DIR, f)
                     if os.path.isfile(fpath) and f.lower().endswith(('.mp4', '.ts')):
+                        rel_path = f"ArchivedClips/{f}"
+                        if rel_path in synced_paths:
+                            continue
                         fsize = os.path.getsize(fpath)
-                        # Use ARCHIVE_DIR as the "event dir" and ArchivedClips/filename as rel
-                        events.append((ARCHIVE_DIR, f"ArchivedClips/{f}", fsize))
+                        # Use the individual file path (not ARCHIVE_DIR)
+                        # so rclone copyto can handle file-to-file copy
+                        events.append((fpath, rel_path, fsize))
             except OSError:
                 pass
     except ImportError:
@@ -488,7 +526,7 @@ def _run_sync(
         except Exception:
             pass
 
-        to_sync = _discover_events(teslacam_path)
+        to_sync = _discover_events(teslacam_path, conn=conn)
 
         if not to_sync:
             _sync_status.update({
@@ -553,23 +591,38 @@ def _run_sync(
                 "progress": f"Uploading {idx + 1}/{len(to_sync)}: {rel_path}",
             })
 
-            # Use rclone copy --ignore-existing on the entire event directory
-            # This copies all camera angles and skips files already on the remote
             remote_dest = f"teslausb:{remote_path}/{rel_path}"
             logger.info("Sync: [%d/%d] %s (%d bytes)",
                         idx + 1, len(to_sync), rel_path, event_size)
 
+            # Mark event as uploading in the tracking database
+            conn.execute(
+                """INSERT OR REPLACE INTO cloud_synced_files
+                   (file_path, file_size, file_mtime, status, retry_count, last_error)
+                   VALUES (?, ?, ?, 'uploading',
+                           COALESCE((SELECT retry_count FROM cloud_synced_files WHERE file_path = ?), 0),
+                           NULL)""",
+                (rel_path, event_size, time.time(), rel_path)
+            )
+            _fsync_db(conn)
+
+            # Use rclone copy for event directories, copyto for single files
+            # (ArchivedClips are individual files, not directories)
+            is_single_file = os.path.isfile(event_dir)
+            rclone_cmd = "copyto" if is_single_file else "copy"
+
+            # Use ionice to give rclone lowest I/O priority so the USB
+            # gadget and web service stay responsive during uploads.
+            # Default size+mtime check catches partial uploads (no --ignore-existing).
             try:
-                # Use ionice to give rclone lowest I/O priority so the USB
-                # gadget and web service stay responsive during uploads
                 result = subprocess.run(
                     [
                         "nice", "-n", "19",
                         "ionice", "-c", "3",
-                        "rclone", "copy",
+                        "rclone", rclone_cmd,
                         "--config", conf_path,
                         "--bwlimit", f"{max_mbps}M",
-                        "--ignore-existing",
+                        "--size-only",
                         "--stats", "0",
                         "--log-level", "ERROR",
                         *mem_flags,
@@ -584,16 +637,52 @@ def _run_sync(
                     bytes_transferred += event_size
                     _sync_status["bytes_transferred"] = bytes_transferred
                     logger.info("Sync: [%d/%d] %s OK", idx + 1, len(to_sync), rel_path)
+
+                    # Mark as synced with timestamp — the critical tracking step
+                    now_synced = datetime.now(timezone.utc).isoformat()
+                    conn.execute(
+                        """UPDATE cloud_synced_files
+                           SET status = 'synced', synced_at = ?, remote_path = ?,
+                               retry_count = 0, last_error = NULL
+                           WHERE file_path = ?""",
+                        (now_synced, remote_dest, rel_path)
+                    )
+                    _fsync_db(conn)
                 else:
                     err_msg = result.stderr.strip()[:500]
                     logger.error("Sync: [%d/%d] %s FAILED (exit %d): %s",
                                 idx + 1, len(to_sync), rel_path,
                                 result.returncode, err_msg[:200])
+                    conn.execute(
+                        """UPDATE cloud_synced_files
+                           SET status = 'failed',
+                               last_error = ?,
+                               retry_count = retry_count + 1
+                           WHERE file_path = ?""",
+                        (err_msg[:255], rel_path)
+                    )
+                    _fsync_db(conn)
 
             except subprocess.TimeoutExpired:
                 logger.error("Sync: %s timed out", rel_path)
+                conn.execute(
+                    """UPDATE cloud_synced_files
+                       SET status = 'failed', last_error = 'Upload timed out (1h)',
+                           retry_count = retry_count + 1
+                       WHERE file_path = ?""",
+                    (rel_path,)
+                )
+                _fsync_db(conn)
             except Exception as e:
                 logger.error("Sync: %s error: %s", rel_path, e)
+                conn.execute(
+                    """UPDATE cloud_synced_files
+                       SET status = 'failed', last_error = ?,
+                           retry_count = retry_count + 1
+                       WHERE file_path = ?""",
+                    (str(e)[:255], rel_path)
+                )
+                _fsync_db(conn)
 
             # Pause between uploads to let the system breathe
             time.sleep(_INTER_UPLOAD_SLEEP)

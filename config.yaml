@@ -100,6 +100,7 @@ mapping:
   index_on_mode_switch: true             # Auto-index after present/edit mode switch
   sample_rate: 30                        # Extract every Nth frame (30 = ~1/sec at 30fps)
   trip_gap_minutes: 5                    # Gap between waypoints to start a new trip
+  archive_indexing: true                 # Index ArchivedClips on SD card during WiFi connect
   event_detection:
     harsh_brake_threshold: -4.0          # m/s² longitudinal (negative = braking)
     emergency_brake_threshold: -7.0      # m/s² longitudinal

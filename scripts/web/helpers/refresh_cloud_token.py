@@ -84,8 +84,8 @@ def main():
 
             # Step 2.5: Index ArchivedClips on SD card (if enabled)
             try:
-                from config import ARCHIVE_ENABLED, ARCHIVE_DIR
-                if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
+                from config import ARCHIVE_ENABLED, ARCHIVE_DIR, MAPPING_ARCHIVE_INDEXING
+                if MAPPING_ARCHIVE_INDEXING and ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
                     logger.info("Indexing ArchivedClips at %s...", ARCHIVE_DIR)
                     trigger_auto_index(
                         db_path=MAPPING_DB_PATH,

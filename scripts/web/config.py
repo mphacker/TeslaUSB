@@ -85,6 +85,7 @@ MAPPING_INDEX_ON_STARTUP = bool(_mapping.get('index_on_startup', True))
 MAPPING_INDEX_ON_MODE_SWITCH = bool(_mapping.get('index_on_mode_switch', True))
 MAPPING_SAMPLE_RATE = int(_mapping.get('sample_rate', 30))
 MAPPING_TRIP_GAP_MINUTES = int(_mapping.get('trip_gap_minutes', 5))
+MAPPING_ARCHIVE_INDEXING = bool(_mapping.get('archive_indexing', True))
 MAPPING_DB_PATH = os.path.join(GADGET_DIR, 'geodata.db')
 _event_cfg = _mapping.get('event_detection', {})
 MAPPING_EVENT_THRESHOLDS = {

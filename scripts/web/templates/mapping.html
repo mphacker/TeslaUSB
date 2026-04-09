@@ -1181,15 +1181,35 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
     const video = document.getElementById('overlayVideo');
     video.src = `/videos/stream/${waypoint.video_path}`;
 
-    // Handle video load error (file may no longer exist)
+    // Handle video load error — auto-skip to next available clip in the trip
     video.addEventListener('error', function onError() {
-        // Only show error if video has a real src (not cleared by closeVideoOverlay)
-        if (video.src && !video.src.endsWith('/')) {
-            if (typeof showToast === 'function') {
-                showToast('Video file not found — Tesla may have overwritten it. Try re-indexing.', 'warning');
+        if (!video.src || video.src.endsWith('/')) return;
+
+        // Try the next clip in the trip that might still exist
+        if (overlayClips && overlayClips.length > 1) {
+            const startIdx = overlayClipIdx;
+            for (let i = 1; i < overlayClips.length; i++) {
+                const nextIdx = (startIdx + i) % overlayClips.length;
+                if (nextIdx === startIdx) break;
+                overlayClipIdx = nextIdx;
+                const clip = overlayClips[nextIdx];
+                const newPath = clip.basePath + `-${overlayCurrentAngle}.mp4`;
+                const newFilename = newPath.split('/').pop();
+                overlayBasePath = clip.basePath;
+                const title = document.getElementById('overlayTitle');
+                if (title) title.textContent = '\u{1f3a5} ' + newFilename;
+                video.src = `/videos/stream/${newPath}`;
+                if (typeof showToast === 'function') {
+                    showToast('Clip missing — skipping to next available video', 'info');
+                }
+                return;
             }
         }
-    }, { once: true });
+        // No other clips available
+        if (typeof showToast === 'function') {
+            showToast('Video file not found — Tesla may have overwritten it.', 'warning');
+        }
+    });
 
     // Seek on load
     video.addEventListener('loadedmetadata', function onLoad() {

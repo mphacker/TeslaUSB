@@ -143,6 +143,25 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Warning: Failed to start file watcher: {e}")
 
+    # Auto-start cloud sync if WiFi is already connected and provider is configured.
+    # The dispatcher only fires on WiFi connect events — if the Pi boots into WiFi
+    # (or the service restarts while on WiFi), sync would never start without this.
+    try:
+        from config import (
+            CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_PROVIDER,
+            CLOUD_ARCHIVE_DB_PATH, CLOUD_PROVIDER_CREDS_PATH,
+        )
+        if (CLOUD_ARCHIVE_ENABLED and CLOUD_ARCHIVE_PROVIDER
+                and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)):
+            from services.cloud_archive_service import trigger_auto_sync
+            from services.video_service import get_teslacam_path
+            teslacam = get_teslacam_path()
+            if teslacam:
+                trigger_auto_sync(teslacam, CLOUD_ARCHIVE_DB_PATH)
+                print("Cloud auto-sync triggered on startup")
+    except Exception as e:
+        print(f"Warning: Cloud auto-sync startup failed: {e}")
+
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:
         from waitress import serve

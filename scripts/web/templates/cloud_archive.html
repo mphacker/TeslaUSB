@@ -398,13 +398,21 @@
                     <label for="bwSlider" style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
                         Bandwidth limit: <span id="bwValue" style="font-weight: 400;">{{ max_upload_mbps }} Mbps</span>
                     </label>
-                    <input type="range" id="bwSlider" name="max_upload_mbps"
-                           min="1" max="50" step="1" value="{{ max_upload_mbps }}"
-                           oninput="document.getElementById('bwValue').textContent = this.value + ' Mbps'"
-                           style="width: 100%; max-width: 360px; cursor: pointer; accent-color: var(--btn-primary-bg);">
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <input type="range" id="bwSlider" name="max_upload_mbps"
+                               min="1" max="50" step="1" value="{{ max_upload_mbps }}"
+                               oninput="document.getElementById('bwValue').textContent = this.value + ' Mbps'"
+                               style="flex:1; max-width: 360px; cursor: pointer; accent-color: var(--btn-primary-bg);">
+                        <button type="button" onclick="runBandwidthTest()" id="bwTestBtn"
+                                class="btn btn-secondary" style="padding:6px 12px; font-size:0.8rem; white-space:nowrap;">
+                            Auto-Detect
+                        </button>
+                    </div>
                     <div style="display: flex; justify-content: space-between; max-width: 360px; font-size: var(--text-xs); color: var(--text-muted);">
                         <span>1 Mbps</span>
                         <span>50 Mbps</span>
+                    </div>
+                    <div id="bwTestResults" style="display:none; margin-top:8px; padding:10px; background:var(--bg-secondary); border-radius:8px; font-size:0.85rem;">
                     </div>
                 </div>
 
@@ -1584,6 +1592,88 @@
             refreshQueue();
         } catch(e) { /* ignore */ }
     }
+
+// Bandwidth Test
+async function runBandwidthTest() {
+    var btn = document.getElementById('bwTestBtn');
+    var results = document.getElementById('bwTestResults');
+    btn.disabled = true;
+    btn.textContent = 'Testing…';
+    results.style.display = 'block';
+    results.innerHTML = '<p>Starting bandwidth test — this takes 1-2 minutes…</p>';
+
+    try {
+        var resp = await fetch('{{ url_for("cloud_archive.api_bandwidth_test") }}', {method: 'POST'});
+        var data = await resp.json();
+        if (!data.success) {
+            results.innerHTML = '<p style="color:var(--error-text);">' + escapeHtml(data.message) + '</p>';
+            btn.disabled = false;
+            btn.textContent = 'Auto-Detect';
+            return;
+        }
+        // Poll for results
+        var pollTimer = setInterval(async function() {
+            try {
+                var r = await fetch('{{ url_for("cloud_archive.api_bandwidth_test_status") }}');
+                var s = await r.json();
+                if (s.running) {
+                    results.innerHTML = '<p>' + escapeHtml(s.progress || 'Testing…') + '</p>';
+                } else {
+                    clearInterval(pollTimer);
+                    btn.disabled = false;
+                    btn.textContent = 'Auto-Detect';
+                    if (s.error) {
+                        results.innerHTML = '<p style="color:var(--error-text);">Error: ' + escapeHtml(s.error) + '</p>';
+                        return;
+                    }
+                    // Show results table
+                    var html = '<table style="width:100%;font-size:0.8rem;border-collapse:collapse;">';
+                    html += '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px;">Speed</th><th>Actual</th><th>Latency</th><th>Memory</th><th>Load</th><th>Status</th></tr>';
+                    (s.results || []).forEach(function(r) {
+                        var color = r.status === 'ok' ? 'var(--accent-success)' : 'var(--error-text)';
+                        html += '<tr style="border-bottom:1px solid var(--border);">';
+                        html += '<td style="padding:4px;">' + r.mbps + ' Mbps</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.actual_mbps || '—') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.web_latency ? r.web_latency + 's' : '—') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.free_memory_mb ? Math.round(r.free_memory_mb) + ' MB' : '—') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.load_avg || '—') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;color:' + color + ';">' + r.status + '</td>';
+                        html += '</tr>';
+                    });
+                    html += '</table>';
+                    if (s.recommended_mbps) {
+                        html += '<div style="margin-top:8px;display:flex;align-items:center;gap:8px;">';
+                        html += '<strong>Recommended: ' + s.recommended_mbps + ' Mbps</strong>';
+                        html += '<button type="button" onclick="applyBandwidth()" class="btn btn-primary" style="padding:4px 12px;font-size:0.8rem;">Apply</button>';
+                        html += '</div>';
+                    }
+                    results.innerHTML = html;
+                }
+            } catch(e) { /* keep polling */ }
+        }, 3000);
+    } catch(e) {
+        results.innerHTML = '<p style="color:var(--error-text);">Failed to start test</p>';
+        btn.disabled = false;
+        btn.textContent = 'Auto-Detect';
+    }
+}
+
+async function applyBandwidth() {
+    try {
+        var resp = await fetch('{{ url_for("cloud_archive.api_bandwidth_test_apply") }}', {method: 'POST'});
+        var data = await resp.json();
+        if (data.success) {
+            var status = await (await fetch('{{ url_for("cloud_archive.api_bandwidth_test_status") }}')).json();
+            var slider = document.getElementById('bwSlider');
+            var label = document.getElementById('bwValue');
+            if (slider && status.recommended_mbps) {
+                slider.value = status.recommended_mbps;
+                label.textContent = status.recommended_mbps + ' Mbps';
+            }
+            if (typeof showToast === 'function') showToast('Bandwidth updated to ' + status.recommended_mbps + ' Mbps', 'success');
+        }
+    } catch(e) { /* ignore */ }
+}
 
 })();
 </script>

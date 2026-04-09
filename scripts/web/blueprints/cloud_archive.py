@@ -598,3 +598,55 @@ def api_archive_cancel():
     except Exception as exc:
         logger.exception("Failed to cancel archive")
         return jsonify({"success": False, "message": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Bandwidth Test API
+# ---------------------------------------------------------------------------
+
+@cloud_archive_bp.route('/api/bandwidth_test', methods=['POST'])
+def api_bandwidth_test():
+    """Start a bandwidth test to find optimal upload speed."""
+    from services.bandwidth_test_service import start_bandwidth_test
+    from services.cloud_archive_service import get_sync_status
+
+    # Don't run during active sync
+    if get_sync_status().get("running"):
+        return jsonify({"success": False, "message": "Stop the active sync first"}), 400
+
+    # Need rclone conf — write a temporary one
+    from services.cloud_archive_service import _write_rclone_conf, _load_provider_creds
+    creds = _load_provider_creds()
+    if not creds:
+        return jsonify({"success": False, "message": "No cloud provider credentials"}), 400
+
+    try:
+        conf_path = _write_rclone_conf(CLOUD_ARCHIVE_PROVIDER, creds)
+        ok, msg = start_bandwidth_test(conf_path, CLOUD_ARCHIVE_REMOTE_PATH)
+        return jsonify({"success": ok, "message": msg})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/bandwidth_test/status')
+def api_bandwidth_test_status():
+    """Return bandwidth test progress and results."""
+    from services.bandwidth_test_service import get_bandwidth_test_status
+    return jsonify(get_bandwidth_test_status())
+
+
+@cloud_archive_bp.route('/api/bandwidth_test/apply', methods=['POST'])
+def api_bandwidth_test_apply():
+    """Apply the recommended bandwidth from the test."""
+    from services.bandwidth_test_service import get_bandwidth_test_status
+
+    status = get_bandwidth_test_status()
+    recommended = status.get("recommended_mbps")
+    if not recommended:
+        return jsonify({"success": False, "message": "No test results available"}), 400
+
+    try:
+        _update_config_yaml({'cloud_archive.max_upload_mbps': recommended})
+        return jsonify({"success": True, "message": f"Bandwidth set to {recommended} Mbps"})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500

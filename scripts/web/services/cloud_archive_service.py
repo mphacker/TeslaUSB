@@ -959,9 +959,11 @@ def get_sync_stats(db_path: str) -> dict:
             ).fetchone()
             counts[status] = row["cnt"] if row else 0
 
+        # Sum bytes from individual synced files (more accurate than session
+        # totals which are lost when sessions are interrupted by restart).
         row = conn.execute(
-            "SELECT COALESCE(SUM(bytes_transferred), 0) AS total "
-            "FROM cloud_sync_sessions WHERE status = 'completed'"
+            "SELECT COALESCE(SUM(file_size), 0) AS total "
+            "FROM cloud_synced_files WHERE status = 'synced'"
         ).fetchone()
         total_bytes = row["total"] if row else 0
 

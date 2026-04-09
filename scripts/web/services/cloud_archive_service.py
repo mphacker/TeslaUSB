@@ -578,6 +578,49 @@ def _run_sync(
         except Exception:
             pass
 
+        # Check available cloud storage and cap sync to what fits.
+        # Reserve 1 GB so we never fill the provider to 100%.
+        _CLOUD_RESERVE_BYTES = 1 * 1024 * 1024 * 1024
+        cloud_free_bytes: Optional[int] = None
+        try:
+            about_result = subprocess.run(
+                ["rclone", "about", "--config", conf_path, "teslausb:", "--json"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if about_result.returncode == 0:
+                import json as _json
+                about = _json.loads(about_result.stdout)
+                if "free" in about:
+                    cloud_free_bytes = int(about["free"]) - _CLOUD_RESERVE_BYTES
+                    cloud_total = int(about.get("total", 0))
+                    logger.info(
+                        "Cloud storage: %.1f GB free / %.1f GB total (%.1f GB reserved)",
+                        (cloud_free_bytes + _CLOUD_RESERVE_BYTES) / (1024 ** 3),
+                        cloud_total / (1024 ** 3),
+                        _CLOUD_RESERVE_BYTES / (1024 ** 3),
+                    )
+        except Exception as e:
+            logger.warning("Could not check cloud storage: %s", e)
+
+        # If we know cloud capacity, trim the sync list to what fits
+        cloud_bytes_remaining = cloud_free_bytes
+        if cloud_bytes_remaining is not None and cloud_bytes_remaining <= 0:
+            _sync_status.update({
+                "running": False,
+                "progress": "Cloud storage full",
+                "error": "Not enough cloud storage — free up space or upgrade your plan",
+            })
+            logger.warning("Cloud sync aborted: no free cloud storage")
+            if session_id is not None:
+                conn.execute(
+                    "UPDATE cloud_sync_sessions SET ended_at = ?, status = 'completed', "
+                    "files_synced = 0, bytes_transferred = 0, "
+                    "error_msg = 'Cloud storage full' WHERE id = ?",
+                    (datetime.now(timezone.utc).isoformat(), session_id),
+                )
+                conn.commit()
+            return
+
         # Memory-safe flags for Pi Zero 2W
         mem_flags = ["--buffer-size", "0", "--transfers", "1", "--checkers", "1"]
 
@@ -601,6 +644,22 @@ def _run_sync(
             remote_dest = f"teslausb:{remote_path}/{rel_path}"
             logger.info("Sync: [%d/%d] %s (%d bytes)",
                         idx + 1, len(to_sync), rel_path, event_size)
+
+            # Cloud space check — skip this file if it won't fit
+            if cloud_bytes_remaining is not None and event_size > cloud_bytes_remaining:
+                skipped = len(to_sync) - idx
+                logger.warning(
+                    "Cloud storage full: %.1f MB remaining, need %.1f MB for %s (%d events skipped)",
+                    cloud_bytes_remaining / (1024 * 1024),
+                    event_size / (1024 * 1024),
+                    rel_path, skipped,
+                )
+                _sync_status["progress"] = (
+                    f"Cloud full after {files_synced} events — "
+                    f"{skipped} skipped (upgrade storage or free space)"
+                )
+                _sync_status["error"] = "Cloud storage full"
+                break
 
             # Mark event as uploading in the tracking database
             conn.execute(
@@ -644,6 +703,10 @@ def _run_sync(
                     bytes_transferred += event_size
                     _sync_status["bytes_transferred"] = bytes_transferred
                     logger.info("Sync: [%d/%d] %s OK", idx + 1, len(to_sync), rel_path)
+
+                    # Track remaining cloud space
+                    if cloud_bytes_remaining is not None:
+                        cloud_bytes_remaining -= event_size
 
                     # Mark as synced with timestamp — the critical tracking step
                     now_synced = datetime.now(timezone.utc).isoformat()

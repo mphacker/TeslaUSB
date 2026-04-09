@@ -776,10 +776,10 @@ def _run_sync(
                 break
 
             _sync_status.update({
-                "files_done": idx,
+                "files_done": files_synced,
                 "current_file": rel_path,
                 "current_file_size": event_size,
-                "progress": f"Uploading {idx + 1}/{len(to_sync)}: {rel_path}",
+                "progress": f"Uploading {files_synced + 1}/{len(to_sync)}: {rel_path}",
             })
 
             remote_dest = f"teslausb:{remote_path}/{rel_path}"
@@ -843,6 +843,7 @@ def _run_sync(
                     files_synced += 1
                     bytes_transferred += event_size
                     _sync_status["bytes_transferred"] = bytes_transferred
+                    _sync_status["files_done"] = files_synced
                     logger.info("Sync: [%d/%d] %s OK", idx + 1, len(to_sync), rel_path)
 
                     # Track remaining cloud space
@@ -1031,24 +1032,11 @@ def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
 def get_sync_status() -> dict:
     """Return a snapshot of the current sync status for UI polling.
 
-    Merges in-memory progress with DB totals so the UI shows consistent
-    numbers across the progress panel and stats cards.
+    Returns only in-memory data — no DB queries. DB totals are updated
+    by the sync thread after each upload completes (see _sync_status
+    updates in _run_sync).
     """
     status = dict(_sync_status)
-
-    # Augment with DB totals so the progress panel reflects all-time
-    # synced count, not just the current session.
-    try:
-        conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
-        try:
-            row = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM cloud_synced_files WHERE status = 'synced'"
-            ).fetchone()
-            status["total_synced"] = row["cnt"] if row else 0
-        finally:
-            conn.close()
-    except Exception:
-        status["total_synced"] = 0
 
     # Calculate ETA from throughput
     if status.get("running") and status.get("started_at") and status.get("bytes_transferred", 0) > 0:

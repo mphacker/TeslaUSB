@@ -224,12 +224,24 @@ def api_sync_stop():
 
 @cloud_archive_bp.route('/api/status')
 def api_status():
-    """Return current sync status and stats for UI polling."""
+    """Return current sync status and stats for UI polling.
+
+    Stats are cached for 10s to avoid hammering SQLite every 3s poll
+    while rclone is doing heavy I/O on the same SD card.
+    """
     from services.cloud_archive_service import get_sync_status, get_sync_stats
+    import time as _time
 
     try:
         status = get_sync_status()
-        stats = get_sync_stats(CLOUD_ARCHIVE_DB_PATH)
+
+        now = _time.time()
+        if not hasattr(api_status, '_cache') or now - api_status._cache.get('ts', 0) > 10:
+            stats = get_sync_stats(CLOUD_ARCHIVE_DB_PATH)
+            api_status._cache = {'data': stats, 'ts': now}
+        else:
+            stats = api_status._cache['data']
+
         return jsonify({"status": status, "stats": stats})
     except Exception as exc:
         logger.exception("Failed to fetch sync status")

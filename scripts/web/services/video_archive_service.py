@@ -56,6 +56,12 @@ _MIN_MEMORY_BYTES = 50 * 1024 * 1024  # 50 MB
 # Pause between file copies to let the system breathe
 _INTER_FILE_SLEEP = 2.0  # 2 seconds
 
+# Max files to copy per archive cycle. Prevents a large backlog from
+# monopolising I/O and RAM for the entire 5-minute interval, which can
+# starve the web server and trigger the hardware watchdog on Pi Zero 2 W.
+# Remaining files are picked up in the next cycle.
+_MAX_FILES_PER_CYCLE = 50
+
 # ---------------------------------------------------------------------------
 # Background Thread State
 # ---------------------------------------------------------------------------
@@ -281,6 +287,14 @@ def _run_archive() -> None:
         for idx, (src_path, rel_path) in enumerate(to_copy):
             if _archive_cancel.is_set():
                 _status["progress"] = "Cancelled"
+                break
+
+            # Per-cycle cap — yield CPU/IO back to the web server and
+            # gadget so the system stays responsive between cycles.
+            if copied >= _MAX_FILES_PER_CYCLE:
+                logger.info("Archive: pausing at %d files (cycle cap), %d remaining",
+                            copied, len(to_copy) - idx)
+                _status["progress"] = f"Paused at {copied} files (continuing next cycle)"
                 break
 
             # Memory pressure check

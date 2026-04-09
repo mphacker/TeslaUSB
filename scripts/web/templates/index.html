@@ -200,30 +200,48 @@
         <summary>Archive Settings</summary>
         <div class="section-content">
             <form method="post" action="{{ url_for('mode_control.save_archive_settings') }}">
-                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
-                    Controls how RecentClips are copied from the USB drive to the SD card.
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 16px">
+                    Tesla records dashcam footage to the USB drive in a circular buffer called RecentClips.
+                    After about an hour, older clips are automatically overwritten by new ones.
+                    The archive service copies these clips to the Pi's SD card before they're lost,
+                    so you can browse and cloud-sync them later.
                 </p>
-                <div class="form-group" style="margin-bottom:12px">
+                <div class="form-group" style="margin-bottom:14px">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
                         <input type="checkbox" name="enabled" {% if cfg_archive.enabled %}checked{% endif %}>
-                        <span>Enable RecentClips archival</span>
+                        <strong>Enable RecentClips archival</strong>
                     </label>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">
+                        When enabled, clips are automatically copied from the USB drive to the SD card every 5 minutes.
+                        Disable this if you don't need local copies of your dashcam footage.
+                    </p>
                 </div>
-                <div class="form-group" style="margin-bottom:12px">
+                <div class="form-group" style="margin-bottom:14px">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
                         <input type="checkbox" name="only_driving" {% if cfg_archive.only_driving %}checked{% endif %}>
-                        <span>Only archive clips from driving trips</span>
+                        <strong>Only archive clips from driving trips</strong>
                     </label>
-                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">Skip idle/parked footage that has no GPS data. Saves significant SD card space.</p>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">
+                        When your car is parked or idle, Tesla still records footage — but these clips have no GPS data
+                        and are usually just a static view of a parking lot. Enabling this skips those idle clips and only
+                        archives footage from times when you were actually driving (based on indexed trip data).
+                        This can save 50–80% of SD card space. If no trips have been indexed yet, all clips are archived as a safety fallback.
+                    </p>
                 </div>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
                     <div class="form-group">
-                        <label style="font-size:0.85rem">Retention (days)</label>
+                        <label style="font-size:0.85rem"><strong>Retention (days)</strong></label>
                         <input type="number" name="retention_days" value="{{ cfg_archive.retention_days }}" min="1" max="365" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Archived clips older than this are automatically deleted to free up SD card space.
+                        </p>
                     </div>
                     <div class="form-group">
-                        <label style="font-size:0.85rem">Min free space (GB)</label>
+                        <label style="font-size:0.85rem"><strong>Min free space (GB)</strong></label>
                         <input type="number" name="min_free_space_gb" value="{{ cfg_archive.min_free_space_gb }}" min="1" max="100" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Archival stops when SD card free space drops below this. Protects the OS and other services from running out of disk.
+                        </p>
                     </div>
                 </div>
                 <button type="submit" class="btn btn-primary" style="width:100%">Save Archive Settings</button>
@@ -236,30 +254,50 @@
         <summary>Mapping & Indexing</summary>
         <div class="section-content">
             <form method="post" action="{{ url_for('mode_control.save_mapping_settings') }}">
-                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
-                    GPS telemetry extraction and trip detection from dashcam footage.
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 16px">
+                    Tesla embeds GPS coordinates and telemetry data (speed, braking, steering) inside each dashcam video.
+                    The indexer extracts this data and builds a database of trips, routes, and driving events.
+                    This powers the map view — showing where you drove, plotting routes, and detecting events
+                    like hard braking or sharp turns.
                 </p>
-                <div class="form-group" style="margin-bottom:12px">
+                <div class="form-group" style="margin-bottom:14px">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
                         <input type="checkbox" name="enabled" {% if cfg_mapping.enabled %}checked{% endif %}>
-                        <span>Enable GPS indexing</span>
+                        <strong>Enable GPS indexing</strong>
                     </label>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">
+                        Scans dashcam videos to extract GPS waypoints and build trip routes.
+                        When disabled, the map page won't show any trips or routes. Videos can still be browsed by folder.
+                    </p>
                 </div>
-                <div class="form-group" style="margin-bottom:12px">
+                <div class="form-group" style="margin-bottom:14px">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
                         <input type="checkbox" name="archive_indexing" {% if cfg_mapping.archive_indexing %}checked{% endif %}>
-                        <span>Index ArchivedClips on WiFi connect</span>
+                        <strong>Index ArchivedClips on WiFi connect</strong>
                     </label>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">
+                        When the Pi connects to WiFi (e.g., you arrive home), also scan archived clips on the SD card
+                        for GPS data. This ensures older trips that were archived from RecentClips still appear on the map.
+                        Disable if indexing takes too long or you only care about recent trips on the USB drive.
+                    </p>
                 </div>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
                     <div class="form-group">
-                        <label style="font-size:0.85rem">Trip gap (minutes)</label>
+                        <label style="font-size:0.85rem"><strong>Trip gap (minutes)</strong></label>
                         <input type="number" name="trip_gap_minutes" value="{{ cfg_mapping.trip_gap_minutes }}" min="1" max="60" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            If there's a gap longer than this between GPS waypoints, a new trip is started.
+                            Lower values split stops (gas station, drive-through) into separate trips.
+                            Higher values keep them as one continuous trip.
+                        </p>
                     </div>
                     <div class="form-group">
-                        <label style="font-size:0.85rem">Speed alert (mph)</label>
+                        <label style="font-size:0.85rem"><strong>Speed alert (mph)</strong></label>
                         <input type="number" name="speed_limit_mph" value="{{ cfg_mapping.speed_limit_mph|int }}" min="0" max="200" step="5" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
-                        <p style="font-size:0.75rem; color:var(--text-secondary); margin:2px 0 0">0 = disabled</p>
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Marks a driving event on the map when your speed exceeds this threshold.
+                            Set to 0 to disable speed alerts entirely.
+                        </p>
                     </div>
                 </div>
                 <button type="submit" class="btn btn-primary" style="width:100%">Save Mapping Settings</button>

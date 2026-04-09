@@ -105,12 +105,25 @@ def main():
         logger.warning("Video indexing failed (non-fatal): %s", e)
 
     # Step 3: Sync event clips to cloud (if configured)
+    # Trigger sync via the web API so the thread runs inside the
+    # long-lived gadget_web process.  Direct imports would start a
+    # daemon thread in THIS process which dies when the script exits.
     try:
-        from config import CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_DB_PATH, CLOUD_PROVIDER_CREDS_PATH
+        from config import CLOUD_ARCHIVE_ENABLED, CLOUD_PROVIDER_CREDS_PATH
         if CLOUD_ARCHIVE_ENABLED and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
-            from services.cloud_archive_service import trigger_auto_sync
-            logger.info("Triggering cloud sync...")
-            trigger_auto_sync(teslacam, CLOUD_ARCHIVE_DB_PATH)
+            import urllib.request
+            logger.info("Triggering cloud sync via web API...")
+            req = urllib.request.Request(
+                "http://localhost/cloud/api/sync_now",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                data=b"{}",
+            )
+            try:
+                resp = urllib.request.urlopen(req, timeout=10)
+                logger.info("Cloud sync triggered: %s", resp.read().decode()[:200])
+            except Exception as e:
+                logger.warning("Cloud sync API call failed: %s", e)
         else:
             logger.info("Cloud archive not configured — skipping sync")
     except Exception as e:

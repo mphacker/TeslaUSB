@@ -7,16 +7,16 @@ ConditionPathExists=!/run/teslausb-safe-mode
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=__GADGET_DIR__/scripts/web
-ExecStart=/usr/bin/python3 -c "from services.cloud_archive_service import trigger_auto_sync; from services.video_service import get_teslacam_path; from config import CLOUD_ARCHIVE_DB_PATH; p = get_teslacam_path(); trigger_auto_sync(p, CLOUD_ARCHIVE_DB_PATH) if p else None"
-TimeoutStartSec=3600
+# Trigger sync via the web API so the upload thread runs inside the
+# long-lived gadget_web process.  Previous approach imported Python
+# directly, starting a daemon thread that died when this oneshot exited.
+ExecStart=/usr/bin/curl -sf -X POST -H "Content-Type: application/json" -d "{}" http://localhost/cloud/api/sync_now
+TimeoutStartSec=30
 Nice=15
-MemoryMax=100M
 
 StandardOutput=journal
 StandardError=journal
 
-# Restart on transient failures (network hiccups)
 Restart=on-failure
 RestartSec=60
 StartLimitBurst=3

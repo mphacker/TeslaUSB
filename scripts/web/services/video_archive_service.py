@@ -266,10 +266,13 @@ def _run_archive() -> None:
         _status["progress"] = f"Copying {len(to_copy)} files..."
         logger.info("Archive: %d new files to copy from RecentClips", len(to_copy))
 
-        # Run retention FIRST to make room for new files.
-        # Without this, the copy loop hits the size cap immediately when
-        # the archive is full, copies only 1 file, then retention runs
-        # and deletes 1 file — a death spiral of 1-file-per-cycle.
+        # Proactive retention: free space early (at 2× the floor) so we
+        # never hit the hard limit mid-copy.  Deletes least-valuable
+        # files first when possible.
+        _proactive_retention()
+
+        # If still at the hard floor after proactive cleanup, try the
+        # full retention cascade before giving up.
         if not _check_disk_space():
             _status["progress"] = "Retention cleanup (making room)..."
             _enforce_retention()
@@ -774,6 +777,51 @@ def _check_disk_space() -> bool:
             return False
 
     return True
+
+
+def _proactive_retention() -> None:
+    """Run retention early when free space is getting low.
+
+    Triggers at 2× the ``min_free_space_gb`` floor so there is always a
+    buffer before the hard limit is reached.  This avoids the scenario
+    where we hit the floor mid-copy and have to stop.  Uses the smart
+    cleanup path (deletes least-valuable files first) when available,
+    falling back to age-based + oldest-first retention.
+    """
+    try:
+        usage = shutil.disk_usage(ARCHIVE_DIR)
+    except OSError:
+        return
+
+    soft_threshold = ARCHIVE_MIN_FREE_SPACE_GB * 2 * 1024 * 1024 * 1024
+    if usage.free >= soft_threshold:
+        return  # Plenty of space — nothing to do
+
+    free_gb = usage.free / (1024 ** 3)
+    target_gb = ARCHIVE_MIN_FREE_SPACE_GB * 2
+    logger.info(
+        "Proactive retention: %.1f GB free < %.0f GB soft threshold, cleaning up",
+        free_gb, target_gb,
+    )
+
+    # Try smart cleanup first (deletes least-valuable files)
+    try:
+        result = smart_cleanup_archive(
+            ARCHIVE_DIR,
+            min_free_gb=target_gb,
+            max_size_gb=ARCHIVE_MAX_SIZE_GB,
+        )
+        if result["deleted_count"]:
+            logger.info(
+                "Proactive retention: smart cleanup freed %.1f MB (%d files)",
+                result["freed_bytes"] / (1024 * 1024), result["deleted_count"],
+            )
+            return
+    except Exception as e:
+        logger.debug("Smart cleanup unavailable, using basic retention: %s", e)
+
+    # Fall back to basic retention (oldest-first)
+    _trim_archive_for_free_space(int(target_gb * 1024 ** 3))
 
 
 def _get_archive_size() -> int:

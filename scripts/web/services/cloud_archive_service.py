@@ -87,6 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_cloud_sessions_started ON cloud_sync_sessions(sta
 _sync_thread: Optional[threading.Thread] = None
 _sync_lock = threading.Lock()
 _sync_cancel = threading.Event()
+_sync_rclone_proc: Optional[subprocess.Popen] = None
 _startup_recovery_done = False
 
 _sync_status: Dict = {
@@ -822,7 +823,7 @@ def _run_sync(
             # gadget and web service stay responsive during uploads.
             # Default size+mtime check catches partial uploads (no --ignore-existing).
             try:
-                result = subprocess.run(
+                _sync_rclone_proc = subprocess.Popen(
                     [
                         "nice", "-n", "19",
                         "ionice", "-c", "3",
@@ -836,10 +837,31 @@ def _run_sync(
                         event_dir,
                         remote_dest,
                     ],
-                    capture_output=True, text=True, timeout=3600,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True,
                 )
+                try:
+                    stdout, stderr = _sync_rclone_proc.communicate(timeout=3600)
+                    returncode = _sync_rclone_proc.returncode
+                except subprocess.TimeoutExpired:
+                    _sync_rclone_proc.kill()
+                    _sync_rclone_proc.communicate()
+                    returncode = -1
+                    stderr = "Upload timed out (1h)"
+                finally:
+                    _sync_rclone_proc = None
 
-                if result.returncode == 0:
+                if cancel_event.is_set():
+                    # Process was killed by stop_sync — don't mark as failed
+                    logger.info("Sync: %s interrupted by stop request", rel_path)
+                    conn.execute(
+                        "UPDATE cloud_synced_files SET status = 'pending' WHERE file_path = ?",
+                        (rel_path,)
+                    )
+                    _fsync_db(conn)
+                    break
+
+                if returncode == 0:
                     files_synced += 1
                     bytes_transferred += event_size
                     _sync_status["bytes_transferred"] = bytes_transferred
@@ -861,10 +883,10 @@ def _run_sync(
                     )
                     _fsync_db(conn)
                 else:
-                    err_msg = result.stderr.strip()[:500]
+                    err_msg = (stderr or "").strip()[:500]
                     logger.error("Sync: [%d/%d] %s FAILED (exit %d): %s",
                                 idx + 1, len(to_sync), rel_path,
-                                result.returncode, err_msg[:200])
+                                returncode, err_msg[:200])
                     conn.execute(
                         """UPDATE cloud_synced_files
                            SET status = 'failed',
@@ -876,15 +898,8 @@ def _run_sync(
                     _fsync_db(conn)
 
             except subprocess.TimeoutExpired:
-                logger.error("Sync: %s timed out", rel_path)
-                conn.execute(
-                    """UPDATE cloud_synced_files
-                       SET status = 'failed', last_error = 'Upload timed out (1h)',
-                           retry_count = retry_count + 1
-                       WHERE file_path = ?""",
-                    (rel_path,)
-                )
-                _fsync_db(conn)
+                # Handled inside Popen.communicate above
+                pass
             except Exception as e:
                 logger.error("Sync: %s error: %s", rel_path, e)
                 conn.execute(
@@ -1007,26 +1022,34 @@ def start_sync(
 
 
 def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
-    """Request cancellation of a running sync.
+    """Stop a running sync by killing the active rclone process.
 
-    Args:
-        graceful: If True, finish the current file upload then stop.
-                  If False, kill rclone immediately (may leave partial file).
+    Always terminates immediately — a single event upload can take 20+
+    minutes, so waiting is impractical. The partial file on the remote
+    will be overwritten on the next sync (--size-only detects mismatch).
     """
+    global _sync_rclone_proc
+
     if not _sync_status.get("running"):
         return False, "Sync is not running"
+
     _sync_cancel.set()
-    if not graceful:
-        # Kill any running rclone subprocess immediately
-        # The sync thread checks cancel_event between files, but for
-        # immediate stop we also need to terminate the active rclone process.
-        # The thread's subprocess.run has a timeout, so it will eventually
-        # return, but we set a flag to signal immediate termination.
-        _sync_status["_force_stop"] = True
-        logger.info("Immediate sync cancellation requested")
-        return True, "Sync stopping immediately (current file may be incomplete)"
-    logger.info("Graceful sync cancellation requested")
-    return True, "Sync will stop after the current file finishes"
+
+    proc = _sync_rclone_proc
+    if proc is not None:
+        try:
+            proc.terminate()
+            logger.info("Sent SIGTERM to rclone (pid=%d)", proc.pid)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                logger.info("Sent SIGKILL to rclone (pid=%d)", proc.pid)
+        except (OSError, ProcessLookupError):
+            pass
+
+    logger.info("Sync stop requested")
+    return True, "Sync stopping"
 
 
 def get_sync_status() -> dict:

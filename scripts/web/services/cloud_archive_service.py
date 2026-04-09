@@ -504,6 +504,13 @@ def _run_sync(
             "UPDATE cloud_synced_files SET status = 'pending', "
             "retry_count = retry_count WHERE status = 'uploading'"
         )
+        # Finalize any sync sessions left "running" by a crash/reboot
+        conn.execute(
+            "UPDATE cloud_sync_sessions SET status = 'interrupted', "
+            "ended_at = ?, error_msg = 'Process terminated (power loss or crash)' "
+            "WHERE status = 'running'",
+            (datetime.now(timezone.utc).isoformat(),)
+        )
         conn.commit()
 
         # Create sync session record

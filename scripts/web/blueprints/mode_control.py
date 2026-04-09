@@ -195,6 +195,10 @@ def index():
         wifi_change_status=wifi_change_status,
         system_info=_get_system_info(),
         auto_refresh=False,
+        # Config settings for editable sections
+        cfg_archive=_get_archive_config(),
+        cfg_mapping=_get_mapping_config(),
+        cfg_network=_get_network_config(),
     )
 
 @mode_control_bp.route("/present_usb", methods=["POST"])
@@ -439,3 +443,122 @@ def api_wifi_scan():
         return jsonify(get_available_networks(rescan=True))
     except Exception:
         return jsonify([])
+
+
+# ---------------------------------------------------------------------------
+# Settings Config Helpers
+# ---------------------------------------------------------------------------
+
+def _get_archive_config() -> dict:
+    """Read current archive settings for the settings page."""
+    from config import (
+        ARCHIVE_ENABLED, ARCHIVE_ONLY_DRIVING,
+        ARCHIVE_RETENTION_DAYS, ARCHIVE_MIN_FREE_SPACE_GB,
+    )
+    return {
+        'enabled': ARCHIVE_ENABLED,
+        'only_driving': ARCHIVE_ONLY_DRIVING,
+        'retention_days': ARCHIVE_RETENTION_DAYS,
+        'min_free_space_gb': ARCHIVE_MIN_FREE_SPACE_GB,
+    }
+
+
+def _get_mapping_config() -> dict:
+    """Read current mapping settings for the settings page."""
+    from config import (
+        MAPPING_ENABLED, MAPPING_ARCHIVE_INDEXING,
+        MAPPING_TRIP_GAP_MINUTES, MAPPING_EVENT_THRESHOLDS,
+    )
+    return {
+        'enabled': MAPPING_ENABLED,
+        'archive_indexing': MAPPING_ARCHIVE_INDEXING,
+        'trip_gap_minutes': MAPPING_TRIP_GAP_MINUTES,
+        'speed_limit_mph': round(MAPPING_EVENT_THRESHOLDS.get('speed_limit_mps', 35.76) * 2.237, 0),
+    }
+
+
+def _get_network_config() -> dict:
+    """Read current network settings for the settings page."""
+    from config import config
+    return {
+        'samba_password': config.get('network', {}).get('samba_password', ''),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Settings Update Routes
+# ---------------------------------------------------------------------------
+
+@mode_control_bp.route("/save/archive", methods=["POST"])
+def save_archive_settings():
+    """Save archive settings from the settings page."""
+    from helpers.config_updater import update_config_yaml
+
+    try:
+        updates = {
+            'archive.enabled': 'enabled' in request.form,
+            'archive.only_driving': 'only_driving' in request.form,
+            'archive.retention_days': max(1, int(request.form.get('retention_days', 30))),
+            'archive.min_free_space_gb': max(1, int(request.form.get('min_free_space_gb', 10))),
+        }
+        update_config_yaml(updates)
+        flash("Archive settings saved. Restart service to apply.", "success")
+    except (ValueError, TypeError) as e:
+        flash(f"Invalid value: {e}", "danger")
+    except Exception as e:
+        flash(f"Failed to save: {e}", "danger")
+
+    return redirect(url_for('mode_control.index'))
+
+
+@mode_control_bp.route("/save/mapping", methods=["POST"])
+def save_mapping_settings():
+    """Save mapping/indexing settings from the settings page."""
+    from helpers.config_updater import update_config_yaml
+
+    try:
+        speed_mph = float(request.form.get('speed_limit_mph', 80))
+        speed_mps = round(speed_mph / 2.237, 2)
+
+        updates = {
+            'mapping.enabled': 'enabled' in request.form,
+            'mapping.archive_indexing': 'archive_indexing' in request.form,
+            'mapping.trip_gap_minutes': max(1, int(request.form.get('trip_gap_minutes', 5))),
+            'mapping.event_detection.speed_limit_mps': speed_mps,
+        }
+        update_config_yaml(updates)
+        flash("Mapping settings saved. Restart service to apply.", "success")
+    except (ValueError, TypeError) as e:
+        flash(f"Invalid value: {e}", "danger")
+    except Exception as e:
+        flash(f"Failed to save: {e}", "danger")
+
+    return redirect(url_for('mode_control.index'))
+
+
+@mode_control_bp.route("/save/network", methods=["POST"])
+def save_network_settings():
+    """Save network settings (Samba password) from the settings page."""
+    from helpers.config_updater import update_config_yaml
+
+    password = request.form.get('samba_password', '').strip()
+    if not password:
+        flash("Samba password cannot be empty.", "danger")
+        return redirect(url_for('mode_control.index'))
+
+    try:
+        update_config_yaml({'network.samba_password': password})
+        # Update Samba user password live
+        result = subprocess.run(
+            ["sudo", "-n", "bash", "-c",
+             f"echo -e '{password}\\n{password}' | smbpasswd -s -a pi"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            flash("Samba password updated.", "success")
+        else:
+            flash("Password saved to config but Samba update failed. Run setup_usb.sh to apply.", "warning")
+    except Exception as e:
+        flash(f"Failed to save: {e}", "danger")
+
+    return redirect(url_for('mode_control.index'))

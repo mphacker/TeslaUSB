@@ -31,6 +31,7 @@ from config import (
     ARCHIVE_RETENTION_DAYS,
     ARCHIVE_MIN_FREE_SPACE_GB,
     ARCHIVE_MAX_SIZE_GB,
+    ARCHIVE_ONLY_DRIVING,
 )
 
 # ---------------------------------------------------------------------------
@@ -379,15 +380,25 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
     """Yield (src_abs_path, relative_path) for files not yet archived.
 
     Skips files younger than _MIN_FILE_AGE_SECONDS (may be actively written).
+    When ARCHIVE_ONLY_DRIVING is True, skips clips with no corresponding
+    trip in geodata.db (idle/parked footage).
     Uses generators to avoid building large in-memory lists.
     """
     now = time.time()
+
+    # Build set of driving timestamps from geodata.db for quick lookup.
+    # Each trip covers a time range; a clip "overlaps" if its timestamp
+    # falls within any trip's [start, end] window (with 60s padding).
+    driving_ranges: Optional[List[Tuple[float, float]]] = None
+    if ARCHIVE_ONLY_DRIVING:
+        driving_ranges = _get_driving_time_ranges()
 
     try:
         entries = sorted(os.listdir(recent_clips))
     except OSError:
         return
 
+    skipped_idle = 0
     for name in entries:
         src = os.path.join(recent_clips, name)
         try:
@@ -413,6 +424,13 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
         if name.lower().endswith('.mp4') and not _is_complete_mp4(src):
             continue
 
+        # Skip idle/parked clips when only_driving is enabled
+        if driving_ranges is not None:
+            clip_ts = _timestamp_from_filename(name)
+            if clip_ts is not None and not _is_during_driving(clip_ts, driving_ranges):
+                skipped_idle += 1
+                continue
+
         # Check if already archived (same name and size)
         dst = os.path.join(ARCHIVE_DIR, name)
         if os.path.isfile(dst):
@@ -424,6 +442,70 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
                 pass
 
         yield (src, name)
+
+    if skipped_idle:
+        logger.info("Archive: skipped %d idle/parked clips (only_driving=true)", skipped_idle)
+
+
+def _get_driving_time_ranges() -> Optional[List[Tuple[float, float]]]:
+    """Load trip time ranges from geodata.db.
+
+    Returns a sorted list of (start_epoch, end_epoch) tuples, or None
+    if the database is unavailable (fall back to archiving everything).
+    """
+    try:
+        from config import MAPPING_ENABLED, MAPPING_DB_PATH
+        if not MAPPING_ENABLED:
+            return None
+        if not os.path.isfile(MAPPING_DB_PATH):
+            return None
+
+        import sqlite3
+        conn = sqlite3.connect(MAPPING_DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT start_time, end_time FROM trips ORDER BY start_time"
+            ).fetchall()
+            if not rows:
+                return None  # No trips indexed yet — archive everything
+
+            ranges = []
+            _PADDING = 120  # 2 min padding around each trip
+            for r in rows:
+                try:
+                    st = datetime.fromisoformat(r['start_time']).timestamp() - _PADDING
+                    et = datetime.fromisoformat(r['end_time']).timestamp() + _PADDING
+                    ranges.append((st, et))
+                except (ValueError, TypeError):
+                    continue
+            return ranges if ranges else None
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("Could not load driving ranges: %s", e)
+        return None
+
+
+def _timestamp_from_filename(name: str) -> Optional[float]:
+    """Extract epoch timestamp from Tesla filename like '2026-04-08_20-00-03-front.mp4'."""
+    try:
+        # First 19 chars: '2026-04-08_20-00-03'
+        ts_str = os.path.basename(name)[:19]
+        dt = datetime.strptime(ts_str, '%Y-%m-%d_%H-%M-%S')
+        return dt.timestamp()
+    except (ValueError, IndexError):
+        return None
+
+
+def _is_during_driving(clip_ts: float, ranges: List[Tuple[float, float]]) -> bool:
+    """Return True if clip_ts falls within any driving time range."""
+    for start, end in ranges:
+        if start <= clip_ts <= end:
+            return True
+        if start > clip_ts:
+            break  # Ranges are sorted — no need to check further
+    return False
 
 
 # ---------------------------------------------------------------------------

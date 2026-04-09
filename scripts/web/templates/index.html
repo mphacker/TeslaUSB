@@ -195,6 +195,99 @@
         </div>
     </details>
 
+    <!-- Archive Settings -->
+    <details class="settings-section">
+        <summary>Archive Settings</summary>
+        <div class="section-content">
+            <form method="post" action="{{ url_for('mode_control.save_archive_settings') }}">
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                    Controls how RecentClips are copied from the USB drive to the SD card.
+                </p>
+                <div class="form-group" style="margin-bottom:12px">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+                        <input type="checkbox" name="enabled" {% if cfg_archive.enabled %}checked{% endif %}>
+                        <span>Enable RecentClips archival</span>
+                    </label>
+                </div>
+                <div class="form-group" style="margin-bottom:12px">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+                        <input type="checkbox" name="only_driving" {% if cfg_archive.only_driving %}checked{% endif %}>
+                        <span>Only archive clips from driving trips</span>
+                    </label>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">Skip idle/parked footage that has no GPS data. Saves significant SD card space.</p>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem">Retention (days)</label>
+                        <input type="number" name="retention_days" value="{{ cfg_archive.retention_days }}" min="1" max="365" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:0.85rem">Min free space (GB)</label>
+                        <input type="number" name="min_free_space_gb" value="{{ cfg_archive.min_free_space_gb }}" min="1" max="100" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">Save Archive Settings</button>
+            </form>
+        </div>
+    </details>
+
+    <!-- Mapping & Indexing Settings -->
+    <details class="settings-section">
+        <summary>Mapping & Indexing</summary>
+        <div class="section-content">
+            <form method="post" action="{{ url_for('mode_control.save_mapping_settings') }}">
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                    GPS telemetry extraction and trip detection from dashcam footage.
+                </p>
+                <div class="form-group" style="margin-bottom:12px">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+                        <input type="checkbox" name="enabled" {% if cfg_mapping.enabled %}checked{% endif %}>
+                        <span>Enable GPS indexing</span>
+                    </label>
+                </div>
+                <div class="form-group" style="margin-bottom:12px">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+                        <input type="checkbox" name="archive_indexing" {% if cfg_mapping.archive_indexing %}checked{% endif %}>
+                        <span>Index ArchivedClips on WiFi connect</span>
+                    </label>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem">Trip gap (minutes)</label>
+                        <input type="number" name="trip_gap_minutes" value="{{ cfg_mapping.trip_gap_minutes }}" min="1" max="60" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:0.85rem">Speed alert (mph)</label>
+                        <input type="number" name="speed_limit_mph" value="{{ cfg_mapping.speed_limit_mph|int }}" min="0" max="200" step="5" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <p style="font-size:0.75rem; color:var(--text-secondary); margin:2px 0 0">0 = disabled</p>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">Save Mapping Settings</button>
+            </form>
+        </div>
+    </details>
+
+    <!-- Network Settings -->
+    <details class="settings-section">
+        <summary>Network File Sharing</summary>
+        <div class="section-content">
+            <form method="post" action="{{ url_for('mode_control.save_network_settings') }}">
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                    Samba (SMB) password used when connecting to shared drives from your computer.
+                </p>
+                <div class="form-group" style="margin-bottom:12px">
+                    <label style="font-size:0.85rem">Samba Password</label>
+                    <div style="display:flex; gap:8px">
+                        <input type="password" name="samba_password" id="samba_password" value="{{ cfg_network.samba_password }}" style="flex:1; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <button type="button" onclick="toggleSambaPassword(this)" class="btn btn-secondary" style="padding:6px 12px; font-size:0.85rem">Show</button>
+                    </div>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">Username: <code>pi</code></p>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">Save Network Settings</button>
+            </form>
+        </div>
+    </details>
+
     <!-- Filesystem Health Check -->
     <details class="settings-section">
         <summary>Filesystem Health Check</summary>
@@ -292,6 +385,17 @@
 <script>
 function togglePassword(btn) {
     const passField = document.getElementById('ap_passphrase');
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+function toggleSambaPassword(btn) {
+    const passField = document.getElementById('samba_password');
     if (passField.type === 'password') {
         passField.type = 'text';
         btn.textContent = 'Hide';

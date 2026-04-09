@@ -146,4 +146,5 @@ archive:
   retention_days: 30                     # Delete archived clips older than this
   min_free_space_gb: 10                  # Hard floor — stop archiving if SD card < this free
   max_size_gb: 0                         # 0 = auto (use all available space minus reserved)
+  only_driving: true                     # Only archive clips from active driving trips (skip idle/parked)
   path: ""                               # Archive path (default: ~/ArchivedClips, set by web app)

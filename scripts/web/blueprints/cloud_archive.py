@@ -37,30 +37,9 @@ def _require_cloud_archive():
 # ---------------------------------------------------------------------------
 
 def _update_config_yaml(updates: dict):
-    """Atomically update config.yaml with new values.
-
-    Args:
-        updates: Dict of dotted-key paths to new values,
-                 e.g. ``{'cloud_archive.max_upload_mbps': 10}``.
-    """
-    import yaml
-
-    with open(CONFIG_YAML, 'r') as f:
-        cfg = yaml.safe_load(f)
-
-    for key, value in updates.items():
-        keys = key.split('.')
-        d = cfg
-        for k in keys[:-1]:
-            d = d.setdefault(k, {})
-        d[keys[-1]] = value
-
-    tmp_path = CONFIG_YAML + '.tmp'
-    with open(tmp_path, 'w') as f:
-        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, CONFIG_YAML)
+    """Atomically update config.yaml — delegates to shared helper."""
+    from helpers.config_updater import update_config_yaml
+    update_config_yaml(updates)
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +112,10 @@ def index():
         priority_order=_priority_order,
         max_upload_mbps=_max_upload_mbps,
         remote_path=_remote_path,
+        cloud_reserve_gb=_cloud.get('cloud_reserve_gb', 1),
+        sync_non_event_videos=bool(_cloud.get('sync_non_event_videos', False)),
+        cloud_auto_cleanup=bool(_cloud.get('cloud_auto_cleanup', False)),
+        cloud_min_retention_days=int(_cloud.get('cloud_min_retention_days', 30)),
         **ctx,
     )
 
@@ -149,11 +132,19 @@ def save_settings():
         priority_raw = request.form.get('priority_order', '')
         priority_order = [p.strip() for p in priority_raw.split(',') if p.strip()]
         max_upload_mbps = int(request.form.get('max_upload_mbps', 5))
+        cloud_reserve_gb = max(0, float(request.form.get('cloud_reserve_gb', 1)))
+        sync_non_event = 'sync_non_event_videos' in request.form
+        auto_cleanup = 'cloud_auto_cleanup' in request.form
+        min_retention = max(1, int(request.form.get('cloud_min_retention_days', 30)))
 
         _update_config_yaml({
             'cloud_archive.sync_folders': sync_folders,
             'cloud_archive.priority_order': priority_order,
             'cloud_archive.max_upload_mbps': max_upload_mbps,
+            'cloud_archive.cloud_reserve_gb': cloud_reserve_gb,
+            'cloud_archive.sync_non_event_videos': sync_non_event,
+            'cloud_archive.cloud_auto_cleanup': auto_cleanup,
+            'cloud_archive.cloud_min_retention_days': min_retention,
         })
 
         flash("Cloud sync settings saved.", "success")

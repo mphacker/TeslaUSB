@@ -407,6 +407,37 @@
                     </div>
                 </div>
 
+                {# Cloud storage reserve #}
+                <div style="margin-bottom: var(--space-4);">
+                    <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
+                        Cloud storage reserve (GB)
+                    </label>
+                    <input type="number" name="cloud_reserve_gb" value="{{ cloud_reserve_gb }}" min="0" max="100" step="0.5"
+                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary);">
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Keep this much free on cloud — sync stops before filling to 100%.</p>
+                </div>
+
+                {# Advanced sync options #}
+                <div style="margin-bottom: var(--space-3);">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">
+                        <input type="checkbox" name="sync_non_event_videos" {% if sync_non_event_videos %}checked{% endif %}>
+                        <span>Sync videos without events or geolocation</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">
+                        <input type="checkbox" name="cloud_auto_cleanup" {% if cloud_auto_cleanup %}checked{% endif %}>
+                        <span>Auto-delete old cloud videos when storage is low</span>
+                    </label>
+                </div>
+
+                <div style="margin-bottom: var(--space-4);">
+                    <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
+                        Minimum cloud retention (days)
+                    </label>
+                    <input type="number" name="cloud_min_retention_days" value="{{ cloud_min_retention_days }}" min="1" max="365"
+                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary);">
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Auto-cleanup won't delete videos newer than this.</p>
+                </div>
+
                 <button type="submit" class="edit-btn" style="padding: 8px 20px; font-size: 14px; margin-top: var(--space-3);">Save Settings</button>
             </form>
         </div>

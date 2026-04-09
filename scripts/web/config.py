@@ -121,6 +121,7 @@ ARCHIVE_INTERVAL_MINUTES = int(_archive.get('interval_minutes', 5))
 ARCHIVE_RETENTION_DAYS = int(_archive.get('retention_days', 30))
 ARCHIVE_MIN_FREE_SPACE_GB = int(_archive.get('min_free_space_gb', 10))
 ARCHIVE_MAX_SIZE_GB = int(_archive.get('max_size_gb', 50))
+ARCHIVE_ONLY_DRIVING = bool(_archive.get('only_driving', True))
 _archive_path = _archive.get('path', '')
 ARCHIVE_DIR = _archive_path if _archive_path else os.path.join(
     os.path.expanduser(f"~{TARGET_USER}"), 'ArchivedClips'

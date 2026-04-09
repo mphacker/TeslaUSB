@@ -1593,7 +1593,11 @@
         } catch(e) { /* ignore */ }
     }
 
-// Bandwidth Test
+})();
+
+// Bandwidth Test (global scope for onclick handlers)
+function _bwEscape(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
 async function runBandwidthTest() {
     var btn = document.getElementById('bwTestBtn');
     var results = document.getElementById('bwTestResults');
@@ -1606,7 +1610,7 @@ async function runBandwidthTest() {
         var resp = await fetch('{{ url_for("cloud_archive.api_bandwidth_test") }}', {method: 'POST'});
         var data = await resp.json();
         if (!data.success) {
-            results.innerHTML = '<p style="color:var(--error-text);">' + escapeHtml(data.message) + '</p>';
+            results.innerHTML = '<p style="color:var(--error-text);">' + _bwEscape(data.message) + '</p>';
             btn.disabled = false;
             btn.textContent = 'Auto-Detect';
             return;
@@ -1617,13 +1621,13 @@ async function runBandwidthTest() {
                 var r = await fetch('{{ url_for("cloud_archive.api_bandwidth_test_status") }}');
                 var s = await r.json();
                 if (s.running) {
-                    results.innerHTML = '<p>' + escapeHtml(s.progress || 'Testing…') + '</p>';
+                    results.innerHTML = '<p>' + _bwEscape(s.progress || 'Testing…') + '</p>';
                 } else {
                     clearInterval(pollTimer);
                     btn.disabled = false;
                     btn.textContent = 'Auto-Detect';
                     if (s.error) {
-                        results.innerHTML = '<p style="color:var(--error-text);">Error: ' + escapeHtml(s.error) + '</p>';
+                        results.innerHTML = '<p style="color:var(--error-text);">Error: ' + _bwEscape(s.error) + '</p>';
                         return;
                     }
                     // Show results table
@@ -1674,7 +1678,5 @@ async function applyBandwidth() {
         }
     } catch(e) { /* ignore */ }
 }
-
-})();
 </script>
 {% endblock %}

@@ -87,9 +87,11 @@ def index():
         pass
     provider_connected = bool(_provider) and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)
 
-    # Get token expiry for connected providers
+    # Get token expiry for connected providers — but SKIP when sync is
+    # running because get_connection_status() spawns rclone which competes
+    # for RAM on the Pi Zero (464MB) and can trigger the watchdog.
     _token_expiry = None
-    if provider_connected:
+    if provider_connected and not sync_status.get("running"):
         try:
             from services.cloud_rclone_service import get_connection_status
             _conn = get_connection_status()

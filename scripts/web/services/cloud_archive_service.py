@@ -464,6 +464,123 @@ def _load_provider_creds() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Cloud Reconciliation
+# ---------------------------------------------------------------------------
+
+def _reconcile_with_remote(
+    conn: sqlite3.Connection,
+    conf_path: str,
+    remote_path: str,
+    mem_flags: list,
+) -> int:
+    """Mark locally-pending files as synced if they already exist on the remote.
+
+    Uses ``rclone lsf`` to list directories and files on the remote,
+    then updates matching DB entries from pending/failed → synced, and
+    inserts new 'synced' entries for remote files not yet tracked in the DB
+    (e.g., files uploaded before tracking was implemented).
+    Returns the number of entries reconciled.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    reconciled = 0
+
+    # List event directories on remote (SentryClips/*, SavedClips/*)
+    for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
+        try:
+            result = subprocess.run(
+                ["rclone", "lsf", "--config", conf_path,
+                 "--dirs-only", *mem_flags,
+                 f"teslausb:{remote_path}/{folder}/"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                continue
+            remote_dirs = {d.rstrip('/') for d in result.stdout.strip().split('\n') if d.strip()}
+            if not remote_dirs:
+                continue
+
+            for dirname in remote_dirs:
+                rel_path = f"{folder}/{dirname}"
+                remote_dest = f"teslausb:{remote_path}/{rel_path}"
+
+                # Update existing pending/failed entries
+                cur = conn.execute(
+                    """UPDATE cloud_synced_files
+                       SET status = 'synced', synced_at = ?,
+                           remote_path = ?, last_error = NULL
+                       WHERE file_path = ? AND status IN ('pending', 'failed')""",
+                    (now_iso, remote_dest, rel_path)
+                )
+                if cur.rowcount > 0:
+                    reconciled += cur.rowcount
+                    continue
+
+                # If not in DB at all, insert as synced (pre-tracking upload)
+                existing = conn.execute(
+                    "SELECT status FROM cloud_synced_files WHERE file_path = ?",
+                    (rel_path,)
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """INSERT INTO cloud_synced_files
+                           (file_path, status, synced_at, remote_path)
+                           VALUES (?, 'synced', ?, ?)""",
+                        (rel_path, now_iso, remote_dest)
+                    )
+                    reconciled += 1
+        except subprocess.TimeoutExpired:
+            logger.warning("Reconcile timeout listing %s", folder)
+        except Exception as e:
+            logger.warning("Reconcile error for %s: %s", folder, e)
+
+    # List ArchivedClips files on remote
+    try:
+        result = subprocess.run(
+            ["rclone", "lsf", "--config", conf_path,
+             *mem_flags,
+             f"teslausb:{remote_path}/ArchivedClips/"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            remote_files = {f.strip() for f in result.stdout.strip().split('\n') if f.strip()}
+            for filename in remote_files:
+                rel_path = f"ArchivedClips/{filename}"
+                remote_dest = f"teslausb:{remote_path}/{rel_path}"
+
+                cur = conn.execute(
+                    """UPDATE cloud_synced_files
+                       SET status = 'synced', synced_at = ?,
+                           remote_path = ?, last_error = NULL
+                       WHERE file_path = ? AND status IN ('pending', 'failed')""",
+                    (now_iso, remote_dest, rel_path)
+                )
+                if cur.rowcount > 0:
+                    reconciled += cur.rowcount
+                    continue
+
+                existing = conn.execute(
+                    "SELECT status FROM cloud_synced_files WHERE file_path = ?",
+                    (rel_path,)
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """INSERT INTO cloud_synced_files
+                           (file_path, status, synced_at, remote_path)
+                           VALUES (?, 'synced', ?, ?)""",
+                        (rel_path, now_iso, remote_dest)
+                    )
+                    reconciled += 1
+    except Exception as e:
+        logger.warning("Reconcile error for ArchivedClips: %s", e)
+
+    if reconciled:
+        conn.commit()
+        logger.info("Cloud reconciliation: marked %d already-uploaded entries as synced", reconciled)
+
+    return reconciled
+
+
+# ---------------------------------------------------------------------------
 # WiFi Detection
 # ---------------------------------------------------------------------------
 
@@ -638,6 +755,15 @@ def _run_sync(
 
         # Memory-safe flags for Pi Zero 2W
         mem_flags = ["--buffer-size", "0", "--transfers", "1", "--checkers", "1"]
+
+        # Reconcile DB with cloud: mark files already on remote as synced.
+        # This catches files uploaded before tracking was added, or by a
+        # previous run that crashed before updating the DB.
+        _sync_status["progress"] = "Reconciling with cloud…"
+        try:
+            _reconcile_with_remote(conn, conf_path, remote_path, mem_flags)
+        except Exception as e:
+            logger.warning("Cloud reconciliation failed (non-fatal): %s", e)
 
         # I/O throttle: pause between event uploads to avoid saturating
         # the SD card (shared with USB gadget and archive service)
@@ -905,9 +1031,24 @@ def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
 def get_sync_status() -> dict:
     """Return a snapshot of the current sync status for UI polling.
 
-    Includes calculated ETA based on average throughput.
+    Merges in-memory progress with DB totals so the UI shows consistent
+    numbers across the progress panel and stats cards.
     """
     status = dict(_sync_status)
+
+    # Augment with DB totals so the progress panel reflects all-time
+    # synced count, not just the current session.
+    try:
+        conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM cloud_synced_files WHERE status = 'synced'"
+            ).fetchone()
+            status["total_synced"] = row["cnt"] if row else 0
+        finally:
+            conn.close()
+    except Exception:
+        status["total_synced"] = 0
 
     # Calculate ETA from throughput
     if status.get("running") and status.get("started_at") and status.get("bytes_transferred", 0) > 0:

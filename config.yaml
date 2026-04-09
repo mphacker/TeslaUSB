@@ -128,6 +128,7 @@ cloud_archive:
     - SavedClips
     - RecentClips
   max_upload_mbps: 5                     # Bandwidth limit (Pi has limited upload)
+  cloud_reserve_gb: 1                    # Keep this much free on cloud (don't fill to 100%)
   keep_local_after_upload: true          # Keep local files after uploading to cloud
   sync_non_event_videos: false          # Opt-in: sync videos without events or geolocation
   cloud_auto_cleanup: false              # Auto-delete old cloud videos when storage is low

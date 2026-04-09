@@ -34,6 +34,7 @@ from config import (
     CLOUD_ARCHIVE_DB_PATH,
     CLOUD_PROVIDER_CREDS_PATH,
     CLOUD_ARCHIVE_SYNC_NON_EVENT,
+    CLOUD_ARCHIVE_RESERVE_GB,
 )
 
 # ---------------------------------------------------------------------------
@@ -86,6 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_cloud_sessions_started ON cloud_sync_sessions(sta
 _sync_thread: Optional[threading.Thread] = None
 _sync_lock = threading.Lock()
 _sync_cancel = threading.Event()
+_startup_recovery_done = False
 
 _sync_status: Dict = {
     "running": False,
@@ -209,6 +211,31 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
             "Cloud archive tables initialized (v%d) in %s",
             _CLOUD_SCHEMA_VERSION, db_path,
         )
+
+    # On first DB access after process start, recover any sessions or
+    # uploads left in a transient state by a crash or service restart.
+    global _startup_recovery_done
+    if not _startup_recovery_done:
+        _startup_recovery_done = True
+        try:
+            n_sessions = conn.execute(
+                "UPDATE cloud_sync_sessions SET status = 'interrupted', "
+                "ended_at = ?, error_msg = 'Process restarted' "
+                "WHERE status = 'running'",
+                (datetime.now(timezone.utc).isoformat(),)
+            ).rowcount
+            n_uploads = conn.execute(
+                "UPDATE cloud_synced_files SET status = 'pending', "
+                "retry_count = retry_count WHERE status = 'uploading'"
+            ).rowcount
+            if n_sessions or n_uploads:
+                conn.commit()
+                logger.info(
+                    "Startup recovery: %d stale sessions, %d interrupted uploads reset",
+                    n_sessions, n_uploads,
+                )
+        except Exception as e:
+            logger.warning("Startup recovery failed: %s", e)
 
     return conn
 
@@ -498,20 +525,8 @@ def _run_sync(
 
     try:
         conn = _init_cloud_tables(db_path)
-
-        # Recover any uploads interrupted by power loss
-        conn.execute(
-            "UPDATE cloud_synced_files SET status = 'pending', "
-            "retry_count = retry_count WHERE status = 'uploading'"
-        )
-        # Finalize any sync sessions left "running" by a crash/reboot
-        conn.execute(
-            "UPDATE cloud_sync_sessions SET status = 'interrupted', "
-            "ended_at = ?, error_msg = 'Process terminated (power loss or crash)' "
-            "WHERE status = 'running'",
-            (datetime.now(timezone.utc).isoformat(),)
-        )
-        conn.commit()
+        # Startup recovery (stale sessions/uploads) is handled by
+        # _init_cloud_tables() on first call after process start.
 
         # Create sync session record
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -579,8 +594,8 @@ def _run_sync(
             pass
 
         # Check available cloud storage and cap sync to what fits.
-        # Reserve 1 GB so we never fill the provider to 100%.
-        _CLOUD_RESERVE_BYTES = 1 * 1024 * 1024 * 1024
+        # Reserve configured amount so we never fill the provider to 100%.
+        cloud_reserve_bytes = int(CLOUD_ARCHIVE_RESERVE_GB * 1024 * 1024 * 1024)
         cloud_free_bytes: Optional[int] = None
         try:
             about_result = subprocess.run(
@@ -591,13 +606,13 @@ def _run_sync(
                 import json as _json
                 about = _json.loads(about_result.stdout)
                 if "free" in about:
-                    cloud_free_bytes = int(about["free"]) - _CLOUD_RESERVE_BYTES
+                    cloud_free_bytes = int(about["free"]) - cloud_reserve_bytes
                     cloud_total = int(about.get("total", 0))
                     logger.info(
                         "Cloud storage: %.1f GB free / %.1f GB total (%.1f GB reserved)",
-                        (cloud_free_bytes + _CLOUD_RESERVE_BYTES) / (1024 ** 3),
+                        (cloud_free_bytes + cloud_reserve_bytes) / (1024 ** 3),
                         cloud_total / (1024 ** 3),
-                        _CLOUD_RESERVE_BYTES / (1024 ** 3),
+                        cloud_reserve_bytes / (1024 ** 3),
                     )
         except Exception as e:
             logger.warning("Could not check cloud storage: %s", e)

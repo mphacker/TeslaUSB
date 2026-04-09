@@ -1096,9 +1096,19 @@ def get_sync_stats(db_path: str) -> dict:
         ).fetchone()
         total_bytes = row["total"] if row else 0
 
+        # Use the higher of DB pending count vs in-memory discovery count.
+        # The DB may not have entries for all events on disk (events only get
+        # DB rows when first attempted). The in-memory files_total from
+        # _discover_events() is the true count of work remaining.
+        db_pending = counts["pending"] + counts["uploading"]
+        mem_total = _sync_status.get("files_total", 0)
+        mem_done = _sync_status.get("files_done", 0)
+        mem_pending = max(0, mem_total - mem_done) if _sync_status.get("running") else 0
+        effective_pending = max(db_pending, mem_pending)
+
         return {
             "total_synced": counts["synced"],
-            "total_pending": counts["pending"] + counts["uploading"],
+            "total_pending": effective_pending,
             "total_failed": counts["failed"],
             "total_bytes": total_bytes,
         }

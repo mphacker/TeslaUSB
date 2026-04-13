@@ -623,6 +623,16 @@ def _run_sync(
     """
     global _sync_status
 
+    # Acquire the global heavy-task lock so the indexer and archiver
+    # don't run concurrently (Pi Zero has limited CPU/IO).
+    from services.task_coordinator import acquire_task, release_task
+    if not acquire_task('cloud_sync'):
+        _sync_status.update({
+            "running": False,
+            "progress": "Skipped: another task is running",
+        })
+        return
+
     _sync_status.update({
         "running": True,
         "progress": "Initialising…",
@@ -970,6 +980,7 @@ def _run_sync(
                 pass
 
         _remove_rclone_conf()
+        release_task('cloud_sync')
 
 
 # ---------------------------------------------------------------------------

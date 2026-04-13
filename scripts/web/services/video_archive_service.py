@@ -208,14 +208,11 @@ def _run_archive() -> None:
     if _status.get("running"):
         return
 
-    # Don't archive while cloud sync is running — both compete for SD card I/O
-    try:
-        from services.cloud_archive_service import get_sync_status
-        if get_sync_status().get("running"):
-            logger.info("Archive skipped: cloud sync is active")
-            return
-    except Exception:
-        pass
+    # Acquire the global heavy-task lock — don't run alongside indexer or sync
+    from services.task_coordinator import acquire_task, release_task
+    if not acquire_task('archive'):
+        logger.info("Archive skipped: another task is running")
+        return
 
     _status.update({
         "running": True,
@@ -369,6 +366,7 @@ def _run_archive() -> None:
         _status["progress"] = f"Error: {e}"
     finally:
         _status["running"] = False
+        release_task('archive')
 
 
 # ---------------------------------------------------------------------------
@@ -644,23 +642,44 @@ def _enforce_retention() -> None:
     1. min_free_space_gb — hard floor, protects OS and IMG growth
     2. max_size_gb — cap on archive folder size
     3. retention_days — age-based cleanup
+
+    After deleting files, purges stale entries from geodata.db so the
+    map page doesn't show ghost trips with missing video files.
     """
     if not os.path.isdir(ARCHIVE_DIR):
         return
 
+    deleted_total = 0
+
     # Age-based cleanup first (cheapest — no disk usage calculation)
     if ARCHIVE_RETENTION_DAYS > 0:
         cutoff = time.time() - (ARCHIVE_RETENTION_DAYS * 86400)
-        _delete_files_older_than(cutoff)
+        deleted_total += _delete_files_older_than(cutoff)
 
     # Size-based cleanup (only when a hard cap is set)
     if ARCHIVE_MAX_SIZE_GB > 0:
         max_bytes = ARCHIVE_MAX_SIZE_GB * 1024 * 1024 * 1024
-        _trim_archive_to_size(max_bytes)
+        deleted_total += _trim_archive_to_size(max_bytes)
 
     # Free-space floor
     min_free_bytes = ARCHIVE_MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
-    _trim_archive_for_free_space(min_free_bytes)
+    deleted_total += _trim_archive_for_free_space(min_free_bytes)
+
+    # Purge stale geodata entries for files we just deleted
+    if deleted_total > 0:
+        try:
+            from config import MAPPING_ENABLED, MAPPING_DB_PATH
+            if MAPPING_ENABLED and os.path.isfile(MAPPING_DB_PATH):
+                from services.mapping_service import purge_deleted_videos
+                from services.video_service import get_teslacam_path
+                tc = get_teslacam_path()
+                if tc:
+                    result = purge_deleted_videos(MAPPING_DB_PATH, teslacam_path=tc)
+                    purged = result.get('purged_files', 0)
+                    if purged:
+                        logger.info("Retention: purged %d stale geodata entries", purged)
+        except Exception as e:
+            logger.debug("Retention geodata purge failed (non-fatal): %s", e)
 
 
 def _delete_files_older_than(cutoff_timestamp: float) -> int:

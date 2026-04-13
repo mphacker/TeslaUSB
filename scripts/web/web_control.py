@@ -138,6 +138,32 @@ if __name__ == "__main__":
         except ImportError:
             pass
         if watch_paths:
+            # Register auto-indexing callback so new videos are indexed
+            # without manual button clicks or WiFi connect events.
+            try:
+                from config import (
+                    MAPPING_ENABLED, MAPPING_DB_PATH,
+                    MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS,
+                    MAPPING_TRIP_GAP_MINUTES,
+                )
+                from services.video_service import get_teslacam_path
+                if MAPPING_ENABLED:
+                    def _on_new_videos(file_paths):
+                        from services.mapping_service import trigger_auto_index
+                        tc = get_teslacam_path()
+                        if tc:
+                            trigger_auto_index(
+                                db_path=MAPPING_DB_PATH,
+                                teslacam_path=tc,
+                                sample_rate=MAPPING_SAMPLE_RATE,
+                                thresholds=MAPPING_EVENT_THRESHOLDS,
+                                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+                            )
+                    register_callback(_on_new_videos)
+                    print("File watcher → auto-indexing callback registered")
+            except Exception as e:
+                print(f"Warning: Failed to register indexing callback: {e}")
+
             start_watcher(watch_paths)
             print(f"File watcher started for {len(watch_paths)} paths")
     except Exception as e:
@@ -161,6 +187,30 @@ if __name__ == "__main__":
                 print("Cloud auto-sync triggered on startup")
     except Exception as e:
         print(f"Warning: Cloud auto-sync startup failed: {e}")
+
+    # Auto-index on startup if enabled — catches videos that arrived while
+    # the service was down or between WiFi connect events.
+    try:
+        from config import (
+            MAPPING_ENABLED, MAPPING_INDEX_ON_STARTUP, MAPPING_DB_PATH,
+            MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS,
+            MAPPING_TRIP_GAP_MINUTES,
+        )
+        if MAPPING_ENABLED and MAPPING_INDEX_ON_STARTUP:
+            from services.mapping_service import trigger_auto_index
+            from services.video_service import get_teslacam_path
+            teslacam = get_teslacam_path()
+            if teslacam:
+                trigger_auto_index(
+                    db_path=MAPPING_DB_PATH,
+                    teslacam_path=teslacam,
+                    sample_rate=MAPPING_SAMPLE_RATE,
+                    thresholds=MAPPING_EVENT_THRESHOLDS,
+                    trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+                )
+                print("Startup geo-indexing triggered")
+    except Exception as e:
+        print(f"Warning: Startup indexing failed: {e}")
 
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:

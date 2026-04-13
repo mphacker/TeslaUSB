@@ -740,6 +740,16 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
     """Background indexer main loop. Scans for new videos and indexes them."""
     global _status
 
+    # Acquire the global heavy-task lock so the archiver and cloud sync
+    # don't run concurrently (Pi Zero has limited CPU/IO).
+    from services.task_coordinator import acquire_task, release_task
+    if not acquire_task('indexer'):
+        _status.update({
+            'running': False,
+            'progress': 'Skipped: another task is running',
+        })
+        return
+
     _status.update({
         'running': True, 'progress': 'Scanning for videos...',
         'files_total': 0, 'files_done': 0, 'current_file': '', 'error': None,
@@ -865,6 +875,7 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
         logger.error("Geo-indexer failed: %s", e)
         _status.update({'running': False, 'error': str(e)})
     finally:
+        release_task('indexer')
         try:
             conn.close()
         except Exception:
@@ -1427,6 +1438,10 @@ def get_stats(db_path: str) -> dict:
         waypoint_count = conn.execute("SELECT COUNT(*) FROM waypoints").fetchone()[0]
         event_count = conn.execute("SELECT COUNT(*) FROM detected_events").fetchone()[0]
         file_count = conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0]
+        # Count only files that produced GPS waypoints (meaningful for map display)
+        mapped_file_count = conn.execute(
+            "SELECT COUNT(*) FROM indexed_files WHERE waypoint_count > 0"
+        ).fetchone()[0]
 
         total_distance = conn.execute(
             "SELECT COALESCE(SUM(distance_km), 0) FROM trips"
@@ -1446,6 +1461,7 @@ def get_stats(db_path: str) -> dict:
             'waypoint_count': waypoint_count,
             'event_count': event_count,
             'indexed_file_count': file_count,
+            'mapped_file_count': mapped_file_count,
             'total_distance_km': round(total_distance, 2),
             'total_duration_seconds': total_duration,
             'event_breakdown': event_breakdown,

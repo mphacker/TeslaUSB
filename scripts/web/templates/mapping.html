@@ -593,7 +593,7 @@
             </button>
         </div>
         <div class="trip-card-indexed" id="tripCardIndexed">
-            <span id="tripIndexedCount">&mdash;</span> clips indexed
+            <span id="tripIndexedCount">&mdash;</span> videos mapped
             <button class="trip-card-all-btn" id="tripAllBtn" onclick="showAllTrips()">All trips</button>
         </div>
     </div>
@@ -806,7 +806,7 @@ async function loadStats() {
         const resp = await fetch('/api/stats');
         const data = await resp.json();
         const indexedEl = document.getElementById('tripIndexedCount');
-        if (indexedEl) indexedEl.textContent = (data.indexed_file_count || 0).toLocaleString();
+        if (indexedEl) indexedEl.textContent = (data.mapped_file_count || data.indexed_file_count || 0).toLocaleString();
     } catch(e) { console.error('Failed to load stats:', e); }
 }
 

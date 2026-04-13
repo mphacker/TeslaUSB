@@ -52,15 +52,15 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Two Operating Modes**:
   - **Present Mode**: Active USB gadget for Tesla recording (shown as "Connected to Tesla" in the UI)
   - **Edit Mode**: Network access via Samba shares for file management (shown as "Network Sharing Active" in the UI)
-- **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>` (port 80) with four main sections — Map (landing page), Analytics, Media, and Settings — plus a sidebar rail on desktop and bottom tabs on mobile
+- **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>` (port 80) with five main sections — Map (landing page), Analytics, Media, Cloud, and Settings — plus a sidebar rail on desktop and bottom tabs on mobile
 - **Captive Portal**: Automatic splash screen when connecting to TeslaUSB WiFi network
 - **Design System**: Dark/light mode with CSS design tokens, Inter variable font (bundled offline), Lucide SVG icon sprite, and glassmorphic overlay HUD
 
 ### Video Management
-- **Map-integrated video browser**: Slide-out panel on the Map page with Events tab (default) and All Clips tab — no separate video pages
+- **Map-integrated video browser**: Slide-out panel on the Map page with three tabs — Events (default), Trips, and All Clips — no separate video pages
 - **Unified overlay player**: Full-screen video playback launched from the map with camera angle switching (front/back/left/right/pillars)
 - **Telemetry HUD**: Glassmorphic overlay showing real-time steering wheel angle, brake/gas pedal positions, speed, gear (P/R/N/D), turn signals, and Autopilot status — powered by pre-indexed server-side waypoint data (instant, no full video download needed)
-- **Auto-indexing**: GPS and telemetry data from dashcam SEI metadata indexed on WiFi connect; sentry events placed on map using inferred location from nearest trip
+- **Auto-indexing**: GPS and telemetry data from dashcam SEI metadata indexed automatically on startup, on new file detection (inotify file watcher), and on WiFi connect; sentry events placed on map using inferred location from nearest trip
 - **RecentClips Archive**: Automatically copies RecentClips to the Pi's SD card every 5 minutes before Tesla's 1-hour circular buffer deletes them — zero USB disruption, videos preserved for 30 days
 - **Skeuomorphic event markers**: Balloon-pin map markers — brake pedal, gas pedal, steering wheel, speedometer, eye (sentry) — always visible on the map
 - **Trip navigation**: Floating trip card with prev/next navigation; FSD overlay toggle
@@ -95,15 +95,23 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 
 ### Automatic Maintenance
 - **Storage Cleanup**: Age, size, or count-based policies per folder
-- **Boot Cleanup**: Optional automatic cleanup before presenting to Tesla
+- **Boot Cleanup**: Deferred post-boot cleanup runs after USB gadget is presented to Tesla
 - **RecentClips Archive**: Automatic background archival with 3-tier retention (free space floor, size cap, age limit)
 - **Chime Scheduler**: Checks every 60 seconds for scheduled changes
 - **Hardware Watchdog**: Automatic system recovery on hangs or crashes
+- **Task Coordinator**: Exclusive lock prevents geo-indexer, video archiver, and cloud sync from running simultaneously (critical for Pi Zero 2 W's 512MB RAM)
 
 ### Network Features
 - **Samba Shares**: Windows/Mac/Linux file access in Edit mode
 - **Offline Access Point**: Automatic fallback AP when WiFi unavailable (in-car web access)
 - **WiFi Roaming**: Automatic switching between access points with the same SSID for optimal signal strength (mesh networks and WiFi extenders)
+
+### Cloud Archive
+- **Queue-based continuous sync**: Automatically uploads dashcam events to cloud storage (Google Drive, S3, Dropbox, etc.) via rclone
+- **Priority ordering**: Events with Tesla event.json uploaded first, then geolocated trips, then remaining clips
+- **Power-loss safe**: Files marked as synced only after rclone confirms upload; partial uploads detected and re-queued on restart
+- **Low impact**: Runs with `nice`/`ionice` throttling, configurable bandwidth limits, one file at a time — web UI stays responsive
+- **Web UI**: Configure cloud provider, browse remote folders, monitor sync queue and history, trigger manual uploads, bandwidth testing
 
 ## Requirements
 
@@ -169,7 +177,7 @@ The setup script will:
 - Configure USB gadget kernel modules and hardware watchdog
 - Detect and disable conflicting `rpi-usb-gadget` service (Pi OS Trixie default)
 - Create disk images (TeslaCam + LightShow + optional Music) with interactive image dashboard
-- Set up Samba shares and web interface with on-demand thumbnail generation
+- Set up Samba shares and web interface
 - Configure systemd services with auto-restart on failure
 - Create `/Chimes` library and migrate existing lock chimes
 
@@ -247,18 +255,19 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 
 ### Web Features
 
-The web interface uses a four-tab navigation — sidebar rail on desktop and bottom tabs on mobile.
+The web interface uses a five-tab navigation — sidebar rail on desktop and bottom tabs on mobile.
 
 **Map Tab** *(landing page at `/`)*:
 - GPS trip routes rendered on an interactive map with floating trip card and prev/next navigation
 - Skeuomorphic balloon-pin event markers (brake pedal, gas pedal, steering wheel, speedometer, eye for sentry) — always visible
-- Video browser slide-out panel with two sub-tabs:
-  - **Clips**: Browse TeslaCam folders with clip cards (Play / Download ZIP / Delete)
-  - **Sentry Timeline**: Chronological view of sentry events
+- Video browser slide-out panel with three sub-tabs:
+  - **Events**: Chronological view of driving events and sentry detections with event type icons
+  - **Trips**: Browse trips with clip cards (Play / Download ZIP / Delete)
+  - **All Clips**: Unified list of all video clips across all sources
 - Unified overlay player with camera angle switching (front/back/left/right/pillars)
 - Telemetry HUD overlay showing speed, gear, steering wheel, brake/gas pedals, blinkers, and Autopilot status (uses pre-indexed server-side waypoint data — instant, no full download)
 - FSD overlay toggle
-- Auto-indexing of dashcam SEI telemetry on startup and mode switch
+- Auto-indexing of dashcam SEI telemetry on startup, file detection (inotify), and WiFi connect
 
 **Analytics Tab**:
 - Storage metrics with drive usage gauges and folder-by-folder breakdown (including Music drive when enabled)
@@ -270,6 +279,14 @@ The web interface uses a four-tab navigation — sidebar rail on desktop and bot
 - **Music** *(requires `music_enabled: true` and Music disk image)*: Browse folders with breadcrumb navigation, in-browser playback (MP3, FLAC, WAV, AAC, M4A), drag-and-drop uploads with chunked transfer, create/move/delete files and folders, usage gauge
 - **Light Shows**: Upload and manage FSEQ + MP3/WAV files, grouped display, preview audio in browser, delete complete sets
 - **Wraps**: Upload PNG files for Tesla Paint Shop wraps (512–1024px, max 1MB, up to 10), thumbnail gallery, download or delete
+
+**Cloud Tab** *(conditional — shown when cloud archive is configured)*:
+- Configure cloud storage provider (Google Drive, S3, Dropbox, etc.) via rclone
+- Browse remote folders and set upload destination
+- Monitor sync queue, upload progress, and transfer history
+- Manual "Archive to Cloud" for individual events from the Map page
+- Bandwidth testing and configurable upload speed limits
+- Start/stop sync on demand
 
 **Settings Tab** *(at `/settings/`)*:
 - **Device status card**: Shows "Connected to Tesla" or "Network Sharing Active" with mode-switch buttons ("Enable Network Sharing" / "Reconnect to Tesla")
@@ -426,7 +443,8 @@ Removes all files, services, and system configuration.
 | Service/Timer | Purpose |
 |---------------|---------|
 | `gadget_web.service` | Web interface (port 80) with captive portal |
-| `present_usb_on_boot.service` | Auto-present USB on boot with optional cleanup |
+| `present_usb_on_boot.service` | Auto-present USB gadget on boot (cleanup deferred) |
+| `teslausb-deferred-tasks.service` | Post-boot tasks: cleanup, chime selection, indexing |
 | `chime_scheduler.timer` | Check scheduled chime changes every 60 seconds |
 | `wifi-monitor.service` | Manage offline access point |
 | `watchdog.service` | Hardware watchdog for system reliability |
@@ -554,6 +572,7 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 - `.quick_edit_part2.lock` file prevents race conditions during temporary RW mounts
 - Shared lock for quick-edit operations on both part2 (LightShow) and part3 (Music)
 - 10-second timeout, 120-second stale lock detection
+- **Task coordinator**: Global exclusive lock prevents geo-indexer, video archiver, and cloud sync from running simultaneously (30-minute stale lock auto-clear)
 - All services and scripts respect lock state
 
 **Performance Optimizations:**
@@ -561,10 +580,4 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 - **Configuration loading**: Single YAML parse with secure eval (properly quoted values prevent command injection)
 - **Web UI responsiveness**: Settings page loads in ~0.4s (optimized from 133s through batched configuration reads)
 - **Memory efficiency**: Desktop services disabled, 1GB swap enabled for stable operation on 512MB RAM
-
----
-
-## Screenshots
-
-Updated screenshots coming soon!
 

@@ -30,6 +30,12 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - Scheduled chime changes for holidays, events, or automatic rotation
 - Offline access point for in-car web access when WiFi is unavailable
 
+<p align="center">
+  <img src="docs/screenshots/map-event-popup.png" alt="TeslaUSB Map Dashboard — trip route with event popup" width="800">
+  <br>
+  <em>Map dashboard showing a trip route with event markers and detail popup</em>
+</p>
+
 > **⚠️ Personal Project Notice**
 >
 > This is a personal project built for my own use. You are welcome to fork the code and make your own changes or updates. Please be aware:

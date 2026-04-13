@@ -735,6 +735,81 @@ def _index_video(
     return len(waypoint_dicts), len(events)
 
 
+def index_single_file(
+    video_path: str,
+    db_path: str,
+    teslacam_root: str,
+    sample_rate: int = 30,
+    thresholds: Optional[dict] = None,
+    trip_gap_minutes: int = 5,
+) -> Tuple[int, int]:
+    """Index a single video file on demand (e.g., after archiving).
+
+    This is the public entry point for per-file indexing. It opens its own
+    DB connection, checks whether the file is already indexed, calls the
+    internal ``_index_video()`` worker, and records the result.
+
+    Returns (waypoint_count, event_count), or (0, 0) on skip/failure.
+    Does NOT acquire the task coordinator lock — the caller is responsible
+    for ensuring no conflicting heavy tasks are running.
+    """
+    if thresholds is None:
+        thresholds = dict(DEFAULT_THRESHOLDS)
+
+    # Only index front-camera files (all cameras share the same GPS data)
+    basename = os.path.basename(video_path).lower()
+    if '-front' not in basename or not basename.endswith('.mp4'):
+        return 0, 0
+
+    try:
+        stat = os.stat(video_path)
+    except OSError:
+        logger.debug("index_single_file: cannot stat %s", video_path)
+        return 0, 0
+
+    # Skip files still being written (< 2 min old)
+    if (time.time() - stat.st_mtime) < 120:
+        logger.debug("index_single_file: skipping %s (still being written)", video_path)
+        return 0, 0
+
+    conn = _init_db(db_path)
+    try:
+        # Check if already indexed with data
+        row = conn.execute(
+            "SELECT waypoint_count FROM indexed_files WHERE file_path = ?",
+            (video_path,)
+        ).fetchone()
+        if row and row['waypoint_count'] and row['waypoint_count'] > 0:
+            return 0, 0  # Already indexed
+
+        wc, ec = _index_video(
+            conn, video_path, teslacam_root, sample_rate, thresholds,
+            trip_gap_minutes,
+        )
+
+        # Record in indexed_files
+        if wc > 0 or ec > 0 or (time.time() - stat.st_mtime) > 300:
+            conn.execute(
+                """INSERT OR REPLACE INTO indexed_files
+                   (file_path, file_size, file_mtime, indexed_at,
+                    waypoint_count, event_count)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (video_path, stat.st_size, stat.st_mtime,
+                 datetime.now(timezone.utc).isoformat(), wc, ec)
+            )
+            conn.commit()
+
+        return wc, ec
+
+    except ImportError:
+        raise  # Protobuf missing — let caller decide
+    except Exception as e:
+        logger.warning("index_single_file failed for %s: %s", video_path, e)
+        return 0, 0
+    finally:
+        conn.close()
+
+
 def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
                  thresholds: dict, trip_gap_minutes: int):
     """Background indexer main loop. Scans for new videos and indexes them."""

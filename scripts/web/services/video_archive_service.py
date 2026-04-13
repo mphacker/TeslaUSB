@@ -340,6 +340,28 @@ def _run_archive() -> None:
                 # already extracted, we just change the file path.
                 _update_geodata_paths(src_path, dst_path, rel_path)
 
+                # Index the archived copy immediately (reads from SD card,
+                # no USB gadget contention). Non-fatal — the startup
+                # indexer catches any files that fail here.
+                try:
+                    from config import MAPPING_ENABLED, MAPPING_DB_PATH, MAPPING_SAMPLE_RATE
+                    if MAPPING_ENABLED:
+                        from services.video_service import get_teslacam_path
+                        from services.mapping_service import index_single_file
+                        tc = get_teslacam_path()
+                        if tc:
+                            wc, ec = index_single_file(
+                                dst_path, MAPPING_DB_PATH, tc,
+                                sample_rate=MAPPING_SAMPLE_RATE,
+                            )
+                            if wc > 0 or ec > 0:
+                                logger.info("Indexed during archive: %s — %d waypoints, %d events",
+                                            rel_path, wc, ec)
+                except ImportError:
+                    pass  # Protobuf missing — startup indexer will handle
+                except Exception as e:
+                    logger.debug("Archive post-index skipped for %s: %s", rel_path, e)
+
             except OSError as e:
                 logger.warning("Failed to copy %s: %s", rel_path, e)
                 continue

@@ -1017,20 +1017,34 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
                     basename = os.path.basename(fp)
                     archive_path = os.path.join(archive_dir, basename)
                     if os.path.isfile(archive_path):
-                        # Update indexed path to point to archive
-                        conn.execute(
-                            "UPDATE indexed_files SET file_path = ? WHERE file_path = ?",
-                            (archive_path, fp)
-                        )
+                        # Update indexed path to point to archive.
+                        # If the archive path already has its own entry (from
+                        # _update_geodata_paths), just delete the stale USB entry.
+                        existing = conn.execute(
+                            "SELECT 1 FROM indexed_files WHERE file_path = ?",
+                            (archive_path,)
+                        ).fetchone()
+                        if existing:
+                            conn.execute(
+                                "DELETE FROM indexed_files WHERE file_path = ?",
+                                (fp,)
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE indexed_files SET file_path = ? WHERE file_path = ?",
+                                (archive_path, fp)
+                            )
                         continue
                 missing.append(fp)
 
             if missing:
                 logger.info("Purging %d missing videos from geodata.db", len(missing))
-                # Recurse with targeted mode for the missing files
-                result = purge_deleted_videos(db_path, deleted_paths=missing)
+                # Commit any path updates before the targeted purge (which
+                # opens its own connection). Without this, the recursive call
+                # deadlocks on the database.
+                conn.commit()
                 conn.close()
-                return result
+                return purge_deleted_videos(db_path, deleted_paths=missing)
 
         conn.commit()
         logger.info(

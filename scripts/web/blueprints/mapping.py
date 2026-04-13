@@ -332,18 +332,28 @@ def api_sentry_events():
                 result['video_path'] = f'ArchivedClips/{basename}'
 
             if teslacam and event_folder:
-                folder_path = os.path.join(teslacam, source_folder)
-                try:
-                    details = get_event_details(folder_path, event_folder)
-                    if details:
-                        cam_count = len([
-                            v for v in (details.get('camera_videos') or {}).values() if v
-                        ])
-                        result['clip_count'] = len(details.get('clips') or [])
-                        result['camera_count'] = cam_count
-                        result['size_mb'] = details.get('size_mb', 0)
-                except Exception:
-                    pass
+                # ArchivedClips lives on SD card, not under TeslaCam
+                if source_folder == 'ArchivedClips':
+                    try:
+                        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+                        folder_path = ARCHIVE_DIR if ARCHIVE_ENABLED else None
+                    except ImportError:
+                        folder_path = None
+                else:
+                    folder_path = os.path.join(teslacam, source_folder)
+
+                if folder_path:
+                    try:
+                        details = get_event_details(folder_path, event_folder)
+                        if details:
+                            cam_count = len([
+                                v for v in (details.get('camera_videos') or {}).values() if v
+                            ])
+                            result['clip_count'] = len(details.get('clips') or [])
+                            result['camera_count'] = cam_count
+                            result['size_mb'] = details.get('size_mb', 0)
+                    except Exception:
+                        pass
 
             enriched.append(result)
 
@@ -363,7 +373,18 @@ def api_event_clips(folder, event_name):
     if not teslacam:
         return jsonify({'error': 'TeslaCam not accessible'}), 503
 
-    folder_path = os.path.join(teslacam, folder)
+    # ArchivedClips lives on SD card, not under TeslaCam
+    if folder == 'ArchivedClips':
+        try:
+            from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+            if not ARCHIVE_ENABLED:
+                return jsonify({'error': 'Archive not enabled'}), 404
+            folder_path = ARCHIVE_DIR
+        except ImportError:
+            return jsonify({'error': 'Archive not configured'}), 404
+    else:
+        folder_path = os.path.join(teslacam, folder)
+
     if not os.path.isdir(folder_path):
         return jsonify({'error': f'Folder not found: {folder}'}), 404
 
@@ -388,9 +409,27 @@ def api_event_clips(folder, event_name):
             'front_clips': clip_paths,
         })
 
-    # Flat folder (RecentClips) — session-based
+    # Flat folder (RecentClips, ArchivedClips) — session-based
     flat_file = os.path.join(folder_path, f'{event_name}-front.mp4')
     if not os.path.isfile(flat_file):
+        # Before giving up, check if the file was archived (RecentClips → ArchivedClips)
+        if folder != 'ArchivedClips':
+            try:
+                from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+                if ARCHIVE_ENABLED:
+                    archive_file = os.path.join(ARCHIVE_DIR, f'{event_name}-front.mp4')
+                    if os.path.isfile(archive_file):
+                        clip_path = f'ArchivedClips/{event_name}-front.mp4'
+                        return jsonify({
+                            'folder': 'ArchivedClips',
+                            'event': event_name,
+                            'structure': 'flat',
+                            'first_front': f'{event_name}-front.mp4',
+                            'front_clips': [clip_path],
+                        })
+            except ImportError:
+                pass
+
         return jsonify({
             'error': 'Video file no longer exists. Tesla may have overwritten it. Try re-indexing.',
             'folder': folder,

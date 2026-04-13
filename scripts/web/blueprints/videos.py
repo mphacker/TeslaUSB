@@ -36,8 +36,12 @@ def _check_archive_fallback(filename: str, folder_hint: str = None):
             archive_path = os.path.join(ARCHIVE_DIR, os.path.basename(filename))
             if os.path.isfile(archive_path):
                 return archive_path
+            else:
+                logger.debug("Archive fallback: %s not found at %s", filename, archive_path)
+        elif not ARCHIVE_ENABLED:
+            logger.debug("Archive fallback skipped: ARCHIVE_ENABLED is False")
     except ImportError:
-        pass
+        logger.debug("Archive fallback skipped: config import failed")
     return None
 
 
@@ -182,12 +186,16 @@ def stream_video(filepath):
     if sanitized_parts and sanitized_parts[0] == 'ArchivedClips':
         video_path = _check_archive_fallback(sanitized_parts[-1])
         if not video_path:
+            logger.warning("Archive fallback failed for %s (ArchivedClips path)", sanitized_parts[-1])
             return "Video not found", 404
     else:
         video_path = os.path.join(teslacam_path, *sanitized_parts)
         if not os.path.isfile(video_path):
             video_path = _check_archive_fallback(sanitized_parts[-1]) if sanitized_parts else None
-            if not video_path:
+            if video_path:
+                logger.info("Serving archived copy for %s", sanitized_parts[-1])
+            else:
+                logger.info("Video not found (USB or archive): %s", '/'.join(sanitized_parts))
                 return "Video not found", 404
 
     file_size = os.path.getsize(video_path)
@@ -325,7 +333,19 @@ def download_event(folder, event_name):
 
     # Sanitize inputs
     folder = os.path.basename(folder)
-    folder_path = os.path.join(teslacam_path, folder)
+
+    # ArchivedClips lives on SD card, not under TeslaCam
+    if folder == 'ArchivedClips':
+        try:
+            from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+            if ARCHIVE_ENABLED:
+                folder_path = ARCHIVE_DIR
+            else:
+                return "Archive not enabled", 404
+        except ImportError:
+            return "Archive not configured", 404
+    else:
+        folder_path = os.path.join(teslacam_path, folder)
 
     if not os.path.isdir(folder_path):
         return "Folder not found", 404
@@ -333,7 +353,11 @@ def download_event(folder, event_name):
     # Determine folder structure
     folders = get_teslacam_folders()
     folder_info = next((f for f in folders if f['name'] == folder), None)
-    folder_structure = folder_info['structure'] if folder_info else 'events'
+    # ArchivedClips is always flat (not in get_teslacam_folders since it's on SD card)
+    if folder == 'ArchivedClips':
+        folder_structure = 'flat'
+    else:
+        folder_structure = folder_info['structure'] if folder_info else 'events'
 
     # Collect video files
     video_files = []
@@ -415,7 +439,19 @@ def delete_event(folder, event_name):
     # Sanitize inputs
     folder = os.path.basename(folder)
     event_name = os.path.basename(event_name)
-    folder_path = os.path.join(teslacam_path, folder)
+
+    # ArchivedClips lives on SD card, not under TeslaCam
+    if folder == 'ArchivedClips':
+        try:
+            from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+            if ARCHIVE_ENABLED:
+                folder_path = ARCHIVE_DIR
+            else:
+                return jsonify({'success': False, 'error': 'Archive not enabled'}), 404
+        except ImportError:
+            return jsonify({'success': False, 'error': 'Archive not configured'}), 404
+    else:
+        folder_path = os.path.join(teslacam_path, folder)
 
     if not os.path.isdir(folder_path):
         return jsonify({
@@ -426,7 +462,11 @@ def delete_event(folder, event_name):
     # Determine folder structure
     folders = get_teslacam_folders()
     folder_info = next((f for f in folders if f['name'] == folder), None)
-    folder_structure = folder_info['structure'] if folder_info else 'events'
+    # ArchivedClips is always flat (not in get_teslacam_folders since it's on SD card)
+    if folder == 'ArchivedClips':
+        folder_structure = 'flat'
+    else:
+        folder_structure = folder_info['structure'] if folder_info else 'events'
 
     deleted_count = 0
     error_count = 0

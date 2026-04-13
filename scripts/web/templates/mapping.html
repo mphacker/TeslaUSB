@@ -608,9 +608,6 @@
                 <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-layers"></use></svg>
             </button>
         </div>
-        <button class="map-fab" id="btnHeat" onclick="toggleHeatmap()" aria-label="Heatmap" title="Heatmap">
-            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-thermometer"></use></svg>
-        </button>
         <button class="map-fab" id="btnIndex" onclick="triggerIndex()" aria-label="Index videos" title="Index Videos">
             <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
         </button>
@@ -645,7 +642,6 @@
 
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.markercluster.js') }}"></script>
-<script src="{{ url_for('static', filename='vendor/leaflet/leaflet-heat.js') }}"></script>
 <script>
 // Register Service Worker for offline tile caching (gap 1)
 if ('serviceWorker' in navigator) {
@@ -683,11 +679,9 @@ const tripLayer = L.layerGroup().addTo(map);
 const eventLayer = L.layerGroup();
 const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true }).addTo(map);
 const fsdLayer = L.layerGroup();
-let heatLayer = null;
 
 let currentView = 'trips';
 let fsdVisible = false;
-let heatVisible = false;
 let allTrips = [];
 let allEvents = [];
 let currentTripIndex = 0;
@@ -1553,54 +1547,6 @@ function toggleFsdOverlay() {
     } else {
         map.removeLayer(fsdLayer);
     }
-}
-
-async function toggleHeatmap() {
-    heatVisible = !heatVisible;
-    document.getElementById('btnHeat').classList.toggle('active', heatVisible);
-
-    if (!heatVisible) {
-        if (heatLayer) map.removeLayer(heatLayer);
-        return;
-    }
-
-    // Build heatmap from all trip waypoints
-    if (!heatLayer) {
-        try {
-            const resp = await fetch('/api/trips?limit=500');
-            const data = await resp.json();
-            const heatPoints = [];
-
-            for (const trip of (data.trips || [])) {
-                if (!trip.start_lat || !trip.start_lon) continue;
-                heatPoints.push([trip.start_lat, trip.start_lon, 0.5]);
-                if (trip.end_lat && trip.end_lon) {
-                    heatPoints.push([trip.end_lat, trip.end_lon, 0.5]);
-                }
-            }
-
-            // Also add event locations with higher intensity
-            const evResp = await fetch('/api/events?limit=1000');
-            const evData = await evResp.json();
-            for (const ev of (evData.events || [])) {
-                if (!ev.lat || !ev.lon) continue;
-                const intensity = ev.severity === 'critical' ? 1.0 : ev.severity === 'warning' ? 0.7 : 0.4;
-                heatPoints.push([ev.lat, ev.lon, intensity]);
-            }
-
-            if (heatPoints.length > 0) {
-                heatLayer = L.heatLayer(heatPoints, {
-                    radius: 20, blur: 15, maxZoom: 15,
-                    gradient: { 0.2: '#17a2b8', 0.4: '#28a745', 0.6: '#ffc107', 0.8: '#fd7e14', 1.0: '#dc3545' }
-                });
-            }
-        } catch(e) {
-            console.error('Failed to build heatmap:', e);
-            return;
-        }
-    }
-
-    if (heatLayer) heatLayer.addTo(map);
 }
 
 // --- Indexer ---

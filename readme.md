@@ -57,7 +57,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Auto-indexing**: GPS and telemetry data from dashcam SEI metadata indexed on WiFi connect; sentry events placed on map using inferred location from nearest trip
 - **RecentClips Archive**: Automatically copies RecentClips to the Pi's SD card every 5 minutes before Tesla's 1-hour circular buffer deletes them — zero USB disruption, videos preserved for 30 days
 - **Skeuomorphic event markers**: Balloon-pin map markers — brake pedal, gas pedal, steering wheel, speedometer, eye (sentry) — always visible on the map
-- **Trip navigation**: Floating trip card with prev/next navigation; FSD overlay and heatmap toggles
+- **Trip navigation**: Floating trip card with prev/next navigation; FSD overlay toggle
 - Download all camera views for an event as a zip file
 - Delete entire events (Edit mode only)
 - Cascade database cleanup when videos are deleted
@@ -251,7 +251,7 @@ The web interface uses a four-tab navigation — sidebar rail on desktop and bot
   - **Sentry Timeline**: Chronological view of sentry events
 - Unified overlay player with camera angle switching (front/back/left/right/pillars)
 - Telemetry HUD overlay showing speed, gear, steering wheel, brake/gas pedals, blinkers, and Autopilot status (uses pre-indexed server-side waypoint data — instant, no full download)
-- FSD overlay toggle, heatmap toggle
+- FSD overlay toggle
 - Auto-indexing of dashcam SEI telemetry on startup and mode switch
 
 **Analytics Tab**:

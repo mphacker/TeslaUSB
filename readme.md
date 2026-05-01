@@ -18,7 +18,7 @@ Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings 
 TeslaUSB creates a multi-drive USB gadget that appears as **two or three separate USB drives** to your Tesla:
 
 - **TeslaCam Drive**: Large exFAT drive for dashcam and sentry recordings
-- **LightShow Drive**: Smaller FAT32 drive for lock chimes, custom wrap images, and light shows with read-only optimization
+- **LightShow Drive**: Smaller FAT32 drive for lock chimes, custom wrap images, license plate images, and light shows with read-only optimization
 - **Music Drive** *(optional)*: FAT32 drive for Tesla music playback (enabled via `music_enabled: true` in config)
 
 **Key Benefits:**
@@ -52,7 +52,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Two Operating Modes**:
   - **Present Mode**: Active USB gadget for Tesla recording (shown as "Connected to Tesla" in the UI)
   - **Edit Mode**: Network access via Samba shares for file management (shown as "Network Sharing Active" in the UI)
-- **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>` (port 80) with five main sections — Map (landing page), Analytics, Media, Cloud, and Settings — plus a sidebar rail on desktop and bottom tabs on mobile
+- **Web Interface**: Browser-based control panel accessible at `http://<pi-ip>` (port 80) with five main sections — Map (landing page), Analytics, Media, Cloud, and Settings — plus a sidebar rail on desktop and bottom tabs on mobile; the Media hub includes sub-tabs for Chimes, Light Shows, Wraps, Plates, and Music
 - **Captive Portal**: Automatic splash screen when connecting to TeslaUSB WiFi network
 - **Design System**: Dark/light mode with CSS design tokens, Inter variable font (bundled offline), Lucide SVG icon sprite, and glassmorphic overlay HUD
 
@@ -92,6 +92,14 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - Automatic validation (512-1024px dimensions, max 1MB, PNG only)
 - Supports up to 10 custom wraps at a time
 - Drag-and-drop upload with progress indicator
+
+### License Plate Management
+- Upload custom PNG license plate images served from the LightShow drive's `LicensePlate/` folder
+- Supports up to 10 plate images (420x100px recommended, any PNG ≤1MB accepted)
+- Dimension warning if image is not 420x100px (upload not blocked)
+- Download and delete individual plates
+- Drag-and-drop multi-file upload on desktop; simple form fallback on mobile
+- Gated on `usb_lightshow.img` availability — tab hidden if LightShow drive is not configured
 
 ### Automatic Maintenance
 - **Storage Cleanup**: Age, size, or count-based policies per folder

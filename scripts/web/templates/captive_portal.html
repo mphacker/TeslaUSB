@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="4;url=http://192.168.4.1/">
     <title>Tesla USB Gadget</title>
     <style>
         * {
@@ -123,6 +124,20 @@
             transform: translateY(0);
         }
 
+        .direct-url {
+            margin-top: 16px;
+            font-size: 14px;
+            color: #718096;
+        }
+
+        .direct-url a {
+            color: #667eea;
+            font-weight: 600;
+            text-decoration: none;
+            font-family: monospace;
+            font-size: 15px;
+        }
+
         .network-info {
             margin-top: 20px;
             padding-top: 20px;
@@ -170,7 +185,11 @@
             </div>
         </div>
 
-        <a href="/" class="continue-btn">Access Web Interface</a>
+        <a href="http://192.168.4.1/" class="continue-btn">Access Web Interface</a>
+
+        <div class="direct-url">
+            Or open directly: <a href="http://192.168.4.1/">http://192.168.4.1/</a>
+        </div>
 
         <div class="network-info">
             Connected to {{ ssid }}

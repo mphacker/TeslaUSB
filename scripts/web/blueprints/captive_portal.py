@@ -113,8 +113,12 @@ def catch_all_redirect(path):
         return None
 
     # Check if this is a known API or page route
-    known_prefixes = ['/videos', '/chimes', '/light_shows', '/analytics',
-                      '/cleanup', '/api', '/fsck', '/mode', '/session']
+    known_prefixes = [
+        '/videos', '/chimes', '/light_shows', '/analytics', '/cleanup',
+        '/api', '/fsck', '/mode', '/session', '/settings', '/wraps',
+        '/license_plates', '/music', '/cloud', '/lock_chimes', '/media',
+        '/mapping', '/tile-cache-sw.js',
+    ]
     if any(path.startswith(prefix.lstrip('/')) for prefix in known_prefixes):
         return None
 

@@ -106,7 +106,12 @@ clear_ap_state() {
 }
 
 ap_iface() {
-    echo "$AP_VIRTUAL_IF"
+    # Use wlan0 directly for AP mode (not a virtual uap0).
+    # On Pi Zero 2W (single-radio brcmfmac), creating a virtual __ap interface
+    # still leaves wpa_supplicant holding wlan0 in STA mode, causing passive
+    # channel scans that break AP TCP connections. Using wlan0 directly lets
+    # hostapd take full control of the radio with no STA activity at all.
+    echo "$WIFI_IF"
 }
 
 get_force_mode() {
@@ -258,11 +263,12 @@ stop_ap() {
     fi
     pkill -9 dnsmasq 2>/dev/null || true
 
-    # Clean up virtual interface (non-blocking)
+    # Remove AP IP and restore wlan0 to managed mode for WiFi client
     ip addr flush dev "$iface" 2>/dev/null || true
-    iw dev "$iface" del 2>/dev/null || true
+    nmcli device set "$iface" managed yes 2>/dev/null || true
+
     clear_ap_state
-    log "Stopped fallback AP"
+    log "Stopped fallback AP — restored $iface to managed mode"
 }
 
 start_ap() {
@@ -273,56 +279,55 @@ start_ap() {
     stop_ap
 
     # Verify physical interface exists
-    if ! iw dev "$WIFI_IF" info >/dev/null 2>&1; then
-        log "Physical interface $WIFI_IF not found, cannot create AP"
+    if ! iw dev "$iface" info >/dev/null 2>&1; then
+        log "Interface $iface not found, cannot start AP"
         return 1
     fi
 
-    # Create virtual AP interface (keeps WiFi client running)
-    iw dev "$iface" del 2>/dev/null || true
-    if ! iw dev "$WIFI_IF" interface add "$iface" type __ap; then
-        log "Failed to create virtual AP interface $iface from $WIFI_IF"
-        return 1
-    fi
-    log "Created virtual AP interface $iface"
-
-    # Bring up the virtual interface (required for hostapd)
-    if ! ip link set "$iface" up; then
-        log "Failed to bring up interface $iface"
-        iw dev "$iface" del 2>/dev/null || true
-        return 1
-    fi
-
-    # Tell NetworkManager to ignore this interface
+    # Release wlan0 from NetworkManager and wpa_supplicant.
+    # nmcli unmanage calls wpa_supplicant RemoveInterface over D-Bus, which
+    # makes wpa_supplicant completely release the nl80211 socket for wlan0.
+    # hostapd can then take the interface and switch it to __ap mode with no
+    # STA firmware module running alongside — eliminating channel scan interference.
+    nmcli device disconnect "$iface" 2>/dev/null || true
     nmcli device set "$iface" managed no 2>/dev/null || true
+    sleep 1  # let wpa_supplicant finish RemoveInterface before hostapd takes over
+    log "Released $iface from NetworkManager — radio available for AP mode"
 
     write_hostapd_conf "$iface"
     write_dnsmasq_conf "$iface"
 
-    # Configure IP address on the interface
-    ip addr flush dev "$iface" 2>/dev/null || true
-    ip addr add "$AP_IPV4_CIDR" dev "$iface" || {
-        log "Failed to assign IP $AP_IPV4_CIDR to $iface"
-        iw dev "$iface" del 2>/dev/null || true
-        return 1
-    }
+    ip link set "$iface" up 2>/dev/null || true
 
     systemctl stop dnsmasq 2>/dev/null || true
     systemctl stop hostapd 2>/dev/null || true
 
-    # Start dnsmasq
-    if ! dnsmasq --conf-file="$DNSMASQ_CONF" --pid-file="$DNSMASQ_PID"; then
-        log "Failed to start dnsmasq for fallback AP"
-        return 1
-    fi
-
-    # Start hostapd (capture errors)
+    # Start hostapd first — it switches wlan0 from managed to __ap mode via nl80211
     local hostapd_out
     hostapd_out=$(hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF" 2>&1)
     if [ $? -ne 0 ]; then
         log "Failed to start hostapd: $hostapd_out"
-        kill "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null || true
-        rm -f "$DNSMASQ_PID"
+        nmcli device set "$iface" managed yes 2>/dev/null || true
+        return 1
+    fi
+
+    # Assign IP after hostapd has configured the interface in AP mode
+    ip addr flush dev "$iface" 2>/dev/null || true
+    ip addr add "$AP_IPV4_CIDR" dev "$iface" || {
+        log "Failed to assign IP $AP_IPV4_CIDR to $iface"
+        kill "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$HOSTAPD_PID"
+        nmcli device set "$iface" managed yes 2>/dev/null || true
+        return 1
+    }
+
+    # Start dnsmasq after IP is assigned
+    if ! dnsmasq --conf-file="$DNSMASQ_CONF" --pid-file="$DNSMASQ_PID"; then
+        log "Failed to start dnsmasq for fallback AP"
+        kill "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$HOSTAPD_PID"
+        ip addr flush dev "$iface" 2>/dev/null || true
+        nmcli device set "$iface" managed yes 2>/dev/null || true
         return 1
     fi
 
@@ -439,11 +444,12 @@ while true; do
             STA_RETRY_COUNTER=0
             log "Periodic STA retry: stopping AP to attempt home WiFi"
             stop_ap
-            sleep 5
+            sleep 8
 
             # Let NetworkManager try to auto-connect (radio is now free)
+            # Longer wait needed because wlan0 was frozen (unmanaged+down)
             nmcli device wifi rescan 2>/dev/null
-            sleep 10
+            sleep 20
 
             if check_wifi; then
                 log "STA reconnected — AP stays off"

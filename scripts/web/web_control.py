@@ -42,6 +42,7 @@ from blueprints import (
     light_shows_bp,
     music_bp,
     wraps_bp,
+    license_plates_bp,
     media_bp,
     analytics_bp,
     mapping_bp,
@@ -60,6 +61,7 @@ app.register_blueprint(lock_chimes_bp)
 app.register_blueprint(light_shows_bp)
 app.register_blueprint(music_bp)
 app.register_blueprint(wraps_bp)
+app.register_blueprint(license_plates_bp)
 app.register_blueprint(media_bp)
 app.register_blueprint(analytics_bp)
 app.register_blueprint(cleanup_bp)
@@ -217,7 +219,9 @@ if __name__ == "__main__":
         from waitress import serve
         print("Using Waitress production server")
         # 4 threads for Pi Zero 2 W — one extra for API polling while sync runs
-        serve(app, host="0.0.0.0", port=WEB_PORT, threads=4, channel_timeout=120,
+        # Listen on both IPv4 and IPv6 so clients on either protocol can connect
+        serve(app, listen=f"0.0.0.0:{WEB_PORT} [::]:{WEB_PORT}", threads=4,
+              channel_timeout=120,
               send_bytes=4194304)  # 4MB send buffer for better video streaming
     except ImportError:
         print("Waitress not available, using Flask development server")

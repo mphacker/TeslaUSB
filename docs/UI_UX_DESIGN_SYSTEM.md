@@ -129,6 +129,7 @@ All icons use [Lucide](https://lucide.dev/) delivered as an inline SVG sprite. D
 | Music | `music` | |
 | Light shows | `sparkles` | |
 | Wraps | `palette` | |
+| License plates | `credit-card` | |
 | Settings | `settings` | |
 | Analytics | `bar-chart-2` | |
 | Mode toggle | `refresh-cw` | |
@@ -312,7 +313,7 @@ The underlying Present/Edit mode distinction is an implementation detail — nev
 ```
 Map (/)              — Primary landing page, full-viewport map
 Analytics (/analytics/) — Storage dashboard, stats, charts
-Media (/media/)      — Lock Chimes, Music, Light Shows, Wraps (sub-tabs)
+Media (/media/)      — Lock Chimes, Music, Light Shows, Wraps, License Plates (sub-tabs)
 Settings (/settings/) — Mode control, WiFi, AP, system config
 ```
 

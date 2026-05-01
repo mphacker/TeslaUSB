@@ -1,0 +1,669 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+    {% include 'media_hub_nav.html' %}
+    <h2>License Plates</h2>
+
+    <!-- iOS Safari Warning -->
+    <div id="iosWarning" class="ios-warning">
+        <p><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
+        <p>Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+    </div>
+
+    <!-- Tesla Requirements Info -->
+    <div class="info-box" style="margin-bottom: 20px;">
+        <p><strong>Tesla License Plate Requirements:</strong></p>
+        <ul style="margin: 10px 0 0 20px; padding: 0; font-size: 13px; color: var(--text-secondary);">
+            <li><strong>Format:</strong> PNG only</li>
+            <li><strong>Size:</strong> {{ (max_file_size / 1024 / 1024)|round(0)|int }} MB maximum</li>
+            <li><strong>Dimensions:</strong> {{ expected_width }}x{{ expected_height }} pixels (recommended)</li>
+            <li><strong>Filename:</strong> {{ max_filename_length }} characters max (letters, numbers, underscores, dashes, spaces)</li>
+            <li><strong>Count:</strong> Up to {{ max_plate_count }} images at a time (currently: {{ plate_count }}/{{ max_plate_count }})</li>
+        </ul>
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            <strong>Usage:</strong> License plates appear in Toybox → Customize → License Plate. Images other than {{ expected_width }}x{{ expected_height }}px will be uploaded but may not display correctly.
+        </p>
+    </div>
+
+    <div class="folder-controls" id="plateUploadControls">
+        <!-- Desktop Drag & Drop Interface -->
+        <div id="desktopUploadInterface" style="display: none;">
+            <div class="drag-drop-zone" id="dragDropZone" style="border: 3px dashed var(--border-input); border-radius: 8px; padding: 40px; text-align: center; background: var(--form-input-bg); cursor: pointer; transition: all 0.3s; margin-bottom: 20px;">
+                <div style="pointer-events: none;">
+                    <i class="bi bi-image" style="font-size: 48px; color: var(--btn-purple-bg); display: block; margin-bottom: 15px;"></i>
+                    <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Drag & drop PNG files here or click to browse</p>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">
+                        PNG files only &bull; {{ expected_width }}x{{ expected_height }}px recommended &bull; Max 1 MB each
+                    </p>
+                </div>
+            </div>
+
+            <input type="file" id="plate_files_multi" accept=".png,image/png" multiple style="display: none;">
+
+            <!-- Selected Files Preview -->
+            <div id="selectedFilesPreview" style="display: none; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">📋 Selected Files:</h4>
+                <div id="filesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 300px; overflow-y: auto;"></div>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button type="button" class="action-btn" id="uploadSelectedBtn">Upload All Files</button>
+                    <button type="button" class="action-btn danger" id="clearSelectedBtn">Clear All</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mobile/Fallback Simple Upload Interface -->
+        <form method="post" action="{{ url_for('license_plates.upload_plate') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="plateUploadForm">
+            <label for="plate_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload License Plate Image:</label>
+            <p style="margin: 0 0 10px 0; font-size: 13px; color: var(--text-secondary);">
+                PNG file &bull; {{ expected_width }}x{{ expected_height }}px recommended &bull; Max 1 MB
+            </p>
+            <input type="file" name="plate_file" id="plate_file" accept=".png,image/png" required
+                   style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary);">
+            <button type="submit" class="action-btn" id="plateUploadBtn">Upload</button>
+        </form>
+        <!-- Upload Progress Bar -->
+        <div id="plateUploadProgress" style="display: none; margin-bottom: 20px;">
+            <div style="background: var(--upload-progress-bg); border-radius: 8px; padding: 15px; border: 2px solid var(--btn-purple-bg);">
+                <h4 style="margin: 0 0 10px 0; color: var(--btn-purple-bg);">📤 Uploading Plate Image...</h4>
+                <div style="background: var(--upload-progress-bar-bg); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                    <div id="plateProgressBar" style="background: linear-gradient(90deg, #6f42c1, #5a32a3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
+                        0%
+                    </div>
+                </div>
+                <p id="plateUploadStatus" style="margin: 0; font-size: 13px; color: var(--text-secondary);">Preparing upload...</p>
+            </div>
+        </div>
+    </div>
+
+    {% if plate_files %}
+    <!-- Desktop Table Layout -->
+    <div class="video-table-container">
+        <table class="video-table" style="table-layout: fixed;">
+            <thead>
+                <tr>
+                    <th style="width: 40%;">Filename</th>
+                    <th style="width: 20%;">Dimensions</th>
+                    <th style="width: 15%;">Size</th>
+                    <th style="width: 25%;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for plate in plate_files %}
+                <tr>
+                    <td style="word-wrap: break-word; overflow-wrap: break-word;">{{ plate.filename }}</td>
+                    <td>{{ plate.dimensions }}</td>
+                    <td>{{ plate.size_str }}</td>
+                    <td>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                            <a href="{{ url_for('license_plates.download_plate', filename=plate.filename) }}"
+                               class="action-btn">
+                                Download
+                            </a>
+                            <form method="post" action="{{ url_for('license_plates.delete_plate', filename=plate.filename) }}" style="display: inline; margin: 0;"
+                                  onsubmit="return confirm('Are you sure you want to delete {{ plate.filename }}?');">
+                                <button type="submit" class="action-btn danger">Delete</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Mobile Card Layout -->
+    <div class="mobile-card-container">
+        {% for plate in plate_files %}
+        <div class="mobile-card">
+            <div class="mobile-card-title">
+                <strong>{{ plate.filename }}</strong>
+            </div>
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Dimensions:</span>
+                    <span class="mobile-card-info-value">{{ plate.dimensions }}</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">{{ plate.size_str }}</span>
+                </div>
+            </div>
+            <div class="mobile-card-actions" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                <a href="{{ url_for('license_plates.download_plate', filename=plate.filename) }}"
+                   class="action-btn" style="flex: 1;">
+                    Download
+                </a>
+                <form method="post" action="{{ url_for('license_plates.delete_plate', filename=plate.filename) }}"
+                      onsubmit="return confirm('Are you sure you want to delete {{ plate.filename }}?');"
+                      style="flex: 1; margin: 0; display: flex;">
+                    <button type="submit" class="action-btn danger" style="width: 100%;">Delete</button>
+                </form>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="info-box">
+        <p>No license plate images found in the LicensePlate folder.</p>
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            Upload PNG images to customize your Tesla's license plate display.
+        </p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+// Validation constants from server
+const MAX_FILE_SIZE = {{ max_file_size }};
+const EXPECTED_WIDTH = {{ expected_width }};
+const EXPECTED_HEIGHT = {{ expected_height }};
+const MAX_FILENAME_LENGTH = {{ max_filename_length }};
+const MAX_PLATE_COUNT = {{ max_plate_count }};
+const CURRENT_PLATE_COUNT = {{ plate_count }};
+
+// Device and capability detection
+function isMobileDevice() {
+    return /(iPad|iPhone|iPod|Android|Mobile)/i.test(navigator.userAgent) ||
+           window.matchMedia("(max-width: 768px)").matches;
+}
+
+function isIOS() {
+    return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
+}
+
+function isSafari() {
+    var ua = navigator.userAgent;
+    return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
+}
+
+function supportsMultipleUpload() {
+    const input = document.createElement('input');
+    return 'multiple' in input && !isIOS();
+}
+
+// Initialize upload interface based on device capabilities
+document.addEventListener('DOMContentLoaded', function() {
+    const isMobile = isMobileDevice();
+    const supportsMulti = supportsMultipleUpload();
+
+    const desktopInterface = document.getElementById('desktopUploadInterface');
+    const mobileForm = document.getElementById('plateUploadForm');
+    const iosWarning = document.getElementById('iosWarning');
+    const uploadControls = document.getElementById('plateUploadControls');
+
+    if (isIOS() && !isSafari()) {
+        if (iosWarning) iosWarning.style.display = 'block';
+        if (uploadControls) uploadControls.style.display = 'none';
+        return;
+    }
+
+    if (!isMobile && supportsMulti) {
+        if (desktopInterface) desktopInterface.style.display = 'block';
+        if (mobileForm) mobileForm.style.display = 'none';
+        initializeDragDrop();
+    } else {
+        if (desktopInterface) desktopInterface.style.display = 'none';
+        if (mobileForm) mobileForm.style.display = 'block';
+        initializeSimpleUpload();
+    }
+});
+
+// Multi-file upload state
+let selectedFiles = [];
+let fileValidationResults = new Map();
+
+function initializeDragDrop() {
+    const dropZone = document.getElementById('dragDropZone');
+    const fileInput = document.getElementById('plate_files_multi');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+
+    if (!dropZone || !fileInput) return;
+
+    dropZone.addEventListener('click', function() {
+        fileInput.click();
+    });
+
+    fileInput.addEventListener('change', function(e) {
+        handleFiles(Array.from(e.target.files));
+    });
+
+    dropZone.addEventListener('dragenter', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--btn-purple-bg)';
+        dropZone.style.background = 'var(--hover-bg, rgba(111, 66, 193, 0.1))';
+    });
+
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+    });
+
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+        handleFiles(Array.from(e.dataTransfer.files));
+    });
+
+    if (uploadBtn) {
+        uploadBtn.addEventListener('click', function() {
+            uploadMultipleFiles();
+        });
+    }
+
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            selectedFiles = [];
+            fileValidationResults.clear();
+            updateFilesList();
+        });
+    }
+}
+
+async function handleFiles(files) {
+    const pngFiles = files.filter(file => {
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        return ext === '.png' || file.type === 'image/png';
+    });
+
+    if (pngFiles.length === 0) {
+        alert('Please select PNG files only');
+        return;
+    }
+
+    const remainingSlots = MAX_PLATE_COUNT - CURRENT_PLATE_COUNT - selectedFiles.length;
+    if (remainingSlots <= 0) {
+        alert(`Maximum of ${MAX_PLATE_COUNT} license plates allowed. You already have ${CURRENT_PLATE_COUNT}.`);
+        return;
+    }
+
+    for (const file of pngFiles) {
+        const exists = selectedFiles.some(f => f.name === file.name && f.size === file.size);
+        if (exists) continue;
+
+        const validation = await validateFile(file);
+        fileValidationResults.set(file.name + '_' + file.size, validation);
+        selectedFiles.push(file);
+
+        if (selectedFiles.length >= remainingSlots) {
+            if (pngFiles.indexOf(file) < pngFiles.length - 1) {
+                alert(`Only ${remainingSlots} slot(s) remaining. Some files were not added.`);
+            }
+            break;
+        }
+    }
+
+    updateFilesList();
+}
+
+async function validateFile(file) {
+    const errors = [];
+    const warnings = [];
+    let dimensions = null;
+
+    const baseName = file.name.replace(/\.png$/i, '');
+    if (baseName.length > MAX_FILENAME_LENGTH) {
+        errors.push(`Filename too long (${baseName.length}/${MAX_FILENAME_LENGTH} chars)`);
+    }
+
+    const validPattern = /^[a-zA-Z0-9_\- ]+$/;
+    if (!validPattern.test(baseName)) {
+        errors.push('Invalid characters in filename');
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+        const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+        errors.push(`File too large (${sizeMB} MB, max 1 MB)`);
+    }
+
+    try {
+        dimensions = await getImageDimensions(file);
+        if (dimensions && (dimensions.width !== EXPECTED_WIDTH || dimensions.height !== EXPECTED_HEIGHT)) {
+            warnings.push(`Image is ${dimensions.width}x${dimensions.height}px. Tesla recommends ${EXPECTED_WIDTH}x${EXPECTED_HEIGHT}px.`);
+        }
+    } catch (e) {
+        errors.push('Could not read image dimensions');
+    }
+
+    return {
+        valid: errors.length === 0,
+        errors: errors,
+        warnings: warnings,
+        dimensions: dimensions
+    };
+}
+
+function getImageDimensions(file) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+
+        img.onload = function() {
+            URL.revokeObjectURL(url);
+            resolve({ width: img.width, height: img.height });
+        };
+
+        img.onerror = function() {
+            URL.revokeObjectURL(url);
+            reject(new Error('Failed to load image'));
+        };
+
+        img.src = url;
+    });
+}
+
+function updateFilesList() {
+    const preview = document.getElementById('selectedFilesPreview');
+    const filesList = document.getElementById('filesList');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+
+    if (!preview || !filesList) return;
+
+    if (selectedFiles.length === 0) {
+        preview.style.display = 'none';
+        return;
+    }
+
+    preview.style.display = 'block';
+
+    let html = '';
+    let hasValidFiles = false;
+
+    selectedFiles.forEach((file, index) => {
+        const sizeKB = (file.size / 1024).toFixed(1);
+        const key = file.name + '_' + file.size;
+        const validation = fileValidationResults.get(key);
+
+        const isValid = validation && validation.valid;
+        if (isValid) hasValidFiles = true;
+
+        const statusIcon = isValid ? '✓' : '⚠️';
+        const statusColor = isValid ? 'var(--success-text, #28a745)' : 'var(--error-text, #dc3545)';
+        const borderColor = isValid ? 'var(--border-input)' : 'var(--error-text, #dc3545)';
+
+        let dimStr = '';
+        if (validation && validation.dimensions) {
+            dimStr = ` (${validation.dimensions.width}x${validation.dimensions.height})`;
+        }
+
+        html += `
+            <div style="display: flex; flex-direction: column; padding: 10px; border-bottom: 1px solid ${borderColor}; color: var(--text-primary);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="flex: 1; overflow: hidden;">
+                        <span style="color: ${statusColor}; margin-right: 8px;">${statusIcon}</span>
+                        <strong style="word-break: break-word;">${escapeHtml(file.name)}</strong>
+                        <span style="color: var(--text-secondary); font-size: 12px; margin-left: 8px;">${sizeKB} KB${dimStr}</span>
+                    </div>
+                    <button type="button" onclick="removeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px; flex-shrink: 0;" title="Remove">&#x2716;</button>
+                </div>
+        `;
+
+        if (validation && validation.errors.length > 0) {
+            html += `<div style="margin-top: 5px; font-size: 12px; color: var(--error-text, #dc3545); padding-left: 24px;">${validation.errors.map(e => escapeHtml(e)).join('<br>')}</div>`;
+        }
+
+        if (validation && validation.warnings.length > 0) {
+            html += `<div style="margin-top: 4px; font-size: 12px; color: var(--warning-text, #856404); padding-left: 24px;">${validation.warnings.map(w => escapeHtml(w)).join('<br>')}</div>`;
+        }
+
+        html += '</div>';
+    });
+
+    filesList.innerHTML = html;
+
+    if (uploadBtn) {
+        uploadBtn.disabled = !hasValidFiles;
+    }
+}
+
+function removeFile(index) {
+    const file = selectedFiles[index];
+    fileValidationResults.delete(file.name + '_' + file.size);
+    selectedFiles.splice(index, 1);
+    updateFilesList();
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function uploadMultipleFiles() {
+    const validFiles = selectedFiles.filter(file => {
+        const key = file.name + '_' + file.size;
+        const validation = fileValidationResults.get(key);
+        return validation && validation.valid;
+    });
+
+    if (validFiles.length === 0) {
+        alert('No valid files to upload. Please fix validation errors first.');
+        return;
+    }
+
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+    const progressDiv = document.getElementById('plateUploadProgress');
+    const progressBar = document.getElementById('plateProgressBar');
+    const statusText = document.getElementById('plateUploadStatus');
+
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (clearBtn) clearBtn.disabled = true;
+
+    if (progressDiv) {
+        progressDiv.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        statusText.textContent = 'Preparing upload...';
+    }
+
+    const formData = new FormData();
+    validFiles.forEach(file => {
+        formData.append('plate_files', file);
+    });
+
+    try {
+        const xhr = new XMLHttpRequest();
+
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = pct + '%';
+                progressBar.textContent = pct + '%';
+                const loadedKB = (e.loaded / 1024).toFixed(1);
+                const totalKB = (e.total / 1024).toFixed(1);
+                statusText.textContent = `Uploading ${validFiles.length} file(s)... (${loadedKB} KB / ${totalKB} KB)`;
+            }
+        });
+
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200) {
+                try {
+                    const response = JSON.parse(xhr.responseText);
+
+                    progressBar.style.width = '100%';
+                    progressBar.textContent = '100%';
+                    progressBar.style.background = '#28a745';
+
+                    if (response.success) {
+                        statusText.textContent = response.summary || 'Upload complete!';
+                        statusText.style.color = '#28a745';
+                        showUploadResults(response.results);
+                        setTimeout(function() {
+                            selectedFiles = [];
+                            fileValidationResults.clear();
+                            window.location.reload();
+                        }, 2000);
+                    } else {
+                        statusText.textContent = 'Upload completed with errors';
+                        statusText.style.color = '#ffc107';
+                        showUploadResults(response.results);
+                        if (uploadBtn) uploadBtn.disabled = false;
+                        if (clearBtn) clearBtn.disabled = false;
+                    }
+                } catch (e) {
+                    progressBar.style.background = '#dc3545';
+                    statusText.textContent = 'Upload complete! Redirecting...';
+                    statusText.style.color = '#28a745';
+                    setTimeout(function() { window.location.reload(); }, 1000);
+                }
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                if (uploadBtn) uploadBtn.disabled = false;
+                if (clearBtn) clearBtn.disabled = false;
+            }
+        });
+
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            if (uploadBtn) uploadBtn.disabled = false;
+            if (clearBtn) clearBtn.disabled = false;
+        });
+
+        xhr.open('POST', '{{ url_for("license_plates.upload_multiple_plates") }}');
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.send(formData);
+
+    } catch (error) {
+        console.error('Upload error:', error);
+        alert('Upload failed: ' + error.message);
+        if (uploadBtn) uploadBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+    }
+}
+
+function showUploadResults(results) {
+    if (!results || results.length === 0) return;
+
+    let html = '<div style="margin-top: 15px; padding: 10px; background: var(--form-input-bg); border-radius: 4px;"><strong>Upload Results:</strong><ul style="margin: 10px 0 0 20px; padding: 0;">';
+
+    results.forEach(result => {
+        const icon = result.success ? '&#x2713;' : '&#x2717;';
+        const color = result.success ? '#28a745' : '#dc3545';
+        const dimInfo = result.dimensions ? ` (${result.dimensions})` : '';
+        html += `<li style="color: ${color}; margin: 5px 0;">${icon} ${escapeHtml(result.filename)}${dimInfo}: ${escapeHtml(result.message)}</li>`;
+        if (result.warning) {
+            html += `<li style="color: #856404; font-size: 12px; margin: 2px 0 5px 20px;">${escapeHtml(result.warning)}</li>`;
+        }
+    });
+
+    html += '</ul></div>';
+
+    const statusText = document.getElementById('plateUploadStatus');
+    if (statusText && statusText.parentNode) {
+        const resultsDiv = document.createElement('div');
+        resultsDiv.innerHTML = html;
+        statusText.parentNode.appendChild(resultsDiv);
+    }
+}
+
+function initializeSimpleUpload() {
+    const form = document.getElementById('plateUploadForm');
+    if (!form) return;
+
+    const fileInput = document.getElementById('plate_file');
+
+    if (fileInput) {
+        fileInput.addEventListener('change', async function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const validation = await validateFile(file);
+            if (!validation.valid) {
+                alert('File validation failed:\n\u2022 ' + validation.errors.join('\n\u2022 '));
+                fileInput.value = '';
+            } else if (validation.warnings.length > 0) {
+                // Show warning but allow upload to continue
+                alert('Warning:\n\u2022 ' + validation.warnings.join('\n\u2022 '));
+            }
+        });
+    }
+
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        const uploadBtn = document.getElementById('plateUploadBtn');
+        const progressDiv = document.getElementById('plateUploadProgress');
+        const progressBar = document.getElementById('plateProgressBar');
+        const statusText = document.getElementById('plateUploadStatus');
+
+        if (!fileInput.files || fileInput.files.length === 0) {
+            alert('Please select a file to upload');
+            return;
+        }
+
+        const file = fileInput.files[0];
+        const formData = new FormData(form);
+
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = 'Uploading...';
+        progressDiv.style.display = 'block';
+
+        const xhr = new XMLHttpRequest();
+
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = pct + '%';
+                progressBar.textContent = pct + '%';
+                const loadedKB = (e.loaded / 1024).toFixed(1);
+                const totalKB = (e.total / 1024).toFixed(1);
+                statusText.textContent = `Uploading ${file.name}... (${loadedKB} KB / ${totalKB} KB)`;
+            }
+        });
+
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200 || xhr.status === 302) {
+                progressBar.style.width = '100%';
+                progressBar.textContent = '100%';
+                progressBar.style.background = '#28a745';
+                statusText.textContent = 'Upload complete! Redirecting...';
+                statusText.style.color = '#28a745';
+                setTimeout(function() { window.location.reload(); }, 1000);
+            } else {
+                progressBar.style.background = '#dc3545';
+                statusText.textContent = 'Upload failed: ' + xhr.statusText;
+                statusText.style.color = '#dc3545';
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Upload';
+            }
+        });
+
+        xhr.addEventListener('error', function() {
+            progressBar.style.background = '#dc3545';
+            statusText.textContent = 'Upload failed: Network error';
+            statusText.style.color = '#dc3545';
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = 'Upload';
+        });
+
+        xhr.open('POST', form.action);
+        xhr.send(formData);
+    });
+}
+
+// iOS Browser Detection and Warning Display
+(function() {
+    if (isIOS() && !isSafari()) {
+        var warning = document.getElementById('iosWarning');
+        var controls = document.getElementById('plateUploadControls');
+        if (warning) warning.style.display = 'block';
+        if (controls) controls.style.display = 'none';
+    }
+})();
+</script>
+{% endblock %}

@@ -55,44 +55,52 @@ CAPTIVE_PORTAL_ENDPOINTS = [
 @captive_portal_bp.route('/library/test/success.html')
 def apple_captive_portal():
     """
-    Apple devices check these URLs and expect a specific response.
-    If they get anything other than "Success", they show the captive portal.
-    Show a branded splash screen instead of auto-redirecting.
+    Return the exact response Apple expects so iOS/macOS considers the
+    network as having internet access and suppresses the captive portal popup.
+    The user opens Safari normally and navigates to http://192.168.4.1/ or http://teslausb/
     """
-    logger.info(f"Apple captive portal detection from {request.remote_addr}")
-    return render_template('captive_portal.html', ssid=get_ap_ssid())
+    logger.info(f"Apple captive portal check from {request.remote_addr} — returning success")
+    resp = make_response('<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>')
+    resp.headers['Content-Type'] = 'text/html'
+    return resp
 
 @captive_portal_bp.route('/generate_204')
 @captive_portal_bp.route('/gen_204')
 def android_captive_portal():
     """
-    Android devices check this URL and expect a 204 No Content response.
-    If they get anything else, they show the captive portal.
-    Show the branded splash screen.
+    Return HTTP 204 so Android considers the network connected and
+    suppresses the captive portal popup.
     """
-    logger.info(f"Android captive portal detection from {request.remote_addr}")
-    return render_template('captive_portal.html', ssid=get_ap_ssid())
+    logger.info(f"Android captive portal check from {request.remote_addr} — returning 204")
+    return '', 204
 
 @captive_portal_bp.route('/connecttest.txt')
 @captive_portal_bp.route('/ncsi.txt')
-@captive_portal_bp.route('/redirect')
 def windows_captive_portal():
     """
-    Windows checks these URLs for connectivity.
-    Show the branded splash screen.
+    Return the exact content Windows NCSI expects to suppress the
+    captive portal notification.
     """
-    logger.info(f"Windows captive portal detection from {request.remote_addr}")
-    return render_template('captive_portal.html', ssid=get_ap_ssid())
+    logger.info(f"Windows captive portal check from {request.remote_addr} — returning success")
+    resp = make_response('Microsoft Connect Test')
+    resp.headers['Content-Type'] = 'text/plain'
+    return resp
+
+@captive_portal_bp.route('/redirect')
+def windows_redirect():
+    """Windows redirect check — return success."""
+    return '', 200
 
 @captive_portal_bp.route('/success.txt')
 @captive_portal_bp.route('/canonical.html')
 def generic_captive_portal():
     """
-    Firefox and other browsers check these endpoints.
-    Show the branded splash screen.
+    Firefox and other browsers check these endpoints — return success.
     """
-    logger.info(f"Generic captive portal detection from {request.remote_addr}")
-    return render_template('captive_portal.html', ssid=get_ap_ssid())
+    logger.info(f"Generic captive portal check from {request.remote_addr} — returning success")
+    resp = make_response('success\n')
+    resp.headers['Content-Type'] = 'text/plain'
+    return resp
 
 @captive_portal_bp.route('/favicon.ico')
 def favicon():

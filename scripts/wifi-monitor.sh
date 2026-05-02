@@ -238,6 +238,8 @@ address=/#/$gateway
 # Local DNS - resolve hostname to AP gateway
 address=/$hostname/$gateway
 address=/$hostname.local/$gateway
+# Friendly shortcut: http://teslausb/ works as an alias for the gateway
+address=/teslausb/$gateway
 log-queries
 log-dhcp
 EOF

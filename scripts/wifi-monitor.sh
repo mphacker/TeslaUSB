@@ -92,7 +92,12 @@ ensure_runtime_dir() {
 }
 
 ap_active() {
-    [ -f "$AP_STATE_FILE" ]
+    # State file must exist AND hostapd process must be alive.
+    # If hostapd died but the state file remains (e.g. after a crash), treat
+    # the AP as inactive so the main loop can attempt recovery.
+    [ -f "$AP_STATE_FILE" ] && \
+        [ -f "$HOSTAPD_PID" ] && \
+        kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null
 }
 
 # Removed: ap_started_at() - no longer used after removing retry logic
@@ -343,6 +348,22 @@ start_ap() {
 # Cleanup any stale virtual interface from previous crash/unclean shutdown
 log_timing "Cleaning up stale interfaces"
 iw dev "$AP_VIRTUAL_IF" del 2>/dev/null || true
+
+# Recovery: if wlan0 is unmanaged (left over from a crashed AP session) but
+# hostapd is no longer running, restore it to managed mode so NM can reconnect.
+# Without this, the Pi silently loses both AP AND WiFi STA after a crash/restart.
+if nmcli device status 2>/dev/null | awk -v if="$WIFI_IF" '$1==if {print $3}' | grep -qi unmanaged; then
+    if ! ([ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null); then
+        log "RECOVERY: $WIFI_IF is unmanaged but hostapd is not running — restoring"
+        pkill -9 hostapd 2>/dev/null || true
+        pkill -9 dnsmasq 2>/dev/null || true
+        ip addr flush dev "$WIFI_IF" 2>/dev/null || true
+        nmcli device set "$WIFI_IF" managed yes 2>/dev/null || true
+        clear_ap_state
+        sleep 2
+        log "RECOVERY: $WIFI_IF restored to managed mode"
+    fi
+fi
 
 # Initialize runtime force mode from persistent config if not already set
 log_timing "Initializing runtime directory"

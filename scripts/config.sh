@@ -44,7 +44,7 @@ eval "$(yq -r '
   "LABEL1=\"" + .disk_images.cam_label + "\"",
   "LABEL2=\"" + .disk_images.lightshow_label + "\"",
   "LABEL3=\"" + (.disk_images.music_label // "Music") + "\"",
-  "MUSIC_ENABLED=\"" + (.disk_images.music_enabled // true | tostring) + "\"",
+  "MUSIC_ENABLED=\"" + (.disk_images.music_enabled | if . == null then "true" else tostring end) + "\"",
   "MUSIC_FS=\"" + (.disk_images.music_fs // "fat32") + "\"",
   "BOOT_FSCK_ENABLED=\"" + (.disk_images.boot_fsck_enabled | tostring) + "\"",
   "PART1_SIZE=\"" + .setup.part1_size + "\"",

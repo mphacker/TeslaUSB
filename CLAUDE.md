@@ -170,7 +170,7 @@ These decisions were made during the initial setup session (2026-04-29) and must
 - **Lock chimes** → LUN 1 `/Chimes/` — managed by TeslaUSB web UI (upload, preview, scheduler)
 - **Wraps** (PNG files for Tesla Paint Shop) → LUN 1 `/Wrap/` — managed by TeslaUSB web UI
 - **License plates** (PNG images, 420x100px recommended) → LUN 1 `/LicensePlate/` — managed by TeslaUSB web UI (upload, download, delete; up to 10 images)
-- **Boombox sounds** → LUN 2 `/Media/` — Tesla reads this folder natively; TeslaUSB has no web UI for it, manage via Samba in Edit mode
+- **Boombox sounds** → LUN 2 `/Media/` — Tesla reads this folder natively; managed by the **Boombox blueprint** (`blueprints/boombox.py`, `services/boombox_service.py`). Upload/delete/preview via the web UI (Media Hub → Boombox tab). MP3 only, max 1 MiB per file, max 20 files. Uses `quick_edit_part3` in present mode.
 - **Music** → LUN 2 root or subfolders — Tesla music player reads from here
 
 ### Why Boombox lives on LUN 2 (Music), not LUN 1 (LightShow)

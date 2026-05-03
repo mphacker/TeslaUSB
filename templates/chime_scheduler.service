@@ -2,6 +2,8 @@
 Description=TeslaUSB Chime Scheduler Check
 After=present_usb_on_boot.service teslausb-safe-mode.service
 ConditionPathExists=!/run/teslausb-safe-mode
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=oneshot
@@ -20,8 +22,6 @@ MemoryMax=50M
 # Restart policy for oneshot service
 Restart=on-failure
 RestartSec=10
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 [Install]
 WantedBy=multi-user.target

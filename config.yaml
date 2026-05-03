@@ -9,7 +9,7 @@
 # Installation & Paths
 # ============================================================================
 installation:
-  target_user: pi # Linux user running the TeslaUSB services (auto-overridden by SUDO_USER during setup)
+  target_user: pablo # Linux user running the TeslaUSB services (auto-overridden by SUDO_USER during setup)
   mount_dir: /mnt/gadget # Mount directory for USB drives
 
 # ============================================================================
@@ -32,10 +32,10 @@ disk_images:
 # These values are specific to the setup process and can be configured here
 # or left empty ("") for interactive prompts during setup.
 setup:
-  part1_size: "" # TeslaCam drive size (e.g., "50G" or leave empty for interactive)
-  part2_size: "" # LightShow drive size (e.g., "10G" or leave empty for interactive)
-  part3_size: "" # Music drive size (e.g., "32G" or leave empty to skip/interactive)
-  reserve_size: "" # Headroom to leave free on Pi filesystem (default: 5G)
+  part1_size: "64G" # TeslaCam drive size (e.g., "50G" or leave empty for interactive)
+  part2_size: "8G" # LightShow drive size (e.g., "10G" or leave empty for interactive)
+  part3_size: "512M" # Music drive size (e.g., "32G" or leave empty to skip/interactive)
+  reserve_size: "5G" # Headroom to leave free on Pi filesystem (default: 5G)
   archive_reserve_size: "50G" # Space reserved for RecentClips archive on SD card
 
 # ============================================================================

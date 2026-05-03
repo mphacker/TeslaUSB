@@ -3,14 +3,14 @@ Description=WiFi Connection Monitor and Auto-Reconnect
 After=network-online.target teslausb-safe-mode.service
 Wants=network-online.target
 # WiFi monitor runs even in safe mode so AP fallback works for recovery
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
 ExecStart=/bin/bash __GADGET_DIR__/scripts/wifi-monitor.sh
 Restart=on-failure
 RestartSec=30
-StartLimitBurst=5
-StartLimitIntervalSec=300
 TimeoutStopSec=5
 KillMode=mixed
 

@@ -13,6 +13,7 @@ Type=simple
 User=root
 Group=__TARGET_USER__
 WorkingDirectory=__GADGET_DIR__/scripts/web
+RuntimeDirectory=samba
 ExecStart=/usr/bin/python3 __GADGET_DIR__/scripts/web/web_control.py
 Restart=on-failure
 RestartSec=30

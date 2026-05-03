@@ -3,6 +3,8 @@ Description=TeslaUSB Network Performance Optimizations
 After=network-online.target NetworkManager.service teslausb-safe-mode.service
 Wants=network-online.target
 ConditionPathExists=!/run/teslausb-safe-mode
+StartLimitBurst=3
+StartLimitIntervalSec=600
 
 [Service]
 Type=oneshot
@@ -12,8 +14,6 @@ ExecStart=/bin/bash __GADGET_DIR__/scripts/optimize_network.sh
 # Restart policy (was missing)
 Restart=on-failure
 RestartSec=30
-StartLimitBurst=3
-StartLimitIntervalSec=600
 
 [Install]
 WantedBy=multi-user.target

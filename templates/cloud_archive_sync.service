@@ -3,6 +3,8 @@ Description=TeslaUSB Cloud Archive Sync
 After=network-online.target gadget_web.service teslausb-safe-mode.service
 Wants=network-online.target
 ConditionPathExists=!/run/teslausb-safe-mode
+StartLimitBurst=3
+StartLimitIntervalSec=600
 
 [Service]
 Type=oneshot
@@ -19,8 +21,6 @@ StandardError=journal
 
 Restart=on-failure
 RestartSec=60
-StartLimitBurst=3
-StartLimitIntervalSec=600
 
 [Install]
 WantedBy=multi-user.target

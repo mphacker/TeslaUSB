@@ -18,3 +18,4 @@ def media_home():
         return redirect(url_for('music.music_home'))
     # Fallback to lock_chimes even if not available (it will show the error message)
     return redirect(url_for('lock_chimes.lock_chimes'))
+

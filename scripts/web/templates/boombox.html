@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+    .boombox-panel {
+        background: var(--bg-container);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 2px 10px var(--shadow);
+        transition: background-color 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+    }
+
+    .boombox-upload-zone {
+        border: 2px dashed var(--border-input);
+        border-radius: 8px;
+        padding: 30px;
+        text-align: center;
+        background: var(--form-input-bg);
+        cursor: pointer;
+        transition: border-color 0.2s, background 0.2s;
+        margin-bottom: 20px;
+    }
+
+    .boombox-upload-zone.drag-over {
+        border-color: var(--accent-primary);
+        background: var(--bg-hover);
+    }
+
+    .boombox-upload-zone p {
+        margin: 6px 0;
+        color: var(--text-secondary);
+        font-size: 13px;
+    }
+
+    .boombox-upload-zone .zone-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 4px;
+    }
+
+    /* File list */
+    .boombox-file-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .boombox-file-row:last-child {
+        border-bottom: none;
+    }
+
+    .boombox-file-name {
+        flex: 1;
+        font-size: 14px;
+        color: var(--text-primary);
+        word-break: break-all;
+    }
+
+    .boombox-file-size {
+        font-size: 12px;
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
+
+    .boombox-file-actions {
+        display: flex;
+        gap: 8px;
+        flex-shrink: 0;
+    }
+
+    /* Mobile cards */
+    @media (max-width: 600px) {
+        .boombox-file-row {
+            flex-wrap: wrap;
+        }
+
+        .boombox-file-actions {
+            width: 100%;
+            justify-content: flex-end;
+        }
+    }
+
+    /* Storage bar */
+    .storage-bar {
+        height: 8px;
+        background: var(--border-color);
+        border-radius: 4px;
+        overflow: hidden;
+        margin: 8px 0 4px;
+    }
+
+    .storage-bar-fill {
+        height: 100%;
+        background: var(--accent-primary);
+        border-radius: 4px;
+        transition: width 0.3s;
+    }
+
+    /* Upload progress */
+    #uploadProgress {
+        display: none;
+        margin-bottom: 16px;
+    }
+
+    #uploadProgressBar {
+        height: 6px;
+        background: var(--accent-primary);
+        border-radius: 3px;
+        width: 0%;
+        transition: width 0.2s;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+    {% include 'media_hub_nav.html' %}
+
+    <h2>Boombox Sounds</h2>
+
+    <div class="info-box" style="margin-bottom: 20px;">
+        <p><strong>Tesla Boombox requirements:</strong></p>
+        <ul style="margin: 8px 0 0 20px; padding: 0; font-size: 13px; color: var(--text-secondary);">
+            <li><strong>Format:</strong> MP3 only</li>
+            <li><strong>Size:</strong> Max {{ (max_file_size / 1024 / 1024)|round(0)|int }} MiB per file</li>
+            <li><strong>Count:</strong> Up to {{ max_file_count }} files (currently {{ files|length }}/{{ max_file_count }})</li>
+            <li><strong>Filename:</strong> Becomes the sound name shown in the Tesla UI</li>
+        </ul>
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            Select a custom sound in your Tesla via <strong>Toybox &rarr; Boombox</strong>.
+        </p>
+    </div>
+
+    {% if error %}
+    <div class="error-box" style="margin-bottom: 20px;">
+        <p>{{ error }}</p>
+    </div>
+    {% endif %}
+
+    <div class="boombox-panel">
+        <!-- Storage summary -->
+        {% if used_bytes is defined %}
+        <div style="margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary);">
+                <span>Used: {{ format_file_size(used_bytes) }}</span>
+                <span>Free: {{ format_file_size(free_bytes) }}</span>
+            </div>
+            {% set total = used_bytes + free_bytes %}
+            {% if total > 0 %}
+            <div class="storage-bar">
+                <div class="storage-bar-fill" style="width: {{ [(used_bytes / total * 100)|round(1), 100]|min }}%;"></div>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <!-- Upload zone -->
+        {% if files|length < max_file_count %}
+        <div class="boombox-upload-zone" id="uploadZone" role="region" aria-label="Upload Boombox sound">
+            <p class="zone-title">Upload MP3 file</p>
+            <p>Drag &amp; drop here, or click to browse</p>
+            <p>MP3 only &bull; max {{ (max_file_size / 1024 / 1024)|round(0)|int }} MiB</p>
+            <input type="file" id="boomboxFileInput" accept=".mp3,audio/mpeg" style="display:none;" aria-label="Select MP3 file">
+        </div>
+
+        <!-- Upload progress -->
+        <div id="uploadProgress" aria-live="polite" aria-label="Upload progress">
+            <div style="background: var(--border-color); border-radius: 3px; overflow: hidden; margin-bottom: 6px;">
+                <div id="uploadProgressBar"></div>
+            </div>
+            <p id="uploadStatus" style="font-size: 12px; color: var(--text-secondary); margin: 0;"></p>
+        </div>
+        {% else %}
+        <div class="info-box" style="margin-bottom: 16px;">
+            <p>Maximum of {{ max_file_count }} files reached. Delete a file before uploading another.</p>
+        </div>
+        {% endif %}
+
+        <!-- File list -->
+        {% if files %}
+        <div id="fileList" aria-label="Boombox sound files">
+            {% for f in files %}
+            <div class="boombox-file-row" id="row-{{ loop.index }}">
+                <span class="boombox-file-name">{{ f.name }}</span>
+                <span class="boombox-file-size">{{ format_file_size(f.size) }}</span>
+                <div class="boombox-file-actions">
+                    <audio controls preload="none"
+                           src="{{ url_for('boombox.play_boombox', filename=f.name) }}"
+                           style="height: 32px; max-width: 140px;"
+                           aria-label="Preview {{ f.name }}"></audio>
+                    <form method="post"
+                          action="{{ url_for('boombox.delete_boombox', filename=f.name) }}"
+                          style="margin: 0;"
+                          onsubmit="return confirm('Delete {{ f.name }}?');">
+                        <button type="submit" class="action-btn danger"
+                                aria-label="Delete {{ f.name }}">
+                            <svg class="nav-icon" aria-hidden="true">
+                                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use>
+                            </svg>
+                        </button>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p style="color: var(--text-secondary); font-size: 14px; margin: 0;">
+            No Boombox sounds uploaded yet. Add MP3 files above.
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+(function () {
+    const zone = document.getElementById('uploadZone');
+    const input = document.getElementById('boomboxFileInput');
+    const progress = document.getElementById('uploadProgress');
+    const bar = document.getElementById('uploadProgressBar');
+    const status = document.getElementById('uploadStatus');
+    const MAX_SIZE = {{ max_file_size }};
+
+    if (!zone || !input) return;
+
+    zone.addEventListener('click', () => input.click());
+
+    zone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        zone.classList.add('drag-over');
+    });
+
+    zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+
+    zone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        zone.classList.remove('drag-over');
+        const file = e.dataTransfer.files[0];
+        if (file) uploadFile(file);
+    });
+
+    input.addEventListener('change', () => {
+        const file = input.files[0];
+        if (file) uploadFile(file);
+        input.value = '';
+    });
+
+    function uploadFile(file) {
+        if (!file.name.toLowerCase().endsWith('.mp3')) {
+            showStatus('Only MP3 files are accepted.', false);
+            return;
+        }
+        if (file.size > MAX_SIZE) {
+            showStatus('File is too large (max {{ (max_file_size / 1024 / 1024)|round(0)|int }} MiB).', false);
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('boombox_file', file);
+
+        progress.style.display = 'block';
+        bar.style.width = '0%';
+        showStatus('Uploading…', true);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '{{ url_for("boombox.upload_boombox") }}');
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+        xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) {
+                bar.style.width = Math.round(e.loaded / e.total * 100) + '%';
+            }
+        });
+
+        xhr.addEventListener('load', () => {
+            try {
+                const resp = JSON.parse(xhr.responseText);
+                if (resp.success) {
+                    bar.style.width = '100%';
+                    showStatus(resp.message, true);
+                    setTimeout(() => window.location.reload(), 800);
+                } else {
+                    showStatus(resp.error || resp.message || 'Upload failed.', false);
+                }
+            } catch {
+                showStatus('Unexpected response from server.', false);
+            }
+        });
+
+        xhr.addEventListener('error', () => showStatus('Network error during upload.', false));
+
+        xhr.send(formData);
+    }
+
+    function showStatus(msg, ok) {
+        status.textContent = msg;
+        status.style.color = ok ? 'var(--accent-success)' : 'var(--accent-error)';
+    }
+}());
+</script>
+{% endblock %}

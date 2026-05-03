@@ -51,6 +51,7 @@ def get_feature_availability():
         'shows_available': lightshow_exists,
         'wraps_available': lightshow_exists,
         'music_available': music_exists,
+        'boombox_available': music_exists,
         'cloud_archive_available': CLOUD_ARCHIVE_ENABLED,
         'cloud_provider_connected': CLOUD_ARCHIVE_ENABLED and bool(CLOUD_ARCHIVE_PROVIDER)
                                     and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH),

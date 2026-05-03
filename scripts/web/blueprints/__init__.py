@@ -14,6 +14,7 @@ from .music import music_bp
 from .media import media_bp
 from .captive_portal import captive_portal_bp, catch_all_redirect
 from .cloud_archive import cloud_archive_bp
+from .boombox import boombox_bp
 
 __all__ = [
     'mode_control_bp',
@@ -31,4 +32,5 @@ __all__ = [
     'captive_portal_bp',
     'catch_all_redirect',
     'cloud_archive_bp',
+    'boombox_bp',
 ]

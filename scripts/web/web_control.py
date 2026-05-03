@@ -51,6 +51,7 @@ from blueprints import (
     captive_portal_bp,
     catch_all_redirect,
     cloud_archive_bp,
+    boombox_bp,
 )
 
 app.register_blueprint(mapping_bp)
@@ -59,6 +60,7 @@ app.register_blueprint(videos_bp)
 app.register_blueprint(lock_chimes_bp)
 app.register_blueprint(light_shows_bp)
 app.register_blueprint(music_bp)
+app.register_blueprint(boombox_bp)
 app.register_blueprint(wraps_bp)
 app.register_blueprint(media_bp)
 app.register_blueprint(analytics_bp)

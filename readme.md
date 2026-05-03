@@ -4,7 +4,7 @@ Transform your Raspberry Pi into a smart USB drive for Tesla dashcam recordings 
 
 > **🚨 IMPORTANT - CHANGES FOR EXISTING USERS 🚨**
 >
-> Significant changes have been made to the application. All configuration is now centralized in a single `config.yaml` file. Please read the [Configuration](#configuration) section for details on updating your setup.  You may want to restart from a clean Raspberry PI OS image and follow the [Installation](#installation) steps again to ensure everything is set up correctly. If you do not want to do that, ensure that the config.yaml file is created and updated with your desired settings and then run the `setup_usb.sh` script again to apply the new configuration structure.
+> Significant changes have been made to the application. All configuration is now centralized in a single `config.yaml` file. Please read the [Configuration](#configuration) section for details on updating your setup. You may want to restart from a clean Raspberry PI OS image and follow the [Installation](#installation) steps again to ensure everything is set up correctly. If you do not want to do that, ensure that the config.yaml file is created and updated with your desired settings and then run the `setup_usb.sh` script again to apply the new configuration structure.
 >
 > **The web interface now runs on PORT 80 (standard HTTP) instead of port 5000.**
 >
@@ -19,9 +19,10 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 
 - **TeslaCam Drive**: Large exFAT drive for dashcam and sentry recordings
 - **LightShow Drive**: Smaller FAT32 drive for lock chimes, custom wrap images, license plate images, and light shows with read-only optimization
-- **Music Drive** *(optional)*: FAT32 drive for Tesla music playback (enabled via `music_enabled: true` in config)
+- **Music Drive** _(optional)_: FAT32 drive for Tesla music playback (enabled via `music_enabled: true` in config)
 
 **Key Benefits:**
+
 - **Map-centric dashboard** with GPS trip routes, event markers, and floating trip cards as the landing page
 - **Telemetry HUD** overlay during video playback — speed, gear, steering, pedals, blinkers, Autopilot status
 - Remote access to dashcam footage without physically removing storage
@@ -39,6 +40,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 > **⚠️ Personal Project Notice**
 >
 > This is a personal project built for my own use. You are welcome to fork the code and make your own changes or updates. Please be aware:
+>
 > - The Git repository may update frequently with new features and changes
 > - Bugs may be introduced into the main branch without extensive testing
 > - Bug fixes will be worked on as time permits, but **no timelines or guarantees** are provided
@@ -48,6 +50,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 ## Features
 
 ### Core Functionality
+
 - **Multi-Drive USB Gadget**: Two or three independent filesystems (TeslaCam + LightShow + optional Music) with optimized performance
 - **Two Operating Modes**:
   - **Present Mode**: Active USB gadget for Tesla recording (shown as "Connected to Tesla" in the UI)
@@ -57,6 +60,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Design System**: Dark/light mode with CSS design tokens, Inter variable font (bundled offline), Lucide SVG icon sprite, and glassmorphic overlay HUD
 
 ### Video Management
+
 - **Map-integrated video browser**: Slide-out panel on the Map page with three tabs — Events (default), Trips, and All Clips — no separate video pages
 - **Unified overlay player**: Full-screen video playback launched from the map with camera angle switching (front/back/left/right/pillars)
 - **Telemetry HUD**: Glassmorphic overlay showing real-time steering wheel angle, brake/gas pedal positions, speed, gear (P/R/N/D), turn signals, and Autopilot status — powered by pre-indexed server-side waypoint data (instant, no full video download needed)
@@ -69,6 +73,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - Cascade database cleanup when videos are deleted
 
 ### Lock Chime Management
+
 - Upload WAV or MP3 files (automatically converted to Tesla-compatible format)
 - Organized chime library with preview and download
 - Volume normalization presets (Broadcast, Streaming, Loud, Maximum)
@@ -81,12 +86,14 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
   - Recurring rotation (every 15min to 12 hours, or on boot)
 
 ### Light Show Management
+
 - Upload FSEQ and MP3/WAV files
 - Grouped display (pairs sequence + audio files)
 - Preview MP3/WAV tracks in browser
 - Delete complete light show sets
 
 ### Custom Wrap Management
+
 - Upload PNG files for Tesla's Paint Shop 3D vehicle visualization
 - Thumbnail previews of all uploaded wraps
 - Automatic validation (512-1024px dimensions, max 1MB, PNG only)
@@ -94,6 +101,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - Drag-and-drop upload with progress indicator
 
 ### License Plate Management
+
 - Upload custom PNG license plate images served from the LightShow drive's `LicensePlate/` folder
 - Supports up to 10 plate images (420x100px recommended, any PNG ≤1MB accepted)
 - Dimension warning if image is not 420x100px (upload not blocked)
@@ -102,6 +110,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - Gated on `usb_lightshow.img` availability — tab hidden if LightShow drive is not configured
 
 ### Automatic Maintenance
+
 - **Storage Cleanup**: Age, size, or count-based policies per folder
 - **Boot Cleanup**: Deferred post-boot cleanup runs after USB gadget is presented to Tesla
 - **RecentClips Archive**: Automatic background archival with 3-tier retention (free space floor, size cap, age limit)
@@ -110,11 +119,13 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Task Coordinator**: Exclusive lock prevents geo-indexer, video archiver, and cloud sync from running simultaneously (critical for Pi Zero 2 W's 512MB RAM)
 
 ### Network Features
+
 - **Samba Shares**: Windows/Mac/Linux file access in Edit mode
 - **Offline Access Point**: Automatic fallback AP when WiFi unavailable (in-car web access)
 - **WiFi Roaming**: Automatic switching between access points with the same SSID for optimal signal strength (mesh networks and WiFi extenders)
 
 ### Cloud Archive
+
 - **Queue-based continuous sync**: Automatically uploads dashcam events to cloud storage (Google Drive, S3, Dropbox, etc.) via rclone
 - **Priority ordering**: Events with Tesla event.json uploaded first, then geolocated trips, then remaining clips
 - **Power-loss safe**: Files marked as synced only after rclone confirms upload; partial uploads detected and re-queued on restart
@@ -138,20 +149,21 @@ For USB gadget projects like TeslaUSB, the **Raspberry Pi Zero family and Comput
 
 For detailed information, see the official Raspberry Pi whitepaper: [Using OTG mode on Raspberry Pi SBCs](https://pip.raspberrypi.com/categories/685-app-notes-guides-whitepapers/documents/RP-009276-WP/Using-OTG-mode-on-Raspberry-Pi-SBCs.pdf)
 
-| Model | OTG Support | Notes |
-|-------|-------------|-------|
-| Raspberry Pi Zero / Zero W / Zero 2 W | ✅ Yes | Fully supported on USB data port |
-| Raspberry Pi 4 | ⚠️ Yes* | USB-C port in device mode |
-| Raspberry Pi 5 | ⚠️ Yes* | USB-C port in device mode |
-| Raspberry Pi A/B/2B/3B/3B+ | ❌ No | Only host mode - **not compatible** |
-| Raspberry Pi Compute Module 1-3 | ✅ Yes | Exposed on OTG pins |
-| Raspberry Pi Compute Module 4 | ✅ Yes | micro-USB on CM4 IO board |
+| Model                                 | OTG Support | Notes                               |
+| ------------------------------------- | ----------- | ----------------------------------- |
+| Raspberry Pi Zero / Zero W / Zero 2 W | ✅ Yes      | Fully supported on USB data port    |
+| Raspberry Pi 4                        | ⚠️ Yes\*    | USB-C port in device mode           |
+| Raspberry Pi 5                        | ⚠️ Yes\*    | USB-C port in device mode           |
+| Raspberry Pi A/B/2B/3B/3B+            | ❌ No       | Only host mode - **not compatible** |
+| Raspberry Pi Compute Module 1-3       | ✅ Yes      | Exposed on OTG pins                 |
+| Raspberry Pi Compute Module 4         | ✅ Yes      | micro-USB on CM4 IO board           |
 
-*\* Raspberry Pi 4 and 5 draw power from the host via USB cable, so there may be limitations on available current due to their higher power requirements.*
+_\* Raspberry Pi 4 and 5 draw power from the host via USB cable, so there may be limitations on available current due to their higher power requirements._
 
 **Note for Pi Zero 2 W users**: Setup automatically optimizes memory by disabling unnecessary desktop services and enabling 1GB swap. This ensures stable operation on the 512MB RAM platform.
 
 **⚠️ Note for Raspberry Pi 4/5 users**: USB OTG/gadget mode is **only available on the USB-C port**, which is also the power input. This creates a challenge: you cannot simultaneously power the Pi from a standard USB charger and present as a USB device to Tesla. Options include:
+
 - USB-C power + data splitter adapters (search "USB-C OTG with PD charging")
 - Powering the Pi via GPIO pins from a separate car charger (advanced)
 - Using a larger SD card instead of external USB storage to avoid power budget issues
@@ -180,6 +192,7 @@ sudo ./setup_usb.sh
 ```
 
 The setup script will:
+
 - Install required packages (parted, dosfstools, python3-flask, python3-av, samba, hostapd, dnsmasq, ffmpeg)
 - Optimize memory for low-RAM systems (disable desktop services, enable swap)
 - Configure USB gadget kernel modules and hardware watchdog
@@ -198,6 +211,7 @@ Alternatively, connect to the TeslaUSB WiFi network and the captive portal will 
 ### 4. Connect to Tesla
 
 Connect the Pi to your Tesla's USB port:
+
 - **Pi Zero 2 W**: Use USB port labeled "USB" (not "PWR")
 - **Pi 4/5**: Use USB-C port
 
@@ -208,6 +222,7 @@ Tesla will detect the USB drives automatically (two drives, or three if Music is
 The TeslaUSB device only runs when the car is awake. When your Tesla enters sleep mode, USB ports are powered off and the Raspberry Pi shuts down.
 
 **To keep your vehicle awake for extended management sessions:**
+
 1. Turn on climate control
 2. Enable "Dog Mode" or "Camp Mode" from the climate screen
 3. Connect to the TeslaUSB web interface and manage your lock chimes, light shows, or videos
@@ -223,18 +238,21 @@ The TeslaUSB device only runs when the car is awake. When your Tesla enters slee
 The web interface abstracts the underlying modes behind user-friendly labels:
 
 **"Connected to Tesla"** (Present USB Mode — default on boot):
+
 - Pi appears as USB drives to Tesla
 - Drives mounted read-only locally at `/mnt/gadget/part1-ro`, `/mnt/gadget/part2-ro`, `/mnt/gadget/part3-ro` (if Music enabled)
 - Web interface: View/play only (no editing) — some operations (chime changes, music uploads) use temporary quick-edit for seamless access
 - Samba shares disabled
 
 **"Network Sharing Active"** (Edit USB Mode):
+
 - USB gadget disconnected
 - Drives mounted read-write at `/mnt/gadget/part1`, `/mnt/gadget/part2`, `/mnt/gadget/part3` (if Music enabled)
 - Web interface: Full file management (upload, delete, organize)
 - Samba shares active for network access
 
 **Switch modes** via the device status card on the Settings page ("Enable Network Sharing" / "Reconnect to Tesla" buttons) or command line:
+
 ```bash
 sudo ~/TeslaUSB/present_usb.sh  # Reconnect to Tesla
 sudo ~/TeslaUSB/edit_usb.sh     # Enable Network Sharing
@@ -243,6 +261,7 @@ sudo ~/TeslaUSB/edit_usb.sh     # Enable Network Sharing
 ### Network Access
 
 **Samba Shares** (Edit mode only):
+
 - `\\<pi-ip-address>\gadget_part1` - TeslaCam drive
 - `\\<pi-ip-address>\gadget_part2` - LightShow drive
 - `\\<pi-ip-address>\gadget_part3` - Music drive (when `music_enabled: true`)
@@ -250,6 +269,7 @@ sudo ~/TeslaUSB/edit_usb.sh     # Enable Network Sharing
 
 **Offline Access Point with Captive Portal**:
 When WiFi is unavailable, the Pi automatically creates a fallback access point:
+
 - SSID: `TeslaUSB` (configurable in `config.yaml`)
 - Password: `teslausb1234` (change this!)
 - IP: `192.168.4.1`
@@ -265,7 +285,8 @@ When WiFi is unavailable, the Pi automatically creates a fallback access point:
 
 The web interface uses a five-tab navigation — sidebar rail on desktop and bottom tabs on mobile.
 
-**Map Tab** *(landing page at `/`)*:
+**Map Tab** _(landing page at `/`)_:
+
 - GPS trip routes rendered on an interactive map with floating trip card and prev/next navigation
 - Skeuomorphic balloon-pin event markers (brake pedal, gas pedal, steering wheel, speedometer, eye for sentry) — always visible
 - Video browser slide-out panel with three sub-tabs:
@@ -278,17 +299,20 @@ The web interface uses a five-tab navigation — sidebar rail on desktop and bot
 - Auto-indexing of dashcam SEI telemetry on startup, file detection (inotify), and WiFi connect
 
 **Analytics Tab**:
+
 - Storage metrics with drive usage gauges and folder-by-folder breakdown (including Music drive when enabled)
 - Driving statistics and event analytics (Chart.js)
 - Video count and size statistics
 
-**Media Tab** *(hub with sub-tabs)*:
+**Media Tab** _(hub with sub-tabs)_:
+
 - **Lock Chimes**: Upload WAV/MP3 files (auto-converted to Tesla format), preview with in-browser player, set active chime, built-in audio editor with waveform visualization, schedule automatic changes (weekly, date, holiday, recurring)
-- **Music** *(requires `music_enabled: true` and Music disk image)*: Browse folders with breadcrumb navigation, in-browser playback (MP3, FLAC, WAV, AAC, M4A), drag-and-drop uploads with chunked transfer, create/move/delete files and folders, usage gauge
+- **Music** _(requires `music_enabled: true` and Music disk image)_: Browse folders with breadcrumb navigation, in-browser playback (MP3, FLAC, WAV, AAC, M4A), drag-and-drop uploads with chunked transfer, create/move/delete files and folders, usage gauge
 - **Light Shows**: Upload and manage FSEQ + MP3/WAV files, grouped display, preview audio in browser, delete complete sets
 - **Wraps**: Upload PNG files for Tesla Paint Shop wraps (512–1024px, max 1MB, up to 10), thumbnail gallery, download or delete
 
-**Cloud Tab** *(conditional — shown when cloud archive is configured)*:
+**Cloud Tab** _(conditional — shown when cloud archive is configured)_:
+
 - Configure cloud storage provider (Google Drive, S3, Dropbox, etc.) via rclone
 - Browse remote folders and set upload destination
 - Monitor sync queue, upload progress, and transfer history
@@ -296,7 +320,8 @@ The web interface uses a five-tab navigation — sidebar rail on desktop and bot
 - Bandwidth testing and configurable upload speed limits
 - Start/stop sync on demand
 
-**Settings Tab** *(at `/settings/`)*:
+**Settings Tab** _(at `/settings/`)_:
+
 - **Device status card**: Shows "Connected to Tesla" or "Network Sharing Active" with mode-switch buttons ("Enable Network Sharing" / "Reconnect to Tesla")
 - **WiFi configuration**: View and update network settings
 - **Access Point controls**: Force start/stop AP or leave in auto mode
@@ -322,91 +347,95 @@ Both bash scripts and the Python web application read from this YAML file, ensur
 # Installation & Paths
 # ============================================================================
 installation:
-  target_user: pi                    # Linux user running services
-  mount_dir: /mnt/gadget             # Mount directory for USB drives
+  target_user: pi # Linux user running services
+  mount_dir: /mnt/gadget # Mount directory for USB drives
 
 # ============================================================================
 # Disk Images
 # ============================================================================
 disk_images:
-  cam_name: usb_cam.img              # TeslaCam disk image filename
-  lightshow_name: usb_lightshow.img  # LightShow disk image filename
-  cam_label: TeslaCam                # Filesystem label for TeslaCam drive
-  lightshow_label: Lightshow         # Filesystem label for LightShow drive
-  music_name: usb_music.img          # Music disk image filename (optional)
-  music_label: Music                 # Filesystem label for Music drive
-  music_enabled: true                # Create and present Music partition (LUN2)
-  music_fs: fat32                    # Filesystem for Music image (fat32 recommended)
-  boot_fsck_enabled: true            # Auto-repair filesystems on boot (recommended)
+  cam_name: usb_cam.img # TeslaCam disk image filename
+  lightshow_name: usb_lightshow.img # LightShow disk image filename
+  cam_label: TeslaCam # Filesystem label for TeslaCam drive
+  lightshow_label: Lightshow # Filesystem label for LightShow drive
+  music_name: usb_music.img # Music disk image filename (optional)
+  music_label: Music # Filesystem label for Music drive
+  music_enabled: true # Create and present Music partition (LUN2)
+  music_fs: fat32 # Filesystem for Music image (fat32 recommended)
+  boot_fsck_enabled: true # Auto-repair filesystems on boot (recommended)
 
 # ============================================================================
 # Setup Configuration (used only by setup_usb.sh)
 # ============================================================================
 # Leave empty ("") for interactive prompts during setup
 setup:
-  part1_size: ""                     # TeslaCam drive size (e.g., "50G")
-  part2_size: ""                     # LightShow drive size (e.g., "10G")
-  part3_size: ""                     # Music drive size (e.g., "32G")
-  reserve_size: ""                   # Free space headroom (default: 5G)
-  archive_reserve_size: "50G"        # Space reserved for RecentClips archive
+  part1_size: "" # TeslaCam drive size (e.g., "50G")
+  part2_size: "" # LightShow drive size (e.g., "10G")
+  part3_size: "" # Music drive size (e.g., "32G")
+  reserve_size: "" # Free space headroom (default: 5G)
+  archive_reserve_size: "50G" # Space reserved for RecentClips archive
 
 # ============================================================================
 # Network & Security
 # ============================================================================
 network:
-  samba_password: tesla              # Samba password (CHANGE THIS!)
-  web_port: 80                       # Web port (80 required for captive portal)
+  samba_password: tesla # Samba password (CHANGE THIS!)
+  web_port: 80 # Web port (80 required for captive portal)
 
 # ============================================================================
 # Offline Access Point Configuration
 # ============================================================================
 offline_ap:
-  enabled: true                      # Enable/disable fallback AP
-  ssid: TeslaUSB                     # AP network name (CHANGE THIS!)
-  passphrase: teslausb1234           # WPA2 passphrase 8-63 chars (CHANGE THIS!)
-  channel: 6                         # 2.4GHz channel (1-11)
-  force_mode: auto                   # auto, force_on, or force_off
+  enabled: true # Enable/disable fallback AP
+  ssid: TeslaUSB # AP network name (CHANGE THIS!)
+  passphrase: teslausb1234 # WPA2 passphrase 8-63 chars (CHANGE THIS!)
+  channel: 6 # 2.4GHz channel (1-11)
+  force_mode: auto # auto, force_on, or force_off
 
 # ============================================================================
 # Web Application Configuration
 # ============================================================================
 web:
   secret_key: CHANGE-THIS-TO-A-RANDOM-SECRET-KEY-ON-FIRST-INSTALL
-  max_lock_chime_size: 1048576       # 1 MiB
-  max_lock_chime_duration: 10.0      # 10 seconds
-  max_upload_size_mb: 2048           # Max upload size for music/lightshow (MiB)
-  max_upload_chunk_mb: 16            # Chunk size for streaming uploads (MiB)
+  max_lock_chime_size: 1048576 # 1 MiB
+  max_lock_chime_duration: 10.0 # 10 seconds
+  max_upload_size_mb: 2048 # Max upload size for music/lightshow (MiB)
+  max_upload_chunk_mb: 16 # Chunk size for streaming uploads (MiB)
 
 # ============================================================================
 # RecentClips Archive
 # ============================================================================
 archive:
-  enabled: true                      # Enable RecentClips archival to SD card
-  interval_minutes: 5                # How often to check for new clips
-  retention_days: 30                 # Delete archived clips older than this
-  min_free_space_gb: 10              # Stop archiving if SD card < this free
-  max_size_gb: 50                    # Cap on total archive folder size
+  enabled: true # Enable RecentClips archival to SD card
+  interval_minutes: 5 # How often to check for new clips
+  retention_days: 30 # Delete archived clips older than this
+  min_free_space_gb: 10 # Stop archiving if SD card < this free
+  max_size_gb: 50 # Cap on total archive folder size
 ```
 
 **Important settings to change before first use:**
+
 - `network.samba_password` - Default is `tesla` (change this!)
 - `offline_ap.ssid` - Default is `TeslaUSB` (customize for your vehicle)
 - `offline_ap.passphrase` - Default is `teslausb1234` (change this!)
 - `web.secret_key` - Auto-generated on first run, but can be set manually
 
 **Optional settings:**
+
 - `disk_images.music_enabled` - Create and present an optional Music drive as a third USB LUN (default: `true`)
 - `disk_images.boot_fsck_enabled` - Auto-repair filesystems on boot (default: `true`, recommended)
 
 **Note:** The installation directory (`GADGET_DIR`) is automatically derived from the script location — no path configuration is needed. Scripts and the web app detect their own location at runtime.
 
 **After making changes:** Restart affected services
+
 ```bash
 sudo systemctl restart gadget_web.service    # For web application changes
 sudo systemctl restart wifi-monitor.service  # For offline AP changes
 ```
 
 **How it works:**
+
 - Bash scripts use `yq` to read YAML values
 - Python web app uses `PyYAML` to load configuration
 - Single source of truth for all settings
@@ -421,6 +450,7 @@ sudo systemctl restart wifi-monitor.service  # For offline AP changes
 > Your USB drive images (`usb_cam.img`, `usb_lightshow.img`, `usb_music.img`) contain all your dashcam videos, lock chimes, light shows, music, and wraps. These files can be **hundreds of gigabytes** and are not recoverable if lost.
 >
 > Before running any upgrade or `git pull`:
+>
 > 1. **Switch to Edit Mode** (or use "Enable Network Sharing" in Settings)
 > 2. **Copy the `.img` files** to a safe location (external drive, NAS, or computer):
 >    ```bash
@@ -448,16 +478,17 @@ Removes all files, services, and system configuration.
 
 ## Systemd Services
 
-| Service/Timer | Purpose |
-|---------------|---------|
-| `gadget_web.service` | Web interface (port 80) with captive portal |
-| `present_usb_on_boot.service` | Auto-present USB gadget on boot (cleanup deferred) |
+| Service/Timer                     | Purpose                                             |
+| --------------------------------- | --------------------------------------------------- |
+| `gadget_web.service`              | Web interface (port 80) with captive portal         |
+| `present_usb_on_boot.service`     | Auto-present USB gadget on boot (cleanup deferred)  |
 | `teslausb-deferred-tasks.service` | Post-boot tasks: cleanup, chime selection, indexing |
-| `chime_scheduler.timer` | Check scheduled chime changes every 60 seconds |
-| `wifi-monitor.service` | Manage offline access point |
-| `watchdog.service` | Hardware watchdog for system reliability |
+| `chime_scheduler.timer`           | Check scheduled chime changes every 60 seconds      |
+| `wifi-monitor.service`            | Manage offline access point                         |
+| `watchdog.service`                | Hardware watchdog for system reliability            |
 
 **Common Commands:**
+
 ```bash
 # Check service status
 sudo systemctl status gadget_web.service
@@ -488,11 +519,11 @@ priority = 1
 
 The following options should be **avoided** on Raspberry Pi Zero 2 W (512MB RAM):
 
-| Setting | Problem |
-|---------|---------|
-| `min-memory = 50000` | Pi Zero 2 W often has <50MB free during normal operation, triggering unnecessary reboots |
-| `repair-binary = /usr/lib/watchdog/repair` | This file doesn't exist on Raspberry Pi OS |
-| `interval` (low values) | Can cause timing issues with the kernel watchdog |
+| Setting                                    | Problem                                                                                  |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `min-memory = 50000`                       | Pi Zero 2 W often has <50MB free during normal operation, triggering unnecessary reboots |
+| `repair-binary = /usr/lib/watchdog/repair` | This file doesn't exist on Raspberry Pi OS                                               |
+| `interval` (low values)                    | Can cause timing issues with the kernel watchdog                                         |
 
 **If your device keeps rebooting in a loop**, the watchdog configuration may be too aggressive. To fix:
 
@@ -509,6 +540,7 @@ The following options should be **avoided** on Raspberry Pi Zero 2 W (512MB RAM)
 ### Common Issues
 
 **Web interface not accessible:**
+
 ```bash
 # Check service status and logs
 sudo systemctl status gadget_web.service
@@ -516,11 +548,13 @@ sudo journalctl -u gadget_web.service -f
 ```
 
 **Videos not showing:**
+
 - Verify correct mode (Present or Edit, not Unknown)
 - Check TeslaCam folder exists on drive 1
 - Confirm drive is properly mounted
 
 **Samba shares appear empty:**
+
 ```bash
 # Force Samba refresh
 sudo smbcontrol all close-share gadget_part1
@@ -531,12 +565,14 @@ sudo systemctl restart smbd nmbd
 
 **Tesla not recognizing new lock chime:**
 Try these steps in order:
+
 1. Power cycle Tesla (close doors, walk away 5+ minutes, wake up)
 2. Switch USB modes (Edit → wait 10s → Present)
 3. Physical reconnect (unplug Pi, wait 10s, plug back in)
 4. Tesla reboot (hold both scroll wheels until screen goes black)
 
 **Operation in Progress banner stuck:**
+
 ```bash
 # Check and remove stale lock file if older than 120 seconds
 ls -lh ~/TeslaUSB/.quick_edit_part2.lock
@@ -544,6 +580,7 @@ rm ~/TeslaUSB/.quick_edit_part2.lock
 ```
 
 **iOS file upload not working:**
+
 - Use **Safari** on iOS (third-party browsers have restricted file access)
 - Desktop browsers work normally regardless of choice
 
@@ -563,6 +600,7 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 ## Technical Details
 
 **Multi-Drive Architecture:**
+
 - Two or three separate disk images:
   - `usb_cam.img` (exFAT) — TeslaCam recordings
   - `usb_lightshow.img` (FAT32) — LightShow, Chimes, and Wraps
@@ -571,12 +609,14 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 - Presented as multi-LUN USB gadget to Tesla
 
 **USB Gadget Implementation:**
+
 - Linux `g_mass_storage` kernel module via `libcomposite`
 - LUN 0: Read-write (ro=0) for TeslaCam recordings
 - LUN 1: Read-only (ro=1) for LightShow/Chimes
 - LUN 2: Read-only (ro=1) for Music (optional, when `music_enabled: true`)
 
 **Concurrency Protection:**
+
 - `.quick_edit_part2.lock` file prevents race conditions during temporary RW mounts
 - Shared lock for quick-edit operations on both part2 (LightShow) and part3 (Music)
 - 10-second timeout, 120-second stale lock detection
@@ -584,8 +624,8 @@ sudo dmesg | grep -i "mass_storage\|gadget"
 - All services and scripts respect lock state
 
 **Performance Optimizations:**
+
 - **Boot time**: ~14 seconds on Pi Zero 2 W (detects existing RW mount at boot to skip unnecessary remount operations)
 - **Configuration loading**: Single YAML parse with secure eval (properly quoted values prevent command injection)
 - **Web UI responsiveness**: Settings page loads in ~0.4s (optimized from 133s through batched configuration reads)
 - **Memory efficiency**: Desktop services disabled, 1GB swap enabled for stable operation on 512MB RAM
-

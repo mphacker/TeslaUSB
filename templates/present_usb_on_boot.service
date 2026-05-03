@@ -1,9 +1,11 @@
 [Unit]
 Description=Present USB gadget at boot
-After=teslausb-safe-mode.service multi-user.target
+After=teslausb-safe-mode.service
 Wants=multi-user.target
 # Skip in safe mode (3+ reboots in 10 min)
 ConditionPathExists=!/run/teslausb-safe-mode
+StartLimitBurst=3
+StartLimitIntervalSec=600
 
 [Service]
 Type=oneshot
@@ -15,8 +17,6 @@ User=root
 # Restart policy
 Restart=on-failure
 RestartSec=15
-StartLimitBurst=3
-StartLimitIntervalSec=600
 
 # Memory limit
 MemoryMax=100M

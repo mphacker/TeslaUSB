@@ -9,6 +9,7 @@ Designed for Pi Zero 2 W: processes one video at a time, uses generators,
 and stores results in a lightweight SQLite database.
 """
 
+import functools
 import json
 import logging
 import math
@@ -19,7 +20,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Callable, Dict, Generator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,43 @@ def _get_sei_parser():
         from services import sei_parser
         _sei_parser = sei_parser
     return _sei_parser
+
+
+def _is_transient_db_error(exc: BaseException) -> bool:
+    """Return True if this is a transient SQLite error worth retrying.
+
+    On a Pi Zero 2 W under concurrent indexer + web load, SQLite can return
+    "disk I/O error" (SQLITE_IOERR) or "database is locked" (SQLITE_BUSY)
+    when the SD card is slow to fsync or shared-memory mmap fails. These
+    almost always succeed on a second attempt with a fresh connection.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return ('disk i/o error' in msg or 'database is locked' in msg
+            or 'unable to open database file' in msg)
+
+
+def _with_db_retry(fn: Callable) -> Callable:
+    """Decorator: retry once on transient SQLite errors.
+
+    Ensures a single bad connection state (typically caused by mmap
+    exhaustion or fsync hiccups during heavy indexer load) doesn't turn
+    into a permanently failing endpoint. The retry uses a fresh
+    connection because each decorated function calls ``_init_db`` itself.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            if not _is_transient_db_error(e):
+                raise
+            logger.warning("Transient DB error in %s (%s); retrying once",
+                           fn.__name__, e)
+            time.sleep(0.2)
+            return fn(*args, **kwargs)
+    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +189,23 @@ def _init_db(db_path: str) -> sqlite3.Connection:
     """Initialize the SQLite database with schema if needed."""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
+    # Tuned for Pi Zero 2 W (512 MB RAM) where mmap exhaustion under
+    # concurrent indexer + web load was producing spurious "disk I/O error"
+    # responses from SQLite. The combination of a small per-connection page
+    # cache, no file mmap, capped WAL size, and frequent autocheckpoint
+    # keeps each connection's memory footprint bounded so we never run out
+    # of address space when many waitress threads open connections in
+    # parallel during a heavy indexer run.
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA cache_size=-2000")        # 2 MB per connection
+    conn.execute("PRAGMA mmap_size=0")             # disable file-mmap (saves vmem)
+    conn.execute("PRAGMA temp_store=MEMORY")       # avoid temp files on slow SD
+    conn.execute("PRAGMA journal_size_limit=4194304")   # cap WAL at 4 MB
+    conn.execute("PRAGMA wal_autocheckpoint=200")  # checkpoint every ~800 KB
     conn.execute("PRAGMA foreign_keys=ON")
 
     # Check schema version. Older code used INSERT OR REPLACE on a PRIMARY KEY
@@ -1883,12 +1935,14 @@ def _diagnose_nal_structure(video_path: str) -> dict:
 
     return result
 
+@_with_db_retry
 def get_db_connection(db_path: str) -> sqlite3.Connection:
     """Get a read-only connection to the geo-index database."""
     conn = _init_db(db_path)
     return conn
 
 
+@_with_db_retry
 def query_trips(db_path: str, limit: int = 50, offset: int = 0,
                 bbox: Optional[Tuple[float, float, float, float]] = None,
                 date_from: Optional[str] = None,
@@ -1946,6 +2000,7 @@ def query_trips(db_path: str, limit: int = 50, offset: int = 0,
         conn.close()
 
 
+@_with_db_retry
 def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
     """Get all waypoints for a trip as a GeoJSON-ready list."""
     conn = _init_db(db_path)
@@ -1964,6 +2019,7 @@ def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
         conn.close()
 
 
+@_with_db_retry
 def query_events(db_path: str, limit: int = 100, offset: int = 0,
                  event_type: Optional[str] = None,
                  severity: Optional[str] = None,
@@ -2002,6 +2058,7 @@ def query_events(db_path: str, limit: int = 100, offset: int = 0,
         conn.close()
 
 
+@_with_db_retry
 def get_stats(db_path: str) -> dict:
     """Get summary statistics from the geo-index database."""
     conn = _init_db(db_path)
@@ -2043,6 +2100,7 @@ def get_stats(db_path: str) -> dict:
         conn.close()
 
 
+@_with_db_retry
 def get_driving_stats(db_path: str) -> dict:
     """Get driving behavior statistics for the analytics dashboard."""
     conn = _init_db(db_path)
@@ -2097,6 +2155,7 @@ def get_driving_stats(db_path: str) -> dict:
         conn.close()
 
 
+@_with_db_retry
 def get_event_chart_data(db_path: str) -> dict:
     """Get event data formatted for Chart.js rendering."""
     conn = _init_db(db_path)

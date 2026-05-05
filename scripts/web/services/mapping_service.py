@@ -1151,6 +1151,21 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
     """Background indexer main loop. Scans for new videos and indexes them."""
     global _status
 
+    # Lower this thread's CPU priority so the Flask request handlers and
+    # the kernel's USB-gadget thread always preempt us. SEI parsing reads
+    # entire 50 MB MP4s from a loop-mounted exFAT image, which holds the
+    # GIL and starves the web server on a Pi Zero 2 W otherwise.
+    # On Linux, os.nice() and SCHED_BATCH apply to the calling thread.
+    try:
+        os.nice(19)
+    except (OSError, AttributeError):
+        pass
+    try:
+        if hasattr(os, "sched_setscheduler") and hasattr(os, "SCHED_BATCH"):
+            os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
+    except (OSError, AttributeError, ValueError):
+        pass
+
     # Acquire the global heavy-task lock so the archiver and cloud sync
     # don't run concurrently (Pi Zero has limited CPU/IO).
     from services.task_coordinator import acquire_task, release_task
@@ -1265,11 +1280,11 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
 
             # Yield CPU between files. SEI parsing is CPU+IO heavy; without
             # this, the indexer can starve the web server's request handlers
-            # and the kernel's USB gadget thread on a Pi Zero 2 W. A 50 ms
-            # pause per file caps indexer throughput at ~20 files/sec, well
-            # above the rate Tesla writes them, while leaving room for
-            # interactive requests.
-            time.sleep(0.05)
+            # and the kernel's USB gadget thread on a Pi Zero 2 W. The
+            # indexer thread also runs at nice 19 / SCHED_BATCH (set in
+            # _run_indexer) so this sleep just adds a guaranteed yield
+            # window between large file reads.
+            time.sleep(0.25)
 
         _status.update({
             'running': False,

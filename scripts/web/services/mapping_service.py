@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS indexed_files (
 CREATE INDEX IF NOT EXISTS idx_waypoints_trip ON waypoints(trip_id);
 CREATE INDEX IF NOT EXISTS idx_waypoints_coords ON waypoints(lat, lon);
 CREATE INDEX IF NOT EXISTS idx_waypoints_timestamp ON waypoints(timestamp);
+CREATE INDEX IF NOT EXISTS idx_waypoints_video_path ON waypoints(video_path);
 CREATE INDEX IF NOT EXISTS idx_events_trip ON detected_events(trip_id);
 CREATE INDEX IF NOT EXISTS idx_events_coords ON detected_events(lat, lon);
 CREATE INDEX IF NOT EXISTS idx_events_type ON detected_events(event_type);
@@ -831,6 +832,51 @@ def _index_video(
         rel_path = os.path.relpath(video_path, teslacam_root)
     file_timestamp = _timestamp_from_filename(video_path)
 
+    # --- Cross-folder dedup (fast path) ---
+    # Tesla videos can exist in both RecentClips and ArchivedClips with the
+    # same basename. They contain identical SEI, so don't re-parse the file.
+    # If the existing copy is in a non-durable folder (RecentClips) and we're
+    # now seeing the durable ArchivedClips copy, upgrade the stored video_path
+    # without touching the (expensive) SEI extractor.
+    #
+    # Restrict the basename check to top-level folders we know can hold a
+    # duplicate (RecentClips, ArchivedClips). Sentry/Saved event subfolders
+    # contain generic basenames (front.mp4, back.mp4, ...) that would
+    # otherwise false-match across unrelated events.
+    basename = os.path.basename(video_path)
+    candidate_paths = [
+        basename,
+        f'RecentClips/{basename}',
+        f'ArchivedClips/{basename}',
+    ]
+    existing_paths = conn.execute(
+        "SELECT DISTINCT video_path FROM waypoints "
+        "WHERE video_path IN (?, ?, ?)",
+        candidate_paths,
+    ).fetchall()
+    if existing_paths:
+        if 'ArchivedClips' in rel_path and not any(
+            'ArchivedClips' in (r['video_path'] or '') for r in existing_paths
+        ):
+            upgraded = conn.execute(
+                "UPDATE waypoints SET video_path = ? "
+                "WHERE video_path IN (?, ?, ?)",
+                (rel_path, *candidate_paths),
+            )
+            conn.execute(
+                "UPDATE detected_events SET video_path = ? "
+                "WHERE video_path IN (?, ?, ?)",
+                (rel_path, *candidate_paths),
+            )
+            conn.commit()
+            logger.info(
+                "Upgraded %d waypoint(s) to durable ArchivedClips path: %s",
+                upgraded.rowcount, basename,
+            )
+        else:
+            logger.debug("Skipping %s: basename already indexed", rel_path)
+        return 0, 0
+
     # Extract SEI messages
     waypoint_dicts = []
     sei_count = 0
@@ -890,40 +936,6 @@ def _index_video(
             inferred = _infer_sentry_event(conn, rel_path, file_timestamp)
             if inferred:
                 return 0, 1  # 0 waypoints, 1 event
-        return 0, 0
-
-    # --- Cross-folder dedup ---
-    # Tesla videos can exist in both RecentClips and ArchivedClips with the
-    # same basename. They contain identical SEI, so don't index twice.
-    # If the existing copy is in a non-durable folder (RecentClips) and we're
-    # now seeing the durable ArchivedClips copy, upgrade the stored video_path.
-    basename = os.path.basename(video_path)
-    existing_paths = conn.execute(
-        "SELECT DISTINCT video_path FROM waypoints "
-        "WHERE video_path = ? OR video_path LIKE ?",
-        (basename, f'%/{basename}'),
-    ).fetchall()
-    if existing_paths:
-        if 'ArchivedClips' in rel_path and not any(
-            'ArchivedClips' in (r['video_path'] or '') for r in existing_paths
-        ):
-            upgraded = conn.execute(
-                "UPDATE waypoints SET video_path = ? "
-                "WHERE video_path = ? OR video_path LIKE ?",
-                (rel_path, basename, f'%/{basename}'),
-            )
-            conn.execute(
-                "UPDATE detected_events SET video_path = ? "
-                "WHERE video_path = ? OR video_path LIKE ?",
-                (rel_path, basename, f'%/{basename}'),
-            )
-            conn.commit()
-            logger.info(
-                "Upgraded %d waypoint(s) to durable ArchivedClips path: %s",
-                upgraded.rowcount, basename,
-            )
-        else:
-            logger.debug("Skipping %s: basename already indexed", rel_path)
         return 0, 0
 
     # Determine source folder

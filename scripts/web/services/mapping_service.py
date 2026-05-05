@@ -39,7 +39,7 @@ def _get_sei_parser():
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -194,6 +194,21 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                 logger.error("Migration v2->v3 failed, leaving schema at v2: %s", e)
                 conn.commit()
                 return conn  # Skip schema_version bump so it retries next startup
+        if current > 0 and current < 4:
+            # v4: re-evaluate Sentry/Saved clips with Tesla's event.json
+            # (which has accurate GPS) instead of the prior nearest-waypoint
+            # guess. We do this by clearing their indexed_files rows so the
+            # next indexer run re-processes them through the new code path.
+            try:
+                conn.execute("SAVEPOINT migrate_v4")
+                _migrate_v3_to_v4(conn)
+                conn.execute("RELEASE SAVEPOINT migrate_v4")
+            except Exception as e:
+                conn.execute("ROLLBACK TO SAVEPOINT migrate_v4")
+                conn.execute("RELEASE SAVEPOINT migrate_v4")
+                logger.error("Migration v3->v4 failed, leaving schema at v3: %s", e)
+                conn.commit()
+                return conn
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",
@@ -403,6 +418,51 @@ _TRIP_GAP_MINUTES_DEFAULT = 5
 
 # ---------------------------------------------------------------------------
 # Event Detection Rules
+# ---------------------------------------------------------------------------
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """Re-evaluate Sentry/Saved clips with Tesla's event.json.
+
+    Earlier versions inferred Sentry/Saved event locations from the
+    nearest waypoint, which was inaccurate (often pointed at a different
+    physical location). Tesla actually writes a precise event.json with
+    est_lat/est_lon in each event folder.
+
+    To pick this up for clips already in the database, we delete:
+      1. The existing inferred-location detected_events rows
+         (they have metadata.inferred_location=true), and
+      2. The indexed_files rows for SavedClips/SentryClips clips with
+         zero waypoints — so the next indexer run re-processes them
+         through the new event.json-aware code path.
+
+    Driving clips (those with waypoints) are left untouched.
+    """
+    # Drop old inferred events so they get recreated from event.json
+    cur = conn.execute(
+        "DELETE FROM detected_events "
+        "WHERE event_type IN ('saved', 'sentry') "
+        "AND metadata IS NOT NULL "
+        "AND (metadata LIKE '%inferred_location%' "
+        "     OR metadata LIKE '%nearest_waypoint%')"
+    )
+    deleted_events = cur.rowcount
+    logger.info("v3->v4: cleared %d stale inferred events", deleted_events)
+
+    # Clear indexed_files rows for SavedClips/SentryClips zero-waypoint
+    # entries so they get re-indexed with event.json reading
+    cur = conn.execute(
+        "DELETE FROM indexed_files "
+        "WHERE waypoint_count = 0 "
+        "AND (file_path LIKE '%/SavedClips/%' "
+        "     OR file_path LIKE '%/SentryClips/%' "
+        "     OR file_path LIKE '%\\SavedClips\\%' "
+        "     OR file_path LIKE '%\\SentryClips\\%')"
+    )
+    cleared_files = cur.rowcount
+    logger.info("v3->v4: cleared %d Sentry/Saved indexed_files entries for re-processing",
+                cleared_files)
+
+
 # ---------------------------------------------------------------------------
 
 # Default thresholds (can be overridden via config.yaml mapping.event_detection)
@@ -721,64 +781,122 @@ def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
             pass
 
 
+def _read_event_json(rel_path: str, teslacam_root: str) -> Optional[dict]:
+    """Read Tesla's event.json from the SavedClips/SentryClips folder.
+
+    Tesla writes an event.json into each SavedClips/SentryClips event
+    folder. It contains accurate GPS (est_lat, est_lon), the trigger
+    reason (e.g. user_interaction_honk, sentry_aware_object_detection),
+    timestamp, city/street, and camera. This is far better than guessing
+    location from the nearest waypoint.
+
+    Returns the parsed dict on success, or None if not found / unreadable.
+    """
+    try:
+        parts = rel_path.replace('\\', '/').split('/')
+        if len(parts) < 2:
+            return None
+        # Folder is e.g. SavedClips/2026-04-23_19-17-39
+        folder_path = os.path.join(teslacam_root, parts[0], parts[1])
+        ej = os.path.join(folder_path, 'event.json')
+        if not os.path.isfile(ej):
+            return None
+        with open(ej, 'r') as f:
+            data = json.load(f)
+        # Validate required fields
+        try:
+            lat = float(data.get('est_lat'))
+            lon = float(data.get('est_lon'))
+        except (TypeError, ValueError):
+            return None
+        # Must be finite, in valid lat/lon range, and not the (0,0) sentinel
+        # that some Tesla firmware writes when GPS hasn't locked yet.
+        import math
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            return None
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            return None
+        if lat == 0 and lon == 0:
+            return None
+        data['_lat'] = lat
+        data['_lon'] = lon
+        return data
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.debug("Could not read event.json for %s: %s", rel_path, e)
+        return None
+
+
 def _infer_sentry_event(
     conn: sqlite3.Connection,
     rel_path: str,
     file_timestamp: Optional[str],
+    teslacam_root: Optional[str] = None,
 ) -> bool:
-    """Create a sentry/saved event at inferred location for clips without GPS.
+    """Create a sentry/saved event for a clip without GPS in its SEI data.
 
-    Looks up the most recent waypoint before the clip's timestamp to determine
-    where the car was parked when the event occurred.
+    Preferred location source: Tesla's event.json (has accurate est_lat/lon
+    and the trigger reason). Falls back to the most recent waypoint before
+    the clip's timestamp if event.json is missing or unparseable.
 
-    Returns True if an event was created, False if location couldn't be inferred.
+    Returns True if an event was created, False otherwise.
     """
     if not file_timestamp:
-        return False
-
-    # Find the most recent waypoint before this clip's timestamp
-    row = conn.execute(
-        """SELECT lat, lon, trip_id FROM waypoints
-           WHERE timestamp <= ? AND lat != 0 AND lon != 0
-           ORDER BY timestamp DESC LIMIT 1""",
-        (file_timestamp,)
-    ).fetchone()
-
-    if not row:
-        # Try any waypoint at all (clip might predate all trips)
-        row = conn.execute(
-            """SELECT lat, lon, trip_id FROM waypoints
-               WHERE lat != 0 AND lon != 0
-               ORDER BY timestamp ASC LIMIT 1""",
-            ()
-        ).fetchone()
-
-    if not row:
-        logger.info("Cannot infer location for %s — no waypoints in database", rel_path)
         return False
 
     # Determine event type from folder
     event_type = 'sentry' if 'SentryClips' in rel_path else 'saved'
     folder_name = rel_path.replace('\\', '/').split('/')[0]
-
-    # Extract event folder name for grouping (e.g., "2026-03-13_20-45-25")
     parts = rel_path.replace('\\', '/').split('/')
     event_folder = parts[1] if len(parts) > 2 else parts[0]
 
-    # Check if we already have an event for this folder+location
+    # Skip if already created for this event folder
     existing = conn.execute(
         """SELECT id FROM detected_events
            WHERE event_type = ? AND video_path LIKE ? LIMIT 1""",
         (event_type, f'%{event_folder}%')
     ).fetchone()
-
     if existing:
-        return False  # Already created for this event folder
+        return False
 
-    description = (
-        f"{'Sentry Mode' if event_type == 'sentry' else 'Saved Clip'} event "
-        f"(location inferred from nearest trip)"
-    )
+    # Try event.json first (accurate Tesla-reported location)
+    lat = lon = None
+    location_source = None
+    reason = None
+    if teslacam_root:
+        ej_data = _read_event_json(rel_path, teslacam_root)
+        if ej_data:
+            lat = ej_data['_lat']
+            lon = ej_data['_lon']
+            reason = ej_data.get('reason') or 'unknown'
+            location_source = 'event_json'
+
+    # Fall back to nearest waypoint (legacy behavior)
+    if lat is None or lon is None:
+        row = conn.execute(
+            """SELECT lat, lon FROM waypoints
+               WHERE timestamp <= ? AND lat != 0 AND lon != 0
+               ORDER BY timestamp DESC LIMIT 1""",
+            (file_timestamp,)
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                """SELECT lat, lon FROM waypoints
+                   WHERE lat != 0 AND lon != 0
+                   ORDER BY timestamp ASC LIMIT 1""",
+                ()
+            ).fetchone()
+        if not row:
+            logger.info("Cannot infer location for %s — no event.json and no waypoints", rel_path)
+            return False
+        lat = row['lat']
+        lon = row['lon']
+        location_source = 'nearest_waypoint'
+
+    label = 'Sentry Mode' if event_type == 'sentry' else 'Saved Clip'
+    if reason:
+        description = f"{label} event ({reason}, location from {location_source})"
+    else:
+        description = f"{label} event (location from {location_source})"
 
     conn.execute(
         """INSERT INTO detected_events
@@ -786,21 +904,25 @@ def _infer_sentry_event(
             description, video_path, frame_offset, metadata)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            row['trip_id'],
+            None,  # not associated with a trip
             file_timestamp,
-            row['lat'],
-            row['lon'],
+            lat,
+            lon,
             event_type,
             'info',
             description,
             rel_path,
             0,
-            json.dumps({'inferred_location': True, 'source_folder': folder_name}),
+            json.dumps({
+                'location_source': location_source,
+                'source_folder': folder_name,
+                'reason': reason,
+            }),
         )
     )
     conn.commit()
-    logger.info("Created inferred %s event for %s at %.4f,%.4f",
-                event_type, event_folder, row['lat'], row['lon'])
+    logger.info("Created %s event for %s at %.4f,%.4f (source=%s)",
+                event_type, event_folder, lat, lon, location_source)
     return True
 
 
@@ -930,9 +1052,11 @@ def _index_video(
             logger.info("%s: %d SEI messages but 0 had GPS (%d checked)",
                         rel_path, sei_count, no_gps_count)
 
-        # For Sentry/Saved clips with no GPS, infer location from nearest trip
+        # For Sentry/Saved clips with no GPS, create an event using the
+        # accurate Tesla event.json (preferred) or nearest waypoint as fallback
         if 'SentryClips' in rel_path or 'SavedClips' in rel_path:
-            inferred = _infer_sentry_event(conn, rel_path, file_timestamp)
+            inferred = _infer_sentry_event(conn, rel_path, file_timestamp,
+                                            teslacam_root=teslacam_root)
             if inferred:
                 return 0, 1  # 0 waypoints, 1 event
         return 0, 0

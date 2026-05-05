@@ -1263,6 +1263,14 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
                 logger.error("Failed to index %s: %s", rel, e)
                 continue
 
+            # Yield CPU between files. SEI parsing is CPU+IO heavy; without
+            # this, the indexer can starve the web server's request handlers
+            # and the kernel's USB gadget thread on a Pi Zero 2 W. A 50 ms
+            # pause per file caps indexer throughput at ~20 files/sec, well
+            # above the rate Tesla writes them, while leaving room for
+            # interactive requests.
+            time.sleep(0.05)
+
         _status.update({
             'running': False,
             'files_done': len(to_index),

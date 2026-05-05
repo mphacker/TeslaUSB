@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -38,7 +39,8 @@ def _get_sei_parser():
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
+_BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -113,6 +115,37 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON detected_events(timestamp);
 """
 
 
+def _backup_db(db_path: str, target_version: int) -> Optional[str]:
+    """Make a copy of the DB before a destructive migration.
+
+    Returns the backup path on success, None on failure (migration still proceeds).
+    Old backups beyond ``_BACKUP_RETENTION`` are pruned.
+    """
+    if not os.path.isfile(db_path):
+        return None
+    try:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = f"{db_path}.bak.v{target_version}.{ts}"
+        shutil.copy2(db_path, backup_path)
+        logger.info("Backed up geo-index DB to %s", backup_path)
+
+        # Prune older backups
+        backups = sorted(
+            f for f in os.listdir(os.path.dirname(db_path) or '.')
+            if f.startswith(os.path.basename(db_path) + '.bak.')
+        )
+        if len(backups) > _BACKUP_RETENTION:
+            for old in backups[:-_BACKUP_RETENTION]:
+                try:
+                    os.remove(os.path.join(os.path.dirname(db_path), old))
+                except OSError:
+                    pass
+        return backup_path
+    except Exception as e:
+        logger.warning("Failed to back up DB before migration: %s", e)
+        return None
+
+
 def _init_db(db_path: str) -> sqlite3.Connection:
     """Initialize the SQLite database with schema if needed."""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -122,14 +155,21 @@ def _init_db(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
-    # Check schema version
+    # Check schema version. Older code used INSERT OR REPLACE on a PRIMARY KEY
+    # column, which actually added a new row each time, so older DBs may have
+    # multiple rows. Use MAX() to read the effective version.
     try:
-        row = conn.execute("SELECT version FROM schema_version").fetchone()
-        current = row['version'] if row else 0
+        row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+        current = row['v'] if row and row['v'] is not None else 0
     except sqlite3.OperationalError:
         current = 0
 
     if current < _SCHEMA_VERSION:
+        # Backup before any destructive migration (only when an existing DB
+        # is being upgraded, not on first install)
+        if current > 0:
+            _backup_db(db_path, _SCHEMA_VERSION)
+
         conn.executescript(_SCHEMA_SQL)
         # Migrations for existing databases
         if current < 2:
@@ -139,14 +179,225 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                     conn.execute(f"ALTER TABLE waypoints ADD COLUMN {col} INTEGER DEFAULT 0")
                 except sqlite3.OperationalError:
                     pass  # Column already exists
+        if current > 0 and current < 3:
+            # v3: clean up duplicate trips/waypoints from earlier indexer bugs.
+            # Wrapped in a savepoint so a failure during migration doesn't leave
+            # the schema_version bumped without the data fixes applied.
+            try:
+                conn.execute("SAVEPOINT migrate_v3")
+                _migrate_v2_to_v3(conn)
+                conn.execute("RELEASE SAVEPOINT migrate_v3")
+            except Exception as e:
+                conn.execute("ROLLBACK TO SAVEPOINT migrate_v3")
+                conn.execute("RELEASE SAVEPOINT migrate_v3")
+                logger.error("Migration v2->v3 failed, leaving schema at v2: %s", e)
+                conn.commit()
+                return conn  # Skip schema_version bump so it retries next startup
+        conn.execute("DELETE FROM schema_version")
         conn.execute(
-            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+            "INSERT INTO schema_version (version) VALUES (?)",
             (_SCHEMA_VERSION,)
         )
         conn.commit()
         logger.info("Geo-index database initialized (v%d) at %s", _SCHEMA_VERSION, db_path)
 
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Migrations
+# ---------------------------------------------------------------------------
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Clean up duplicate trips and waypoints from earlier indexer bugs.
+
+    Earlier versions of the indexer:
+      * Created separate trips for the same physical drive when the videos
+        were ingested from different source folders (RecentClips vs ArchivedClips).
+      * Stored duplicate waypoints with the same ``(timestamp, lat, lon)`` but
+        different ``video_path`` strings (one per copy of the video).
+      * Recorded ``source_folder='..'`` for ArchivedClips because of a path
+        normalization bug.
+
+    This one-time migration:
+      1. Repairs ``source_folder='..'`` rows by inferring from waypoint paths.
+      2. Merges trips whose time windows overlap or are within
+         ``_TRIP_GAP_MINUTES_DEFAULT`` minutes of each other (regardless of
+         source_folder).
+      3. Dedupes waypoints within each trip by ``(timestamp, lat, lon)``,
+         preferring the row whose ``video_path`` references ArchivedClips
+         (most durable storage).
+      4. Recomputes ``start_time``, ``end_time``, start/end coords,
+         ``distance_km`` and ``duration_seconds`` for every trip; deletes
+         trips left with no waypoints.
+    """
+    gap_seconds = _TRIP_GAP_MINUTES_DEFAULT * 60
+    log_parts: List[str] = []
+
+    # --- Phase 1: source_folder='..' ---
+    bad = conn.execute(
+        "SELECT id FROM trips WHERE source_folder = '..' OR source_folder LIKE '..%'"
+    ).fetchall()
+    fixed_src = 0
+    for r in bad:
+        wp = conn.execute(
+            "SELECT video_path FROM waypoints "
+            "WHERE trip_id = ? AND video_path IS NOT NULL ORDER BY id LIMIT 1",
+            (r['id'],),
+        ).fetchone()
+        if wp and wp['video_path']:
+            vp = wp['video_path'].replace('\\', '/')
+            if 'ArchivedClips' in vp:
+                folder = 'ArchivedClips'
+            elif '/' in vp:
+                folder = vp.split('/')[0]
+            else:
+                folder = 'Unknown'
+            conn.execute(
+                "UPDATE trips SET source_folder = ? WHERE id = ?",
+                (folder, r['id']),
+            )
+            fixed_src += 1
+    log_parts.append(f"fixed {fixed_src} '..' source_folder rows")
+
+    # --- Phase 2: merge overlapping/close trips ---
+    # Repeatedly find any pair of trips whose windows are within gap_seconds
+    # of each other (in either direction) and merge the higher-id into the lower.
+    merged = 0
+    iterations = 0
+    while True:
+        iterations += 1
+        if iterations > 10000:
+            logger.warning("Trip merge loop exceeded 10000 iterations; aborting")
+            break
+        pair = conn.execute(
+            """SELECT a.id AS keep_id, b.id AS drop_id
+               FROM trips a
+               JOIN trips b
+                 ON a.id < b.id
+                AND a.start_time IS NOT NULL AND a.end_time IS NOT NULL
+                AND b.start_time IS NOT NULL AND b.end_time IS NOT NULL
+                AND ((julianday(b.start_time) - julianday(a.end_time)) * 86400) <= ?
+                AND ((julianday(a.start_time) - julianday(b.end_time)) * 86400) <= ?
+               LIMIT 1""",
+            (gap_seconds, gap_seconds),
+        ).fetchone()
+        if not pair:
+            break
+        keep_id, drop_id = pair['keep_id'], pair['drop_id']
+        conn.execute("UPDATE waypoints SET trip_id = ? WHERE trip_id = ?",
+                     (keep_id, drop_id))
+        conn.execute("UPDATE detected_events SET trip_id = ? WHERE trip_id = ?",
+                     (keep_id, drop_id))
+        conn.execute("DELETE FROM trips WHERE id = ?", (drop_id,))
+        merged += 1
+    log_parts.append(f"merged {merged} overlapping trip pairs")
+
+    # --- Phase 3: dedupe waypoints within a trip ---
+    dups = conn.execute(
+        """SELECT trip_id, timestamp, lat, lon, COUNT(*) AS cnt
+           FROM waypoints
+           WHERE trip_id IS NOT NULL
+           GROUP BY trip_id, timestamp, lat, lon
+           HAVING COUNT(*) > 1"""
+    ).fetchall()
+    deduped = 0
+    for d in dups:
+        ids = conn.execute(
+            """SELECT id, video_path FROM waypoints
+               WHERE trip_id = ? AND timestamp = ? AND lat = ? AND lon = ?
+               ORDER BY
+                 CASE WHEN video_path LIKE '%ArchivedClips%' THEN 0 ELSE 1 END,
+                 id""",
+            (d['trip_id'], d['timestamp'], d['lat'], d['lon']),
+        ).fetchall()
+        # Keep the first (durable / lowest id), delete the rest
+        drop_ids = [(r['id'],) for r in ids[1:]]
+        if drop_ids:
+            conn.executemany("DELETE FROM waypoints WHERE id = ?", drop_ids)
+            deduped += len(drop_ids)
+    log_parts.append(f"deduped {deduped} duplicate waypoints")
+
+    # --- Phase 4: recompute trip stats; drop empty trips ---
+    # Distance is computed per video file (in frame/id order) and summed,
+    # because Tesla videos can overlap in time (e.g. when a saved clip is
+    # triggered alongside RecentClips). Sorting all waypoints globally by
+    # timestamp would interleave overlapping recordings and produce huge
+    # phantom jumps. start_time/end_time still come from min/max timestamp.
+    trips = conn.execute("SELECT id FROM trips").fetchall()
+    recomputed = 0
+    dropped_empty = 0
+    for t in trips:
+        bounds = conn.execute(
+            "SELECT MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts "
+            "FROM waypoints WHERE trip_id = ?",
+            (t['id'],),
+        ).fetchone()
+        if not bounds or not bounds['first_ts']:
+            conn.execute("DELETE FROM trips WHERE id = ?", (t['id'],))
+            dropped_empty += 1
+            continue
+        first_ts, last_ts = bounds['first_ts'], bounds['last_ts']
+        first_row = conn.execute(
+            "SELECT lat, lon FROM waypoints WHERE trip_id = ? "
+            "AND timestamp = ? ORDER BY id LIMIT 1",
+            (t['id'], first_ts),
+        ).fetchone()
+        last_row = conn.execute(
+            "SELECT lat, lon FROM waypoints WHERE trip_id = ? "
+            "AND timestamp = ? ORDER BY id DESC LIMIT 1",
+            (t['id'], last_ts),
+        ).fetchone()
+        # Distance summed per video file
+        total_dist = 0.0
+        videos = conn.execute(
+            "SELECT DISTINCT video_path FROM waypoints "
+            "WHERE trip_id = ? AND video_path IS NOT NULL",
+            (t['id'],),
+        ).fetchall()
+        for v in videos:
+            wps = conn.execute(
+                "SELECT lat, lon FROM waypoints "
+                "WHERE trip_id = ? AND video_path = ? ORDER BY id",
+                (t['id'], v['video_path']),
+            ).fetchall()
+            for j in range(1, len(wps)):
+                total_dist += _haversine_km(
+                    wps[j-1]['lat'], wps[j-1]['lon'],
+                    wps[j]['lat'], wps[j]['lon'],
+                )
+        try:
+            dur = max(0, int((
+                datetime.fromisoformat(last_ts)
+                - datetime.fromisoformat(first_ts)
+            ).total_seconds()))
+        except (ValueError, TypeError):
+            dur = 0
+        conn.execute(
+            """UPDATE trips SET
+               start_time = ?, end_time = ?,
+               start_lat = ?, start_lon = ?,
+               end_lat = ?, end_lon = ?,
+               distance_km = ?, duration_seconds = ?
+               WHERE id = ?""",
+            (first_ts, last_ts,
+             first_row['lat'] if first_row else None,
+             first_row['lon'] if first_row else None,
+             last_row['lat'] if last_row else None,
+             last_row['lon'] if last_row else None,
+             total_dist, dur, t['id']),
+        )
+        recomputed += 1
+    log_parts.append(
+        f"recomputed stats for {recomputed} trips; dropped {dropped_empty} empty"
+    )
+
+    logger.info("Migration v2->v3: %s", "; ".join(log_parts))
+
+
+# Default trip gap, also used by the migration. Kept here so the migration
+# can run before any per-call ``trip_gap_minutes`` argument is available.
+_TRIP_GAP_MINUTES_DEFAULT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -641,33 +892,64 @@ def _index_video(
                 return 0, 1  # 0 waypoints, 1 event
         return 0, 0
 
+    # --- Cross-folder dedup ---
+    # Tesla videos can exist in both RecentClips and ArchivedClips with the
+    # same basename. They contain identical SEI, so don't index twice.
+    # If the existing copy is in a non-durable folder (RecentClips) and we're
+    # now seeing the durable ArchivedClips copy, upgrade the stored video_path.
+    basename = os.path.basename(video_path)
+    existing_paths = conn.execute(
+        "SELECT DISTINCT video_path FROM waypoints "
+        "WHERE video_path = ? OR video_path LIKE ?",
+        (basename, f'%/{basename}'),
+    ).fetchall()
+    if existing_paths:
+        if 'ArchivedClips' in rel_path and not any(
+            'ArchivedClips' in (r['video_path'] or '') for r in existing_paths
+        ):
+            upgraded = conn.execute(
+                "UPDATE waypoints SET video_path = ? "
+                "WHERE video_path = ? OR video_path LIKE ?",
+                (rel_path, basename, f'%/{basename}'),
+            )
+            conn.execute(
+                "UPDATE detected_events SET video_path = ? "
+                "WHERE video_path = ? OR video_path LIKE ?",
+                (rel_path, basename, f'%/{basename}'),
+            )
+            conn.commit()
+            logger.info(
+                "Upgraded %d waypoint(s) to durable ArchivedClips path: %s",
+                upgraded.rowcount, basename,
+            )
+        else:
+            logger.debug("Skipping %s: basename already indexed", rel_path)
+        return 0, 0
+
     # Determine source folder
     parts = rel_path.replace('\\', '/').split('/')
     source_folder = parts[0] if parts else 'Unknown'
 
-    # Find or create trip (check if this video extends an existing trip)
+    # Find or create trip — match on time proximity, regardless of source_folder.
+    # Earlier code filtered by source_folder, which fragmented trips when
+    # the same drive was ingested from RecentClips vs ArchivedClips, and
+    # picked the wrong trip when videos were indexed out of order.
     first_wp = waypoint_dicts[0]
     last_wp = waypoint_dicts[-1]
+    new_start = first_wp['timestamp']
+    new_end = last_wp['timestamp']
+    gap_seconds = trip_gap_minutes * 60
 
-    # Look for a recent trip to extend (within trip_gap_minutes)
-    gap_threshold = file_timestamp or first_wp['timestamp']
     existing_trip = conn.execute(
-        """SELECT id, end_time, end_lat, end_lon FROM trips
-           WHERE source_folder = ? AND end_time IS NOT NULL
-           ORDER BY end_time DESC LIMIT 1""",
-        (source_folder,)
+        """SELECT id FROM trips
+           WHERE start_time IS NOT NULL AND end_time IS NOT NULL
+             AND ((julianday(?) - julianday(end_time)) * 86400) <= ?
+             AND ((julianday(start_time) - julianday(?)) * 86400) <= ?
+           ORDER BY ABS((julianday(?) - julianday(start_time)) * 86400)
+           LIMIT 1""",
+        (new_start, gap_seconds, new_end, gap_seconds, new_start),
     ).fetchone()
-
-    trip_id = None
-    if existing_trip:
-        try:
-            last_end = datetime.fromisoformat(existing_trip['end_time'])
-            this_start = datetime.fromisoformat(gap_threshold)
-            gap = abs((this_start - last_end).total_seconds())
-            if gap <= trip_gap_minutes * 60:
-                trip_id = existing_trip['id']
-        except (ValueError, TypeError):
-            pass
+    trip_id = existing_trip['id'] if existing_trip else None
 
     if trip_id is None:
         # Create new trip
@@ -711,25 +993,68 @@ def _index_video(
              for ev in events]
         )
 
-    # Update trip end point and distance
-    total_dist = 0.0
-    for j in range(1, len(waypoint_dicts)):
-        total_dist += _haversine_km(
-            waypoint_dicts[j - 1]['lat'], waypoint_dicts[j - 1]['lon'],
-            waypoint_dicts[j]['lat'], waypoint_dicts[j]['lon']
+    # Recompute trip stats from the full waypoint set. The new video may
+    # extend the trip in either direction (forward OR backward in time when
+    # archive videos are indexed out of order), so we can't just append
+    # to the existing distance. Distance is summed per video file in
+    # frame/id order, because Tesla videos can overlap in time (e.g. saved
+    # clips alongside RecentClips); a global timestamp sort would interleave
+    # them and produce phantom GPS jumps.
+    bounds = conn.execute(
+        "SELECT MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts "
+        "FROM waypoints WHERE trip_id = ?",
+        (trip_id,),
+    ).fetchone()
+    if bounds and bounds['first_ts']:
+        first_ts, last_ts = bounds['first_ts'], bounds['last_ts']
+        first_row = conn.execute(
+            "SELECT lat, lon FROM waypoints WHERE trip_id = ? "
+            "AND timestamp = ? ORDER BY id LIMIT 1",
+            (trip_id, first_ts),
+        ).fetchone()
+        last_row = conn.execute(
+            "SELECT lat, lon FROM waypoints WHERE trip_id = ? "
+            "AND timestamp = ? ORDER BY id DESC LIMIT 1",
+            (trip_id, last_ts),
+        ).fetchone()
+        total_dist = 0.0
+        videos = conn.execute(
+            "SELECT DISTINCT video_path FROM waypoints "
+            "WHERE trip_id = ? AND video_path IS NOT NULL",
+            (trip_id,),
+        ).fetchall()
+        for v in videos:
+            vwps = conn.execute(
+                "SELECT lat, lon FROM waypoints "
+                "WHERE trip_id = ? AND video_path = ? ORDER BY id",
+                (trip_id, v['video_path']),
+            ).fetchall()
+            for j in range(1, len(vwps)):
+                total_dist += _haversine_km(
+                    vwps[j-1]['lat'], vwps[j-1]['lon'],
+                    vwps[j]['lat'], vwps[j]['lon'],
+                )
+        try:
+            dur = max(0, int((
+                datetime.fromisoformat(last_ts)
+                - datetime.fromisoformat(first_ts)
+            ).total_seconds()))
+        except (ValueError, TypeError):
+            dur = 0
+        conn.execute(
+            """UPDATE trips SET
+               start_time = ?, end_time = ?,
+               start_lat = ?, start_lon = ?,
+               end_lat = ?, end_lon = ?,
+               distance_km = ?, duration_seconds = ?
+               WHERE id = ?""",
+            (first_ts, last_ts,
+             first_row['lat'] if first_row else None,
+             first_row['lon'] if first_row else None,
+             last_row['lat'] if last_row else None,
+             last_row['lon'] if last_row else None,
+             total_dist, dur, trip_id),
         )
-
-    conn.execute(
-        """UPDATE trips SET
-           end_time = ?, end_lat = ?, end_lon = ?,
-           distance_km = COALESCE(distance_km, 0) + ?,
-           duration_seconds = CAST(
-               (julianday(?) - julianday(start_time)) * 86400 AS INTEGER
-           )
-           WHERE id = ?""",
-        (last_wp['timestamp'], last_wp['lat'], last_wp['lon'],
-         total_dist, last_wp['timestamp'], trip_id)
-    )
 
     conn.commit()
     return len(waypoint_dicts), len(events)
@@ -1405,12 +1730,22 @@ def get_db_connection(db_path: str) -> sqlite3.Connection:
 def query_trips(db_path: str, limit: int = 50, offset: int = 0,
                 bbox: Optional[Tuple[float, float, float, float]] = None,
                 date_from: Optional[str] = None,
-                date_to: Optional[str] = None) -> List[dict]:
-    """Query trips with optional bounding box and date filters."""
+                date_to: Optional[str] = None,
+                min_distance_km: float = 0.05) -> List[dict]:
+    """Query trips with optional bounding box and date filters.
+
+    ``min_distance_km`` defaults to 50 m, which hides parking-lot blips and
+    isolated sentry recordings from the trip nav. Pass ``0`` to include all
+    trips regardless of distance.
+    """
     conn = _init_db(db_path)
     try:
         sql = "SELECT * FROM trips WHERE 1=1"
-        params = []
+        params: List = []
+
+        if min_distance_km and min_distance_km > 0:
+            sql += " AND COALESCE(distance_km, 0) >= ?"
+            params.append(min_distance_km)
 
         if bbox:
             min_lat, min_lon, max_lat, max_lon = bbox

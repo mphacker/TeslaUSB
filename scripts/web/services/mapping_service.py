@@ -336,8 +336,15 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
     while True:
         iterations += 1
         if iterations > 10000:
-            logger.warning("Trip merge loop exceeded 10000 iterations; aborting")
-            break
+            # Don't silently continue — that would leave duplicates AND
+            # bump schema_version, making this migration unrunnable on the
+            # next startup. Raising here triggers the SAVEPOINT rollback
+            # in _init_db, leaves schema at v2, and surfaces the failure
+            # in the logs so we can investigate.
+            raise RuntimeError(
+                "v2->v3 trip merge loop exceeded 10000 iterations; "
+                "possible infinite loop or pathological duplicate set"
+            )
         pair = conn.execute(
             """SELECT a.id AS keep_id, b.id AS drop_id
                FROM trips a
@@ -901,14 +908,33 @@ def _infer_sentry_event(
     parts = rel_path.replace('\\', '/').split('/')
     event_folder = parts[1] if len(parts) > 2 else parts[0]
 
-    # Skip if already created for this event folder
+    # Skip if a fresh event.json-based event already exists for this folder.
+    # If we find an OLDER event with metadata that doesn't include
+    # ``location_source: event_json``, delete it so we can replace it with
+    # the more accurate version. This handles legacy DBs from earlier
+    # versions that wrote events with different (or no) metadata, which the
+    # v3->v4 migration's substring filter may not have matched.
     existing = conn.execute(
-        """SELECT id FROM detected_events
+        """SELECT id, metadata FROM detected_events
            WHERE event_type = ? AND video_path LIKE ? LIMIT 1""",
         (event_type, f'%{event_folder}%')
     ).fetchone()
     if existing:
-        return False
+        # Parse metadata as JSON to robustly check the source. Substring
+        # matching would break if json.dumps formatting changes (e.g.
+        # whitespace/key order).
+        is_event_json = False
+        if existing['metadata']:
+            try:
+                meta_dict = json.loads(existing['metadata'])
+                is_event_json = meta_dict.get('location_source') == 'event_json'
+            except (ValueError, TypeError):
+                pass
+        if is_event_json:
+            return False
+        # Stale event from older code path — drop it so we can recreate
+        # with the accurate event.json-derived data below.
+        conn.execute("DELETE FROM detected_events WHERE id = ?", (existing['id'],))
 
     # Try event.json first (accurate Tesla-reported location)
     lat = lon = None

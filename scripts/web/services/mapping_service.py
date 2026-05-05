@@ -667,59 +667,58 @@ def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
     """Find all front-camera MP4 files in TeslaCam folders and ArchivedClips.
 
     Only indexes front camera since all cameras share the same GPS data.
-    Yields absolute file paths. Also scans the SD card archive directory
-    for clips that Tesla may have already deleted from RecentClips.
+    Yields absolute file paths.
+
+    Priority order (highest first):
+      1. ArchivedClips on the SD card — durable copies of past drives,
+         oldest first, where the real GPS data lives.
+      2. SavedClips and SentryClips event subfolders — user-marked clips.
+      3. RecentClips — the rolling buffer. Most files written while parked
+         (sentry mode) contain no GPS at all, so we process these last.
     """
-    for folder in ('RecentClips', 'SavedClips', 'SentryClips'):
-        folder_path = os.path.join(teslacam_path, folder)
-        if not os.path.isdir(folder_path):
-            continue
+    seen_basenames: set = set()
 
-        if folder == 'RecentClips':
-            # Flat structure: files directly in folder
-            try:
-                for f in sorted(os.listdir(folder_path)):
-                    if f.lower().endswith('.mp4') and '-front' in f.lower():
-                        yield os.path.join(folder_path, f)
-            except OSError:
-                pass
-        else:
-            # Event structure: files in subfolders
-            try:
-                for event_dir in sorted(os.listdir(folder_path)):
-                    event_path = os.path.join(folder_path, event_dir)
-                    if not os.path.isdir(event_path):
-                        continue
-                    for f in sorted(os.listdir(event_path)):
-                        if f.lower().endswith('.mp4') and '-front' in f.lower():
-                            yield os.path.join(event_path, f)
-            except OSError:
-                pass
-
-    # Also scan ArchivedClips on SD card (flat structure, same as RecentClips)
+    # 1. ArchivedClips (SD card archive of past drives)
     try:
         from config import ARCHIVE_DIR, ARCHIVE_ENABLED
         if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
-            # Track filenames already yielded from RecentClips to avoid duplicates
-            seen_names = set()
-            for folder in ('RecentClips',):
-                fp = os.path.join(teslacam_path, folder)
-                if os.path.isdir(fp):
-                    try:
-                        for f in os.listdir(fp):
-                            seen_names.add(f)
-                    except OSError:
-                        pass
-
             try:
                 for f in sorted(os.listdir(ARCHIVE_DIR)):
                     if f.lower().endswith('.mp4') and '-front' in f.lower():
-                        if f not in seen_names:
-                            yield os.path.join(ARCHIVE_DIR, f)
+                        seen_basenames.add(f)
+                        yield os.path.join(ARCHIVE_DIR, f)
             except OSError:
                 pass
     except ImportError:
         pass
+
+    # 2. SavedClips and SentryClips event folders
+    for folder in ('SavedClips', 'SentryClips'):
+        folder_path = os.path.join(teslacam_path, folder)
+        if not os.path.isdir(folder_path):
+            continue
+        try:
+            for event_dir in sorted(os.listdir(folder_path)):
+                event_path = os.path.join(folder_path, event_dir)
+                if not os.path.isdir(event_path):
+                    continue
+                for f in sorted(os.listdir(event_path)):
+                    if f.lower().endswith('.mp4') and '-front' in f.lower():
+                        yield os.path.join(event_path, f)
+        except OSError:
+            pass
+
+    # 3. RecentClips last (skip basenames already covered by ArchivedClips)
+    folder_path = os.path.join(teslacam_path, 'RecentClips')
+    if os.path.isdir(folder_path):
+        try:
+            for f in sorted(os.listdir(folder_path)):
+                if f.lower().endswith('.mp4') and '-front' in f.lower():
+                    if f in seen_basenames:
+                        continue
+                    yield os.path.join(folder_path, f)
+        except OSError:
+            pass
 
 
 def _infer_sentry_event(
@@ -1190,13 +1189,17 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
             try:
                 stat = os.stat(vp)
                 row = conn.execute(
-                    "SELECT file_size, file_mtime, waypoint_count FROM indexed_files WHERE file_path = ?",
+                    "SELECT file_size, file_mtime, waypoint_count, event_count "
+                    "FROM indexed_files WHERE file_path = ?",
                     (vp,)
                 ).fetchone()
                 if row and row['file_size'] == stat.st_size and row['file_mtime'] == stat.st_mtime:
-                    # Skip if already indexed with waypoints; re-try if 0 waypoints
-                    if row['waypoint_count'] and row['waypoint_count'] > 0:
-                        continue
+                    # File hasn't changed since we last looked at it. Skip.
+                    # Even if waypoint_count is 0 we don't re-parse: most
+                    # zero-waypoint files are sentry/parked recordings without
+                    # GPS, and re-parsing them every run wastes the Pi's CPU
+                    # and starves the web server.
+                    continue
                 to_index.append((vp, stat.st_size, stat.st_mtime))
             except OSError:
                 continue

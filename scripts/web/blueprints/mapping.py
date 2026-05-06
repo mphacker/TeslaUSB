@@ -183,8 +183,10 @@ def api_events():
     # When ``date`` is supplied the request is asking for a complete
     # day's worth of markers (the map renders all of them). Allow up
     # to 5000 in that case so a busy sentry-event day is not silently
-    # truncated. The unscoped listing keeps the older 1000 cap because
-    # nothing on the page actually wants more than a few hundred.
+    # truncated. ``overview=1`` also bumps the cap so the All time
+    # map view never silently drops markers. The unscoped listing
+    # otherwise keeps the older 1000 cap because nothing else on the
+    # page wants more than a few hundred at once.
     raw_limit = request.args.get('limit', 100, type=int)
     offset = request.args.get('offset', 0, type=int)
     event_type = request.args.get('type')
@@ -192,6 +194,10 @@ def api_events():
     date_from = request.args.get('date_from')
     date_to = request.args.get('date_to')
     date = request.args.get('date')
+    # ``overview=1`` opts into the higher cap used for the All time
+    # map view, where the page expects every event back so markers
+    # don't silently disappear when the user has a long history.
+    overview = request.args.get('overview', type=int)
 
     # Reject malformed single-day filters early so we never pass a
     # non-canonical string into the substr() comparison. ``date_from``
@@ -203,7 +209,7 @@ def api_events():
 
     if raw_limit is None or raw_limit <= 0:
         raw_limit = 100
-    cap = 5000 if date else 1000
+    cap = 5000 if (date or overview) else 1000
     limit = min(raw_limit, cap)
 
     bbox = None
@@ -340,6 +346,77 @@ def api_day_routes(date):
         return jsonify(result)
     except Exception as e:  # noqa: BLE001
         logger.error("Failed to query day routes: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+# Maximum subsampled waypoints per trip in /api/all-routes. 50 is
+# the sweet spot: enough to trace the route at regional zoom, few
+# enough that 100+ trips still render within the Pi Zero 2 W's
+# Leaflet/Canvas budget. Raising this past ~100 starts to cost
+# noticeable frame time on a busy DB.
+_DEFAULT_ALL_ROUTES_MAX_POINTS = 50
+_ALL_ROUTES_MAX_POINTS_CAP = 200
+
+
+@mapping_bp.route("/api/all-routes")
+def api_all_routes():
+    """Return a subsampled overview of every indexed trip.
+
+    Powers the "All time" overlay on the map page. Each trip is
+    represented by its metadata (start/end coords, distance,
+    duration) plus a subsampled waypoint list (at most
+    ``max_points`` waypoints, default 50, hard cap 200) so the
+    payload renders smoothly on a Pi Zero 2 W even when the user
+    has hundreds of trips indexed. The default ``min_distance``
+    matches /api/trips and /api/day/<date>/routes so the All time
+    overlay never advertises trips that other views hide as
+    parking-lot blips.
+
+    Each trip carries the ``date`` (YYYY-MM-DD) it started so the
+    client can drill into that day on click without an extra
+    round trip.
+
+    Response shape::
+
+        {
+          "trips": [
+            {
+              "trip_id": int,
+              "date": "YYYY-MM-DD",
+              "start_time", "end_time",
+              "start_lat", "start_lon", "end_lat", "end_lon",
+              "distance_km", "duration_seconds",
+              "waypoints": [{"lat", "lon", "speed_mps"}, ...]
+            },
+            ...
+          ]
+        }
+    """
+    from services.mapping_service import query_all_routes_simplified
+
+    min_distance_km = request.args.get(
+        'min_distance', _DEFAULT_DAY_MIN_DISTANCE_KM, type=float
+    )
+    if min_distance_km is None or min_distance_km < 0:
+        min_distance_km = _DEFAULT_DAY_MIN_DISTANCE_KM
+
+    max_points = request.args.get(
+        'max_points', _DEFAULT_ALL_ROUTES_MAX_POINTS, type=int
+    )
+    if max_points is None or max_points < 2:
+        max_points = _DEFAULT_ALL_ROUTES_MAX_POINTS
+    if max_points > _ALL_ROUTES_MAX_POINTS_CAP:
+        max_points = _ALL_ROUTES_MAX_POINTS_CAP
+
+    try:
+        trips = query_all_routes_simplified(
+            MAPPING_DB_PATH,
+            min_distance_km=min_distance_km,
+            max_points_per_trip=max_points,
+        )
+        return jsonify({'trips': trips})
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to query all routes: %s", e)
         return jsonify({'error': str(e)}), 500
 
 

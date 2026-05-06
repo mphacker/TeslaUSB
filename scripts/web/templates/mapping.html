@@ -284,6 +284,7 @@
     .indexer-status.running { border-left: 3px solid #f0ad4e; }
 
     .popup-video-link { color: var(--accent-primary, #3B82F6); cursor: pointer; text-decoration: underline; }
+    .popup-day-link { color: var(--accent-primary, #3B82F6); cursor: pointer; text-decoration: underline; }
 
     /* ── Video Player Overlay (unchanged) ── */
     .video-overlay {
@@ -1438,57 +1439,95 @@ function renderTripOnDay(trip, bounds) {
     }).bindPopup('Trip End').addTo(tripLayer);
 }
 
-function renderAllTime() {
-    // Lightweight overview: trip start/end markers only across
-    // all known days. NO polylines (rendering routes for
-    // hundreds of trips would crush the Pi Zero 2 W) and NO
-    // events (cluster gets noisy and pinning the map to a
-    // point is meaningless when you can see the whole history).
-    const seq = ++dayLoadSeq;  // also invalidates any in-flight loadDay
+async function renderAllTime() {
+    // Render every indexed trip as a low-opacity gray polyline plus
+    // every event marker. The trip routes come from /api/all-routes
+    // which subsamples each trip's waypoints (default 50 points/trip)
+    // so a database with hundreds of trips still renders smoothly on
+    // a Pi Zero 2 W. Events come from /api/events?overview=1 which
+    // bumps the per-call cap to 5000 so a long history doesn't get
+    // silently truncated.
+    //
+    // Polyline click → drills into that trip's day. Event marker
+    // popup → "Go to this day" link. The visual language is
+    // intentionally muted (single neutral gray, low opacity) so
+    // event markers stand out — the All time view's job is to
+    // surface where things happened, not to compare per-trip speed.
+    const seq = ++dayLoadSeq;
     tripLayer.clearLayers();
     fsdLayer.clearLayers();
     eventCluster.clearLayers();
-    // Clear the events cache so rebuildEventFilterPills() actually
-    // empty-states the pills — without this it would re-render the
-    // pills from the previously-selected day's event types.
+    // Clear the events cache so rebuildEventFilterPills() empty-states
+    // the pills until the new payload arrives — without this it would
+    // momentarily re-render the previous day's pills.
     allEvents = [];
     rebuildEventFilterPills();
 
-    // We need per-day waypoints to draw markers. Rather than
-    // fetching all of them up-front, fetch /api/trips for the
-    // markers (its lightweight payload includes start/end coords).
-    fetch('/api/trips?limit=2000').then(r => r.json()).then(data => {
-        // Race guard: user may have cycled away from "All time" or
-        // started a different load while we were waiting.
+    let routesData, eventsData;
+    try {
+        const [routesResp, eventsResp] = await Promise.all([
+            fetch('/api/all-routes'),
+            fetch('/api/events?limit=5000&overview=1'),
+        ]);
+        routesData = await routesResp.json();
+        eventsData = await eventsResp.json();
+    } catch (e) {
+        console.error('Failed to load all-time view:', e);
         if (seq !== dayLoadSeq || !showingAllTime) return;
-        // Clear again — between the initial clear and the fetch
-        // landing, an earlier in-flight render may have added
-        // markers. This guarantees we don't double-render.
-        tripLayer.clearLayers();
-        const trips = data.trips || [];
-        const bounds = [];
-        for (const trip of trips) {
-            if (Number.isFinite(trip.start_lat) && Number.isFinite(trip.start_lon)) {
-                bounds.push([trip.start_lat, trip.start_lon]);
-                L.circleMarker([trip.start_lat, trip.start_lon], {
-                    renderer: sharedCanvasRenderer,
-                    radius: 4, fillColor: '#28a745', color: '#fff',
-                    weight: 1, fillOpacity: 0.85, interactive: false,
-                }).addTo(tripLayer);
-            }
-            if (Number.isFinite(trip.end_lat) && Number.isFinite(trip.end_lon)) {
-                bounds.push([trip.end_lat, trip.end_lon]);
-                L.circleMarker([trip.end_lat, trip.end_lon], {
-                    renderer: sharedCanvasRenderer,
-                    radius: 4, fillColor: '#dc3545', color: '#fff',
-                    weight: 1, fillOpacity: 0.85, interactive: false,
-                }).addTo(tripLayer);
-            }
+        if (typeof showToast === 'function') {
+            showToast('Could not load All time view. Try again.', 'warning');
         }
-        if (bounds.length) {
-            map.fitBounds(bounds, { padding: [30, 30] });
+        return;
+    }
+
+    // Race guard: user may have cycled out of All time or started
+    // a different load while we were waiting. Apply nothing if so.
+    if (seq !== dayLoadSeq || !showingAllTime) return;
+
+    // Re-clear between fetch start and result land in case an
+    // earlier load added layers; guarantees no double-render.
+    tripLayer.clearLayers();
+    eventCluster.clearLayers();
+
+    const trips = (routesData && routesData.trips) || [];
+    const bounds = [];
+
+    for (const trip of trips) {
+        const valid = (trip.waypoints || []).filter(w =>
+            Number.isFinite(w.lat) && Number.isFinite(w.lon));
+        if (valid.length < 2) continue;
+
+        const latLngs = valid.map(w => [w.lat, w.lon]);
+        for (const ll of latLngs) bounds.push(ll);
+
+        // Single neutral-gray polyline per trip — events stand out
+        // better against gray than against speed-bucketed viridis,
+        // and one polyline per trip keeps Leaflet's layer count
+        // manageable when zoomed out across hundreds of trips.
+        const line = L.polyline(latLngs, {
+            renderer: sharedCanvasRenderer,
+            color: '#9aa4b2',
+            weight: 3,
+            opacity: 0.55,
+            interactive: true,
+        });
+        if (trip.date && /^\d{4}-\d{2}-\d{2}$/.test(trip.date)) {
+            line.on('click', () => loadDay(trip.date));
         }
-    }).catch(e => console.error('Failed to render all-time view:', e));
+        line.addTo(tripLayer);
+    }
+
+    // Populate events and let the standard pipeline handle rendering
+    // — renderEvents() now draws markers in All time mode too, with
+    // a "Go to this day" link in each popup.
+    allEvents = (eventsData && eventsData.events) || [];
+    rebuildEventFilterPills();
+    const eventBounds = renderEvents();
+    for (const c of eventBounds) bounds.push(c);
+
+    if (bounds.length) {
+        map.fitBounds(bounds, { padding: [30, 30] });
+    }
 }
 
 // --- Video Player Overlay ---
@@ -1807,6 +1846,20 @@ document.addEventListener('click', function(e) {
         );
         return;
     }
+    // Drill-into-day link rendered inside event-marker popups when
+    // the All time view is active. Validate the date format before
+    // dispatching so a corrupt timestamp can't trigger an unbounded
+    // loadDay() call.
+    const dayLink = e.target.closest('.popup-day-link');
+    if (dayLink) {
+        e.preventDefault();
+        const date = dayLink.dataset.date || '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            map.closePopup();
+            loadDay(date);
+        }
+        return;
+    }
     const camBtn = e.target.closest('.cam-btn');
     if (camBtn && camBtn.dataset.angle) {
         switchCamera(camBtn.dataset.angle);
@@ -1934,10 +1987,6 @@ function renderEvents() {
     eventCluster.clearLayers();
     const bounds = [];
 
-    // In "All time" mode we deliberately don't show event markers
-    // — the cluster gets noisy and it's not actionable.
-    if (showingAllTime) return bounds;
-
     allEvents.forEach(ev => {
         // Filter: skip events whose type is currently disabled,
         // and skip null/non-finite coords (would crash Leaflet).
@@ -1951,12 +2000,21 @@ function renderEvents() {
         const safeType = (ev.event_type || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/_/g, ' ');
         const safeDesc = (ev.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+        // In "All time" mode add a "Go to this day" link so the
+        // popup is actionable — the user can drill into the day
+        // that owns the event without leaving the map.
+        const eventDate = (ev.timestamp || '').slice(0, 10);
+        const dayLink = (showingAllTime && /^\d{4}-\d{2}-\d{2}$/.test(eventDate))
+            ? `<br><a href="#" class="popup-day-link" data-date="${eventDate}">Go to this day &rarr;</a>`
+            : '';
+
         marker.bindPopup(
             `<strong>${safeType}</strong><br>` +
             `${formatLocalTime(ev.timestamp)}<br>` +
-            `${safeDesc}<br>` +
+            `${safeDesc}` +
             (ev.video_path ?
-                `<a href="#" class="popup-video-link" data-trip-id="${ev.trip_id || 0}" data-video-path="${(ev.video_path || '').replace(/"/g, '&quot;')}" data-frame-offset="${ev.frame_offset || 0}" data-lat="${ev.lat}" data-lon="${ev.lon}">View Video</a>` : '')
+                `<br><a href="#" class="popup-video-link" data-trip-id="${ev.trip_id || 0}" data-video-path="${(ev.video_path || '').replace(/"/g, '&quot;')}" data-frame-offset="${ev.frame_offset || 0}" data-lat="${ev.lat}" data-lon="${ev.lon}">View Video</a>` : '') +
+            dayLink
         );
 
         eventCluster.addLayer(marker);

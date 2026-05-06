@@ -879,6 +879,164 @@ class TestQueryDayRoutes:
         assert [t['trip_id'] for t in result['trips']] == [2]
 
 
+class TestQueryAllRoutesSimplified:
+    """Subsampled all-trip overview that powers the All time map view.
+
+    Tests cover: every-trip rendering, subsampling math (first +
+    last preserved + stride sample of middle), min_distance filter
+    matching /api/trips, ordering, and exclusion of trips that
+    can't render a polyline.
+    """
+
+    def _make_db(self, tmp_path, name='all_routes.db'):
+        db_path = str(tmp_path / name)
+        conn = _init_db(db_path)
+        return db_path, conn
+
+    def _add_trip(self, conn, trip_id, start, end=None, distance_km=2.5,
+                  source_folder='RecentClips'):
+        conn.execute(
+            """INSERT INTO trips (id, start_time, end_time, start_lat,
+                                  start_lon, end_lat, end_lon, distance_km,
+                                  duration_seconds, source_folder)
+               VALUES (?, ?, ?, 37.7, -122.4, 37.8, -122.5, ?, 600, ?)""",
+            (trip_id, start, end or start, distance_km, source_folder),
+        )
+
+    def _add_waypoints(self, conn, trip_id, count, video_path='clip.mp4',
+                       start_ts='2026-05-04T08:15:00'):
+        for i in range(count):
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon,
+                                         speed_mps, autopilot_state,
+                                         video_path, frame_offset)
+                   VALUES (?, ?, ?, ?, 25.0, 'NONE', ?, ?)""",
+                (trip_id, start_ts, 37.7 + i * 0.001, -122.4 + i * 0.001,
+                 video_path, i * 30),
+            )
+
+    def test_all_trips_returned_ordered_newest_first(self, tmp_path):
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-03T08:00:00', distance_km=3.0)
+        self._add_waypoints(conn, 1, count=4)
+        self._add_trip(conn, 2, '2026-05-04T08:00:00', distance_km=5.0)
+        self._add_waypoints(conn, 2, count=4, video_path='c2.mp4')
+        self._add_trip(conn, 3, '2026-05-05T08:00:00', distance_km=8.0)
+        self._add_waypoints(conn, 3, count=4, video_path='c3.mp4')
+        conn.commit(); conn.close()
+
+        trips = query_all_routes_simplified(db_path)
+        assert [t['trip_id'] for t in trips] == [3, 2, 1]
+
+    def test_each_trip_carries_its_start_date(self, tmp_path):
+        # The client uses ``date`` to drill into the right day on
+        # polyline click — must match substr(start_time, 1, 10), the
+        # same bucketing rule query_days/query_day_routes use.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T23:59:00',
+                       end='2026-05-05T00:30:00', distance_km=3.0)
+        self._add_waypoints(conn, 1, count=2)
+        conn.commit(); conn.close()
+        trips = query_all_routes_simplified(db_path)
+        assert trips[0]['date'] == '2026-05-04'
+
+    def test_subsampling_keeps_first_and_last(self, tmp_path):
+        # First + last waypoints anchor the polyline at the trip's
+        # actual endpoints — a stride-only sample could drop one or
+        # both. The kept count must also stay close to the cap so the
+        # client renders quickly.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        # 200 waypoints at lat = 37.700, 37.701, ..., 37.899
+        self._add_waypoints(conn, 1, count=200)
+        conn.commit(); conn.close()
+
+        trips = query_all_routes_simplified(db_path, max_points_per_trip=20)
+        assert len(trips) == 1
+        wps = trips[0]['waypoints']
+        # Allow modest overshoot from the stride+endpoint logic.
+        assert 18 <= len(wps) <= 25
+        # First waypoint is preserved.
+        assert wps[0]['lat'] == pytest.approx(37.700)
+        # Last waypoint is preserved.
+        assert wps[-1]['lat'] == pytest.approx(37.899)
+
+    def test_subsampling_returns_all_when_count_under_cap(self, tmp_path):
+        # A short trip (fewer waypoints than the cap) must round-trip
+        # every point — subsampling should never drop data when there
+        # is no rendering pressure to do so.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        self._add_waypoints(conn, 1, count=8)
+        conn.commit(); conn.close()
+        trips = query_all_routes_simplified(db_path, max_points_per_trip=50)
+        assert len(trips[0]['waypoints']) == 8
+
+    def test_min_distance_filter_excludes_parking_blips(self, tmp_path):
+        # Same default as /api/trips and /api/day/<date>/routes —
+        # the All time overlay must not advertise trips other views
+        # hide as parking-lot blips.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        self._add_waypoints(conn, 1, count=4)
+        self._add_trip(conn, 2, '2026-05-04T09:00:00', distance_km=0.005)
+        self._add_waypoints(conn, 2, count=4, video_path='blip.mp4')
+        conn.commit(); conn.close()
+        trips = query_all_routes_simplified(db_path)
+        assert [t['trip_id'] for t in trips] == [1]
+        # min_distance=0 includes both.
+        trips = query_all_routes_simplified(db_path, min_distance_km=0.0)
+        assert sorted(t['trip_id'] for t in trips) == [1, 2]
+
+    def test_trip_with_only_one_valid_waypoint_excluded(self, tmp_path):
+        # Need >= 2 surviving lat/lon pairs to render a polyline;
+        # otherwise Leaflet would draw nothing and the JSON payload
+        # would just waste bandwidth. The schema enforces NOT NULL on
+        # lat/lon so this guard kicks in via the <2-row count path.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        self._add_waypoints(conn, 1, count=1)
+        conn.commit(); conn.close()
+        trips = query_all_routes_simplified(db_path)
+        assert trips == []
+
+    def test_trips_with_no_waypoints_excluded_by_inner_join(self, tmp_path):
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        # Trip 1 has zero waypoints — must be excluded.
+        self._add_trip(conn, 2, '2026-05-04T09:00:00', distance_km=4.0)
+        self._add_waypoints(conn, 2, count=3, video_path='c2.mp4')
+        conn.commit(); conn.close()
+        trips = query_all_routes_simplified(db_path)
+        assert [t['trip_id'] for t in trips] == [2]
+
+    def test_empty_db_returns_empty_list(self, tmp_path):
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        conn.commit(); conn.close()
+        assert query_all_routes_simplified(db_path) == []
+
+    def test_waypoints_chronological_within_each_trip(self, tmp_path):
+        # Polyline rendering depends on the waypoints arriving in
+        # the order the trip actually drove them — out-of-order
+        # rows would draw a tangled mess.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        self._add_waypoints(conn, 1, count=10)
+        conn.commit(); conn.close()
+        trips = query_all_routes_simplified(db_path, max_points_per_trip=50)
+        lats = [w['lat'] for w in trips[0]['waypoints']]
+        assert lats == sorted(lats)
+
+
 class TestQueryEventsWithDate:
     """The single-day filter on /api/events powers the day-based map.
 

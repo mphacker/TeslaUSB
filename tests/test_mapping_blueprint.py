@@ -274,3 +274,66 @@ class TestApiEventsDateFilter:
         assert r.status_code == 200
         events = r.get_json()['events']
         assert len(events) == 720
+
+    def test_overview_flag_bumps_unscoped_cap_to_5000(self, app, client):
+        # The All time map view passes ``overview=1`` so a long
+        # history (more than a few hundred events) doesn't get
+        # silently truncated to the older 1000 cap.
+        for day in range(20):  # 20 days × 80 events = 1600 events
+            for minute in range(0, 80):
+                _add_event(app.db_path, f'2026-05-{day+1:02d}T08:{minute:02d}:00')
+        r = client.get('/api/events?overview=1&limit=5000')
+        assert r.status_code == 200
+        events = r.get_json()['events']
+        assert len(events) == 1600
+
+
+# ---------------------------------------------------------------------------
+# /api/all-routes
+# ---------------------------------------------------------------------------
+
+class TestApiAllRoutes:
+    def test_returns_every_trip_with_subsampled_waypoints(self, app, client):
+        _add_trip(app.db_path, 1, '2026-05-03T08:00:00', distance_km=3.0)
+        _add_trip(app.db_path, 2, '2026-05-04T08:00:00', distance_km=5.0)
+        _add_waypoint(app.db_path, 1)
+        _add_waypoint(app.db_path, 1)
+        _add_waypoint(app.db_path, 2)
+        _add_waypoint(app.db_path, 2)
+        r = client.get('/api/all-routes')
+        assert r.status_code == 200
+        body = r.get_json()
+        assert sorted(t['trip_id'] for t in body['trips']) == [1, 2]
+        for trip in body['trips']:
+            assert 'date' in trip
+            assert 'waypoints' in trip
+            assert len(trip['waypoints']) >= 2
+
+    def test_caps_max_points_to_protect_pi(self, app, client):
+        # The hard cap (200) prevents a malicious caller from
+        # asking for an unbounded subsample that would defeat the
+        # whole point of having an overview endpoint.
+        _add_trip(app.db_path, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        for _ in range(20):
+            _add_waypoint(app.db_path, 1)
+        r = client.get('/api/all-routes?max_points=99999')
+        assert r.status_code == 200
+        # All 20 waypoints round-trip (20 < 200 cap), so subsampling
+        # is a no-op and we don't crash on the silly value.
+        assert len(r.get_json()['trips'][0]['waypoints']) == 20
+
+    def test_min_distance_default_excludes_blips(self, app, client):
+        _add_trip(app.db_path, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        _add_trip(app.db_path, 2, '2026-05-04T09:00:00', distance_km=0.005)
+        _add_waypoint(app.db_path, 1)
+        _add_waypoint(app.db_path, 1)
+        _add_waypoint(app.db_path, 2)
+        _add_waypoint(app.db_path, 2)
+        r = client.get('/api/all-routes')
+        ids = sorted(t['trip_id'] for t in r.get_json()['trips'])
+        assert ids == [1]
+
+    def test_empty_db_returns_empty_trips(self, client):
+        r = client.get('/api/all-routes')
+        assert r.status_code == 200
+        assert r.get_json() == {'trips': []}

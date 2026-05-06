@@ -16,7 +16,7 @@ from services.wrap_service import (
     upload_wrap_file,
     delete_wrap_file,
     list_wrap_files,
-    get_wrap_count,
+    get_wrap_count_any_mode,
     WRAPS_FOLDER,
     MAX_WRAP_COUNT,
     MAX_WRAP_SIZE,
@@ -147,8 +147,10 @@ def upload_multiple_wraps():
     # Get part2 mount path (only needed in edit mode, None is fine for present mode)
     part2_mount_path = get_mount_path("part2") if mode == "edit" else None
 
-    # Check current wrap count
-    current_count = get_wrap_count(part2_mount_path) if part2_mount_path else 0
+    # Check current wrap count via the mode-aware helper. The old code
+    # passed the upload destination path here, which silently returned
+    # 0 in present mode and bypassed MAX_WRAP_COUNT entirely.
+    current_count = get_wrap_count_any_mode()
 
     results = []
     total_uploaded = 0
@@ -168,8 +170,12 @@ def upload_multiple_wraps():
 
         filename = file.filename
 
-        # Handle individual file upload
-        success, message, dimensions = upload_wrap_file(file, filename, part2_mount_path)
+        # Handle individual file upload. ``defer_rebind=True`` so we
+        # only re-enumerate the USB gadget once after the whole batch
+        # — otherwise Tesla would disconnect/reconnect once per file
+        # for a 10-file upload.
+        success, message, dimensions = upload_wrap_file(
+            file, filename, part2_mount_path, defer_rebind=True)
         results.append({
             'filename': filename,
             'success': success,
@@ -187,9 +193,21 @@ def upload_multiple_wraps():
         except Exception as e:
             logger.error(f"Samba refresh failed: {e}")
 
-    # Delay for filesystem settling
-    if total_uploaded > 0:
-        time.sleep(1.0)
+    # One USB gadget rebind for the whole batch (present mode only).
+    # Tesla caches USB file contents; without this the new wraps
+    # don't appear in the in-car Background selector until a reboot.
+    if mode == "present" and total_uploaded > 0:
+        from services.partition_mount_service import rebind_usb_gadget
+        try:
+            ok, msg = rebind_usb_gadget()
+            if not ok:
+                logger.warning(
+                    f"USB gadget rebind after wrap batch failed: {msg}")
+        except Exception as e:
+            logger.warning(
+                f"USB gadget rebind raised after wrap batch: {e}",
+                exc_info=True,
+            )
 
     if is_ajax:
         success_count = sum(1 for r in results if r['success'])
@@ -227,13 +245,17 @@ def upload_wrap():
     # Get part2 mount path (only needed in edit mode, None is fine for present mode)
     part2_mount_path = get_mount_path("part2") if mode == "edit" else None
 
-    # Check current wrap count
-    current_count = get_wrap_count(part2_mount_path) if part2_mount_path else 0
+    # Check current wrap count via the mode-aware helper (the old
+    # call passed the upload destination path, which silently
+    # returned 0 in present mode and bypassed MAX_WRAP_COUNT).
+    current_count = get_wrap_count_any_mode()
     if current_count >= MAX_WRAP_COUNT:
         flash(f"Maximum of {MAX_WRAP_COUNT} wraps allowed. Delete some wraps first.", "error")
         return redirect(url_for("wraps.wraps"))
 
-    # Handle file upload
+    # Handle file upload. ``defer_rebind`` defaults to False so the
+    # service rebinds the USB gadget after a successful present-mode
+    # write, forcing Tesla to re-enumerate and pick up the new wrap.
     success, message, dimensions = upload_wrap_file(file, file.filename, part2_mount_path)
 
     if success:
@@ -246,9 +268,6 @@ def upload_wrap():
                 restart_samba_services()
             except Exception as e:
                 flash(f"File uploaded but Samba refresh failed: {str(e)}", "warning")
-
-        # Longer delay for filesystem settling after quick_edit remount
-        time.sleep(1.0)
     else:
         flash(message, "error")
 
@@ -268,7 +287,10 @@ def delete_wrap(partition, filename):
     # Get part2 mount path (only needed in edit mode, None is fine for present mode)
     part2_mount_path = get_mount_path(partition) if mode == "edit" else None
 
-    # Delete the file using the service (mode-aware)
+    # Delete the file using the service (mode-aware). The service
+    # handles the USB rebind after a successful present-mode delete
+    # so Tesla invalidates its cache and removes the wrap from the
+    # in-car Background selector without a reboot.
     success, message = delete_wrap_file(filename, part2_mount_path)
 
     if success:
@@ -281,9 +303,6 @@ def delete_wrap(partition, filename):
                 restart_samba_services()
             except Exception as e:
                 flash(f"File deleted but Samba refresh failed: {str(e)}", "warning")
-
-        # Small delay for filesystem settling
-        time.sleep(0.2)
     else:
         flash(message, "error")
 

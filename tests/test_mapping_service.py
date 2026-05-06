@@ -8,6 +8,7 @@ import json
 import os
 import struct
 import sqlite3
+import time
 import pytest
 
 from services.mapping_service import (
@@ -18,13 +19,38 @@ from services.mapping_service import (
     _timestamp_from_filename,
     _find_front_camera_videos,
     _index_video,
+    boot_catchup_scan,
+    canonical_key,
+    candidate_db_paths,
+    claim_next_queue_item,
+    clear_all_queue,
+    clear_pending_queue,
+    clear_queue,
+    complete_queue_item,
+    compute_backoff,
+    defer_queue_item,
+    enqueue_for_indexing,
+    enqueue_many_for_indexing,
+    get_queue_status,
+    index_single_file,
+    IndexOutcome,
+    IndexResult,
+    priority_for_path,
     query_trips,
     query_trip_route,
     query_events,
     get_stats,
     get_driving_stats,
     get_event_chart_data,
+    recover_stale_claims,
+    release_claim,
+    start_daily_stale_scan,
+    stop_daily_stale_scan,
     DEFAULT_THRESHOLDS,
+    _PARSE_ERROR_MAX_ATTEMPTS,
+    _PRIORITY_ARCHIVE,
+    _PRIORITY_RECENT,
+    _PRIORITY_SENTRY_SAVED,
     _SCHEMA_VERSION,
 )
 from services.dashcam_pb2 import SeiMetadata
@@ -349,6 +375,80 @@ class TestFindFrontCameraVideos:
         assert list(_find_front_camera_videos(str(tmp_path))) == []
 
 
+class TestCanonicalKey:
+    """The canonical key is the queue/dedup primary key. Two paths share a
+    canonical key iff they refer to the same recording."""
+
+    def test_recent_clips_keys_on_basename(self):
+        assert canonical_key(
+            '/mnt/gadget/part1-ro/TeslaCam/RecentClips/2026-01-01_12-00-00-front.mp4'
+        ) == '2026-01-01_12-00-00-front.mp4'
+
+    def test_archived_clips_keys_on_basename(self):
+        assert canonical_key(
+            '/home/pi/ArchivedClips/2026-01-01_12-00-00-front.mp4'
+        ) == '2026-01-01_12-00-00-front.mp4'
+
+    def test_recent_and_archived_collide(self):
+        """The whole point: same basename in Recent and Archived → same key."""
+        rec = canonical_key('RecentClips/2026-01-01_12-00-00-front.mp4')
+        arc = canonical_key('ArchivedClips/2026-01-01_12-00-00-front.mp4')
+        assert rec == arc
+
+    def test_saved_clips_keys_include_event_folder(self):
+        key = canonical_key(
+            '/mnt/gadget/part1-ro/TeslaCam/SavedClips/'
+            '2026-01-01_12-00-00/2026-01-01_12-00-00-front.mp4'
+        )
+        assert key == 'SavedClips/2026-01-01_12-00-00/2026-01-01_12-00-00-front.mp4'
+
+    def test_sentry_clips_keys_include_event_folder(self):
+        key = canonical_key(
+            'SentryClips/2026-01-01_12-00-00/2026-01-01_12-00-00-front.mp4'
+        )
+        assert key == 'SentryClips/2026-01-01_12-00-00/2026-01-01_12-00-00-front.mp4'
+
+    def test_different_events_dont_collide(self):
+        """Two SavedClips events must not share a canonical key even if a
+        clip basename happens to match (Tesla can use generic timestamps
+        within an event)."""
+        a = canonical_key(
+            'SavedClips/2026-01-01_12-00-00/2026-01-01_12-00-00-front.mp4'
+        )
+        b = canonical_key(
+            'SavedClips/2026-02-15_09-30-00/2026-01-01_12-00-00-front.mp4'
+        )
+        assert a != b
+
+    def test_bare_basename_collides_with_recent(self):
+        """Legacy DB rows storing just the basename must dedupe with their
+        Recent/Archived siblings."""
+        bare = canonical_key('2026-01-01_12-00-00-front.mp4')
+        rec = canonical_key('RecentClips/2026-01-01_12-00-00-front.mp4')
+        assert bare == rec
+
+    def test_handles_windows_separators(self):
+        """File paths on Windows / cross-platform tooling may use backslashes."""
+        key = canonical_key(
+            r'C:\TeslaCam\SentryClips\2026-01-01_12-00-00\2026-01-01_12-00-00-front.mp4'
+        )
+        assert key == 'SentryClips/2026-01-01_12-00-00/2026-01-01_12-00-00-front.mp4'
+
+
+class TestCandidateDbPaths:
+    def test_basename_key_expands_to_three_forms(self):
+        paths = candidate_db_paths('2026-01-01_12-00-00-front.mp4')
+        assert set(paths) == {
+            '2026-01-01_12-00-00-front.mp4',
+            'RecentClips/2026-01-01_12-00-00-front.mp4',
+            'ArchivedClips/2026-01-01_12-00-00-front.mp4',
+        }
+
+    def test_event_folder_key_returns_only_itself(self):
+        key = 'SavedClips/2026-01-01_12-00-00/2026-01-01_12-00-00-front.mp4'
+        assert candidate_db_paths(key) == [key]
+
+
 # ---------------------------------------------------------------------------
 # Query API Tests
 # ---------------------------------------------------------------------------
@@ -392,6 +492,66 @@ class TestQueryAPIs:
         trips = query_trips(db_with_data)
         assert len(trips) == 1
         assert trips[0]['source_folder'] == 'RecentClips'
+        # Enrichment is now part of the same SQL — make sure it still
+        # surfaces the per-trip event/video counts.
+        assert trips[0]['event_count'] == 1
+        assert trips[0]['video_count'] == 1
+
+    def test_query_trips_zero_counts_when_empty(self, tmp_path):
+        # A trip with no events and no waypoints must still come back with
+        # numeric counts (not NULL) — the UI sorts/filters on these fields.
+        db_path = str(tmp_path / "empty_trip.db")
+        conn = _init_db(db_path)
+        conn.execute(
+            "INSERT INTO trips (id, start_time, end_time, distance_km, "
+            "                   source_folder) "
+            "VALUES (99, '2025-12-01T00:00:00', '2025-12-01T00:10:00', "
+            "        1.0, 'RecentClips')"
+        )
+        conn.commit()
+        conn.close()
+
+        trips = query_trips(db_path)
+        assert len(trips) == 1
+        assert trips[0]['event_count'] == 0
+        assert trips[0]['video_count'] == 0
+
+    def test_query_trips_distinct_video_count(self, tmp_path):
+        # Multiple waypoints sharing the same video_path must collapse to
+        # ONE video, not N. This is the bug the covering index fixes.
+        db_path = str(tmp_path / "distinct.db")
+        conn = _init_db(db_path)
+        conn.execute(
+            "INSERT INTO trips (id, start_time, end_time, distance_km, "
+            "                   source_folder) "
+            "VALUES (1, '2025-12-01T00:00:00', '2025-12-01T00:10:00', "
+            "        1.0, 'RecentClips')"
+        )
+        # 3 waypoints in same clip + 2 in another + 1 with NULL path
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO waypoints (trip_id, timestamp, lat, lon, "
+                "                       video_path) "
+                "VALUES (1, ?, 37.0, -122.0, 'RecentClips/clip_a-front.mp4')",
+                (f'2025-12-01T00:00:{i:02d}',)
+            )
+        for i in range(2):
+            conn.execute(
+                "INSERT INTO waypoints (trip_id, timestamp, lat, lon, "
+                "                       video_path) "
+                "VALUES (1, ?, 37.0, -122.0, 'RecentClips/clip_b-front.mp4')",
+                (f'2025-12-01T00:01:{i:02d}',)
+            )
+        conn.execute(
+            "INSERT INTO waypoints (trip_id, timestamp, lat, lon, "
+            "                       video_path) "
+            "VALUES (1, '2025-12-01T00:02:00', 37.0, -122.0, NULL)"
+        )
+        conn.commit()
+        conn.close()
+
+        trips = query_trips(db_path)
+        assert trips[0]['video_count'] == 2  # NULL excluded; duplicates collapsed
 
     def test_query_trips_with_date_filter(self, db_with_data):
         trips = query_trips(db_with_data, date_from='2025-11-09')
@@ -424,6 +584,13 @@ class TestQueryAPIs:
 # End-to-End Indexing Tests
 # ---------------------------------------------------------------------------
 
+def _unpack(result: IndexResult):
+    """Tests historically asserted on ``(waypoint_count, event_count)``;
+    keep that shape locally so individual tests stay readable while the
+    public API returns the structured :class:`IndexResult`."""
+    return result.waypoints, result.events
+
+
 class TestIndexVideo:
     def test_index_synthetic_video(self, tmp_path):
         db_path = str(tmp_path / "test.db")
@@ -442,11 +609,11 @@ class TestIndexVideo:
         video_file = teslacam / "2025-11-08_08-15-44-front.mp4"
         video_file.write_bytes(mp4_data)
 
-        wc, ec = _index_video(
+        wc, ec = _unpack(_index_video(
             conn, str(video_file), str(tmp_path / "TeslaCam"),
             sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
             trip_gap_minutes=5,
-        )
+        ))
 
         assert wc == 3
         trips = conn.execute("SELECT * FROM trips").fetchall()
@@ -471,11 +638,11 @@ class TestIndexVideo:
         video_file = teslacam / "2025-11-08_08-15-44-front.mp4"
         video_file.write_bytes(mp4_data)
 
-        wc, ec = _index_video(
+        wc, ec = _unpack(_index_video(
             conn, str(video_file), str(tmp_path / "TeslaCam"),
             sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
             trip_gap_minutes=5,
-        )
+        ))
 
         assert wc == 2
         assert ec >= 1  # Should detect harsh braking
@@ -498,14 +665,17 @@ class TestIndexVideo:
         video_file = teslacam / "2025-11-08_08-15-44-front.mp4"
         video_file.write_bytes(mp4_data)
 
-        wc, ec = _index_video(
+        result = _index_video(
             conn, str(video_file), str(tmp_path / "TeslaCam"),
             sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
             trip_gap_minutes=5,
         )
 
-        assert wc == 0
-        assert ec == 0
+        assert result.waypoints == 0
+        assert result.events == 0
+        # Recent-folder no-GPS clips are recorded as NO_GPS_RECORDED so the
+        # queue worker can drop the row without flapping retries.
+        assert result.outcome == IndexOutcome.NO_GPS_RECORDED
         conn.close()
 
 
@@ -664,3 +834,955 @@ class TestEventChartData:
         data = get_event_chart_data(db_path)
         assert data['by_type']['labels'] == []
         assert data['by_type']['values'] == []
+
+
+
+
+# ---------------------------------------------------------------------------
+# IndexResult Outcome Dispatch Tests
+# ---------------------------------------------------------------------------
+
+class TestIndexResultOutcomes:
+    """Each non-INDEXED outcome maps to a specific queue dispatch decision.
+    These tests pin the contract so the worker can rely on it."""
+
+    def test_terminal_outcomes(self):
+        # All of these allow the queue worker to delete the row.
+        for outcome in (
+            IndexOutcome.INDEXED,
+            IndexOutcome.ALREADY_INDEXED,
+            IndexOutcome.DUPLICATE_UPGRADED,
+            IndexOutcome.NO_GPS_RECORDED,
+            IndexOutcome.NOT_FRONT_CAMERA,
+            IndexOutcome.FILE_MISSING,
+        ):
+            assert IndexResult(outcome).terminal, outcome
+
+    def test_non_terminal_outcomes_require_retry(self):
+        # The queue must NOT delete these — worker either reschedules
+        # (TOO_NEW), backs off (PARSE_ERROR), or releases the claim
+        # (DB_BUSY).
+        for outcome in (
+            IndexOutcome.TOO_NEW,
+            IndexOutcome.PARSE_ERROR,
+            IndexOutcome.DB_BUSY,
+        ):
+            assert not IndexResult(outcome).terminal, outcome
+
+
+class TestIndexSingleFileOutcomes:
+    def test_not_front_camera(self, tmp_path):
+        # Right basename for a Tesla clip but wrong camera.
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+        clip = tmp_path / "2025-11-08_08-15-44-back.mp4"
+        clip.write_bytes(b'')
+
+        result = index_single_file(str(clip), db, str(tmp_path))
+        assert result.outcome == IndexOutcome.NOT_FRONT_CAMERA
+        assert result.terminal
+
+    def test_file_missing(self, tmp_path):
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+        result = index_single_file(
+            str(tmp_path / "does-not-exist-front.mp4"),
+            db,
+            str(tmp_path),
+        )
+        assert result.outcome == IndexOutcome.FILE_MISSING
+        assert result.terminal
+
+    def test_too_new(self, tmp_path):
+        # File exists but mtime is now() — Tesla may still be writing.
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+        clip = tmp_path / "2025-11-08_08-15-44-front.mp4"
+        clip.write_bytes(b'')
+        result = index_single_file(str(clip), db, str(tmp_path))
+        assert result.outcome == IndexOutcome.TOO_NEW
+        assert not result.terminal  # worker should retry once mtime ages
+
+    def test_parse_error_caught(self, tmp_path):
+        # Old-enough file (>120s) with no MP4 atoms at all → parser raises.
+        # Result is reported as PARSE_ERROR so the queue worker can apply
+        # exponential backoff instead of looping forever.
+        import os as _os
+        import time as _time
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+        clip = tmp_path / "2025-11-08_08-15-44-front.mp4"
+        clip.write_bytes(b'not an mp4 file at all')
+        # Backdate so the TOO_NEW guard doesn't intercept us.
+        old = _time.time() - 600
+        _os.utime(str(clip), (old, old))
+
+        result = index_single_file(str(clip), db, str(tmp_path))
+        # Could legitimately come back as either NO_GPS_RECORDED (parser
+        # found 0 SEI frames) or PARSE_ERROR (parser raised). Both are
+        # acceptable terminal-or-retry classifications — the assertion
+        # we care about is that we never get an INDEXED with 0 waypoints.
+        assert result.outcome in (
+            IndexOutcome.NO_GPS_RECORDED,
+            IndexOutcome.PARSE_ERROR,
+        )
+        if result.outcome == IndexOutcome.PARSE_ERROR:
+            assert result.error is not None
+            assert not result.terminal
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Indexing queue
+# ---------------------------------------------------------------------------
+
+
+class TestPriorityForPath:
+    def test_sentry_clip_is_highest_priority(self):
+        path = '/mnt/teslacam/SentryClips/2025-01-01_event/clip-front.mp4'
+        assert priority_for_path(path) == _PRIORITY_SENTRY_SAVED
+
+    def test_saved_clip_is_highest_priority(self):
+        path = '/mnt/teslacam/SavedClips/event/clip-front.mp4'
+        assert priority_for_path(path) == _PRIORITY_SENTRY_SAVED
+
+    def test_archived_clip_lower_than_event(self):
+        path = '/mnt/sd/ArchivedClips/2025-01-01/clip-front.mp4'
+        assert priority_for_path(path) == _PRIORITY_ARCHIVE
+        assert _PRIORITY_ARCHIVE > _PRIORITY_SENTRY_SAVED
+
+    def test_recent_clip_lowest_among_known_folders(self):
+        path = '/mnt/teslacam/RecentClips/clip-front.mp4'
+        assert priority_for_path(path) == _PRIORITY_RECENT
+        assert _PRIORITY_RECENT > _PRIORITY_ARCHIVE
+
+    def test_windows_path_separator_is_normalized(self):
+        path = r'D:\TeslaCam\SentryClips\event\clip-front.mp4'
+        assert priority_for_path(path) == _PRIORITY_SENTRY_SAVED
+
+    def test_unknown_folder_gets_default(self):
+        path = '/some/random/place/clip.mp4'
+        assert priority_for_path(path) == 50
+
+    def test_empty_path_gets_default(self):
+        assert priority_for_path('') == 50
+
+
+class TestComputeBackoff:
+    def test_first_failure_uses_base_backoff(self):
+        # attempts=0 means "no failures yet, computing wait for the first
+        # retry". delay = base * 2^0 = base.
+        assert compute_backoff(0) == 60.0
+
+    def test_backoff_doubles_each_attempt(self):
+        assert compute_backoff(1) == 120.0
+        assert compute_backoff(2) == 240.0
+        assert compute_backoff(3) == 480.0
+
+    def test_backoff_is_capped(self):
+        # 60 * 2^10 = 61440, well past the 3600 cap.
+        assert compute_backoff(10) == 3600.0
+
+    def test_negative_attempts_treated_as_zero(self):
+        assert compute_backoff(-5) == 60.0
+
+
+class TestEnqueue:
+    @pytest.fixture
+    def db(self, tmp_path):
+        db_path = str(tmp_path / "queue.db")
+        _init_db(db_path)
+        return db_path
+
+    def test_enqueue_writes_one_row(self, db):
+        assert enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/2025-01-01_clip-front.mp4',
+            source='watcher',
+        )
+        with sqlite3.connect(db) as c:
+            rows = c.execute("SELECT * FROM indexing_queue").fetchall()
+        assert len(rows) == 1
+
+    def test_enqueue_uses_canonical_key(self, db):
+        # Same canonical_key for both Recent and Archived versions.
+        assert enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/2025-01-01_clip-front.mp4',
+        )
+        assert enqueue_for_indexing(
+            db, '/mnt/sd/ArchivedClips/2025-01-01_clip-front.mp4',
+        )
+        with sqlite3.connect(db) as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0]
+        # One row, deduplicated by canonical_key.
+        assert count == 1
+
+    def test_enqueue_lowers_priority_when_more_urgent(self, db):
+        # First enqueue at default (50), then upgrade to sentry priority.
+        assert enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',  # canonical_key = "clip.mp4"
+            priority=50,
+        )
+        assert enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+            priority=10,
+        )
+        with sqlite3.connect(db) as c:
+            prio = c.execute(
+                "SELECT priority FROM indexing_queue"
+            ).fetchone()[0]
+        assert prio == 10
+
+    def test_enqueue_does_not_raise_priority(self, db):
+        assert enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+            priority=10,
+        )
+        assert enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+            priority=50,
+        )
+        with sqlite3.connect(db) as c:
+            prio = c.execute(
+                "SELECT priority FROM indexing_queue"
+            ).fetchone()[0]
+        # MIN(50, 10) = 10 — re-enqueue at lower priority is a no-op.
+        assert prio == 10
+
+    def test_enqueue_empty_path_returns_false(self, db):
+        assert enqueue_for_indexing(db, '') is False
+        assert enqueue_for_indexing(db, None) is False  # type: ignore
+
+    def test_enqueue_does_not_overwrite_claimed_row(self, db):
+        # Simulate a worker holding a claim. A new enqueue for the same
+        # canonical_key must NOT change file_path or source — that would
+        # rip the file out from under the worker.
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+            source='watcher',
+        )
+        with sqlite3.connect(db) as c:
+            c.execute(
+                """UPDATE indexing_queue SET claimed_by='w1', claimed_at=?
+                   WHERE canonical_key='clip.mp4'""",
+                (time.time(),),
+            )
+        # Try to "upgrade" the path/source while it's claimed.
+        enqueue_for_indexing(
+            db, '/mnt/sd/ArchivedClips/clip.mp4',
+            source='archive',
+        )
+        with sqlite3.connect(db) as c:
+            row = c.execute(
+                """SELECT file_path, source FROM indexing_queue
+                   WHERE canonical_key='clip.mp4'"""
+            ).fetchone()
+        assert row[0] == '/mnt/teslacam/RecentClips/clip.mp4'
+        assert row[1] == 'watcher'
+
+    def test_enqueue_with_next_attempt_at_defers_first_claim(self, db):
+        # Producers (the archive flow in particular) need to defer the
+        # first attempt atomically with the INSERT to avoid racing the
+        # worker. Verify the deferral lands on a fresh row.
+        future = time.time() + 120
+        assert enqueue_for_indexing(
+            db, '/mnt/sd/ArchivedClips/clip-front.mp4',
+            source='archive',
+            next_attempt_at=future,
+        ) is True
+        with sqlite3.connect(db) as c:
+            row = c.execute(
+                """SELECT next_attempt_at FROM indexing_queue
+                   WHERE canonical_key='clip-front.mp4'"""
+            ).fetchone()
+        assert abs(row[0] - future) < 0.01
+
+    def test_enqueue_without_next_attempt_at_is_immediate(self, db):
+        # The default is "available right now" so the watcher path
+        # doesn't need to know about the deferral feature.
+        assert enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip-front.mp4',
+        ) is True
+        with sqlite3.connect(db) as c:
+            row = c.execute(
+                """SELECT next_attempt_at FROM indexing_queue
+                   WHERE canonical_key='clip-front.mp4'"""
+            ).fetchone()
+        assert row[0] == 0.0
+
+
+class TestEnqueueMany:
+    @pytest.fixture
+    def db(self, tmp_path):
+        db_path = str(tmp_path / "queue.db")
+        _init_db(db_path)
+        return db_path
+
+    def test_batch_inserts_all(self, db):
+        items = [
+            ('/mnt/teslacam/RecentClips/a-front.mp4', None),
+            ('/mnt/teslacam/RecentClips/b-front.mp4', None),
+            ('/mnt/teslacam/SentryClips/event/c-front.mp4', None),
+        ]
+        n = enqueue_many_for_indexing(db, items, source='catchup')
+        assert n == 3
+        with sqlite3.connect(db) as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0]
+        assert count == 3
+
+    def test_batch_dedups_by_canonical_key(self, db):
+        # The Recent and Archived versions share canonical_key — second
+        # one collapses into the first.
+        items = [
+            ('/mnt/teslacam/RecentClips/clip-front.mp4', None),
+            ('/mnt/sd/ArchivedClips/clip-front.mp4', None),
+        ]
+        enqueue_many_for_indexing(db, items)
+        with sqlite3.connect(db) as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0]
+        assert count == 1
+
+    def test_batch_skips_empty(self, db):
+        items = [
+            ('', None),
+            ('/mnt/teslacam/RecentClips/a-front.mp4', None),
+        ]
+        n = enqueue_many_for_indexing(db, items)
+        assert n == 1
+
+
+class TestClaimQueueItem:
+    @pytest.fixture
+    def db(self, tmp_path):
+        db_path = str(tmp_path / "queue.db")
+        _init_db(db_path)
+        return db_path
+
+    def test_returns_none_when_empty(self, db):
+        assert claim_next_queue_item(db, 'worker-1') is None
+
+    def test_claim_returns_highest_priority_first(self, db):
+        # Insert in random order.
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/recent.mp4',
+            priority=_PRIORITY_RECENT,
+        )
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/SentryClips/event/sentry-front.mp4',
+            priority=_PRIORITY_SENTRY_SAVED,
+        )
+        enqueue_for_indexing(
+            db, '/mnt/sd/ArchivedClips/archive.mp4',
+            priority=_PRIORITY_ARCHIVE,
+        )
+        row = claim_next_queue_item(db, 'worker-1')
+        assert row is not None
+        assert row['canonical_key'] == 'SentryClips/event/sentry-front.mp4'
+        assert row['priority'] == _PRIORITY_SENTRY_SAVED
+
+    def test_claim_marks_row_claimed(self, db):
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+        )
+        claim_next_queue_item(db, 'worker-X')
+        with sqlite3.connect(db) as c:
+            row = c.execute(
+                "SELECT claimed_by, claimed_at FROM indexing_queue"
+            ).fetchone()
+        assert row[0] == 'worker-X'
+        assert row[1] is not None
+
+    def test_two_concurrent_claims_dont_double_book(self, db, tmp_path):
+        # The atomic-claim contract: even with two threads racing, a
+        # given canonical_key can only be picked once per release cycle.
+        # Enqueue 5 items, spawn 2 worker threads, each claiming as fast
+        # as possible. No canonical_key should appear in both workers'
+        # results.
+        import threading
+        for i in range(5):
+            enqueue_for_indexing(
+                db, f'/mnt/teslacam/RecentClips/clip{i}.mp4',
+            )
+        results = {'a': [], 'b': []}
+
+        def claim_loop(label):
+            for _ in range(10):
+                row = claim_next_queue_item(db, label)
+                if row is None:
+                    break
+                results[label].append(row['canonical_key'])
+
+        ta = threading.Thread(target=claim_loop, args=('a',))
+        tb = threading.Thread(target=claim_loop, args=('b',))
+        ta.start(); tb.start()
+        ta.join(timeout=10); tb.join(timeout=10)
+
+        all_claimed = results['a'] + results['b']
+        assert len(all_claimed) == 5
+        assert len(set(all_claimed)) == 5  # No duplicates.
+
+    def test_claim_skips_future_attempts(self, db):
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+        )
+        # Defer to 100s in the future.
+        defer_queue_item(
+            db, 'clip.mp4', time.time() + 100,
+        )
+        assert claim_next_queue_item(db, 'worker-1') is None
+
+    def test_claim_skips_dead_letter_rows(self, db):
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+        )
+        # Drive attempts past the cap.
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "UPDATE indexing_queue SET attempts = ?",
+                (_PARSE_ERROR_MAX_ATTEMPTS,),
+            )
+        assert claim_next_queue_item(db, 'worker-1') is None
+
+
+class TestCompleteAndRelease:
+    @pytest.fixture
+    def db(self, tmp_path):
+        db_path = str(tmp_path / "queue.db")
+        _init_db(db_path)
+        enqueue_for_indexing(
+            db_path, '/mnt/teslacam/RecentClips/clip.mp4',
+        )
+        claim_next_queue_item(db_path, 'worker-1')
+        return db_path
+
+    def test_complete_deletes_row(self, db):
+        assert complete_queue_item(db, 'clip.mp4') is True
+        with sqlite3.connect(db) as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0]
+        assert count == 0
+
+    def test_complete_no_row_returns_false(self, db):
+        assert complete_queue_item(db, 'nonexistent.mp4') is False
+
+    def test_release_clears_claim_but_keeps_row(self, db):
+        assert release_claim(db, 'clip.mp4') is True
+        with sqlite3.connect(db) as c:
+            row = c.execute(
+                "SELECT claimed_by, claimed_at, attempts FROM indexing_queue"
+            ).fetchone()
+        assert row[0] is None
+        assert row[1] is None
+        assert row[2] == 0  # release does NOT bump attempts
+
+    def test_after_release_can_be_reclaimed(self, db):
+        release_claim(db, 'clip.mp4')
+        row = claim_next_queue_item(db, 'worker-2')
+        assert row is not None
+        assert row['canonical_key'] == 'clip.mp4'
+
+
+class TestDeferQueueItem:
+    @pytest.fixture
+    def db(self, tmp_path):
+        db_path = str(tmp_path / "queue.db")
+        _init_db(db_path)
+        enqueue_for_indexing(
+            db_path, '/mnt/teslacam/RecentClips/clip.mp4',
+        )
+        claim_next_queue_item(db_path, 'worker-1')
+        return db_path
+
+    def test_defer_without_bump_does_not_increment_attempts(self, db):
+        future = time.time() + 200
+        assert defer_queue_item(
+            db, 'clip.mp4', future, bump_attempts=False,
+        )
+        with sqlite3.connect(db) as c:
+            row = c.execute(
+                """SELECT attempts, next_attempt_at, claimed_by
+                   FROM indexing_queue"""
+            ).fetchone()
+        assert row[0] == 0
+        assert abs(row[1] - future) < 1e-3
+        assert row[2] is None
+
+    def test_defer_with_bump_increments_attempts(self, db):
+        defer_queue_item(
+            db, 'clip.mp4', time.time() + 60,
+            bump_attempts=True, last_error='boom',
+        )
+        with sqlite3.connect(db) as c:
+            row = c.execute(
+                "SELECT attempts, last_error FROM indexing_queue"
+            ).fetchone()
+        assert row[0] == 1
+        assert row[1] == 'boom'
+
+
+class TestRecoverStaleClaims:
+    def test_releases_old_claim(self, tmp_path):
+        db = str(tmp_path / "stale.db")
+        _init_db(db)
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+        )
+        # Manually plant an ancient claim.
+        with sqlite3.connect(db) as c:
+            c.execute(
+                """UPDATE indexing_queue
+                   SET claimed_by='dead-worker', claimed_at=?""",
+                (time.time() - 7200,),  # 2 hours ago
+            )
+        n = recover_stale_claims(db, max_age_seconds=1800)
+        assert n == 1
+        with sqlite3.connect(db) as c:
+            row = c.execute(
+                "SELECT claimed_by FROM indexing_queue"
+            ).fetchone()
+        assert row[0] is None
+
+    def test_keeps_recent_claim(self, tmp_path):
+        db = str(tmp_path / "stale.db")
+        _init_db(db)
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/clip.mp4',
+        )
+        with sqlite3.connect(db) as c:
+            c.execute(
+                """UPDATE indexing_queue
+                   SET claimed_by='active-worker', claimed_at=?""",
+                (time.time() - 60,),  # 1 minute ago
+            )
+        assert recover_stale_claims(db, max_age_seconds=1800) == 0
+
+
+class TestQueueStatus:
+    def test_status_on_empty_queue(self, tmp_path):
+        db = str(tmp_path / "q.db")
+        _init_db(db)
+        st = get_queue_status(db)
+        assert st['queue_depth'] == 0
+        assert st['claimed_count'] == 0
+        assert st['dead_letter_count'] == 0
+        assert st['next_ready_at'] is None
+
+    def test_status_reflects_state(self, tmp_path):
+        db = str(tmp_path / "q.db")
+        _init_db(db)
+        # Three pending, one claimed, one dead-lettered.
+        for i in range(3):
+            enqueue_for_indexing(
+                db, f'/mnt/teslacam/RecentClips/p{i}.mp4',
+            )
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/claimed.mp4',
+        )
+        with sqlite3.connect(db) as c:
+            c.execute(
+                """UPDATE indexing_queue
+                   SET claimed_by='w', claimed_at=?
+                   WHERE canonical_key='claimed.mp4'""",
+                (time.time(),),
+            )
+        enqueue_for_indexing(
+            db, '/mnt/teslacam/RecentClips/dead.mp4',
+        )
+        with sqlite3.connect(db) as c:
+            c.execute(
+                """UPDATE indexing_queue SET attempts=?
+                   WHERE canonical_key='dead.mp4'""",
+                (_PARSE_ERROR_MAX_ATTEMPTS,),
+            )
+        st = get_queue_status(db)
+        assert st['queue_depth'] == 3
+        assert st['claimed_count'] == 1
+        assert st['dead_letter_count'] == 1
+        assert st['next_ready_at'] is not None
+
+
+class TestClearQueue:
+    def test_removes_everything(self, tmp_path):
+        db = str(tmp_path / "q.db")
+        _init_db(db)
+        for i in range(5):
+            enqueue_for_indexing(
+                db, f'/mnt/teslacam/RecentClips/c{i}.mp4',
+            )
+        n = clear_queue(db)
+        assert n == 5
+        with sqlite3.connect(db) as c:
+            assert c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0] == 0
+
+    def test_clear_pending_preserves_claimed_rows(self, tmp_path):
+        # /api/index/cancel must keep the in-flight file's claim row
+        # intact so the worker can finish the file without its
+        # owner-guarded complete failing on a vanished row.
+        db = str(tmp_path / "q.db")
+        _init_db(db)
+        for i in range(3):
+            enqueue_for_indexing(
+                db, f'/mnt/teslacam/RecentClips/c{i}-front.mp4',
+            )
+        # Claim one — simulates the worker mid-file.
+        claimed = claim_next_queue_item(db, worker_id='wk-1')
+        assert claimed is not None
+
+        n = clear_pending_queue(db)
+        # Two pending unclaimed rows removed; the claimed row stays.
+        assert n == 2
+
+        with sqlite3.connect(db) as c:
+            rows = c.execute(
+                "SELECT canonical_key, claimed_by FROM indexing_queue"
+            ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == claimed['canonical_key']
+        assert rows[0][1] == 'wk-1'
+
+    def test_clear_all_removes_claimed_rows_too(self, tmp_path):
+        # The advanced-rebuild path uses clear_all_queue (after pausing
+        # the worker) to wipe everything.
+        db = str(tmp_path / "q.db")
+        _init_db(db)
+        for i in range(3):
+            enqueue_for_indexing(
+                db, f'/mnt/teslacam/RecentClips/c{i}-front.mp4',
+            )
+        claim_next_queue_item(db, worker_id='wk-1')
+
+        n = clear_all_queue(db)
+        assert n == 3
+        with sqlite3.connect(db) as c:
+            assert c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0] == 0
+
+
+class TestPurgeDeletedVideos:
+    """Targeted-purge regression tests.
+
+    The targeted purge flow runs from the file-watcher's delete
+    callback whenever Tesla rotates a clip out of RecentClips. Older
+    versions used ``LIKE '%basename%'`` to delete waypoints, which
+    erased ArchivedClips geodata for clips that had a same-basename
+    rotated copy in RecentClips. These tests pin the safe behavior:
+
+      - skip purge entirely when a surviving on-disk copy exists
+      - exact-match candidate relative paths instead of basename LIKE
+    """
+
+    def _seed(self, db, *, waypoint_video_path, indexed_abs_path,
+              file_size=1024, file_mtime=100.0):
+        from services.mapping_service import purge_deleted_videos  # noqa: F401
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "INSERT INTO trips (start_time, indexed_at) "
+                "VALUES ('2025-01-01T00:00:00', '2025-01-01T00:00:00')"
+            )
+            trip_id = c.execute(
+                "SELECT id FROM trips ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+            c.execute(
+                "INSERT INTO waypoints "
+                "(trip_id, timestamp, lat, lon, video_path) "
+                "VALUES (?, '2025-01-01T00:00:01', 37.0, -122.0, ?)",
+                (trip_id, waypoint_video_path),
+            )
+            c.execute(
+                "INSERT INTO indexed_files "
+                "(file_path, file_size, file_mtime, indexed_at, "
+                " waypoint_count, event_count) "
+                "VALUES (?, ?, ?, '2025-01-01T00:00:00', 1, 0)",
+                (indexed_abs_path, file_size, file_mtime),
+            )
+            c.commit()
+        return trip_id
+
+    def test_purge_skips_when_archive_copy_exists(self, tmp_path):
+        # Reproduces BLOCKING bug: Tesla rotates RecentClips/foo-front
+        # while ArchivedClips/foo-front (same basename) still exists.
+        # The waypoint MUST survive — it's tied to the archived copy.
+        from services.mapping_service import purge_deleted_videos
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+
+        recent_path = str(tmp_path / "TeslaCam" / "RecentClips" /
+                           "2025-01-01_00-foo-front.mp4")
+        archive_path = str(tmp_path / "ArchivedClips" /
+                            "2025-01-01_00-foo-front.mp4")
+
+        os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+        # Surviving archive copy
+        with open(archive_path, "wb") as f:
+            f.write(b"hello")
+        # No file at recent_path — Tesla deleted it. The watcher fires
+        # purge_deleted_videos with the recent_path.
+
+        # The waypoint reflects the archived copy (post-archive rewrite)
+        self._seed(
+            db,
+            waypoint_video_path='ArchivedClips/'
+                                  '2025-01-01_00-foo-front.mp4',
+            indexed_abs_path=archive_path,
+        )
+
+        # Patch ARCHIVE_DIR so the surviving-copy check finds it.
+        import config as _cfg
+        old_dir = getattr(_cfg, 'ARCHIVE_DIR', None)
+        old_en = getattr(_cfg, 'ARCHIVE_ENABLED', None)
+        _cfg.ARCHIVE_DIR = str(tmp_path / "ArchivedClips")
+        _cfg.ARCHIVE_ENABLED = True
+        try:
+            result = purge_deleted_videos(
+                db, deleted_paths=[recent_path],
+            )
+        finally:
+            if old_dir is not None:
+                _cfg.ARCHIVE_DIR = old_dir
+            if old_en is not None:
+                _cfg.ARCHIVE_ENABLED = old_en
+
+        # Nothing purged — surviving copy detected.
+        assert result['purged_waypoints'] == 0
+        assert result['purged_files'] == 0
+
+        with sqlite3.connect(db) as c:
+            wp_count = c.execute(
+                "SELECT COUNT(*) FROM waypoints"
+            ).fetchone()[0]
+            file_count = c.execute(
+                "SELECT COUNT(*) FROM indexed_files"
+            ).fetchone()[0]
+        assert wp_count == 1
+        assert file_count == 1
+
+    def test_purge_exact_matches_when_no_surviving_copy(self, tmp_path):
+        # Counterpart: with no surviving copy on disk, the targeted
+        # purge SHOULD remove the matching waypoints/indexed_files
+        # rows — using exact-match against canonical candidate paths,
+        # not a basename LIKE.
+        from services.mapping_service import purge_deleted_videos
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+
+        recent_path = str(tmp_path / "TeslaCam" / "RecentClips" /
+                           "2025-01-01_00-bar-front.mp4")
+        # No file written anywhere — both Recent and Archived missing.
+
+        self._seed(
+            db,
+            waypoint_video_path='RecentClips/'
+                                  '2025-01-01_00-bar-front.mp4',
+            indexed_abs_path=recent_path,
+        )
+
+        import config as _cfg
+        old_dir = getattr(_cfg, 'ARCHIVE_DIR', None)
+        old_en = getattr(_cfg, 'ARCHIVE_ENABLED', None)
+        _cfg.ARCHIVE_DIR = str(tmp_path / "ArchivedClips")  # nonexistent
+        _cfg.ARCHIVE_ENABLED = True
+        try:
+            result = purge_deleted_videos(
+                db, deleted_paths=[recent_path],
+            )
+        finally:
+            if old_dir is not None:
+                _cfg.ARCHIVE_DIR = old_dir
+            if old_en is not None:
+                _cfg.ARCHIVE_ENABLED = old_en
+
+        assert result['purged_files'] == 1
+        assert result['purged_waypoints'] == 1
+
+        with sqlite3.connect(db) as c:
+            assert c.execute(
+                "SELECT COUNT(*) FROM waypoints"
+            ).fetchone()[0] == 0
+            assert c.execute(
+                "SELECT COUNT(*) FROM indexed_files"
+            ).fetchone()[0] == 0
+
+    def test_purge_does_not_substring_match_unrelated_basename(
+        self, tmp_path,
+    ):
+        # A clip named "front.mp4" must not erase waypoints for
+        # unrelated clips like "front-cam-extra.mp4". Older basename-
+        # LIKE matching would have done so — the new candidate-path
+        # exact match prevents it.
+        from services.mapping_service import purge_deleted_videos
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+
+        # Waypoint for an UNRELATED clip — substring of victim basename
+        unrelated_path = str(tmp_path / "TeslaCam" / "RecentClips" /
+                              "2025-01-01_00-extra-front.mp4")
+        self._seed(
+            db,
+            waypoint_video_path='RecentClips/'
+                                  '2025-01-01_00-extra-front.mp4',
+            indexed_abs_path=unrelated_path,
+        )
+
+        # Purge a file with a DIFFERENT basename. The unrelated row
+        # must not be touched.
+        victim_path = str(tmp_path / "TeslaCam" / "RecentClips" /
+                           "2025-01-01_00-front.mp4")
+        result = purge_deleted_videos(
+            db, deleted_paths=[victim_path],
+        )
+
+        assert result['purged_waypoints'] == 0
+        with sqlite3.connect(db) as c:
+            assert c.execute(
+                "SELECT COUNT(*) FROM waypoints"
+            ).fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Boot catch-up scan
+# ---------------------------------------------------------------------------
+
+
+class TestBootCatchupScan:
+    def _make_teslacam(self, root, files):
+        """Create a fake TeslaCam tree with the given relative paths."""
+        for rel in files:
+            full = root / rel
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_bytes(b'')
+        return str(root)
+
+    def test_no_files_returns_zero_counts(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = self._make_teslacam(tmp_path / "TeslaCam", [])
+        result = boot_catchup_scan(db, tc)
+        assert result == {'scanned': 0, 'already_indexed': 0, 'enqueued': 0}
+
+    def test_enqueues_orphan_clips(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = self._make_teslacam(tmp_path / "TeslaCam", [
+            'RecentClips/2025-11-08_08-15-44-front.mp4',
+            'SavedClips/2025-11-08_evt/2025-11-08_08-15-44-front.mp4',
+            'SentryClips/2025-11-08_evt2/2025-11-08_08-20-00-front.mp4',
+        ])
+        result = boot_catchup_scan(db, tc)
+        # SavedClips and SentryClips entries enqueue (event-folder keys);
+        # RecentClips also enqueues (basename key). Total = 3 distinct
+        # canonical keys. (RecentClips and SavedClips share basename
+        # 2025-11-08_08-15-44-front.mp4 but DIFFERENT canonical_key
+        # because SavedClips is event-folder-keyed.)
+        assert result['scanned'] >= 3
+        assert result['enqueued'] == 3
+        with sqlite3.connect(db) as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0]
+        assert count == 3
+
+    def test_skips_already_indexed_clips(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = self._make_teslacam(tmp_path / "TeslaCam", [
+            'RecentClips/2025-11-08_08-15-44-front.mp4',
+        ])
+        # Pre-populate indexed_files with the same canonical_key.
+        full_path = os.path.join(
+            tc, 'RecentClips', '2025-11-08_08-15-44-front.mp4'
+        )
+        with sqlite3.connect(db) as c:
+            c.execute(
+                """INSERT INTO indexed_files
+                   (file_path, file_size, file_mtime, indexed_at,
+                    waypoint_count, event_count)
+                   VALUES (?, 0, 0, '2025-01-01', 5, 0)""",
+                (full_path,),
+            )
+        result = boot_catchup_scan(db, tc)
+        assert result['scanned'] >= 1
+        assert result['already_indexed'] >= 1
+        assert result['enqueued'] == 0
+
+    def test_skips_already_queued_clips(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = self._make_teslacam(tmp_path / "TeslaCam", [
+            'RecentClips/2025-11-08_08-15-44-front.mp4',
+        ])
+        full_path = os.path.join(
+            tc, 'RecentClips', '2025-11-08_08-15-44-front.mp4'
+        )
+        # Pre-queue (e.g. from a watcher event during the scan).
+        enqueue_for_indexing(db, full_path)
+        # Catch-up must not double-enqueue.
+        result = boot_catchup_scan(db, tc)
+        assert result['enqueued'] == 0
+        with sqlite3.connect(db) as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0]
+        assert count == 1
+
+    def test_recent_and_archived_dedup_by_canonical_key(self, tmp_path):
+        # If a clip exists in both RecentClips and ArchivedClips, the
+        # catch-up should enqueue only once (canonical_key dedup).
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        # ArchivedClips lives outside TeslaCam but _find_front_camera_videos
+        # picks it up via config.ARCHIVE_DIR. Without setting that env
+        # we just test the in-memory dedup against duplicate yields.
+        tc = self._make_teslacam(tmp_path / "TeslaCam", [
+            'RecentClips/dup-front.mp4',
+        ])
+        # Fake a second yield by also placing the file in a SavedClips
+        # event folder under the same basename — this WILL get a
+        # different canonical_key (event/saved keys are unique). So
+        # this verifies *that's* the case (no false dedup).
+        os.makedirs(os.path.join(tc, 'SavedClips', 'evt'), exist_ok=True)
+        with open(
+            os.path.join(tc, 'SavedClips', 'evt', 'dup-front.mp4'), 'wb'
+        ) as f:
+            f.write(b'')
+        result = boot_catchup_scan(db, tc)
+        # Two distinct canonical keys: bare 'dup-front.mp4' (Recent)
+        # and 'SavedClips/evt/dup-front.mp4' (Saved).
+        assert result['enqueued'] == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Daily stale scan
+# ---------------------------------------------------------------------------
+
+
+class TestDailyStaleScan:
+    def test_start_returns_true_first_time_false_second(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        try:
+            assert start_daily_stale_scan(db, lambda: None) is True
+            # Idempotent — second call should not start another thread.
+            assert start_daily_stale_scan(db, lambda: None) is False
+        finally:
+            stop_daily_stale_scan(timeout=2.0)
+
+    def test_stop_terminates_thread(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        start_daily_stale_scan(db, lambda: None)
+        # Cleanly stop within a reasonable time.
+        assert stop_daily_stale_scan(timeout=5.0) is True
+
+    def test_stop_when_not_running_is_safe(self, tmp_path):
+        # Should be idempotent even when nothing is running.
+        assert stop_daily_stale_scan(timeout=1.0) is True
+        assert stop_daily_stale_scan(timeout=1.0) is True
+

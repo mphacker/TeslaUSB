@@ -348,24 +348,52 @@ def _run_archive() -> None:
                 _update_geodata_paths(src_path, dst_path, rel_path)
 
                 # Index the archived copy immediately (reads from SD card,
-                # no USB gadget contention). Non-fatal — the startup
-                # indexer catches any files that fail here.
+                # no USB gadget contention). Non-fatal — and even if this
+                # crashes, the safety-net enqueue below means the worker
+                # will pick it up after 120s.
                 try:
                     from config import MAPPING_ENABLED, MAPPING_DB_PATH, MAPPING_SAMPLE_RATE
                     if MAPPING_ENABLED:
                         from services.video_service import get_teslacam_path
-                        from services.mapping_service import index_single_file
+                        from services.mapping_service import (
+                            enqueue_for_indexing,
+                            index_single_file,
+                        )
                         tc = get_teslacam_path()
                         if tc:
-                            wc, ec = index_single_file(
+                            # Safety net: enqueue with 120s deferral baked
+                            # into the INSERT. If the inline call below
+                            # succeeds, the worker will see ALREADY_INDEXED
+                            # and clear the row cheaply when 120s elapses.
+                            # If the archive job crashes between the copy
+                            # and the inline call, the worker still picks
+                            # up the file after the deferral — no waiting
+                            # until next boot. Atomic with the insert so
+                            # there's no race against a worker that might
+                            # claim the row before we can defer it.
+                            try:
+                                enqueue_for_indexing(
+                                    MAPPING_DB_PATH, dst_path,
+                                    source='archive',
+                                    next_attempt_at=time.time() + 120,
+                                )
+                            except Exception as e:
+                                logger.debug(
+                                    "Safety-net enqueue skipped: %s", e,
+                                )
+                            index_result = index_single_file(
                                 dst_path, MAPPING_DB_PATH, tc,
                                 sample_rate=MAPPING_SAMPLE_RATE,
                             )
-                            if wc > 0 or ec > 0:
-                                logger.info("Indexed during archive: %s — %d waypoints, %d events",
-                                            rel_path, wc, ec)
+                            if index_result.waypoints > 0 or index_result.events > 0:
+                                logger.info(
+                                    "Indexed during archive: %s — %d waypoints, %d events",
+                                    rel_path,
+                                    index_result.waypoints,
+                                    index_result.events,
+                                )
                 except ImportError:
-                    pass  # Protobuf missing — startup indexer will handle
+                    pass  # Protobuf missing — worker will pick it up
                 except Exception as e:
                     logger.debug("Archive post-index skipped for %s: %s", rel_path, e)
 
@@ -659,6 +687,7 @@ def _prune_non_driving_archives() -> int:
     # is marked for deletion. Side/back cams without a front-cam decision
     # are NEVER deleted here — only positive evidence drives deletion.
     deleted = 0
+    deleted_paths: List[str] = []
     for name in names:
         if not name.lower().endswith('.mp4'):
             continue
@@ -671,6 +700,7 @@ def _prune_non_driving_archives() -> int:
         try:
             os.unlink(fpath)
             deleted += 1
+            deleted_paths.append(fpath)
         except OSError:
             continue
 
@@ -679,15 +709,14 @@ def _prune_non_driving_archives() -> int:
             "Prune: deleted %d archived clips with positive non-driving evidence",
             deleted,
         )
-        # Purge stale geodata entries for the files we just deleted
+        # Targeted geodata purge for the exact files we just deleted.
         try:
             from config import MAPPING_ENABLED, MAPPING_DB_PATH
             if MAPPING_ENABLED and os.path.isfile(MAPPING_DB_PATH):
                 from services.mapping_service import purge_deleted_videos
-                from services.video_service import get_teslacam_path
-                tc = get_teslacam_path()
-                if tc:
-                    purge_deleted_videos(MAPPING_DB_PATH, teslacam_path=tc)
+                purge_deleted_videos(
+                    MAPPING_DB_PATH, deleted_paths=deleted_paths,
+                )
         except Exception as e:
             logger.debug("Prune geodata purge failed: %s", e)
 
@@ -832,49 +861,52 @@ def _enforce_retention() -> None:
     3. retention_days — age-based cleanup
 
     After deleting files, purges stale entries from geodata.db so the
-    map page doesn't show ghost trips with missing video files.
+    map page doesn't show ghost trips with missing video files. The
+    purge is targeted (the exact files we just deleted) rather than a
+    full-tree scan — much cheaper on a Pi with thousands of clips.
     """
     if not os.path.isdir(ARCHIVE_DIR):
         return
 
-    deleted_total = 0
+    deleted_paths: List[str] = []
 
     # Age-based cleanup first (cheapest — no disk usage calculation)
     if ARCHIVE_RETENTION_DAYS > 0:
         cutoff = time.time() - (ARCHIVE_RETENTION_DAYS * 86400)
-        deleted_total += _delete_files_older_than(cutoff)
+        deleted_paths.extend(_delete_files_older_than(cutoff))
 
     # Size-based cleanup (only when a hard cap is set)
     if ARCHIVE_MAX_SIZE_GB > 0:
         max_bytes = ARCHIVE_MAX_SIZE_GB * 1024 * 1024 * 1024
-        deleted_total += _trim_archive_to_size(max_bytes)
+        deleted_paths.extend(_trim_archive_to_size(max_bytes))
 
     # Free-space floor
     min_free_bytes = ARCHIVE_MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
-    deleted_total += _trim_archive_for_free_space(min_free_bytes)
+    deleted_paths.extend(_trim_archive_for_free_space(min_free_bytes))
 
-    # Purge stale geodata entries for files we just deleted
-    if deleted_total > 0:
+    # Targeted geodata purge for the exact files we just deleted.
+    if deleted_paths:
         try:
             from config import MAPPING_ENABLED, MAPPING_DB_PATH
             if MAPPING_ENABLED and os.path.isfile(MAPPING_DB_PATH):
                 from services.mapping_service import purge_deleted_videos
-                from services.video_service import get_teslacam_path
-                tc = get_teslacam_path()
-                if tc:
-                    result = purge_deleted_videos(MAPPING_DB_PATH, teslacam_path=tc)
-                    purged = result.get('purged_files', 0)
-                    if purged:
-                        logger.info("Retention: purged %d stale geodata entries", purged)
+                result = purge_deleted_videos(
+                    MAPPING_DB_PATH, deleted_paths=deleted_paths,
+                )
+                purged = result.get('purged_files', 0)
+                if purged:
+                    logger.info(
+                        "Retention: purged %d stale geodata entries", purged,
+                    )
         except Exception as e:
             logger.debug("Retention geodata purge failed (non-fatal): %s", e)
 
 
-def _delete_files_older_than(cutoff_timestamp: float) -> int:
-    """Delete archived files older than the cutoff. Returns count deleted."""
-    deleted = 0
+def _delete_files_older_than(cutoff_timestamp: float) -> List[str]:
+    """Delete archived files older than the cutoff. Returns deleted paths."""
+    deleted: List[str] = []
     if not os.path.isdir(ARCHIVE_DIR):
-        return 0
+        return deleted
 
     try:
         for name in os.listdir(ARCHIVE_DIR):
@@ -884,7 +916,7 @@ def _delete_files_older_than(cutoff_timestamp: float) -> int:
             try:
                 if os.stat(fpath).st_mtime < cutoff_timestamp:
                     os.unlink(fpath)
-                    deleted += 1
+                    deleted.append(fpath)
             except OSError:
                 continue
     except OSError:
@@ -892,35 +924,39 @@ def _delete_files_older_than(cutoff_timestamp: float) -> int:
 
     if deleted:
         logger.info("Retention: deleted %d files older than %d days",
-                     deleted, ARCHIVE_RETENTION_DAYS)
+                     len(deleted), ARCHIVE_RETENTION_DAYS)
     return deleted
 
 
-def _trim_archive_to_size(max_bytes: int) -> int:
-    """Delete oldest files until archive is under max_bytes. Returns count deleted."""
+def _trim_archive_to_size(max_bytes: int) -> List[str]:
+    """Delete oldest files until archive is under max_bytes. Returns deleted paths."""
     files = _get_archived_files_sorted()
     total_size = sum(s for _, s, _ in files)
-    deleted = 0
+    deleted: List[str] = []
 
     while total_size > max_bytes and files:
         fpath, fsize, _ = files.pop(0)  # oldest first
         try:
             os.unlink(fpath)
             total_size -= fsize
-            deleted += 1
+            deleted.append(fpath)
         except OSError:
             continue
 
     if deleted:
         logger.info("Retention: deleted %d files to stay under %d GB",
-                     deleted, ARCHIVE_MAX_SIZE_GB)
+                     len(deleted), ARCHIVE_MAX_SIZE_GB)
     return deleted
 
 
-def _trim_archive_for_free_space(min_free_bytes: int) -> int:
-    """Delete oldest archived files until SD card has enough free space."""
+def _trim_archive_for_free_space(min_free_bytes: int) -> List[str]:
+    """Delete oldest archived files until SD card has enough free space.
+
+    Returns the deleted paths so callers can do a targeted geodata
+    purge instead of a full-tree scan.
+    """
     files = _get_archived_files_sorted()
-    deleted = 0
+    deleted: List[str] = []
 
     while files:
         try:
@@ -932,13 +968,13 @@ def _trim_archive_for_free_space(min_free_bytes: int) -> int:
         fpath, _, _ = files.pop(0)
         try:
             os.unlink(fpath)
-            deleted += 1
+            deleted.append(fpath)
         except OSError:
             continue
 
     if deleted:
         logger.info("Retention: deleted %d files to maintain %d GB free",
-                     deleted, ARCHIVE_MIN_FREE_SPACE_GB)
+                     len(deleted), ARCHIVE_MIN_FREE_SPACE_GB)
     return deleted
 
 
@@ -979,10 +1015,16 @@ def _update_geodata_paths(old_abs: str, new_abs: str, filename: str) -> None:
     - indexed_files.file_path: absolute path (primary key — requires delete+insert)
     - waypoints.video_path: relative path (e.g. "RecentClips/...-front.mp4")
     - detected_events.video_path: same relative format
+
+    Uses the canonical-key candidate paths so we update every form the DB
+    might have stored (bare basename, RecentClips/<basename>) and never
+    accidentally match an unrelated path that simply happens to contain
+    the basename as a substring.
     """
     try:
         import sqlite3
         from config import MAPPING_DB_PATH
+        from services.mapping_service import canonical_key, candidate_db_paths
 
         if not os.path.isfile(MAPPING_DB_PATH):
             return
@@ -991,12 +1033,10 @@ def _update_geodata_paths(old_abs: str, new_abs: str, filename: str) -> None:
         conn.row_factory = sqlite3.Row
 
         try:
-            # Build the old and new relative paths for waypoints/events
-            # Old: "RecentClips/2026-...-front.mp4"
-            # New: use a synthetic "ArchivedClips/..." relative path
             basename = os.path.basename(filename)
-            old_rel_pattern = f"%{basename}"
             new_rel = f"ArchivedClips/{basename}"
+            old_paths = candidate_db_paths(canonical_key(basename))
+            placeholders = ','.join('?' * len(old_paths))
 
             # Update indexed_files (file_path is PRIMARY KEY, so delete+insert)
             row = conn.execute(
@@ -1013,17 +1053,21 @@ def _update_geodata_paths(old_abs: str, new_abs: str, filename: str) -> None:
                      row['waypoint_count'], row['event_count']),
                 )
 
-            # Update waypoints.video_path
-            conn.execute(
-                "UPDATE waypoints SET video_path = ? WHERE video_path LIKE ?",
-                (new_rel, old_rel_pattern),
-            )
-
-            # Update detected_events.video_path
-            conn.execute(
-                "UPDATE detected_events SET video_path = ? WHERE video_path LIKE ?",
-                (new_rel, old_rel_pattern),
-            )
+            # Update waypoints.video_path — exact-match every candidate form
+            # except the new path itself (avoid no-op self-update churn).
+            non_archive = [p for p in old_paths if p != new_rel]
+            if non_archive:
+                non_archive_placeholders = ','.join('?' * len(non_archive))
+                conn.execute(
+                    f"UPDATE waypoints SET video_path = ? "
+                    f"WHERE video_path IN ({non_archive_placeholders})",
+                    (new_rel, *non_archive),
+                )
+                conn.execute(
+                    f"UPDATE detected_events SET video_path = ? "
+                    f"WHERE video_path IN ({non_archive_placeholders})",
+                    (new_rel, *non_archive),
+                )
 
             conn.commit()
         finally:

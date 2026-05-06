@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
-"""WiFi connect handler — index videos + sync to cloud.
+"""WiFi connect handler — drive the post-arrival workflow.
 
-Called by the NetworkManager dispatcher (99-teslausb-cloud-refresh)
-whenever wlan0 comes up.  This is the "car arrived home" trigger:
+Called by the NetworkManager dispatcher (``99-teslausb-cloud-refresh``)
+whenever ``wlan0`` comes up. This is the "car arrived home" trigger:
 
-1. Refresh the RO mount (see Tesla's latest writes)
-2. Index new videos (build trips, detect events)
-3. Sync event clips to cloud (if configured)
+1. Refresh the read-only mount so the local file watcher sees Tesla's
+   latest writes.
+2. Trigger a RecentClips → SD-card archive run via the long-lived
+   ``gadget_web`` HTTP API. (Daemon threads started in this short-lived
+   dispatcher process die when it exits, so we route the work through
+   the always-on web service.)
+3. Wait — bounded — for the archive run and the indexing-queue drain,
+   so cloud sync uploads include the freshly archived/indexed clips.
+4. Trigger cloud sync (also via the gadget_web HTTP API, for the same
+   daemon-thread-lifetime reason).
 
-The user parks at home, WiFi connects, and within ~60 seconds
-everything is fresh — no manual action needed.
+Every "wait" step has a hard cap so a hung backend can never make this
+script run forever and pile up dispatcher invocations.
 """
 
+import json
+import logging
 import os
 import sys
+import time
+import urllib.error
+import urllib.request
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, WEB_DIR)
 
-import logging
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +38,127 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def main():
+# Hard caps on the bounded waits. The dispatcher fires on every WiFi
+# up event; if the script ran for an unbounded time we'd accumulate
+# overlapping invocations.
+_ARCHIVE_TIMEOUT_SECONDS = 5 * 60   # 5 min — RecentClips is small
+_INDEX_TIMEOUT_SECONDS = 120        # 2 min — front-cam priority enqueues first
+_HTTP_TIMEOUT_SECONDS = 10
+_WEB_BASE = "http://localhost"
+
+
+def _http_get_json(path: str, timeout: float = _HTTP_TIMEOUT_SECONDS):
+    req = urllib.request.Request(_WEB_BASE + path, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read()
+    return json.loads(body.decode("utf-8"))
+
+
+def _http_post_json(path: str, payload=None,
+                    timeout: float = _HTTP_TIMEOUT_SECONDS):
+    data = json.dumps(payload or {}).encode("utf-8")
+    req = urllib.request.Request(
+        _WEB_BASE + path, data=data, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read()
+    return json.loads(body.decode("utf-8"))
+
+
+def _trigger_recent_archive() -> bool:
+    """Fire the recent-clips archive endpoint. Non-blocking on the server."""
+    try:
+        result = _http_post_json("/api/recent_archive/trigger")
+        logger.info(
+            "Recent-clips archive trigger: started=%s message=%s",
+            result.get("started"), result.get("message"),
+        )
+        return bool(result.get("started"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Recent-clips archive trigger failed: %s", e)
+        return False
+
+
+def _wait_for_recent_archive(deadline_seconds: float) -> None:
+    """Poll the archive status until idle or the deadline elapses."""
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            status = _http_get_json("/api/recent_archive/status")
+            if not status.get("running"):
+                logger.info("Recent-clips archive complete.")
+                return
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Archive status poll failed (will retry): %s", e)
+        time.sleep(5)
+    logger.info(
+        "Recent-clips archive still running after %.0fs — moving on.",
+        deadline_seconds,
+    )
+
+
+def _wait_for_index_drain(deadline_seconds: float) -> None:
+    """Poll the indexing-queue status until empty or the deadline elapses.
+
+    "Drained enough to start cloud sync" means:
+      * No file is being actively parsed RIGHT NOW
+        (``active_file is None``), AND
+      * No queue row is ready to be picked up RIGHT NOW
+        (``next_ready_at`` is in the future, or there are no
+        ready rows at all).
+
+    We deliberately do NOT wait for deferred rows (TOO_NEW or the
+    archive flow's 120 s safety net). Cloud sync runs on every
+    dispatcher fire, so any latecomer will be uploaded the next time
+    the car arrives home.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            status = _http_get_json("/api/index/status")
+            active = status.get("active_file")
+            next_ready = status.get("next_ready_at")
+            now_wall = time.time()
+            ready_now = (next_ready is not None and next_ready <= now_wall)
+            if not active and not ready_now:
+                logger.info("Indexing queue idle (next_ready_at=%s).",
+                            next_ready)
+                return
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Index status poll failed (will retry): %s", e)
+        time.sleep(3)
+    logger.info(
+        "Indexing queue still has work after %.0fs — moving on.",
+        deadline_seconds,
+    )
+
+
+def _trigger_cloud_sync() -> None:
+    """Trigger cloud sync via the gadget_web API (long-lived process)."""
+    try:
+        from config import (
+            CLOUD_ARCHIVE_ENABLED, CLOUD_PROVIDER_CREDS_PATH,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not read cloud archive config: %s", e)
+        return
+
+    if not CLOUD_ARCHIVE_ENABLED:
+        logger.info("Cloud archive disabled — skipping sync.")
+        return
+    if not os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
+        logger.info("Cloud provider credentials missing — skipping sync.")
+        return
+
+    try:
+        result = _http_post_json("/cloud/api/sync_now")
+        logger.info("Cloud sync triggered: %s", str(result)[:200])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Cloud sync trigger failed: %s", e)
+
+
+def main() -> int:
     from services.video_service import get_teslacam_path
 
     teslacam = get_teslacam_path()
@@ -35,99 +166,36 @@ def main():
         logger.info("TeslaCam path not available — skipping")
         return 0
 
-    # Step 1: Refresh the RO mount so we see Tesla's latest files
+    # Step 1: Refresh the RO mount so the local file watcher (and the
+    # boot catch-up scan that the worker already runs in idle ticks)
+    # see Tesla's latest files.
     try:
         from services.mapping_service import _refresh_ro_mount
         _refresh_ro_mount(teslacam)
         logger.info("RO mount refreshed")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("Mount refresh failed (non-fatal): %s", e)
 
-    # Step 1.5: Archive RecentClips to SD card (before Tesla deletes them)
-    try:
-        from config import ARCHIVE_ENABLED
-        if ARCHIVE_ENABLED:
-            from services.video_archive_service import trigger_archive_now
-            logger.info("Archiving RecentClips...")
-            trigger_archive_now()
-            # Don't wait for completion — it runs in background
-            logger.info("RecentClips archive triggered")
-    except Exception as e:
-        logger.warning("RecentClips archive failed (non-fatal): %s", e)
+    # Step 2: Trigger RecentClips → SD-card archive in the long-lived
+    # gadget_web process. (Older versions of this script started the
+    # archive thread in the dispatcher process directly, which meant
+    # the daemon thread died as soon as the script exited.)
+    started = _trigger_recent_archive()
+    if started:
+        _wait_for_recent_archive(_ARCHIVE_TIMEOUT_SECONDS)
 
-    # Step 2: Index new videos (builds trips, detects events)
-    try:
-        from config import (
-            MAPPING_ENABLED, MAPPING_DB_PATH,
-            MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS,
-            MAPPING_TRIP_GAP_MINUTES,
-        )
-        if MAPPING_ENABLED:
-            from services.mapping_service import trigger_auto_index
-            logger.info("Indexing new videos...")
-            trigger_auto_index(
-                db_path=MAPPING_DB_PATH,
-                teslacam_path=teslacam,
-                sample_rate=MAPPING_SAMPLE_RATE,
-                thresholds=MAPPING_EVENT_THRESHOLDS,
-                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
-            )
-            # Wait for indexing to complete before syncing
-            # (so newly indexed events can be synced)
-            import time
-            from services.mapping_service import get_indexer_status
-            for _ in range(120):  # max 10 minutes
-                if not get_indexer_status().get('running'):
-                    break
-                time.sleep(5)
-            logger.info("Video indexing complete")
+    # Step 3: Bounded wait for the indexing queue to drain. The
+    # archive run above pre-enqueues each newly archived clip (with
+    # a short defer to avoid racing the inline parse), so by the
+    # time we reach this point the queue should be very small. Cap
+    # at _INDEX_TIMEOUT_SECONDS so a slow parse doesn't block cloud
+    # sync indefinitely — the cloud sync will pick up any latecomers
+    # on the next dispatcher fire.
+    _wait_for_index_drain(_INDEX_TIMEOUT_SECONDS)
 
-            # Step 2.5: Index ArchivedClips on SD card (if enabled)
-            try:
-                from config import ARCHIVE_ENABLED, ARCHIVE_DIR, MAPPING_ARCHIVE_INDEXING
-                if MAPPING_ARCHIVE_INDEXING and ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
-                    logger.info("Indexing ArchivedClips at %s...", ARCHIVE_DIR)
-                    trigger_auto_index(
-                        db_path=MAPPING_DB_PATH,
-                        teslacam_path=ARCHIVE_DIR,
-                        sample_rate=MAPPING_SAMPLE_RATE,
-                        thresholds=MAPPING_EVENT_THRESHOLDS,
-                        trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
-                    )
-                    for _ in range(120):
-                        if not get_indexer_status().get('running'):
-                            break
-                        time.sleep(5)
-                    logger.info("ArchivedClips indexing complete")
-            except Exception as e:
-                logger.warning("ArchivedClips indexing failed (non-fatal): %s", e)
-    except Exception as e:
-        logger.warning("Video indexing failed (non-fatal): %s", e)
-
-    # Step 3: Sync event clips to cloud (if configured)
-    # Trigger sync via the web API so the thread runs inside the
-    # long-lived gadget_web process.  Direct imports would start a
-    # daemon thread in THIS process which dies when the script exits.
-    try:
-        from config import CLOUD_ARCHIVE_ENABLED, CLOUD_PROVIDER_CREDS_PATH
-        if CLOUD_ARCHIVE_ENABLED and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH):
-            import urllib.request
-            logger.info("Triggering cloud sync via web API...")
-            req = urllib.request.Request(
-                "http://localhost/cloud/api/sync_now",
-                method="POST",
-                headers={"Content-Type": "application/json"},
-                data=b"{}",
-            )
-            try:
-                resp = urllib.request.urlopen(req, timeout=10)
-                logger.info("Cloud sync triggered: %s", resp.read().decode()[:200])
-            except Exception as e:
-                logger.warning("Cloud sync API call failed: %s", e)
-        else:
-            logger.info("Cloud archive not configured — skipping sync")
-    except Exception as e:
-        logger.warning("Cloud sync trigger failed (non-fatal): %s", e)
+    # Step 4: Trigger cloud sync. Same daemon-thread-lifetime reason
+    # — done via the long-lived gadget_web process.
+    _trigger_cloud_sync()
 
     return 0
 

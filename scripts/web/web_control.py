@@ -121,9 +121,13 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Warning: Failed to start archive timer: {e}")
 
-    # Start file watcher for new video detection (triggers indexing + cloud sync)
+    # Start file watcher for new video detection. The callback enqueues
+    # individual paths into the indexing_queue table; the indexing
+    # worker (started below) drains the queue one file at a time.
     try:
-        from services.file_watcher_service import start_watcher, register_callback
+        from services.file_watcher_service import (
+            start_watcher, register_callback, register_delete_callback,
+        )
         watch_paths = []
         # Watch TeslaCam on USB (RO mount)
         from config import RO_MNT_DIR
@@ -138,36 +142,88 @@ if __name__ == "__main__":
         except ImportError:
             pass
         if watch_paths:
-            # Register auto-indexing callback so new videos are indexed
-            # without manual button clicks or WiFi connect events.
             try:
-                from config import (
-                    MAPPING_ENABLED, MAPPING_DB_PATH,
-                    MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS,
-                    MAPPING_TRIP_GAP_MINUTES,
-                )
-                from services.video_service import get_teslacam_path
+                from config import MAPPING_ENABLED, MAPPING_DB_PATH
                 if MAPPING_ENABLED:
                     def _on_new_videos(file_paths):
-                        from services.mapping_service import trigger_auto_index
-                        tc = get_teslacam_path()
-                        if tc:
-                            trigger_auto_index(
-                                db_path=MAPPING_DB_PATH,
-                                teslacam_path=tc,
-                                sample_rate=MAPPING_SAMPLE_RATE,
-                                thresholds=MAPPING_EVENT_THRESHOLDS,
-                                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+                        from services.mapping_service import (
+                            enqueue_many_for_indexing,
+                        )
+                        items = [(p, None) for p in file_paths if p]
+                        if items:
+                            enqueue_many_for_indexing(
+                                MAPPING_DB_PATH, items, source='watcher',
                             )
+
+                    def _on_deleted_videos(file_paths):
+                        # Mirror deletes immediately so the map page
+                        # doesn't keep showing trips/events for clips
+                        # the user (or Tesla) just removed.
+                        from services.mapping_service import (
+                            purge_deleted_videos,
+                        )
+                        try:
+                            purge_deleted_videos(
+                                MAPPING_DB_PATH,
+                                deleted_paths=list(file_paths),
+                            )
+                        except Exception as e:
+                            print(f"Warning: purge_deleted_videos failed: {e}")
+
                     register_callback(_on_new_videos)
-                    print("File watcher → auto-indexing callback registered")
+                    register_delete_callback(_on_deleted_videos)
+                    print("File watcher → indexing queue producer registered")
             except Exception as e:
-                print(f"Warning: Failed to register indexing callback: {e}")
+                print(f"Warning: Failed to register watcher callbacks: {e}")
 
             start_watcher(watch_paths)
             print(f"File watcher started for {len(watch_paths)} paths")
     except Exception as e:
         print(f"Warning: Failed to start file watcher: {e}")
+
+    # Start the indexing worker (single low-priority thread that drains
+    # indexing_queue). This replaces the old "trigger_auto_index" full
+    # filesystem walk that used to run on startup, on mode-switch, and
+    # on every WiFi connect — those triggers caused the constantly-
+    # flashing "Indexing…" banner. The worker only shows the banner
+    # while it's actively parsing one specific file.
+    try:
+        from config import MAPPING_ENABLED, MAPPING_DB_PATH
+        if MAPPING_ENABLED:
+            from services.video_service import get_teslacam_path
+            from services import indexing_worker
+            from services.mapping_service import boot_catchup_scan
+            tc = get_teslacam_path()
+            if tc:
+                # Catch-up scan first: any clip on disk that isn't in
+                # indexed_files becomes a new queue row. Cheap (no
+                # video parsing); takes tens of milliseconds even on a
+                # full SD card. Worker picks them up afterwards.
+                try:
+                    summary = boot_catchup_scan(MAPPING_DB_PATH, tc)
+                    print(
+                        "Boot catch-up scan: "
+                        f"scanned={summary['scanned']}, "
+                        f"already_indexed={summary['already_indexed']}, "
+                        f"enqueued={summary['enqueued']}"
+                    )
+                except Exception as e:
+                    print(f"Warning: boot catch-up scan failed: {e}")
+                indexing_worker.start_worker(MAPPING_DB_PATH, tc)
+                print("Indexing worker started")
+                # Independent safety net for stale geodata rows. Runs
+                # ~daily with jitter; cheap (one os.path.isfile per
+                # indexed_files row) and only logs the count it cleans.
+                from services.mapping_service import (
+                    start_daily_stale_scan,
+                )
+                from services.video_service import (
+                    get_teslacam_path as _get_tc,
+                )
+                start_daily_stale_scan(MAPPING_DB_PATH, _get_tc)
+                print("Daily stale scan scheduled")
+    except Exception as e:
+        print(f"Warning: Failed to start indexing worker: {e}")
 
     # Auto-start cloud sync if WiFi is already connected and provider is configured.
     # The dispatcher only fires on WiFi connect events — if the Pi boots into WiFi
@@ -188,29 +244,24 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Warning: Cloud auto-sync startup failed: {e}")
 
-    # Auto-index on startup if enabled — catches videos that arrived while
-    # the service was down or between WiFi connect events.
+    # NOTE: ``MAPPING_INDEX_ON_STARTUP`` is intentionally no longer
+    # honored. The boot catch-up scan above has the same effect with
+    # none of the cost (no full re-parse of clips already indexed).
+    # The config flag is kept in config.yaml for now to avoid breaking
+    # existing installs; it just becomes a no-op.
     try:
         from config import (
-            MAPPING_ENABLED, MAPPING_INDEX_ON_STARTUP, MAPPING_DB_PATH,
-            MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS,
-            MAPPING_TRIP_GAP_MINUTES,
+            MAPPING_INDEX_ON_STARTUP, MAPPING_INDEX_ON_MODE_SWITCH,
         )
-        if MAPPING_ENABLED and MAPPING_INDEX_ON_STARTUP:
-            from services.mapping_service import trigger_auto_index
-            from services.video_service import get_teslacam_path
-            teslacam = get_teslacam_path()
-            if teslacam:
-                trigger_auto_index(
-                    db_path=MAPPING_DB_PATH,
-                    teslacam_path=teslacam,
-                    sample_rate=MAPPING_SAMPLE_RATE,
-                    thresholds=MAPPING_EVENT_THRESHOLDS,
-                    trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
-                )
-                print("Startup geo-indexing triggered")
-    except Exception as e:
-        print(f"Warning: Startup indexing failed: {e}")
+        if MAPPING_INDEX_ON_STARTUP or MAPPING_INDEX_ON_MODE_SWITCH:
+            print(
+                "INFO: mapping.index_on_startup / mapping.index_on_mode_switch "
+                "are deprecated and now have no effect. The persistent indexing "
+                "queue + worker handle this automatically — to force a re-scan, "
+                "use the 'Scan for new clips' button on the map page."
+            )
+    except Exception:
+        pass
 
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:

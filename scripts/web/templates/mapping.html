@@ -608,7 +608,7 @@
                 <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-layers"></use></svg>
             </button>
         </div>
-        <button class="map-fab" id="btnIndex" onclick="triggerIndex()" aria-label="Index videos" title="Index Videos">
+        <button class="map-fab" id="btnScan" onclick="scanForNewClips()" aria-label="Scan for new clips" title="Scan for new clips">
             <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
         </button>
     </div>
@@ -1550,9 +1550,21 @@ function toggleFsdOverlay() {
 }
 
 // --- Indexer ---
+//
+// The "Scan for new clips" button asks the server to walk the
+// TeslaCam tree and enqueue any orphans it finds. The actual
+// parsing happens asynchronously in the indexing-worker thread;
+// the floating banner stays visible whenever a file is being
+// parsed (driven by `active_file` in /api/index/status). The
+// banner does NOT appear during the scan itself — only when the
+// worker is mid-parse.
 
-async function triggerIndex() {
-    const btn = document.getElementById('btnIndex');
+const INDEX_POLL_BUSY_MS = 3000;   // active parse: poll every 3 s
+const INDEX_POLL_IDLE_MS = 15000;  // idle: poll every 15 s
+const INDEX_TRIP_REFRESH_MS = 10000;
+
+async function scanForNewClips() {
+    const btn = document.getElementById('btnScan');
     btn.disabled = true;
     btn.classList.add('spinning');
 
@@ -1560,63 +1572,102 @@ async function triggerIndex() {
         const resp = await fetch('/api/index/trigger', { method: 'POST' });
         const data = await resp.json();
         if (data.success) {
+            const summary = data.summary || {};
+            const enq = summary.enqueued || 0;
+            // Surface a transient "scan complete" message.
+            const statusDiv = document.getElementById('indexerStatus');
+            statusDiv.className = 'indexer-status';
+            statusDiv.style.display = 'block';
+            statusDiv.textContent = enq > 0
+                ? `Scan complete: ${enq} new clip(s) queued for indexing.`
+                : 'Scan complete: no new clips found.';
+            setTimeout(() => {
+                if (!pollIndexer._activeFile) {
+                    statusDiv.style.display = 'none';
+                }
+            }, 5000);
+            // Bump poll rate so the banner appears quickly when the
+            // worker picks up the first orphan.
             pollIndexer();
         } else {
-            alert(data.message || 'Failed to start indexer');
-            btn.disabled = false;
-            btn.classList.remove('spinning');
+            alert(data.message || 'Failed to scan for new clips');
         }
     } catch(e) {
-        alert('Failed to start indexer: ' + e.message);
+        alert('Failed to scan for new clips: ' + e.message);
+    } finally {
         btn.disabled = false;
         btn.classList.remove('spinning');
     }
 }
 
+function _bannerTextForSource(source, filesDone) {
+    // Human-friendly banner text. `filesDone` is per-session worker
+    // count, so it bumps as each file completes.
+    switch (source) {
+        case 'watcher':
+            return 'Indexing new clip from drive…';
+        case 'archive':
+            return 'Indexing archived clip…';
+        case 'manual':
+            return `Rebuilding map index (${filesDone} done)…`;
+        case 'catchup':
+            return `Indexing existing clip (${filesDone} done)…`;
+        default:
+            return 'Indexing video…';
+    }
+}
+
 async function pollIndexer() {
+    // Cancel any previously-scheduled poll so we don't run multiple
+    // overlapping chains (scanForNewClips and the page-load init both
+    // call pollIndexer() directly).
+    if (pollIndexer._timeoutId) {
+        clearTimeout(pollIndexer._timeoutId);
+        pollIndexer._timeoutId = null;
+    }
     const statusDiv = document.getElementById('indexerStatus');
-    const btn = document.getElementById('btnIndex');
 
     try {
         const resp = await fetch('/api/index/status');
         const data = await resp.json();
 
-        if (data.running) {
+        const active = data.active_file;
+        pollIndexer._activeFile = active;
+
+        if (active) {
+            // A file is being parsed right now → banner on.
             statusDiv.style.display = 'block';
             statusDiv.className = 'indexer-status running';
-            statusDiv.textContent = `Indexing... (${data.files_done || 0}/${data.files_total || '?'})`;
-            btn.disabled = true;
-            btn.classList.add('spinning');
-            // Refresh trips periodically while indexer runs (every 10s)
+            statusDiv.textContent = _bannerTextForSource(
+                data.source, data.files_done_session || 0,
+            );
+            // Refresh trips/stats on a slower cadence so the user
+            // sees new data trickle in without hammering the API.
             if (!pollIndexer._lastTripRefresh ||
-                Date.now() - pollIndexer._lastTripRefresh > 10000) {
+                Date.now() - pollIndexer._lastTripRefresh > INDEX_TRIP_REFRESH_MS) {
                 pollIndexer._lastTripRefresh = Date.now();
                 loadTrips();
                 loadStats();
             }
-            setTimeout(pollIndexer, 2000);
+            pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_BUSY_MS);
         } else {
-            statusDiv.style.display = data.error ? 'block' : 'none';
-            if (data.error) {
-                statusDiv.className = 'indexer-status';
-                statusDiv.textContent = data.error;
-            } else if (data.progress) {
-                statusDiv.style.display = 'block';
-                statusDiv.className = 'indexer-status';
-                statusDiv.textContent = data.progress;
-                setTimeout(() => { statusDiv.style.display = 'none'; }, 10000);
+            // Worker idle (queue empty or all rows deferred). Hide
+            // banner unless we just finished a session — refresh data
+            // one last time.
+            const wasBusy = !!pollIndexer._wasBusyLastTick;
+            statusDiv.style.display = 'none';
+            if (wasBusy) {
+                pollIndexer._lastTripRefresh = 0;
+                loadStats();
+                loadTrips();
+                loadEvents();
             }
-            btn.disabled = false;
-            btn.classList.remove('spinning');
-            pollIndexer._lastTripRefresh = 0;
-            // Reload data after completion
-            loadStats();
-            loadTrips();
-            loadEvents();
+            pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_IDLE_MS);
         }
+        pollIndexer._wasBusyLastTick = !!active;
     } catch(e) {
-        btn.disabled = false;
-        btn.classList.remove('spinning');
+        // Network blip — try again on the slow cadence.
+        pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_IDLE_MS);
     }
 }
 
@@ -1721,14 +1772,20 @@ async function loadSentryTimeline() {
 
             // Driving events have description; sentry/saved have clip counts
             const isFolderEvent = (evType === 'sentry' || evType === 'saved');
+            // Sentry/saved metadata is now lazy-loaded via /api/event-details
+            // when the card scrolls into view; show a placeholder until it
+            // arrives. This keeps the initial /api/sentry-events response
+            // pure-DB and the panel responsive even with hundreds of events.
             let metaHtml = '';
+            let metaIsLazy = false;
             if (isFolderEvent) {
-                const clips = ev.clip_count != null ? ev.clip_count : '?';
-                const cams = ev.camera_count != null ? ev.camera_count : '?';
-                const sizePart = ev.size_mb ? Math.round(ev.size_mb) + ' MB' : '';
-                const metaParts = [clips + ' clips', cams + ' cameras'];
-                if (sizePart) metaParts.push(sizePart);
-                metaHtml = metaParts.join(' \u00b7 ');
+                if (folder) {
+                    metaHtml = '<span class="st-meta-loading">Loading details\u2026</span>';
+                    metaIsLazy = true;
+                } else {
+                    // No event folder (rare — orphaned event row); nothing to fetch.
+                    metaHtml = '';
+                }
             } else {
                 // Driving event — show description and severity
                 const desc = ev.description || '';
@@ -1747,7 +1804,7 @@ async function loadSentryTimeline() {
             html += '<div class="st-card">';
             html += '<div class="st-type">' + typeLabel + '</div>';
             html += '<div class="st-date">' + dateStr + '</div>';
-            html += '<div class="st-meta">' + metaHtml + '</div>';
+            html += '<div class="st-meta"' + (metaIsLazy ? ' data-lazy-meta="1"' : '') + '>' + metaHtml + '</div>';
             html += '<div class="st-actions">';
             if (isFolderEvent) {
                 // Sentry/saved events — always have a play button
@@ -1768,9 +1825,72 @@ async function loadSentryTimeline() {
 
         html += '</div>';
         list.innerHTML = html;
+        startLazyEventDetails(list);
     } catch(e) {
         console.error('Failed to load sentry timeline:', e);
         list.innerHTML = '<div class="vp-empty">Failed to load events</div>';
+    }
+}
+
+// Lazy-fetch per-event details (clip count, camera count, size) only for
+// cards that scroll into view. Earlier code did this enrichment server-side
+// in a single /api/sentry-events call, which fired N filesystem ops up
+// front and made the panel sluggish on a Pi Zero 2 W. The endpoint is
+// now DB-only; this observer fills in the metadata on demand.
+function startLazyEventDetails(container) {
+    const cards = container.querySelectorAll('.st-event');
+    if (!cards.length) return;
+
+    const inflight = new Set();
+    const fetchDetails = function(card) {
+        const folder = card.getAttribute('data-folder');
+        const name = card.getAttribute('data-name');
+        if (!folder || !name) return;
+        const key = folder + '/' + name;
+        if (inflight.has(key)) return;
+        inflight.add(key);
+
+        const metaEl = card.querySelector('.st-meta[data-lazy-meta="1"]');
+        if (!metaEl) return;
+
+        fetch('/api/event-details/' + encodeURIComponent(folder) + '/' + encodeURIComponent(name))
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) {
+                if (!data || data.error) {
+                    metaEl.textContent = '';
+                    metaEl.removeAttribute('data-lazy-meta');
+                    return;
+                }
+                const clips = data.clip_count != null ? data.clip_count : '?';
+                const cams = data.camera_count != null ? data.camera_count : '?';
+                const sizePart = data.size_mb ? Math.round(data.size_mb) + ' MB' : '';
+                const parts = [clips + ' clips', cams + ' cameras'];
+                if (sizePart) parts.push(sizePart);
+                metaEl.textContent = parts.join(' \u00b7 ');
+                metaEl.removeAttribute('data-lazy-meta');
+            })
+            .catch(function() {
+                metaEl.textContent = '';
+                metaEl.removeAttribute('data-lazy-meta');
+            });
+    };
+
+    if (typeof IntersectionObserver === 'function') {
+        const io = new IntersectionObserver(function(entries) {
+            entries.forEach(function(e) {
+                if (e.isIntersecting) {
+                    fetchDetails(e.target);
+                    io.unobserve(e.target);
+                }
+            });
+        }, { root: container, rootMargin: '200px 0px' });
+        cards.forEach(function(c) {
+            if (c.querySelector('.st-meta[data-lazy-meta="1"]')) io.observe(c);
+        });
+    } else {
+        // No IntersectionObserver — fall back to a simple "fetch the first
+        // 20" pass. Better than blocking the server response on every event.
+        Array.prototype.slice.call(cards, 0, 20).forEach(fetchDetails);
     }
 }
 
@@ -2125,9 +2245,10 @@ loadStats();
 loadTrips();
 loadEvents();
 
-// Check if indexer is already running on page load
-fetch('/api/index/status')
-    .then(r => r.json())
-    .then(data => { if (data.running) pollIndexer(); });
+// Kick off the indexing-status poll loop. It self-schedules with
+// a fast cadence while a file is being parsed and a slow cadence
+// when idle, so the banner appears within ~3 s of any background
+// indexing activity without hammering the API in steady state.
+pollIndexer();
 </script>
 {% endblock %}

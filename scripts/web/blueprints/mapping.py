@@ -218,39 +218,169 @@ def api_stats():
 
 @mapping_bp.route("/api/index/status")
 def api_index_status():
-    """Get current indexer status."""
-    from services.mapping_service import get_indexer_status
-    return jsonify(get_indexer_status())
+    """Return the current indexing-worker status.
+
+    The UI polls this to drive the "Indexing…" banner. Banner is
+    shown whenever ``active_file`` is truthy — either a file is
+    actively being parsed, or a manual rebuild has just been
+    triggered. The bare boot catch-up scan does NOT set
+    ``active_file`` (it only enqueues), so the banner stays off
+    while the queue is being filled but no parsing is happening.
+    """
+    try:
+        from services import indexing_worker
+        status = indexing_worker.get_worker_status()
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to fetch worker status: %s", e)
+        status = {
+            'worker_running': False,
+            'active_file': None,
+            'queue_depth': 0,
+            'files_done_session': 0,
+            'last_drained_at': None,
+            'last_error': str(e),
+            'source': None,
+        }
+    return jsonify(status)
 
 
 @mapping_bp.route("/api/index/trigger", methods=['POST'])
 def api_index_trigger():
-    """Manually trigger the geo-indexer."""
-    from services.mapping_service import start_indexer
+    """Scan the TeslaCam tree for un-indexed clips and enqueue them.
 
+    This is the cheap "Scan for new clips" action. It walks the
+    filesystem once, diffs against ``indexed_files``, and enqueues
+    orphan canonical keys. The worker drains the queue in the
+    background.
+    """
     if not MAPPING_ENABLED:
-        return jsonify({'success': False, 'message': 'Mapping is disabled in config.yaml'}), 400
+        return jsonify({
+            'success': False,
+            'message': 'Mapping is disabled in config.yaml',
+        }), 400
 
     teslacam_path = get_teslacam_path()
     if not teslacam_path:
-        return jsonify({'success': False, 'message': 'TeslaCam not accessible'}), 503
+        return jsonify({
+            'success': False,
+            'message': 'TeslaCam not accessible',
+        }), 503
 
-    success, message = start_indexer(
-        db_path=MAPPING_DB_PATH,
-        teslacam_path=teslacam_path,
-        sample_rate=MAPPING_SAMPLE_RATE,
-        thresholds=MAPPING_EVENT_THRESHOLDS,
-        trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
-    )
-    return jsonify({'success': success, 'message': message})
+    from services.mapping_service import boot_catchup_scan
+    try:
+        summary = boot_catchup_scan(
+            MAPPING_DB_PATH, teslacam_path, source='manual',
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("Manual scan failed: %s", e)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+    return jsonify({
+        'success': True,
+        'message': (
+            f"Scan complete: {summary['enqueued']} new clip(s) queued "
+            f"({summary['already_indexed']} already indexed)."
+        ),
+        'summary': summary,
+    })
+
+
+@mapping_bp.route("/api/index/rebuild", methods=['POST'])
+def api_index_rebuild():
+    """Destructively rebuild the entire map index (advanced).
+
+    Drops every row from ``indexed_files``, ``waypoints``,
+    ``detected_events``, ``trips``, and ``indexing_queue``, then
+    re-walks the TeslaCam tree to enqueue every front-camera clip.
+    Use only when parsers/thresholds change and existing data needs
+    to be reparsed from scratch.
+    """
+    if not MAPPING_ENABLED:
+        return jsonify({
+            'success': False,
+            'message': 'Mapping is disabled in config.yaml',
+        }), 400
+
+    teslacam_path = get_teslacam_path()
+    if not teslacam_path:
+        return jsonify({
+            'success': False,
+            'message': 'TeslaCam not accessible',
+        }), 503
+
+    # Require an explicit confirm flag so a stray POST cannot wipe
+    # someone's index. The UI must send this from the confirmation
+    # dialog.
+    data = request.get_json(silent=True) or {}
+    if not data.get('confirm'):
+        return jsonify({
+            'success': False,
+            'message': 'Confirmation required (set confirm=true).',
+        }), 400
+
+    import sqlite3
+    from services.mapping_service import boot_catchup_scan, clear_all_queue
+    from services import indexing_worker
+
+    # Pause the worker for the destructive sweep so it can't be
+    # mid-INSERT into a table we're about to wipe. If the worker
+    # can't pause within 30s, abort — the user can try again.
+    paused = indexing_worker.pause_worker(timeout=30.0)
+    if not paused:
+        # Clear the pause flag so the worker keeps running.
+        indexing_worker.resume_worker()
+        return jsonify({
+            'success': False,
+            'message': (
+                'Indexer is busy parsing a clip. Please try again in '
+                'a few seconds.'
+            ),
+        }), 503
+    try:
+        with sqlite3.connect(MAPPING_DB_PATH) as conn:
+            conn.execute("DELETE FROM waypoints")
+            conn.execute("DELETE FROM detected_events")
+            conn.execute("DELETE FROM trips")
+            conn.execute("DELETE FROM indexed_files")
+            conn.commit()
+        cleared = clear_all_queue(MAPPING_DB_PATH)
+        summary = boot_catchup_scan(
+            MAPPING_DB_PATH, teslacam_path, source='manual',
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("Rebuild failed: %s", e)
+        return jsonify({'success': False, 'message': str(e)}), 500
+    finally:
+        indexing_worker.resume_worker()
+
+    return jsonify({
+        'success': True,
+        'message': (
+            f"Index rebuild started: cleared queue ({cleared} pending), "
+            f"enqueued {summary['enqueued']} clip(s) for re-parsing."
+        ),
+        'summary': summary,
+    })
 
 
 @mapping_bp.route("/api/index/cancel", methods=['POST'])
 def api_index_cancel():
-    """Cancel the running indexer."""
-    from services.mapping_service import cancel_indexer
-    success, message = cancel_indexer()
-    return jsonify({'success': success, 'message': message})
+    """Cancel any pending queue items.
+
+    The currently-claimed file (if any) is allowed to finish so
+    in-flight work isn't wasted. Useful if a user accidentally
+    triggered a rebuild on a Pi with thousands of clips.
+    """
+    from services.mapping_service import clear_pending_queue
+    try:
+        n = clear_pending_queue(MAPPING_DB_PATH)
+    except Exception as e:  # noqa: BLE001
+        logger.error("Cancel failed: %s", e)
+        return jsonify({'success': False, 'message': str(e)}), 500
+    return jsonify({
+        'success': True,
+        'message': f"Cleared {n} queued item(s).",
+    })
 
 
 @mapping_bp.route("/api/index/diagnose")
@@ -301,9 +431,17 @@ def api_event_charts():
 
 @mapping_bp.route("/api/sentry-events")
 def api_sentry_events():
-    """Get all detected events (sentry, saved, and driving events) enriched with filesystem details."""
+    """Return all detected events (sentry, saved, and driving) — DB only.
+
+    Performance: this endpoint used to enrich each event with a filesystem
+    call to ``get_event_details()``. With 200 events that meant 200
+    directory listings + JSON parses + per-file ``stat()`` calls inline,
+    which made the map page panel sluggish and held the geo-index
+    connection open for several hundred ms. The list now returns DB-only
+    data; the client lazily fetches per-event details via
+    :func:`api_event_details` for cards as they scroll into view.
+    """
     from services.mapping_service import query_events
-    from services.video_service import get_event_details
 
     try:
         # Fetch ALL detected events — sentry, saved, and driving events
@@ -312,7 +450,6 @@ def api_sentry_events():
         # Sort by timestamp descending (most recent first)
         events.sort(key=lambda e: e.get('timestamp', ''), reverse=True)
 
-        teslacam = get_teslacam_path()
         enriched = []
         for ev in events:
             vp = ev.get('video_path', '')
@@ -334,37 +471,62 @@ def api_sentry_events():
             if source_folder == 'ArchivedClips':
                 basename = vp.rsplit('/', 1)[-1] if '/' in vp else vp
                 result['video_path'] = f'ArchivedClips/{basename}'
-
-            if teslacam and event_folder:
-                # ArchivedClips lives on SD card, not under TeslaCam
-                if source_folder == 'ArchivedClips':
-                    try:
-                        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
-                        folder_path = ARCHIVE_DIR if ARCHIVE_ENABLED else None
-                    except ImportError:
-                        folder_path = None
-                else:
-                    folder_path = os.path.join(teslacam, source_folder)
-
-                if folder_path:
-                    try:
-                        details = get_event_details(folder_path, event_folder)
-                        if details:
-                            cam_count = len([
-                                v for v in (details.get('camera_videos') or {}).values() if v
-                            ])
-                            result['clip_count'] = len(details.get('clips') or [])
-                            result['camera_count'] = cam_count
-                            result['size_mb'] = details.get('size_mb', 0)
-                    except Exception:
-                        pass
-
             enriched.append(result)
 
         return jsonify({'events': enriched})
     except Exception as e:
         logger.error("Failed to get sentry events: %s", e)
         return jsonify({'error': str(e)}), 500
+
+
+@mapping_bp.route("/api/event-details/<folder>/<event_name>")
+def api_event_details(folder, event_name):
+    """Lazy filesystem details for a single sentry/saved event card.
+
+    Called by the map-page event panel as cards scroll into view, so the
+    initial list render isn't blocked by per-event ``os.listdir`` /
+    ``os.stat`` work. Returns ``clip_count``, ``camera_count``, and
+    ``size_mb`` — the three fields the panel surfaces.
+    """
+    from services.video_service import get_event_details
+
+    folder = os.path.basename(folder)
+    event_name = os.path.basename(event_name)
+
+    teslacam = get_teslacam_path()
+    if not teslacam:
+        return jsonify({'error': 'TeslaCam not accessible'}), 503
+
+    if folder == 'ArchivedClips':
+        try:
+            from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+            folder_path = ARCHIVE_DIR if ARCHIVE_ENABLED else None
+        except ImportError:
+            folder_path = None
+    else:
+        folder_path = os.path.join(teslacam, folder)
+
+    if not folder_path or not os.path.isdir(folder_path):
+        return jsonify({'error': f'Folder not found: {folder}'}), 404
+
+    try:
+        details = get_event_details(folder_path, event_name)
+    except Exception as e:
+        logger.warning("Failed to get details for %s/%s: %s",
+                       folder, event_name, e)
+        return jsonify({'error': 'Failed to read event details'}), 500
+
+    if not details:
+        return jsonify({'clip_count': 0, 'camera_count': 0, 'size_mb': 0})
+
+    cam_count = len([
+        v for v in (details.get('camera_videos') or {}).values() if v
+    ])
+    return jsonify({
+        'clip_count': len(details.get('clips') or []),
+        'camera_count': cam_count,
+        'size_mb': details.get('size_mb', 0),
+    })
 
 
 @mapping_bp.route("/api/event-clips/<folder>/<event_name>")

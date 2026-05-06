@@ -104,6 +104,60 @@ def gadget_state():
         }), 500
 
 
+@api_bp.route("/recent_archive/trigger", methods=['POST'])
+def recent_archive_trigger():
+    """Start a one-shot RecentClips → SD-card archive in gadget_web.
+
+    Designed to be called from the NetworkManager dispatcher script
+    (``99-teslausb-cloud-refresh``). The dispatcher process is short
+    lived, so any background thread it starts dies when it exits.
+    Routing the trigger through this endpoint runs the work inside
+    the long-lived ``gadget_web`` service instead, where the
+    daemon thread can run to completion.
+
+    Returns:
+        JSON ``{started: bool, message: str}``. ``started=False`` is
+        not an error — it means archiving is disabled or already in
+        progress.
+    """
+    from services.video_archive_service import (
+        trigger_archive_now, get_archive_status,
+    )
+    try:
+        started = trigger_archive_now()
+        if started:
+            return jsonify({
+                "started": True,
+                "message": "Recent-clips archive started.",
+            })
+        status = get_archive_status()
+        if status.get("running"):
+            return jsonify({
+                "started": False,
+                "message": "Archive already running.",
+            })
+        return jsonify({
+            "started": False,
+            "message": "Archive disabled in config.yaml.",
+        })
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"started": False, "message": str(e)}), 500
+
+
+@api_bp.route("/recent_archive/status")
+def recent_archive_status():
+    """Return the current RecentClips → SD-card archive status.
+
+    The dispatcher script polls this to know when the archive run
+    has finished so it can move on to triggering cloud sync.
+    """
+    from services.video_archive_service import get_archive_status
+    try:
+        return jsonify(get_archive_status())
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"running": False, "error": str(e)}), 500
+
+
 @api_bp.route("/recover_gadget", methods=['POST'])
 def recover_gadget():
     """

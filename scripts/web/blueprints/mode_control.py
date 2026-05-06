@@ -16,29 +16,121 @@ mode_control_bp = Blueprint('mode_control', __name__, url_prefix='/settings')
 
 logger = logging.getLogger(__name__)
 
+# How long we'll wait for the indexing worker to finish its current
+# file before refusing the mode switch. The longest plausible parse on
+# a Pi Zero 2 W is ~10 s; 30 s is comfortably above that without
+# making the user click a stuck button.
+_PAUSE_TIMEOUT_SECONDS = 30.0
 
-def _trigger_auto_index_after_mode_switch():
-    """Trigger background video indexing after a mode switch if enabled."""
+
+def _pause_worker_for_mode_switch() -> bool:
+    """Pause the indexing worker between files. Returns True on success.
+
+    On timeout (worker mid-file longer than ``_PAUSE_TIMEOUT_SECONDS``)
+    we refuse the mode switch — unmounting while a clip is being parsed
+    would either fail (busy) or corrupt the in-flight write. We also
+    immediately clear the pause flag in the timeout path so the worker
+    keeps making progress instead of staying frozen until the next
+    successful mode switch.
+
+    Failure semantics: if mapping is enabled and the pause API itself
+    raises an unexpected exception, we treat that as a failure and
+    refuse the mode switch — better to surface a 503 to the user than
+    to let an unmount race a worker thread we can't see. If mapping is
+    disabled (so there is no worker), we fail open.
+    """
     try:
-        from config import (
-            MAPPING_ENABLED, MAPPING_INDEX_ON_MODE_SWITCH, MAPPING_DB_PATH,
-            MAPPING_SAMPLE_RATE, MAPPING_EVENT_THRESHOLDS, MAPPING_TRIP_GAP_MINUTES,
-        )
-        if not MAPPING_ENABLED or not MAPPING_INDEX_ON_MODE_SWITCH:
-            return
-        from services.video_service import get_teslacam_path
-        from services.mapping_service import trigger_auto_index
-        teslacam = get_teslacam_path()
-        if teslacam:
-            trigger_auto_index(
-                db_path=MAPPING_DB_PATH,
-                teslacam_path=teslacam,
-                sample_rate=MAPPING_SAMPLE_RATE,
-                thresholds=MAPPING_EVENT_THRESHOLDS,
-                trip_gap_minutes=MAPPING_TRIP_GAP_MINUTES,
+        from config import MAPPING_ENABLED
+    except ImportError:
+        MAPPING_ENABLED = False  # noqa: N806
+    try:
+        from services import indexing_worker
+        if not indexing_worker.is_running():
+            return True
+        ok = indexing_worker.pause_worker(timeout=_PAUSE_TIMEOUT_SECONDS)
+        if not ok:
+            # The worker is still mid-file. Clear the pause flag so it
+            # can resume after the current file finishes — otherwise it
+            # would idle forever, breaking all subsequent indexing.
+            indexing_worker.resume_worker()
+        return ok
+    except ImportError as e:
+        # No worker module available — nothing to pause. Safe to proceed.
+        logger.debug("indexing_worker module not available: %s", e)
+        return True
+    except Exception as e:  # noqa: BLE001
+        if MAPPING_ENABLED:
+            # Worker should be present but pause API failed. Don't
+            # silently let the mode switch proceed — surface the error.
+            logger.error(
+                "Pause indexing worker failed (mapping enabled): %s", e,
             )
-    except Exception as e:
-        logger.warning("Auto-index after mode switch failed: %s", e)
+            return False
+        logger.warning("Failed to pause indexing worker: %s", e)
+        return True
+
+
+def _resume_worker_after_mode_switch() -> None:
+    """Resume the indexing worker (and trigger a catch-up scan).
+
+    The catch-up scan handles the case where a clip arrived while the
+    worker was paused or while we were swapping mount namespaces — the
+    file-watcher's inotify subscription is invalidated by the unmount,
+    so the watcher alone can't be trusted to notice everything.
+
+    Also lazy-starts the worker if it never started at boot (e.g. the
+    TeslaCam mount wasn't ready when ``web_control.startup`` ran but
+    the user has now switched into present mode).
+    """
+    try:
+        from services import indexing_worker
+        from services.mapping_service import boot_catchup_scan
+        from services.video_service import get_teslacam_path
+        from config import MAPPING_ENABLED, MAPPING_DB_PATH
+        if MAPPING_ENABLED:
+            tc = get_teslacam_path()
+            if tc:
+                try:
+                    summary = boot_catchup_scan(MAPPING_DB_PATH, tc)
+                    logger.info(
+                        "Post-mode-switch catch-up: scanned=%d, enqueued=%d",
+                        summary['scanned'], summary['enqueued'],
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Catch-up after mode switch failed: %s", e)
+            # Lazy-start the worker if a late-arriving mount means the
+            # boot-time start_worker was a no-op.
+            indexing_worker.ensure_worker_started()
+        indexing_worker.resume_worker()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to resume indexing worker: %s", e)
+
+
+def _restart_watcher_after_mode_switch() -> None:
+    """Re-attach the file watcher to whatever mount paths now exist.
+
+    Mode switches swap which directories are mounted RO/RW. The
+    pre-switch inotify watches still point at the old (now-unmounted)
+    inodes, so we tear them down and re-add fresh watches on whatever
+    is mounted now.
+    """
+    try:
+        from services import file_watcher_service
+        from services.video_service import get_teslacam_path
+        watch_paths = []
+        teslacam = get_teslacam_path()
+        if teslacam and os.path.isdir(teslacam):
+            watch_paths.append(teslacam)
+        try:
+            from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+            if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
+                watch_paths.append(ARCHIVE_DIR)
+        except ImportError:
+            pass
+        if watch_paths:
+            file_watcher_service.restart_watcher(watch_paths)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to restart file watcher: %s", e)
 
 
 def _trigger_cloud_sync_after_mode_switch():
@@ -207,6 +299,18 @@ def present_usb():
     script_path = os.path.join(GADGET_DIR, "scripts", "present_usb.sh")
     log_path = os.path.join(GADGET_DIR, "present_usb_web.log")
 
+    # Pause the indexing worker so we don't try to unmount a partition
+    # while a clip is being parsed. If the worker is mid-file longer
+    # than the timeout, refuse the switch — it's safer than busy
+    # unmounts.
+    if not _pause_worker_for_mode_switch():
+        flash(
+            "Cannot switch modes - video indexing is in progress. "
+            "Please wait a few seconds and try again.",
+            "warning",
+        )
+        return redirect(url_for("mode_control.index"))
+
     try:
         with open(log_path, "w") as log:
             result = subprocess.run(
@@ -229,8 +333,10 @@ def present_usb():
 
         if result.returncode == 0:
             flash("Successfully switched to Present Mode", "success")
-            # Auto-index videos after switching to present mode
-            _trigger_auto_index_after_mode_switch()
+            # Re-attach the watcher to the freshly-mounted RO partition,
+            # then resume the worker. The catch-up scan inside resume
+            # picks up any clips that landed during the switch.
+            _restart_watcher_after_mode_switch()
         else:
             flash(f"Present mode switch completed with warnings. Check {log_path} for details.", "info")
 
@@ -238,6 +344,8 @@ def present_usb():
         flash("Error: Script timed out after 120 seconds", "error")
     except Exception as e:
         flash(f"Error: {str(e)}", "error")
+    finally:
+        _resume_worker_after_mode_switch()
 
     return redirect(url_for("mode_control.index"))
 
@@ -247,6 +355,14 @@ def edit_usb():
     """Switch to edit mode with local mounts and Samba."""
     script_path = os.path.join(GADGET_DIR, "scripts", "edit_usb.sh")
     log_path = os.path.join(GADGET_DIR, "edit_usb_web.log")
+
+    if not _pause_worker_for_mode_switch():
+        flash(
+            "Cannot switch modes - video indexing is in progress. "
+            "Please wait a few seconds and try again.",
+            "warning",
+        )
+        return redirect(url_for("mode_control.index"))
 
     try:
         with open(log_path, "w") as log:
@@ -270,8 +386,7 @@ def edit_usb():
 
         if result.returncode == 0:
             flash("Successfully switched to Edit Mode", "success")
-            # Auto-index videos after switching to edit mode
-            _trigger_auto_index_after_mode_switch()
+            _restart_watcher_after_mode_switch()
         else:
             flash(f"Edit mode switch completed with warnings. Check {log_path} for details.", "info")
 
@@ -279,6 +394,8 @@ def edit_usb():
         flash("Error: Script timed out after 120 seconds", "error")
     except Exception as e:
         flash(f"Error: {str(e)}", "error")
+    finally:
+        _resume_worker_after_mode_switch()
 
     return redirect(url_for("mode_control.index"))
 

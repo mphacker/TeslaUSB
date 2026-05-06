@@ -34,11 +34,13 @@ fi
 GADGET_DIR="__GADGET_DIR__"
 LOCK="/run/teslausb-wifi-handler.lock"
 
-# Prevent multiple concurrent runs
+# Prevent multiple concurrent runs. The handler is bounded at
+# ~5 min (archive) + ~2 min (indexer drain) + small overhead, so
+# treat any lock newer than 10 minutes as still-valid and skip
+# this fire.
 if [ -f "$LOCK" ]; then
     LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) ))
-    # Only skip if lock is fresh (< 5 minutes)
-    [ "$LOCK_AGE" -lt 300 ] && exit 0
+    [ "$LOCK_AGE" -lt 600 ] && exit 0
 fi
 touch "$LOCK"
 

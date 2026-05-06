@@ -19,10 +19,76 @@ import sqlite3
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Generator, List, Optional, Tuple
+from enum import Enum
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Indexing Outcome Types
+# ---------------------------------------------------------------------------
+
+class IndexOutcome(Enum):
+    """Possible outcomes when attempting to index a single video file.
+
+    The queue worker dispatches on this value to decide whether to delete
+    the queue row, retry later (with backoff or after the file ages), or
+    purge stale DB rows. Every outcome maps to exactly one queue action,
+    eliminating the historical ``(0, 0)`` ambiguity that meant any of
+    seven different things (parse error, no GPS, too new, missing file,
+    wrong camera, dedup skip, ...) and was unsafe for retry decisions.
+    """
+
+    INDEXED = 'indexed'                        # New waypoints/events written
+    ALREADY_INDEXED = 'already_indexed'        # Canonical key present with data
+    DUPLICATE_UPGRADED = 'duplicate_upgraded'  # RecentClips→ArchivedClips upgrade
+    NO_GPS_RECORDED = 'no_gps_recorded'        # File parsed; no GPS; tracked
+    NOT_FRONT_CAMERA = 'not_front_camera'      # Skip non-front-cam clip
+    TOO_NEW = 'too_new'                        # mtime < 120s ago — retry later
+    FILE_MISSING = 'file_missing'              # File no longer exists; purge DB
+    PARSE_ERROR = 'parse_error'                # SEI parse exception
+    DB_BUSY = 'db_busy'                        # SQLite locked; transient retry
+
+
+# Outcomes after which the queue row can be deleted. PARSE_ERROR / TOO_NEW /
+# DB_BUSY require backoff or scheduled retry, so they are not terminal.
+_TERMINAL_OUTCOMES = frozenset({
+    IndexOutcome.INDEXED,
+    IndexOutcome.ALREADY_INDEXED,
+    IndexOutcome.DUPLICATE_UPGRADED,
+    IndexOutcome.NO_GPS_RECORDED,
+    IndexOutcome.NOT_FRONT_CAMERA,
+    IndexOutcome.FILE_MISSING,
+})
+
+
+@dataclass(frozen=True)
+class IndexResult:
+    """Structured outcome of indexing a single video file.
+
+    Replaces the historical ``(waypoint_count, event_count)`` tuple. The
+    ``outcome`` member is the source of truth for queue dispatch; the
+    counts are informational (logging, status display).
+    """
+
+    outcome: IndexOutcome
+    waypoints: int = 0
+    events: int = 0
+    error: Optional[str] = None
+
+    @property
+    def terminal(self) -> bool:
+        """True iff the queue worker can safely delete this row.
+
+        Note: ``FILE_MISSING`` is terminal for the queue (no point retrying)
+        even though it triggers a separate DB cleanup pass. Worker dispatch
+        is by-outcome, not by-property — ``terminal`` is a convenience for
+        the common "delete this row" case.
+        """
+        return self.outcome in _TERMINAL_OUTCOMES
 
 # Lazy-import SEI parser to avoid startup cost
 _sei_parser = None
@@ -77,7 +143,7 @@ def _with_db_retry(fn: Callable) -> Callable:
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 6
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -143,14 +209,51 @@ CREATE TABLE IF NOT EXISTS indexed_files (
     event_count INTEGER DEFAULT 0
 );
 
+-- Persistent indexing work queue. One row per pending clip, keyed by
+-- canonical_key (RecentClips/ArchivedClips dedup, Saved/Sentry events
+-- disambiguated by event folder — see canonical_key()). The single
+-- worker thread (services.indexing_worker) drains this; producers
+-- (file watcher, archive job, manual button, boot catch-up) just
+-- INSERT rows. claimed_by/claimed_at let the worker take an exclusive
+-- claim atomically; stale claims (>30 min) are auto-released so a
+-- crashed worker can't permanently lock a row.
+CREATE TABLE IF NOT EXISTS indexing_queue (
+    canonical_key TEXT PRIMARY KEY,
+    file_path TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 50,
+    enqueued_at REAL NOT NULL,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    claimed_by TEXT,
+    claimed_at REAL,
+    source TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_waypoints_trip ON waypoints(trip_id);
 CREATE INDEX IF NOT EXISTS idx_waypoints_coords ON waypoints(lat, lon);
 CREATE INDEX IF NOT EXISTS idx_waypoints_timestamp ON waypoints(timestamp);
 CREATE INDEX IF NOT EXISTS idx_waypoints_video_path ON waypoints(video_path);
+-- Covering index for query_trips' video_count subquery: lets SQLite count
+-- DISTINCT video_path per trip without touching the main waypoints table.
+-- Without this, /api/trips fans out to 1 + 2N queries (where N = page size)
+-- and visibly stalls the map page on databases with thousands of waypoints.
+CREATE INDEX IF NOT EXISTS idx_waypoints_trip_video
+    ON waypoints(trip_id, video_path);
 CREATE INDEX IF NOT EXISTS idx_events_trip ON detected_events(trip_id);
 CREATE INDEX IF NOT EXISTS idx_events_coords ON detected_events(lat, lon);
 CREATE INDEX IF NOT EXISTS idx_events_type ON detected_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON detected_events(timestamp);
+-- Worker pick-next index: partial index over only unclaimed, ready-to-run
+-- rows. Keeps the atomic-claim subquery O(log n) regardless of queue depth.
+CREATE INDEX IF NOT EXISTS idx_queue_ready
+    ON indexing_queue(priority, enqueued_at)
+    WHERE claimed_by IS NULL;
+-- Stale-claim recovery scan: lets the worker quickly find rows whose
+-- claim has aged out (>30 min, indicating the previous worker crashed).
+CREATE INDEX IF NOT EXISTS idx_queue_claimed_at
+    ON indexing_queue(claimed_at)
+    WHERE claimed_by IS NOT NULL;
 """
 
 
@@ -261,6 +364,15 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                 logger.error("Migration v3->v4 failed, leaving schema at v3: %s", e)
                 conn.commit()
                 return conn
+        # v5: covering index ``idx_waypoints_trip_video`` for the
+        # ``/api/trips`` page-load N+1 fix. The index is created by the
+        # ``executescript(_SCHEMA_SQL)`` call above (CREATE INDEX IF NOT
+        # EXISTS), so no separate data migration is needed — the schema
+        # version bump is the trigger.
+        # v6: ``indexing_queue`` table for the queue-based indexer
+        # redesign. Created by the executescript call; no data migration
+        # because there's nothing in the queue on the first upgrade — the
+        # boot catch-up scan will repopulate from indexed_files diff.
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",
@@ -697,28 +809,57 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Background Indexer
+# Indexer status bridge (legacy)
 # ---------------------------------------------------------------------------
-
-_indexer_thread: Optional[threading.Thread] = None
-_indexer_lock = threading.Lock()
-_indexer_cancel = threading.Event()
-
-# Status dict (read from any thread, written only by indexer thread)
-_status: Dict = {
-    'running': False,
-    'progress': '',
-    'files_total': 0,
-    'files_done': 0,
-    'current_file': '',
-    'last_run': None,
-    'error': None,
-}
+#
+# The original indexer was a single long-lived thread driven by a global
+# ``_status`` dict. It has been replaced by ``services.indexing_worker``,
+# which uses an SQLite-backed queue. The two helpers below are kept as
+# thin compatibility shims for any caller that still hits the old API
+# (currently just ``get_stats`` for ``/api/stats``).
 
 
 def get_indexer_status() -> dict:
-    """Return a copy of the current indexer status."""
-    return dict(_status)
+    """Return a worker-status snapshot.
+
+    .. deprecated::
+        Use :func:`services.indexing_worker.get_worker_status` instead.
+        This shim exists so external callers (templates, third-party
+        integrations) that still reach for the old dict shape keep
+        working through the migration.
+    """
+    return _get_worker_status_for_stats()
+
+
+def _get_worker_status_for_stats() -> dict:
+    """Return a worker-status snapshot in the legacy ``_status`` shape.
+
+    The ``/api/stats`` endpoint historically returned this dict so the
+    Analytics page could surface "indexing in progress" hints. We
+    bridge to the new worker module here so old consumers keep
+    working without importing ``indexing_worker`` directly (which
+    would create a circular import at module-load time).
+    """
+    try:
+        # Lazy import: indexing_worker imports mapping_service, so
+        # importing it at module load time would cycle.
+        from services import indexing_worker
+        ws = indexing_worker.get_worker_status()
+    except Exception:  # noqa: BLE001 — never raise from a status getter
+        return {
+            'running': False, 'queue_depth': 0,
+            'files_done_session': 0, 'active_file': None,
+            'source': None, 'last_drained_at': None, 'last_error': None,
+        }
+    return {
+        'running': bool(ws.get('active_file')),
+        'queue_depth': ws.get('queue_depth', 0),
+        'files_done_session': ws.get('files_done_session', 0),
+        'active_file': ws.get('active_file'),
+        'source': ws.get('source'),
+        'last_drained_at': ws.get('last_drained_at'),
+        'last_error': ws.get('last_error'),
+    }
 
 
 def _timestamp_from_filename(filename: str) -> Optional[str]:
@@ -737,6 +878,599 @@ def _timestamp_from_filename(filename: str) -> Optional[str]:
         except ValueError:
             pass
     return None
+
+
+def canonical_key(video_path: str) -> str:
+    """Return a stable identity key for a Tesla dashcam video file.
+
+    Two paths share a canonical key iff they refer to the same recording
+    (identical SEI/GPS data), so the indexer can dedupe them and the
+    queue / claim mechanism can use the key as a primary key.
+
+    Rules:
+      - RecentClips and ArchivedClips clips with the same basename are the
+        same recording (Tesla writes to RecentClips; the archive job copies
+        the file to the SD card). Key = basename.
+      - SavedClips/SentryClips event-folder clips key on
+        ``<source>/<event>/<basename>``. Two events can contain
+        similarly-named clips, so the event folder is what disambiguates
+        them.
+      - Bare basename paths (no folder prefix, e.g. legacy DB rows or
+        clips referenced from the SD-card archive root) key on the
+        basename so they collide with their Recent/Archived siblings.
+
+    Args:
+        video_path: Absolute or relative path to a video file.
+            Either path-separator style is accepted.
+
+    Returns:
+        Canonical key string.
+    """
+    norm = video_path.replace('\\', '/')
+    basename = norm.rsplit('/', 1)[-1]
+    parts = norm.split('/')
+
+    # Walk the path looking for a SavedClips/SentryClips marker followed by
+    # an event subfolder and a clip filename. The event folder is what
+    # makes these clips distinct from same-basename clips in other events.
+    for i, part in enumerate(parts):
+        if part in ('SavedClips', 'SentryClips') and i + 2 < len(parts):
+            event = parts[i + 1]
+            return f"{part}/{event}/{basename}"
+
+    return basename
+
+
+def candidate_db_paths(canonical_key_value: str) -> List[str]:
+    """Return every ``waypoints.video_path`` form that shares ``canonical_key_value``.
+
+    For basename-only keys (RecentClips/ArchivedClips clips), expands to
+    all relative-path forms the DB might have stored historically:
+    bare basename (legacy), ``RecentClips/<basename>``, and
+    ``ArchivedClips/<basename>``. For event-folder keys, the relative
+    path is unique on its own.
+
+    Mirrors the dedup logic in ``_index_video`` and is the single source
+    of truth used by the queue worker, the catch-up scan, and
+    ``_update_geodata_paths``.
+    """
+    if '/' not in canonical_key_value:
+        return [
+            canonical_key_value,
+            f'RecentClips/{canonical_key_value}',
+            f'ArchivedClips/{canonical_key_value}',
+        ]
+    return [canonical_key_value]
+
+
+# ---------------------------------------------------------------------------
+# Indexing queue API (services.indexing_worker is the consumer)
+# ---------------------------------------------------------------------------
+
+# Priority is "lower wins". Defaults reflect the plan's user-experience
+# ordering: event clips first (user wants to see the incident), then
+# archived trips (already on local SD, won't disappear), then recent
+# clips (least urgent — Tesla's circular buffer will overwrite them
+# eventually but the watcher catches them in real time).
+_PRIORITY_SENTRY_SAVED = 10
+_PRIORITY_ARCHIVE = 20
+_PRIORITY_RECENT = 30
+_PRIORITY_DEFAULT = 50
+
+# Worker tuning — kept module-level so tests can monkeypatch them.
+_PARSE_ERROR_MAX_ATTEMPTS = 3
+_PARSE_ERROR_BASE_BACKOFF = 60.0
+_PARSE_ERROR_MAX_BACKOFF = 3600.0
+# Rows whose claim is older than this are considered orphaned (worker
+# crashed mid-file) and can be released for re-attempt.
+_STALE_CLAIM_SECONDS = 1800.0
+# Sentinel: permanently failed rows are deferred this far into the
+# future. Surfaces them in dead-letter queries via attempts column.
+_DEAD_LETTER_DEFER_SECONDS = 365 * 24 * 3600.0
+
+
+def priority_for_path(file_path: str) -> int:
+    """Map a clip path to its indexing-queue priority.
+
+    Uses the same folder-name heuristic as ``canonical_key`` so the
+    classification is consistent across producers (watcher, archive,
+    catch-up) and the worker.
+    """
+    norm = (file_path or '').replace('\\', '/').lower()
+    if '/savedclips/' in norm or '/sentryclips/' in norm:
+        return _PRIORITY_SENTRY_SAVED
+    if '/archivedclips/' in norm:
+        return _PRIORITY_ARCHIVE
+    if '/recentclips/' in norm:
+        return _PRIORITY_RECENT
+    return _PRIORITY_DEFAULT
+
+
+def _open_queue_conn(db_path: str) -> sqlite3.Connection:
+    """Open a tuned SQLite connection for queue ops.
+
+    Mirrors the per-connection settings used by ``_init_db`` so writers
+    don't trip over contended locks. Caller owns close.
+    """
+    conn = sqlite3.connect(db_path, timeout=15.0, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 15000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    return conn
+
+
+def enqueue_for_indexing(db_path: str, file_path: str, *,
+                         priority: Optional[int] = None,
+                         source: str = 'manual',
+                         next_attempt_at: Optional[float] = None) -> bool:
+    """Add or upgrade a single file in the indexing queue.
+
+    Returns True if a row was inserted or updated, False if the file
+    was rejected (path empty, canonical_key empty). Idempotent — a
+    second enqueue of the same canonical_key only lowers the priority
+    if the new value is more urgent.
+
+    ``next_attempt_at`` lets producers defer the first claim atomically
+    with the insert. The archive flow uses this to give the inline
+    indexer a head start so the worker doesn't race the inline call
+    and clobber a fresh claim. Only applied on INSERT — an existing
+    row already has its own schedule that we should respect.
+
+    Safe to call from any producer (watcher, archive, manual button).
+    Never blocks the caller for I/O — the actual parse happens in the
+    worker thread.
+    """
+    if not file_path:
+        return False
+    key = canonical_key(file_path)
+    if not key:
+        return False
+    if priority is None:
+        priority = priority_for_path(file_path)
+    now = time.time()
+    next_at = float(next_attempt_at) if next_attempt_at is not None else 0.0
+    try:
+        with _open_queue_conn(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO indexing_queue
+                    (canonical_key, file_path, priority,
+                     enqueued_at, next_attempt_at, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(canonical_key) DO UPDATE SET
+                    priority = MIN(priority, excluded.priority),
+                    file_path = CASE
+                        WHEN claimed_by IS NULL
+                            THEN excluded.file_path
+                        ELSE file_path
+                    END,
+                    source = CASE
+                        WHEN claimed_by IS NULL
+                            THEN excluded.source
+                        ELSE source
+                    END
+                """,
+                (key, file_path, priority, now, next_at, source),
+            )
+        return True
+    except sqlite3.Error as e:
+        logger.warning("enqueue_for_indexing failed for %s: %s", file_path, e)
+        return False
+
+
+def enqueue_many_for_indexing(db_path: str,
+                              items: List[Tuple[str, Optional[int]]],
+                              source: str = 'catchup') -> int:
+    """Batch enqueue. ``items`` is a list of ``(file_path, priority)``.
+
+    A None priority means "use ``priority_for_path``". Returns the
+    number of items that were actually written (skipping empty paths).
+    Single transaction so a 200-orphan boot catch-up costs ~10 ms.
+    """
+    if not items:
+        return 0
+    now = time.time()
+    rows: List[Tuple[str, str, int, float, str]] = []
+    for file_path, prio in items:
+        if not file_path:
+            continue
+        key = canonical_key(file_path)
+        if not key:
+            continue
+        if prio is None:
+            prio = priority_for_path(file_path)
+        rows.append((key, file_path, prio, now, source))
+    if not rows:
+        return 0
+    try:
+        with _open_queue_conn(db_path) as conn:
+            conn.executemany(
+                """
+                INSERT INTO indexing_queue
+                    (canonical_key, file_path, priority,
+                     enqueued_at, next_attempt_at, source)
+                VALUES (?, ?, ?, ?, 0, ?)
+                ON CONFLICT(canonical_key) DO UPDATE SET
+                    priority = MIN(priority, excluded.priority),
+                    file_path = CASE
+                        WHEN claimed_by IS NULL
+                            THEN excluded.file_path
+                        ELSE file_path
+                    END,
+                    source = CASE
+                        WHEN claimed_by IS NULL
+                            THEN excluded.source
+                        ELSE source
+                    END
+                """,
+                rows,
+            )
+        return len(rows)
+    except sqlite3.Error as e:
+        logger.warning("enqueue_many_for_indexing failed: %s", e)
+        return 0
+
+
+def recover_stale_claims(db_path: str,
+                         max_age_seconds: float = _STALE_CLAIM_SECONDS) -> int:
+    """Release claims older than ``max_age_seconds``.
+
+    Called once at worker startup so a previous crash can't permanently
+    lock a row. Returns the number of claims released.
+    """
+    cutoff = time.time() - max_age_seconds
+    try:
+        with _open_queue_conn(db_path) as conn:
+            cur = conn.execute(
+                """
+                UPDATE indexing_queue
+                   SET claimed_by = NULL, claimed_at = NULL
+                 WHERE claimed_by IS NOT NULL
+                   AND claimed_at < ?
+                """,
+                (cutoff,),
+            )
+            released = cur.rowcount or 0
+        if released:
+            logger.warning(
+                "Released %d stale indexing claims (>%ds old)",
+                released, int(max_age_seconds),
+            )
+        return released
+    except sqlite3.Error as e:
+        logger.warning("recover_stale_claims failed: %s", e)
+        return 0
+
+
+def claim_next_queue_item(db_path: str,
+                          worker_id: str) -> Optional[Dict[str, Any]]:
+    """Atomically claim the next ready, highest-priority queue item.
+
+    Returns a dict with the row's columns, or None if nothing is ready.
+    Uses ``BEGIN IMMEDIATE`` so two workers (or worker + archive inline
+    indexer) can never see the same canonical_key.
+
+    The returned dict includes ``claimed_by`` and ``claimed_at`` (the
+    timestamp at which we claimed). Pass these back to
+    ``complete_queue_item`` / ``release_claim`` / ``defer_queue_item``
+    as ``claimed_by=`` and ``claimed_at=`` so a stale worker can never
+    mutate a row a fresh worker has re-claimed.
+
+    "Ready" = ``claimed_by IS NULL AND next_attempt_at <= now()`` AND
+    ``attempts < _PARSE_ERROR_MAX_ATTEMPTS`` (dead-letter rows are
+    skipped automatically).
+    """
+    now = time.time()
+    try:
+        conn = _open_queue_conn(db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT canonical_key, file_path, priority, enqueued_at,
+                       next_attempt_at, attempts, last_error, source
+                  FROM indexing_queue
+                 WHERE claimed_by IS NULL
+                   AND next_attempt_at <= ?
+                   AND attempts < ?
+                 ORDER BY priority ASC, enqueued_at ASC
+                 LIMIT 1
+                """,
+                (now, _PARSE_ERROR_MAX_ATTEMPTS),
+            ).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return None
+            conn.execute(
+                """
+                UPDATE indexing_queue
+                   SET claimed_by = ?, claimed_at = ?
+                 WHERE canonical_key = ?
+                """,
+                (worker_id, now, row['canonical_key']),
+            )
+            conn.execute("COMMIT")
+            result = dict(row)
+            # Include the claim token so the worker can pass it back as
+            # an owner-guard for complete/release/defer.
+            result['claimed_by'] = worker_id
+            result['claimed_at'] = now
+            return result
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.warning("claim_next_queue_item failed: %s", e)
+        return None
+
+
+def complete_queue_item(db_path: str, canonical_key_value: str,
+                        *, claimed_by: Optional[str] = None,
+                        claimed_at: Optional[float] = None) -> bool:
+    """Remove a row after a terminal-outcome processing.
+
+    Used for INDEXED, ALREADY_INDEXED, DUPLICATE_UPGRADED,
+    NO_GPS_RECORDED, NOT_FRONT_CAMERA, FILE_MISSING. Returns True if a
+    row was deleted.
+
+    If ``claimed_by`` and ``claimed_at`` are provided, the delete is
+    guarded so it only takes effect if the row is still owned by the
+    same claim. This prevents a stuck/timed-out worker from deleting a
+    row that's been re-claimed by a fresh worker. Pass them whenever
+    you have them (the worker always does); omit only for catch-up /
+    one-shot scripts that don't claim.
+    """
+    if not canonical_key_value:
+        return False
+    try:
+        with _open_queue_conn(db_path) as conn:
+            if claimed_by is None:
+                cur = conn.execute(
+                    "DELETE FROM indexing_queue WHERE canonical_key = ?",
+                    (canonical_key_value,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    DELETE FROM indexing_queue
+                     WHERE canonical_key = ?
+                       AND claimed_by = ?
+                       AND claimed_at = ?
+                    """,
+                    (canonical_key_value, claimed_by, claimed_at),
+                )
+            return (cur.rowcount or 0) > 0
+    except sqlite3.Error as e:
+        logger.warning(
+            "complete_queue_item failed for %s: %s",
+            canonical_key_value, e,
+        )
+        return False
+
+
+def release_claim(db_path: str, canonical_key_value: str,
+                  *, claimed_by: Optional[str] = None,
+                  claimed_at: Optional[float] = None) -> bool:
+    """Release a claim without progressing the row.
+
+    Used for transient failures (DB_BUSY, worker pause/resume) where
+    we want another tick — or another worker — to retry without
+    incrementing ``attempts``.
+
+    If ``claimed_by`` and ``claimed_at`` are provided, the release is
+    guarded so a stale worker can't accidentally release a row
+    re-claimed by a fresh worker.
+    """
+    if not canonical_key_value:
+        return False
+    try:
+        with _open_queue_conn(db_path) as conn:
+            if claimed_by is None:
+                cur = conn.execute(
+                    """
+                    UPDATE indexing_queue
+                       SET claimed_by = NULL, claimed_at = NULL
+                     WHERE canonical_key = ?
+                    """,
+                    (canonical_key_value,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE indexing_queue
+                       SET claimed_by = NULL, claimed_at = NULL
+                     WHERE canonical_key = ?
+                       AND claimed_by = ?
+                       AND claimed_at = ?
+                    """,
+                    (canonical_key_value, claimed_by, claimed_at),
+                )
+            return (cur.rowcount or 0) > 0
+    except sqlite3.Error as e:
+        logger.warning(
+            "release_claim failed for %s: %s",
+            canonical_key_value, e,
+        )
+        return False
+
+
+def defer_queue_item(db_path: str, canonical_key_value: str,
+                     next_attempt_at: float, *,
+                     bump_attempts: bool = False,
+                     last_error: Optional[str] = None,
+                     claimed_by: Optional[str] = None,
+                     claimed_at: Optional[float] = None) -> bool:
+    """Re-schedule a row for a later attempt.
+
+    ``bump_attempts=False`` for TOO_NEW (we know exactly when the file
+    will be old enough to parse — no failure occurred).
+    ``bump_attempts=True`` for PARSE_ERROR with an exponential backoff
+    computed by the caller.
+
+    Always releases the claim so the next call to ``claim_next_queue_item``
+    can re-pick the row when ``next_attempt_at`` is reached.
+
+    If ``claimed_by`` and ``claimed_at`` are provided, the update is
+    guarded — a stale worker can't move the goalposts on a row that's
+    been re-claimed and possibly already finished.
+    """
+    if not canonical_key_value:
+        return False
+    try:
+        with _open_queue_conn(db_path) as conn:
+            params: tuple
+            if bump_attempts:
+                set_clause = (
+                    "claimed_by = NULL, claimed_at = NULL, "
+                    "next_attempt_at = ?, "
+                    "attempts = attempts + 1, "
+                    "last_error = ?"
+                )
+            else:
+                set_clause = (
+                    "claimed_by = NULL, claimed_at = NULL, "
+                    "next_attempt_at = ?, "
+                    "last_error = ?"
+                )
+            if claimed_by is None:
+                cur = conn.execute(
+                    f"UPDATE indexing_queue SET {set_clause} "
+                    f"WHERE canonical_key = ?",
+                    (next_attempt_at, last_error, canonical_key_value),
+                )
+            else:
+                cur = conn.execute(
+                    f"UPDATE indexing_queue SET {set_clause} "
+                    f"WHERE canonical_key = ? "
+                    f"  AND claimed_by = ? "
+                    f"  AND claimed_at = ?",
+                    (next_attempt_at, last_error, canonical_key_value,
+                     claimed_by, claimed_at),
+                )
+        if cur.rowcount == 0:
+            # Owner-guarded miss: row was re-claimed by another worker
+            # (or the row was deleted out from under us). Surface this
+            # so the caller logs / metrics catch it instead of silently
+            # masking a stale-claim bug.
+            if claimed_by is not None:
+                logger.warning(
+                    "defer_queue_item: owner-guard miss for %s "
+                    "(claimed_by=%s) — row re-claimed or deleted",
+                    canonical_key_value, claimed_by,
+                )
+            return False
+        return True
+    except sqlite3.Error as e:
+        logger.warning(
+            "defer_queue_item failed for %s: %s",
+            canonical_key_value, e,
+        )
+        return False
+
+
+def compute_backoff(attempts: int) -> float:
+    """Exponential backoff with cap. Pure function — easy to unit test.
+
+    ``attempts`` is the *failure count BEFORE this one* (so the first
+    retry waits ``BASE``, the second waits ``2*BASE``, etc.).
+    """
+    if attempts < 0:
+        attempts = 0
+    delay = _PARSE_ERROR_BASE_BACKOFF * (2 ** attempts)
+    return min(delay, _PARSE_ERROR_MAX_BACKOFF)
+
+
+def get_queue_status(db_path: str) -> Dict[str, Any]:
+    """Snapshot of queue health for the /api/index/status endpoint.
+
+    Returns ``{queue_depth, claimed_count, dead_letter_count,
+    next_ready_at, last_error}``. Cheap (single SQL with aggregates).
+    """
+    try:
+        with _open_queue_conn(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN claimed_by IS NULL
+                              AND attempts < ?
+                             THEN 1 ELSE 0 END) AS queue_depth,
+                    SUM(CASE WHEN claimed_by IS NOT NULL
+                             THEN 1 ELSE 0 END) AS claimed_count,
+                    SUM(CASE WHEN attempts >= ?
+                             THEN 1 ELSE 0 END) AS dead_letter_count,
+                    MIN(CASE WHEN claimed_by IS NULL
+                              AND attempts < ?
+                             THEN next_attempt_at END) AS next_ready_at
+                  FROM indexing_queue
+                """,
+                (_PARSE_ERROR_MAX_ATTEMPTS,
+                 _PARSE_ERROR_MAX_ATTEMPTS,
+                 _PARSE_ERROR_MAX_ATTEMPTS),
+            ).fetchone()
+        return {
+            'queue_depth': int(row['queue_depth'] or 0),
+            'claimed_count': int(row['claimed_count'] or 0),
+            'dead_letter_count': int(row['dead_letter_count'] or 0),
+            'next_ready_at': float(row['next_ready_at'])
+                              if row['next_ready_at'] is not None else None,
+        }
+    except sqlite3.Error as e:
+        logger.warning("get_queue_status failed: %s", e)
+        return {
+            'queue_depth': 0,
+            'claimed_count': 0,
+            'dead_letter_count': 0,
+            'next_ready_at': None,
+            'error': str(e),
+        }
+
+
+def clear_pending_queue(db_path: str) -> int:
+    """Remove only **unclaimed** rows from the indexing queue.
+
+    Used by ``/api/index/cancel`` so the currently-claimed file (if
+    any) is allowed to finish — its claim row stays in the table until
+    the worker's owner-guarded delete on completion. Returns the count
+    of rows actually removed.
+    """
+    try:
+        with _open_queue_conn(db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM indexing_queue WHERE claimed_by IS NULL"
+            )
+            return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("clear_pending_queue failed: %s", e)
+        return 0
+
+
+def clear_all_queue(db_path: str) -> int:
+    """Remove every row from the indexing queue, including claimed ones.
+
+    Used by the manual "Rebuild map index (advanced)" action **after**
+    the worker has been paused — otherwise the worker may be mid-INSERT
+    into waypoints/detected_events for a row this delete would erase
+    out from under it. Callers MUST pause the worker first. Returns
+    count of rows removed.
+    """
+    try:
+        with _open_queue_conn(db_path) as conn:
+            cur = conn.execute("DELETE FROM indexing_queue")
+            return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("clear_all_queue failed: %s", e)
+        return 0
+
+
+# Backward-compat alias — same dangerous semantics as the original
+# (deletes claimed rows). New code should pick one of the two above.
+clear_queue = clear_all_queue
 
 
 def _refresh_ro_mount(teslacam_path: str) -> None:
@@ -1011,10 +1745,12 @@ def _index_video(
     sample_rate: int,
     thresholds: dict,
     trip_gap_minutes: int,
-) -> Tuple[int, int]:
+) -> IndexResult:
     """Index a single video file: extract SEI, detect events, store in DB.
 
-    Returns (waypoint_count, event_count).
+    Returns a structured :class:`IndexResult` describing what happened.
+    The queue worker dispatches on ``result.outcome`` to decide retry /
+    delete / cleanup behavior. Counts are informational.
     """
     parser = _get_sei_parser()
 
@@ -1038,19 +1774,17 @@ def _index_video(
     # now seeing the durable ArchivedClips copy, upgrade the stored video_path
     # without touching the (expensive) SEI extractor.
     #
-    # Restrict the basename check to top-level folders we know can hold a
-    # duplicate (RecentClips, ArchivedClips). Sentry/Saved event subfolders
-    # contain generic basenames (front.mp4, back.mp4, ...) that would
-    # otherwise false-match across unrelated events.
-    basename = os.path.basename(video_path)
-    candidate_paths = [
-        basename,
-        f'RecentClips/{basename}',
-        f'ArchivedClips/{basename}',
-    ]
+    # Canonicalization rules live in ``canonical_key`` / ``candidate_db_paths``
+    # so the queue worker, catch-up scan, and ``_update_geodata_paths`` all
+    # see the same identity for a given clip. Sentry/Saved event subfolders
+    # disambiguate by event name (their canonical key includes the event
+    # folder), preventing false-matches across unrelated events.
+    ckey = canonical_key(video_path)
+    candidate_paths = candidate_db_paths(ckey)
+    placeholders = ','.join('?' * len(candidate_paths))
     existing_paths = conn.execute(
-        "SELECT DISTINCT video_path FROM waypoints "
-        "WHERE video_path IN (?, ?, ?)",
+        f"SELECT DISTINCT video_path FROM waypoints "
+        f"WHERE video_path IN ({placeholders})",
         candidate_paths,
     ).fetchall()
     if existing_paths:
@@ -1058,23 +1792,23 @@ def _index_video(
             'ArchivedClips' in (r['video_path'] or '') for r in existing_paths
         ):
             upgraded = conn.execute(
-                "UPDATE waypoints SET video_path = ? "
-                "WHERE video_path IN (?, ?, ?)",
+                f"UPDATE waypoints SET video_path = ? "
+                f"WHERE video_path IN ({placeholders})",
                 (rel_path, *candidate_paths),
             )
             conn.execute(
-                "UPDATE detected_events SET video_path = ? "
-                "WHERE video_path IN (?, ?, ?)",
+                f"UPDATE detected_events SET video_path = ? "
+                f"WHERE video_path IN ({placeholders})",
                 (rel_path, *candidate_paths),
             )
             conn.commit()
             logger.info(
                 "Upgraded %d waypoint(s) to durable ArchivedClips path: %s",
-                upgraded.rowcount, basename,
+                upgraded.rowcount, ckey,
             )
-        else:
-            logger.debug("Skipping %s: basename already indexed", rel_path)
-        return 0, 0
+            return IndexResult(IndexOutcome.DUPLICATE_UPGRADED)
+        logger.debug("Skipping %s: canonical key already indexed", rel_path)
+        return IndexResult(IndexOutcome.ALREADY_INDEXED)
 
     # Extract SEI messages
     waypoint_dicts = []
@@ -1121,7 +1855,7 @@ def _index_video(
         raise
     except Exception as e:
         logger.warning("Failed to parse SEI from %s: %s", rel_path, e)
-        return 0, 0
+        return IndexResult(IndexOutcome.PARSE_ERROR, error=str(e))
 
     if not waypoint_dicts:
         if sei_count == 0:
@@ -1136,8 +1870,9 @@ def _index_video(
             inferred = _infer_sentry_event(conn, rel_path, file_timestamp,
                                             teslacam_root=teslacam_root)
             if inferred:
-                return 0, 1  # 0 waypoints, 1 event
-        return 0, 0
+                # 1 inferred event written; treat as indexed for queue purposes.
+                return IndexResult(IndexOutcome.INDEXED, waypoints=0, events=1)
+        return IndexResult(IndexOutcome.NO_GPS_RECORDED)
 
     # Determine source folder
     parts = rel_path.replace('\\', '/').split('/')
@@ -1270,7 +2005,11 @@ def _index_video(
         )
 
     conn.commit()
-    return len(waypoint_dicts), len(events)
+    return IndexResult(
+        IndexOutcome.INDEXED,
+        waypoints=len(waypoint_dicts),
+        events=len(events),
+    )
 
 
 def index_single_file(
@@ -1280,14 +2019,19 @@ def index_single_file(
     sample_rate: int = 30,
     thresholds: Optional[dict] = None,
     trip_gap_minutes: int = 5,
-) -> Tuple[int, int]:
+) -> IndexResult:
     """Index a single video file on demand (e.g., after archiving).
 
     This is the public entry point for per-file indexing. It opens its own
-    DB connection, checks whether the file is already indexed, calls the
-    internal ``_index_video()`` worker, and records the result.
+    DB connection, classifies the file (front-cam? exists? too new? already
+    indexed?), calls the internal :func:`_index_video` worker if needed, and
+    records the result in ``indexed_files``.
 
-    Returns (waypoint_count, event_count), or (0, 0) on skip/failure.
+    Returns a structured :class:`IndexResult`. The queue worker dispatches
+    on ``result.outcome``; non-queue callers (e.g. inline archive indexing)
+    typically only care that the call did not raise — counts are exposed
+    via ``result.waypoints`` / ``result.events`` for logging.
+
     Does NOT acquire the task coordinator lock — the caller is responsible
     for ensuring no conflicting heavy tasks are running.
     """
@@ -1297,20 +2041,29 @@ def index_single_file(
     # Only index front-camera files (all cameras share the same GPS data)
     basename = os.path.basename(video_path).lower()
     if '-front' not in basename or not basename.endswith('.mp4'):
-        return 0, 0
+        return IndexResult(IndexOutcome.NOT_FRONT_CAMERA)
 
     try:
         stat = os.stat(video_path)
     except OSError:
         logger.debug("index_single_file: cannot stat %s", video_path)
-        return 0, 0
+        return IndexResult(IndexOutcome.FILE_MISSING)
 
-    # Skip files still being written (< 2 min old)
+    # Skip files still being written (< 2 min old). Tesla writes the moov
+    # atom at the end of each clip, and re-indexing while writes are in
+    # progress wastes CPU and may produce truncated waypoint lists.
     if (time.time() - stat.st_mtime) < 120:
         logger.debug("index_single_file: skipping %s (still being written)", video_path)
-        return 0, 0
+        return IndexResult(IndexOutcome.TOO_NEW)
 
-    conn = _init_db(db_path)
+    try:
+        conn = _init_db(db_path)
+    except sqlite3.OperationalError as e:
+        if _is_transient_db_error(e):
+            logger.debug("index_single_file: DB busy opening %s: %s", video_path, e)
+            return IndexResult(IndexOutcome.DB_BUSY, error=str(e))
+        raise
+
     try:
         # Check if already indexed with data
         row = conn.execute(
@@ -1318,258 +2071,50 @@ def index_single_file(
             (video_path,)
         ).fetchone()
         if row and row['waypoint_count'] and row['waypoint_count'] > 0:
-            return 0, 0  # Already indexed
+            return IndexResult(IndexOutcome.ALREADY_INDEXED)
 
-        wc, ec = _index_video(
+        result = _index_video(
             conn, video_path, teslacam_root, sample_rate, thresholds,
             trip_gap_minutes,
         )
 
-        # Record in indexed_files
-        if wc > 0 or ec > 0 or (time.time() - stat.st_mtime) > 300:
+        # Record in indexed_files for any terminal outcome that produced a
+        # decision (good or "no GPS"). Skip TOO_NEW / DB_BUSY / PARSE_ERROR
+        # so the worker retries them. The "older than 5 min" clause records
+        # zero-waypoint terminal results for old files so the indexer doesn't
+        # re-examine them on every catch-up scan.
+        if result.outcome in (
+            IndexOutcome.INDEXED,
+            IndexOutcome.DUPLICATE_UPGRADED,
+        ) or (
+            result.outcome == IndexOutcome.NO_GPS_RECORDED
+            and (time.time() - stat.st_mtime) > 300
+        ):
             conn.execute(
                 """INSERT OR REPLACE INTO indexed_files
                    (file_path, file_size, file_mtime, indexed_at,
                     waypoint_count, event_count)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (video_path, stat.st_size, stat.st_mtime,
-                 datetime.now(timezone.utc).isoformat(), wc, ec)
+                 datetime.now(timezone.utc).isoformat(),
+                 result.waypoints, result.events)
             )
             conn.commit()
 
-        return wc, ec
+        return result
 
     except ImportError:
         raise  # Protobuf missing — let caller decide
+    except sqlite3.OperationalError as e:
+        if _is_transient_db_error(e):
+            return IndexResult(IndexOutcome.DB_BUSY, error=str(e))
+        logger.warning("index_single_file failed for %s: %s", video_path, e)
+        return IndexResult(IndexOutcome.PARSE_ERROR, error=str(e))
     except Exception as e:
         logger.warning("index_single_file failed for %s: %s", video_path, e)
-        return 0, 0
+        return IndexResult(IndexOutcome.PARSE_ERROR, error=str(e))
     finally:
         conn.close()
-
-
-def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
-                 thresholds: dict, trip_gap_minutes: int):
-    """Background indexer main loop. Scans for new videos and indexes them."""
-    global _status
-
-    # Lower this thread's CPU priority so the Flask request handlers and
-    # the kernel's USB-gadget thread always preempt us. SEI parsing reads
-    # entire 50 MB MP4s from a loop-mounted exFAT image, which holds the
-    # GIL and starves the web server on a Pi Zero 2 W otherwise.
-    # On Linux, os.nice() and SCHED_BATCH apply to the calling thread.
-    try:
-        os.nice(19)
-    except (OSError, AttributeError):
-        pass
-    try:
-        if hasattr(os, "sched_setscheduler") and hasattr(os, "SCHED_BATCH"):
-            os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
-    except (OSError, AttributeError, ValueError):
-        pass
-
-    # Acquire the global heavy-task lock so the archiver and cloud sync
-    # don't run concurrently (Pi Zero has limited CPU/IO).
-    from services.task_coordinator import acquire_task, release_task
-    if not acquire_task('indexer'):
-        _status.update({
-            'running': False,
-            'progress': 'Skipped: another task is running',
-        })
-        return
-
-    _status.update({
-        'running': True, 'progress': 'Scanning for videos...',
-        'files_total': 0, 'files_done': 0, 'current_file': '', 'error': None,
-    })
-
-    try:
-        # Refresh the RO mount to see Tesla's latest writes.
-        # In present mode, exFAT caches filesystem metadata and won't see
-        # new/changed files until the mount is cycled.
-        _refresh_ro_mount(teslacam_path)
-
-        conn = _init_db(db_path)
-
-        # Find all front-camera videos
-        all_videos = list(_find_front_camera_videos(teslacam_path))
-        if not all_videos:
-            _status.update({'running': False, 'progress': 'No videos found'})
-            conn.close()
-            return
-
-        # Filter to unindexed files
-        to_index = []
-        for vp in all_videos:
-            if _indexer_cancel.is_set():
-                break
-            try:
-                stat = os.stat(vp)
-                row = conn.execute(
-                    "SELECT file_size, file_mtime, waypoint_count, event_count "
-                    "FROM indexed_files WHERE file_path = ?",
-                    (vp,)
-                ).fetchone()
-                if row and row['file_size'] == stat.st_size and row['file_mtime'] == stat.st_mtime:
-                    # File hasn't changed since we last looked at it. Skip.
-                    # Even if waypoint_count is 0 we don't re-parse: most
-                    # zero-waypoint files are sentry/parked recordings without
-                    # GPS, and re-parsing them every run wastes the Pi's CPU
-                    # and starves the web server.
-                    continue
-                to_index.append((vp, stat.st_size, stat.st_mtime))
-            except OSError:
-                continue
-
-        _status['files_total'] = len(to_index)
-        _status['progress'] = f'Indexing {len(to_index)} new videos...'
-        logger.info("Geo-indexer: %d new videos to index (of %d total)",
-                     len(to_index), len(all_videos))
-
-        total_waypoints = 0
-        total_events = 0
-
-        for idx, (vp, fsize, fmtime) in enumerate(to_index):
-            if _indexer_cancel.is_set():
-                _status['progress'] = 'Cancelled'
-                break
-
-            rel = os.path.relpath(vp, teslacam_path)
-            _status.update({
-                'files_done': idx,
-                'current_file': rel,
-                'progress': f'Indexing {idx + 1}/{len(to_index)}: {rel}',
-            })
-
-            try:
-                # Skip files still being written by Tesla (mtime < 2 min ago)
-                if (time.time() - fmtime) < 120:
-                    logger.debug("Skipping %s (still being written)", rel)
-                    continue
-
-                wc, ec = _index_video(
-                    conn, vp, teslacam_path, sample_rate, thresholds,
-                    trip_gap_minutes,
-                )
-                total_waypoints += wc
-                total_events += ec
-
-                # Record in indexed_files (only if we got data, or it's an
-                # older file unlikely to change — skip incomplete recordings)
-                if wc > 0 or ec > 0 or (time.time() - fmtime) > 300:
-                    conn.execute(
-                        """INSERT OR REPLACE INTO indexed_files
-                           (file_path, file_size, file_mtime, indexed_at,
-                            waypoint_count, event_count)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (vp, fsize, fmtime,
-                         datetime.now(timezone.utc).isoformat(), wc, ec)
-                    )
-                    conn.commit()
-
-            except ImportError as e:
-                # Protobuf missing — stop indexer, report clearly
-                logger.error("Indexer aborted: %s", e)
-                _status.update({
-                    'running': False,
-                    'error': str(e),
-                    'progress': f'Error: {e}',
-                })
-                return
-            except Exception as e:
-                logger.error("Failed to index %s: %s", rel, e)
-                continue
-
-            # Yield CPU between files. SEI parsing is CPU+IO heavy; without
-            # this, the indexer can starve the web server's request handlers
-            # and the kernel's USB gadget thread on a Pi Zero 2 W. The
-            # indexer thread also runs at nice 19 / SCHED_BATCH (set in
-            # _run_indexer) so this sleep just adds a guaranteed yield
-            # window between large file reads.
-            time.sleep(0.25)
-
-        _status.update({
-            'running': False,
-            'files_done': len(to_index),
-            'current_file': '',
-            'progress': f'Done: {total_waypoints} waypoints, {total_events} events '
-                        f'from {len(to_index)} videos',
-            'last_run': datetime.now(timezone.utc).isoformat(),
-        })
-        logger.info("Geo-indexer complete: %d waypoints, %d events from %d videos",
-                     total_waypoints, total_events, len(to_index))
-
-        # Purge stale entries — remove DB records for files that no longer exist
-        try:
-            purge_result = purge_deleted_videos(db_path, teslacam_path=teslacam_path)
-            if purge_result.get('purged_files', 0) > 0:
-                logger.info("Purged stale data: %d files, %d waypoints, %d events, %d trips",
-                            purge_result.get('purged_files', 0),
-                            purge_result.get('purged_waypoints', 0),
-                            purge_result.get('purged_events', 0),
-                            purge_result.get('purged_trips', 0))
-        except Exception as e:
-            logger.warning("Stale data purge failed (non-fatal): %s", e)
-
-    except Exception as e:
-        logger.error("Geo-indexer failed: %s", e)
-        _status.update({'running': False, 'error': str(e)})
-    finally:
-        release_task('indexer')
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def start_indexer(
-    db_path: str,
-    teslacam_path: str,
-    sample_rate: int = 30,
-    thresholds: Optional[dict] = None,
-    trip_gap_minutes: int = 5,
-) -> Tuple[bool, str]:
-    """Start the background geo-indexer.
-
-    Args:
-        db_path: Path to the SQLite database file.
-        teslacam_path: Path to TeslaCam directory.
-        sample_rate: Frame sampling rate (30 = ~1/sec at 30fps).
-        thresholds: Event detection thresholds (uses defaults if None).
-        trip_gap_minutes: Gap between waypoints to split into separate trips.
-
-    Returns:
-        (success, message) tuple.
-    """
-    global _indexer_thread
-
-    if thresholds is None:
-        thresholds = dict(DEFAULT_THRESHOLDS)
-
-    with _indexer_lock:
-        if _status.get('running'):
-            return False, "Indexer already running"
-
-        _indexer_cancel.clear()
-        _indexer_thread = threading.Thread(
-            target=_run_indexer,
-            args=(db_path, teslacam_path, sample_rate, thresholds, trip_gap_minutes),
-            daemon=True,
-        )
-        _indexer_thread.start()
-        return True, "Indexer started"
-
-
-def cancel_indexer() -> Tuple[bool, str]:
-    """Request cancellation of the running indexer."""
-    if not _status.get('running'):
-        return False, "Indexer is not running"
-    _indexer_cancel.set()
-    return True, "Cancellation requested"
 
 
 def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
@@ -1592,58 +2137,123 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
 
     try:
         if deleted_paths:
-            # Targeted mode — remove entries matching the given paths
-            for path in deleted_paths:
-                # indexed_files stores absolute paths; also try matching by
-                # video_path column in waypoints which stores relative paths.
-                row = conn.execute(
-                    "SELECT file_path FROM indexed_files WHERE file_path = ? "
-                    "OR file_path LIKE ?",
-                    (path, f'%{os.path.basename(path)}%')
-                ).fetchone()
-                if row:
-                    conn.execute(
-                        "DELETE FROM indexed_files WHERE file_path = ?",
-                        (row['file_path'],)
-                    )
-                    purged_files += 1
+            # Targeted mode — remove entries matching the given paths.
+            #
+            # Critical safety: a single video may live in BOTH
+            # ``RecentClips`` (Tesla's rolling buffer) and
+            # ``ArchivedClips`` (our SD-card copy). When Tesla rotates a
+            # clip out of RecentClips, the watcher fires a delete event
+            # for that path — but the archived copy must survive. We
+            # canonical-key dedupe and check candidate paths on disk
+            # before purging waypoints/events.
+            try:
+                from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+                archive_dir = ARCHIVE_DIR if ARCHIVE_ENABLED else None
+            except ImportError:
+                archive_dir = None
 
-            # Build a pattern for waypoint cleanup — match on basename of
-            # front-camera files (all camera angles share the same waypoints
-            # via the front-camera video_path).
+            # If the caller didn't supply ``teslacam_path`` (e.g. the
+            # watcher delete callback), look it up so the
+            # surviving-copy probe can still check the USB drive. We
+            # treat a lookup failure as "no surviving copy on USB" —
+            # the archive_dir check will still fire if applicable.
+            tc_for_check = teslacam_path
+            if not tc_for_check:
+                try:
+                    from services.video_service import (
+                        get_teslacam_path as _gtp,
+                    )
+                    tc_for_check = _gtp() or None
+                except Exception:  # noqa: BLE001
+                    tc_for_check = None
+
             for path in deleted_paths:
                 basename = os.path.basename(path)
-                # Only front-camera files have waypoints
-                if '-front' not in basename.lower():
+                if not basename:
                     continue
-                # waypoints.video_path is relative (e.g. "RecentClips/2026-...")
-                rows = conn.execute(
-                    "SELECT DISTINCT trip_id FROM waypoints "
-                    "WHERE video_path LIKE ?",
-                    (f'%{basename}%',)
-                ).fetchall()
-                trip_ids = [r['trip_id'] for r in rows]
+                key = canonical_key(path)
+                if not key:
+                    continue
+                # Candidate ON-DISK locations for this canonical key.
+                # If ANY of them still exists, the geodata still has a
+                # backing video — skip purge entirely.
+                surviving_files = []
+                if tc_for_check:
+                    surviving_files.extend([
+                        os.path.join(tc_for_check, 'RecentClips', basename),
+                        os.path.join(tc_for_check, 'SavedClips', basename),
+                        os.path.join(tc_for_check, 'SentryClips', basename),
+                    ])
+                if archive_dir:
+                    surviving_files.extend([
+                        os.path.join(archive_dir, basename),
+                        os.path.join(archive_dir, 'ArchivedClips', basename),
+                    ])
+                # Don't count the file we're being told was just deleted
+                # — it's gone (the kernel told the watcher so).
+                surviving_files = [p for p in surviving_files
+                                   if os.path.abspath(p) !=
+                                   os.path.abspath(path)]
+                if any(os.path.isfile(p) for p in surviving_files):
+                    logger.debug(
+                        "Skipping purge for %s — surviving copy exists",
+                        basename,
+                    )
+                    continue
 
+                # No surviving copy — safe to purge.
+                # 1) indexed_files: exact-match the absolute path that
+                #    was reported. (The other absolute forms were
+                #    rewritten by ``_update_geodata_paths`` when the
+                #    archive moved the file, so an exact match is
+                #    correct here.)
+                cur = conn.execute(
+                    "DELETE FROM indexed_files WHERE file_path = ?",
+                    (path,),
+                )
+                purged_files += cur.rowcount
+
+                # 2) waypoints / detected_events: video_path stores
+                #    relative DB paths from canonical_key. Exact-match
+                #    every candidate so we don't substring-match an
+                #    unrelated clip that happens to share the basename.
+                rel_paths = candidate_db_paths(key)
+                if not rel_paths:
+                    continue
+                placeholders = ','.join('?' * len(rel_paths))
+                trip_ids = [
+                    r['trip_id']
+                    for r in conn.execute(
+                        f"SELECT DISTINCT trip_id FROM waypoints "
+                        f"WHERE video_path IN ({placeholders})",
+                        rel_paths,
+                    ).fetchall()
+                ]
                 wc = conn.execute(
-                    "DELETE FROM waypoints WHERE video_path LIKE ?",
-                    (f'%{basename}%',)
+                    f"DELETE FROM waypoints "
+                    f"WHERE video_path IN ({placeholders})",
+                    rel_paths,
                 ).rowcount
                 purged_waypoints += wc
-
                 ec = conn.execute(
-                    "DELETE FROM detected_events WHERE video_path LIKE ?",
-                    (f'%{basename}%',)
+                    f"DELETE FROM detected_events "
+                    f"WHERE video_path IN ({placeholders})",
+                    rel_paths,
                 ).rowcount
                 purged_events += ec
 
-                # Remove trips that now have zero waypoints
+                # 3) Trips with no remaining waypoints get removed.
                 for tid in trip_ids:
+                    if tid is None:
+                        continue
                     remaining = conn.execute(
                         "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?",
-                        (tid,)
+                        (tid,),
                     ).fetchone()[0]
                     if remaining == 0:
-                        conn.execute("DELETE FROM trips WHERE id = ?", (tid,))
+                        conn.execute(
+                            "DELETE FROM trips WHERE id = ?", (tid,),
+                        )
                         purged_trips += 1
 
         elif teslacam_path:
@@ -1713,34 +2323,172 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
     }
 
 
-def trigger_auto_index(db_path: str, teslacam_path: str,
-                       sample_rate: int = 30,
-                       thresholds: Optional[dict] = None,
-                       trip_gap_minutes: int = 5) -> None:
-    """Trigger indexing in the background if TeslaCam path is accessible.
+def boot_catchup_scan(db_path: str, teslacam_path: str,
+                      *, source: str = 'catchup') -> Dict[str, int]:
+    """Diff filesystem vs ``indexed_files`` and enqueue any orphans.
 
-    Safe to call from startup or mode-switch hooks. Does nothing if the
-    indexer is already running or the path is not available.
+    Replaces the legacy "auto-index on startup" full re-scan. Cheap by
+    design: one ``os.listdir`` walk via :func:`_find_front_camera_videos`
+    + one bulk SELECT of every indexed canonical_key + an in-memory diff
+    + one batch INSERT into ``indexing_queue``. No video parsing happens
+    here — that's the worker's job.
+
+    Returns ``{scanned, already_indexed, enqueued}``. The
+    ``active_file`` banner stays off during this call (no parsing); the
+    banner only lights up when the worker actually picks up an orphan.
     """
+    result = {'scanned': 0, 'already_indexed': 0, 'enqueued': 0}
     if not teslacam_path or not os.path.isdir(teslacam_path):
-        logger.debug("Auto-index skipped: TeslaCam path not accessible")
-        return
+        logger.debug("boot_catchup_scan: TeslaCam path not accessible")
+        return result
 
-    if _status.get('running'):
-        logger.debug("Auto-index skipped: indexer already running")
-        return
+    # Build the set of canonical_keys already represented in
+    # indexed_files. We diff against canonical keys (not raw paths) so a
+    # clip that exists in both Recent and Archived doesn't get
+    # re-enqueued.
+    try:
+        conn = _init_db(db_path)
+        try:
+            indexed_paths = [
+                row['file_path']
+                for row in conn.execute(
+                    "SELECT file_path FROM indexed_files"
+                ).fetchall()
+            ]
+            queued_keys = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT canonical_key FROM indexing_queue"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.warning("boot_catchup_scan: DB read failed: %s", e)
+        return result
 
-    success, msg = start_indexer(
-        db_path=db_path,
-        teslacam_path=teslacam_path,
-        sample_rate=sample_rate,
-        thresholds=thresholds,
-        trip_gap_minutes=trip_gap_minutes,
+    indexed_keys = {canonical_key(p) for p in indexed_paths if p}
+    indexed_keys.discard('')
+
+    to_enqueue: List[Tuple[str, Optional[int]]] = []
+    for fpath in _find_front_camera_videos(teslacam_path):
+        result['scanned'] += 1
+        key = canonical_key(fpath)
+        if not key:
+            continue
+        if key in indexed_keys:
+            result['already_indexed'] += 1
+            continue
+        if key in queued_keys:
+            # Already pending — don't churn the row.
+            continue
+        to_enqueue.append((fpath, None))
+        # Track in-memory so the same canonical_key isn't appended
+        # twice from two folders during this same scan.
+        queued_keys.add(key)
+
+    if to_enqueue:
+        n = enqueue_many_for_indexing(db_path, to_enqueue, source=source)
+        result['enqueued'] = n
+    logger.info(
+        "boot_catchup_scan: scanned=%d, already_indexed=%d, enqueued=%d",
+        result['scanned'], result['already_indexed'], result['enqueued'],
     )
-    if success:
-        logger.info("Auto-index triggered: %s", msg)
-    else:
-        logger.debug("Auto-index not started: %s", msg)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Daily stale-data sweep
+# ---------------------------------------------------------------------------
+
+# Independent safety net for the case where ``purge_deleted_videos`` calls
+# from the watcher / archive-retention paths missed something. Iterates
+# every ``indexed_files`` row, ``os.path.isfile`` checks each, and removes
+# rows whose underlying file no longer exists. Designed to run once per
+# day with jitter so multiple Pis don't hammer the same minute.
+_DAILY_STALE_SCAN_INTERVAL = 24 * 60 * 60  # 24 hours
+_DAILY_STALE_SCAN_JITTER = 60 * 60         # +/- 1 hour
+_daily_stale_scan_thread: Optional[threading.Thread] = None
+_daily_stale_scan_stop: Optional[threading.Event] = None
+
+
+def start_daily_stale_scan(db_path: str, teslacam_path_provider) -> bool:
+    """Start the background daily stale-scan thread (idempotent).
+
+    ``teslacam_path_provider`` is a zero-arg callable that returns the
+    current TeslaCam path (so we re-resolve on each tick — the path
+    can change across mode switches).
+
+    Returns ``True`` if a thread was started, ``False`` if already
+    running.
+    """
+    global _daily_stale_scan_thread, _daily_stale_scan_stop
+    import random as _random
+
+    if _daily_stale_scan_thread is not None and _daily_stale_scan_thread.is_alive():
+        return False
+
+    stop_event = threading.Event()
+    _daily_stale_scan_stop = stop_event
+
+    def _loop():
+        # Initial wait: between 1h and 1h+24h after boot — boot itself
+        # is busy with USB gadget binding, so give the system time to
+        # settle before scanning.
+        first_delay = 60 * 60 + _random.randint(0, _DAILY_STALE_SCAN_INTERVAL)
+        if stop_event.wait(timeout=first_delay):
+            return
+        while not stop_event.is_set():
+            try:
+                tc = teslacam_path_provider()
+                if tc and os.path.isdir(tc):
+                    result = purge_deleted_videos(db_path, teslacam_path=tc)
+                    logger.info(
+                        "Daily stale scan: purged files=%d waypoints=%d "
+                        "events=%d trips=%d",
+                        result.get('purged_files', 0),
+                        result.get('purged_waypoints', 0),
+                        result.get('purged_events', 0),
+                        result.get('purged_trips', 0),
+                    )
+                else:
+                    logger.debug(
+                        "Daily stale scan: TeslaCam not accessible — "
+                        "skipping this cycle",
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Daily stale scan failed: %s", e)
+            # Re-jitter for next cycle so failures don't lock-step.
+            jitter = _random.randint(-_DAILY_STALE_SCAN_JITTER,
+                                     _DAILY_STALE_SCAN_JITTER)
+            if stop_event.wait(
+                timeout=_DAILY_STALE_SCAN_INTERVAL + jitter,
+            ):
+                return
+
+    _daily_stale_scan_thread = threading.Thread(
+        target=_loop, name='daily-stale-scan', daemon=True,
+    )
+    _daily_stale_scan_thread.start()
+    return True
+
+
+def stop_daily_stale_scan(timeout: float = 5.0) -> bool:
+    """Stop the daily stale-scan thread.
+
+    Mostly for tests. The production thread is daemon and will be
+    killed on process exit.
+    """
+    global _daily_stale_scan_thread, _daily_stale_scan_stop
+    if _daily_stale_scan_stop is not None:
+        _daily_stale_scan_stop.set()
+    t = _daily_stale_scan_thread
+    if t is not None and t.is_alive():
+        t.join(timeout=timeout)
+        if t.is_alive():
+            return False
+    _daily_stale_scan_thread = None
+    return True
 
 
 def diagnose_video(teslacam_path: str, max_videos: int = 3) -> dict:
@@ -1979,49 +2727,50 @@ def query_trips(db_path: str, limit: int = 50, offset: int = 0,
     ``min_distance_km`` defaults to 50 m, which hides parking-lot blips and
     isolated sentry recordings from the trip nav. Pass ``0`` to include all
     trips regardless of distance.
+
+    Performance: ``event_count`` and ``video_count`` are computed via
+    correlated subqueries in the same SELECT so the whole call is a single
+    SQL statement regardless of page size. The earlier per-trip Python
+    loop fired 1 + 2*page_size queries (401 for a 200-trip page) and was
+    the dominant cost of opening the map page on databases with thousands
+    of waypoints.
     """
     conn = _init_db(db_path)
     try:
-        sql = "SELECT * FROM trips WHERE 1=1"
+        sql = (
+            "SELECT t.*, "
+            "       (SELECT COUNT(*) FROM detected_events de "
+            "          WHERE de.trip_id = t.id) AS event_count, "
+            "       (SELECT COUNT(DISTINCT w.video_path) FROM waypoints w "
+            "          WHERE w.trip_id = t.id "
+            "            AND w.video_path IS NOT NULL) AS video_count "
+            "  FROM trips t "
+            " WHERE 1=1"
+        )
         params: List = []
 
         if min_distance_km and min_distance_km > 0:
-            sql += " AND COALESCE(distance_km, 0) >= ?"
+            sql += " AND COALESCE(t.distance_km, 0) >= ?"
             params.append(min_distance_km)
 
         if bbox:
             min_lat, min_lon, max_lat, max_lon = bbox
-            sql += " AND start_lat BETWEEN ? AND ? AND start_lon BETWEEN ? AND ?"
+            sql += (" AND t.start_lat BETWEEN ? AND ? "
+                    "AND t.start_lon BETWEEN ? AND ?")
             params.extend([min_lat, max_lat, min_lon, max_lon])
 
         if date_from:
-            sql += " AND start_time >= ?"
+            sql += " AND t.start_time >= ?"
             params.append(date_from)
         if date_to:
-            sql += " AND start_time <= ?"
+            sql += " AND t.start_time <= ?"
             params.append(date_to)
 
-        sql += " ORDER BY start_time DESC LIMIT ? OFFSET ?"
+        sql += " ORDER BY t.start_time DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         rows = conn.execute(sql, params).fetchall()
-        trips = [dict(r) for r in rows]
-
-        # Enrich trips with event counts and video counts
-        for trip in trips:
-            row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM detected_events WHERE trip_id = ?",
-                (trip['id'],)
-            ).fetchone()
-            trip['event_count'] = row['cnt'] if row else 0
-
-            row = conn.execute(
-                "SELECT COUNT(DISTINCT video_path) as cnt FROM waypoints WHERE trip_id = ? AND video_path IS NOT NULL",
-                (trip['id'],)
-            ).fetchone()
-            trip['video_count'] = row['cnt'] if row else 0
-
-        return trips
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -2120,7 +2869,7 @@ def get_stats(db_path: str) -> dict:
             'total_distance_km': round(total_distance, 2),
             'total_duration_seconds': total_duration,
             'event_breakdown': event_breakdown,
-            'indexer_status': get_indexer_status(),
+            'indexer_status': _get_worker_status_for_stats(),
         }
     finally:
         conn.close()

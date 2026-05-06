@@ -259,29 +259,6 @@
         flex-shrink: 0;
     }
 
-    /* ── Legend ── */
-    .legend {
-        position: absolute;
-        bottom: 30px;
-        right: 60px;
-        z-index: 1000;
-        background: var(--bg-secondary);
-        color: var(--text-primary);
-        padding: 10px 14px;
-        border-radius: var(--radius-lg, 12px);
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-        font-size: 12px;
-        max-width: 200px;
-        border: 1px solid var(--border-color, var(--border));
-        backdrop-filter: blur(8px);
-    }
-    [data-theme="dark"] .legend {
-        background: rgba(30, 41, 59, 0.9);
-        border-color: var(--border-color, #334155);
-    }
-    .legend-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
-    .legend-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
-    .legend-icon { font-size: 14px; width: 16px; text-align: center; display: inline-block; line-height: 1; }
     .event-svg-icon { background: none !important; border: none !important; }
 
     /* ── Indexer Status (floating on map) ── */
@@ -385,13 +362,9 @@
     .oh-ap { grid-area: ap; text-align: center; font-size: 9px; font-weight: 600; color: rgba(52,199,89,1); opacity: 0; transition: opacity 0.2s; }
     .oh-ap.active { opacity: 1; }
 
-    /* FSD legend colors */
-    .fsd-engaged { background: #28a745; }
-    .fsd-manual { background: #6c757d; }
-
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
-        .map-fab, .trip-nav-btn, .trip-card, .legend, .indexer-status,
+        .map-fab, .trip-nav-btn, .trip-card, .indexer-status,
         .event-filter-pill {
             transition: none !important;
         }

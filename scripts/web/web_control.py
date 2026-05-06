@@ -111,9 +111,6 @@ if __name__ == "__main__":
     print(f"Gadget directory: {GADGET_DIR}")
     print(f"Access the interface at: http://0.0.0.0:{WEB_PORT}/")
 
-    # Video indexing is triggered by WiFi connect (NetworkManager dispatcher)
-    # No boot-time indexing needed — the dispatcher handles it automatically
-
     # Start RecentClips archive timer (copies clips to SD card before Tesla deletes them)
     try:
         from services.video_archive_service import start_archive_timer

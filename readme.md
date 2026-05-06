@@ -60,7 +60,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Map-integrated video browser**: Slide-out panel on the Map page with three tabs — Events (default), Trips, and All Clips — no separate video pages
 - **Unified overlay player**: Full-screen video playback launched from the map with camera angle switching (front/back/left/right/pillars)
 - **Telemetry HUD**: Glassmorphic overlay showing real-time steering wheel angle, brake/gas pedal positions, speed, gear (P/R/N/D), turn signals, and Autopilot status — powered by pre-indexed server-side waypoint data (instant, no full video download needed)
-- **Auto-indexing**: GPS and telemetry data from dashcam SEI metadata indexed automatically on startup, on new file detection (inotify file watcher), and on WiFi connect; sentry events placed on map using inferred location from nearest trip
+- **Auto-indexing**: A single low-priority background worker drains a SQLite-backed `indexing_queue` one file at a time. Producers: boot catch-up scan, real-time inotify on new files, the post-WiFi archive run, and manual reindex from the UI. The "Indexing…" banner only appears while a specific file is actively being parsed. Sentry events placed on map using inferred location from nearest trip
 - **RecentClips Archive**: Automatically copies RecentClips to the Pi's SD card every 5 minutes before Tesla's 1-hour circular buffer deletes them — zero USB disruption, videos preserved for 30 days
 - **Skeuomorphic event markers**: Balloon-pin map markers — brake pedal, gas pedal, steering wheel, speedometer, eye (sentry) — always visible on the map
 - **Trip navigation**: Floating trip card with prev/next navigation; FSD overlay toggle
@@ -267,7 +267,7 @@ The web interface uses a five-tab navigation — sidebar rail on desktop and bot
 - Unified overlay player with camera angle switching (front/back/left/right/pillars)
 - Telemetry HUD overlay showing speed, gear, steering wheel, brake/gas pedals, blinkers, and Autopilot status (uses pre-indexed server-side waypoint data — instant, no full download)
 - FSD overlay toggle
-- Auto-indexing of dashcam SEI telemetry on startup, file detection (inotify), and WiFi connect
+- Auto-indexing of dashcam SEI telemetry via a queue-backed background worker (boot catch-up + inotify + post-WiFi archive run); banner shows only during real parse activity
 
 **Analytics Tab**:
 - Storage metrics with drive usage gauges and folder-by-folder breakdown (including Music drive when enabled)
@@ -444,7 +444,7 @@ Removes all files, services, and system configuration.
 |---------------|---------|
 | `gadget_web.service` | Web interface (port 80) with captive portal |
 | `present_usb_on_boot.service` | Auto-present USB gadget on boot (cleanup deferred) |
-| `teslausb-deferred-tasks.service` | Post-boot tasks: cleanup, chime selection, indexing |
+| `teslausb-deferred-tasks.service` | Post-boot tasks: cleanup, random chime selection |
 | `chime_scheduler.timer` | Check scheduled chime changes every 60 seconds |
 | `wifi-monitor.service` | Manage offline access point |
 | `watchdog.service` | Hardware watchdog for system reliability |

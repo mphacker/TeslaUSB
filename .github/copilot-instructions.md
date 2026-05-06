@@ -37,7 +37,7 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - **quick_edit_part2 sequence**: Clear LUN1 backing → unmount RO → detach old loops → create RW loop → mount RW → do work → sync → unmount → detach → create RO loop → remount RO → restore LUN1 backing. Any shortcuts risk read-only filesystems or kernel locks.
 
 ## Web App Patterns
-- Flask app under `scripts/web/`; blueprints in `scripts/web/blueprints/`; services in `scripts/web/services/` encapsulate logic (mount handling, chimes, thumbnails, Samba, mode).
+- Flask app under `scripts/web/`; blueprints in `scripts/web/blueprints/`; services in `scripts/web/services/` encapsulate logic (mount handling, chimes, indexing, Samba, mode).
 - Mode-aware file ops: lock chimes/light shows/videos must go through services that choose RO/RW paths; avoid direct filesystem writes in view code.
 - Samba cache: after edits in edit mode, call `close_samba_share()` and `restart_samba_services()` (see lock chime routes).
 - **Web service runs on port 80** (not 5000) to enable captive portal functionality. The service runs as root (via systemd) to bind to privileged port 80.
@@ -123,7 +123,7 @@ See the full design system for color palettes, typography scale, spacing tokens,
 ## Boot Priority
 - **USB gadget presentation is the #1 priority at boot.** Tesla must see the USB drive within ~3 seconds. All other tasks (cleanup, chime selection, indexing, cloud sync) are deferred to background services that run AFTER the gadget is bound.
 - `present_usb_on_boot.service` calls `present_usb.sh` directly — no cleanup wrapper.
-- `teslausb-deferred-tasks.service` handles post-boot tasks (cleanup via quick_edit, chime selection, indexing, cloud sync). These tasks may temporarily unbind/rebind the gadget (quick_edit pattern), but only after Tesla has had time to initialize the drive.
+- `teslausb-deferred-tasks.service` handles post-boot cleanup (via quick_edit) and random chime selection. It does **not** drive indexing or cloud sync — those run inside `gadget_web.service` (indexing worker thread + cloud archive worker) which starts in parallel.
 - Never add blocking work before the UDC bind in `present_usb.sh`. Even RO local mounts happen AFTER the gadget is presented to Tesla.
 
 ## Video Panel (Map-Integrated)
@@ -141,9 +141,24 @@ See the full design system for color palettes, typography scale, spacing tokens,
 - **Low impact**: `nice -n 19` + `ionice -c3` on rclone, bandwidth limit (`max_upload_mbps`), one file at a time, inter-file sleep. Web UI must remain responsive during sync.
 - **Keeps going**: Sync worker idles only when queue is empty AND inotify reports no new files. On WiFi reconnect, immediately re-checks queue.
 
+## Video Indexing
+- **Single SQLite-backed queue + one worker.** All video indexing flows through `indexing_queue` (in `geodata.db`, schema v6). One low-priority background thread (`indexing_worker.py`, started inside `gadget_web.service`) drains the queue one file at a time. **Never re-introduce parallel triggers** — the old design had 6 redundant paths (every page load, every mode switch, every WiFi connect, etc.) that caused the constantly-flashing "Indexing…" banner.
+- **Producers** (the only legal ways to add work to the queue):
+  - **Boot catch-up scan** — `mapping_service.boot_catchup_scan()` runs once at `gadget_web` start; cheap directory walk + batch INSERT, no parsing.
+  - **inotify file watcher** — `file_watcher_service.py` callback calls `enqueue_many_for_indexing()` on `IN_CREATE` / `IN_MOVED_TO`.
+  - **Archive run** — `video_archive_service` enqueues each newly archived clip with a short defer.
+  - **Manual reindex** — `POST /api/index/trigger` (single file) and `POST /api/index/rebuild` (full rebuild).
+- **Dedup is the queue's job**, not the producers'. `mapping_service.canonical_key(path)` resolves both the SD-card and USB-RO views of the same file to the same key. `enqueue_*` is idempotent — duplicate enqueues are no-ops.
+- **Outcomes are structured.** The worker calls `mapping_service.index_single_file(file_path, db_path, teslacam_root)` which returns `IndexResult(outcome=IndexOutcome.X, ...)`. `IndexOutcome` enumerates every terminal/retry state — `INDEXED`, `ALREADY_INDEXED`, `DUPLICATE_UPGRADED`, `NO_GPS_RECORDED`, `NOT_FRONT_CAMERA`, `TOO_NEW`, `FILE_MISSING`, `PARSE_ERROR`, `DB_BUSY`. Add new branches there, not via stringly-typed return values. `_TERMINAL_OUTCOMES` lists which delete the queue row vs. which retry with backoff.
+- **Mutual exclusion.** Worker calls `task_coordinator.acquire_task('indexer')` before each item to coordinate with the `archive` and `cloud_sync` tasks. If the lock is busy it sleeps briefly and retries.
+- **Banner truth.** `/api/index/status` reports `active_file` (file currently being parsed), `queue_depth`, `claimed_count`, `dead_letter_count`, `paused`, `last_outcome`, `worker_running`. The UI shows the banner **only** when `active_file != null`. Don't add UI heuristics that flash the banner based on queue depth alone.
+- **Pause for mode switches.** `pause_worker()` / `resume_worker()` bracket any RW remount or quick_edit; the worker drops its current claim cleanly so RO/RW transitions never race the parser.
+- **Power-loss safe.** Claims auto-expire (claimed_at older than the stale threshold get re-claimed by the next worker startup). Permanent failures move to dead-letter (`dead_letter_count`); they don't keep retrying forever.
+- **Daily stale scan** (`start_daily_stale_scan()`) sweeps `indexed_files` rows whose source file no longer exists; cheap (one `os.path.isfile` per row) and runs ~daily with jitter.
+
 ## File Watcher (inotify)
 - `file_watcher_service.py` monitors USB RO mount + ArchivedClips using `watchdog` library.
-- On new file: queues for indexing + cloud sync.
+- On new file: enqueues into `indexing_queue` (via `enqueue_many_for_indexing`) and notifies the cloud sync producer. Both consumers dedup by canonical key.
 - Falls back to 5-minute polling if inotify unavailable (mount changes, etc.).
 - Must be memory-efficient: watch directory-level events only (IN_CREATE, IN_MOVED_TO).
 
@@ -171,6 +186,8 @@ See the full design system for color palettes, typography scale, spacing tokens,
 - Deleting or overwriting `*.img` files in GADGET_DIR from any code path.
 - Running rclone without `nice`/`ionice` (starves the web server and gadget).
 - Marking a file as `synced` in the cloud database before rclone confirms the upload completed.
+- Re-introducing redundant indexing triggers (every page load, every mode switch, every WiFi connect, full filesystem walks). The indexing worker is the SINGLE consumer of `indexing_queue`; producers only enqueue. Adding parallel "trigger_auto_index"-style code paths is what caused the constantly-flashing banner the redesign removed.
+- Flashing the indexing banner based on queue depth instead of `active_file`. The user only wants to know when a file is *actively being parsed*, not when items are queued.
 
 ## AI & Testing Workspace Rules
 - **Never install packages, dependencies, or node_modules inside the git repo.** Test tooling (Playwright, npm packages, debug scripts) must live **outside** the repository — use `../playwright-test/` or another folder above the repo root.

@@ -143,7 +143,7 @@ def _with_db_retry(fn: Callable) -> Callable:
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 8
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -240,10 +240,27 @@ CREATE INDEX IF NOT EXISTS idx_waypoints_video_path ON waypoints(video_path);
 -- and visibly stalls the map page on databases with thousands of waypoints.
 CREATE INDEX IF NOT EXISTS idx_waypoints_trip_video
     ON waypoints(trip_id, video_path);
+-- Day-based aggregate (/api/days) and per-day route lookup
+-- (/api/day/<date>/routes) both filter by substr(start_time,1,10).
+-- v7: ``idx_trips_start_time`` keeps a sortable-text scan available
+-- for callers that filter by ``start_time >= ?`` (e.g. /api/trips with
+-- date_from/date_to).
+CREATE INDEX IF NOT EXISTS idx_trips_start_time ON trips(start_time);
 CREATE INDEX IF NOT EXISTS idx_events_trip ON detected_events(trip_id);
 CREATE INDEX IF NOT EXISTS idx_events_coords ON detected_events(lat, lon);
 CREATE INDEX IF NOT EXISTS idx_events_type ON detected_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON detected_events(timestamp);
+-- v8: expression indexes on substr(<ts>, 1, 10) for the day-based
+-- queries (/api/days, /api/day/<date>/routes, /api/events?date=).
+-- Plain idx_trips_start_time / idx_events_timestamp are NOT used by
+-- SQLite when the WHERE clause wraps the column in substr() — verified
+-- via EXPLAIN QUERY PLAN. Without these expression indexes the day
+-- view degrades to a full table scan on every nav, which is unusable
+-- on a Pi Zero 2 W with a few thousand trips.
+CREATE INDEX IF NOT EXISTS idx_trips_day
+    ON trips(substr(start_time, 1, 10));
+CREATE INDEX IF NOT EXISTS idx_events_day
+    ON detected_events(substr(timestamp, 1, 10));
 -- Worker pick-next index: partial index over only unclaimed, ready-to-run
 -- rows. Keeps the atomic-claim subquery O(log n) regardless of queue depth.
 CREATE INDEX IF NOT EXISTS idx_queue_ready
@@ -373,6 +390,16 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         # redesign. Created by the executescript call; no data migration
         # because there's nothing in the queue on the first upgrade — the
         # boot catch-up scan will repopulate from indexed_files diff.
+        # v7: ``idx_trips_start_time`` for callers that range-scan
+        # by ``start_time`` directly (e.g. /api/trips with date_from
+        # bounds). Created by the executescript above.
+        # v8: expression indexes ``idx_trips_day`` and
+        # ``idx_events_day`` on ``substr(<ts>, 1, 10)`` so the day-
+        # based map queries can avoid full scans. Plain timestamp
+        # indexes do NOT cover ``substr(col, 1, 10) = ?``. The
+        # expression indexes are created by the executescript above
+        # (CREATE INDEX IF NOT EXISTS is idempotent); no data
+        # migration required.
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",
@@ -2800,8 +2827,20 @@ def query_events(db_path: str, limit: int = 100, offset: int = 0,
                  severity: Optional[str] = None,
                  bbox: Optional[Tuple[float, float, float, float]] = None,
                  date_from: Optional[str] = None,
-                 date_to: Optional[str] = None) -> List[dict]:
-    """Query detected events with optional filters."""
+                 date_to: Optional[str] = None,
+                 date: Optional[str] = None) -> List[dict]:
+    """Query detected events with optional filters.
+
+    ``date`` is a single-day filter (YYYY-MM-DD). It uses
+    ``substr(timestamp, 1, 10) = ?`` so that timezone-naive ISO
+    strings (the format Tesla writes into filenames and that the
+    indexer copies into ``waypoints.timestamp`` /
+    ``detected_events.timestamp``) bucket correctly. SQLite's
+    ``date()`` function would mis-bucket any row that ever gained a
+    ``Z`` or ``+offset`` suffix, so ``substr`` is the safer
+    contract. ``date`` and ``date_from``/``date_to`` are
+    independent: passing all three narrows progressively.
+    """
     conn = _init_db(db_path)
     try:
         sql = "SELECT * FROM detected_events WHERE 1=1"
@@ -2823,12 +2862,223 @@ def query_events(db_path: str, limit: int = 100, offset: int = 0,
         if date_to:
             sql += " AND timestamp <= ?"
             params.append(date_to)
+        if date:
+            sql += " AND substr(timestamp, 1, 10) = ?"
+            params.append(date)
 
         sql += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_with_db_retry
+def query_days(db_path: str, limit: int = 60,
+               min_distance_km: float = 0.05) -> List[dict]:
+    """Aggregate trips and events by local-day for the day navigator.
+
+    Returns one row per day that has either at least one qualifying
+    trip (``distance_km >= min_distance_km``) or at least one
+    detected event. Rows are ordered most-recent-day first.
+
+    Each returned dict has:
+      * ``date`` — ISO ``YYYY-MM-DD`` string
+      * ``trip_count`` — qualifying trip count for the day
+      * ``total_distance_km`` — sum of qualifying trip distances
+      * ``event_count`` — total detected events
+      * ``sentry_count`` — events with ``event_type='sentry'``
+      * ``first_start`` — earliest trip ``start_time`` of the day
+        (NULL if the day is event-only)
+      * ``last_end`` — latest trip ``end_time`` (or ``start_time`` if
+        end is missing) — NULL if the day is event-only
+
+    Day-bucketing rule: ``substr(<column>, 1, 10)``. NEVER
+    ``date(<column>)`` — see :func:`query_events` for rationale.
+
+    Important: trips are filtered the same way ``/api/trips`` filters
+    them (``COALESCE(distance_km, 0) >= min_distance_km``, default
+    50 m). Without this, the day card would advertise "3 trips" while
+    the map only shows 1 because the other two are below the
+    distance threshold.
+
+    Performance: a single CTE-based query on indexed columns
+    (``idx_trips_day``, ``idx_events_day`` — expression indexes on
+    ``substr(<column>, 1, 10)`` introduced in schema v8). Expected
+    runtime O(days × trips_per_day) — well under 50 ms even with
+    thousands of trips.
+    """
+    if min_distance_km is None or min_distance_km < 0:
+        min_distance_km = 0.0
+    if limit is None or limit <= 0:
+        limit = 60
+
+    conn = _init_db(db_path)
+    try:
+        sql = """
+            WITH trip_days AS (
+                SELECT substr(start_time, 1, 10)            AS day,
+                       COUNT(*)                             AS trip_count,
+                       COALESCE(SUM(distance_km), 0)        AS total_distance_km,
+                       0                                    AS event_count,
+                       0                                    AS sentry_count,
+                       MIN(start_time)                      AS first_start,
+                       MAX(COALESCE(end_time, start_time))  AS last_end
+                  FROM trips
+                 WHERE start_time IS NOT NULL
+                   AND COALESCE(distance_km, 0) >= ?
+                 GROUP BY day
+            ),
+            event_days AS (
+                SELECT substr(timestamp, 1, 10)             AS day,
+                       0                                    AS trip_count,
+                       0.0                                  AS total_distance_km,
+                       COUNT(*)                             AS event_count,
+                       SUM(CASE WHEN event_type='sentry' THEN 1 ELSE 0 END) AS sentry_count,
+                       NULL                                 AS first_start,
+                       NULL                                 AS last_end
+                  FROM detected_events
+                 WHERE timestamp IS NOT NULL
+                 GROUP BY day
+            )
+            SELECT day                                      AS date,
+                   SUM(trip_count)                          AS trip_count,
+                   SUM(total_distance_km)                   AS total_distance_km,
+                   SUM(event_count)                         AS event_count,
+                   SUM(sentry_count)                        AS sentry_count,
+                   MIN(first_start)                         AS first_start,
+                   MAX(last_end)                            AS last_end
+              FROM (
+                  SELECT * FROM trip_days
+                  UNION ALL
+                  SELECT * FROM event_days
+              )
+             WHERE day IS NOT NULL
+             GROUP BY day
+             ORDER BY day DESC
+             LIMIT ?
+        """
+        rows = conn.execute(sql, (min_distance_km, limit)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_with_db_retry
+def query_day_routes(db_path: str, date_str: str,
+                     min_distance_km: float = 0.05) -> Dict[str, Any]:
+    """Return all trip routes (with waypoints) that started on ``date_str``.
+
+    ``date_str`` must be ISO ``YYYY-MM-DD``; the caller is expected
+    to validate the format before calling. Day-bucketing is by
+    ``substr(start_time, 1, 10)`` — a midnight-spanning trip belongs
+    to the day it started, not the day it ended (matches
+    :func:`query_days`).
+
+    Returns ``{'trips': [...]}`` where each trip has the same
+    metadata fields as :func:`query_trips` plus a ``waypoints`` list
+    sorted by waypoint id (ascending = chronological). Waypoints
+    are NOT post-processed — callers (i.e. the blueprint) are
+    responsible for path normalization (``ArchivedClips`` prefix
+    stripping) so the service stays free of presentation concerns.
+
+    Performance: one INNER JOIN; ``idx_trips_day`` (expression index
+    on ``substr(start_time, 1, 10)``, schema v8) makes the date filter
+    O(log n), then ``idx_waypoints_trip`` covers the join. All trip
+    waypoints come back in one round trip, then we group in Python.
+    For the worst-case 10-trip day with 500 waypoints each (5000
+    rows), this is well under 100 ms on a Pi Zero 2 W.
+
+    Trips with zero waypoints are excluded by the INNER JOIN —
+    those wouldn't render on the map anyway. The day card's
+    ``trip_count`` from :func:`query_days` may therefore exceed
+    ``len(result['trips'])`` if some trips were drift artifacts
+    with no GPS — that's surfaced in the UI as expected.
+    """
+    if min_distance_km is None or min_distance_km < 0:
+        min_distance_km = 0.0
+
+    conn = _init_db(db_path)
+    try:
+        sql = """
+            SELECT t.id                AS trip_id,
+                   t.start_time        AS start_time,
+                   t.end_time          AS end_time,
+                   t.distance_km       AS distance_km,
+                   t.duration_seconds  AS duration_seconds,
+                   t.start_lat         AS start_lat,
+                   t.start_lon         AS start_lon,
+                   t.end_lat           AS end_lat,
+                   t.end_lon           AS end_lon,
+                   t.source_folder     AS source_folder,
+                   w.id                AS waypoint_id,
+                   w.timestamp         AS w_timestamp,
+                   w.lat               AS w_lat,
+                   w.lon               AS w_lon,
+                   w.heading           AS w_heading,
+                   w.speed_mps         AS w_speed_mps,
+                   w.acceleration_x    AS w_acceleration_x,
+                   w.acceleration_y    AS w_acceleration_y,
+                   w.gear              AS w_gear,
+                   w.autopilot_state   AS w_autopilot_state,
+                   w.steering_angle    AS w_steering_angle,
+                   w.brake_applied     AS w_brake_applied,
+                   w.blinker_on_left   AS w_blinker_on_left,
+                   w.blinker_on_right  AS w_blinker_on_right,
+                   w.video_path        AS w_video_path,
+                   w.frame_offset      AS w_frame_offset
+              FROM trips t
+              JOIN waypoints w ON w.trip_id = t.id
+             WHERE substr(t.start_time, 1, 10) = ?
+               AND COALESCE(t.distance_km, 0) >= ?
+             ORDER BY t.start_time DESC, w.id ASC
+        """
+        rows = conn.execute(sql, (date_str, min_distance_km)).fetchall()
+
+        # Group rows by trip_id, preserving the SELECT order (start_time DESC).
+        trips_by_id: Dict[int, dict] = {}
+        order: List[int] = []
+        for row in rows:
+            trip_id = row['trip_id']
+            trip = trips_by_id.get(trip_id)
+            if trip is None:
+                trip = {
+                    'trip_id': trip_id,
+                    'start_time': row['start_time'],
+                    'end_time': row['end_time'],
+                    'distance_km': row['distance_km'],
+                    'duration_seconds': row['duration_seconds'],
+                    'start_lat': row['start_lat'],
+                    'start_lon': row['start_lon'],
+                    'end_lat': row['end_lat'],
+                    'end_lon': row['end_lon'],
+                    'source_folder': row['source_folder'],
+                    'waypoints': [],
+                }
+                trips_by_id[trip_id] = trip
+                order.append(trip_id)
+            trip['waypoints'].append({
+                'id': row['waypoint_id'],
+                'timestamp': row['w_timestamp'],
+                'lat': row['w_lat'],
+                'lon': row['w_lon'],
+                'heading': row['w_heading'],
+                'speed_mps': row['w_speed_mps'],
+                'acceleration_x': row['w_acceleration_x'],
+                'acceleration_y': row['w_acceleration_y'],
+                'gear': row['w_gear'],
+                'autopilot_state': row['w_autopilot_state'],
+                'steering_angle': row['w_steering_angle'],
+                'brake_applied': row['w_brake_applied'],
+                'blinker_on_left': row['w_blinker_on_left'],
+                'blinker_on_right': row['w_blinker_on_right'],
+                'video_path': row['w_video_path'],
+                'frame_offset': row['w_frame_offset'],
+            })
+
+        return {'trips': [trips_by_id[tid] for tid in order]}
     finally:
         conn.close()
 

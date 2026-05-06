@@ -1,6 +1,7 @@
 """Blueprint for map-based video browser with GPS tracking and event detection."""
 
 import os
+import re
 from flask import Blueprint, render_template, jsonify, request, redirect, url_for, flash
 
 from config import (
@@ -14,6 +15,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 mapping_bp = Blueprint('mapping', __name__, url_prefix='')
+
+# Strict ISO date validation. The day-based map view passes the
+# selected day verbatim into a SQL substr() comparison, so we don't
+# rely on SQLite to silently coerce — we reject anything that isn't
+# exactly YYYY-MM-DD up front. This also prevents a path-traversal
+# style attempt against /api/day/<date>/routes from ever reaching
+# the database layer.
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 @mapping_bp.before_request
@@ -171,12 +180,31 @@ def api_events():
     """List detected events with optional filters."""
     from services.mapping_service import query_events
 
-    limit = request.args.get('limit', 100, type=int)
+    # When ``date`` is supplied the request is asking for a complete
+    # day's worth of markers (the map renders all of them). Allow up
+    # to 5000 in that case so a busy sentry-event day is not silently
+    # truncated. The unscoped listing keeps the older 1000 cap because
+    # nothing on the page actually wants more than a few hundred.
+    raw_limit = request.args.get('limit', 100, type=int)
     offset = request.args.get('offset', 0, type=int)
     event_type = request.args.get('type')
     severity = request.args.get('severity')
     date_from = request.args.get('date_from')
     date_to = request.args.get('date_to')
+    date = request.args.get('date')
+
+    # Reject malformed single-day filters early so we never pass a
+    # non-canonical string into the substr() comparison. ``date_from``
+    # and ``date_to`` are open-ended strings (callers may pass
+    # full ISO timestamps for fine-grained windows) so we don't
+    # validate those.
+    if date is not None and not _DATE_RE.match(date):
+        return jsonify({'error': 'date must be YYYY-MM-DD'}), 400
+
+    if raw_limit is None or raw_limit <= 0:
+        raw_limit = 100
+    cap = 5000 if date else 1000
+    limit = min(raw_limit, cap)
 
     bbox = None
     if all(request.args.get(k) for k in ('min_lat', 'min_lon', 'max_lat', 'max_lon')):
@@ -193,10 +221,125 @@ def api_events():
     try:
         events = query_events(MAPPING_DB_PATH, limit=limit, offset=offset,
                               event_type=event_type, severity=severity,
-                              bbox=bbox, date_from=date_from, date_to=date_to)
+                              bbox=bbox, date_from=date_from, date_to=date_to,
+                              date=date)
         return jsonify({'events': events})
     except Exception as e:
         logger.error("Failed to query events: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Day-based APIs (powering the day navigator on the map page)
+# ---------------------------------------------------------------------------
+
+# Default trip-distance threshold matches /api/trips so the day card's
+# trip count never advertises trips the map omits. 50 m hides parking-
+# lot blips and stationary sentry recordings.
+_DEFAULT_DAY_MIN_DISTANCE_KM = 0.05
+# Maximum days returned by /api/days. The day navigator scrolls
+# locally; 365 covers a full year of indexed history. Higher values
+# would just bloat the initial payload without changing the UI.
+_DAYS_LIMIT_MAX = 365
+_DAYS_LIMIT_DEFAULT = 60
+
+
+@mapping_bp.route("/api/days")
+def api_days():
+    """Return a list of days that have trips and/or detected events.
+
+    Powers the day navigator (prev/next chevrons + day card stats).
+    Each day row carries enough metadata to render the card without
+    a follow-up call:
+
+      * ``date`` (``YYYY-MM-DD``)
+      * ``trip_count`` / ``total_distance_km`` — trips meeting
+        ``min_distance`` (default 50 m, matches ``/api/trips``)
+      * ``event_count`` / ``sentry_count``
+      * ``first_start`` / ``last_end`` (NULL on event-only days)
+
+    Query params:
+      * ``limit`` — max days to return (default 60, capped at 365)
+      * ``min_distance`` — trip distance threshold in km
+        (default 0.05 = 50 m). Pass 0 to include parking blips.
+    """
+    from services.mapping_service import query_days
+
+    limit = request.args.get('limit', _DAYS_LIMIT_DEFAULT, type=int)
+    if limit is None or limit <= 0:
+        limit = _DAYS_LIMIT_DEFAULT
+    limit = min(limit, _DAYS_LIMIT_MAX)
+
+    min_distance_km = request.args.get(
+        'min_distance', _DEFAULT_DAY_MIN_DISTANCE_KM, type=float
+    )
+    if min_distance_km is None or min_distance_km < 0:
+        min_distance_km = _DEFAULT_DAY_MIN_DISTANCE_KM
+
+    try:
+        days = query_days(MAPPING_DB_PATH, limit=limit,
+                          min_distance_km=min_distance_km)
+        return jsonify({'days': days})
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to query days: %s", e)
+        return jsonify({'error': str(e)}), 500
+
+
+@mapping_bp.route("/api/day/<date>/routes")
+def api_day_routes(date):
+    """Return all trip routes that started on ``date`` (``YYYY-MM-DD``).
+
+    Powers the multi-trip overlay for a selected day. One server
+    round trip returns every trip's metadata + waypoints in a single
+    JSON payload, so the client doesn't fan out to per-trip
+    ``/api/trip/<id>/route`` calls (which would be expensive on a
+    multi-trip day with hundreds of waypoints each).
+
+    Response shape::
+
+        {
+          "date": "2026-05-04",
+          "trips": [
+            {
+              "trip_id": int,
+              "start_time", "end_time",
+              "start_lat", "start_lon", "end_lat", "end_lon",
+              "distance_km", "duration_seconds",
+              "source_folder",
+              "waypoints": [{"id", "lat", "lon", "speed_mps",
+                             "video_path", ...}, ...]
+            },
+            ...
+          ]
+        }
+    """
+    from services.mapping_service import query_day_routes
+
+    if not _DATE_RE.match(date):
+        return jsonify({'error': 'date must be YYYY-MM-DD'}), 400
+
+    min_distance_km = request.args.get(
+        'min_distance', _DEFAULT_DAY_MIN_DISTANCE_KM, type=float
+    )
+    if min_distance_km is None or min_distance_km < 0:
+        min_distance_km = _DEFAULT_DAY_MIN_DISTANCE_KM
+
+    try:
+        result = query_day_routes(MAPPING_DB_PATH, date,
+                                  min_distance_km=min_distance_km)
+        # Normalize ArchivedClips video paths so the client can
+        # use them as relative URLs without further parsing — same
+        # contract as /api/trip/<id>/route.
+        for trip in result.get('trips', []):
+            for wp in trip.get('waypoints', []):
+                vp = wp.get('video_path') or ''
+                if vp and 'ArchivedClips' in vp:
+                    basename = vp.rsplit('/', 1)[-1] if '/' in vp else vp
+                    wp['video_path'] = f'ArchivedClips/{basename}'
+        result['date'] = date
+        return jsonify(result)
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to query day routes: %s", e)
         return jsonify({'error': str(e)}), 500
 
 

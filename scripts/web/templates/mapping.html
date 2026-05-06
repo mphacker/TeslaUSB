@@ -22,9 +22,6 @@
     }
     #map { width: 100%; height: 100%; z-index: 1; }
 
-    /* Hidden selects for trip/event filtering */
-    .map-hidden-controls { display: none; }
-
     /* ── Trip Card (bottom-left floating) ── */
     .trip-card {
         position: absolute;
@@ -162,40 +159,104 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── Event Filter Dropdown ── */
-    .event-filter-dropdown {
+    /* ── Event-Type Filter Pills (top-center floating) ── */
+    .event-filter-pills {
         position: absolute;
-        right: calc(100% + 8px);
-        top: 0;
-        z-index: 1001;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1000;
+        display: flex;
+        flex-wrap: nowrap;
+        gap: 6px;
+        max-width: calc(100vw - 120px);
+        overflow-x: auto;
+        scrollbar-width: thin;
+        padding: 4px 8px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: 999px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        backdrop-filter: blur(8px);
+    }
+    [data-theme="dark"] .event-filter-pills {
+        background: rgba(30, 41, 59, 0.92);
+        border-color: var(--border-color, #334155);
+    }
+    .event-filter-pills:empty { display: none; }
+    .event-filter-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        font-size: 0.75rem;
+        font-weight: 500;
+        color: var(--text-secondary);
+        background: transparent;
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: 999px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: all 150ms ease;
+        flex-shrink: 0;
+        min-height: 28px;  /* nudge toward 44 px touch target on combined hit */
+    }
+    .event-filter-pill:hover {
+        color: var(--text-primary);
+        border-color: var(--accent-primary, #3B82F6);
+    }
+    .event-filter-pill.active {
+        color: #fff;
+        border-color: transparent;
+        /* per-pill background-color set inline by JS to match the
+           event-marker color so the pill reads as "this is the type" */
+    }
+    .event-filter-pill .pill-count {
+        font-weight: 600;
+        opacity: 0.85;
+    }
+    .event-filter-pill.master {
+        font-weight: 600;
+    }
+
+    /* ── Speed Color Legend (bottom-right floating, toggleable) ── */
+    .speed-legend {
+        position: absolute;
+        right: 64px;  /* leaves room for the FAB column */
+        bottom: 12px;
+        z-index: 1000;
         background: var(--bg-secondary);
         border: 1px solid var(--border-color, var(--border));
         border-radius: var(--radius-lg, 12px);
-        padding: 8px 0;
-        min-width: 180px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        padding: 8px 10px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
         backdrop-filter: blur(8px);
+        font-size: 0.6875rem;
+        color: var(--text-secondary);
+        display: none;
     }
-    [data-theme="dark"] .event-filter-dropdown {
-        background: rgba(30, 41, 59, 0.95);
+    [data-theme="dark"] .speed-legend {
+        background: rgba(30, 41, 59, 0.92);
         border-color: var(--border-color, #334155);
     }
-    .event-filter-dropdown .filter-option {
-        display: block; width: 100%;
-        padding: 6px 14px;
-        background: none; border: none;
-        color: var(--text-primary);
-        font-size: 0.8125rem;
-        text-align: left;
-        cursor: pointer;
-        transition: background 150ms ease;
-    }
-    .event-filter-dropdown .filter-option:hover {
-        background: var(--bg-tertiary, var(--bg-primary));
-    }
-    .event-filter-dropdown .filter-option.active {
-        color: var(--accent-primary, #3B82F6);
+    .speed-legend.visible { display: block; }
+    .speed-legend-title {
         font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 4px;
+    }
+    .speed-legend-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        line-height: 1.4;
+    }
+    .speed-legend-swatch {
+        display: inline-block;
+        width: 18px;
+        height: 4px;
+        border-radius: 2px;
+        flex-shrink: 0;
     }
 
     /* ── Legend ── */
@@ -331,7 +392,7 @@
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
         .map-fab, .trip-nav-btn, .trip-card, .legend, .indexer-status,
-        .event-filter-dropdown .filter-option {
+        .event-filter-pill {
             transition: none !important;
         }
         .map-fab.spinning .nav-icon { animation: none !important; }
@@ -568,34 +629,41 @@
 </style>
 
 <div class="map-container">
-    <!-- Hidden select controls (kept for data/filtering logic) -->
-    <div class="map-hidden-controls">
-        <select id="tripFilter" onchange="filterTrips()">
-            <option value="">All Trips</option>
-        </select>
-    </div>
-
     <!-- Map -->
     <div id="map"></div>
 
-    <!-- Trip Card (bottom-left floating) -->
+    <!-- Event-Type Filter Pills (top-center, populated dynamically per day) -->
+    <div class="event-filter-pills" id="eventFilterPills" role="toolbar" aria-label="Filter event markers"></div>
+
+    <!-- Day Card (bottom-left floating) -->
     <div class="trip-card" id="tripCard">
         <div class="trip-card-nav">
-            <button class="trip-nav-btn" id="tripPrev" onclick="cycleTrip(-1)" aria-label="Previous trip">
+            <button class="trip-nav-btn" id="dayPrev" onclick="cycleDay(-1)" aria-label="Older day">
                 <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-left"></use></svg>
             </button>
             <div class="trip-card-info">
-                <div class="trip-card-date" id="tripCardDate">Loading...</div>
-                <div class="trip-card-stats" id="tripCardStats">&mdash;</div>
+                <div class="trip-card-date" id="dayCardDate">Loading...</div>
+                <div class="trip-card-stats" id="dayCardStats">&mdash;</div>
             </div>
-            <button class="trip-nav-btn" id="tripNext" onclick="cycleTrip(1)" aria-label="Next trip">
+            <button class="trip-nav-btn" id="dayNext" onclick="cycleDay(1)" aria-label="Newer day">
                 <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-right"></use></svg>
             </button>
         </div>
         <div class="trip-card-indexed" id="tripCardIndexed">
             <span id="tripIndexedCount">&mdash;</span> videos mapped
-            <button class="trip-card-all-btn" id="tripAllBtn" onclick="showAllTrips()">All trips</button>
+            <button class="trip-card-all-btn" id="dayAllBtn" onclick="showAllTime()">All time</button>
         </div>
+    </div>
+
+    <!-- Speed Color Legend (toggleable, hidden by default) -->
+    <div class="speed-legend" id="speedLegend" aria-hidden="true">
+        <div class="speed-legend-title">Speed (mph)</div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch" style="background:#440154"></span><span>0&ndash;33</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch" style="background:#3b528b"></span><span>33&ndash;67</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch" style="background:#21918c"></span><span>67&ndash;100</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch" style="background:#5ec962"></span><span>100&ndash;134</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch" style="background:#fde725"></span><span>134&ndash;168</span></div>
+        <div class="speed-legend-row"><span class="speed-legend-swatch" style="background:#fffacd"></span><span>168+</span></div>
     </div>
 
     <!-- FAB Group (right-side floating) -->
@@ -608,6 +676,9 @@
                 <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-layers"></use></svg>
             </button>
         </div>
+        <button class="map-fab" id="btnSpeedLegend" onclick="toggleSpeedLegend()" aria-label="Speed color legend" title="Speed Legend">
+            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use></svg>
+        </button>
         <button class="map-fab" id="btnScan" onclick="scanForNewClips()" aria-label="Scan for new clips" title="Scan for new clips">
             <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
         </button>
@@ -675,17 +746,71 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 }).addTo(map);
 
 // Layer groups
+// Map renderer: canvas is dramatically faster than SVG for the
+// dozens-of-polylines-per-trip workload introduced by speed-bucket
+// rendering. We share a single canvas instance across all polylines.
+const sharedCanvasRenderer = L.canvas({ padding: 0.2 });
 const tripLayer = L.layerGroup().addTo(map);
-const eventLayer = L.layerGroup();
 const eventCluster = L.markerClusterGroup({ maxClusterRadius: 40, spiderfyOnMaxZoom: true }).addTo(map);
 const fsdLayer = L.layerGroup();
 
-let currentView = 'trips';
 let fsdVisible = false;
-let allTrips = [];
+let speedLegendVisible = false;
+
+// Day-based state (replaces the trip-by-trip model). ``allDays`` is
+// the navigator source of truth, ordered newest-first; ``currentDate``
+// is the YYYY-MM-DD currently rendered on the map; ``currentDayData``
+// is the cached payload from /api/day/<date>/routes; ``allEvents`` is
+// the matching /api/events?date= payload (kept separate so the filter
+// pills can re-render without refetching). ``dayLoadSeq`` is a token
+// used to discard out-of-order responses when the user cycles fast or
+// the indexer-refresh hook fires mid-load. ``showingAllTime`` is the
+// "All time" overview mode (trip start/end markers only).
+// ``tripSelectSeq`` guards selectDayForTrip's pre-loadDay window — a
+// fast tap on Trip A then Trip B in the video panel shouldn't let
+// the slower A response win the race.
+let allDays = [];
+let currentDate = null;
+let currentDayData = { trips: [] };
 let allEvents = [];
-let currentTripIndex = 0;
-let showingAllTrips = false;
+let dayLoadSeq = 0;
+let tripSelectSeq = 0;
+let showingAllTime = false;
+
+// User-controllable per-event-type visibility. ``null`` means
+// "show all"; otherwise it's a Set of enabled event types.
+// Persisted to localStorage so the user's preferred filter state
+// survives page reloads.
+const EVENT_TYPES_STORAGE_KEY = 'mapping.enabledEventTypes';
+
+let enabledEventTypes = (function () {
+    try {
+        const raw = localStorage.getItem(EVENT_TYPES_STORAGE_KEY);
+        if (raw === null) return null;  // never set → show all
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? new Set(parsed) : null;
+    } catch (e) { return null; }
+})();
+
+// Speed buckets in m/s mapped to viridis colors. Polyline segments
+// are bucketed and each bucket emits run-length-encoded multi-line
+// segments, NOT one polyline per waypoint pair (which would create
+// thousands of Leaflet objects on a multi-trip day and crush the
+// Pi Zero 2 W).
+const SPEED_BUCKETS = [
+    { max: 15, color: '#440154' },   //   0-15 m/s   (~0-33 mph)   stopped/parking
+    { max: 30, color: '#3b528b' },   //  15-30 m/s   (~33-67 mph)  city
+    { max: 45, color: '#21918c' },   //  30-45 m/s   (~67-100 mph) suburban/highway
+    { max: 60, color: '#5ec962' },   //  45-60 m/s   (~100-134 mph)
+    { max: 75, color: '#fde725' },   //  60-75 m/s   (~134-168 mph)
+    { max: Infinity, color: '#fffacd' }, // 75+ m/s
+];
+
+function speedColor(mps) {
+    const v = (typeof mps === 'number' && Number.isFinite(mps)) ? mps : 0;
+    for (const b of SPEED_BUCKETS) if (v < b.max) return b.color;
+    return SPEED_BUCKETS[SPEED_BUCKETS.length - 1].color;
+}
 
 const severityColors = {
     critical: '#dc3545',
@@ -787,12 +912,6 @@ function makeEventIcon(eventType) {
     });
 }
 
-const eventIcons = {
-    harsh_brake: '🛑', emergency_brake: '‼️', hard_acceleration: '⚡',
-    sharp_turn: '↻', speeding: '💨', fsd_disengage: '✋', fsd_engage: '🤖',
-    sentry: '👁', saved: '🔖',
-};
-
 // --- Data Loading ---
 
 async function loadStats() {
@@ -804,176 +923,283 @@ async function loadStats() {
     } catch(e) { console.error('Failed to load stats:', e); }
 }
 
-async function loadTrips() {
+async function loadDays() {
+    // Refresh the day navigator. Preserves the user's current
+    // selection if it still exists; otherwise jumps to the most
+    // recent day. The indexer-refresh hook calls this whenever
+    // background indexing changes the row count, so we have to
+    // be careful not to clobber an in-flight day load — that's
+    // what the dayLoadSeq token in loadDay() is for.
     try {
-        // Remember current selection before refresh
-        const prevTripId = allTrips.length > 0 ? allTrips[currentTripIndex]?.id : null;
-
-        const resp = await fetch('/api/trips?limit=200');
+        const resp = await fetch('/api/days?limit=365');
         const data = await resp.json();
-        allTrips = data.trips || [];
+        allDays = data.days || [];
 
-        // Populate hidden trip dropdown (kept for data reference)
-        const sel = document.getElementById('tripFilter');
-        sel.replaceChildren();
-        const defaultOpt = document.createElement('option');
-        defaultOpt.value = '';
-        defaultOpt.textContent = 'All Trips';
-        sel.appendChild(defaultOpt);
-        allTrips.forEach(t => {
-            const date = formatLocalTime(t.start_time);
-            const dist = ((t.distance_km || 0) * 0.621371).toFixed(1);
-            const opt = document.createElement('option');
-            opt.value = t.id;
-            opt.textContent = `${date} — ${dist} mi`;
-            sel.appendChild(opt);
-        });
-
-        if (allTrips.length > 0) {
-            // Restore previous selection if it still exists
-            const restoredIdx = prevTripId != null
-                ? allTrips.findIndex(t => t.id === prevTripId)
-                : -1;
-            currentTripIndex = restoredIdx >= 0 ? restoredIdx : 0;
-
-            updateTripCard();
-            sel.value = allTrips[currentTripIndex].id;
-            const trip = allTrips[currentTripIndex];
-            const saved = allTrips;
-            allTrips = [trip];
-            await renderTrips();
-            allTrips = saved;
-        } else {
-            updateTripCard();
-            await renderTrips();
+        if (!allDays.length) {
+            renderEmptyState();
+            return;
         }
-    } catch(e) { console.error('Failed to load trips:', e); }
+
+        // Restore current selection if it still exists; otherwise
+        // jump to the most recent day. ``showingAllTime`` overrides
+        // both — we leave the user where they were.
+        const stillExists = currentDate &&
+            allDays.some(d => d.date === currentDate);
+        if (showingAllTime) {
+            renderAllTimeCard();
+            renderAllTime();
+            return;
+        }
+        if (!stillExists) {
+            currentDate = allDays[0].date;
+        }
+        await loadDay(currentDate);
+    } catch (e) {
+        console.error('Failed to load days:', e);
+    }
 }
 
-// Update trip card display based on currentTripIndex
-function updateTripCard() {
-    const dateEl = document.getElementById('tripCardDate');
-    const statsEl = document.getElementById('tripCardStats');
-    const prevBtn = document.getElementById('tripPrev');
-    const nextBtn = document.getElementById('tripNext');
+async function loadDay(date) {
+    // Render all trips and events for ``date`` in a single pass.
+    // Increments dayLoadSeq so any in-flight earlier loadDay() call
+    // discards its results when it returns — this prevents the
+    // indexer-refresh poll from overwriting a day the user just
+    // navigated to with stale data from the previous day.
+    if (!date) return;
+    showingAllTime = false;
+    currentDate = date;
+    const seq = ++dayLoadSeq;
 
-    if (!allTrips.length) {
-        dateEl.textContent = 'No trips';
+    renderDayCard();  // immediate paint from cached metadata
+
+    // Clear stale layers up-front so the user doesn't see the
+    // previous day's routes/events while the new day loads (and so
+    // a fetch failure doesn't leave inconsistent map state).
+    tripLayer.clearLayers();
+    fsdLayer.clearLayers();
+    eventCluster.clearLayers();
+
+    try {
+        // No date-scoped event cap: a busy sentry day can have
+        // hundreds of events and silently truncating would hide
+        // markers the day card promises. Server caps at 5000.
+        const [routesResp, eventsResp] = await Promise.all([
+            fetch(`/api/day/${encodeURIComponent(date)}/routes`),
+            fetch(`/api/events?date=${encodeURIComponent(date)}&limit=5000`),
+        ]);
+        const routesData = await routesResp.json();
+        const eventsData = await eventsResp.json();
+
+        // Race guard: only apply if we're still the latest load AND
+        // the user didn't navigate away while we were waiting.
+        if (seq !== dayLoadSeq || date !== currentDate) return;
+
+        currentDayData = routesData && routesData.trips ? routesData : { trips: [] };
+        allEvents = eventsData.events || [];
+        rebuildEventFilterPills();
+        await renderDay();
+    } catch (e) {
+        console.error('Failed to load day routes/events:', e);
+        if (seq !== dayLoadSeq || date !== currentDate) return;
+        // Keep layers cleared (already done above) and reset cached
+        // payloads so a subsequent successful load starts clean.
+        currentDayData = { trips: [] };
+        allEvents = [];
+        rebuildEventFilterPills();
+        if (typeof showToast === 'function') {
+            showToast('Could not load this day. Try again.', 'warning');
+        }
+    }
+}
+
+function renderDayCard() {
+    const day = allDays.find(d => d.date === currentDate);
+    const dateEl = document.getElementById('dayCardDate');
+    const statsEl = document.getElementById('dayCardStats');
+    const prevBtn = document.getElementById('dayPrev');
+    const nextBtn = document.getElementById('dayNext');
+    const allBtn = document.getElementById('dayAllBtn');
+
+    // Re-enable "All time" — empty-state may have disabled it.
+    if (allBtn) allBtn.disabled = !allDays.length;
+
+    if (!day) {
+        dateEl.textContent = currentDate || 'No data';
         statsEl.textContent = '\u2014';
         if (prevBtn) prevBtn.disabled = true;
         if (nextBtn) nextBtn.disabled = true;
         return;
     }
 
-    const trip = allTrips[currentTripIndex];
-    const date = formatLocalTime(trip.start_time);
-    const dist = ((trip.distance_km || 0) * 0.621371).toFixed(1);
-    const dur = Math.round((trip.duration_seconds || 0) / 60);
-    const events = trip.event_count || 0;
+    dateEl.textContent = formatDayLabel(day.date);
 
-    dateEl.textContent = date;
-
-    const statParts = [`${dist} mi`];
-    if (dur > 0) statParts.push(`${dur} min`);
-    if (events > 0) statParts.push(`${events} events`);
-    statsEl.textContent = statParts.join(' \u00B7 ');
-
-    if (prevBtn) prevBtn.disabled = (currentTripIndex >= allTrips.length - 1);
-    if (nextBtn) nextBtn.disabled = (currentTripIndex <= 0);
-}
-
-// Cycle through trips via trip card arrows
-function cycleTrip(direction) {
-    if (!allTrips.length) return;
-
-    // If showing all trips, exit to single-trip view
-    if (showingAllTrips) {
-        showingAllTrips = false;
-        // direction +1 (next/newer) → index 0, direction -1 (prev/older) → last
-        currentTripIndex = direction > 0 ? 0 : allTrips.length - 1;
-    } else {
-        // allTrips is sorted newest-first; -1 = older (higher index), +1 = newer (lower index)
-        const newIndex = currentTripIndex - direction;
-        if (newIndex < 0 || newIndex >= allTrips.length) return;
-        currentTripIndex = newIndex;
+    const parts = [];
+    if (day.trip_count > 0) {
+        const dist = (day.total_distance_km * 0.621371).toFixed(1);
+        parts.push(`${day.trip_count} trip${day.trip_count === 1 ? '' : 's'}`);
+        parts.push(`${dist} mi`);
     }
+    if (day.event_count > 0) {
+        parts.push(`${day.event_count} event${day.event_count === 1 ? '' : 's'}`);
+    }
+    statsEl.textContent = parts.length ? parts.join(' \u00B7 ') : '\u2014';
 
-    updateTripCard();
-
-    // Show this single trip on the map
-    const trip = allTrips[currentTripIndex];
-    const sel = document.getElementById('tripFilter');
-    sel.value = trip.id;
-    const saved = allTrips;
-    allTrips = [trip];
-    renderTrips().then(() => { allTrips = saved; });
+    // allDays is sorted newest-first: -1 = older (higher index),
+    // +1 = newer (lower index). Disable buttons at the edges.
+    const idx = allDays.findIndex(d => d.date === currentDate);
+    if (prevBtn) prevBtn.disabled = (idx < 0 || idx >= allDays.length - 1);
+    if (nextBtn) nextBtn.disabled = (idx <= 0);
 }
 
-// Show all trips on the map
-function showAllTrips() {
-    if (!allTrips.length) {
-        showToast('No trips available yet. Try indexing videos first.', 'warning');
+function renderAllTimeCard() {
+    const dateEl = document.getElementById('dayCardDate');
+    const statsEl = document.getElementById('dayCardStats');
+    const prevBtn = document.getElementById('dayPrev');
+    const nextBtn = document.getElementById('dayNext');
+    const allBtn = document.getElementById('dayAllBtn');
+
+    const totalDist = allDays.reduce(
+        (s, d) => s + (d.total_distance_km || 0), 0) * 0.621371;
+    const totalTrips = allDays.reduce(
+        (s, d) => s + (d.trip_count || 0), 0);
+
+    dateEl.textContent = `All time (${allDays.length} days)`;
+    statsEl.textContent = `${totalTrips} trips \u00B7 ${totalDist.toFixed(1)} mi total`;
+
+    // Enable nav so the user can exit "all time" by cycling, and
+    // re-enable "All time" itself in case empty-state had disabled it.
+    if (prevBtn) prevBtn.disabled = !allDays.length;
+    if (nextBtn) nextBtn.disabled = !allDays.length;
+    if (allBtn) allBtn.disabled = !allDays.length;
+}
+
+function renderEmptyState() {
+    const dateEl = document.getElementById('dayCardDate');
+    const statsEl = document.getElementById('dayCardStats');
+    const prevBtn = document.getElementById('dayPrev');
+    const nextBtn = document.getElementById('dayNext');
+    const allBtn = document.getElementById('dayAllBtn');
+
+    dateEl.textContent = 'No mapped drives yet';
+    statsEl.textContent = 'Index dashcam clips to see trips and events';
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    if (allBtn) allBtn.disabled = true;
+
+    // Reset state so a stale load can't re-render against a now-empty
+    // navigator and so filter pills don't show event types from a
+    // previous populated state.
+    currentDate = null;
+    currentDayData = { trips: [] };
+    allEvents = [];
+    showingAllTime = false;
+
+    tripLayer.clearLayers();
+    fsdLayer.clearLayers();
+    eventCluster.clearLayers();
+    rebuildEventFilterPills();
+}
+
+function formatDayLabel(date) {
+    // ``date`` is a YYYY-MM-DD string from the server. Build a
+    // local-tz Date object so the weekday is correct for the
+    // viewer; constructing from "YYYY-MM-DDT00:00" avoids the
+    // UTC parsing trap that bare ``new Date('2026-05-04')`` falls
+    // into (which interprets as UTC and shifts the weekday in
+    // negative-offset timezones).
+    if (!date) return '';
+    const parts = date.split('-');
+    if (parts.length !== 3) return date;
+    const d = new Date(
+        parseInt(parts[0], 10),
+        parseInt(parts[1], 10) - 1,
+        parseInt(parts[2], 10),
+    );
+    if (isNaN(d.getTime())) return date;
+    return d.toLocaleDateString(undefined, {
+        weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+    });
+}
+
+function cycleDay(direction) {
+    // direction: -1 = older day (cycle to next-higher index in
+    // newest-first list); +1 = newer day. If currently in
+    // "All time" mode, cycling exits to a single-day view at
+    // the appropriate edge.
+    if (!allDays.length) return;
+
+    if (showingAllTime) {
+        showingAllTime = false;
+        currentDate = direction > 0 ? allDays[0].date
+                                    : allDays[allDays.length - 1].date;
+        loadDay(currentDate);
         return;
     }
-    showingAllTrips = true;
-    const sel = document.getElementById('tripFilter');
-    sel.value = '';
 
-    const dateEl = document.getElementById('tripCardDate');
-    const statsEl = document.getElementById('tripCardStats');
-    dateEl.textContent = `All Trips (${allTrips.length})`;
-    const totalDist = allTrips.reduce((s, t) => s + (t.distance_km || 0), 0) * 0.621371;
-    statsEl.textContent = `${totalDist.toFixed(1)} mi total`;
-
-    const prevBtn = document.getElementById('tripPrev');
-    const nextBtn = document.getElementById('tripNext');
-    // Enable arrows so user can exit "all" mode by cycling
-    if (prevBtn) prevBtn.disabled = false;
-    if (nextBtn) nextBtn.disabled = false;
-
-    renderTrips();
+    const idx = allDays.findIndex(d => d.date === currentDate);
+    if (idx < 0) {
+        loadDay(allDays[0].date);
+        return;
+    }
+    const newIdx = idx - direction;  // -1 = older = +1 idx, etc.
+    if (newIdx < 0 || newIdx >= allDays.length) return;
+    loadDay(allDays[newIdx].date);
 }
 
-function filterTrips() {
-    const selected = document.getElementById('tripFilter').value;
-    if (selected) {
-        const trip = allTrips.find(t => t.id == selected);
-        if (trip) {
-            const saved = allTrips;
-            allTrips = [trip];
-            renderTrips().then(() => { allTrips = saved; });
+function showAllTime() {
+    if (!allDays.length) {
+        showToast('No mapped drives yet. Try indexing videos first.', 'warning');
+        return;
+    }
+    showingAllTime = true;
+    currentDate = null;
+    // dayLoadSeq is bumped inside renderAllTime() — that single
+    // increment also invalidates any in-flight loadDay() response.
+    renderAllTimeCard();
+    renderAllTime();
+}
+
+function selectDayForTrip(tripId) {
+    // Used by the video panel "Trips" tab when the user taps a
+    // trip row. We don't always know which day the trip belongs
+    // to (videos panel may show trips outside the loaded day's
+    // routes), so fetch the route, derive the date from the
+    // first waypoint, and switch to that day. Fast taps on
+    // multiple trips are protected by tripSelectSeq so a slower
+    // earlier response can't overwrite a later one.
+    const seq = ++tripSelectSeq;
+    loadTripRoute(tripId).then(function (geojson) {
+        if (seq !== tripSelectSeq) return;
+        if (!geojson || !geojson.properties || !geojson.properties.waypoints) {
+            return;
         }
-    } else {
-        renderTrips();
-    }
-}
+        const wps = geojson.properties.waypoints;
+        if (!wps.length || !wps[0].timestamp) return;
+        const date = String(wps[0].timestamp).substr(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
 
-function selectTripById(tripId) {
-    // Find trip in allTrips and navigate to it
-    const idx = allTrips.findIndex(t => t.id === tripId);
-    if (idx >= 0) {
-        currentTripIndex = idx;
-        showingAllTrips = false;
-        updateTripCard();
-        const trip = allTrips[idx];
-        const sel = document.getElementById('tripFilter');
-        sel.value = trip.id;
-        const saved = allTrips;
-        allTrips = [trip];
-        renderTrips().then(() => { allTrips = saved; });
-    } else {
-        // Trip not in loaded set — load route directly
-        loadTripRoute(tripId).then(function(geojson) {
-            if (geojson && geojson.geometry) {
-                const coords = geojson.geometry.coordinates;
-                if (coords.length > 0) {
-                    const bounds = L.latLngBounds(coords.map(c => [c[1], c[0]]));
-                    map.fitBounds(bounds, { padding: [40, 40] });
-                }
-            }
-        });
-    }
-    // Close the video panel so the map is visible
+        // If the trip's day is older than the /api/days window
+        // (e.g. user has 365+ days of data and clicked an old
+        // trip in the videos panel), inject a synthetic stub so
+        // cycleDay() and renderDayCard() don't disable the nav.
+        // The stub is best-effort metadata; real stats land on
+        // the next loadDays() refresh.
+        if (!allDays.some(d => d.date === date)) {
+            allDays.push({
+                date: date,
+                trip_count: 1,
+                total_distance_km: geojson.properties.distance_km || 0,
+                event_count: 0,
+                sentry_count: 0,
+            });
+            allDays.sort((a, b) => b.date.localeCompare(a.date));
+        }
+        loadDay(date);
+    }).catch(function (e) {
+        if (seq !== tripSelectSeq) return;
+        console.error('Failed to resolve trip day:', e);
+    });
+    // Close the video panel so the map is visible.
     if (videoPanelOpen) toggleVideoPanel();
 }
 
@@ -981,95 +1207,311 @@ async function loadTripRoute(tripId) {
     try {
         const resp = await fetch(`/api/trip/${tripId}/route`);
         return await resp.json();
-    } catch(e) {
+    } catch (e) {
         console.error('Failed to load route:', e);
         return null;
     }
 }
 
-async function loadEvents() {
-    try {
-        const resp = await fetch('/api/events?limit=500');
-        const data = await resp.json();
-        allEvents = data.events || [];
-        renderEvents();
-    } catch(e) { console.error('Failed to load events:', e); }
+// --- Event Filter Pills ---
+
+function rebuildEventFilterPills() {
+    // Pills are built per-day from the actually-present event
+    // types, so users only see filters that are relevant. The
+    // "All" pill at the front is a master toggle that turns
+    // everything on or off.
+    const container = document.getElementById('eventFilterPills');
+    if (!container) return;
+    container.replaceChildren();
+
+    if (!allEvents.length) return;
+
+    const counts = new Map();
+    for (const ev of allEvents) {
+        const t = ev.event_type || 'unknown';
+        counts.set(t, (counts.get(t) || 0) + 1);
+    }
+    const types = Array.from(counts.keys()).sort();
+
+    // "All" master pill
+    const allOn = isAllEventsEnabled(types);
+    container.appendChild(makePill({
+        label: 'All', count: allEvents.length, type: null,
+        active: allOn, color: 'var(--accent-primary, #3B82F6)',
+        master: true,
+    }));
+
+    for (const t of types) {
+        const cfg = eventMarkerSvgs[t] || { color: '#6c757d' };
+        container.appendChild(makePill({
+            label: t.replace(/_/g, ' '), count: counts.get(t), type: t,
+            active: isTypeEnabled(t), color: cfg.color,
+        }));
+    }
 }
 
-// --- Rendering ---
+function makePill({ label, count, type, active, color, master }) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'event-filter-pill' + (active ? ' active' : '') +
+                    (master ? ' master' : '');
+    if (active) btn.style.backgroundColor = color;
+    const labelSpan = document.createElement('span');
+    labelSpan.textContent = label;
+    btn.appendChild(labelSpan);
+    const countSpan = document.createElement('span');
+    countSpan.className = 'pill-count';
+    countSpan.textContent = String(count);
+    btn.appendChild(countSpan);
+    btn.addEventListener('click', () => toggleEventFilter(type));
+    return btn;
+}
 
-async function renderTrips() {
+function isTypeEnabled(t) {
+    return enabledEventTypes === null || enabledEventTypes.has(t);
+}
+
+function isAllEventsEnabled(presentTypes) {
+    if (enabledEventTypes === null) return true;
+    return presentTypes.every(t => enabledEventTypes.has(t));
+}
+
+function toggleEventFilter(type) {
+    const presentTypes = Array.from(new Set(
+        allEvents.map(e => e.event_type || 'unknown')));
+
+    if (type === null) {
+        // Master toggle: if all on, turn all off; else turn all on.
+        if (isAllEventsEnabled(presentTypes)) {
+            enabledEventTypes = new Set();
+        } else {
+            enabledEventTypes = null;
+        }
+    } else {
+        if (enabledEventTypes === null) {
+            enabledEventTypes = new Set(presentTypes);
+        }
+        if (enabledEventTypes.has(type)) enabledEventTypes.delete(type);
+        else enabledEventTypes.add(type);
+    }
+    persistEventTypeFilter();
+    rebuildEventFilterPills();
+    renderEvents();
+}
+
+function persistEventTypeFilter() {
+    try {
+        if (enabledEventTypes === null) {
+            localStorage.removeItem(EVENT_TYPES_STORAGE_KEY);
+        } else {
+            localStorage.setItem(
+                EVENT_TYPES_STORAGE_KEY,
+                JSON.stringify(Array.from(enabledEventTypes)),
+            );
+        }
+    } catch (e) { /* localStorage may be disabled; ignore */ }
+}
+
+function toggleSpeedLegend() {
+    speedLegendVisible = !speedLegendVisible;
+    const el = document.getElementById('speedLegend');
+    const btn = document.getElementById('btnSpeedLegend');
+    if (el) {
+        el.classList.toggle('visible', speedLegendVisible);
+        el.setAttribute('aria-hidden', speedLegendVisible ? 'false' : 'true');
+    }
+    if (btn) btn.classList.toggle('active', speedLegendVisible);
+}
+
+// --- Day Rendering ---
+//
+// renderDay() draws all trips for ``currentDate`` plus their event
+// markers in one pass. The bound trip data lives on
+// ``currentDayData.trips`` (already includes inline waypoints, so
+// we don't fan out per-trip route fetches like the old
+// trip-by-trip view did). Speed-bucketed polylines render on a
+// shared canvas — see SPEED_BUCKETS / sharedCanvasRenderer above.
+
+async function renderDay() {
     tripLayer.clearLayers();
     fsdLayer.clearLayers();
     const bounds = [];
 
-    for (const trip of allTrips) {
-        if (!trip.start_lat || !trip.start_lon) continue;
-        bounds.push([trip.start_lat, trip.start_lon]);
-        if (trip.end_lat && trip.end_lon) bounds.push([trip.end_lat, trip.end_lon]);
-
-        const geojson = await loadTripRoute(trip.id);
-        if (!geojson || !geojson.geometry) continue;
-
-        const coords = geojson.geometry.coordinates;
-        const waypoints = geojson.properties.waypoints || [];
-        const latLngs = coords.map(c => [c[1], c[0]]);
-
-        // Route polyline
-        const routeLine = L.polyline(latLngs, {
-            color: '#007bff', weight: 4, opacity: 0.8,
-        }).addTo(tripLayer);
-
-        // FSD overlay segments
-        let segStart = 0;
-        for (let i = 1; i < waypoints.length; i++) {
-            const prevAp = waypoints[i-1].autopilot_state;
-            const curAp = waypoints[i].autopilot_state;
-            if (prevAp !== curAp || i === waypoints.length - 1) {
-                const segCoords = latLngs.slice(segStart, i + 1);
-                const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(prevAp);
-                L.polyline(segCoords, {
-                    color: engaged ? '#28a745' : '#6c757d',
-                    weight: 6, opacity: 0.7, interactive: false,
-                }).addTo(fsdLayer);
-                segStart = i;
-            }
-        }
-
-        // Start/end markers
-        if (latLngs.length > 0) {
-            const dist = ((trip.distance_km || 0) * 0.621371).toFixed(1);
-            const dur = Math.round((trip.duration_seconds || 0) / 60);
-            L.circleMarker(latLngs[0], {
-                radius: 8, fillColor: '#28a745', color: '#fff', weight: 2, fillOpacity: 0.9,
-            }).bindPopup(
-                `<strong>🟢 Trip #${trip.id}</strong><br>` +
-                `📅 ${formatLocalTime(trip.start_time)}<br>` +
-                `📏 ${dist} mi · ⏱ ${dur} min`
-            ).addTo(tripLayer);
-
-            L.circleMarker(latLngs[latLngs.length - 1], {
-                radius: 8, fillColor: '#dc3545', color: '#fff', weight: 2, fillOpacity: 0.9,
-            }).bindPopup('🔴 Trip End').addTo(tripLayer);
-        }
-
-        // Click route to open video player overlay
-        const routeWaypoints = waypoints; // capture for closure
-        routeLine.on('click', function(e) {
-            let minDist = Infinity, nearest = null;
-            routeWaypoints.forEach(wp => {
-                const d = map.distance(e.latlng, [wp.lat, wp.lon]);
-                if (d < minDist) { minDist = d; nearest = wp; }
-            });
-            if (nearest && nearest.video_path) {
-                openVideoOverlay(nearest, e.containerPoint, routeWaypoints);
-            }
-        });
+    const trips = currentDayData && currentDayData.trips ? currentDayData.trips : [];
+    for (const trip of trips) {
+        renderTripOnDay(trip, bounds);
     }
+
+    // Render events first so we can include their coords in bounds.
+    // Otherwise event-only days (sentry weekend at home) would show
+    // markers but leave the viewport pinned wherever the user was.
+    const eventBounds = renderEvents();
+    for (const c of eventBounds) bounds.push(c);
 
     if (bounds.length > 0) {
         map.fitBounds(bounds, { padding: [30, 30] });
     }
+}
+
+function renderTripOnDay(trip, bounds) {
+    const waypoints = trip.waypoints || [];
+    if (!waypoints.length) return;
+
+    // Filter to renderable waypoints (skip null/non-finite coords).
+    const valid = waypoints.filter(wp =>
+        Number.isFinite(wp.lat) && Number.isFinite(wp.lon));
+    if (!valid.length) return;
+
+    if (Number.isFinite(trip.start_lat) && Number.isFinite(trip.start_lon)) {
+        bounds.push([trip.start_lat, trip.start_lon]);
+    }
+    if (Number.isFinite(trip.end_lat) && Number.isFinite(trip.end_lon)) {
+        bounds.push([trip.end_lat, trip.end_lon]);
+    }
+
+    // Speed-colored polyline: walk valid waypoints, group adjacent
+    // segments by speed bucket, emit one polyline per run. This
+    // gives us color information without exploding the polyline
+    // count.
+    const segments = [];
+    let currentColor = null;
+    let currentRun = null;
+    for (const wp of valid) {
+        const color = speedColor(wp.speed_mps);
+        if (color !== currentColor) {
+            if (currentRun && currentRun.length >= 2) {
+                segments.push({ color: currentColor, latlngs: currentRun });
+            }
+            // Start new run; carry the previous endpoint so segments
+            // visually connect across bucket transitions.
+            const seed = currentRun && currentRun.length
+                ? [currentRun[currentRun.length - 1]] : [];
+            currentRun = seed.concat([[wp.lat, wp.lon]]);
+            currentColor = color;
+        } else {
+            currentRun.push([wp.lat, wp.lon]);
+        }
+    }
+    if (currentRun && currentRun.length >= 2) {
+        segments.push({ color: currentColor, latlngs: currentRun });
+    }
+
+    const allLatLngs = valid.map(wp => [wp.lat, wp.lon]);
+
+    // Invisible click-target polyline laid under the colored
+    // segments, used to capture clicks (canvas polylines are
+    // hit-tested as a single object so a wide stroke is friendlier
+    // for tap interactions than per-segment hit-testing).
+    const clickTarget = L.polyline(allLatLngs, {
+        renderer: sharedCanvasRenderer,
+        color: '#000', weight: 14, opacity: 0,
+        interactive: true,
+    }).addTo(tripLayer);
+    clickTarget.on('click', function (e) {
+        let minDist = Infinity, nearest = null;
+        for (const wp of valid) {
+            const d = map.distance(e.latlng, [wp.lat, wp.lon]);
+            if (d < minDist) { minDist = d; nearest = wp; }
+        }
+        if (nearest && nearest.video_path) {
+            openVideoOverlay(nearest, e.containerPoint, valid);
+        }
+    });
+
+    for (const seg of segments) {
+        L.polyline(seg.latlngs, {
+            renderer: sharedCanvasRenderer,
+            color: seg.color, weight: 4, opacity: 0.9,
+            interactive: false,
+        }).addTo(tripLayer);
+    }
+
+    // FSD overlay segments.
+    let segStart = 0;
+    for (let i = 1; i < valid.length; i++) {
+        const prevAp = valid[i - 1].autopilot_state;
+        const curAp = valid[i].autopilot_state;
+        if (prevAp !== curAp || i === valid.length - 1) {
+            const segCoords = allLatLngs.slice(segStart, i + 1);
+            const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(prevAp);
+            L.polyline(segCoords, {
+                renderer: sharedCanvasRenderer,
+                color: engaged ? '#28a745' : '#6c757d',
+                weight: 6, opacity: 0.7, interactive: false,
+            }).addTo(fsdLayer);
+            segStart = i;
+        }
+    }
+
+    // Start/end markers. Use the trip metadata coords if present,
+    // otherwise fall back to the first/last valid waypoint.
+    const dist = ((trip.distance_km || 0) * 0.621371).toFixed(1);
+    const dur = Math.round((trip.duration_seconds || 0) / 60);
+    const startCoord = (Number.isFinite(trip.start_lat) && Number.isFinite(trip.start_lon))
+        ? [trip.start_lat, trip.start_lon] : allLatLngs[0];
+    const endCoord = (Number.isFinite(trip.end_lat) && Number.isFinite(trip.end_lon))
+        ? [trip.end_lat, trip.end_lon] : allLatLngs[allLatLngs.length - 1];
+
+    L.circleMarker(startCoord, {
+        radius: 7, fillColor: '#28a745', color: '#fff', weight: 2, fillOpacity: 0.9,
+    }).bindPopup(
+        `<strong>Trip #${trip.trip_id}</strong><br>` +
+        `${formatLocalTime(trip.start_time)}<br>` +
+        `${dist} mi \u00B7 ${dur} min`
+    ).addTo(tripLayer);
+
+    L.circleMarker(endCoord, {
+        radius: 7, fillColor: '#dc3545', color: '#fff', weight: 2, fillOpacity: 0.9,
+    }).bindPopup('Trip End').addTo(tripLayer);
+}
+
+function renderAllTime() {
+    // Lightweight overview: trip start/end markers only across
+    // all known days. NO polylines (rendering routes for
+    // hundreds of trips would crush the Pi Zero 2 W) and NO
+    // events (cluster gets noisy and pinning the map to a
+    // point is meaningless when you can see the whole history).
+    const seq = ++dayLoadSeq;  // also invalidates any in-flight loadDay
+    tripLayer.clearLayers();
+    fsdLayer.clearLayers();
+    eventCluster.clearLayers();
+    rebuildEventFilterPills();  // empty-state the pills
+
+    // We need per-day waypoints to draw markers. Rather than
+    // fetching all of them up-front, fetch /api/trips for the
+    // markers (its lightweight payload includes start/end coords).
+    fetch('/api/trips?limit=2000').then(r => r.json()).then(data => {
+        // Race guard: user may have cycled away from "All time" or
+        // started a different load while we were waiting.
+        if (seq !== dayLoadSeq || !showingAllTime) return;
+        // Clear again — between the initial clear and the fetch
+        // landing, an earlier in-flight render may have added
+        // markers. This guarantees we don't double-render.
+        tripLayer.clearLayers();
+        const trips = data.trips || [];
+        const bounds = [];
+        for (const trip of trips) {
+            if (Number.isFinite(trip.start_lat) && Number.isFinite(trip.start_lon)) {
+                bounds.push([trip.start_lat, trip.start_lon]);
+                L.circleMarker([trip.start_lat, trip.start_lon], {
+                    renderer: sharedCanvasRenderer,
+                    radius: 4, fillColor: '#28a745', color: '#fff',
+                    weight: 1, fillOpacity: 0.85, interactive: false,
+                }).addTo(tripLayer);
+            }
+            if (Number.isFinite(trip.end_lat) && Number.isFinite(trip.end_lon)) {
+                bounds.push([trip.end_lat, trip.end_lon]);
+                L.circleMarker([trip.end_lat, trip.end_lon], {
+                    renderer: sharedCanvasRenderer,
+                    radius: 4, fillColor: '#dc3545', color: '#fff',
+                    weight: 1, fillOpacity: 0.85, interactive: false,
+                }).addTo(tripLayer);
+            }
+        }
+        if (bounds.length) {
+            map.fitBounds(bounds, { padding: [30, 30] });
+        }
+    }).catch(e => console.error('Failed to render all-time view:', e));
 }
 
 // --- Video Player Overlay ---
@@ -1509,35 +1951,45 @@ function _resetArchiveNavBtn(btn) {
 }
 
 function renderEvents() {
+    // Returns an array of [lat, lon] coords for the rendered markers
+    // so the caller can include them in fitBounds(). Event-only days
+    // would otherwise leave the viewport unchanged.
     eventCluster.clearLayers();
+    const bounds = [];
+
+    // In "All time" mode we deliberately don't show event markers
+    // — the cluster gets noisy and it's not actionable.
+    if (showingAllTime) return bounds;
 
     allEvents.forEach(ev => {
-        if (!ev.lat || !ev.lon) return;
-        const icon = eventIcons[ev.event_type] || '📍';
+        // Filter: skip events whose type is currently disabled,
+        // and skip null/non-finite coords (would crash Leaflet).
+        if (!isTypeEnabled(ev.event_type || 'unknown')) return;
+        if (!Number.isFinite(ev.lat) || !Number.isFinite(ev.lon)) return;
 
         const marker = L.marker([ev.lat, ev.lon], {
             icon: makeEventIcon(ev.event_type),
         });
 
+        const safeType = (ev.event_type || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/_/g, ' ');
+        const safeDesc = (ev.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
         marker.bindPopup(
-            `<strong>${icon} ${(ev.event_type || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/_/g, ' ')}</strong><br>` +
-            `📅 ${formatLocalTime(ev.timestamp)}<br>` +
-            `${(ev.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}<br>` +
+            `<strong>${safeType}</strong><br>` +
+            `${formatLocalTime(ev.timestamp)}<br>` +
+            `${safeDesc}<br>` +
             (ev.video_path ?
-                `🎥 <a href="#" class="popup-video-link" data-trip-id="${ev.trip_id || 0}" data-video-path="${(ev.video_path || '').replace(/"/g, '&quot;')}" data-frame-offset="${ev.frame_offset || 0}" data-lat="${ev.lat}" data-lon="${ev.lon}">View Video</a>` : '')
+                `<a href="#" class="popup-video-link" data-trip-id="${ev.trip_id || 0}" data-video-path="${(ev.video_path || '').replace(/"/g, '&quot;')}" data-frame-offset="${ev.frame_offset || 0}" data-lat="${ev.lat}" data-lon="${ev.lon}">View Video</a>` : '')
         );
 
         eventCluster.addLayer(marker);
+        bounds.push([ev.lat, ev.lon]);
     });
+
+    return bounds;
 }
 
 // --- View Switching ---
-
-function showTrips() {
-    currentView = 'trips';
-    tripLayer.addTo(map);
-    loadTrips();
-}
 
 function toggleFsdOverlay() {
     fsdVisible = !fsdVisible;
@@ -1641,12 +2093,14 @@ async function pollIndexer() {
             statusDiv.textContent = _bannerTextForSource(
                 data.source, data.files_done_session || 0,
             );
-            // Refresh trips/stats on a slower cadence so the user
+            // Refresh days/stats on a slower cadence so the user
             // sees new data trickle in without hammering the API.
+            // refreshCurrentView() respects the dayLoadSeq race
+            // token, so it can't clobber a navigation in flight.
             if (!pollIndexer._lastTripRefresh ||
                 Date.now() - pollIndexer._lastTripRefresh > INDEX_TRIP_REFRESH_MS) {
                 pollIndexer._lastTripRefresh = Date.now();
-                loadTrips();
+                refreshCurrentView();
                 loadStats();
             }
             pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_BUSY_MS);
@@ -1659,8 +2113,7 @@ async function pollIndexer() {
             if (wasBusy) {
                 pollIndexer._lastTripRefresh = 0;
                 loadStats();
-                loadTrips();
-                loadEvents();
+                refreshCurrentView();
             }
             pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_IDLE_MS);
         }
@@ -1669,6 +2122,14 @@ async function pollIndexer() {
         // Network blip — try again on the slow cadence.
         pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_IDLE_MS);
     }
+}
+
+// Re-fetch the current view's data after the indexer ticks.
+// Always reloads the day list (so new days show up in the navigator),
+// then either reloads the currently-displayed day or rebuilds the
+// "All time" overview, whichever is active.
+function refreshCurrentView() {
+    loadDays();
 }
 
 // --- Video Browser Panel ---
@@ -1950,13 +2411,13 @@ async function loadTripsTimeline() {
             el.addEventListener('click', function(e) {
                 if (e.target.closest('.vp-btn')) return;
                 const tripId = el.dataset.tripId;
-                if (tripId) selectTripById(parseInt(tripId));
+                if (tripId) selectDayForTrip(parseInt(tripId));
             });
         });
         list.querySelectorAll('.st-btn-map[data-trip-id]').forEach(function(btn) {
             btn.addEventListener('click', function() {
                 const tripId = btn.dataset.tripId;
-                if (tripId) selectTripById(parseInt(tripId));
+                if (tripId) selectDayForTrip(parseInt(tripId));
             });
         });
     } catch(e) {
@@ -2242,8 +2703,30 @@ document.getElementById('vpList').addEventListener('click', function(e) {
 
 // --- Init ---
 loadStats();
-loadTrips();
-loadEvents();
+loadDays();
+
+// Keyboard shortcuts: left/right arrows cycle days. Skip while the
+// user is typing into a form control or has the video overlay open
+// (it has its own clip-cycling behavior bound to the same keys).
+document.addEventListener('keydown', function (e) {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (e.target && e.target.isContentEditable)) {
+        return;
+    }
+    // If the video overlay is open, let it own the arrow keys.
+    const overlay = document.getElementById('videoOverlay');
+    if (overlay && overlay.style.display !== 'none' && overlay.offsetParent !== null) {
+        return;
+    }
+    if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        cycleDay(-1);
+    } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        cycleDay(1);
+    }
+});
 
 // Kick off the indexing-status poll loop. It self-schedules with
 // a fast cadence while a file is being parsed and a slow cadence

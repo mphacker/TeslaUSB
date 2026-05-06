@@ -36,6 +36,8 @@ from services.mapping_service import (
     IndexOutcome,
     IndexResult,
     priority_for_path,
+    query_days,
+    query_day_routes,
     query_trips,
     query_trip_route,
     query_events,
@@ -578,6 +580,383 @@ class TestQueryAPIs:
         assert stats['waypoint_count'] == 5
         assert stats['event_count'] == 1
         assert stats['event_breakdown']['harsh_brake'] == 1
+
+
+# ---------------------------------------------------------------------------
+# Day-Based Query Tests (powering the day navigator)
+# ---------------------------------------------------------------------------
+
+class TestQueryDays:
+    """Aggregate-by-day query that drives the bottom-left day card.
+
+    Day-bucketing is by ``substr(timestamp, 1, 10)`` — NEVER ``date()``
+    — because Tesla writes timezone-naive ISO strings and SQLite's
+    ``date()`` would silently mis-bucket any row that ever gained a
+    Z/offset suffix. Tests cover trip-only days, event-only days,
+    mixed days, ordering, sentry events with NULL coords, and the
+    min_distance_km filter (which must match /api/trips behaviour).
+    """
+
+    def _make_db(self, tmp_path, name='days.db'):
+        db_path = str(tmp_path / name)
+        conn = _init_db(db_path)
+        return db_path, conn
+
+    def _add_trip(self, conn, trip_id, start, end=None, distance_km=2.5):
+        conn.execute(
+            """INSERT INTO trips (id, start_time, end_time, distance_km,
+                                  duration_seconds, source_folder)
+               VALUES (?, ?, ?, ?, 600, 'RecentClips')""",
+            (trip_id, start, end or start, distance_km),
+        )
+
+    def _add_event(self, conn, trip_id, ts, event_type='harsh_brake',
+                   lat=37.7749, lon=-122.4194):
+        conn.execute(
+            """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+                                            event_type, severity, description)
+               VALUES (?, ?, ?, ?, ?, 'warning', 'test')""",
+            (trip_id, ts, lat, lon, event_type),
+        )
+
+    def test_trip_only_day(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:15:00', '2026-05-04T08:25:00',
+                       distance_km=3.2)
+        conn.commit(); conn.close()
+
+        days = query_days(db_path)
+        assert len(days) == 1
+        assert days[0]['date'] == '2026-05-04'
+        assert days[0]['trip_count'] == 1
+        assert days[0]['event_count'] == 0
+        assert days[0]['sentry_count'] == 0
+        assert days[0]['total_distance_km'] == pytest.approx(3.2)
+        assert days[0]['first_start'] == '2026-05-04T08:15:00'
+        assert days[0]['last_end'] == '2026-05-04T08:25:00'
+
+    def test_event_only_day_surfaces_in_navigator(self, tmp_path):
+        # A weekend at home with sentry events — no trips — must
+        # still appear in the day navigator. This is the entire
+        # point of the day-based redesign vs. trip-based.
+        db_path, conn = self._make_db(tmp_path)
+        self._add_event(conn, None, '2026-05-04T22:30:00',
+                        event_type='sentry')
+        conn.commit(); conn.close()
+
+        days = query_days(db_path)
+        assert len(days) == 1
+        assert days[0]['date'] == '2026-05-04'
+        assert days[0]['trip_count'] == 0
+        assert days[0]['event_count'] == 1
+        assert days[0]['sentry_count'] == 1
+        assert days[0]['first_start'] is None
+        assert days[0]['last_end'] is None
+
+    def test_sentry_with_null_coords_still_counted(self, tmp_path):
+        # Sentry events sometimes have NULL lat/lon (when SEI parsing
+        # extracted no GPS). They must STILL count in event_count and
+        # sentry_count so the day card stat reads truthfully — the
+        # frontend handles "N events · location not available" UX.
+        db_path, conn = self._make_db(tmp_path)
+        conn.execute(
+            """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+                                            event_type, severity, description)
+               VALUES (NULL, '2026-05-04T22:30:00', NULL, NULL,
+                       'sentry', 'info', 'no gps')"""
+        )
+        conn.commit(); conn.close()
+
+        days = query_days(db_path)
+        assert days[0]['event_count'] == 1
+        assert days[0]['sentry_count'] == 1
+
+    def test_mixed_day_combines_trip_and_event_stats(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:15:00', '2026-05-04T08:25:00',
+                       distance_km=3.2)
+        self._add_trip(conn, 2, '2026-05-04T17:00:00', '2026-05-04T17:30:00',
+                       distance_km=5.5)
+        self._add_event(conn, 1, '2026-05-04T08:20:00')
+        self._add_event(conn, None, '2026-05-04T22:30:00',
+                        event_type='sentry')
+        conn.commit(); conn.close()
+
+        days = query_days(db_path)
+        assert len(days) == 1
+        d = days[0]
+        assert d['date'] == '2026-05-04'
+        assert d['trip_count'] == 2
+        assert d['total_distance_km'] == pytest.approx(8.7)
+        assert d['event_count'] == 2
+        assert d['sentry_count'] == 1
+        assert d['first_start'] == '2026-05-04T08:15:00'
+        assert d['last_end'] == '2026-05-04T17:30:00'
+
+    def test_ordering_most_recent_first(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-04-01T08:00:00')
+        self._add_trip(conn, 2, '2026-05-04T08:00:00')
+        self._add_trip(conn, 3, '2026-04-15T08:00:00')
+        conn.commit(); conn.close()
+
+        days = query_days(db_path)
+        assert [d['date'] for d in days] == [
+            '2026-05-04', '2026-04-15', '2026-04-01'
+        ]
+
+    def test_min_distance_filter_excludes_parking_blips(self, tmp_path):
+        # Default 50 m hides parking-lot blips. Without this filter
+        # the day card would advertise "3 trips" while /api/trips
+        # only returns 1 — the day card and the trips list must
+        # agree.
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:15:00', distance_km=3.2)
+        self._add_trip(conn, 2, '2026-05-04T08:30:00', distance_km=0.005)  # 5 m blip
+        self._add_trip(conn, 3, '2026-05-04T09:00:00', distance_km=0.0)
+        conn.commit(); conn.close()
+
+        # With default filter (50 m) only the 3.2 km trip counts.
+        days = query_days(db_path)
+        assert days[0]['trip_count'] == 1
+        assert days[0]['total_distance_km'] == pytest.approx(3.2)
+
+        # With min_distance_km=0 every trip counts.
+        days = query_days(db_path, min_distance_km=0.0)
+        assert days[0]['trip_count'] == 3
+        assert days[0]['total_distance_km'] == pytest.approx(3.205)
+
+    def test_limit_clamps_results(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        for i in range(10):
+            self._add_trip(conn, i + 1, f'2026-05-{i+1:02d}T08:00:00')
+        conn.commit(); conn.close()
+
+        days = query_days(db_path, limit=3)
+        assert len(days) == 3
+        # Most recent first
+        assert days[0]['date'] == '2026-05-10'
+        assert days[2]['date'] == '2026-05-08'
+
+    def test_substr_bucketing_handles_naive_iso_timestamps(self, tmp_path):
+        # Tesla writes naive ISO strings like '2026-05-04T08:15:00'.
+        # substr(...,1,10) yields '2026-05-04' regardless of any future
+        # suffix (Z, +offset). This test pins that contract — switching
+        # to date() would silently mis-bucket Z-suffixed rows.
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T23:59:59',
+                       end='2026-05-05T00:00:01')
+        conn.commit(); conn.close()
+
+        days = query_days(db_path)
+        # Trip starting on 5/4 belongs to 5/4, even though it ended on 5/5.
+        assert len(days) == 1
+        assert days[0]['date'] == '2026-05-04'
+
+    def test_empty_db(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        conn.commit(); conn.close()
+        assert query_days(db_path) == []
+
+
+class TestQueryDayRoutes:
+    """Per-day route aggregator that drives the multi-trip overlay.
+
+    Tests cover: multi-trip rendering, midnight-spanning trip
+    bucketing, waypoint ordering within a trip, archive path
+    handling deferred to the blueprint, empty days, and the
+    min_distance filter matching ``/api/trips``.
+    """
+
+    def _make_db(self, tmp_path, name='day_routes.db'):
+        db_path = str(tmp_path / name)
+        conn = _init_db(db_path)
+        return db_path, conn
+
+    def _add_trip(self, conn, trip_id, start, end=None, distance_km=2.5,
+                  source_folder='RecentClips'):
+        conn.execute(
+            """INSERT INTO trips (id, start_time, end_time, start_lat,
+                                  start_lon, end_lat, end_lon, distance_km,
+                                  duration_seconds, source_folder)
+               VALUES (?, ?, ?, 37.7, -122.4, 37.8, -122.5, ?, 600, ?)""",
+            (trip_id, start, end or start, distance_km, source_folder),
+        )
+
+    def _add_waypoints(self, conn, trip_id, count, video_path='clip.mp4',
+                       start_ts='2026-05-04T08:15:00'):
+        for i in range(count):
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon,
+                                         speed_mps, autopilot_state,
+                                         video_path, frame_offset)
+                   VALUES (?, ?, ?, ?, 25.0, 'NONE', ?, ?)""",
+                (trip_id, start_ts, 37.7 + i * 0.001, -122.4 + i * 0.001,
+                 video_path, i * 30),
+            )
+
+    def test_multi_trip_day(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.2)
+        self._add_waypoints(conn, 1, count=4)
+        self._add_trip(conn, 2, '2026-05-04T17:00:00', distance_km=5.5)
+        self._add_waypoints(conn, 2, count=3, video_path='clip2.mp4')
+        # A trip on a different day must NOT be returned.
+        self._add_trip(conn, 3, '2026-05-05T08:00:00')
+        self._add_waypoints(conn, 3, count=2, video_path='clip3.mp4')
+        conn.commit(); conn.close()
+
+        result = query_day_routes(db_path, '2026-05-04')
+        assert len(result['trips']) == 2
+        # Ordered by start_time DESC — newest first.
+        assert result['trips'][0]['trip_id'] == 2
+        assert result['trips'][1]['trip_id'] == 1
+        assert len(result['trips'][0]['waypoints']) == 3
+        assert len(result['trips'][1]['waypoints']) == 4
+
+    def test_midnight_spanning_trip_belongs_to_start_day(self, tmp_path):
+        # User-confirmed bucketing rule: a trip that starts at 23:59:00
+        # on 5/4 and ends at 00:30:00 on 5/5 is part of 5/4's day. The
+        # day card reads truthfully and the route renders on the right
+        # day. The opposite bucket (5/5) must NOT see this trip.
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T23:59:00',
+                       end='2026-05-05T00:30:00', distance_km=3.0)
+        self._add_waypoints(conn, 1, count=2)
+        conn.commit(); conn.close()
+
+        same_day = query_day_routes(db_path, '2026-05-04')
+        next_day = query_day_routes(db_path, '2026-05-05')
+        assert len(same_day['trips']) == 1
+        assert same_day['trips'][0]['trip_id'] == 1
+        assert next_day['trips'] == []
+
+    def test_waypoints_ordered_by_id(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00')
+        # Insert in shuffled order — query must still return ASC by id.
+        self._add_waypoints(conn, 1, count=5)
+        conn.commit(); conn.close()
+
+        result = query_day_routes(db_path, '2026-05-04')
+        ids = [wp['id'] for wp in result['trips'][0]['waypoints']]
+        assert ids == sorted(ids)
+
+    def test_min_distance_filter_excludes_parking_blips(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        self._add_waypoints(conn, 1, count=2)
+        self._add_trip(conn, 2, '2026-05-04T09:00:00', distance_km=0.005)
+        self._add_waypoints(conn, 2, count=2, video_path='blip.mp4')
+        conn.commit(); conn.close()
+
+        # Default filter excludes the 5 m blip.
+        result = query_day_routes(db_path, '2026-05-04')
+        assert [t['trip_id'] for t in result['trips']] == [1]
+        # min_distance_km=0 includes both.
+        result = query_day_routes(db_path, '2026-05-04', min_distance_km=0.0)
+        assert sorted(t['trip_id'] for t in result['trips']) == [1, 2]
+
+    def test_empty_day_returns_empty_list(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00')
+        self._add_waypoints(conn, 1, count=2)
+        conn.commit(); conn.close()
+        assert query_day_routes(db_path, '2026-04-01') == {'trips': []}
+
+    def test_trips_with_no_waypoints_excluded_by_inner_join(self, tmp_path):
+        # A trip row with no waypoints can't render — the INNER JOIN
+        # excludes it. The day card's trip_count may legitimately
+        # exceed len(result['trips']) on databases with phantom trips.
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00')
+        # Trip 1 has zero waypoints.
+        self._add_trip(conn, 2, '2026-05-04T09:00:00')
+        self._add_waypoints(conn, 2, count=2)
+        conn.commit(); conn.close()
+
+        result = query_day_routes(db_path, '2026-05-04')
+        assert [t['trip_id'] for t in result['trips']] == [2]
+
+
+class TestQueryEventsWithDate:
+    """The single-day filter on /api/events powers the day-based map.
+
+    Must use substr() bucketing (same contract as query_days) and
+    must still return events with NULL lat/lon so the day card can
+    advertise them, even though the map skips rendering null
+    markers client-side.
+    """
+
+    def _make_db(self, tmp_path, name='events_date.db'):
+        db_path = str(tmp_path / name)
+        conn = _init_db(db_path)
+        return db_path, conn
+
+    def test_filter_returns_only_matching_day(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        for ts in ('2026-05-03T08:00:00', '2026-05-04T08:00:00',
+                   '2026-05-04T20:00:00', '2026-05-05T08:00:00'):
+            conn.execute(
+                """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+                                                event_type, severity, description)
+                   VALUES (NULL, ?, 37.7, -122.4, 'harsh_brake',
+                           'warning', 'test')""",
+                (ts,),
+            )
+        conn.commit(); conn.close()
+
+        events = query_events(db_path, date='2026-05-04')
+        assert len(events) == 2
+        assert all(e['timestamp'].startswith('2026-05-04') for e in events)
+
+    def test_filter_includes_null_lat_lon_rows(self, tmp_path):
+        # Day card stats include null-coord events; the listing
+        # endpoint must return them too so the client can show
+        # "N events · location not available" guidance.
+        db_path, conn = self._make_db(tmp_path)
+        conn.execute(
+            """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+                                            event_type, severity, description)
+               VALUES (NULL, '2026-05-04T22:00:00', NULL, NULL,
+                       'sentry', 'info', 'no gps')"""
+        )
+        conn.commit(); conn.close()
+
+        events = query_events(db_path, date='2026-05-04')
+        assert len(events) == 1
+        assert events[0]['lat'] is None
+        assert events[0]['lon'] is None
+
+    def test_filter_combined_with_event_type(self, tmp_path):
+        db_path, conn = self._make_db(tmp_path)
+        for evt in ('harsh_brake', 'sentry', 'speeding'):
+            conn.execute(
+                """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+                                                event_type, severity, description)
+                   VALUES (NULL, '2026-05-04T08:00:00', 37.7, -122.4,
+                           ?, 'warning', 'x')""",
+                (evt,),
+            )
+        conn.commit(); conn.close()
+
+        events = query_events(db_path, date='2026-05-04', event_type='sentry')
+        assert len(events) == 1
+        assert events[0]['event_type'] == 'sentry'
+
+    def test_no_date_returns_all(self, tmp_path):
+        # Backwards compat: omitting `date` returns everything.
+        db_path, conn = self._make_db(tmp_path)
+        for ts in ('2026-05-04T08:00:00', '2026-05-05T08:00:00'):
+            conn.execute(
+                """INSERT INTO detected_events (trip_id, timestamp, lat, lon,
+                                                event_type, severity, description)
+                   VALUES (NULL, ?, 37.7, -122.4, 'harsh_brake',
+                           'warning', 't')""",
+                (ts,),
+            )
+        conn.commit(); conn.close()
+        assert len(query_events(db_path)) == 2
 
 
 # ---------------------------------------------------------------------------

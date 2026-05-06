@@ -127,11 +127,20 @@ See the full design system for color palettes, typography scale, spacing tokens,
 - Never add blocking work before the UDC bind in `present_usb.sh`. Even RO local mounts happen AFTER the gadget is presented to Tesla.
 
 ## Video Panel (Map-Integrated)
-- **There is no standalone Videos page.** All video browsing happens in the map page (`mapping.html`) via a slide-out side panel with two tabs: "Recent Events" and "All Clips".
-- **Recent Events tab**: Shows trips with events and sentry clips, sorted most-recent-first. Trip entries have NO play button (user plays from the map route). Sentry entries HAVE a play button (no map route for stationary events).
-- **All Clips tab**: Unified list of every trip, sentry event, and clip. If geolocation data exists, show on map and play from there (no play button in list). If no geolocation, show play button in the list entry.
+- **There is no standalone Videos page.** All video browsing happens in the map page (`mapping.html`) via a slide-out side panel with three tabs: "Events", "Trips", and "All Clips".
+- **Events tab**: Sentry/dashcam events sorted most-recent-first with type icons. Sentry entries play directly from the list (no map route exists for stationary events).
+- **Trips tab**: Browse trips with per-clip Play / Download ZIP / Delete actions.
+- **All Clips tab**: Unified list of every clip across sources. If geolocation data exists, the user plays from the map route; otherwise the list entry exposes a play button.
 - **All sources included**: TeslaCam USB folders (SentryClips, SavedClips, RecentClips) AND ArchivedClips on the SD card.
 - **No thumbnails**: Thumbnail generation code has been removed. Video entries show metadata (date, event type, duration, cameras) but no preview images.
+- **Overlay player** (`openVideoOverlay()` in `mapping.html`):
+  - Camera switcher uses directional Lucide SVG icons (no emoji) and equal-width buttons; full labels including "L Pillar"/"R Pillar" must fit at the default 480px overlay width — keep `gap` and per-button padding tight if adding cameras.
+  - Native `<video>` fullscreen + PiP controls are hidden (`controlslist="nofullscreen" disablepictureinpicture`); all fullscreen flows go through the nav-row buttons so the affordances stay consistent.
+  - Two fullscreen affordances are intentional and distinct:
+    - **Fullscreen** (`icon-maximize`, four-corner) calls `requestFullscreen()` on the `.video-overlay-stage` wrapper (NOT the bare `<video>`) so the `.overlay-hud` telemetry overlay rides into the OS fullscreen layer with the video.
+    - **Maximize** (`icon-maximize-2`, diagonal arrows) toggles a `.maximized` class on `.video-overlay` to fill the browser viewport with HUD/header/cam-switcher/nav still visible.
+  - **iOS Safari limitation**: `webkitEnterFullscreen` only works on `<video>` elements and the iOS native player cannot have HTML overlaid, so the HUD is not visible in OS fullscreen on iPhone/iPad. Use Maximize instead.
+- **Disambiguation popup**: When the user clicks the map at a location with multiple overlapping clips (e.g., a road driven multiple times in one day or across days), `mapping.html` opens a chooser listing each clip with its trip date/time so the right clip can be selected before the overlay player is launched.
 
 ## Cloud Sync Architecture
 - **Queue-based continuous sync**: A persistent sync queue (SQLite) is populated by the inotify file watcher, WiFi connect handler, and manual "Archive to Cloud" actions. A sync worker thread processes items one at a time.
@@ -188,6 +197,8 @@ See the full design system for color palettes, typography scale, spacing tokens,
 - Marking a file as `synced` in the cloud database before rclone confirms the upload completed.
 - Re-introducing redundant indexing triggers (every page load, every mode switch, every WiFi connect, full filesystem walks). The indexing worker is the SINGLE consumer of `indexing_queue`; producers only enqueue. Adding parallel "trigger_auto_index"-style code paths is what caused the constantly-flashing banner the redesign removed.
 - Flashing the indexing banner based on queue depth instead of `active_file`. The user only wants to know when a file is *actively being parsed*, not when items are queued.
+- Calling `requestFullscreen()` on the bare `<video>` element in `mapping.html` — the `.overlay-hud` is a sibling DOM node, so it drops out of the OS fullscreen layer. Always fullscreen the `.video-overlay-stage` wrapper instead so the HUD rides along.
+- Removing `controlslist="nofullscreen" disablepictureinpicture` from the overlay `<video>` — exposes the native fullscreen button (which fullscreens just the video and hides the HUD), which contradicts the dedicated nav-row Fullscreen button and the HUD-visible architecture.
 
 ## AI & Testing Workspace Rules
 - **Never install packages, dependencies, or node_modules inside the git repo.** Test tooling (Playwright, npm packages, debug scripts) must live **outside** the repository — use `../playwright-test/` or another folder above the repo root.

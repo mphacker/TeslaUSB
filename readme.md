@@ -58,7 +58,8 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 
 ### Video Management
 - **Map-integrated video browser**: Slide-out panel on the Map page with three tabs — Events (default), Trips, and All Clips — no separate video pages
-- **Unified overlay player**: Full-screen video playback launched from the map with camera angle switching (front/back/left/right/pillars)
+- **Unified overlay player**: Map-launched video playback with camera angle switching (Front, Back, Left, Right, L Pillar, R Pillar) using directional Lucide SVG icons, plus two distinct fullscreen modes — **Fullscreen** (OS-level, hides browser chrome) and **Maximize** (fills the browser viewport). Both keep the telemetry HUD visible.
+- **Disambiguation popup**: Tapping the map at a location with multiple overlapping clips (e.g., a road driven multiple times) opens a chooser listing each clip with its trip date/time so the right one can be selected.
 - **Telemetry HUD**: Glassmorphic overlay showing real-time steering wheel angle, brake/gas pedal positions, speed, gear (P/R/N/D), turn signals, and Autopilot status — powered by pre-indexed server-side waypoint data (instant, no full video download needed)
 - **Auto-indexing**: A single low-priority background worker drains a SQLite-backed `indexing_queue` one file at a time. Producers: boot catch-up scan, real-time inotify on new files, the post-WiFi archive run, and manual reindex from the UI. The "Indexing…" banner only appears while a specific file is actively being parsed. Sentry events placed on map using inferred location from nearest trip
 - **RecentClips Archive**: Automatically copies RecentClips to the Pi's SD card every 5 minutes before Tesla's 1-hour circular buffer deletes them — zero USB disruption, videos preserved for 30 days
@@ -264,7 +265,9 @@ The web interface uses a five-tab navigation — sidebar rail on desktop and bot
   - **Events**: Chronological view of driving events and sentry detections with event type icons
   - **Trips**: Browse trips with clip cards (Play / Download ZIP / Delete)
   - **All Clips**: Unified list of all video clips across all sources
-- Unified overlay player with camera angle switching (front/back/left/right/pillars)
+- Unified overlay player with camera angle switching using directional Lucide SVG icons (Front, Back, Left, Right, L Pillar, R Pillar)
+- Two fullscreen modes — **Fullscreen** (OS-level, hides browser chrome) and **Maximize** (fills browser viewport); both keep the telemetry HUD visible
+- Disambiguation popup when a map location has multiple overlapping clips (lists each clip with trip date/time so the right one can be selected)
 - Telemetry HUD overlay showing speed, gear, steering wheel, brake/gas pedals, blinkers, and Autopilot status (uses pre-indexed server-side waypoint data — instant, no full download)
 - FSD overlay toggle
 - Auto-indexing of dashcam SEI telemetry via a queue-backed background worker (boot catch-up + inotify + post-WiFi archive run); banner shows only during real parse activity

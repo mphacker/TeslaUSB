@@ -1621,8 +1621,17 @@ watchdog-device = /dev/watchdog
 # Note: 60s needed for large disk images (400GB+) which take longer to configure
 watchdog-timeout = 60
 
-# Reboot if 1-minute load average exceeds 24 (6x the 4 cores)
+# Reboot if 1-minute load average exceeds 24 (6x the 4 cores).
+# A spiky-but-recovering workload won't trip this.
 max-load-1 = 24
+
+# Reboot if 5-minute load average exceeds 16 (4x the 4 cores).
+# Catches sustained CPU/IO storms (e.g. a wedged indexer churning on
+# Tesla recordings) where load stays high for several minutes but the
+# 1-minute average never spikes above 24. Without this, the kernel
+# watchdog daemon happily pets the dog while userspace is stuck in D
+# state waiting on slow exFAT I/O.
+max-load-5 = 16
 
 # Realtime priority for watchdog daemon
 realtime = yes

@@ -63,6 +63,13 @@ _INTER_FILE_SLEEP = 2.0  # 2 seconds
 # Remaining files are picked up in the next cycle.
 _MAX_FILES_PER_CYCLE = 50
 
+# Grace period before pruning a clip as "non-driving". Gives the indexer
+# time to extract GPS from the clip and the trip detector time to
+# consolidate sequential waypoints into a trip. Clips younger than this
+# are kept regardless of whether they fall in a known trip range — they
+# may be from a drive that hasn't been indexed yet.
+_PRUNE_GRACE_SECONDS = 6 * 3600  # 6 hours
+
 # ---------------------------------------------------------------------------
 # Background Thread State
 # ---------------------------------------------------------------------------
@@ -375,7 +382,16 @@ def _run_archive() -> None:
         })
         logger.info("Archive: copied %d files", copied)
 
-        # Run retention cleanup
+        # Prune clips the indexer has positively identified as non-driving
+        # FIRST, so retention afterwards has fewer "unknown" clips to
+        # potentially evict under disk pressure. The prune is conservative
+        # (positive evidence only), so this is always safe.
+        _status["progress"] = "Pruning non-driving clips..."
+        _prune_non_driving_archives()
+
+        # Run retention cleanup. By running after prune, retention's
+        # oldest-first deletion is less likely to evict still-unprocessed
+        # driving clips: the obvious sentry/parked footage is already gone.
         _status["progress"] = "Retention cleanup..."
         _enforce_retention()
 
@@ -400,25 +416,25 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
     """Yield (src_abs_path, relative_path) for files not yet archived.
 
     Skips files younger than _MIN_FILE_AGE_SECONDS (may be actively written).
-    When ARCHIVE_ONLY_DRIVING is True, skips clips with no corresponding
-    trip in geodata.db (idle/parked footage).
+    Always archives fresh RecentClips regardless of whether they fall in a
+    known driving trip — at archive time we don't yet know whether a clip
+    is part of a drive (the indexer creates trips AFTER seeing several
+    sequential GPS-bearing clips). The driving-vs-parked filter is applied
+    later by ``_prune_non_driving_archives`` after the indexer has had a
+    chance to populate trip data. This breaks the chicken-and-egg cycle
+    where new drives were being skipped because no trip existed yet, then
+    Tesla's circular buffer overwrote the source clips before we could
+    process them.
+
     Uses generators to avoid building large in-memory lists.
     """
     now = time.time()
-
-    # Build set of driving timestamps from geodata.db for quick lookup.
-    # Each trip covers a time range; a clip "overlaps" if its timestamp
-    # falls within any trip's [start, end] window (with 60s padding).
-    driving_ranges: Optional[List[Tuple[float, float]]] = None
-    if ARCHIVE_ONLY_DRIVING:
-        driving_ranges = _get_driving_time_ranges()
 
     try:
         entries = sorted(os.listdir(recent_clips))
     except OSError:
         return
 
-    skipped_idle = 0
     for name in entries:
         src = os.path.join(recent_clips, name)
         try:
@@ -444,13 +460,6 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
         if name.lower().endswith('.mp4') and not _is_complete_mp4(src):
             continue
 
-        # Skip idle/parked clips when only_driving is enabled
-        if driving_ranges is not None:
-            clip_ts = _timestamp_from_filename(name)
-            if clip_ts is not None and not _is_during_driving(clip_ts, driving_ranges):
-                skipped_idle += 1
-                continue
-
         # Check if already archived (same name and size)
         dst = os.path.join(ARCHIVE_DIR, name)
         if os.path.isfile(dst):
@@ -462,9 +471,6 @@ def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, N
                 pass
 
         yield (src, name)
-
-    if skipped_idle:
-        logger.info("Archive: skipped %d idle/parked clips (only_driving=true)", skipped_idle)
 
 
 def _get_driving_time_ranges() -> Optional[List[Tuple[float, float]]]:
@@ -526,6 +532,166 @@ def _is_during_driving(clip_ts: float, ranges: List[Tuple[float, float]]) -> boo
         if start > clip_ts:
             break  # Ranges are sorted — no need to check further
     return False
+
+
+def _prune_non_driving_archives() -> int:
+    """Delete archived clips that the indexer has positively identified
+    as containing no GPS data and no detected events.
+
+    Honors the ARCHIVE_ONLY_DRIVING flag — does nothing if False.
+
+    A clip is DELETED only when there is positive evidence it isn't a
+    drive. Specifically, the front-camera clip must have an
+    ``indexed_files`` row (so we know the indexer processed it) with
+    ``waypoint_count == 0`` AND ``event_count == 0`` (so we know the
+    extraction succeeded but found nothing). Clips that have never been
+    indexed are kept unconditionally — we never delete on the absence of
+    evidence, only on the presence of contrary evidence.
+
+    A clip is also KEPT if any of:
+      - It's younger than the grace period (give the indexer time)
+      - Its timestamp falls within any known trip range (with padding)
+      - It has waypoints in geodata.db (proven driving)
+      - It has detected events in geodata.db (saved/sentry events)
+
+    Decisions are made per timestamp prefix (YYYY-MM-DD_HH-MM-SS) so all
+    six cameras for one recording moment are kept or deleted together.
+    The front-camera clip is the source of truth (only front-cam is
+    indexed); sibling cameras follow the front-cam decision. Side cameras
+    that exist as orphans (no front-cam) are left alone — we only delete
+    on positive evidence.
+
+    Returns the number of files deleted.
+    """
+    if not ARCHIVE_ONLY_DRIVING:
+        return 0
+    if not os.path.isdir(ARCHIVE_DIR):
+        return 0
+
+    driving_ranges = _get_driving_time_ranges()
+    if driving_ranges is None:
+        return 0  # No trips yet — leave clips so they can be indexed
+
+    # Build:
+    #   keep_basenames        — clips with positive driving/event evidence
+    #   proven_non_driving    — front-cam basenames the indexer proved have
+    #                            no GPS and no events (safe to delete)
+    keep_basenames = set()
+    proven_non_driving = set()
+    try:
+        from config import MAPPING_ENABLED, MAPPING_DB_PATH
+        if not (MAPPING_ENABLED and os.path.isfile(MAPPING_DB_PATH)):
+            return 0
+        import sqlite3
+        conn = sqlite3.connect(MAPPING_DB_PATH, timeout=10)
+        try:
+            for row in conn.execute(
+                "SELECT DISTINCT video_path FROM waypoints "
+                "WHERE lat != 0 AND lon != 0"
+            ):
+                if row[0]:
+                    keep_basenames.add(os.path.basename(row[0]))
+            for row in conn.execute(
+                "SELECT DISTINCT video_path FROM detected_events"
+            ):
+                if row[0]:
+                    keep_basenames.add(os.path.basename(row[0]))
+            for row in conn.execute(
+                "SELECT file_path FROM indexed_files "
+                "WHERE waypoint_count = 0 AND event_count = 0"
+            ):
+                if not row[0]:
+                    continue
+                basename = os.path.basename(row[0])
+                if basename.endswith('-front.mp4'):
+                    proven_non_driving.add(basename)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("prune: failed loading classification sets: %s", e)
+        return 0  # Can't determine safely — don't prune this cycle
+
+    cutoff = time.time() - _PRUNE_GRACE_SECONDS
+
+    try:
+        names = list(os.listdir(ARCHIVE_DIR))
+    except OSError:
+        return 0
+
+    # Decide per timestamp prefix using the front-camera clip
+    decision: Dict[str, bool] = {}  # ts_prefix -> True (keep) / False (delete)
+    for name in names:
+        if not name.lower().endswith('.mp4'):
+            continue
+        if not name.endswith('-front.mp4'):
+            continue
+
+        clip_ts = _timestamp_from_filename(name)
+        if clip_ts is None:
+            continue
+        ts_key = name[:19]
+
+        # Grace period — keep recent clips no matter what
+        if clip_ts > cutoff:
+            decision[ts_key] = True
+            continue
+
+        # Indexer found waypoints/events for this clip
+        if name in keep_basenames:
+            decision[ts_key] = True
+            continue
+
+        # Falls inside a known driving trip's time window
+        if _is_during_driving(clip_ts, driving_ranges):
+            decision[ts_key] = True
+            continue
+
+        # Only DELETE when we have positive evidence that the indexer
+        # processed this clip and found neither GPS nor events. Without
+        # that evidence (no indexed_files row at all), keep the clip so
+        # the indexer can try again on a future run.
+        if name in proven_non_driving:
+            decision[ts_key] = False
+        else:
+            decision[ts_key] = True
+
+    # Second pass: delete all clips (any camera) whose timestamp prefix
+    # is marked for deletion. Side/back cams without a front-cam decision
+    # are NEVER deleted here — only positive evidence drives deletion.
+    deleted = 0
+    for name in names:
+        if not name.lower().endswith('.mp4'):
+            continue
+        if len(name) < 19:
+            continue
+        ts_key = name[:19]
+        if decision.get(ts_key) is not False:
+            continue
+        fpath = os.path.join(ARCHIVE_DIR, name)
+        try:
+            os.unlink(fpath)
+            deleted += 1
+        except OSError:
+            continue
+
+    if deleted:
+        logger.info(
+            "Prune: deleted %d archived clips with positive non-driving evidence",
+            deleted,
+        )
+        # Purge stale geodata entries for the files we just deleted
+        try:
+            from config import MAPPING_ENABLED, MAPPING_DB_PATH
+            if MAPPING_ENABLED and os.path.isfile(MAPPING_DB_PATH):
+                from services.mapping_service import purge_deleted_videos
+                from services.video_service import get_teslacam_path
+                tc = get_teslacam_path()
+                if tc:
+                    purge_deleted_videos(MAPPING_DB_PATH, teslacam_path=tc)
+        except Exception as e:
+            logger.debug("Prune geodata purge failed: %s", e)
+
+    return deleted
 
 
 # ---------------------------------------------------------------------------

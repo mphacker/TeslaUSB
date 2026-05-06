@@ -45,6 +45,9 @@ def api_trips():
     offset = request.args.get('offset', 0, type=int)
     date_from = request.args.get('date_from')
     date_to = request.args.get('date_to')
+    # Default 50 m: hides parking-lot blips and isolated sentry recordings
+    # from the main trip nav. Pass ?min_distance=0 to include all trips.
+    min_distance_km = request.args.get('min_distance', 0.05, type=float)
 
     bbox = None
     if all(request.args.get(k) for k in ('min_lat', 'min_lon', 'max_lat', 'max_lon')):
@@ -60,7 +63,8 @@ def api_trips():
 
     try:
         trips = query_trips(MAPPING_DB_PATH, limit=limit, offset=offset,
-                            bbox=bbox, date_from=date_from, date_to=date_to)
+                            bbox=bbox, date_from=date_from, date_to=date_to,
+                            min_distance_km=min_distance_km)
         return jsonify({'trips': trips})
     except Exception as e:
         logger.error("Failed to query trips: %s", e)

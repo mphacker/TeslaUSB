@@ -9,16 +9,18 @@ Designed for Pi Zero 2 W: processes one video at a time, uses generators,
 and stores results in a lightweight SQLite database.
 """
 
+import functools
 import json
 import logging
 import math
 import os
+import shutil
 import sqlite3
 import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Callable, Dict, Generator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +36,49 @@ def _get_sei_parser():
     return _sei_parser
 
 
+def _is_transient_db_error(exc: BaseException) -> bool:
+    """Return True if this is a transient SQLite error worth retrying.
+
+    On a Pi Zero 2 W under concurrent indexer + web load, SQLite can return
+    "disk I/O error" (SQLITE_IOERR) or "database is locked" (SQLITE_BUSY)
+    when the SD card is slow to fsync or shared-memory mmap fails. These
+    almost always succeed on a second attempt with a fresh connection.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return ('disk i/o error' in msg or 'database is locked' in msg
+            or 'unable to open database file' in msg)
+
+
+def _with_db_retry(fn: Callable) -> Callable:
+    """Decorator: retry once on transient SQLite errors.
+
+    Ensures a single bad connection state (typically caused by mmap
+    exhaustion or fsync hiccups during heavy indexer load) doesn't turn
+    into a permanently failing endpoint. The retry uses a fresh
+    connection because each decorated function calls ``_init_db`` itself.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            if not _is_transient_db_error(e):
+                raise
+            logger.warning("Transient DB error in %s (%s); retrying once",
+                           fn.__name__, e)
+            time.sleep(0.2)
+            return fn(*args, **kwargs)
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 4
+_BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -106,6 +146,7 @@ CREATE TABLE IF NOT EXISTS indexed_files (
 CREATE INDEX IF NOT EXISTS idx_waypoints_trip ON waypoints(trip_id);
 CREATE INDEX IF NOT EXISTS idx_waypoints_coords ON waypoints(lat, lon);
 CREATE INDEX IF NOT EXISTS idx_waypoints_timestamp ON waypoints(timestamp);
+CREATE INDEX IF NOT EXISTS idx_waypoints_video_path ON waypoints(video_path);
 CREATE INDEX IF NOT EXISTS idx_events_trip ON detected_events(trip_id);
 CREATE INDEX IF NOT EXISTS idx_events_coords ON detected_events(lat, lon);
 CREATE INDEX IF NOT EXISTS idx_events_type ON detected_events(event_type);
@@ -113,23 +154,75 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON detected_events(timestamp);
 """
 
 
+def _backup_db(db_path: str, target_version: int) -> Optional[str]:
+    """Make a copy of the DB before a destructive migration.
+
+    Returns the backup path on success, None on failure (migration still proceeds).
+    Old backups beyond ``_BACKUP_RETENTION`` are pruned.
+    """
+    if not os.path.isfile(db_path):
+        return None
+    try:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = f"{db_path}.bak.v{target_version}.{ts}"
+        shutil.copy2(db_path, backup_path)
+        logger.info("Backed up geo-index DB to %s", backup_path)
+
+        # Prune older backups
+        backups = sorted(
+            f for f in os.listdir(os.path.dirname(db_path) or '.')
+            if f.startswith(os.path.basename(db_path) + '.bak.')
+        )
+        if len(backups) > _BACKUP_RETENTION:
+            for old in backups[:-_BACKUP_RETENTION]:
+                try:
+                    os.remove(os.path.join(os.path.dirname(db_path), old))
+                except OSError:
+                    pass
+        return backup_path
+    except Exception as e:
+        logger.warning("Failed to back up DB before migration: %s", e)
+        return None
+
+
 def _init_db(db_path: str) -> sqlite3.Connection:
     """Initialize the SQLite database with schema if needed."""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
+    # Tuned for Pi Zero 2 W (512 MB RAM) where mmap exhaustion under
+    # concurrent indexer + web load was producing spurious "disk I/O error"
+    # responses from SQLite. The combination of a small per-connection page
+    # cache, no file mmap, capped WAL size, and frequent autocheckpoint
+    # keeps each connection's memory footprint bounded so we never run out
+    # of address space when many waitress threads open connections in
+    # parallel during a heavy indexer run.
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA cache_size=-2000")        # 2 MB per connection
+    conn.execute("PRAGMA mmap_size=0")             # disable file-mmap (saves vmem)
+    conn.execute("PRAGMA temp_store=MEMORY")       # avoid temp files on slow SD
+    conn.execute("PRAGMA journal_size_limit=4194304")   # cap WAL at 4 MB
+    conn.execute("PRAGMA wal_autocheckpoint=200")  # checkpoint every ~800 KB
     conn.execute("PRAGMA foreign_keys=ON")
 
-    # Check schema version
+    # Check schema version. Older code used INSERT OR REPLACE on a PRIMARY KEY
+    # column, which actually added a new row each time, so older DBs may have
+    # multiple rows. Use MAX() to read the effective version.
     try:
-        row = conn.execute("SELECT version FROM schema_version").fetchone()
-        current = row['version'] if row else 0
+        row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+        current = row['v'] if row and row['v'] is not None else 0
     except sqlite3.OperationalError:
         current = 0
 
     if current < _SCHEMA_VERSION:
+        # Backup before any destructive migration (only when an existing DB
+        # is being upgraded, not on first install)
+        if current > 0:
+            _backup_db(db_path, _SCHEMA_VERSION)
+
         conn.executescript(_SCHEMA_SQL)
         # Migrations for existing databases
         if current < 2:
@@ -139,8 +232,38 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                     conn.execute(f"ALTER TABLE waypoints ADD COLUMN {col} INTEGER DEFAULT 0")
                 except sqlite3.OperationalError:
                     pass  # Column already exists
+        if current > 0 and current < 3:
+            # v3: clean up duplicate trips/waypoints from earlier indexer bugs.
+            # Wrapped in a savepoint so a failure during migration doesn't leave
+            # the schema_version bumped without the data fixes applied.
+            try:
+                conn.execute("SAVEPOINT migrate_v3")
+                _migrate_v2_to_v3(conn)
+                conn.execute("RELEASE SAVEPOINT migrate_v3")
+            except Exception as e:
+                conn.execute("ROLLBACK TO SAVEPOINT migrate_v3")
+                conn.execute("RELEASE SAVEPOINT migrate_v3")
+                logger.error("Migration v2->v3 failed, leaving schema at v2: %s", e)
+                conn.commit()
+                return conn  # Skip schema_version bump so it retries next startup
+        if current > 0 and current < 4:
+            # v4: re-evaluate Sentry/Saved clips with Tesla's event.json
+            # (which has accurate GPS) instead of the prior nearest-waypoint
+            # guess. We do this by clearing their indexed_files rows so the
+            # next indexer run re-processes them through the new code path.
+            try:
+                conn.execute("SAVEPOINT migrate_v4")
+                _migrate_v3_to_v4(conn)
+                conn.execute("RELEASE SAVEPOINT migrate_v4")
+            except Exception as e:
+                conn.execute("ROLLBACK TO SAVEPOINT migrate_v4")
+                conn.execute("RELEASE SAVEPOINT migrate_v4")
+                logger.error("Migration v3->v4 failed, leaving schema at v3: %s", e)
+                conn.commit()
+                return conn
+        conn.execute("DELETE FROM schema_version")
         conn.execute(
-            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+            "INSERT INTO schema_version (version) VALUES (?)",
             (_SCHEMA_VERSION,)
         )
         conn.commit()
@@ -150,7 +273,255 @@ def _init_db(db_path: str) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
+# Migrations
+# ---------------------------------------------------------------------------
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Clean up duplicate trips and waypoints from earlier indexer bugs.
+
+    Earlier versions of the indexer:
+      * Created separate trips for the same physical drive when the videos
+        were ingested from different source folders (RecentClips vs ArchivedClips).
+      * Stored duplicate waypoints with the same ``(timestamp, lat, lon)`` but
+        different ``video_path`` strings (one per copy of the video).
+      * Recorded ``source_folder='..'`` for ArchivedClips because of a path
+        normalization bug.
+
+    This one-time migration:
+      1. Repairs ``source_folder='..'`` rows by inferring from waypoint paths.
+      2. Merges trips whose time windows overlap or are within
+         ``_TRIP_GAP_MINUTES_DEFAULT`` minutes of each other (regardless of
+         source_folder).
+      3. Dedupes waypoints within each trip by ``(timestamp, lat, lon)``,
+         preferring the row whose ``video_path`` references ArchivedClips
+         (most durable storage).
+      4. Recomputes ``start_time``, ``end_time``, start/end coords,
+         ``distance_km`` and ``duration_seconds`` for every trip; deletes
+         trips left with no waypoints.
+    """
+    gap_seconds = _TRIP_GAP_MINUTES_DEFAULT * 60
+    log_parts: List[str] = []
+
+    # --- Phase 1: source_folder='..' ---
+    bad = conn.execute(
+        "SELECT id FROM trips WHERE source_folder = '..' OR source_folder LIKE '..%'"
+    ).fetchall()
+    fixed_src = 0
+    for r in bad:
+        wp = conn.execute(
+            "SELECT video_path FROM waypoints "
+            "WHERE trip_id = ? AND video_path IS NOT NULL ORDER BY id LIMIT 1",
+            (r['id'],),
+        ).fetchone()
+        if wp and wp['video_path']:
+            vp = wp['video_path'].replace('\\', '/')
+            if 'ArchivedClips' in vp:
+                folder = 'ArchivedClips'
+            elif '/' in vp:
+                folder = vp.split('/')[0]
+            else:
+                folder = 'Unknown'
+            conn.execute(
+                "UPDATE trips SET source_folder = ? WHERE id = ?",
+                (folder, r['id']),
+            )
+            fixed_src += 1
+    log_parts.append(f"fixed {fixed_src} '..' source_folder rows")
+
+    # --- Phase 2: merge overlapping/close trips ---
+    # Repeatedly find any pair of trips whose windows are within gap_seconds
+    # of each other (in either direction) and merge the higher-id into the lower.
+    merged = 0
+    iterations = 0
+    while True:
+        iterations += 1
+        if iterations > 10000:
+            # Don't silently continue — that would leave duplicates AND
+            # bump schema_version, making this migration unrunnable on the
+            # next startup. Raising here triggers the SAVEPOINT rollback
+            # in _init_db, leaves schema at v2, and surfaces the failure
+            # in the logs so we can investigate.
+            raise RuntimeError(
+                "v2->v3 trip merge loop exceeded 10000 iterations; "
+                "possible infinite loop or pathological duplicate set"
+            )
+        pair = conn.execute(
+            """SELECT a.id AS keep_id, b.id AS drop_id
+               FROM trips a
+               JOIN trips b
+                 ON a.id < b.id
+                AND a.start_time IS NOT NULL AND a.end_time IS NOT NULL
+                AND b.start_time IS NOT NULL AND b.end_time IS NOT NULL
+                AND ((julianday(b.start_time) - julianday(a.end_time)) * 86400) <= ?
+                AND ((julianday(a.start_time) - julianday(b.end_time)) * 86400) <= ?
+               LIMIT 1""",
+            (gap_seconds, gap_seconds),
+        ).fetchone()
+        if not pair:
+            break
+        keep_id, drop_id = pair['keep_id'], pair['drop_id']
+        conn.execute("UPDATE waypoints SET trip_id = ? WHERE trip_id = ?",
+                     (keep_id, drop_id))
+        conn.execute("UPDATE detected_events SET trip_id = ? WHERE trip_id = ?",
+                     (keep_id, drop_id))
+        conn.execute("DELETE FROM trips WHERE id = ?", (drop_id,))
+        merged += 1
+    log_parts.append(f"merged {merged} overlapping trip pairs")
+
+    # --- Phase 3: dedupe waypoints within a trip ---
+    dups = conn.execute(
+        """SELECT trip_id, timestamp, lat, lon, COUNT(*) AS cnt
+           FROM waypoints
+           WHERE trip_id IS NOT NULL
+           GROUP BY trip_id, timestamp, lat, lon
+           HAVING COUNT(*) > 1"""
+    ).fetchall()
+    deduped = 0
+    for d in dups:
+        ids = conn.execute(
+            """SELECT id, video_path FROM waypoints
+               WHERE trip_id = ? AND timestamp = ? AND lat = ? AND lon = ?
+               ORDER BY
+                 CASE WHEN video_path LIKE '%ArchivedClips%' THEN 0 ELSE 1 END,
+                 id""",
+            (d['trip_id'], d['timestamp'], d['lat'], d['lon']),
+        ).fetchall()
+        # Keep the first (durable / lowest id), delete the rest
+        drop_ids = [(r['id'],) for r in ids[1:]]
+        if drop_ids:
+            conn.executemany("DELETE FROM waypoints WHERE id = ?", drop_ids)
+            deduped += len(drop_ids)
+    log_parts.append(f"deduped {deduped} duplicate waypoints")
+
+    # --- Phase 4: recompute trip stats; drop empty trips ---
+    # Distance is computed per video file (in frame/id order) and summed,
+    # because Tesla videos can overlap in time (e.g. when a saved clip is
+    # triggered alongside RecentClips). Sorting all waypoints globally by
+    # timestamp would interleave overlapping recordings and produce huge
+    # phantom jumps. start_time/end_time still come from min/max timestamp.
+    trips = conn.execute("SELECT id FROM trips").fetchall()
+    recomputed = 0
+    dropped_empty = 0
+    for t in trips:
+        bounds = conn.execute(
+            "SELECT MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts "
+            "FROM waypoints WHERE trip_id = ?",
+            (t['id'],),
+        ).fetchone()
+        if not bounds or not bounds['first_ts']:
+            conn.execute("DELETE FROM trips WHERE id = ?", (t['id'],))
+            dropped_empty += 1
+            continue
+        first_ts, last_ts = bounds['first_ts'], bounds['last_ts']
+        first_row = conn.execute(
+            "SELECT lat, lon FROM waypoints WHERE trip_id = ? "
+            "AND timestamp = ? ORDER BY id LIMIT 1",
+            (t['id'], first_ts),
+        ).fetchone()
+        last_row = conn.execute(
+            "SELECT lat, lon FROM waypoints WHERE trip_id = ? "
+            "AND timestamp = ? ORDER BY id DESC LIMIT 1",
+            (t['id'], last_ts),
+        ).fetchone()
+        # Distance summed per video file
+        total_dist = 0.0
+        videos = conn.execute(
+            "SELECT DISTINCT video_path FROM waypoints "
+            "WHERE trip_id = ? AND video_path IS NOT NULL",
+            (t['id'],),
+        ).fetchall()
+        for v in videos:
+            wps = conn.execute(
+                "SELECT lat, lon FROM waypoints "
+                "WHERE trip_id = ? AND video_path = ? ORDER BY id",
+                (t['id'], v['video_path']),
+            ).fetchall()
+            for j in range(1, len(wps)):
+                total_dist += _haversine_km(
+                    wps[j-1]['lat'], wps[j-1]['lon'],
+                    wps[j]['lat'], wps[j]['lon'],
+                )
+        try:
+            dur = max(0, int((
+                datetime.fromisoformat(last_ts)
+                - datetime.fromisoformat(first_ts)
+            ).total_seconds()))
+        except (ValueError, TypeError):
+            dur = 0
+        conn.execute(
+            """UPDATE trips SET
+               start_time = ?, end_time = ?,
+               start_lat = ?, start_lon = ?,
+               end_lat = ?, end_lon = ?,
+               distance_km = ?, duration_seconds = ?
+               WHERE id = ?""",
+            (first_ts, last_ts,
+             first_row['lat'] if first_row else None,
+             first_row['lon'] if first_row else None,
+             last_row['lat'] if last_row else None,
+             last_row['lon'] if last_row else None,
+             total_dist, dur, t['id']),
+        )
+        recomputed += 1
+    log_parts.append(
+        f"recomputed stats for {recomputed} trips; dropped {dropped_empty} empty"
+    )
+
+    logger.info("Migration v2->v3: %s", "; ".join(log_parts))
+
+
+# Default trip gap, also used by the migration. Kept here so the migration
+# can run before any per-call ``trip_gap_minutes`` argument is available.
+_TRIP_GAP_MINUTES_DEFAULT = 5
+
+
+# ---------------------------------------------------------------------------
 # Event Detection Rules
+# ---------------------------------------------------------------------------
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """Re-evaluate Sentry/Saved clips with Tesla's event.json.
+
+    Earlier versions inferred Sentry/Saved event locations from the
+    nearest waypoint, which was inaccurate (often pointed at a different
+    physical location). Tesla actually writes a precise event.json with
+    est_lat/est_lon in each event folder.
+
+    To pick this up for clips already in the database, we delete:
+      1. The existing inferred-location detected_events rows
+         (they have metadata.inferred_location=true), and
+      2. The indexed_files rows for SavedClips/SentryClips clips with
+         zero waypoints — so the next indexer run re-processes them
+         through the new event.json-aware code path.
+
+    Driving clips (those with waypoints) are left untouched.
+    """
+    # Drop old inferred events so they get recreated from event.json
+    cur = conn.execute(
+        "DELETE FROM detected_events "
+        "WHERE event_type IN ('saved', 'sentry') "
+        "AND metadata IS NOT NULL "
+        "AND (metadata LIKE '%inferred_location%' "
+        "     OR metadata LIKE '%nearest_waypoint%')"
+    )
+    deleted_events = cur.rowcount
+    logger.info("v3->v4: cleared %d stale inferred events", deleted_events)
+
+    # Clear indexed_files rows for SavedClips/SentryClips zero-waypoint
+    # entries so they get re-indexed with event.json reading
+    cur = conn.execute(
+        "DELETE FROM indexed_files "
+        "WHERE waypoint_count = 0 "
+        "AND (file_path LIKE '%/SavedClips/%' "
+        "     OR file_path LIKE '%/SentryClips/%' "
+        "     OR file_path LIKE '%\\SavedClips\\%' "
+        "     OR file_path LIKE '%\\SentryClips\\%')"
+    )
+    cleared_files = cur.rowcount
+    logger.info("v3->v4: cleared %d Sentry/Saved indexed_files entries for re-processing",
+                cleared_files)
+
+
 # ---------------------------------------------------------------------------
 
 # Default thresholds (can be overridden via config.yaml mapping.event_detection)
@@ -415,119 +786,195 @@ def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
     """Find all front-camera MP4 files in TeslaCam folders and ArchivedClips.
 
     Only indexes front camera since all cameras share the same GPS data.
-    Yields absolute file paths. Also scans the SD card archive directory
-    for clips that Tesla may have already deleted from RecentClips.
+    Yields absolute file paths.
+
+    Priority order (highest first):
+      1. ArchivedClips on the SD card — durable copies of past drives,
+         oldest first, where the real GPS data lives.
+      2. SavedClips and SentryClips event subfolders — user-marked clips.
+      3. RecentClips — the rolling buffer. Most files written while parked
+         (sentry mode) contain no GPS at all, so we process these last.
     """
-    for folder in ('RecentClips', 'SavedClips', 'SentryClips'):
-        folder_path = os.path.join(teslacam_path, folder)
-        if not os.path.isdir(folder_path):
-            continue
+    seen_basenames: set = set()
 
-        if folder == 'RecentClips':
-            # Flat structure: files directly in folder
-            try:
-                for f in sorted(os.listdir(folder_path)):
-                    if f.lower().endswith('.mp4') and '-front' in f.lower():
-                        yield os.path.join(folder_path, f)
-            except OSError:
-                pass
-        else:
-            # Event structure: files in subfolders
-            try:
-                for event_dir in sorted(os.listdir(folder_path)):
-                    event_path = os.path.join(folder_path, event_dir)
-                    if not os.path.isdir(event_path):
-                        continue
-                    for f in sorted(os.listdir(event_path)):
-                        if f.lower().endswith('.mp4') and '-front' in f.lower():
-                            yield os.path.join(event_path, f)
-            except OSError:
-                pass
-
-    # Also scan ArchivedClips on SD card (flat structure, same as RecentClips)
+    # 1. ArchivedClips (SD card archive of past drives)
     try:
         from config import ARCHIVE_DIR, ARCHIVE_ENABLED
         if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
-            # Track filenames already yielded from RecentClips to avoid duplicates
-            seen_names = set()
-            for folder in ('RecentClips',):
-                fp = os.path.join(teslacam_path, folder)
-                if os.path.isdir(fp):
-                    try:
-                        for f in os.listdir(fp):
-                            seen_names.add(f)
-                    except OSError:
-                        pass
-
             try:
                 for f in sorted(os.listdir(ARCHIVE_DIR)):
                     if f.lower().endswith('.mp4') and '-front' in f.lower():
-                        if f not in seen_names:
-                            yield os.path.join(ARCHIVE_DIR, f)
+                        seen_basenames.add(f)
+                        yield os.path.join(ARCHIVE_DIR, f)
             except OSError:
                 pass
     except ImportError:
         pass
+
+    # 2. SavedClips and SentryClips event folders
+    for folder in ('SavedClips', 'SentryClips'):
+        folder_path = os.path.join(teslacam_path, folder)
+        if not os.path.isdir(folder_path):
+            continue
+        try:
+            for event_dir in sorted(os.listdir(folder_path)):
+                event_path = os.path.join(folder_path, event_dir)
+                if not os.path.isdir(event_path):
+                    continue
+                for f in sorted(os.listdir(event_path)):
+                    if f.lower().endswith('.mp4') and '-front' in f.lower():
+                        yield os.path.join(event_path, f)
+        except OSError:
+            pass
+
+    # 3. RecentClips last (skip basenames already covered by ArchivedClips)
+    folder_path = os.path.join(teslacam_path, 'RecentClips')
+    if os.path.isdir(folder_path):
+        try:
+            for f in sorted(os.listdir(folder_path)):
+                if f.lower().endswith('.mp4') and '-front' in f.lower():
+                    if f in seen_basenames:
+                        continue
+                    yield os.path.join(folder_path, f)
+        except OSError:
+            pass
+
+
+def _read_event_json(rel_path: str, teslacam_root: str) -> Optional[dict]:
+    """Read Tesla's event.json from the SavedClips/SentryClips folder.
+
+    Tesla writes an event.json into each SavedClips/SentryClips event
+    folder. It contains accurate GPS (est_lat, est_lon), the trigger
+    reason (e.g. user_interaction_honk, sentry_aware_object_detection),
+    timestamp, city/street, and camera. This is far better than guessing
+    location from the nearest waypoint.
+
+    Returns the parsed dict on success, or None if not found / unreadable.
+    """
+    try:
+        parts = rel_path.replace('\\', '/').split('/')
+        if len(parts) < 2:
+            return None
+        # Folder is e.g. SavedClips/2026-04-23_19-17-39
+        folder_path = os.path.join(teslacam_root, parts[0], parts[1])
+        ej = os.path.join(folder_path, 'event.json')
+        if not os.path.isfile(ej):
+            return None
+        with open(ej, 'r') as f:
+            data = json.load(f)
+        # Validate required fields
+        try:
+            lat = float(data.get('est_lat'))
+            lon = float(data.get('est_lon'))
+        except (TypeError, ValueError):
+            return None
+        # Must be finite, in valid lat/lon range, and not the (0,0) sentinel
+        # that some Tesla firmware writes when GPS hasn't locked yet.
+        import math
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            return None
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            return None
+        if lat == 0 and lon == 0:
+            return None
+        data['_lat'] = lat
+        data['_lon'] = lon
+        return data
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.debug("Could not read event.json for %s: %s", rel_path, e)
+        return None
 
 
 def _infer_sentry_event(
     conn: sqlite3.Connection,
     rel_path: str,
     file_timestamp: Optional[str],
+    teslacam_root: Optional[str] = None,
 ) -> bool:
-    """Create a sentry/saved event at inferred location for clips without GPS.
+    """Create a sentry/saved event for a clip without GPS in its SEI data.
 
-    Looks up the most recent waypoint before the clip's timestamp to determine
-    where the car was parked when the event occurred.
+    Preferred location source: Tesla's event.json (has accurate est_lat/lon
+    and the trigger reason). Falls back to the most recent waypoint before
+    the clip's timestamp if event.json is missing or unparseable.
 
-    Returns True if an event was created, False if location couldn't be inferred.
+    Returns True if an event was created, False otherwise.
     """
     if not file_timestamp:
-        return False
-
-    # Find the most recent waypoint before this clip's timestamp
-    row = conn.execute(
-        """SELECT lat, lon, trip_id FROM waypoints
-           WHERE timestamp <= ? AND lat != 0 AND lon != 0
-           ORDER BY timestamp DESC LIMIT 1""",
-        (file_timestamp,)
-    ).fetchone()
-
-    if not row:
-        # Try any waypoint at all (clip might predate all trips)
-        row = conn.execute(
-            """SELECT lat, lon, trip_id FROM waypoints
-               WHERE lat != 0 AND lon != 0
-               ORDER BY timestamp ASC LIMIT 1""",
-            ()
-        ).fetchone()
-
-    if not row:
-        logger.info("Cannot infer location for %s — no waypoints in database", rel_path)
         return False
 
     # Determine event type from folder
     event_type = 'sentry' if 'SentryClips' in rel_path else 'saved'
     folder_name = rel_path.replace('\\', '/').split('/')[0]
-
-    # Extract event folder name for grouping (e.g., "2026-03-13_20-45-25")
     parts = rel_path.replace('\\', '/').split('/')
     event_folder = parts[1] if len(parts) > 2 else parts[0]
 
-    # Check if we already have an event for this folder+location
+    # Skip if a fresh event.json-based event already exists for this folder.
+    # If we find an OLDER event with metadata that doesn't include
+    # ``location_source: event_json``, delete it so we can replace it with
+    # the more accurate version. This handles legacy DBs from earlier
+    # versions that wrote events with different (or no) metadata, which the
+    # v3->v4 migration's substring filter may not have matched.
     existing = conn.execute(
-        """SELECT id FROM detected_events
+        """SELECT id, metadata FROM detected_events
            WHERE event_type = ? AND video_path LIKE ? LIMIT 1""",
         (event_type, f'%{event_folder}%')
     ).fetchone()
-
     if existing:
-        return False  # Already created for this event folder
+        # Parse metadata as JSON to robustly check the source. Substring
+        # matching would break if json.dumps formatting changes (e.g.
+        # whitespace/key order).
+        is_event_json = False
+        if existing['metadata']:
+            try:
+                meta_dict = json.loads(existing['metadata'])
+                is_event_json = meta_dict.get('location_source') == 'event_json'
+            except (ValueError, TypeError):
+                pass
+        if is_event_json:
+            return False
+        # Stale event from older code path — drop it so we can recreate
+        # with the accurate event.json-derived data below.
+        conn.execute("DELETE FROM detected_events WHERE id = ?", (existing['id'],))
 
-    description = (
-        f"{'Sentry Mode' if event_type == 'sentry' else 'Saved Clip'} event "
-        f"(location inferred from nearest trip)"
-    )
+    # Try event.json first (accurate Tesla-reported location)
+    lat = lon = None
+    location_source = None
+    reason = None
+    if teslacam_root:
+        ej_data = _read_event_json(rel_path, teslacam_root)
+        if ej_data:
+            lat = ej_data['_lat']
+            lon = ej_data['_lon']
+            reason = ej_data.get('reason') or 'unknown'
+            location_source = 'event_json'
+
+    # Fall back to nearest waypoint (legacy behavior)
+    if lat is None or lon is None:
+        row = conn.execute(
+            """SELECT lat, lon FROM waypoints
+               WHERE timestamp <= ? AND lat != 0 AND lon != 0
+               ORDER BY timestamp DESC LIMIT 1""",
+            (file_timestamp,)
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                """SELECT lat, lon FROM waypoints
+                   WHERE lat != 0 AND lon != 0
+                   ORDER BY timestamp ASC LIMIT 1""",
+                ()
+            ).fetchone()
+        if not row:
+            logger.info("Cannot infer location for %s — no event.json and no waypoints", rel_path)
+            return False
+        lat = row['lat']
+        lon = row['lon']
+        location_source = 'nearest_waypoint'
+
+    label = 'Sentry Mode' if event_type == 'sentry' else 'Saved Clip'
+    if reason:
+        description = f"{label} event ({reason}, location from {location_source})"
+    else:
+        description = f"{label} event (location from {location_source})"
 
     conn.execute(
         """INSERT INTO detected_events
@@ -535,21 +982,25 @@ def _infer_sentry_event(
             description, video_path, frame_offset, metadata)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            row['trip_id'],
+            None,  # not associated with a trip
             file_timestamp,
-            row['lat'],
-            row['lon'],
+            lat,
+            lon,
             event_type,
             'info',
             description,
             rel_path,
             0,
-            json.dumps({'inferred_location': True, 'source_folder': folder_name}),
+            json.dumps({
+                'location_source': location_source,
+                'source_folder': folder_name,
+                'reason': reason,
+            }),
         )
     )
     conn.commit()
-    logger.info("Created inferred %s event for %s at %.4f,%.4f",
-                event_type, event_folder, row['lat'], row['lon'])
+    logger.info("Created %s event for %s at %.4f,%.4f (source=%s)",
+                event_type, event_folder, lat, lon, location_source)
     return True
 
 
@@ -579,6 +1030,51 @@ def _index_video(
     except ImportError:
         rel_path = os.path.relpath(video_path, teslacam_root)
     file_timestamp = _timestamp_from_filename(video_path)
+
+    # --- Cross-folder dedup (fast path) ---
+    # Tesla videos can exist in both RecentClips and ArchivedClips with the
+    # same basename. They contain identical SEI, so don't re-parse the file.
+    # If the existing copy is in a non-durable folder (RecentClips) and we're
+    # now seeing the durable ArchivedClips copy, upgrade the stored video_path
+    # without touching the (expensive) SEI extractor.
+    #
+    # Restrict the basename check to top-level folders we know can hold a
+    # duplicate (RecentClips, ArchivedClips). Sentry/Saved event subfolders
+    # contain generic basenames (front.mp4, back.mp4, ...) that would
+    # otherwise false-match across unrelated events.
+    basename = os.path.basename(video_path)
+    candidate_paths = [
+        basename,
+        f'RecentClips/{basename}',
+        f'ArchivedClips/{basename}',
+    ]
+    existing_paths = conn.execute(
+        "SELECT DISTINCT video_path FROM waypoints "
+        "WHERE video_path IN (?, ?, ?)",
+        candidate_paths,
+    ).fetchall()
+    if existing_paths:
+        if 'ArchivedClips' in rel_path and not any(
+            'ArchivedClips' in (r['video_path'] or '') for r in existing_paths
+        ):
+            upgraded = conn.execute(
+                "UPDATE waypoints SET video_path = ? "
+                "WHERE video_path IN (?, ?, ?)",
+                (rel_path, *candidate_paths),
+            )
+            conn.execute(
+                "UPDATE detected_events SET video_path = ? "
+                "WHERE video_path IN (?, ?, ?)",
+                (rel_path, *candidate_paths),
+            )
+            conn.commit()
+            logger.info(
+                "Upgraded %d waypoint(s) to durable ArchivedClips path: %s",
+                upgraded.rowcount, basename,
+            )
+        else:
+            logger.debug("Skipping %s: basename already indexed", rel_path)
+        return 0, 0
 
     # Extract SEI messages
     waypoint_dicts = []
@@ -634,9 +1130,11 @@ def _index_video(
             logger.info("%s: %d SEI messages but 0 had GPS (%d checked)",
                         rel_path, sei_count, no_gps_count)
 
-        # For Sentry/Saved clips with no GPS, infer location from nearest trip
+        # For Sentry/Saved clips with no GPS, create an event using the
+        # accurate Tesla event.json (preferred) or nearest waypoint as fallback
         if 'SentryClips' in rel_path or 'SavedClips' in rel_path:
-            inferred = _infer_sentry_event(conn, rel_path, file_timestamp)
+            inferred = _infer_sentry_event(conn, rel_path, file_timestamp,
+                                            teslacam_root=teslacam_root)
             if inferred:
                 return 0, 1  # 0 waypoints, 1 event
         return 0, 0
@@ -645,29 +1143,26 @@ def _index_video(
     parts = rel_path.replace('\\', '/').split('/')
     source_folder = parts[0] if parts else 'Unknown'
 
-    # Find or create trip (check if this video extends an existing trip)
+    # Find or create trip — match on time proximity, regardless of source_folder.
+    # Earlier code filtered by source_folder, which fragmented trips when
+    # the same drive was ingested from RecentClips vs ArchivedClips, and
+    # picked the wrong trip when videos were indexed out of order.
     first_wp = waypoint_dicts[0]
     last_wp = waypoint_dicts[-1]
+    new_start = first_wp['timestamp']
+    new_end = last_wp['timestamp']
+    gap_seconds = trip_gap_minutes * 60
 
-    # Look for a recent trip to extend (within trip_gap_minutes)
-    gap_threshold = file_timestamp or first_wp['timestamp']
     existing_trip = conn.execute(
-        """SELECT id, end_time, end_lat, end_lon FROM trips
-           WHERE source_folder = ? AND end_time IS NOT NULL
-           ORDER BY end_time DESC LIMIT 1""",
-        (source_folder,)
+        """SELECT id FROM trips
+           WHERE start_time IS NOT NULL AND end_time IS NOT NULL
+             AND ((julianday(?) - julianday(end_time)) * 86400) <= ?
+             AND ((julianday(start_time) - julianday(?)) * 86400) <= ?
+           ORDER BY ABS((julianday(?) - julianday(start_time)) * 86400)
+           LIMIT 1""",
+        (new_start, gap_seconds, new_end, gap_seconds, new_start),
     ).fetchone()
-
-    trip_id = None
-    if existing_trip:
-        try:
-            last_end = datetime.fromisoformat(existing_trip['end_time'])
-            this_start = datetime.fromisoformat(gap_threshold)
-            gap = abs((this_start - last_end).total_seconds())
-            if gap <= trip_gap_minutes * 60:
-                trip_id = existing_trip['id']
-        except (ValueError, TypeError):
-            pass
+    trip_id = existing_trip['id'] if existing_trip else None
 
     if trip_id is None:
         # Create new trip
@@ -711,25 +1206,68 @@ def _index_video(
              for ev in events]
         )
 
-    # Update trip end point and distance
-    total_dist = 0.0
-    for j in range(1, len(waypoint_dicts)):
-        total_dist += _haversine_km(
-            waypoint_dicts[j - 1]['lat'], waypoint_dicts[j - 1]['lon'],
-            waypoint_dicts[j]['lat'], waypoint_dicts[j]['lon']
+    # Recompute trip stats from the full waypoint set. The new video may
+    # extend the trip in either direction (forward OR backward in time when
+    # archive videos are indexed out of order), so we can't just append
+    # to the existing distance. Distance is summed per video file in
+    # frame/id order, because Tesla videos can overlap in time (e.g. saved
+    # clips alongside RecentClips); a global timestamp sort would interleave
+    # them and produce phantom GPS jumps.
+    bounds = conn.execute(
+        "SELECT MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts "
+        "FROM waypoints WHERE trip_id = ?",
+        (trip_id,),
+    ).fetchone()
+    if bounds and bounds['first_ts']:
+        first_ts, last_ts = bounds['first_ts'], bounds['last_ts']
+        first_row = conn.execute(
+            "SELECT lat, lon FROM waypoints WHERE trip_id = ? "
+            "AND timestamp = ? ORDER BY id LIMIT 1",
+            (trip_id, first_ts),
+        ).fetchone()
+        last_row = conn.execute(
+            "SELECT lat, lon FROM waypoints WHERE trip_id = ? "
+            "AND timestamp = ? ORDER BY id DESC LIMIT 1",
+            (trip_id, last_ts),
+        ).fetchone()
+        total_dist = 0.0
+        videos = conn.execute(
+            "SELECT DISTINCT video_path FROM waypoints "
+            "WHERE trip_id = ? AND video_path IS NOT NULL",
+            (trip_id,),
+        ).fetchall()
+        for v in videos:
+            vwps = conn.execute(
+                "SELECT lat, lon FROM waypoints "
+                "WHERE trip_id = ? AND video_path = ? ORDER BY id",
+                (trip_id, v['video_path']),
+            ).fetchall()
+            for j in range(1, len(vwps)):
+                total_dist += _haversine_km(
+                    vwps[j-1]['lat'], vwps[j-1]['lon'],
+                    vwps[j]['lat'], vwps[j]['lon'],
+                )
+        try:
+            dur = max(0, int((
+                datetime.fromisoformat(last_ts)
+                - datetime.fromisoformat(first_ts)
+            ).total_seconds()))
+        except (ValueError, TypeError):
+            dur = 0
+        conn.execute(
+            """UPDATE trips SET
+               start_time = ?, end_time = ?,
+               start_lat = ?, start_lon = ?,
+               end_lat = ?, end_lon = ?,
+               distance_km = ?, duration_seconds = ?
+               WHERE id = ?""",
+            (first_ts, last_ts,
+             first_row['lat'] if first_row else None,
+             first_row['lon'] if first_row else None,
+             last_row['lat'] if last_row else None,
+             last_row['lon'] if last_row else None,
+             total_dist, dur, trip_id),
         )
-
-    conn.execute(
-        """UPDATE trips SET
-           end_time = ?, end_lat = ?, end_lon = ?,
-           distance_km = COALESCE(distance_km, 0) + ?,
-           duration_seconds = CAST(
-               (julianday(?) - julianday(start_time)) * 86400 AS INTEGER
-           )
-           WHERE id = ?""",
-        (last_wp['timestamp'], last_wp['lat'], last_wp['lon'],
-         total_dist, last_wp['timestamp'], trip_id)
-    )
 
     conn.commit()
     return len(waypoint_dicts), len(events)
@@ -815,6 +1353,21 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
     """Background indexer main loop. Scans for new videos and indexes them."""
     global _status
 
+    # Lower this thread's CPU priority so the Flask request handlers and
+    # the kernel's USB-gadget thread always preempt us. SEI parsing reads
+    # entire 50 MB MP4s from a loop-mounted exFAT image, which holds the
+    # GIL and starves the web server on a Pi Zero 2 W otherwise.
+    # On Linux, os.nice() and SCHED_BATCH apply to the calling thread.
+    try:
+        os.nice(19)
+    except (OSError, AttributeError):
+        pass
+    try:
+        if hasattr(os, "sched_setscheduler") and hasattr(os, "SCHED_BATCH"):
+            os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
+    except (OSError, AttributeError, ValueError):
+        pass
+
     # Acquire the global heavy-task lock so the archiver and cloud sync
     # don't run concurrently (Pi Zero has limited CPU/IO).
     from services.task_coordinator import acquire_task, release_task
@@ -853,13 +1406,17 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
             try:
                 stat = os.stat(vp)
                 row = conn.execute(
-                    "SELECT file_size, file_mtime, waypoint_count FROM indexed_files WHERE file_path = ?",
+                    "SELECT file_size, file_mtime, waypoint_count, event_count "
+                    "FROM indexed_files WHERE file_path = ?",
                     (vp,)
                 ).fetchone()
                 if row and row['file_size'] == stat.st_size and row['file_mtime'] == stat.st_mtime:
-                    # Skip if already indexed with waypoints; re-try if 0 waypoints
-                    if row['waypoint_count'] and row['waypoint_count'] > 0:
-                        continue
+                    # File hasn't changed since we last looked at it. Skip.
+                    # Even if waypoint_count is 0 we don't re-parse: most
+                    # zero-waypoint files are sentry/parked recordings without
+                    # GPS, and re-parsing them every run wastes the Pi's CPU
+                    # and starves the web server.
+                    continue
                 to_index.append((vp, stat.st_size, stat.st_mtime))
             except OSError:
                 continue
@@ -922,6 +1479,14 @@ def _run_indexer(db_path: str, teslacam_path: str, sample_rate: int,
             except Exception as e:
                 logger.error("Failed to index %s: %s", rel, e)
                 continue
+
+            # Yield CPU between files. SEI parsing is CPU+IO heavy; without
+            # this, the indexer can starve the web server's request handlers
+            # and the kernel's USB gadget thread on a Pi Zero 2 W. The
+            # indexer thread also runs at nice 19 / SCHED_BATCH (set in
+            # _run_indexer) so this sleep just adds a guaranteed yield
+            # window between large file reads.
+            time.sleep(0.25)
 
         _status.update({
             'running': False,
@@ -1396,21 +1961,33 @@ def _diagnose_nal_structure(video_path: str) -> dict:
 
     return result
 
+@_with_db_retry
 def get_db_connection(db_path: str) -> sqlite3.Connection:
     """Get a read-only connection to the geo-index database."""
     conn = _init_db(db_path)
     return conn
 
 
+@_with_db_retry
 def query_trips(db_path: str, limit: int = 50, offset: int = 0,
                 bbox: Optional[Tuple[float, float, float, float]] = None,
                 date_from: Optional[str] = None,
-                date_to: Optional[str] = None) -> List[dict]:
-    """Query trips with optional bounding box and date filters."""
+                date_to: Optional[str] = None,
+                min_distance_km: float = 0.05) -> List[dict]:
+    """Query trips with optional bounding box and date filters.
+
+    ``min_distance_km`` defaults to 50 m, which hides parking-lot blips and
+    isolated sentry recordings from the trip nav. Pass ``0`` to include all
+    trips regardless of distance.
+    """
     conn = _init_db(db_path)
     try:
         sql = "SELECT * FROM trips WHERE 1=1"
-        params = []
+        params: List = []
+
+        if min_distance_km and min_distance_km > 0:
+            sql += " AND COALESCE(distance_km, 0) >= ?"
+            params.append(min_distance_km)
 
         if bbox:
             min_lat, min_lon, max_lat, max_lon = bbox
@@ -1449,6 +2026,7 @@ def query_trips(db_path: str, limit: int = 50, offset: int = 0,
         conn.close()
 
 
+@_with_db_retry
 def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
     """Get all waypoints for a trip as a GeoJSON-ready list."""
     conn = _init_db(db_path)
@@ -1467,6 +2045,7 @@ def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
         conn.close()
 
 
+@_with_db_retry
 def query_events(db_path: str, limit: int = 100, offset: int = 0,
                  event_type: Optional[str] = None,
                  severity: Optional[str] = None,
@@ -1505,6 +2084,7 @@ def query_events(db_path: str, limit: int = 100, offset: int = 0,
         conn.close()
 
 
+@_with_db_retry
 def get_stats(db_path: str) -> dict:
     """Get summary statistics from the geo-index database."""
     conn = _init_db(db_path)
@@ -1546,6 +2126,7 @@ def get_stats(db_path: str) -> dict:
         conn.close()
 
 
+@_with_db_retry
 def get_driving_stats(db_path: str) -> dict:
     """Get driving behavior statistics for the analytics dashboard."""
     conn = _init_db(db_path)
@@ -1600,6 +2181,7 @@ def get_driving_stats(db_path: str) -> dict:
         conn.close()
 
 
+@_with_db_retry
 def get_event_chart_data(db_path: str) -> dict:
     """Get event data formatted for Chart.js rendering."""
     conn = _init_db(db_path)

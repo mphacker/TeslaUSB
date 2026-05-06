@@ -403,14 +403,20 @@
         padding: 8px 12px; font-size: 12px; color: var(--text-secondary, #aaa);
         display: flex; gap: 12px; flex-wrap: wrap;
     }
+    .video-overlay-stage { position: relative; }
     .cam-switcher {
-        display: flex; gap: 2px; padding: 4px 6px;
-        background: var(--bg-primary, #111); overflow-x: auto;
+        display: flex; gap: 4px; padding: 6px;
+        background: var(--bg-primary, #111);
+        /* No horizontal scroll: buttons share space evenly via flex:1.
+           Labels ellipsize on narrow widths but stay tap-able. */
+        overflow: hidden;
     }
     .cam-btn {
-        padding: 4px 10px; border: 1px solid var(--border, #333); border-radius: 4px;
+        flex: 1 1 0; min-width: 0;
+        padding: 4px 6px; border: 1px solid var(--border, #333); border-radius: 4px;
         background: var(--bg-secondary, #1a1a2e); color: var(--text-secondary, #aaa);
-        font-size: 11px; cursor: pointer; white-space: nowrap;
+        font-size: 11px; cursor: pointer;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;
     }
     .cam-btn:hover { background: var(--bg-hover, #333); color: var(--text-primary, #eee); }
     .cam-btn.active { background: var(--accent-color, #007bff); color: #fff; border-color: var(--accent-color, #007bff); }
@@ -418,8 +424,45 @@
         padding: 3px 10px; border: 1px solid var(--border, #333); border-radius: 4px;
         background: var(--bg-secondary, #1a1a2e); color: var(--text-primary, #eee);
         font-size: 14px; cursor: pointer; line-height: 1;
+        display: inline-flex; align-items: center; justify-content: center;
     }
     .nav-btn:hover { background: var(--accent-color, #007bff); color: #fff; }
+    .nav-btn .nav-icon { width: 14px; height: 14px; }
+
+    /* ── Maximized video overlay (window-bound, keeps HUD) ──
+       Different from the native <video controls> fullscreen, which only
+       shows the video. This expands the entire overlay (header, camera
+       switcher, video, HUD, info bar) to fill the viewport. */
+    .video-overlay.maximized {
+        /* inset:0 + width/height:auto + border-box keeps the 1px border
+           inside the viewport instead of overflowing by 2px. */
+        inset: 0;
+        left: 0 !important;
+        top: 0 !important;
+        right: 0;
+        bottom: 0;
+        width: auto !important;
+        max-width: none !important;
+        height: auto;
+        box-sizing: border-box;
+        border-radius: 0;
+        display: flex;
+        flex-direction: column;
+    }
+    .video-overlay.maximized .video-overlay-header,
+    .video-overlay.maximized .cam-switcher,
+    .video-overlay.maximized .video-overlay-info { flex-shrink: 0; }
+    .video-overlay.maximized .video-overlay-stage {
+        flex: 1; min-height: 0;
+        display: flex; align-items: center; justify-content: center;
+        background: #000;
+    }
+    .video-overlay.maximized .video-overlay-stage video {
+        max-height: 100% !important;
+        width: 100%; height: 100%;
+        object-fit: contain;
+    }
+    .video-overlay.maximized .video-overlay-header { cursor: default !important; }
 
     /* ── Overlay Telemetry HUD ── */
     .overlay-hud {
@@ -2073,7 +2116,8 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
 
     const cameraBtns = CAMERA_ANGLES.map(a => {
         const active = a === overlayCurrentAngle ? ' active' : '';
-        return `<button class="cam-btn${active}" data-angle="${a}">${CAMERA_LABELS[a]}</button>`;
+        const lbl = CAMERA_LABELS[a];
+        return `<button class="cam-btn${active}" data-angle="${a}" title="${lbl}" aria-label="${lbl}">${lbl}</button>`;
     }).join('');
 
     overlay.innerHTML = `
@@ -2082,7 +2126,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
             <button class="close-btn" onclick="closeVideoOverlay()">✕</button>
         </div>
         <div class="cam-switcher" id="camSwitcher">${cameraBtns}</div>
-        <div style="position:relative">
+        <div class="video-overlay-stage">
             <video id="overlayVideo" controls autoplay muted></video>
             <div class="overlay-hud" id="overlayHud">
                 <div class="oh-gear" id="olGear">P</div>
@@ -2102,6 +2146,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
                 <button class="nav-btn" onclick="navigateClip(1)" title="Next clip">⏭</button>
                 <button class="nav-btn" onclick="overlayDownload()" title="Download ZIP">⬇</button>
                 {% if cloud_provider_connected %}<button class="nav-btn" id="archiveNavBtn" onclick="overlayArchive()" title="Archive to Cloud" style="color:#32ADE6">☁</button>{% endif %}
+                <button class="nav-btn" id="overlayMaximizeBtn" onclick="toggleOverlayMaximize()" title="Maximize" aria-label="Maximize video overlay"><svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-maximize-2"></use></svg></button>
                 <button class="nav-btn" onclick="overlayDelete()" title="Delete" style="color:#dc3545">🗑</button>
             </div>
         </div>
@@ -2145,27 +2190,74 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
         updateOverlayTelemetry(waypoint);
     }
 
-    // Draggable
+    // Draggable. Use an AbortController so we can remove all document-level
+    // listeners in one shot when the overlay closes — previously these
+    // accumulated across opens, causing stale closures and a slow leak.
     let isDragging = false, dragX, dragY;
     const header = overlay.querySelector('.video-overlay-header');
     header.style.cursor = 'grab';
+    overlayDragController = new AbortController();
+    const sig = overlayDragController.signal;
     header.addEventListener('mousedown', (e) => {
+        if (overlay.classList.contains('maximized')) return;
         if (e.target.classList.contains('close-btn')) return;
         isDragging = true;
         dragX = e.clientX - overlay.offsetLeft;
         dragY = e.clientY - overlay.offsetTop;
         header.style.cursor = 'grabbing';
-    });
+    }, { signal: sig });
     document.addEventListener('mousemove', (e) => {
         if (!isDragging) return;
         overlay.style.left = (e.clientX - dragX) + 'px';
         overlay.style.top = (e.clientY - dragY) + 'px';
-    });
+    }, { signal: sig });
     document.addEventListener('mouseup', () => {
+        if (!isDragging) return;
         isDragging = false;
-        if (header) header.style.cursor = 'grab';
-    });
+        if (header && !overlay.classList.contains('maximized')) header.style.cursor = 'grab';
+    }, { signal: sig });
 }
+
+// Module-level so closeVideoOverlay can abort drag listeners attached
+// during openVideoOverlay. Reset on each open/close cycle.
+let overlayDragController = null;
+
+const OVERLAY_ICON_MAX = "{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-maximize-2";
+const OVERLAY_ICON_MIN = "{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-minimize-2";
+
+function updateOverlayMaximizeButton(isMax) {
+    const btn = document.getElementById('overlayMaximizeBtn');
+    if (!btn) return;
+    btn.title = isMax ? 'Restore' : 'Maximize';
+    btn.setAttribute('aria-label', isMax ? 'Restore video overlay' : 'Maximize video overlay');
+    const use = btn.querySelector('use');
+    if (use) use.setAttribute('href', isMax ? OVERLAY_ICON_MIN : OVERLAY_ICON_MAX);
+}
+
+function toggleOverlayMaximize() {
+    const overlay = document.getElementById('videoOverlay');
+    if (!overlay) return;
+    const isMax = overlay.classList.toggle('maximized');
+    updateOverlayMaximizeButton(isMax);
+    // Reset header cursor when leaving maximized so drag indicator returns.
+    const header = overlay.querySelector('.video-overlay-header');
+    if (header) header.style.cursor = isMax ? 'default' : 'grab';
+}
+
+// Single global ESC handler: restores from maximized state. Attached once
+// at module load — does NOT accumulate per overlay open. Does not close
+// the overlay on ESC (the X button is the explicit close affordance) and
+// does not interfere with the browser's native ESC-exits-fullscreen
+// behavior because that only fires while the video is in OS fullscreen.
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const overlay = document.getElementById('videoOverlay');
+    if (!overlay || !overlay.classList.contains('maximized')) return;
+    overlay.classList.remove('maximized');
+    updateOverlayMaximizeButton(false);
+    const header = overlay.querySelector('.video-overlay-header');
+    if (header) header.style.cursor = 'grab';
+});
 
 function onOverlayTimeUpdate() {
     const video = document.getElementById('overlayVideo');
@@ -2356,6 +2448,10 @@ function closeVideoOverlay() {
             video.pause(); video.src = '';
         }
         existing.remove();
+    }
+    if (overlayDragController) {
+        overlayDragController.abort();
+        overlayDragController = null;
     }
     overlayWaypoints = [];
     overlayClips = [];

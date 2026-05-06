@@ -405,21 +405,26 @@
     }
     .video-overlay-stage { position: relative; }
     .cam-switcher {
-        display: flex; gap: 4px; padding: 6px;
+        display: flex; gap: 3px; padding: 6px;
         background: var(--bg-primary, #111);
         /* No horizontal scroll: buttons share space evenly via flex:1.
-           Labels ellipsize on narrow widths but stay tap-able. */
+           Tight gap + minimal padding lets full labels (incl. "L Pillar"
+           and "R Pillar") fit without truncation in the default 480px
+           overlay width. */
         overflow: hidden;
     }
     .cam-btn {
         flex: 1 1 0; min-width: 0;
-        padding: 4px 6px; border: 1px solid var(--border, #333); border-radius: 4px;
+        padding: 4px 4px; border: 1px solid var(--border, #333); border-radius: 4px;
         background: var(--bg-secondary, #1a1a2e); color: var(--text-secondary, #aaa);
         font-size: 11px; cursor: pointer;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;
+        display: inline-flex; align-items: center; justify-content: center;
+        gap: 4px; overflow: hidden;
     }
     .cam-btn:hover { background: var(--bg-hover, #333); color: var(--text-primary, #eee); }
     .cam-btn.active { background: var(--accent-color, #007bff); color: #fff; border-color: var(--accent-color, #007bff); }
+    .cam-btn .cam-icon { width: 12px; height: 12px; flex-shrink: 0; }
+    .cam-btn .cam-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .nav-btn {
         padding: 3px 10px; border: 1px solid var(--border, #333); border-radius: 4px;
         background: var(--bg-secondary, #1a1a2e); color: var(--text-primary, #eee);
@@ -2057,9 +2062,20 @@ async function renderAllTime() {
 
 const CAMERA_ANGLES = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
 const CAMERA_LABELS = {
-    'front': '🎥 Front', 'back': '🔙 Back',
-    'left_repeater': '◀️ Left', 'right_repeater': '▶️ Right',
-    'left_pillar': '↙️ L Pillar', 'right_pillar': '↘️ R Pillar'
+    'front': 'Front', 'back': 'Back',
+    'left_repeater': 'Left', 'right_repeater': 'Right',
+    'left_pillar': 'L Pillar', 'right_pillar': 'R Pillar'
+};
+// Directional Lucide icons matching each camera's view direction (top-down
+// car perspective). Front faces forward (up), pillar cameras face the rear
+// quarter (diagonal arrows). Keeps the switcher visually scannable.
+const CAMERA_ICONS = {
+    'front': 'icon-chevron-up',
+    'back': 'icon-chevron-down',
+    'left_repeater': 'icon-chevron-left',
+    'right_repeater': 'icon-chevron-right',
+    'left_pillar': 'icon-arrow-down-left',
+    'right_pillar': 'icon-arrow-down-right'
 };
 
 let overlayWaypoints = [];
@@ -2117,7 +2133,10 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
     const cameraBtns = CAMERA_ANGLES.map(a => {
         const active = a === overlayCurrentAngle ? ' active' : '';
         const lbl = CAMERA_LABELS[a];
-        return `<button class="cam-btn${active}" data-angle="${a}" title="${lbl}" aria-label="${lbl}">${lbl}</button>`;
+        const icon = CAMERA_ICONS[a];
+        return `<button class="cam-btn${active}" data-angle="${a}" title="${lbl}" aria-label="${lbl}">`
+             + `<svg class="cam-icon"><use href="${LUCIDE_SPRITE}#${icon}"></use></svg>`
+             + `<span class="cam-label">${lbl}</span></button>`;
     }).join('');
 
     overlay.innerHTML = `
@@ -2127,7 +2146,7 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
         </div>
         <div class="cam-switcher" id="camSwitcher">${cameraBtns}</div>
         <div class="video-overlay-stage">
-            <video id="overlayVideo" controls autoplay muted></video>
+            <video id="overlayVideo" controls autoplay muted controlslist="nofullscreen" disablepictureinpicture></video>
             <div class="overlay-hud" id="overlayHud">
                 <div class="oh-gear" id="olGear">P</div>
                 <div class="oh-pedal oh-brake" id="olBrake"><span class="oh-fill"><i></i></span><span class="oh-lbl">B</span></div>
@@ -2146,7 +2165,8 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
                 <button class="nav-btn" onclick="navigateClip(1)" title="Next clip">⏭</button>
                 <button class="nav-btn" onclick="overlayDownload()" title="Download ZIP">⬇</button>
                 {% if cloud_provider_connected %}<button class="nav-btn" id="archiveNavBtn" onclick="overlayArchive()" title="Archive to Cloud" style="color:#32ADE6">☁</button>{% endif %}
-                <button class="nav-btn" id="overlayMaximizeBtn" onclick="toggleOverlayMaximize()" title="Maximize" aria-label="Maximize video overlay"><svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-maximize-2"></use></svg></button>
+                <button class="nav-btn" onclick="overlayFullscreen()" title="Fullscreen video" aria-label="Fullscreen video"><svg class="nav-icon"><use href="${LUCIDE_SPRITE}#icon-maximize"></use></svg></button>
+                <button class="nav-btn" id="overlayMaximizeBtn" onclick="toggleOverlayMaximize()" title="Maximize" aria-label="Maximize video overlay"><svg class="nav-icon"><use href="${LUCIDE_SPRITE}#icon-maximize-2"></use></svg></button>
                 <button class="nav-btn" onclick="overlayDelete()" title="Delete" style="color:#dc3545">🗑</button>
             </div>
         </div>
@@ -2222,8 +2242,27 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
 // during openVideoOverlay. Reset on each open/close cycle.
 let overlayDragController = null;
 
-const OVERLAY_ICON_MAX = "{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-maximize-2";
-const OVERLAY_ICON_MIN = "{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-minimize-2";
+const LUCIDE_SPRITE = "{{ url_for('static', filename='icons/lucide-sprite.svg') }}";
+const OVERLAY_ICON_MAX = LUCIDE_SPRITE + "#icon-maximize-2";
+const OVERLAY_ICON_MIN = LUCIDE_SPRITE + "#icon-minimize-2";
+
+function overlayFullscreen() {
+    // Native OS-level fullscreen of just the video element. The native
+    // <video> control is hidden via controlslist="nofullscreen" so this
+    // button is the single entry point — keeps the nav row consistent
+    // with the in-page Maximize button next to it. iOS Safari ignores
+    // controlslist, so the native button is still visible there but
+    // both buttons do the same thing.
+    const v = document.getElementById('overlayVideo');
+    if (!v) return;
+    if (v.requestFullscreen) {
+        v.requestFullscreen().catch(() => {});
+    } else if (v.webkitEnterFullscreen) {
+        v.webkitEnterFullscreen();
+    } else if (v.webkitRequestFullscreen) {
+        v.webkitRequestFullscreen();
+    }
+}
 
 function updateOverlayMaximizeButton(isMax) {
     const btn = document.getElementById('overlayMaximizeBtn');

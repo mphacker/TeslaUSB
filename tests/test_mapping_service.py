@@ -944,37 +944,123 @@ class TestQueryAllRoutesSimplified:
 
     def test_subsampling_keeps_first_and_last(self, tmp_path):
         # First + last waypoints anchor the polyline at the trip's
-        # actual endpoints — a stride-only sample could drop one or
-        # both. The kept count must also stay close to the cap so the
-        # client renders quickly.
+        # actual endpoints — no matter how aggressively RDP collapses
+        # straight middle stretches, both endpoints must survive.
         from services.mapping_service import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
-        # 200 waypoints at lat = 37.700, 37.701, ..., 37.899
+        # 200 waypoints at lat = 37.700, 37.701, ..., 37.899 (a
+        # perfectly straight line). RDP collapses straight lines to
+        # just the endpoints — that's the whole point.
         self._add_waypoints(conn, 1, count=200)
         conn.commit(); conn.close()
 
-        trips = query_all_routes_simplified(db_path, max_points_per_trip=20)
+        trips = query_all_routes_simplified(db_path)
         assert len(trips) == 1
         wps = trips[0]['waypoints']
-        # Allow modest overshoot from the stride+endpoint logic.
-        assert 18 <= len(wps) <= 25
-        # First waypoint is preserved.
+        # First waypoint preserved.
         assert wps[0]['lat'] == pytest.approx(37.700)
-        # Last waypoint is preserved.
+        # Last waypoint preserved.
         assert wps[-1]['lat'] == pytest.approx(37.899)
 
+    def test_straight_line_collapses_to_endpoints(self, tmp_path):
+        # The whole motivation for RDP: a straight line of N points
+        # should compress to just the 2 endpoints, regardless of N.
+        # The previous stride-based sampler returned ~N/step points
+        # even on perfectly straight roads, wasting bytes for no
+        # visual benefit.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=10.0)
+        self._add_waypoints(conn, 1, count=500)
+        conn.commit(); conn.close()
+        trips = query_all_routes_simplified(db_path)
+        assert len(trips[0]['waypoints']) == 2
+
+    def test_sharp_corner_is_preserved(self, tmp_path):
+        # The bug RDP fixes: stride sampling cuts diagonally across
+        # sharp turns when the corner falls inside a stride gap. RDP
+        # detects the corner via its perpendicular distance from the
+        # chord and forces a kept point there.
+        from services.mapping_service import query_all_routes_simplified
+        import sqlite3
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        # 50 points going east at lat=37.7, then 50 points going
+        # north at lon=-122.350 — a hard 90 degree corner at the
+        # midpoint that's ~5.5 km from the chord.
+        for i in range(50):
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon,
+                                          speed_mps, autopilot_state,
+                                          video_path, frame_offset)
+                   VALUES (1, '2026-05-04T08:15:00', 37.7,
+                           ?, 25.0, 'NONE', 'clip.mp4', 0)""",
+                (-122.400 + i * 0.001,),
+            )
+        for i in range(50):
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon,
+                                          speed_mps, autopilot_state,
+                                          video_path, frame_offset)
+                   VALUES (1, '2026-05-04T08:15:00', ?,
+                           -122.350, 25.0, 'NONE', 'clip.mp4', 0)""",
+                (37.7 + i * 0.001,),
+            )
+        conn.commit(); conn.close()
+
+        trips = query_all_routes_simplified(db_path)
+        wps = trips[0]['waypoints']
+        # Endpoints + at least one point near the corner. The
+        # corner is at (37.7, -122.350); allow a small tolerance
+        # since RDP picks whichever discrete point has the maximum
+        # perpendicular distance.
+        assert any(
+            abs(w['lat'] - 37.7) < 0.001 and abs(w['lon'] + 122.350) < 0.001
+            for w in wps
+        ), f"corner not preserved; got {[(w['lat'], w['lon']) for w in wps]}"
+
     def test_subsampling_returns_all_when_count_under_cap(self, tmp_path):
-        # A short trip (fewer waypoints than the cap) must round-trip
-        # every point — subsampling should never drop data when there
-        # is no rendering pressure to do so.
+        # Short trips (well under the cap) used to round-trip every
+        # point. With RDP on a perfectly straight line, only the
+        # endpoints survive — that's the correct simplification, and
+        # any mid-trip drilldown should drill into the per-day
+        # endpoint which preserves every raw waypoint.
         from services.mapping_service import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         self._add_waypoints(conn, 1, count=8)
         conn.commit(); conn.close()
-        trips = query_all_routes_simplified(db_path, max_points_per_trip=50)
-        assert len(trips[0]['waypoints']) == 8
+        trips = query_all_routes_simplified(db_path)
+        # Straight line collapses to endpoints, regardless of how
+        # many raw waypoints were on it.
+        assert len(trips[0]['waypoints']) == 2
+
+    def test_max_points_safety_cap_clamps_pathological_zigzag(self, tmp_path):
+        # If the path is so zigzagged that even RDP keeps too many
+        # points, the safety cap kicks in via stride sampling. This
+        # test builds a pathological zigzag where every other point
+        # is a real corner so RDP has to keep them all.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        # 40 zigzag points that alternate north/south so every
+        # interior point is a sharp corner.
+        for i in range(40):
+            lat = 37.7 + (0.01 if i % 2 else -0.01)
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon,
+                                          speed_mps, autopilot_state,
+                                          video_path, frame_offset)
+                   VALUES (1, '2026-05-04T08:15:00', ?, ?,
+                           25.0, 'NONE', 'clip.mp4', 0)""",
+                (lat, -122.4 + i * 0.001),
+            )
+        conn.commit(); conn.close()
+        trips = query_all_routes_simplified(db_path, max_points_per_trip=10)
+        # The cap clamps the result; allow a small overshoot from
+        # the "force the last point" guarantee.
+        assert len(trips[0]['waypoints']) <= 12
 
     def test_min_distance_filter_excludes_parking_blips(self, tmp_path):
         # Same default as /api/trips and /api/day/<date>/routes —

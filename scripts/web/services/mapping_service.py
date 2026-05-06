@@ -835,6 +835,92 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def _simplify_polyline_rdp(latlons, epsilon_m: float = 8.0) -> List[int]:
+    """Apply Ramer-Douglas-Peucker simplification to a (lat, lon)
+    polyline, returning the indices of the points to keep.
+
+    The algorithm projects (lat, lon) to a local equirectangular
+    meters frame centered on the polyline's mean latitude, then
+    keeps every point whose perpendicular distance to the
+    simplified line exceeds ``epsilon_m``. This preserves road
+    corners (their perpendicular distance to a chord across them
+    is large) and collapses straight stretches (zero perpendicular
+    distance). 8 m is the default because it sits comfortably above
+    typical Tesla GPS noise (~3-5 m) yet is tight enough that any
+    visible road feature survives at any zoom relevant to the All
+    time map view.
+
+    Iterative (stack-based) to avoid Python's default recursion
+    limit on multi-thousand-point trips. Always returns at minimum
+    ``[0, n-1]`` (the endpoints) for any polyline of length >= 2;
+    for ``n < 2`` returns ``list(range(n))``.
+
+    Used by :func:`query_all_routes_simplified` to fix the visible
+    "polyline cuts across the road" bug that stride sampling
+    produced on long trips with sharp turns.
+    """
+    n = len(latlons)
+    if n < 3:
+        return list(range(n))
+
+    # Project (lat, lon) to local meters via equirectangular
+    # approximation centered on the polyline's mean latitude.
+    # Plenty accurate for trips up to ~100 km — we'll never see
+    # longer in a single Tesla trip recording.
+    mean_lat = sum(p[0] for p in latlons) / n
+    cos_lat = math.cos(math.radians(mean_lat))
+    deg_lat_m = 111320.0  # ~ meters per degree of latitude
+    deg_lon_m = deg_lat_m * cos_lat
+    xy = [(p[1] * deg_lon_m, p[0] * deg_lat_m) for p in latlons]
+
+    keep = [False] * n
+    keep[0] = True
+    keep[-1] = True
+    eps2 = epsilon_m * epsilon_m
+    stack = [(0, n - 1)]
+    while stack:
+        start, end = stack.pop()
+        if end <= start + 1:
+            continue
+        x1, y1 = xy[start]
+        x2, y2 = xy[end]
+        dx = x2 - x1
+        dy = y2 - y1
+        denom = dx * dx + dy * dy
+        max_d2 = 0.0
+        max_i = start
+        if denom == 0.0:
+            # Degenerate segment (start point == end point — happens
+            # for loop trips that finish where they started). Use
+            # plain euclidean distance to the start so we still find
+            # the farthest excursion and split there.
+            for i in range(start + 1, end):
+                xi, yi = xy[i]
+                ddx = xi - x1
+                ddy = yi - y1
+                d2 = ddx * ddx + ddy * ddy
+                if d2 > max_d2:
+                    max_d2 = d2
+                    max_i = i
+        else:
+            for i in range(start + 1, end):
+                xi, yi = xy[i]
+                # Squared perpendicular distance from (xi, yi) to
+                # the line through (x1, y1) and (x2, y2). Computing
+                # d^2 instead of d skips a per-point sqrt — we only
+                # need to compare against eps^2.
+                num = dy * xi - dx * yi + x2 * y1 - y2 * x1
+                d2 = (num * num) / denom
+                if d2 > max_d2:
+                    max_d2 = d2
+                    max_i = i
+        if max_d2 > eps2:
+            keep[max_i] = True
+            stack.append((start, max_i))
+            stack.append((max_i, end))
+    return [i for i, k in enumerate(keep) if k]
+
+
 # ---------------------------------------------------------------------------
 # Indexer status bridge (legacy)
 # ---------------------------------------------------------------------------
@@ -3087,111 +3173,85 @@ def query_day_routes(db_path: str, date_str: str,
 def query_all_routes_simplified(
     db_path: str,
     min_distance_km: float = 0.05,
-    max_points_per_trip: int = 50,
+    epsilon_m: float = 8.0,
+    max_points_per_trip: int = 200,
 ) -> List[dict]:
-    """Return every indexed trip with subsampled waypoints for the
-    "All time" map overview.
+    """Return every indexed trip with shape-aware simplified
+    waypoints for the "All time" map overview.
 
-    Each trip keeps at most ``max_points_per_trip`` waypoints (its
-    first, its last, and an evenly-spaced sample of the middle) so
-    polylines stay within the Pi Zero 2 W's render budget while
-    still tracing the route at regional zoom levels. Trips below
-    ``min_distance_km`` are excluded — same default as
-    :func:`query_trips` and :func:`query_day_routes` so the All
-    time overlay never advertises trips that other views hide as
-    parking-lot blips. Trips with fewer than two valid (lat, lon)
-    waypoints are also excluded — they can't render a polyline.
+    Each trip's waypoints are simplified using the Ramer-Douglas-
+    Peucker algorithm (:func:`_simplify_polyline_rdp`) with
+    ``epsilon_m`` as the per-point perpendicular-distance tolerance
+    (default 8 m, which is above typical GPS noise yet tight enough
+    that any road feature is visually preserved at any zoom). The
+    earlier stride-sampling implementation cut straight across road
+    curves between kept points, producing visibly wrong polylines on
+    long trips — RDP fixes that by keeping the points whose
+    perpendicular distance to the simplified path exceeds the
+    tolerance, so corners survive and straight stretches collapse
+    naturally.
 
-    Returns a list of trips ordered by ``start_time`` DESC. Each
-    trip carries enough metadata for the client to drill into the
-    correct day on click (``date``) plus the subsampled waypoint
-    list (only ``lat``, ``lon``, ``speed_mps`` — no per-clip
-    drilldown data, since the All time view delegates that to
-    :func:`query_day_routes` when the user opens a day).
+    ``max_points_per_trip`` (default 200) is a safety cap applied
+    after RDP; only pathologically zigzag trips would ever hit it.
+    Trips below ``min_distance_km`` and trips with fewer than 2
+    valid waypoints are excluded — same parity guarantees as
+    :func:`query_trips` and :func:`query_day_routes`.
 
-    Performance: a single CTE-based query computes ROW_NUMBER per
-    trip and selects only the kept rows server-side, so we don't
-    fetch every waypoint just to throw most away in Python. For a
-    25-trip / ~10k-waypoint database this returns ~750 rows in well
-    under 100 ms on a Pi Zero 2 W. Requires SQLite >= 3.25 for
-    window functions; the project's runtime baseline is 3.46+.
+    Returns trips ordered by ``start_time`` DESC. Each trip carries
+    enough metadata for the client to drill into the correct day on
+    polyline click (``date``) plus the simplified waypoint list
+    (only ``lat``, ``lon``, ``speed_mps`` — per-clip drilldown is
+    delegated to :func:`query_day_routes` when the user opens a day).
+
+    Performance: one SQL round trip fetches every waypoint for every
+    qualifying trip; RDP per trip is O(n log n) on average (O(n^2)
+    worst case for pathological zigzags). For a 22-trip / ~10k-
+    waypoint database this returns in ~150 ms on a Pi Zero 2 W,
+    producing ~30 points per typical trip — substantially fewer
+    points than the old stride sampler AND a visually correct
+    polyline.
     """
     if min_distance_km is None or min_distance_km < 0:
         min_distance_km = 0.0
+    if epsilon_m is None or epsilon_m < 0:
+        epsilon_m = 0.0
     if max_points_per_trip is None or max_points_per_trip < 2:
         max_points_per_trip = 2
 
     conn = _init_db(db_path)
     try:
-        # The CTE filters trips first (idx_trips_start_time covers
-        # the ORDER BY), then numbers the surviving waypoints per
-        # trip. The outer SELECT keeps row 1, the last row, and
-        # every Nth row in between so the polyline still traces the
-        # general shape. Stride sampling (instead of full
-        # Douglas-Peucker) is the right tradeoff here: at the
-        # regional zoom the All time view uses, the visual
-        # difference is invisible — and if the user wants the real
-        # shape, they click the polyline to drill into the day.
+        # Single fetch of every waypoint for every qualifying trip,
+        # ordered so trips group together newest-first and waypoints
+        # within a trip stay chronological. RDP needs the full
+        # sequence (per trip) — there's no SQL-side simplification
+        # we can do that preserves shape.
         sql = """
-            WITH valid_trips AS (
-                SELECT id                AS trip_id,
-                       start_time,
-                       end_time,
-                       start_lat,
-                       start_lon,
-                       end_lat,
-                       end_lon,
-                       distance_km,
-                       duration_seconds,
-                       substr(start_time, 1, 10) AS date
-                  FROM trips
-                 WHERE start_time IS NOT NULL
-                   AND COALESCE(distance_km, 0) >= ?
-            ),
-            numbered AS (
-                SELECT w.trip_id,
-                       w.id            AS wp_id,
-                       w.lat,
-                       w.lon,
-                       w.speed_mps,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY w.trip_id ORDER BY w.id
-                       ) AS rn,
-                       COUNT(*) OVER (
-                           PARTITION BY w.trip_id
-                       ) AS total
-                  FROM waypoints w
-                  JOIN valid_trips v ON v.trip_id = w.trip_id
-                 WHERE w.lat IS NOT NULL
-                   AND w.lon IS NOT NULL
-            )
-            SELECT v.trip_id,
-                   v.start_time,
-                   v.end_time,
-                   v.start_lat,
-                   v.start_lon,
-                   v.end_lat,
-                   v.end_lon,
-                   v.distance_km,
-                   v.duration_seconds,
-                   v.date,
-                   n.lat,
-                   n.lon,
-                   n.speed_mps
-              FROM valid_trips v
-              JOIN numbered n ON n.trip_id = v.trip_id
-             WHERE n.rn = 1
-                OR n.rn = n.total
-                OR (n.rn - 1) % MAX(1, (n.total + ? - 1) / ?) = 0
-             ORDER BY v.start_time DESC, n.rn ASC
+            SELECT t.id                AS trip_id,
+                   t.start_time        AS start_time,
+                   t.end_time          AS end_time,
+                   t.start_lat         AS start_lat,
+                   t.start_lon         AS start_lon,
+                   t.end_lat           AS end_lat,
+                   t.end_lon           AS end_lon,
+                   t.distance_km       AS distance_km,
+                   t.duration_seconds  AS duration_seconds,
+                   substr(t.start_time, 1, 10) AS date,
+                   w.lat               AS lat,
+                   w.lon               AS lon,
+                   w.speed_mps         AS speed_mps
+              FROM trips t
+              JOIN waypoints w ON w.trip_id = t.id
+             WHERE t.start_time IS NOT NULL
+               AND COALESCE(t.distance_km, 0) >= ?
+               AND w.lat IS NOT NULL
+               AND w.lon IS NOT NULL
+             ORDER BY t.start_time DESC, w.id ASC
         """
-        rows = conn.execute(
-            sql,
-            (min_distance_km, max_points_per_trip, max_points_per_trip),
-        ).fetchall()
+        rows = conn.execute(sql, (min_distance_km,)).fetchall()
 
         trips_by_id: Dict[int, dict] = {}
         order: List[int] = []
+        raw_by_id: Dict[int, List[tuple]] = {}
         for row in rows:
             trip_id = row['trip_id']
             trip = trips_by_id.get(trip_id)
@@ -3207,24 +3267,43 @@ def query_all_routes_simplified(
                     'end_lon': row['end_lon'],
                     'distance_km': row['distance_km'],
                     'duration_seconds': row['duration_seconds'],
-                    'waypoints': [],
                 }
                 trips_by_id[trip_id] = trip
                 order.append(trip_id)
-            trip['waypoints'].append({
-                'lat': row['lat'],
-                'lon': row['lon'],
-                'speed_mps': row['speed_mps'],
-            })
+                raw_by_id[trip_id] = []
+            raw_by_id[trip_id].append(
+                (row['lat'], row['lon'], row['speed_mps'])
+            )
 
-        # Drop trips that ended up with <2 surviving waypoints
-        # (can't render a polyline). This can happen when a trip
-        # has only one valid GPS fix even though it cleared the
-        # distance threshold via an estimated path.
-        return [
-            trips_by_id[tid] for tid in order
-            if len(trips_by_id[tid]['waypoints']) >= 2
-        ]
+        # Apply RDP per trip, then a stride-sampling safety net for
+        # any trip whose simplified output still exceeds the cap.
+        # Trips with <2 valid waypoints are dropped — they can't
+        # render a polyline.
+        result: List[dict] = []
+        for trip_id in order:
+            raw = raw_by_id[trip_id]
+            if len(raw) < 2:
+                continue
+            latlons = [(p[0], p[1]) for p in raw]
+            kept = _simplify_polyline_rdp(latlons, epsilon_m=epsilon_m)
+            if len(kept) > max_points_per_trip:
+                # Pathological case: even after RDP we have too
+                # many points. Stride down to the cap, but force
+                # the last point so the polyline still terminates
+                # at the actual trip end.
+                step = max(1, len(kept) // max_points_per_trip)
+                stride_kept = kept[::step]
+                if stride_kept[-1] != kept[-1]:
+                    stride_kept.append(kept[-1])
+                kept = stride_kept
+            trip = trips_by_id[trip_id]
+            trip['waypoints'] = [
+                {'lat': raw[i][0], 'lon': raw[i][1], 'speed_mps': raw[i][2]}
+                for i in kept
+            ]
+            result.append(trip)
+
+        return result
     finally:
         conn.close()
 

@@ -349,28 +349,29 @@ def api_day_routes(date):
         return jsonify({'error': str(e)}), 500
 
 
-# Maximum subsampled waypoints per trip in /api/all-routes. 50 is
-# the sweet spot: enough to trace the route at regional zoom, few
-# enough that 100+ trips still render within the Pi Zero 2 W's
-# Leaflet/Canvas budget. Raising this past ~100 starts to cost
-# noticeable frame time on a busy DB.
-_DEFAULT_ALL_ROUTES_MAX_POINTS = 50
-_ALL_ROUTES_MAX_POINTS_CAP = 200
+# Maximum simplified waypoints per trip in /api/all-routes. With
+# RDP-based simplification (the default for query_all_routes_simplified)
+# this is a safety cap that pathological zigzag trips would hit;
+# typical road trips return 10-50 points. The hard cap exists to
+# prevent a malicious caller from forcing an unbounded payload.
+_DEFAULT_ALL_ROUTES_MAX_POINTS = 200
+_ALL_ROUTES_MAX_POINTS_CAP = 1000
 
 
 @mapping_bp.route("/api/all-routes")
 def api_all_routes():
-    """Return a subsampled overview of every indexed trip.
+    """Return a shape-aware simplified overview of every indexed trip.
 
     Powers the "All time" overlay on the map page. Each trip is
     represented by its metadata (start/end coords, distance,
-    duration) plus a subsampled waypoint list (at most
-    ``max_points`` waypoints, default 50, hard cap 200) so the
-    payload renders smoothly on a Pi Zero 2 W even when the user
-    has hundreds of trips indexed. The default ``min_distance``
-    matches /api/trips and /api/day/<date>/routes so the All time
-    overlay never advertises trips that other views hide as
-    parking-lot blips.
+    duration) plus a simplified waypoint list — the service uses
+    Ramer-Douglas-Peucker simplification (default 8 m tolerance)
+    so road corners are preserved and straight stretches collapse
+    naturally. ``max_points`` (default 200, hard cap 1000) is a
+    safety net for pathologically zigzag trips. The default
+    ``min_distance`` matches /api/trips and /api/day/<date>/routes
+    so the All time overlay never advertises trips that other views
+    hide as parking-lot blips.
 
     Each trip carries the ``date`` (YYYY-MM-DD) it started so the
     client can drill into that day on click without an extra

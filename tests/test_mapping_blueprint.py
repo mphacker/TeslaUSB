@@ -310,16 +310,30 @@ class TestApiAllRoutes:
             assert len(trip['waypoints']) >= 2
 
     def test_caps_max_points_to_protect_pi(self, app, client):
-        # The hard cap (200) prevents a malicious caller from
-        # asking for an unbounded subsample that would defeat the
-        # whole point of having an overview endpoint.
+        # The hard cap (1000) prevents a malicious caller from
+        # asking for an unbounded payload. The default cap (200) is
+        # plenty for shape-aware RDP; the hard cap is purely a
+        # safety net for pathological inputs.
+        import sqlite3
         _add_trip(app.db_path, 1, '2026-05-04T08:00:00', distance_km=3.0)
-        for _ in range(20):
-            _add_waypoint(app.db_path, 1)
+        # 20 zigzag waypoints so RDP can't collapse the route — every
+        # interior point is a real corner and survives simplification.
+        conn = sqlite3.connect(app.db_path)
+        for i in range(20):
+            lat = 37.7 + (0.01 if i % 2 else -0.01)
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon,
+                                          speed_mps, autopilot_state,
+                                          video_path, frame_offset)
+                   VALUES (1, '2026-05-04T08:00:00', ?, ?,
+                           25.0, 'NONE', 'clip.mp4', 0)""",
+                (lat, -122.4 + i * 0.001),
+            )
+        conn.commit(); conn.close()
         r = client.get('/api/all-routes?max_points=99999')
         assert r.status_code == 200
-        # All 20 waypoints round-trip (20 < 200 cap), so subsampling
-        # is a no-op and we don't crash on the silly value.
+        # 99999 is clamped to the hard cap (1000); 20 zigzag points
+        # all survive RDP, well under the cap, so all 20 round-trip.
         assert len(r.get_json()['trips'][0]['waypoints']) == 20
 
     def test_min_distance_default_excludes_blips(self, app, client):

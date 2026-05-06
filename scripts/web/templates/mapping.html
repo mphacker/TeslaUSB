@@ -469,6 +469,24 @@
     }
     .video-overlay.maximized .video-overlay-header { cursor: default !important; }
 
+    /* OS-level fullscreen of the stage wrapper. The stage contains both
+       the <video> and the .overlay-hud, so the telemetry HUD stays
+       visible during fullscreen (instead of dropping out of the
+       fullscreen layer when only <video> goes fullscreen). */
+    .video-overlay-stage:fullscreen,
+    .video-overlay-stage:-webkit-full-screen {
+        width: 100vw; height: 100vh;
+        background: #000;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .video-overlay-stage:fullscreen video,
+    .video-overlay-stage:-webkit-full-screen video {
+        width: 100%; height: 100%;
+        max-height: 100% !important;
+        object-fit: contain;
+        background: #000;
+    }
+
     /* ── Overlay Telemetry HUD ── */
     .overlay-hud {
         position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
@@ -2247,20 +2265,29 @@ const OVERLAY_ICON_MAX = LUCIDE_SPRITE + "#icon-maximize-2";
 const OVERLAY_ICON_MIN = LUCIDE_SPRITE + "#icon-minimize-2";
 
 function overlayFullscreen() {
-    // Native OS-level fullscreen of just the video element. The native
-    // <video> control is hidden via controlslist="nofullscreen" so this
-    // button is the single entry point — keeps the nav row consistent
-    // with the in-page Maximize button next to it. iOS Safari ignores
-    // controlslist, so the native button is still visible there but
-    // both buttons do the same thing.
+    // OS-level fullscreen of the .video-overlay-stage wrapper, NOT the
+    // <video> element directly. The stage contains both the video and
+    // the .overlay-hud telemetry overlay, so the HUD stays visible in
+    // fullscreen. (Fullscreening the bare <video> drops the HUD out of
+    // the fullscreen layer.) The native <video> fullscreen button is
+    // hidden via controlslist="nofullscreen" so this button is the
+    // single entry point.
+    //
+    // iOS Safari fallback: webkitEnterFullscreen is only available on
+    // <video> elements and iOS hands off to its native player which
+    // cannot have HTML overlaid. On iOS the HUD will not be visible in
+    // fullscreen — acceptable platform limitation. Use Maximize (the
+    // adjacent button) on iOS to get an HUD-visible fill of the
+    // browser viewport instead.
+    const stage = document.querySelector('.video-overlay-stage');
     const v = document.getElementById('overlayVideo');
     if (!v) return;
-    if (v.requestFullscreen) {
-        v.requestFullscreen().catch(() => {});
+    if (stage && stage.requestFullscreen) {
+        stage.requestFullscreen().catch(() => {});
+    } else if (stage && stage.webkitRequestFullscreen) {
+        stage.webkitRequestFullscreen();
     } else if (v.webkitEnterFullscreen) {
         v.webkitEnterFullscreen();
-    } else if (v.webkitRequestFullscreen) {
-        v.webkitRequestFullscreen();
     }
 }
 

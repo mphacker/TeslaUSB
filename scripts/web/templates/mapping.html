@@ -1852,17 +1852,34 @@ function renderTripOnDay(trip, bounds) {
     // segments by speed bucket, emit one polyline per run. This
     // gives us color information without exploding the polyline
     // count.
+    //
+    // Polylines are also broken at any waypoint flagged ``gap_after``
+    // by the backend (large time/space jump to the next waypoint —
+    // missing clip, parking break, or SEI clock skew). Without this,
+    // a 6-minute parking gap would render as a multi-km diagonal
+    // straight line cutting across roads.
     const segments = [];
     let currentColor = null;
     let currentRun = null;
-    for (const wp of valid) {
+    for (let i = 0; i < valid.length; i++) {
+        const wp = valid[i];
         const color = speedColor(wp.speed_mps);
-        if (color !== currentColor) {
+        const gapBefore = i > 0 && !!valid[i - 1].gap_after;
+        if (gapBefore) {
+            // Gap split: close current run, start new run with NO seed
+            // so the new polyline does not visually connect to the
+            // previous one across the gap.
             if (currentRun && currentRun.length >= 2) {
                 segments.push({ color: currentColor, latlngs: currentRun });
             }
-            // Start new run; carry the previous endpoint so segments
-            // visually connect across bucket transitions.
+            currentRun = [[wp.lat, wp.lon]];
+            currentColor = color;
+        } else if (color !== currentColor) {
+            if (currentRun && currentRun.length >= 2) {
+                segments.push({ color: currentColor, latlngs: currentRun });
+            }
+            // Color-bucket transition: seed the new run with the
+            // previous endpoint so adjacent buckets visually connect.
             const seed = currentRun && currentRun.length
                 ? [currentRun[currentRun.length - 1]] : [];
             currentRun = seed.concat([[wp.lat, wp.lon]]);
@@ -1877,35 +1894,50 @@ function renderTripOnDay(trip, bounds) {
 
     const allLatLngs = valid.map(wp => [wp.lat, wp.lon]);
 
-    // Invisible click-target polyline laid under the colored
-    // segments, used to capture clicks (canvas polylines are
-    // hit-tested as a single object so a wide stroke is friendlier
-    // for tap interactions than per-segment hit-testing).
-    const clickTarget = L.polyline(allLatLngs, {
-        renderer: sharedCanvasRenderer,
-        color: '#000', weight: 14, opacity: 0,
-        interactive: true,
-    }).addTo(tripLayer);
-    clickTarget.on('click', function (e) {
-        // Search across ALL trips currently rendered for this day,
-        // not just this one — overlapping commute segments need
-        // disambiguation, otherwise Leaflet's hit-test silently
-        // picks whichever trip's clickTarget happens to be on top
-        // and the user can't choose the drive they wanted.
-        const candidates = findCandidatesNearClick(e.latlng);
-        if (candidates.length >= 2) {
-            showDisambigPopup(e.latlng, candidates);
-            return;
+    // Build per-chunk click targets (one invisible wide polyline per
+    // gap-bounded chunk of valid waypoints). A single trip-wide click
+    // target would still register clicks in the empty space between
+    // segments — chunking matches the visible polyline behavior.
+    const clickChunks = [];
+    let chunk = [];
+    for (let i = 0; i < valid.length; i++) {
+        chunk.push(valid[i]);
+        if (valid[i].gap_after || i === valid.length - 1) {
+            if (chunk.length >= 2) clickChunks.push(chunk);
+            chunk = [];
         }
-        // Single-candidate (or zero) fast path — preserve the
-        // pre-disambiguation behavior of opening the nearest
-        // playable waypoint immediately.
-        const trip = (candidates[0] && candidates[0].trip) || { waypoints: valid };
-        const playable = pickPlayableWaypointForTrip(trip, e.latlng);
-        if (playable) {
-            openVideoOverlay(playable, e.containerPoint, trip.waypoints || valid);
-        }
-    });
+    }
+
+    for (const chunkWps of clickChunks) {
+        const chunkLatLngs = chunkWps.map(wp => [wp.lat, wp.lon]);
+        const clickTarget = L.polyline(chunkLatLngs, {
+            renderer: sharedCanvasRenderer,
+            color: '#000', weight: 14, opacity: 0,
+            interactive: true,
+        }).addTo(tripLayer);
+        clickTarget.on('click', function (e) {
+            // Search across ALL trips currently rendered for this day,
+            // not just this one — overlapping commute segments need
+            // disambiguation, otherwise Leaflet's hit-test silently
+            // picks whichever trip's clickTarget happens to be on top
+            // and the user can't choose the drive they wanted.
+            const candidates = findCandidatesNearClick(e.latlng);
+            if (candidates.length >= 2) {
+                showDisambigPopup(e.latlng, candidates);
+                return;
+            }
+            // Single-candidate (or zero) fast path — preserve the
+            // pre-disambiguation behavior of opening the nearest
+            // playable waypoint immediately. Pass the full trip's
+            // valid waypoints (not just this chunk) so the overlay
+            // can navigate the entire trip's video timeline.
+            const trip = (candidates[0] && candidates[0].trip) || { waypoints: valid };
+            const playable = pickPlayableWaypointForTrip(trip, e.latlng);
+            if (playable) {
+                openVideoOverlay(playable, e.containerPoint, trip.waypoints || valid);
+            }
+        });
+    }
 
     for (const seg of segments) {
         L.polyline(seg.latlngs, {
@@ -1915,19 +1947,26 @@ function renderTripOnDay(trip, bounds) {
         }).addTo(tripLayer);
     }
 
-    // FSD overlay segments.
+    // FSD overlay segments — break on autopilot_state change OR on a
+    // gap_after boundary so a long drive with stable autopilot state
+    // doesn't render a single overlay line that crosses a gap.
     let segStart = 0;
-    for (let i = 1; i < valid.length; i++) {
+    for (let i = 1; i <= valid.length; i++) {
+        const isEnd = i === valid.length;
         const prevAp = valid[i - 1].autopilot_state;
-        const curAp = valid[i].autopilot_state;
-        if (prevAp !== curAp || i === valid.length - 1) {
-            const segCoords = allLatLngs.slice(segStart, i + 1);
-            const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(prevAp);
-            L.polyline(segCoords, {
-                renderer: sharedCanvasRenderer,
-                color: engaged ? '#28a745' : '#6c757d',
-                weight: 6, opacity: 0.7, interactive: false,
-            }).addTo(fsdLayer);
+        const gapAtPrev = !!valid[i - 1].gap_after;
+        const curAp = isEnd ? null : valid[i].autopilot_state;
+        if (isEnd || gapAtPrev || prevAp !== curAp) {
+            const segCoords = allLatLngs.slice(segStart, i);
+            if (segCoords.length >= 2) {
+                const engaged = ['SELF_DRIVING', 'AUTOSTEER'].includes(
+                    valid[segStart].autopilot_state);
+                L.polyline(segCoords, {
+                    renderer: sharedCanvasRenderer,
+                    color: engaged ? '#28a745' : '#6c757d',
+                    weight: 6, opacity: 0.7, interactive: false,
+                }).addTo(fsdLayer);
+            }
             segStart = i;
         }
     }
@@ -2021,35 +2060,23 @@ async function renderAllTime() {
             Number.isFinite(w.lat) && Number.isFinite(w.lon));
         if (valid.length < 2) continue;
 
-        const latLngs = valid.map(w => [w.lat, w.lon]);
-        for (const ll of latLngs) bounds.push(ll);
+        // Split the trip's simplified waypoints into gap-bounded
+        // segments. The backend stamps ``gap_after: true`` on the last
+        // waypoint of each pre-RDP segment; we render one polyline per
+        // segment so a 6-minute parking gap (or any GPS dropout) does
+        // not draw a long diagonal cutting across the map.
+        const segs = [];
+        let segStart = 0;
+        for (let i = 0; i < valid.length; i++) {
+            if (valid[i].gap_after || i === valid.length - 1) {
+                const slice = valid.slice(segStart, i + 1);
+                if (slice.length >= 2) segs.push(slice);
+                segStart = i + 1;
+            }
+        }
+        if (segs.length === 0) continue;
 
-        // Single neutral-gray polyline per trip — events stand out
-        // better against gray than against speed-bucketed viridis,
-        // and one polyline per trip keeps Leaflet's layer count
-        // manageable when zoomed out across hundreds of trips.
-        // The visible line is non-interactive so the wide invisible
-        // click target below catches the click — without that, a
-        // tap 6+ pixels from the visible 3px stroke would miss.
-        L.polyline(latLngs, {
-            renderer: sharedCanvasRenderer,
-            color: '#9aa4b2',
-            weight: 3,
-            opacity: 0.55,
-            interactive: false,
-        }).addTo(tripLayer);
-
-        // Invisible wide click target so taps near the visible
-        // line still register, mirroring the per-day pattern.
-        // Click dispatches through findCandidatesNearClick so
-        // overlapping commute trips get the disambiguation popup
-        // instead of silently picking whichever line was on top.
-        const clickTarget = L.polyline(latLngs, {
-            renderer: sharedCanvasRenderer,
-            color: '#000', weight: 14, opacity: 0,
-            interactive: true,
-        }).addTo(tripLayer);
-        clickTarget.on('click', function (e) {
+        const onClick = function (e) {
             const candidates = findCandidatesNearClick(e.latlng);
             if (candidates.length >= 2) {
                 showDisambigPopup(e.latlng, candidates);
@@ -2060,7 +2087,40 @@ async function renderAllTime() {
             if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
                 loadDay(date);
             }
-        });
+        };
+
+        for (const seg of segs) {
+            const latLngs = seg.map(w => [w.lat, w.lon]);
+            for (const ll of latLngs) bounds.push(ll);
+
+            // Single neutral-gray polyline per segment — events stand
+            // out better against gray than against speed-bucketed
+            // viridis, and one polyline per segment keeps Leaflet's
+            // layer count manageable when zoomed out across hundreds
+            // of trips. The visible line is non-interactive so the
+            // wide invisible click target below catches the click —
+            // without that, a tap 6+ pixels from the visible 3px
+            // stroke would miss.
+            L.polyline(latLngs, {
+                renderer: sharedCanvasRenderer,
+                color: '#9aa4b2',
+                weight: 3,
+                opacity: 0.55,
+                interactive: false,
+            }).addTo(tripLayer);
+
+            // Invisible wide click target so taps near the visible
+            // line still register, mirroring the per-day pattern.
+            // Click dispatches through findCandidatesNearClick so
+            // overlapping commute trips get the disambiguation popup
+            // instead of silently picking whichever line was on top.
+            const clickTarget = L.polyline(latLngs, {
+                renderer: sharedCanvasRenderer,
+                color: '#000', weight: 14, opacity: 0,
+                interactive: true,
+            }).addTo(tripLayer);
+            clickTarget.on('click', onClick);
+        }
     }
 
     // Populate events and let the standard pipeline handle rendering

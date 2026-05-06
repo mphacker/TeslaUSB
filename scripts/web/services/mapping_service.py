@@ -835,6 +835,86 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+# ---------------------------------------------------------------------------
+# Polyline gap detection
+# ---------------------------------------------------------------------------
+
+# A "gap" between consecutive waypoints means we should NOT draw a
+# polyline segment connecting them — the car either wasn't recording
+# (Tesla skipped clips during a parking break, or the dashcam was off)
+# or the SEI metadata is corrupted. Without gap detection, day-view and
+# All-time renderers draw a long straight diagonal across the map from
+# one side of the gap to the other (observed bug Apr 26 2026: a 5.8 km
+# straight line between two ends of a 6-minute parking break the trip
+# detector incorrectly merged into one trip).
+#
+# Two complementary thresholds, OR'd together — either alone catches
+# different real-world failure modes:
+#
+#   * MAX_GAP_SECONDS = 60 — Tesla front-camera clips are 60 s; a gap
+#     longer than that means at least one clip is missing entirely.
+#     Catches park-break gaps even when the car barely moved.
+#
+#   * MAX_GAP_METERS = 250 — Tesla SEI samples at ~1 Hz; even at 80 mph
+#     (~36 m/s) consecutive samples are <40 m apart. A jump >250 m
+#     between two adjacent waypoints is geographically impossible and
+#     usually indicates SEI clock skew across overlapping clips, dropped
+#     frames, or interleaved data from a re-indexed late-arriving clip
+#     whose timestamps disagree with the rest of the trip.
+#
+# Both numbers were chosen conservatively: real driving never trips
+# them, and any miss would be visible to the user anyway.
+
+GAP_MAX_SECONDS_DEFAULT = 60.0
+GAP_MAX_METERS_DEFAULT = 250.0
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two GPS points, in meters."""
+    return _haversine_km(lat1, lon1, lat2, lon2) * 1000.0
+
+
+def _parse_iso_seconds(ts: Optional[str]) -> Optional[float]:
+    """Parse an ISO-8601 timestamp to epoch seconds; ``None`` on failure.
+
+    Tolerates timezone-naive and ``Z``-suffixed forms — both are
+    produced by the indexer depending on whether the SEI carried tz.
+    """
+    if not ts:
+        return None
+    try:
+        if ts.endswith('Z'):
+            ts = ts[:-1] + '+00:00'
+        return datetime.fromisoformat(ts).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_gap_between(prev_ts: Optional[str], prev_lat: Optional[float],
+                    prev_lon: Optional[float], curr_ts: Optional[str],
+                    curr_lat: Optional[float], curr_lon: Optional[float],
+                    max_seconds: float = GAP_MAX_SECONDS_DEFAULT,
+                    max_meters: float = GAP_MAX_METERS_DEFAULT) -> bool:
+    """Return True iff (prev → curr) crosses a gap that should split a
+    polyline.
+
+    Either threshold is enough on its own; both are checked because
+    they catch different failure modes (see module-level constants).
+    Missing coordinates or unparseable timestamps are treated as no
+    gap on that axis — never as a positive — so a malformed waypoint
+    can't accidentally break a long continuous polyline.
+    """
+    pa = _parse_iso_seconds(prev_ts)
+    pb = _parse_iso_seconds(curr_ts)
+    if pa is not None and pb is not None and abs(pb - pa) > max_seconds:
+        return True
+    if (prev_lat is not None and prev_lon is not None
+            and curr_lat is not None and curr_lon is not None):
+        if _haversine_m(prev_lat, prev_lon, curr_lat, curr_lon) > max_meters:
+            return True
+    return False
+
+
 def _simplify_polyline_rdp(latlons, epsilon_m: float = 8.0) -> List[int]:
     """Apply Ramer-Douglas-Peucker simplification to a (lat, lon)
     polyline, returning the indices of the points to keep.
@@ -3180,6 +3260,23 @@ def query_day_routes(db_path: str, date_str: str,
                 'frame_offset': row['w_frame_offset'],
             })
 
+        # Walk each trip's waypoints and stamp ``gap_after = True`` on
+        # every waypoint that is followed by a polyline-breaking gap
+        # (see ``_is_gap_between`` for the criteria). The frontend
+        # renderer ends the current polyline whenever it sees this
+        # flag, so a 6-minute parking break or an SEI clock-skew zigzag
+        # no longer renders as a long straight diagonal across the map.
+        # The flag is omitted when there's no gap so payload size on
+        # the wire is unchanged for clean trips.
+        for trip in trips_by_id.values():
+            wps = trip['waypoints']
+            for i in range(len(wps) - 1):
+                if _is_gap_between(
+                    wps[i].get('timestamp'), wps[i].get('lat'), wps[i].get('lon'),
+                    wps[i + 1].get('timestamp'), wps[i + 1].get('lat'), wps[i + 1].get('lon'),
+                ):
+                    wps[i]['gap_after'] = True
+
         return {'trips': [trips_by_id[tid] for tid in order]}
     finally:
         conn.close()
@@ -3252,6 +3349,7 @@ def query_all_routes_simplified(
                    t.distance_km       AS distance_km,
                    t.duration_seconds  AS duration_seconds,
                    substr(t.start_time, 1, 10) AS date,
+                   w.timestamp         AS w_timestamp,
                    w.lat               AS lat,
                    w.lon               AS lon,
                    w.speed_mps         AS speed_mps
@@ -3288,35 +3386,115 @@ def query_all_routes_simplified(
                 order.append(trip_id)
                 raw_by_id[trip_id] = []
             raw_by_id[trip_id].append(
-                (row['lat'], row['lon'], row['speed_mps'])
+                (row['w_timestamp'], row['lat'], row['lon'], row['speed_mps'])
             )
 
-        # Apply RDP per trip, then a stride-sampling safety net for
-        # any trip whose simplified output still exceeds the cap.
-        # Trips with <2 valid waypoints are dropped — they can't
-        # render a polyline.
+        # Split each trip into gap-free segments BEFORE applying RDP,
+        # then RDP per segment, then concatenate the simplified
+        # waypoints with a ``gap_after`` flag at every segment boundary.
+        # Two reasons we split before RDP rather than just flagging the
+        # raw boundary points and trusting RDP to keep them:
+        #   1. RDP picks points by perpendicular distance from a chord
+        #      that crosses the gap. The chord IS the bug: it picks the
+        #      gap endpoints as outliers, then keeps an apparently
+        #      "smooth" line that visibly cuts across the map.
+        #   2. Per-segment RDP gives each real segment its own epsilon
+        #      budget, so a short pre-gap subroute (say a 3-point loop
+        #      around a parking lot) doesn't get crushed by the noise
+        #      floor of a multi-mile freeway segment in the same trip.
+        # Trips with <2 valid waypoints are dropped — they can't render
+        # a polyline.
         result: List[dict] = []
         for trip_id in order:
             raw = raw_by_id[trip_id]
             if len(raw) < 2:
                 continue
-            latlons = [(p[0], p[1]) for p in raw]
-            kept = _simplify_polyline_rdp(latlons, epsilon_m=epsilon_m)
-            if len(kept) > max_points_per_trip:
-                # Pathological case: even after RDP we have too
-                # many points. Stride down to the cap, but force
-                # the last point so the polyline still terminates
-                # at the actual trip end.
-                step = max(1, len(kept) // max_points_per_trip)
-                stride_kept = kept[::step]
-                if stride_kept[-1] != kept[-1]:
-                    stride_kept.append(kept[-1])
-                kept = stride_kept
+
+            segments: List[List[tuple]] = []
+            current: List[tuple] = [raw[0]]
+            for i in range(1, len(raw)):
+                a, b = raw[i - 1], raw[i]
+                if _is_gap_between(a[0], a[1], a[2], b[0], b[1], b[2]):
+                    segments.append(current)
+                    current = [b]
+                else:
+                    current.append(b)
+            segments.append(current)
+
+            output: List[dict] = []
+            for seg_idx, seg in enumerate(segments):
+                if len(seg) < 2:
+                    # Single-point segment can't render but its endpoint
+                    # should still terminate any prior polyline at the
+                    # gap; emit it carrying the gap flag so the renderer
+                    # closes the prior segment cleanly.
+                    seg_out = [{
+                        'lat': seg[0][1], 'lon': seg[0][2],
+                        'speed_mps': seg[0][3],
+                    }]
+                else:
+                    latlons = [(p[1], p[2]) for p in seg]
+                    kept = _simplify_polyline_rdp(latlons, epsilon_m=epsilon_m)
+                    seg_out = [
+                        {'lat': seg[i][1], 'lon': seg[i][2],
+                         'speed_mps': seg[i][3]}
+                        for i in kept
+                    ]
+                if seg_idx < len(segments) - 1 and seg_out:
+                    seg_out[-1]['gap_after'] = True
+                output.extend(seg_out)
+
+            if len(output) > max_points_per_trip:
+                # Pathological case: even after per-segment RDP we have
+                # too many points. Stride down to the cap, but always
+                # keep the very last point so the polyline terminates
+                # at the actual trip end. Note: stride-sampling can
+                # drop a ``gap_after`` flagged point — re-stamp the
+                # flag onto whichever simplified point now precedes
+                # each gap so the renderer still breaks correctly.
+                step = max(1, len(output) // max_points_per_trip)
+                gap_after_lats = {
+                    (p['lat'], p['lon']) for p in output if p.get('gap_after')
+                }
+                stride_kept = output[::step]
+                if stride_kept[-1] is not output[-1]:
+                    stride_kept.append(output[-1])
+                # Re-apply gap_after on the last surviving point of each
+                # original gap-bounded segment.
+                seen_gaps = set()
+                for p in stride_kept:
+                    if (p['lat'], p['lon']) in gap_after_lats:
+                        p['gap_after'] = True
+                        seen_gaps.add((p['lat'], p['lon']))
+                # If a gap point was dropped entirely, fall back to
+                # flagging the nearest surviving simplified point that
+                # was originally before that gap.
+                missed = gap_after_lats - seen_gaps
+                if missed:
+                    flat_indexed = list(enumerate(output))
+                    for ml, mlon in missed:
+                        # Find the original index of the missed gap point.
+                        orig_idx = next(
+                            (i for i, p in flat_indexed
+                             if p['lat'] == ml and p['lon'] == mlon),
+                            None,
+                        )
+                        if orig_idx is None:
+                            continue
+                        # Walk back to the nearest stride-kept point at
+                        # or before that original index.
+                        for sp in reversed(stride_kept):
+                            si = next(
+                                (i for i, p in flat_indexed if p is sp),
+                                None,
+                            )
+                            if si is not None and si <= orig_idx:
+                                sp['gap_after'] = True
+                                break
+                output = stride_kept
+
             trip = trips_by_id[trip_id]
-            trip['waypoints'] = [
-                {'lat': raw[i][0], 'lon': raw[i][1], 'speed_mps': raw[i][2]}
-                for i in kept
-            ]
+            trip['waypoints'] = output
             result.append(trip)
 
         return result

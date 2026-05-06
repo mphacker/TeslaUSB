@@ -16,6 +16,11 @@ from services.mapping_service import (
     _detect_events,
     _debounce_events,
     _haversine_km,
+    _haversine_m,
+    _is_gap_between,
+    _parse_iso_seconds,
+    GAP_MAX_SECONDS_DEFAULT,
+    GAP_MAX_METERS_DEFAULT,
     _timestamp_from_filename,
     _find_front_camera_videos,
     _index_video,
@@ -2454,3 +2459,231 @@ class TestDailyStaleScan:
         assert stop_daily_stale_scan(timeout=1.0) is True
         assert stop_daily_stale_scan(timeout=1.0) is True
 
+
+
+class TestGapDetectionHelpers:
+    """Pure-function tests for the gap-detection helpers used by the
+    map polyline renderer to avoid drawing diagonal straight lines
+    across actual GPS dropouts (parking breaks, missing clips, SEI
+    clock skew).
+    """
+
+    def test_no_gap_for_close_in_time_and_space(self):
+        # Two adjacent SEI samples ~1 second / ~25 m apart at typical
+        # surface-street speed. Must not be flagged as a gap.
+        assert _is_gap_between(
+            '2026-05-04T08:00:00', 37.7000, -122.4000,
+            '2026-05-04T08:00:01', 37.70022, -122.40000,
+        ) is False
+
+    def test_gap_when_time_threshold_exceeded(self):
+        # 6-minute parking break with the car moved <1 m. Time alone
+        # must trip the gap, even though the car barely moved (e.g.
+        # someone got out, ran into a store, came back).
+        assert _is_gap_between(
+            '2026-05-04T08:00:00', 37.7000, -122.4000,
+            '2026-05-04T08:06:00', 37.7000, -122.4000,
+        ) is True
+
+    def test_gap_when_distance_threshold_exceeded(self):
+        # 1-second time delta but car somehow jumped ~5.5 km. This is
+        # the SEI-clock-skew case — overlapping clips disagree about
+        # where the vehicle was. Must trip on distance.
+        assert _is_gap_between(
+            '2026-05-04T08:00:00', 37.7000, -122.4000,
+            '2026-05-04T08:00:01', 37.7500, -122.4000,
+        ) is True
+
+    def test_gap_threshold_uses_strict_greater_than(self):
+        # Defaults are 60 s and 250 m. A delta clearly under both
+        # thresholds must NOT be a gap. Pin this so a future tweak
+        # to either threshold can't silently turn clean drives into
+        # split polylines.
+        # Build a 200 m east step at 37.7 N (< 250 m threshold).
+        meters_per_deg_lon = _haversine_m(37.7, 0.0, 37.7, 1.0)
+        deg_for_200m = 200.0 / meters_per_deg_lon
+        assert _is_gap_between(
+            '2026-05-04T08:00:00', 37.7, -122.4,
+            '2026-05-04T08:00:55', 37.7, -122.4 + deg_for_200m,
+        ) is False  # 55 s and ~200 m — both safely under threshold.
+
+    def test_no_gap_when_lat_lon_missing(self):
+        # A waypoint that lacks coordinates can't contribute a
+        # distance-based gap signal. If timestamps are also close,
+        # no gap. Critical so a single bad row doesn't silently
+        # split a long valid polyline at random spots.
+        assert _is_gap_between(
+            '2026-05-04T08:00:00', None, None,
+            '2026-05-04T08:00:01', 37.7, -122.4,
+        ) is False
+
+    def test_no_gap_when_timestamps_unparseable(self):
+        # Garbage timestamps should not be treated as positive-gap
+        # signals — fall back to the distance check only.
+        assert _is_gap_between(
+            'not-a-ts', 37.7, -122.4,
+            'also-not-a-ts', 37.7001, -122.4001,
+        ) is False
+
+    def test_z_suffix_timestamps_parse_correctly(self):
+        # The indexer can emit either naive ISO strings or trailing-Z
+        # forms depending on whether SEI carried timezone. Both must
+        # parse so a clean drive with mixed forms doesn't get false
+        # gaps from the time arm being silently disabled.
+        a = _parse_iso_seconds('2026-05-04T08:00:00Z')
+        b = _parse_iso_seconds('2026-05-04T08:00:00+00:00')
+        assert a is not None and b is not None
+        assert abs(a - b) < 0.001
+
+    def test_unparseable_timestamp_returns_none(self):
+        assert _parse_iso_seconds('') is None
+        assert _parse_iso_seconds(None) is None
+        assert _parse_iso_seconds('garbage') is None
+
+
+class TestGapAfterStamping:
+    """Integration tests for ``gap_after`` flag stamping in the
+    routes queries. The flag is what tells the frontend to break the
+    polyline at a gap boundary instead of drawing a straight line
+    across the (often multi-km) chord between adjacent waypoints.
+    """
+
+    def _make_db(self, tmp_path, name='gap.db'):
+        db_path = str(tmp_path / name)
+        conn = _init_db(db_path)
+        return db_path, conn
+
+    def _add_trip(self, conn, trip_id, start, end=None, distance_km=2.5):
+        conn.execute(
+            """INSERT INTO trips (id, start_time, end_time, start_lat,
+                                  start_lon, end_lat, end_lon, distance_km,
+                                  duration_seconds, source_folder)
+               VALUES (?, ?, ?, 37.7, -122.4, 37.8, -122.5, ?, 600,
+                       'RecentClips')""",
+            (trip_id, start, end or start, distance_km),
+        )
+
+    def _insert_wp(self, conn, trip_id, ts, lat, lon, speed_mps=25.0,
+                   video_path='clip.mp4', frame_offset=0):
+        conn.execute(
+            """INSERT INTO waypoints (trip_id, timestamp, lat, lon,
+                                     speed_mps, autopilot_state,
+                                     video_path, frame_offset)
+               VALUES (?, ?, ?, ?, ?, 'NONE', ?, ?)""",
+            (trip_id, ts, lat, lon, speed_mps, video_path, frame_offset),
+        )
+
+    def test_query_day_routes_stamps_gap_after_for_long_pause(self, tmp_path):
+        # Mimics the Apr 26 2026 field bug: trip has 3 waypoints, then
+        # a 6-minute parking pause, then 3 more waypoints far enough
+        # away that without splitting the renderer would draw a long
+        # diagonal line cutting across the map. ``gap_after`` must
+        # land on the LAST waypoint of the pre-pause group, so the
+        # frontend ends that polyline run cleanly.
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-04-26T09:00:00')
+        # First group: 3 close-together points.
+        self._insert_wp(conn, 1, '2026-04-26T09:00:00', 37.7000, -122.4000)
+        self._insert_wp(conn, 1, '2026-04-26T09:00:01', 37.70022, -122.40000)
+        self._insert_wp(conn, 1, '2026-04-26T09:00:02', 37.70044, -122.40000)
+        # 6-min gap that displaces the car ~1 km.
+        self._insert_wp(conn, 1, '2026-04-26T09:06:00', 37.7100, -122.4100)
+        self._insert_wp(conn, 1, '2026-04-26T09:06:01', 37.71022, -122.41000)
+        self._insert_wp(conn, 1, '2026-04-26T09:06:02', 37.71044, -122.41000)
+        conn.commit(); conn.close()
+
+        result = query_day_routes(db_path, '2026-04-26')
+        wps = result['trips'][0]['waypoints']
+        flags = [bool(wp.get('gap_after')) for wp in wps]
+        # Exactly one True, on the third waypoint (last of the pre-gap
+        # group). The very last waypoint of the trip must NOT be
+        # flagged — there's no waypoint after it, so a flag would be
+        # nonsensical and could confuse the renderer.
+        assert flags == [False, False, True, False, False, False], flags
+
+    def test_query_day_routes_no_gap_for_clean_drive(self, tmp_path):
+        # Tight, regular SEI samples. No flag should land on any
+        # waypoint — the absence of the key keeps the JSON payload
+        # exactly the same size as before the gap-detection feature.
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00')
+        for i in range(5):
+            ts = f'2026-05-04T08:00:{i:02d}'
+            # ~24 m east per second at this latitude.
+            self._insert_wp(conn, 1, ts, 37.700 + i * 0.0001, -122.400)
+        conn.commit(); conn.close()
+
+        result = query_day_routes(db_path, '2026-05-04')
+        wps = result['trips'][0]['waypoints']
+        # No waypoint should carry the key at all. We assert absence
+        # (not False) because the backend deliberately omits the key
+        # on clean drives to keep payload size unchanged.
+        assert all('gap_after' not in wp for wp in wps), [
+            (wp.get('timestamp'), wp.get('gap_after')) for wp in wps
+        ]
+
+    def test_query_all_routes_simplified_splits_at_gap(self, tmp_path):
+        # The All-time view's RDP simplification used to crush a
+        # short pre-gap segment into a single endpoint and then draw
+        # one straight line all the way to the post-gap segment —
+        # exactly what created the diagonal artifact. Verify the new
+        # per-segment RDP path preserves the gap_after flag on the
+        # last simplified waypoint of the pre-gap segment so the
+        # frontend renders TWO polylines per trip, not one.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-04-26T09:00:00', distance_km=3.0)
+        # Build a longer drive on each side of the gap so RDP keeps
+        # multiple points per segment. 10 east-bound points, 6-min
+        # parking pause, 10 more east-bound points 1 km away.
+        for i in range(10):
+            self._insert_wp(
+                conn, 1, f'2026-04-26T09:00:{i:02d}',
+                37.700, -122.400 + i * 0.001,  # ~88 m east each step
+            )
+        for i in range(10):
+            self._insert_wp(
+                conn, 1, f'2026-04-26T09:06:{i:02d}',
+                37.710, -122.410 + i * 0.001,
+            )
+        conn.commit(); conn.close()
+
+        trips = query_all_routes_simplified(db_path)
+        assert len(trips) == 1
+        wps = trips[0]['waypoints']
+        gap_indices = [i for i, wp in enumerate(wps) if wp.get('gap_after')]
+        # Must have exactly one gap boundary in the simplified output.
+        assert len(gap_indices) == 1, (
+            "RDP must preserve exactly one gap_after marker; got %r at %r"
+            % (gap_indices, [(wp['lat'], wp['lon']) for wp in wps])
+        )
+        # The flagged waypoint must NOT be the last point of the trip
+        # — that would mean the gap "leaked" across the trip end.
+        assert gap_indices[0] < len(wps) - 1, (
+            "gap_after on final waypoint is meaningless"
+        )
+        # All waypoints up to and including the gap must be on the
+        # pre-gap side (lat < 37.705); all after must be on the
+        # post-gap side (lat > 37.705). This is what proves the
+        # split happened where we expected it, not somewhere else.
+        gap_idx = gap_indices[0]
+        assert all(wp['lat'] < 37.705 for wp in wps[:gap_idx + 1])
+        assert all(wp['lat'] > 37.705 for wp in wps[gap_idx + 1:])
+
+    def test_query_all_routes_simplified_no_gap_for_clean_trip(self, tmp_path):
+        # Clean drive: no gap_after key should appear anywhere. Pin
+        # the no-flag invariant so the payload doesn't grow for the
+        # 99% case of well-indexed trips.
+        from services.mapping_service import query_all_routes_simplified
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
+        for i in range(20):
+            self._insert_wp(
+                conn, 1, f'2026-05-04T08:00:{i:02d}',
+                37.700 + i * 0.0002, -122.400,
+            )
+        conn.commit(); conn.close()
+
+        trips = query_all_routes_simplified(db_path)
+        for wp in trips[0]['waypoints']:
+            assert 'gap_after' not in wp

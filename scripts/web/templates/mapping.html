@@ -1475,7 +1475,11 @@ function renderAllTime() {
     tripLayer.clearLayers();
     fsdLayer.clearLayers();
     eventCluster.clearLayers();
-    rebuildEventFilterPills();  // empty-state the pills
+    // Clear the events cache so rebuildEventFilterPills() actually
+    // empty-states the pills — without this it would re-render the
+    // pills from the previously-selected day's event types.
+    allEvents = [];
+    rebuildEventFilterPills();
 
     // We need per-day waypoints to draw markers. Rather than
     // fetching all of them up-front, fetch /api/trips for the

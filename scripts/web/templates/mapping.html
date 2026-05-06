@@ -286,6 +286,97 @@
     .popup-video-link { color: var(--accent-primary, #3B82F6); cursor: pointer; text-decoration: underline; }
     .popup-day-link { color: var(--accent-primary, #3B82F6); cursor: pointer; text-decoration: underline; }
 
+    /* ── Disambiguation Popup ── */
+    /*
+     * Shown when the user taps a road segment with multiple
+     * overlapping trips. Lists each candidate trip; tapping a row
+     * either opens the video (per-day view) or drills into that
+     * trip's day (All time view). The popup is a Leaflet popup
+     * with className 'disambig-popup' so we can override the
+     * default Leaflet styling to match the design system tokens
+     * and play nicely with dark/light mode.
+     */
+    .leaflet-popup.disambig-popup .leaflet-popup-content-wrapper {
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color, var(--border));
+        border-radius: var(--radius-lg, 12px);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+        padding: 0;
+    }
+    .leaflet-popup.disambig-popup .leaflet-popup-content {
+        margin: 0;
+        width: 260px !important;
+        max-width: calc(100vw - 32px);
+    }
+    .leaflet-popup.disambig-popup .leaflet-popup-tip {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color, var(--border));
+    }
+    .leaflet-popup.disambig-popup .leaflet-popup-close-button {
+        color: var(--text-secondary);
+        padding: 6px 8px 0 0;
+    }
+    .disambig-header {
+        padding: 10px 14px 8px 14px;
+        border-bottom: 1px solid var(--border-color, var(--border));
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+    .disambig-list {
+        max-height: 280px;
+        overflow-y: auto;
+        padding: 4px 0;
+    }
+    .disambig-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 44px;
+        padding: 8px 14px;
+        cursor: pointer;
+        background: transparent;
+        border: none;
+        width: 100%;
+        text-align: left;
+        color: inherit;
+        font-family: inherit;
+        font-size: 0.8125rem;
+        border-bottom: 1px solid transparent;
+        transition: background-color 0.12s ease;
+    }
+    .disambig-row:hover,
+    .disambig-row:focus-visible {
+        background: var(--bg-tertiary, rgba(59,130,246,0.08));
+        outline: none;
+    }
+    .disambig-row + .disambig-row {
+        border-top: 1px solid var(--border-color, var(--border));
+    }
+    .disambig-row-main {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+    .disambig-row-primary {
+        color: var(--text-primary);
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .disambig-row-secondary {
+        color: var(--text-secondary);
+        font-size: 0.75rem;
+    }
+    .disambig-row-chevron {
+        color: var(--text-muted, var(--text-secondary));
+        flex: 0 0 auto;
+    }
+
     /* ── Video Player Overlay (unchanged) ── */
     .video-overlay {
         position: fixed; z-index: 2000;
@@ -751,6 +842,24 @@ let dayLoadSeq = 0;
 let tripSelectSeq = 0;
 let showingAllTime = false;
 
+// All-time trips snapshot. Populated by renderAllTime() once the
+// race-guard passes; cleared whenever we leave All time. The
+// disambiguation popup needs this to find candidate trips near a
+// click without re-fetching, and the lifecycle is tied to the
+// rendered All time layers — never let it outlive them.
+let allTimeTrips = [];
+
+// Highlight overlay used by the disambiguation popup to flash a
+// candidate trip's polyline on row hover. Drawn into a dedicated
+// layer group (not tripLayer) so we never have to "restore" the
+// styles of existing polylines — clearing this layer is enough.
+const disambigHighlightLayer = L.layerGroup().addTo(map);
+
+// Tracks whether a disambiguation popup is open so we can
+// cleanup highlight layers on navigation/render without depending
+// on Leaflet's popupclose event firing in every code path.
+let disambigPopupOpen = false;
+
 // User-controllable per-event-type visibility. ``null`` means
 // "show all"; otherwise it's a Set of enabled event types.
 // Persisted to localStorage so the user's preferred filter state
@@ -784,6 +893,330 @@ function speedColor(mps) {
     const v = (typeof mps === 'number' && Number.isFinite(mps)) ? mps : 0;
     for (const b of SPEED_BUCKETS) if (v < b.max) return b.color;
     return SPEED_BUCKETS[SPEED_BUCKETS.length - 1].color;
+}
+
+// ===========================================================
+// Disambiguation popup
+// ===========================================================
+//
+// When the user taps a road segment that multiple trips have
+// driven over, we want to show a list of candidate trips so they
+// can pick the one whose video they actually want. The match is
+// done in pixel space (not waypoint distance) so a click between
+// sparse RDP-simplified waypoints in the All time view still
+// correctly identifies the trips passing through that point.
+//
+// Per-day: tapping a row opens the video overlay for that trip's
+// nearest playable waypoint.
+// All time: tapping a row drills into that trip's day (we don't
+// have video paths in the simplified all-routes payload).
+
+const DISAMBIG_PIXEL_RADIUS = 22;  // ~ matches the 14px clickTarget stroke + a small fudge for fat-finger
+
+function pointSegDistPx(p, a, b) {
+    // Distance from container point ``p`` to the line segment a→b
+    // in container-pixel space. All three are L.Point. Using
+    // pixels avoids the need to convert a search radius from
+    // pixels to meters at every zoom level — and it's how a user
+    // perceives distance on the screen anyway.
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) {
+        const px = p.x - a.x, py = p.y - a.y;
+        return Math.sqrt(px * px + py * py);
+    }
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const projX = a.x + t * dx;
+    const projY = a.y + t * dy;
+    const px = p.x - projX, py = p.y - projY;
+    return Math.sqrt(px * px + py * py);
+}
+
+function findCandidatesNearClick(clickLatLng, pixelRadius) {
+    // Returns one candidate per visible trip whose closest segment
+    // is within ``pixelRadius`` pixels of the click. Picks the
+    // active trip set based on the current view (All time vs
+    // per-day). Sort: newest first by start_time; tie-break by
+    // distance.
+    const radius = (pixelRadius == null) ? DISAMBIG_PIXEL_RADIUS : pixelRadius;
+    const trips = showingAllTime
+        ? (allTimeTrips || [])
+        : ((currentDayData && currentDayData.trips) || []);
+    if (!trips.length) return [];
+
+    const clickPt = map.latLngToContainerPoint(clickLatLng);
+    const radius2 = radius * radius;
+
+    const candidates = [];
+    for (const trip of trips) {
+        const wps = trip.waypoints || [];
+        if (wps.length < 1) continue;
+
+        // Project every waypoint to container space once. For a
+        // trip with hundreds of waypoints this is O(n) per click,
+        // which is fine on the user's phone (the Pi only serves
+        // the JSON; this code runs in the browser).
+        const projected = [];
+        let minLeft = Infinity, minTop = Infinity;
+        let maxLeft = -Infinity, maxTop = -Infinity;
+        for (const wp of wps) {
+            if (!Number.isFinite(wp.lat) || !Number.isFinite(wp.lon)) {
+                projected.push(null);
+                continue;
+            }
+            const pt = map.latLngToContainerPoint([wp.lat, wp.lon]);
+            projected.push(pt);
+            if (pt.x < minLeft) minLeft = pt.x;
+            if (pt.x > maxLeft) maxLeft = pt.x;
+            if (pt.y < minTop) minTop = pt.y;
+            if (pt.y > maxTop) maxTop = pt.y;
+        }
+        // Cheap pixel-bounds reject: if the click + radius
+        // doesn't overlap the trip's pixel bounding box, skip
+        // the per-segment check entirely.
+        if (clickPt.x < minLeft - radius || clickPt.x > maxLeft + radius
+                || clickPt.y < minTop - radius || clickPt.y > maxTop + radius) {
+            continue;
+        }
+
+        // Walk segments between consecutive valid waypoints.
+        // Track the minimum segment distance and which waypoint
+        // index was the segment endpoint nearest to the click —
+        // that's what we'll use to seed the video overlay.
+        let bestDist = Infinity;
+        let bestWpIdx = -1;
+        for (let i = 0; i < projected.length - 1; i++) {
+            const a = projected[i];
+            const b = projected[i + 1];
+            if (!a || !b) continue;
+            const d = pointSegDistPx(clickPt, a, b);
+            if (d < bestDist) {
+                bestDist = d;
+                // Pick whichever segment endpoint is closer to
+                // the click as the seed waypoint.
+                const da2 = (clickPt.x - a.x) * (clickPt.x - a.x)
+                          + (clickPt.y - a.y) * (clickPt.y - a.y);
+                const db2 = (clickPt.x - b.x) * (clickPt.x - b.x)
+                          + (clickPt.y - b.y) * (clickPt.y - b.y);
+                bestWpIdx = (da2 <= db2) ? i : i + 1;
+            }
+        }
+        // Single-waypoint trip (no segments) — fall back to the
+        // single point's distance.
+        if (bestWpIdx === -1 && projected[0]) {
+            const a = projected[0];
+            const d2 = (clickPt.x - a.x) * (clickPt.x - a.x)
+                     + (clickPt.y - a.y) * (clickPt.y - a.y);
+            if (d2 <= radius2) {
+                bestDist = Math.sqrt(d2);
+                bestWpIdx = 0;
+            }
+        }
+        if (bestWpIdx >= 0 && bestDist <= radius) {
+            candidates.push({
+                trip: trip,
+                nearestWpIdx: bestWpIdx,
+                distance: bestDist,
+            });
+        }
+    }
+
+    candidates.sort((a, b) => {
+        const ta = (a.trip && a.trip.start_time) || '';
+        const tb = (b.trip && b.trip.start_time) || '';
+        if (ta && tb && ta !== tb) return tb.localeCompare(ta);
+        if (ta && !tb) return -1;
+        if (!ta && tb) return 1;
+        return a.distance - b.distance;
+    });
+    return candidates;
+}
+
+function pickPlayableWaypointForTrip(trip, clickLatLng) {
+    // Find the nearest waypoint with a video_path so the video
+    // overlay always opens to a real clip. Used for the per-day
+    // disambiguation flow — All time waypoints have no video_path
+    // so this isn't called there.
+    const wps = (trip && trip.waypoints) || [];
+    if (!wps.length) return null;
+    const clickPt = map.latLngToContainerPoint(clickLatLng);
+    let bestDist2 = Infinity, best = null;
+    for (const wp of wps) {
+        if (!wp || !wp.video_path) continue;
+        if (!Number.isFinite(wp.lat) || !Number.isFinite(wp.lon)) continue;
+        const pt = map.latLngToContainerPoint([wp.lat, wp.lon]);
+        const dx = clickPt.x - pt.x, dy = clickPt.y - pt.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestDist2) { bestDist2 = d2; best = wp; }
+    }
+    return best;
+}
+
+function highlightCandidateTrip(trip) {
+    // Draw a fresh thick polyline on a dedicated layer for the
+    // candidate. Doesn't touch any existing trip layers, so we
+    // never have to "restore" original styles — just clear the
+    // highlight layer. Per the design system the accent color
+    // works in both dark and light mode.
+    disambigHighlightLayer.clearLayers();
+    if (!trip) return;
+    const wps = trip.waypoints || [];
+    const latLngs = [];
+    for (const wp of wps) {
+        if (Number.isFinite(wp.lat) && Number.isFinite(wp.lon)) {
+            latLngs.push([wp.lat, wp.lon]);
+        }
+    }
+    if (latLngs.length < 2) return;
+    L.polyline(latLngs, {
+        renderer: sharedCanvasRenderer,
+        color: '#3B82F6',
+        weight: 6,
+        opacity: 0.9,
+        interactive: false,
+    }).addTo(disambigHighlightLayer);
+}
+
+function clearDisambigHighlight() {
+    disambigHighlightLayer.clearLayers();
+}
+
+function closeDisambigPopup() {
+    // Idempotent cleanup. Called from navigation, layer clears,
+    // popup close, and before opening the video overlay so a
+    // stale popup never shadows the new context.
+    clearDisambigHighlight();
+    if (disambigPopupOpen) {
+        disambigPopupOpen = false;
+        map.closePopup();
+    }
+}
+
+function buildDisambigRow(candidate, isAllTime, onPick) {
+    // Build the popup row as DOM nodes (no innerHTML for any
+    // user-derived text) so trip metadata can never sneak HTML
+    // into the page.
+    const trip = candidate.trip;
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'disambig-row';
+
+    const main = document.createElement('div');
+    main.className = 'disambig-row-main';
+    const primary = document.createElement('div');
+    primary.className = 'disambig-row-primary';
+    primary.textContent = formatLocalTime(trip.start_time);
+    main.appendChild(primary);
+
+    const secondaryParts = [];
+    const distMi = (typeof trip.distance_km === 'number')
+        ? (trip.distance_km * 0.621371).toFixed(1) + ' mi'
+        : null;
+    const durMin = (typeof trip.duration_seconds === 'number')
+        ? Math.round(trip.duration_seconds / 60) + ' min'
+        : null;
+    if (distMi) secondaryParts.push(distMi);
+    if (durMin) secondaryParts.push(durMin);
+    if (isAllTime && trip.date) secondaryParts.unshift('Tap to open day');
+    if (secondaryParts.length) {
+        const secondary = document.createElement('div');
+        secondary.className = 'disambig-row-secondary';
+        secondary.textContent = secondaryParts.join(' \u00B7 ');
+        main.appendChild(secondary);
+    }
+    row.appendChild(main);
+
+    const chevron = document.createElement('span');
+    chevron.className = 'disambig-row-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+    chevron.textContent = '\u203A';  // single right-pointing angle, not a Lucide icon
+    row.appendChild(chevron);
+
+    row.addEventListener('mouseenter', () => highlightCandidateTrip(trip));
+    row.addEventListener('focus', () => highlightCandidateTrip(trip));
+    row.addEventListener('mouseleave', clearDisambigHighlight);
+    row.addEventListener('blur', clearDisambigHighlight);
+    row.addEventListener('click', (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        onPick(candidate);
+    });
+    return row;
+}
+
+function showDisambigPopup(latlng, candidates) {
+    // Open the disambiguation popup at ``latlng``. Caller has
+    // already verified candidates.length >= 2.
+    closeDisambigPopup();
+
+    const isAllTime = !!showingAllTime;
+    const container = document.createElement('div');
+
+    const header = document.createElement('div');
+    header.className = 'disambig-header';
+    const noun = isAllTime ? 'trips' : 'clips';
+    header.textContent = candidates.length + ' ' + noun + ' through here';
+    container.appendChild(header);
+
+    const list = document.createElement('div');
+    list.className = 'disambig-list';
+
+    const onPick = (candidate) => {
+        const trip = candidate.trip;
+        if (isAllTime) {
+            const date = trip && trip.date;
+            closeDisambigPopup();
+            if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+                loadDay(date);
+            }
+            return;
+        }
+        // Per-day: open the video overlay for the trip's nearest
+        // playable waypoint. Use the original click latlng so we
+        // pick the same point the user actually tapped — not the
+        // candidate's seed waypoint, which may be off-segment.
+        const playable = pickPlayableWaypointForTrip(trip, latlng);
+        const seed = playable
+            || (trip.waypoints && trip.waypoints[candidate.nearestWpIdx])
+            || null;
+        if (!seed || !seed.video_path) {
+            closeDisambigPopup();
+            if (typeof showToast === 'function') {
+                showToast('No video available for this trip near this point.', 'warning');
+            }
+            return;
+        }
+        const screenPt = map.latLngToContainerPoint(latlng);
+        closeDisambigPopup();
+        openVideoOverlay(seed, screenPt, trip.waypoints || []);
+    };
+
+    for (const c of candidates) {
+        list.appendChild(buildDisambigRow(c, isAllTime, onPick));
+    }
+    container.appendChild(list);
+
+    L.popup({
+        className: 'disambig-popup',
+        closeOnClick: true,
+        autoClose: true,
+        closeButton: true,
+        keepInView: true,
+        offset: L.point(0, -4),
+    })
+    .setLatLng(latlng)
+    .setContent(container)
+    .openOn(map);
+
+    disambigPopupOpen = true;
+    // Single one-shot listener guarantees the highlight gets
+    // cleaned up regardless of how the popup closes (close
+    // button, outside click, Escape, programmatic close).
+    map.once('popupclose', () => {
+        disambigPopupOpen = false;
+        clearDisambigHighlight();
+    });
 }
 
 const severityColors = {
@@ -940,6 +1373,12 @@ async function loadDay(date) {
     // indexer-refresh poll from overwriting a day the user just
     // navigated to with stale data from the previous day.
     if (!date) return;
+    closeDisambigPopup();
+    // Drop the All time trip cache: leaving All time means the
+    // disambiguation search must source from currentDayData.trips,
+    // and the All time waypoints would be stale anyway after a
+    // re-render.
+    allTimeTrips = [];
     showingAllTime = false;
     currentDate = date;
     const seq = ++dayLoadSeq;
@@ -1382,13 +1821,23 @@ function renderTripOnDay(trip, bounds) {
         interactive: true,
     }).addTo(tripLayer);
     clickTarget.on('click', function (e) {
-        let minDist = Infinity, nearest = null;
-        for (const wp of valid) {
-            const d = map.distance(e.latlng, [wp.lat, wp.lon]);
-            if (d < minDist) { minDist = d; nearest = wp; }
+        // Search across ALL trips currently rendered for this day,
+        // not just this one — overlapping commute segments need
+        // disambiguation, otherwise Leaflet's hit-test silently
+        // picks whichever trip's clickTarget happens to be on top
+        // and the user can't choose the drive they wanted.
+        const candidates = findCandidatesNearClick(e.latlng);
+        if (candidates.length >= 2) {
+            showDisambigPopup(e.latlng, candidates);
+            return;
         }
-        if (nearest && nearest.video_path) {
-            openVideoOverlay(nearest, e.containerPoint, valid);
+        // Single-candidate (or zero) fast path — preserve the
+        // pre-disambiguation behavior of opening the nearest
+        // playable waypoint immediately.
+        const trip = (candidates[0] && candidates[0].trip) || { waypoints: valid };
+        const playable = pickPlayableWaypointForTrip(trip, e.latlng);
+        if (playable) {
+            openVideoOverlay(playable, e.containerPoint, trip.waypoints || valid);
         }
     });
 
@@ -1454,6 +1903,11 @@ async function renderAllTime() {
     // event markers stand out — the All time view's job is to
     // surface where things happened, not to compare per-trip speed.
     const seq = ++dayLoadSeq;
+    closeDisambigPopup();
+    // Tear down any prior all-time state up front so a click during
+    // the fetch doesn't search a half-stale trip set, and so a
+    // failed load doesn't leave the previous trips searchable.
+    allTimeTrips = [];
     tripLayer.clearLayers();
     fsdLayer.clearLayers();
     eventCluster.clearLayers();
@@ -1490,6 +1944,10 @@ async function renderAllTime() {
     eventCluster.clearLayers();
 
     const trips = (routesData && routesData.trips) || [];
+    // Cache trips for the disambiguation popup to search. Only
+    // assigned after the race guard above so a stale load can't
+    // overwrite a newer one.
+    allTimeTrips = trips;
     const bounds = [];
 
     for (const trip of trips) {
@@ -1504,17 +1962,39 @@ async function renderAllTime() {
         // better against gray than against speed-bucketed viridis,
         // and one polyline per trip keeps Leaflet's layer count
         // manageable when zoomed out across hundreds of trips.
-        const line = L.polyline(latLngs, {
+        // The visible line is non-interactive so the wide invisible
+        // click target below catches the click — without that, a
+        // tap 6+ pixels from the visible 3px stroke would miss.
+        L.polyline(latLngs, {
             renderer: sharedCanvasRenderer,
             color: '#9aa4b2',
             weight: 3,
             opacity: 0.55,
+            interactive: false,
+        }).addTo(tripLayer);
+
+        // Invisible wide click target so taps near the visible
+        // line still register, mirroring the per-day pattern.
+        // Click dispatches through findCandidatesNearClick so
+        // overlapping commute trips get the disambiguation popup
+        // instead of silently picking whichever line was on top.
+        const clickTarget = L.polyline(latLngs, {
+            renderer: sharedCanvasRenderer,
+            color: '#000', weight: 14, opacity: 0,
             interactive: true,
+        }).addTo(tripLayer);
+        clickTarget.on('click', function (e) {
+            const candidates = findCandidatesNearClick(e.latlng);
+            if (candidates.length >= 2) {
+                showDisambigPopup(e.latlng, candidates);
+                return;
+            }
+            const targetTrip = (candidates[0] && candidates[0].trip) || trip;
+            const date = targetTrip && targetTrip.date;
+            if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+                loadDay(date);
+            }
         });
-        if (trip.date && /^\d{4}-\d{2}-\d{2}$/.test(trip.date)) {
-            line.on('click', () => loadDay(trip.date));
-        }
-        line.addTo(tripLayer);
     }
 
     // Populate events and let the standard pipeline handle rendering
@@ -1552,6 +2032,7 @@ function getBasePath(videoPath) {
 }
 
 function openVideoOverlay(waypoint, clickPoint, routeWps) {
+    closeDisambigPopup();
     closeVideoOverlay();
 
     // Set waypoints AFTER close clears them

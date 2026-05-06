@@ -831,11 +831,56 @@ class TestQueryDayRoutes:
         assert same_day['trips'][0]['trip_id'] == 1
         assert next_day['trips'] == []
 
-    def test_waypoints_ordered_by_id(self, tmp_path):
+    def test_waypoints_ordered_by_timestamp_not_id(self, tmp_path):
+        # Regression: when v2->v3 trip-merge combines two trips, or a
+        # late-arriving video gets indexed into an existing trip
+        # (boot catch-up scan, file watcher, ArchivedClips re-discovery),
+        # the new waypoints land with higher ids but their timestamps
+        # fall in the middle of the trip's time range. Walking those
+        # in id-order draws long straight diagonals across the map
+        # — bug confirmed in the field on Apr 26 2026 view.
+        # The query MUST return waypoints in timestamp order so the
+        # frontend renders the polyline correctly.
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00')
-        # Insert in shuffled order — query must still return ASC by id.
-        self._add_waypoints(conn, 1, count=5)
+        # Simulate two ingest batches that interleave temporally:
+        #   - First batch: t=00, t=02, t=04 (the original video)
+        #   - Second batch: t=01, t=03 (the late-discovered video,
+        #     same trip, gets higher ids 4 and 5).
+        # If ordered by id we get times 0,2,4,1,3 — zigzag.
+        # If ordered by timestamp we get 0,1,2,3,4 — clean polyline.
+        rows = [
+            ('2026-05-04T08:00:00', 37.700, -122.400),  # id=1
+            ('2026-05-04T08:00:02', 37.702, -122.402),  # id=2
+            ('2026-05-04T08:00:04', 37.704, -122.404),  # id=3
+            ('2026-05-04T08:00:01', 37.701, -122.401),  # id=4 (late)
+            ('2026-05-04T08:00:03', 37.703, -122.403),  # id=5 (late)
+        ]
+        for ts, lat, lon in rows:
+            conn.execute(
+                """INSERT INTO waypoints (trip_id, timestamp, lat, lon,
+                                         speed_mps, autopilot_state,
+                                         video_path, frame_offset)
+                   VALUES (1, ?, ?, ?, 25.0, 'NONE', 'clip.mp4', 0)""",
+                (ts, lat, lon),
+            )
+        conn.commit(); conn.close()
+
+        result = query_day_routes(db_path, '2026-05-04')
+        timestamps = [wp['timestamp'] for wp in result['trips'][0]['waypoints']]
+        assert timestamps == sorted(timestamps), (
+            "waypoints must be returned in timestamp ASC order so "
+            "polyline rendering follows true chronological path; "
+            "got %r" % timestamps
+        )
+
+    def test_waypoints_id_tiebreaks_identical_timestamps(self, tmp_path):
+        # When timestamps tie (rare but possible — e.g., two SEI rows
+        # for the same MP4 frame), id ASC is the deterministic
+        # tiebreaker so output stays stable across runs.
+        db_path, conn = self._make_db(tmp_path)
+        self._add_trip(conn, 1, '2026-05-04T08:00:00')
+        self._add_waypoints(conn, 1, count=5)  # all share start_ts
         conn.commit(); conn.close()
 
         result = query_day_routes(db_path, '2026-05-04')

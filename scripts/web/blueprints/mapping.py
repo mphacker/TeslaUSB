@@ -138,10 +138,15 @@ def api_waypoints_for_clip():
         ).fetchall()
 
         if rows:
-            # Found — also get all waypoints from the same trip for full HUD
+            # Found — also get all waypoints from the same trip for full HUD.
+            # Sort by timestamp (id as tiebreaker): id-only ordering breaks
+            # when late-indexed videos or merged trips give waypoints non-
+            # monotonic ids relative to their timestamps. See
+            # mapping_service.query_day_routes docstring for the full story.
             trip_id = rows[0]['trip_id']
             all_wps = conn.execute(
-                """SELECT * FROM waypoints WHERE trip_id = ? ORDER BY id""",
+                """SELECT * FROM waypoints WHERE trip_id = ?
+                   ORDER BY timestamp ASC, id ASC""",
                 (trip_id,)
             ).fetchall()
             conn.close()
@@ -158,7 +163,8 @@ def api_waypoints_for_clip():
         if rows:
             trip_id = rows[0]['trip_id']
             all_wps = conn.execute(
-                """SELECT * FROM waypoints WHERE trip_id = ? ORDER BY id""",
+                """SELECT * FROM waypoints WHERE trip_id = ?
+                   ORDER BY timestamp ASC, id ASC""",
                 (trip_id,)
             ).fetchall()
             conn.close()

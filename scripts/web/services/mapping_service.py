@@ -2890,7 +2890,13 @@ def query_trips(db_path: str, limit: int = 50, offset: int = 0,
 
 @_with_db_retry
 def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
-    """Get all waypoints for a trip as a GeoJSON-ready list."""
+    """Get all waypoints for a trip as a GeoJSON-ready list.
+
+    Sorted by ``timestamp ASC`` (with ``id ASC`` as tiebreaker) so
+    polylines and HUD interpolation walk the trip in true chrono-
+    logical order even when waypoints from a late-indexed video or
+    a v2->v3 trip-merge land with non-monotonic ids.
+    """
     conn = _init_db(db_path)
     try:
         rows = conn.execute(
@@ -2899,7 +2905,8 @@ def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
                       steering_angle, brake_applied, gear,
                       acceleration_x, acceleration_y,
                       blinker_on_left, blinker_on_right
-               FROM waypoints WHERE trip_id = ? ORDER BY id""",
+               FROM waypoints WHERE trip_id = ?
+               ORDER BY timestamp ASC, id ASC""",
             (trip_id,)
         ).fetchall()
         return [dict(r) for r in rows]
@@ -3065,9 +3072,18 @@ def query_day_routes(db_path: str, date_str: str,
 
     Returns ``{'trips': [...]}`` where each trip has the same
     metadata fields as :func:`query_trips` plus a ``waypoints`` list
-    sorted by waypoint id (ascending = chronological). Waypoints
-    are NOT post-processed — callers (i.e. the blueprint) are
-    responsible for path normalization (``ArchivedClips`` prefix
+    sorted by ``timestamp ASC`` (with ``id ASC`` as a tiebreaker).
+    Sorting by id alone is NOT sufficient: when the v2->v3 trip-
+    merge migration combines two originally-separate trips, or when
+    a late-arriving video gets indexed into an existing trip (boot
+    catch-up scan, file watcher, ArchivedClips re-discovery), the
+    new waypoints land with higher ids but their timestamps fall in
+    the middle of the existing trip's time range. Walking those in
+    id-order draws long straight diagonals across the map. Sorting
+    by timestamp restores the true chronological sequence.
+
+    Waypoints are NOT post-processed — callers (i.e. the blueprint)
+    are responsible for path normalization (``ArchivedClips`` prefix
     stripping) so the service stays free of presentation concerns.
 
     Performance: one INNER JOIN; ``idx_trips_day`` (expression index
@@ -3119,7 +3135,7 @@ def query_day_routes(db_path: str, date_str: str,
               JOIN waypoints w ON w.trip_id = t.id
              WHERE substr(t.start_time, 1, 10) = ?
                AND COALESCE(t.distance_km, 0) >= ?
-             ORDER BY t.start_time DESC, w.id ASC
+             ORDER BY t.start_time DESC, w.timestamp ASC, w.id ASC
         """
         rows = conn.execute(sql, (date_str, min_distance_km)).fetchall()
 
@@ -3245,7 +3261,7 @@ def query_all_routes_simplified(
                AND COALESCE(t.distance_km, 0) >= ?
                AND w.lat IS NOT NULL
                AND w.lon IS NOT NULL
-             ORDER BY t.start_time DESC, w.id ASC
+             ORDER BY t.start_time DESC, w.timestamp ASC, w.id ASC
         """
         rows = conn.execute(sql, (min_distance_km,)).fetchall()
 

@@ -150,8 +150,8 @@ live_event_sync:
   watch_folders:                         # Tesla event subfolders to react to
     - SentryClips
     - SavedClips
-  upload_scope: "event_minute"           # event_minute = 6 cams + event.json (~40 MB);
-                                         # event_folder = all .mp4 in the event dir
+  upload_scope: "event_minute"           # event_minute = 6 cams + event.json (~150-200 MB);
+                                         # event_folder = all .mp4 in the event dir (~0.7-2 GB)
   retry_max_attempts: 5                  # Move row to 'failed' after this many attempts
   retry_backoff_seconds: [30, 120, 300, 900, 3600]  # 30s, 2m, 5m, 15m, 1h
   daily_data_cap_mb: 0                   # 0 = unlimited; pause uploads when exceeded

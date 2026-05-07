@@ -563,10 +563,10 @@
                     <select id="lesUploadScope"
                             style="width: 100%; max-width: 480px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary);">
                         <option value="event_minute" {% if les_upload_scope == 'event_minute' %}selected{% endif %}>
-                            Event minute &mdash; 6 cameras + event.json (~40 MB / event)
+                            Event minute &mdash; 6 cameras + event.json (~150&ndash;200 MB / event)
                         </option>
                         <option value="event_folder" {% if les_upload_scope == 'event_folder' %}selected{% endif %}>
-                            Full event folder &mdash; every clip Tesla saved for the event
+                            Full event folder &mdash; every clip Tesla saved (~0.7&ndash;2 GB / event)
                         </option>
                     </select>
                 </div>
@@ -588,7 +588,7 @@
                         <input type="number" id="lesDailyDataCapMb" min="0" step="1"
                                value="{{ les_daily_data_cap_mb }}"
                                style="width: 120px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary);">
-                        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">0 = unlimited. Pauses uploads when exceeded.</p>
+                        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">0 = unlimited. Pauses uploads when exceeded. At default scope, ~5 events fit in 1 GB.</p>
                     </div>
                 </div>
 

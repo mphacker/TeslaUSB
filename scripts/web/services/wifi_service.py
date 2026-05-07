@@ -3,12 +3,24 @@ import logging
 import subprocess
 import re
 import os
+import threading
+import time
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 # File to store WiFi change history/status
 WIFI_STATUS_FILE = "/tmp/teslausb_wifi_status.json"
+
+# Runtime-only AP force mode file (does NOT persist to config.sh).
+# Used by the manual "Connect Now" flow so a worker crash cannot disable
+# the AP across reboots.
+_RUNTIME_FORCE_DIR = "/run/teslausb-ap"
+_RUNTIME_FORCE_FILE = "/run/teslausb-ap/force.mode"
+
+# Serializes user-initiated connect attempts. Two simultaneous Connect
+# clicks would otherwise fight over the radio and the AP state machine.
+_CONNECT_LOCK = threading.Lock()
 
 
 def _save_wifi_status(status: dict):
@@ -587,6 +599,235 @@ def get_saved_networks():
     except Exception as e:
         logger.error("Error getting saved networks: %s", e)
         return []
+
+
+def _set_runtime_force_mode(mode: str) -> bool:
+    """Write force mode to /run only (no config.sh edit) and wake wifi-monitor.
+
+    Unlike ap_control.sh's set_force_mode which persists to config.sh via sed,
+    this is intentionally transient: if our worker crashes, a reboot resets
+    the runtime file and wifi-monitor falls back to the persistent config.
+    """
+    if mode not in ("auto", "force_on", "force_off"):
+        raise ValueError(f"invalid force mode: {mode}")
+    try:
+        os.makedirs(_RUNTIME_FORCE_DIR, exist_ok=True)
+        tmp = _RUNTIME_FORCE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(mode + "\n")
+        os.replace(tmp, _RUNTIME_FORCE_FILE)
+    except Exception as e:
+        logger.warning("Failed to write runtime force mode %s: %s", mode, e)
+        return False
+    # Wake wifi-monitor so it observes the change immediately (best-effort).
+    # No sudo: gadget_web.service runs as root (port 80 binding requirement,
+    # see copilot-instructions.md "Web App Patterns"). Any future privilege
+    # drop would have to add sudo here AND update the sudoers policy.
+    try:
+        subprocess.run(
+            ["systemctl", "kill", "-s", "SIGUSR1", "wifi-monitor.service"],
+            capture_output=True, check=False, timeout=5,
+        )
+    except Exception:
+        pass
+    return True
+
+
+def _wait_for_ap_down(timeout_s: int = 15) -> bool:
+    """Poll until the AP is confirmed down (hostapd/dnsmasq stopped)."""
+    from services.ap_service import ap_status
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not bool(ap_status().get("ap_active")):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _get_active_wlan0_connection_name():
+    """Return the NetworkManager connection name currently active on wlan0, or None."""
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 2 and parts[1] == "wlan0":
+                    return parts[0]
+    except Exception:
+        pass
+    return None
+
+
+def _wlan0_has_ipv4() -> bool:
+    """True if wlan0 has an IPv4 address bound (basic connectivity check)."""
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "-br", "addr", "show", "wlan0"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        if result.returncode != 0:
+            return False
+        # Brief format example: "wlan0            UP             192.168.1.42/24"
+        return bool(re.search(r"\d+\.\d+\.\d+\.\d+", result.stdout))
+    except Exception:
+        return False
+
+
+def _wait_for_target_connection(target_name: str, timeout_s: int = 60) -> bool:
+    """Poll until wlan0 is associated with target_name AND has an IPv4 address."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        active = _get_active_wlan0_connection_name()
+        if active == target_name and _wlan0_has_ipv4():
+            return True
+        time.sleep(1)
+    return False
+
+
+def _normalize_force_mode_for_runtime(status_value):
+    """Normalize ap_status() force_mode field to a runtime-file value."""
+    if status_value in ("auto", "force_on", "force_off"):
+        return status_value
+    return "auto"
+
+
+def _connect_worker(connection_name: str, original_force_mode: str, ap_was_up: bool):
+    """Background worker that drops the AP, runs nmcli, and restores force mode."""
+    success = False
+    error_msg = None
+    final_active = None
+    try:
+        if ap_was_up:
+            logger.info("connect_to_network: dropping AP for STA reconnect to %r", connection_name)
+            _set_runtime_force_mode("force_off")
+            if not _wait_for_ap_down(timeout_s=15):
+                error_msg = "AP did not stop within 15s; aborting"
+                logger.warning(error_msg)
+                return
+            time.sleep(1)  # brief settle so the radio releases the channel
+
+        logger.info("connect_to_network: nmcli connection up id %r ifname wlan0", connection_name)
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "nmcli", "connection", "up",
+                 "id", connection_name, "ifname", "wlan0"],
+                capture_output=True, text=True, check=False, timeout=45,
+            )
+            if result.returncode != 0:
+                logger.warning("nmcli connection up returned %d: %s",
+                               result.returncode, (result.stderr or "").strip())
+        except subprocess.TimeoutExpired:
+            logger.warning("nmcli connection up timed out (45s)")
+
+        # Verify the actual outcome regardless of nmcli return code: NM is finicky.
+        if _wait_for_target_connection(connection_name, timeout_s=60):
+            success = True
+        final_active = _get_active_wlan0_connection_name()
+    except Exception as e:
+        error_msg = str(e)
+        logger.exception("connect_to_network worker failed: %s", e)
+    finally:
+        # Always restore the user's original force mode so a worker crash cannot
+        # leave the AP permanently disabled.
+        try:
+            _set_runtime_force_mode(_normalize_force_mode_for_runtime(original_force_mode))
+        except Exception:
+            logger.exception("Failed to restore force mode to %r", original_force_mode)
+
+        _save_wifi_status({
+            "type": "manual_connect",
+            "target": connection_name,
+            "success": success,
+            "active_after": final_active,
+            "message": (
+                f"Connected to '{connection_name}'." if success
+                else (error_msg or f"Could not connect to '{connection_name}'.")
+            ),
+        })
+        # Release the connect lock so further attempts are allowed.
+        try:
+            _CONNECT_LOCK.release()
+        except RuntimeError:
+            # Already released or never held - shouldn't happen, but log it.
+            logger.warning("Connect lock release: already released")
+
+
+def connect_to_network(connection_name: str) -> dict:
+    """User-initiated reconnect to a saved WiFi network.
+
+    Drops the offline AP if it is currently up (radio is single-channel on Pi
+    Zero 2 W, so STA cannot associate while hostapd holds uap0). Restores the
+    user's original AP force mode in a finally block.
+
+    Validation: connection_name must match a known saved network exactly. The
+    name is then passed verbatim to nmcli as a list arg (no shell).
+
+    Returns immediately with `started: True` if a worker was spawned; the
+    caller (route handler) should map this to HTTP 202. Final result is
+    written to WIFI_STATUS_FILE for the settings page to display.
+    """
+    # 1. Allowlist validation against currently-saved networks.
+    saved = get_saved_networks()
+    target = next((n for n in saved if n["name"] == connection_name), None)
+    if target is None:
+        return {
+            "success": False, "started": False,
+            "message": f"Network '{connection_name}' is not in the saved list",
+        }
+
+    # 2. Already connected to this network and IP is live? No-op.
+    if target.get("active") and _wlan0_has_ipv4():
+        return {
+            "success": True, "started": False,
+            "message": f"Already connected to '{connection_name}'",
+            "ap_will_drop": False,
+        }
+
+    # 3. Serialize: only one connect attempt at a time.
+    if not _CONNECT_LOCK.acquire(blocking=False):
+        return {
+            "success": False, "started": False, "in_progress": True,
+            "message": "Another connect attempt is in progress. Please wait.",
+        }
+
+    # 4. Capture state and spawn worker. From here the lock will be released by
+    #    the worker's finally block (or by us on the immediate-failure path).
+    try:
+        from services.ap_service import ap_status
+        status = ap_status()
+        ap_was_up = bool(status.get("ap_active"))
+        original_force_mode = status.get("force_mode") or "auto"
+
+        worker = threading.Thread(
+            target=_connect_worker,
+            args=(connection_name, original_force_mode, ap_was_up),
+            name=f"wifi-connect-{connection_name[:20]}",
+            daemon=True,
+        )
+        worker.start()
+    except Exception as e:
+        # Spawn failed: release lock so future attempts work.
+        try:
+            _CONNECT_LOCK.release()
+        except RuntimeError:
+            pass
+        logger.exception("Failed to start connect worker: %s", e)
+        return {"success": False, "started": False, "message": f"Failed to start: {e}"}
+
+    return {
+        "success": True, "started": True,
+        "ap_will_drop": ap_was_up,
+        "target": connection_name,
+        "message": (
+            f"Reconnect to '{connection_name}' started. "
+            "AP will drop for ~30-60 seconds while we attempt the connection."
+            if ap_was_up else
+            f"Reconnect to '{connection_name}' started."
+        ),
+    }
 
 
 def forget_network(connection_name: str) -> dict:

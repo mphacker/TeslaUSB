@@ -10,7 +10,7 @@ from config import GADGET_DIR
 from utils import get_base_context
 from services.mode_service import mode_display
 from services.ap_service import ap_status, ap_force, get_ap_config, update_ap_config
-from services.wifi_service import get_current_wifi_connection, update_wifi_credentials, get_available_networks, get_wifi_status, clear_wifi_status, get_saved_networks, forget_network, reorder_networks
+from services.wifi_service import get_current_wifi_connection, update_wifi_credentials, get_available_networks, get_wifi_status, clear_wifi_status, get_saved_networks, forget_network, reorder_networks, connect_to_network
 
 mode_control_bp = Blueprint('mode_control', __name__, url_prefix='/settings')
 
@@ -551,6 +551,34 @@ def api_wifi_forget():
         return jsonify(result)
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+@mode_control_bp.route("/api/wifi/connect", methods=["POST"])
+def api_wifi_connect():
+    """Manually reconnect to a saved WiFi network.
+
+    Drops the offline AP if it is currently up so the single-radio chip can
+    associate. Returns 202 Accepted with `started: True` when a worker was
+    spawned; the actual outcome is written to the WiFi status file. Returns
+    409 Conflict if another connect attempt is already in progress.
+    """
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "message": "No network name provided"}), 400
+    try:
+        result = connect_to_network(name)
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+    if result.get("started"):
+        return jsonify(result), 202
+    if result.get("in_progress"):
+        return jsonify(result), 409
+    if not result.get("success"):
+        # Validation failure (unknown network) or already-connected no-op.
+        return jsonify(result), 400 if "saved list" in result.get("message", "") else 200
+    return jsonify(result), 200
 
 
 @mode_control_bp.route("/api/wifi/scan")

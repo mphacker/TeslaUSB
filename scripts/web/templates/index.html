@@ -469,11 +469,31 @@ function loadSavedNetworks() {
             const dot = net.active ? '<span style="color:var(--success-text, #22c55e);margin-right:6px">●</span>' : '<span style="margin-right:14px"></span>';
             const signal = net.in_range ? '<span style="font-size:0.8em;color:var(--text-secondary)">' + getSignalIcon(net.signal) + ' ' + net.signal + '%</span>' : '<span style="font-size:0.8em;color:var(--text-secondary)">Not in range</span>';
             const name = (net.ssid || net.name).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            const escapedName = net.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            // Defence against XSS via SSID. The value is embedded inside
+            //   onclick="someFn('VALUE')"
+            // so we have to escape for two contexts in order:
+            //   1. JS string literal: backslash, then single quote (the JS
+            //      string delimiter).
+            //   2. HTML attribute value: ampersand first (must come before
+            //      other &-entities so we don't double-encode), then the
+            //      attribute delimiter (").
+            // Without the HTML attribute pass, an SSID containing `"` or
+            // `&quot;` could close the onclick attribute and inject
+            // arbitrary HTML. The order matters in BOTH passes.
+            const escapedName = net.name
+                .replace(/\\/g, '\\\\')   // JS: backslash
+                .replace(/'/g, "\\'")     // JS: single quote (string delimiter)
+                .replace(/&/g, '&amp;')   // HTML attr: ampersand (first!)
+                .replace(/"/g, '&quot;'); // HTML attr: double quote (delimiter)
             html += '<div style="display:flex;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border-color, var(--border));gap:6px">';
             html += dot;
             html += '<span style="flex:1;font-size:0.875rem;font-weight:' + (net.active ? '600' : '400') + '">' + name + '</span>';
             html += signal;
+            // Connect button: only shown for non-active networks. Disabled if not in range.
+            if (!net.active) {
+                const cantConnect = !net.in_range;
+                html += '<button class="edit-btn wifi-connect-btn" onclick="connectToNetwork(\'' + escapedName + '\')" title="' + (cantConnect ? 'Network not in range' : 'Connect to this network now') + '" style="padding:2px 8px;font-size:0.8em;min-height:auto"' + (cantConnect ? ' disabled' : '') + '>Connect</button>';
+            }
             html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',-1)" title="Move up" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === 0 ? ' disabled' : '') + '>▲</button>';
             html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',1)" title="Move down" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === networks.length - 1 ? ' disabled' : '') + '>▼</button>';
             html += '<button class="present-btn" onclick="forgetNetwork(\'' + escapedName + '\')" title="Forget" style="padding:2px 6px;font-size:0.8em;min-height:auto">✕</button>';
@@ -516,6 +536,49 @@ function forgetNetwork(name) {
         if (data.message) alert(data.message);
         loadSavedNetworks();
     });
+}
+
+function connectToNetwork(name) {
+    const msg = 'Connect to "' + name + '" now?\n\n'
+        + 'If the offline access point is currently active, it will drop for ~30-60 seconds '
+        + 'while we attempt the connection. After about 60-90 seconds:\n\n'
+        + '  - If WiFi reconnect succeeds, the AP stays off. Reach the Pi at '
+        + 'http://cybertruckusb.local on your home WiFi.\n'
+        + '  - If WiFi reconnect fails, the AP comes back automatically. '
+        + 'Reconnect to the TeslaUSB AP and try again.';
+    if (!confirm(msg)) return;
+
+    // Disable all Connect buttons so the user cannot double-fire.
+    document.querySelectorAll('.wifi-connect-btn').forEach(b => {
+        b.disabled = true;
+        if (b.getAttribute('onclick') && b.getAttribute('onclick').indexOf(name) !== -1) {
+            b.textContent = 'Connecting…';
+        }
+    });
+
+    fetch('{{ url_for("mode_control.api_wifi_connect") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name})
+    }).then(r => r.json().then(data => ({status: r.status, data: data})))
+      .then(({status, data}) => {
+          if (status === 202 || (data && data.success)) {
+              alert((data && data.message) || 'Reconnect started.');
+          } else if (status === 409) {
+              alert('Another connect attempt is already in progress. Please wait.');
+              loadSavedNetworks();
+          } else {
+              alert((data && data.message) || ('Connect failed (HTTP ' + status + ')'));
+              loadSavedNetworks();
+          }
+      })
+      .catch(err => {
+          // Expected when the AP drops mid-fetch: the request is in flight, the
+          // server is doing its work, but the response could not be delivered.
+          alert('Reconnect attempt sent. The AP may have dropped. Wait ~60-90s, '
+              + 'then try http://cybertruckusb.local on your home WiFi, or '
+              + 'reconnect to the TeslaUSB AP if the attempt failed.');
+      });
 }
 
 function toggleAddNetwork() {

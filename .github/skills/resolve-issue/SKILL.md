@@ -448,11 +448,25 @@ Review **only the changed files** against these TeslaUSB-specific criteria:
 
 | Severity | Meaning | Action |
 |----------|---------|--------|
-| 🔴 **Critical** | Mount safety violations, data corruption risk, command injection, path traversal | Must fix before proceeding |
-| 🟡 **Warning** | Convention violations, missing error handling, hardcoded values | Should fix in this PR |
-| 🔵 **Info** | Style suggestions, minor improvements | Fix if trivial, otherwise note |
+| 🔴 **Critical** | Mount safety violations, data corruption risk, command injection, path traversal | **Must fix** before proceeding |
+| 🟡 **Warning** | Convention violations, missing error handling, hardcoded values | **Must fix** in this PR |
+| 🔵 **Info** | Style suggestions, minor improvements, latent code smells, defense-in-depth | **Must fix** in this PR (or explicitly defer with user approval — see below) |
 
-Address all 🔴 Critical and 🟡 Warning findings before proceeding.
+**Address all findings — Critical, Warning, AND Info — before proceeding.** The goal is
+zero code smells and no latent issues left behind. "Info" does not mean "optional" — it
+means "lower urgency than Warning, but still expected to be addressed in this PR."
+
+The only acceptable reasons to leave an Info finding unfixed are:
+
+1. The finding is a false positive (document why in the resolution comment).
+2. Fixing it requires significantly larger refactoring outside this PR's scope. In that
+   case, **file a follow-up GitHub issue** linking back to this PR and reference the
+   issue number in the resolution comment.
+3. The user has explicitly approved deferring the specific finding (quote the user
+   statement in the resolution comment).
+
+Do not silently defer Info findings. If you cannot fix one, the resolution comment must
+state which finding was deferred, why, and where the follow-up work is tracked.
 
 ---
 
@@ -473,7 +487,8 @@ what was done.
 - `path/to/file2.sh` — [what was changed and why]
 
 **Verification:** Syntax checks pass; app loads without import errors; self code review
-passed with no Critical or Warning findings.
+passed with **no findings of any severity** (Critical, Warning, or Info) left unaddressed.
+Any deferred Info findings are documented below with a follow-up issue link.
 
 <!-- skill:resolve-issue:resolution:{number} -->
 ```
@@ -490,7 +505,8 @@ passed with no Critical or Warning findings.
 - `path/to/new_file.py` — [new file, purpose]
 
 **Verification:** Syntax checks pass; app loads without import errors; self code review
-passed with no Critical or Warning findings.
+passed with **no findings of any severity** (Critical, Warning, or Info) left unaddressed.
+Any deferred Info findings are documented below with a follow-up issue link.
 
 <!-- skill:resolve-issue:resolution:{number} -->
 ```
@@ -590,12 +606,21 @@ When resolving multiple issues (filtered or all mode):
 ### What this skill does NOT do
 
 - **Does not commit or push to `main`** — all changes go on a feature branch.
+- **Does not merge pull requests.** Even when a PR is open, reviewed, and clean, the
+  merge decision belongs to the user. The skill may push a feature branch and open a PR,
+  but it must NEVER call `gh pr merge` or otherwise combine the feature branch into
+  `main` automatically. If the user asks for a merge, treat that as a separate explicit
+  instruction outside this skill.
 - **Does not close issues manually** — relies on `Closes #N` in commit messages (except
   sub-item mode, which uses `Ref #N`).
 - **Does not skip root-cause analysis** — even for "obvious" bugs, the analysis must be
   documented with evidence.
 - **Does not ignore unrelated problems** — any bugs, safety violations, or risks discovered
   during investigation are filed as new GitHub issues (Phase 2.6).
+- **Does not leave any code smells or latent issues behind.** All findings of any
+  severity (Critical, Warning, Info) must be resolved before the resolution comment is
+  posted. Any Info finding that cannot be fixed in this PR must have a follow-up issue
+  filed and referenced in the resolution comment.
 - **Does not deploy to the Pi** — implementation and commits happen locally; deployment
   via `setup_usb.sh` is a separate manual step after merge.
 
@@ -607,6 +632,6 @@ When resolving multiple issues (filtered or all mode):
 | Phase 3 | Comment posted on issue with root-cause analysis or implementation plan |
 | Phase 3.5 | Feature branch created off `main`; working tree is on the new branch |
 | Phase 4 | Python syntax checks pass; app loads without import errors |
-| Phase 5 | No Critical or Warning findings from self code review |
+| Phase 5 | No findings of any severity (Critical, Warning, Info) left unaddressed; any deferred Info findings have a follow-up GitHub issue filed |
 | Phase 6 | Resolution comment posted on issue |
 | Phase 7 | Commit created on feature branch with proper message format and issue reference |

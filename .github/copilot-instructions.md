@@ -143,12 +143,33 @@ See the full design system for color palettes, typography scale, spacing tokens,
 - **Disambiguation popup**: When the user clicks the map at a location with multiple overlapping clips (e.g., a road driven multiple times in one day or across days), `mapping.html` opens a chooser listing each clip with its trip date/time so the right clip can be selected before the overlay player is launched.
 
 ## Cloud Sync Architecture
-- **Queue-based continuous sync**: A persistent sync queue (SQLite) is populated by the inotify file watcher, WiFi connect handler, and manual "Archive to Cloud" actions. A sync worker thread processes items one at a time.
+TeslaUSB has **two separate cloud upload subsystems** that share one rclone provider config but otherwise operate independently. **Never merge them or have one call into the other's worker** — the priority/coordination contract below is what guarantees real-time event uploads aren't blocked by bulk catch-up sync.
+
+### `cloud_archive_service` — bulk catch-up sync
+- **Queue-based continuous sync**: A persistent sync queue (SQLite, `cloud_sync.db`) is populated by the inotify file watcher, WiFi connect handler, and manual "Archive to Cloud" actions. A sync worker thread processes items one at a time.
 - **Priority order (default)**: (1) Oldest videos with Tesla events (from event.json), (2) Oldest trip videos with geolocation (from geodata.db), (3) Non-event/non-geo videos (opt-in, disabled by default via `cloud_archive.sync_non_event_videos: false`).
 - **Detection**: event.json for folder-level classification + SEI telemetry for fine-grained event detection.
 - **Power-loss safe**: File marked as `synced` only after rclone confirms upload + DB commit + fsync. Partially uploaded files detected on restart and re-queued.
 - **Low impact**: `nice -n 19` + `ionice -c3` on rclone, bandwidth limit (`max_upload_mbps`), one file at a time, inter-file sleep. Web UI must remain responsive during sync.
 - **Keeps going**: Sync worker idles only when queue is empty AND inotify reports no new files. On WiFi reconnect, immediately re-checks queue.
+- **Yields to LES**: between every file, `_run_sync` checks `live_event_queue` for pending rows; if found it releases the `task_coordinator` lock, sleeps briefly, then re-acquires. `trigger_auto_sync()` skips entirely when LES has pending work. **Both checks are O(1) indexed `SELECT 1`** — sub-millisecond, no measurable impact.
+
+### `live_event_sync_service` (LES) — real-time per-event uploader
+- **Trigger**: Tesla's `event.json` arrival in `SentryClips/` or `SavedClips/`. Detected by the same `file_watcher_service` inotify (no second watcher) via `register_event_json_callback`.
+- **Queue**: dedicated `live_event_queue` table in the same `cloud_sync.db`. Schema: `id, event_dir, event_json_path, event_timestamp, event_reason, upload_scope, status, enqueued_at, uploaded_at, attempts, last_error, next_retry_at`. **Sharing the DB but not the table** keeps backups simple and never crosses queues.
+- **Worker**: ONE dedicated thread, idle-on-event semantics. Blocks on `threading.Event.wait()` when queue is empty (< 0.1% CPU). Wakes on (a) enqueue callback or (b) NM dispatcher's `/api/live_events/wake`.
+- **File selection**: `event_minute` (default — 6 cameras × 1 minute centered on `event.json.timestamp`) or `event_folder` (everything in the event dir). Configured per-instance via `live_event_sync.upload_scope`.
+- **Priority over cloud_archive**: When LES has work AND WiFi is up, cloud_archive yields between files (see above). The NM WiFi-connect dispatcher path wakes LES BEFORE triggering cloud sync, and waits up to 10 minutes for the LES queue to drain before kicking cloud sync.
+- **WiFi-aware**: when WiFi is down, queue grows but worker idles. On reconnect, drains immediately. Persistent across reboots — `uploading` rows reset to `pending` on startup recovery.
+- **Failure handling**: per-row `attempts` + `next_retry_at` with backoff `[30s, 120s, 300s, 900s, 3600s]`. After `retry_max_attempts` (default 5), row is `failed`; `POST /api/live_events/retry/<id>` resets it.
+- **Resource ceilings**: ≤ 25 MB RSS steady, ≤ 60 MB peak during upload. No heavy imports (`sqlite3`, `os`, `subprocess`, `threading`, `json`, `re`, `time`, `urllib.request` only — NO `cv2`/`av`/`PIL`/`numpy`/`requests`). One rclone subprocess at a time, never stacked with cloud_archive (coordinated via `task_coordinator` keys `'cloud_sync'` and `'live_event_sync'`).
+- **Opt-in**: `live_event_sync.enabled: false` by default. When disabled, the watcher callback is never registered, the worker never starts, and the API returns `{"enabled": false}`.
+
+### Coordination contract (don't break this)
+- **`task_coordinator` is the single mutual-exclusion point.** Adding parallel rclone subprocesses or a second cloud worker that doesn't go through `acquire_task` will overlap uploads and starve the gadget endpoint.
+- **LES never touches `cloud_synced_files`**, and cloud_archive never touches `live_event_queue`. Each owns its table.
+- **The shared rclone helpers** (`upload_path_via_rclone`, `write_rclone_conf`, `remove_rclone_conf`, `load_provider_creds`, `is_wifi_connected`, `RCLONE_MEM_FLAGS`) live in `cloud_archive_service` and are imported by LES. **Don't duplicate them** — fix-once vs. fix-twice.
+- **The NM dispatcher (`refresh_cloud_token.py`) is the single WiFi-connect entry point.** It refreshes the RO mount → wakes LES → waits for archive timer → waits for indexing queue → waits for LES drain (capped) → triggers cloud_archive. Adding a second WiFi-up trigger would race the queues.
 
 ## Video Indexing
 - **Single SQLite-backed queue + one worker.** All video indexing flows through `indexing_queue` (in `geodata.db`, schema v6). One low-priority background thread (`indexing_worker.py`, started inside `gadget_web.service`) drains the queue one file at a time. **Never re-introduce parallel triggers** — the old design had 6 redundant paths (every page load, every mode switch, every WiFi connect, etc.) that caused the constantly-flashing "Indexing…" banner.
@@ -168,8 +189,23 @@ See the full design system for color palettes, typography scale, spacing tokens,
 ## File Watcher (inotify)
 - `file_watcher_service.py` monitors USB RO mount + ArchivedClips using `watchdog` library.
 - On new file: enqueues into `indexing_queue` (via `enqueue_many_for_indexing`) and notifies the cloud sync producer. Both consumers dedup by canonical key.
-- Falls back to 5-minute polling if inotify unavailable (mount changes, etc.).
-- Must be memory-efficient: watch directory-level events only (IN_CREATE, IN_MOVED_TO).
+- **Two callback types** (subscribed independently): `register_callback(cb)` for `.mp4` arrivals (consumed by the indexing producer) and `register_event_json_callback(cb)` for Tesla `event.json` arrivals (consumed by Live Event Sync). The mp4 callback uses a 60-second age gate; the event_json callback fires immediately because Tesla writes event.json atomically as the last file in the event dir.
+- Falls back to 5-minute polling if inotify unavailable (mount changes, etc.). Both callback types fire from the polling path too.
+- Must be memory-efficient: watch directory-level events only (IN_CREATE, IN_MOVED_TO, IN_CLOSE_WRITE for event.json).
+
+## Live Event Sync (LES) — Real-Time Event Uploader
+LES is a **separate, opt-in subsystem** that uploads Sentry and Saved events to the cloud the moment Tesla writes them. It runs **alongside** `cloud_archive_service`, not inside it. See **Cloud Sync Architecture** above for the full coordination contract; key points for working in this codebase:
+
+- **Disabled by default** (`live_event_sync.enabled: false`). When disabled, the watcher callback is never registered, no thread starts, and the API returns `{"enabled": false}`. **Existing installs see zero behavior change.**
+- **Service**: `scripts/web/services/live_event_sync_service.py`. Public API: `start()`, `stop()`, `wake()`, `enqueue_event_json(paths)`, `enqueue_event_dir(dir, event_json)`, `get_status()`, `list_queue(limit)`, `retry_failed(id_or_None)`. **Don't reach inside the module — use these functions.**
+- **Blueprint**: `scripts/web/blueprints/live_events.py`, mounted at `/api/live_events/{status,queue,retry/<id>,retry_all,wake}`. All routes are JSON-only and image-gated on `IMG_CAM_PATH`.
+- **NM dispatcher integration**: `helpers/refresh_cloud_token.py` calls `/api/live_events/wake` BEFORE waiting for the index drain or triggering cloud sync, then waits up to 10 min for `/api/live_events/status` to show `pending+uploading == 0` before kicking cloud_archive. Don't reorder these steps — the priority contract depends on them.
+- **Queue table**: `live_event_queue` in `cloud_sync.db`. `_startup_recovery()` resets stale `uploading` rows back to `pending` on every start; `_prune_old_uploaded()` evicts rows older than 7 days to keep the table ≤ 200 KB.
+- **File selection**: `select_event_files(event_dir, mode, timestamp)` — `event_minute` (default) matches the 6 cameras for the timestamp's `YYYY-MM-DD_HH-MM` prefix; `event_folder` selects everything in the dir. **Add new modes here, not in the worker.**
+- **Daily data cap**: `live_event_sync.daily_data_cap_mb` (0 = unlimited). When exceeded, the worker idles until the local clock crosses midnight (cheap `_today_uploaded_bytes()` SUM over `uploaded_at` rows).
+- **Webhook**: `live_event_sync.notify_webhook_url` — fired via `urllib.request` (no `requests` import) on successful upload. Don't add HTTP libraries here.
+- **Resource budget is enforced by code review, not by tooling** — every new dependency, thread, or in-memory cache in this module needs a justification. The Pi Zero 2 W has no headroom for "just one more" library.
+
 
 ## Safety & Stability
 - **SSH is sacred**: sshd has a systemd drop-in preventing it from being stopped or masked. Safe-mode boot detection skips TeslaUSB services after 3+ reboots in 10 minutes.
@@ -195,6 +231,11 @@ See the full design system for color palettes, typography scale, spacing tokens,
 - Deleting or overwriting `*.img` files in GADGET_DIR from any code path.
 - Running rclone without `nice`/`ionice` (starves the web server and gadget).
 - Marking a file as `synced` in the cloud database before rclone confirms the upload completed.
+- Letting `cloud_archive_service` upload a Sentry/Saved event clip when LES has a pending row for that event (cloud_archive yields between files; don't remove or weaken the inter-file `live_event_queue` check).
+- Calling LES from inside `cloud_archive_service` (or vice versa) — they're separate subsystems with separate enable flags. Cross-call only via the documented coordination points (`task_coordinator`, the inter-file LES-pending check, and the `/api/live_events/wake` endpoint).
+- Importing `cv2`/`av`/`PIL`/`numpy`/`requests` inside `live_event_sync_service.py` — blows the 25 MB steady-state RSS budget on Pi Zero 2 W.
+- Adding a second inotify watcher for LES (use `register_event_json_callback` on the existing one — zero additional file descriptors).
+- Stacking rclone subprocesses (one at a time, ever, across both cloud_archive and LES — coordinated via `task_coordinator`).
 - Re-introducing redundant indexing triggers (every page load, every mode switch, every WiFi connect, full filesystem walks). The indexing worker is the SINGLE consumer of `indexing_queue`; producers only enqueue. Adding parallel "trigger_auto_index"-style code paths is what caused the constantly-flashing banner the redesign removed.
 - Flashing the indexing banner based on queue depth instead of `active_file`. The user only wants to know when a file is *actively being parsed*, not when items are queued.
 - Calling `requestFullscreen()` on the bare `<video>` element in `mapping.html` — the `.overlay-hud` is a sibling DOM node, so it drops out of the OS fullscreen layer. Always fullscreen the `.video-overlay-stage` wrapper instead so the HUD rides along.

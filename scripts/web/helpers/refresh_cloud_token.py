@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 # overlapping invocations.
 _ARCHIVE_TIMEOUT_SECONDS = 5 * 60   # 5 min — RecentClips is small
 _INDEX_TIMEOUT_SECONDS = 120        # 2 min — front-cam priority enqueues first
+_LIVE_EVENT_TIMEOUT_SECONDS = 10 * 60  # 10 min — Sentry events are ~6 small clips
 _HTTP_TIMEOUT_SECONDS = 10
 _WEB_BASE = "http://localhost"
 
@@ -158,6 +159,77 @@ def _trigger_cloud_sync() -> None:
         logger.warning("Cloud sync trigger failed: %s", e)
 
 
+def _wake_live_event_sync() -> None:
+    """Poke the Live Event Sync worker so it drains BEFORE cloud sync starts.
+
+    LES is the priority subsystem when both want WiFi. The endpoint is a
+    no-op when LES is disabled.
+    """
+    try:
+        result = _http_post_json("/api/live_events/wake")
+        logger.info("LES wake: enabled=%s", result.get("enabled"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("LES wake skipped: %s", e)
+
+
+def _wait_for_live_event_drain(deadline_seconds: float) -> None:
+    """Bounded poll until LES has no *ready* work (or deadline elapses).
+
+    Live events take strict priority over cloud_archive: we wait for
+    them to drain before triggering cloud sync. Cap the wait so a long
+    cellular outage doesn't block cloud_archive forever.
+
+    "Drained" here means LES has nothing it could be doing right now —
+    not necessarily an empty queue. We use the server-side
+    ``has_ready_work`` flag (which already drives cloud_archive's
+    yielding logic) as the source of truth: a row that is ``pending``
+    but in backoff (``next_retry_at`` in the future), over the retry
+    cap, or paused for the daily data cap should NOT block
+    cloud_archive for the full 10-minute deadline.
+
+    The queue is treated as drained when:
+
+      * ``has_ready_work`` is False, AND
+      * nothing is currently in flight (``uploading == 0``), AND
+      * the worker is not actively processing a row (``running``
+        is falsy).
+
+    Legacy fallback: if the server response predates this field
+    (e.g. user hasn't restarted ``gadget_web`` after upgrading), we
+    keep the old ``pending + uploading == 0`` behaviour so an
+    out-of-date server doesn't accidentally let cloud_archive race
+    LES.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            status = _http_get_json("/api/live_events/status")
+            if not status.get("enabled"):
+                return
+            counts = status.get("queue_counts") or {}
+            uploading = counts.get("uploading", 0) or 0
+            running = bool(status.get("running"))
+            if 'has_ready_work' in status:
+                if (not status.get("has_ready_work", False)
+                        and uploading == 0
+                        and not running):
+                    logger.info("LES has no ready work.")
+                    return
+            else:
+                # Out-of-date server (no has_ready_work field yet).
+                pending = (counts.get("pending", 0) or 0) + uploading
+                if pending == 0 and not running:
+                    logger.info("LES queue idle (legacy semantics).")
+                    return
+        except Exception as e:  # noqa: BLE001
+            logger.warning("LES status poll failed (will retry): %s", e)
+        time.sleep(3)
+    logger.info(
+        "LES queue still has work after %.0fs — moving on.",
+        deadline_seconds,
+    )
+
+
 def main() -> int:
     from services.video_service import get_teslacam_path
 
@@ -176,7 +248,12 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         logger.warning("Mount refresh failed (non-fatal): %s", e)
 
-    # Step 2: Trigger RecentClips → SD-card archive in the long-lived
+    # Step 2: Wake the Live Event Sync worker IMMEDIATELY so any
+    # queued sentry/save events start uploading right away. LES gets
+    # priority over cloud_archive when both want WiFi.
+    _wake_live_event_sync()
+
+    # Step 3: Trigger RecentClips → SD-card archive in the long-lived
     # gadget_web process. (Older versions of this script started the
     # archive thread in the dispatcher process directly, which meant
     # the daemon thread died as soon as the script exited.)
@@ -184,7 +261,7 @@ def main() -> int:
     if started:
         _wait_for_recent_archive(_ARCHIVE_TIMEOUT_SECONDS)
 
-    # Step 3: Bounded wait for the indexing queue to drain. The
+    # Step 4: Bounded wait for the indexing queue to drain. The
     # archive run above pre-enqueues each newly archived clip (with
     # a short defer to avoid racing the inline parse), so by the
     # time we reach this point the queue should be very small. Cap
@@ -193,7 +270,11 @@ def main() -> int:
     # on the next dispatcher fire.
     _wait_for_index_drain(_INDEX_TIMEOUT_SECONDS)
 
-    # Step 4: Trigger cloud sync. Same daemon-thread-lifetime reason
+    # Step 5: Bounded wait for LES to drain so cloud sync doesn't
+    # contend with it for the upload bandwidth or the task_coordinator.
+    _wait_for_live_event_drain(_LIVE_EVENT_TIMEOUT_SECONDS)
+
+    # Step 6: Trigger cloud sync. Same daemon-thread-lifetime reason
     # — done via the long-lived gadget_web process.
     _trigger_cloud_sync()
 

@@ -253,17 +253,34 @@ category.
 
 | Severity | Meaning | Action |
 |----------|---------|--------|
-| 🔴 **Critical** | Mount safety violations, data corruption risk, command injection, path traversal | Must fix before merge |
-| 🟡 **Warning** | Convention violations, missing error handling, hardcoded values | Should fix in this PR |
-| 🔵 **Info** | Suggestions, minor improvements, style preferences | Optional |
+| 🔴 **Critical** | Mount safety violations, data corruption risk, command injection, path traversal | **Must fix** before merge |
+| 🟡 **Warning** | Convention violations, missing error handling, hardcoded values | **Must fix** in this PR |
+| 🔵 **Info** | Suggestions, minor improvements, latent code smells, defense-in-depth | **Must fix** in this PR (or document deferral with follow-up issue link) |
+
+**TeslaUSB policy: zero code smells or latent issues left behind.** Info findings are
+NOT optional. They represent latent code smells or defense-in-depth gaps that should be
+addressed in the same PR — leaving them unfixed accumulates technical debt and erodes
+the code quality bar. The only acceptable reasons to leave an Info finding open are:
+
+1. It is a false positive (state why in the action items).
+2. The fix requires a larger refactor out of scope; **a follow-up GitHub issue must be
+   filed and linked** in the action items.
+3. The PR author / user explicitly accepts the deferral (and the deferral is documented).
+
+Phrase action items for Info findings as "expected to address" — never "optional" or
+"nice to have."
 
 ### Review decision
 
 | Condition | Decision | GH CLI flag |
 |-----------|----------|-------------|
 | Any 🔴 Critical findings | Request changes | `--request-changes` |
-| Only 🟡 Warning and/or 🔵 Info findings | Comment | `--comment` |
+| Any 🟡 Warning **or** 🔵 Info findings | Comment | `--comment` |
 | No findings — clean PR | Approve | `--approve` |
+
+**Never merge a PR as part of this skill.** The review's only output is a posted review
+(approve / request-changes / comment). The actual merge decision belongs to the user, not
+the agent. See the "Does not merge PRs" guardrail below.
 
 ### Review body format
 
@@ -297,7 +314,7 @@ Build the review body as Markdown:
 
 1. **Critical** — [must-fix items — block merge until resolved]
 2. **Warnings** — [should-fix items — fix in this PR]
-3. **Info** — [optional improvements]
+3. **Info** — [expected-to-address items in this PR; cite a follow-up issue for any deferral]
 
 <!-- skill:review-pr:review:{number} -->
 ```
@@ -419,7 +436,17 @@ List any PRs that were skipped (merged, closed, not found) with the reason.
 
 - **Does not auto-fix code.** This is a review — it reports findings for the author to fix.
 - **Does not run tests.** TeslaUSB has no automated test suite.
-- **Does not merge PRs.** The review decision is advisory.
+- **Never merges PRs — under any circumstances.** The review decision is advisory only.
+  Even on a clean Approve, the skill MUST NOT call `gh pr merge`, push to `main`, or
+  otherwise combine the PR into the base branch. Merging is exclusively the user's
+  decision and must be performed by the user (or by an explicit, separate instruction
+  outside this skill). If the user asks the agent to merge after the review, that is a
+  separate task — confirm with the user first and treat it as a deliberate, supervised
+  operation, never as the implicit next step after a review.
+- **Does not treat Info findings as optional.** Info-level items are latent code smells
+  / defense-in-depth gaps and are expected to be addressed in the same PR. If the
+  reviewer finds genuine deferrals are needed, a follow-up GitHub issue must be filed
+  and linked in the review.
 - **Does not review files outside the PR diff.** Stay within the changed files.
 - **Does not auto-select PRs.** The user must provide PR numbers.
 - **Does not deploy changes.** Deployment via `setup_usb.sh` is a separate step.

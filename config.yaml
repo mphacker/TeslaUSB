@@ -136,6 +136,28 @@ cloud_archive:
   cloud_min_retention_days: 30           # Keep at least this many days of videos
 
 # ============================================================================
+# Live Event Sync Configuration
+# ============================================================================
+# Real-time upload of Sentry/Saved events as soon as Tesla writes the
+# event.json metadata. Separate first-class subsystem from cloud_archive:
+#   - own enable flag, queue, and worker thread
+#   - shares only the cloud provider credentials (configured in the web UI)
+#   - takes priority over cloud_archive when both want WiFi
+#   - persists the queue across reboots and WiFi outages
+# Pi Zero 2 W resource budget: < 25 MB RSS steady state, < 0.1% idle CPU.
+live_event_sync:
+  enabled: false                         # Opt-in default; existing installs unchanged
+  watch_folders:                         # Tesla event subfolders to react to
+    - SentryClips
+    - SavedClips
+  upload_scope: "event_minute"           # event_minute = 6 cams + event.json (~150-200 MB);
+                                         # event_folder = all .mp4 in the event dir (~0.7-2 GB)
+  retry_max_attempts: 5                  # Move row to 'failed' after this many attempts
+  retry_backoff_seconds: [30, 120, 300, 900, 3600]  # 30s, 2m, 5m, 15m, 1h
+  daily_data_cap_mb: 0                   # 0 = unlimited; pause uploads when exceeded
+  notify_webhook_url: ""                 # Optional POST URL on successful upload
+
+# ============================================================================
 # RecentClips Archive Configuration
 # ============================================================================
 # Automatically copies RecentClips from the USB image (RO mount) to the Pi's

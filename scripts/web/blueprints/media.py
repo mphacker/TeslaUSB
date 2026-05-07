@@ -16,5 +16,9 @@ def media_home():
         return redirect(url_for('lock_chimes.lock_chimes'))
     if os.path.isfile(IMG_MUSIC_PATH) and MUSIC_ENABLED:
         return redirect(url_for('music.music_home'))
+    # Boombox lives on the music drive too — same gating as music. If
+    # somehow only Boombox is registered (a future config), surface it.
+    if os.path.isfile(IMG_MUSIC_PATH) and MUSIC_ENABLED:
+        return redirect(url_for('boombox.boombox_home'))
     # Fallback to lock_chimes even if not available (it will show the error message)
     return redirect(url_for('lock_chimes.lock_chimes'))

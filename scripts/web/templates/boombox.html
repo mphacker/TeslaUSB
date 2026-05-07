@@ -1,0 +1,503 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+    /* NHTSA safety banner — uses ios-warning tokens which are the
+       project's amber callout palette. The banner is the most important
+       UI element on this page; it must sit above the upload zone on
+       both desktop and 375px-wide mobile (no max-width hiding it under
+       the fold). */
+    .boombox-nhtsa-warning {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        background-color: var(--ios-warning-bg);
+        border-left: 4px solid var(--ios-warning-border);
+        padding: 14px 16px;
+        border-radius: 5px;
+        margin: 16px 0 20px 0;
+        transition: background-color 0.3s ease, border-color 0.3s ease;
+    }
+
+    .boombox-nhtsa-warning .nhtsa-icon {
+        flex-shrink: 0;
+        width: 22px;
+        height: 22px;
+        color: var(--ios-warning-text);
+        margin-top: 2px;
+    }
+
+    .boombox-nhtsa-warning .nhtsa-body {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .boombox-nhtsa-warning p {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.45;
+        color: var(--ios-warning-text);
+    }
+
+    .boombox-nhtsa-warning p + p {
+        margin-top: 6px;
+        font-size: 13px;
+        color: var(--text-secondary);
+    }
+
+    .boombox-nhtsa-warning strong {
+        font-weight: 600;
+    }
+
+    /* Requirements card */
+    .boombox-requirements {
+        background-color: var(--bg-info);
+        color: var(--text-info);
+        padding: 14px 16px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+    }
+
+    .boombox-requirements ul {
+        margin: 8px 0 0 20px;
+        padding: 0;
+        font-size: 13px;
+        color: var(--text-secondary);
+    }
+
+    .boombox-requirements li {
+        margin-bottom: 2px;
+    }
+
+    /* Count badge */
+    .boombox-count-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 12px;
+        border-radius: 999px;
+        background: var(--bg-info);
+        color: var(--text-primary);
+        font-size: 13px;
+        font-weight: 600;
+        border: 1px solid var(--border-color);
+    }
+
+    .boombox-count-badge.full {
+        background: var(--ios-warning-bg);
+        color: var(--ios-warning-text);
+        border-color: var(--ios-warning-border);
+    }
+
+    /* Upload drop zone */
+    .boombox-drop-zone {
+        border: 2px dashed var(--border-input);
+        border-radius: 8px;
+        padding: 32px 20px;
+        text-align: center;
+        background: var(--form-input-bg);
+        cursor: pointer;
+        transition: border-color 0.2s ease, background-color 0.2s ease;
+        margin-bottom: 20px;
+    }
+
+    .boombox-drop-zone:hover,
+    .boombox-drop-zone.is-dragover {
+        border-color: var(--btn-primary-bg);
+        background: var(--bg-hover);
+    }
+
+    .boombox-drop-zone .drop-icon {
+        width: 40px;
+        height: 40px;
+        color: var(--btn-primary-bg);
+        margin-bottom: 10px;
+    }
+
+    .boombox-drop-zone .drop-title {
+        font-size: 15px;
+        font-weight: 600;
+        margin-bottom: 4px;
+        color: var(--text-primary);
+    }
+
+    .boombox-drop-zone .drop-hint {
+        font-size: 13px;
+        color: var(--text-secondary);
+    }
+
+    .boombox-drop-zone.is-disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+    }
+
+    /* File list */
+    .boombox-file-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-top: 16px;
+    }
+
+    .boombox-file {
+        background: var(--bg-container);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 14px 16px;
+        transition: background-color 0.2s ease, border-color 0.2s ease;
+    }
+
+    .boombox-file.is-invalid {
+        border-left: 4px solid var(--ios-warning-border);
+    }
+
+    .boombox-file-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+    }
+
+    .boombox-file-icon {
+        width: 18px;
+        height: 18px;
+        color: var(--btn-primary-bg);
+        flex-shrink: 0;
+    }
+
+    .boombox-file-name {
+        font-weight: 600;
+        color: var(--text-primary);
+        font-size: 15px;
+        flex: 1;
+        min-width: 0;
+        word-break: break-word;
+    }
+
+    .boombox-file-size {
+        font-size: 13px;
+        color: var(--text-secondary);
+        flex-shrink: 0;
+    }
+
+    .boombox-file-warning {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        background: var(--ios-warning-bg);
+        border-radius: 4px;
+        padding: 8px 10px;
+        margin-bottom: 10px;
+        color: var(--ios-warning-text);
+        font-size: 13px;
+        line-height: 1.4;
+    }
+
+    .boombox-file-warning .warn-icon {
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+        margin-top: 2px;
+    }
+
+    .boombox-file audio {
+        width: 100%;
+        height: 40px;
+        margin-bottom: 10px;
+    }
+
+    .boombox-file-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .boombox-file-actions .action-btn {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    .boombox-empty {
+        text-align: center;
+        padding: 40px 20px;
+        color: var(--text-secondary);
+        background: var(--bg-container);
+        border: 1px dashed var(--border-color);
+        border-radius: 8px;
+    }
+
+    .boombox-empty .empty-icon {
+        width: 48px;
+        height: 48px;
+        color: var(--text-muted);
+        margin-bottom: 12px;
+    }
+
+    .boombox-empty p {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.5;
+    }
+
+    .boombox-section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin: 24px 0 12px 0;
+    }
+
+    .boombox-section-header h3 {
+        margin: 0;
+        font-size: 18px;
+    }
+
+    /* Mobile: 375px */
+    @media (max-width: 480px) {
+        .boombox-drop-zone {
+            padding: 22px 14px;
+        }
+        .boombox-file-actions .action-btn {
+            flex: 1;
+        }
+        .boombox-file-header {
+            gap: 6px;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container">
+    {% include 'media_hub_nav.html' %}
+
+    <h2>Boombox</h2>
+    <p style="margin: 4px 0 0 0; color: var(--text-secondary); font-size: 14px;">
+        Sounds Tesla plays through the external pedestrian-warning speaker.
+    </p>
+
+    {# === NHTSA SAFETY WARNING (must stay above the upload zone) === #}
+    <div class="boombox-nhtsa-warning" role="alert">
+        <svg class="nhtsa-icon" aria-hidden="true">
+            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use>
+        </svg>
+        <div class="nhtsa-body">
+            <p>
+                <strong>Boombox sounds only play while the vehicle is in Park</strong>
+                (NHTSA safety restriction, Feb 2022).
+            </p>
+            <p>
+                Your vehicle must have an external pedestrian-warning speaker &mdash;
+                built September 2019 or later for Model 3, Y, S, or X, or any Cybertruck.
+            </p>
+        </div>
+    </div>
+
+    <div class="boombox-requirements">
+        <p style="margin: 0; display: flex; align-items: center; gap: 8px;">
+            <svg style="width: 18px; height: 18px; flex-shrink: 0;" aria-hidden="true">
+                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use>
+            </svg>
+            <strong>Tesla Boombox Requirements</strong>
+        </p>
+        <ul>
+            <li><strong>Folder:</strong> <code>/{{ boombox_folder }}</code> at the root of the Music drive (managed for you)</li>
+            <li><strong>Format:</strong> MP3 or WAV only</li>
+            <li><strong>Size:</strong> {{ max_file_size_mb }} MB maximum (≤ 5 seconds recommended)</li>
+            <li><strong>Filename:</strong> {{ max_filename_length }} characters max (letters, numbers, spaces, underscores, dashes, dots)</li>
+            <li><strong>Count:</strong> Up to {{ max_file_count }} sounds (Tesla loads the first {{ max_file_count }} alphabetically)</li>
+        </ul>
+    </div>
+
+    {# === UPLOAD ZONE === #}
+    <div class="boombox-section-header">
+        <h3>Add a sound</h3>
+        <span id="boomboxCountBadge"
+              class="boombox-count-badge {% if file_count >= max_file_count %}full{% endif %}">
+            <svg style="width: 14px; height: 14px;" aria-hidden="true">
+                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use>
+            </svg>
+            {{ file_count }} / {{ max_file_count }} sounds
+        </span>
+    </div>
+
+    <form method="post" action="{{ url_for('boombox.upload') }}"
+          enctype="multipart/form-data" id="boomboxUploadForm">
+        <label for="boomboxFileInput" class="boombox-drop-zone {% if file_count >= max_file_count %}is-disabled{% endif %}"
+               id="boomboxDropZone">
+            <svg class="drop-icon" aria-hidden="true">
+                <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use>
+            </svg>
+            <div class="drop-title">
+                {% if file_count >= max_file_count %}
+                Maximum sounds reached
+                {% else %}
+                Drop a file here or click to choose
+                {% endif %}
+            </div>
+            <div class="drop-hint">
+                MP3 or WAV &middot; up to {{ max_file_size_mb }} MB &middot;
+                {{ max_file_count - file_count }} slot{% if (max_file_count - file_count) != 1 %}s{% endif %} remaining
+            </div>
+            <input type="file" id="boomboxFileInput" name="boombox_files"
+                   accept=".mp3,.wav,audio/mpeg,audio/wav,audio/x-wav"
+                   {% if file_count < max_file_count %}multiple{% endif %}
+                   style="display: none;"
+                   {% if file_count >= max_file_count %}disabled{% endif %}>
+        </label>
+        <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: -8px; margin-bottom: 16px;">
+            <button type="submit" class="action-btn primary"
+                    id="boomboxSubmitBtn"
+                    {% if file_count >= max_file_count %}disabled{% endif %}
+                    style="display: none; min-height: 44px;">
+                <svg style="width: 16px; height: 16px; vertical-align: middle; margin-right: 4px;" aria-hidden="true">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use>
+                </svg>
+                Upload
+            </button>
+        </div>
+    </form>
+
+    {# === FILE LIST === #}
+    <div class="boombox-section-header">
+        <h3>Current sounds</h3>
+    </div>
+
+    {% if files %}
+    <div class="boombox-file-list">
+        {% for file in files %}
+        <div class="boombox-file {% if not file.valid %}is-invalid{% endif %}">
+            <div class="boombox-file-header">
+                <svg class="boombox-file-icon" aria-hidden="true">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use>
+                </svg>
+                <span class="boombox-file-name">{{ file.filename }}</span>
+                <span class="boombox-file-size">{{ file.size_str }}</span>
+            </div>
+
+            {% if file.warning %}
+            <div class="boombox-file-warning" role="status">
+                <svg class="warn-icon" aria-hidden="true">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use>
+                </svg>
+                <div>
+                    <strong>Tesla may ignore this file.</strong> {{ file.warning }}
+                </div>
+            </div>
+            {% endif %}
+
+            <audio controls preload="none">
+                {% set ext = file.filename.lower().rsplit('.', 1)[-1] %}
+                <source src="{{ url_for('boombox.play', filename=file.filename) }}"
+                        type="{{ 'audio/mpeg' if ext == 'mp3' else 'audio/wav' }}">
+                Your browser does not support the audio element.
+            </audio>
+
+            <div class="boombox-file-actions">
+                <form method="post"
+                      action="{{ url_for('boombox.delete', filename=file.filename) }}"
+                      style="display: inline; margin: 0;"
+                      onsubmit="return confirm('Delete {{ file.filename|e }}?');">
+                    <button type="submit" class="action-btn danger" aria-label="Delete {{ file.filename|e }}">
+                        <svg style="width: 16px; height: 16px; vertical-align: middle; margin-right: 4px;" aria-hidden="true">
+                            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use>
+                        </svg>
+                        Delete
+                    </button>
+                </form>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="boombox-empty">
+        <svg class="empty-icon" aria-hidden="true">
+            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-megaphone"></use>
+        </svg>
+        <p>
+            <strong>Add your first Boombox sound</strong> &mdash; it&rsquo;ll play through your car&rsquo;s
+            external speaker when you unlock or park.
+        </p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+(function() {
+    const dropZone = document.getElementById('boomboxDropZone');
+    const fileInput = document.getElementById('boomboxFileInput');
+    const submitBtn = document.getElementById('boomboxSubmitBtn');
+    const form = document.getElementById('boomboxUploadForm');
+    const maxFileSize = {{ max_file_size }};
+    const maxFileCount = {{ max_file_count }};
+    const currentCount = {{ file_count }};
+    const allowedExts = ['.mp3', '.wav'];
+
+    if (!dropZone || !fileInput || !form) return;
+
+    function validateFiles(fileList) {
+        const remaining = maxFileCount - currentCount;
+        if (fileList.length > remaining) {
+            alert('Only ' + remaining + ' more file(s) can be added '
+                  + '(max ' + maxFileCount + ' total).');
+            return false;
+        }
+        for (let i = 0; i < fileList.length; i++) {
+            const f = fileList[i];
+            const lower = f.name.toLowerCase();
+            const ext = '.' + (lower.split('.').pop() || '');
+            if (allowedExts.indexOf(ext) === -1) {
+                alert(f.name + ': only MP3 and WAV files are allowed.');
+                return false;
+            }
+            if (f.size > maxFileSize) {
+                alert(f.name + ': file is larger than 1 MB.');
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fileInput.addEventListener('change', function() {
+        if (!fileInput.files || fileInput.files.length === 0) {
+            if (submitBtn) submitBtn.style.display = 'none';
+            return;
+        }
+        if (!validateFiles(fileInput.files)) {
+            fileInput.value = '';
+            if (submitBtn) submitBtn.style.display = 'none';
+            return;
+        }
+        // Auto-submit so the user doesn't need to click twice on mobile.
+        form.submit();
+    });
+
+    // Drag-and-drop wiring (desktop niceness; click-to-pick covers mobile).
+    ['dragenter', 'dragover'].forEach(function(ev) {
+        dropZone.addEventListener(ev, function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!fileInput.disabled) {
+                dropZone.classList.add('is-dragover');
+            }
+        });
+    });
+    ['dragleave', 'drop'].forEach(function(ev) {
+        dropZone.addEventListener(ev, function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('is-dragover');
+        });
+    });
+    dropZone.addEventListener('drop', function(e) {
+        if (fileInput.disabled) return;
+        const files = (e.dataTransfer && e.dataTransfer.files) || [];
+        if (!files.length) return;
+        if (!validateFiles(files)) return;
+        fileInput.files = files;
+        form.submit();
+    });
+})();
+</script>
+{% endblock %}

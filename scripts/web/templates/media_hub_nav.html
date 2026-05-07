@@ -12,6 +12,12 @@
     Music
   </a>
   {% endif %}
+  {% if boombox_available %}
+  <a href="{{ url_for('boombox.boombox_home') }}" class="media-pill {% if media_tab == 'boombox' %}active{% endif %}">
+    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-megaphone"></use></svg>
+    Boombox
+  </a>
+  {% endif %}
   {% if shows_available %}
   <a href="{{ url_for('light_shows.light_shows') }}" class="media-pill {% if media_tab == 'shows' %}active{% endif %}">
     <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-sparkles"></use></svg>

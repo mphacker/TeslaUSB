@@ -40,6 +40,15 @@
     --ios-warning-border: #ffc107;
     --ios-warning-text: #856404;
 
+    /* Cropper overlay (canvas) — intentionally theme-invariant.
+       The crop outline + handle fill/stroke must stay visible against
+       arbitrary user image content, so the standard white-on-black
+       halo is used in BOTH themes. Centralised here so the values
+       can be tuned in one place rather than scattered across JS. */
+    --cropper-handle-fill: #ffffff;
+    --cropper-handle-stroke: #000000;
+    --cropper-bg-fallback: #000000;
+
     --text-primary: #333333;
     --text-secondary: #666666;
     --text-navbar: #ffffff;
@@ -124,6 +133,11 @@
     --ios-warning-bg: #2d2a1e;
     --ios-warning-border: #9e6a03;
     --ios-warning-text: #e3b341;
+
+    /* Cropper overlay — same values in dark mode (see :root comment). */
+    --cropper-handle-fill: #ffffff;
+    --cropper-handle-stroke: #000000;
+    --cropper-bg-fallback: #000000;
 
     --text-primary: #e6edf3;
     --text-secondary: #8b949e;

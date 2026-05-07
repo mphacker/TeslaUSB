@@ -1,0 +1,1102 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+    {% include 'media_hub_nav.html' %}
+    <h2>Custom License Plates</h2>
+
+    {# iOS Safari Warning — file uploads only work in mobile Safari on iOS #}
+    <div id="iosWarning" class="ios-warning" style="display: none;">
+        <p>
+            <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+            <strong>iOS Browser Limitation:</strong>
+            File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.
+        </p>
+        <p>Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+    </div>
+
+    {# Tesla Requirements Info #}
+    <div class="info-box" style="margin-bottom: 20px;">
+        <p>
+            <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+            <strong>Tesla License-Plate Requirements:</strong>
+        </p>
+        <ul style="margin: 10px 0 0 20px; padding: 0; font-size: 13px; color: var(--text-secondary);">
+            <li><strong>Format:</strong> PNG only</li>
+            <li><strong>Size:</strong> {{ (max_file_size / 1024)|round(0)|int }} KB maximum</li>
+            <li><strong>Dimensions:</strong> {{ plate_width_na }}x{{ plate_height_na }} (North America) or {{ plate_width_eu }}x{{ plate_height_eu }} (Europe / Italy)</li>
+            <li><strong>Filename:</strong> {{ max_filename_length }} characters max, letters and numbers only (no spaces, dashes, or underscores)</li>
+            <li><strong>Count:</strong> Up to {{ max_plate_count }} plates at a time (currently: {{ plate_count }}/{{ max_plate_count }})</li>
+        </ul>
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            <strong>Usage:</strong> License plates appear in the in-car Background &rarr; Image selector under license plate config.
+            <a href="https://github.com/teslamotors/custom-wraps" target="_blank" rel="noopener" style="color: var(--text-link);">View Tesla's custom-wraps repository</a> (license-plate spec is documented in <a href="https://github.com/teslamotors/custom-wraps/issues/13" target="_blank" rel="noopener" style="color: var(--text-link);">issue #13</a>).
+        </p>
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            Drop any image and we'll open a cropper to produce a Tesla-compliant PNG &mdash; no need to resize ahead of time.
+        </p>
+    </div>
+
+    <div class="folder-controls" id="plateUploadControls">
+        {# Desktop drag-and-drop interface (hidden by default; JS shows it when supported) #}
+        <div id="desktopUploadInterface" style="display: none;">
+            <div class="drag-drop-zone" id="dragDropZone" style="border: 3px dashed var(--border-input); border-radius: 8px; padding: 40px; text-align: center; background: var(--form-input-bg); cursor: pointer; transition: all 0.3s; margin-bottom: 20px; min-height: 44px;">
+                <div style="pointer-events: none;">
+                    <svg class="drop-zone-icon" aria-hidden="true" style="width: 48px; height: 48px; color: var(--accent); display: block; margin: 0 auto 15px;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-image"></use></svg>
+                    <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Drag &amp; drop image files here or click to browse</p>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">
+                        Any image format &middot; we'll crop to {{ plate_width_na }}x{{ plate_height_na }} or {{ plate_width_eu }}x{{ plate_height_eu }} &middot; max {{ (max_file_size / 1024)|round(0)|int }} KB output
+                    </p>
+                </div>
+            </div>
+
+            <input type="file" id="plate_files_multi" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple style="display: none;">
+
+            <div id="selectedFilesPreview" style="display: none; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">
+                    <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-list"></use></svg>
+                    Selected Files
+                </h4>
+                <div id="filesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 300px; overflow-y: auto;"></div>
+                <div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">
+                    <button type="button" class="action-btn" id="uploadSelectedBtn" style="min-height: 44px;">Upload All Files</button>
+                    <button type="button" class="action-btn danger" id="clearSelectedBtn" style="min-height: 44px;">Clear All</button>
+                </div>
+            </div>
+        </div>
+
+        {# Mobile / fallback simple form (always rendered; JS hides it when desktop interface is active) #}
+        <form method="post" action="{{ url_for('license_plates.upload_plate') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="plateUploadForm">
+            <label for="plate_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Custom License Plate:</label>
+            <p style="margin: 0 0 10px 0; font-size: 13px; color: var(--text-secondary);">
+                Any image &middot; we'll crop to {{ plate_width_na }}x{{ plate_height_na }} or {{ plate_width_eu }}x{{ plate_height_eu }} &middot; max {{ (max_file_size / 1024)|round(0)|int }} KB output
+            </p>
+            <input type="file" name="plate_file" id="plate_file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" required
+                   style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary); min-height: 44px;">
+            <button type="submit" class="action-btn" id="plateUploadBtn" style="min-height: 44px;">Upload</button>
+        </form>
+
+        <div id="plateUploadProgress" style="display: none; margin-bottom: 20px;">
+            <div style="background: var(--upload-progress-bg, var(--form-input-bg)); border-radius: 8px; padding: 15px; border: 2px solid var(--accent);">
+                <h4 style="margin: 0 0 10px 0; color: var(--accent);">
+                    <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use></svg>
+                    Uploading License Plate&hellip;
+                </h4>
+                <div style="background: var(--upload-progress-bar-bg, var(--bg-secondary)); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                    <div id="plateProgressBar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: var(--bg-primary); font-weight: bold; font-size: 14px;">
+                        0%
+                    </div>
+                </div>
+                <p id="plateUploadStatus" style="margin: 0; font-size: 13px; color: var(--text-secondary);">Preparing upload&hellip;</p>
+            </div>
+        </div>
+    </div>
+
+    {% if plate_files %}
+    {# Desktop table layout #}
+    <div class="video-table-container">
+        <table class="video-table" style="table-layout: fixed;">
+            <thead>
+                <tr>
+                    <th style="width: 18%;">Preview</th>
+                    <th style="width: 28%;">Filename</th>
+                    <th style="width: 14%;">Dimensions</th>
+                    <th style="width: 12%;">Size</th>
+                    <th style="width: 28%;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for plate in plate_files %}
+                <tr{% if not plate.compliant %} style="background: var(--bg-warning, var(--form-input-bg));"{% endif %}>
+                    <td>
+                        {# User-uploaded PNG rendered as a thumbnail — exempt from the SVG-only rule per design system #}
+                        <img src="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                             alt="License plate {{ plate.filename }}"
+                             style="max-width: 120px; max-height: 60px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);"
+                             loading="lazy">
+                    </td>
+                    <td style="word-wrap: break-word; overflow-wrap: break-word;">
+                        {{ plate.filename }}
+                        {% if not plate.compliant %}
+                        <div style="margin-top: 6px; font-size: 12px; color: var(--accent-danger, var(--text-secondary));">
+                            <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                            {% for issue in plate.issues %}
+                            {{ issue }}{% if not loop.last %}; {% endif %}
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </td>
+                    <td>{{ plate.dimensions }}</td>
+                    <td>{{ plate.size_str }}</td>
+                    <td>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                            <a href="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                               class="action-btn" style="min-height: 44px; display: inline-flex; align-items: center;">
+                                Download
+                            </a>
+                            <form method="post" action="{{ url_for('license_plates.delete_plate', partition=plate.partition_key, filename=plate.filename) }}" style="display: inline; margin: 0;"
+                                  onsubmit="return confirm('Are you sure you want to delete {{ plate.filename }}?');">
+                                <button type="submit" class="action-btn danger" style="min-height: 44px;">Delete</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {# Mobile card layout #}
+    <div class="mobile-card-container">
+        {% for plate in plate_files %}
+        <div class="mobile-card plate-card"{% if not plate.compliant %} style="border-color: var(--accent-danger, var(--border-input));"{% endif %}>
+            <div style="text-align: center; margin-bottom: 8px;">
+                <img src="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                     alt="License plate {{ plate.filename }}"
+                     style="max-width: 100%; max-height: 80px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);"
+                     loading="lazy">
+            </div>
+            <div class="mobile-card-title">
+                <strong>{{ plate.filename }}</strong>
+            </div>
+            {% if not plate.compliant %}
+            <div style="margin: 6px 0; padding: 6px 8px; background: var(--bg-warning, var(--form-input-bg)); border-radius: 4px; font-size: 12px; color: var(--accent-danger, var(--text-secondary));">
+                <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                {% for issue in plate.issues %}
+                {{ issue }}{% if not loop.last %}; {% endif %}
+                {% endfor %}
+            </div>
+            {% endif %}
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Dimensions:</span>
+                    <span class="mobile-card-info-value">{{ plate.dimensions }}</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">{{ plate.size_str }}</span>
+                </div>
+            </div>
+            <div class="mobile-card-actions" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                <a href="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                   class="action-btn" style="flex: 1; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;">
+                    Download
+                </a>
+                <form method="post" action="{{ url_for('license_plates.delete_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                      onsubmit="return confirm('Are you sure you want to delete {{ plate.filename }}?');"
+                      style="flex: 1; margin: 0; display: flex;">
+                    <button type="submit" class="action-btn danger" style="width: 100%; min-height: 44px;">Delete</button>
+                </form>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="info-box">
+        <p>No license-plate files found in the LicensePlate folder.</p>
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            Upload a PNG to set a custom background image behind the license plate in your Tesla.
+        </p>
+    </div>
+    {% endif %}
+</div>
+
+{# ============================================================== #}
+{# Smart-resize cropper modal — pure vanilla JS / canvas / pointer #}
+{# ============================================================== #}
+<div id="cropperModal" class="cropper-modal" role="dialog" aria-modal="true" aria-labelledby="cropperTitle" style="display: none;">
+    <div class="cropper-content">
+        <header class="cropper-header">
+            <h3 id="cropperTitle" style="margin: 0;">
+                <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-image"></use></svg>
+                Crop License Plate Image
+            </h3>
+            <button type="button" id="cropperCloseBtn" class="action-btn" aria-label="Close cropper" style="min-width: 44px; min-height: 44px;">
+                <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-x"></use></svg>
+            </button>
+        </header>
+
+        <div class="cropper-body">
+            <div id="cropperFileInfo" style="margin-bottom: 10px; font-size: 13px; color: var(--text-secondary);"></div>
+
+            <fieldset style="border: 1px solid var(--border-input); border-radius: 4px; padding: 10px 14px; margin-bottom: 12px;">
+                <legend style="font-size: 13px; font-weight: 600; padding: 0 6px;">Region</legend>
+                <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; min-height: 44px; cursor: pointer;">
+                    <input type="radio" name="plateRegion" value="na" id="cropperRegionNa" checked style="width: 18px; height: 18px;">
+                    <span>North America ({{ plate_width_na }}&times;{{ plate_height_na }})</span>
+                </label>
+                <label style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; cursor: pointer;">
+                    <input type="radio" name="plateRegion" value="eu" id="cropperRegionEu" style="width: 18px; height: 18px;">
+                    <span>Europe / Italy ({{ plate_width_eu }}&times;{{ plate_height_eu }})</span>
+                </label>
+            </fieldset>
+
+            <div class="cropper-canvas-wrapper" style="position: relative; max-width: 100%; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border-input); border-radius: 4px; touch-action: none;">
+                <canvas id="cropperCanvas" style="display: block; max-width: 100%; touch-action: none;"></canvas>
+            </div>
+
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
+                <button type="button" id="cropperResetBtn" class="action-btn" style="min-height: 44px;">Reset crop</button>
+                <button type="button" id="cropperMaximizeBtn" class="action-btn" style="min-height: 44px;">Maximize crop</button>
+            </div>
+
+            <div style="margin-top: 14px;">
+                <p style="margin: 0 0 6px 0; font-size: 13px; font-weight: 600; color: var(--text-primary);">Live preview (actual size):</p>
+                <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; border: 1px solid var(--border-input); display: inline-block;">
+                    <canvas id="cropperPreview" style="display: block; image-rendering: auto; background: var(--bg-primary);"></canvas>
+                </div>
+                <p id="cropperOutputInfo" style="margin: 6px 0 0 0; font-size: 12px; color: var(--text-secondary);"></p>
+            </div>
+        </div>
+
+        <footer class="cropper-footer" style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 16px;">
+            <button type="button" id="cropperCancelBtn" class="action-btn" style="min-height: 44px;">Cancel</button>
+            <button type="button" id="cropperConfirmBtn" class="action-btn" style="min-height: 44px;">Use this image</button>
+        </footer>
+    </div>
+</div>
+
+<style>
+.cropper-modal {
+    position: fixed; inset: 0; z-index: 9999;
+    background: var(--modal-overlay-bg, rgba(0, 0, 0, 0.65));
+    display: flex; align-items: center; justify-content: center;
+    padding: 12px;
+    overflow-y: auto;
+}
+.cropper-content {
+    background: var(--bg-modal, var(--bg-primary));
+    color: var(--text-primary);
+    border: 1px solid var(--border-input);
+    border-radius: 8px;
+    padding: 16px;
+    width: 100%;
+    max-width: 720px;
+    max-height: 95vh;
+    overflow-y: auto;
+}
+.cropper-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; gap: 8px;
+}
+.cropper-body {
+    display: flex; flex-direction: column;
+}
+.inline-icon {
+    width: 16px; height: 16px;
+    display: inline-block; vertical-align: text-bottom;
+}
+.drop-zone-icon { display: block; }
+@media (max-width: 480px) {
+    .cropper-content { padding: 12px; }
+}
+[data-theme="dark"] .cropper-modal {
+    background: var(--modal-overlay-bg, rgba(0, 0, 0, 0.8));
+}
+</style>
+
+<script>
+// ---------------------------------------------------------------
+// Server-supplied limits & target dimensions
+// ---------------------------------------------------------------
+const MAX_FILE_SIZE = {{ max_file_size }};
+const MAX_FILENAME_LENGTH = {{ max_filename_length }};
+const MAX_PLATE_COUNT = {{ max_plate_count }};
+const CURRENT_PLATE_COUNT = {{ plate_count }};
+const PLATE_NA = { width: {{ plate_width_na }}, height: {{ plate_height_na }} };
+const PLATE_EU = { width: {{ plate_width_eu }}, height: {{ plate_height_eu }} };
+const VALID_FILENAME_RE = /^[A-Za-z0-9]+$/;
+
+function isMobileDevice() {
+    return /(iPad|iPhone|iPod|Android|Mobile)/i.test(navigator.userAgent) ||
+           window.matchMedia("(max-width: 768px)").matches;
+}
+function isIOS() {
+    return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
+}
+function isSafari() {
+    var ua = navigator.userAgent;
+    return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
+}
+function supportsMultipleUpload() {
+    const input = document.createElement('input');
+    return 'multiple' in input && !isIOS();
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const isMobile = isMobileDevice();
+    const supportsMulti = supportsMultipleUpload();
+
+    const desktopInterface = document.getElementById('desktopUploadInterface');
+    const mobileForm = document.getElementById('plateUploadForm');
+    const iosWarning = document.getElementById('iosWarning');
+    const uploadControls = document.getElementById('plateUploadControls');
+
+    if (isIOS() && !isSafari()) {
+        if (iosWarning) iosWarning.style.display = 'block';
+        if (uploadControls) uploadControls.style.display = 'none';
+        return;
+    }
+
+    if (!isMobile && supportsMulti) {
+        if (desktopInterface) desktopInterface.style.display = 'block';
+        if (mobileForm) mobileForm.style.display = 'none';
+        initializeDragDrop();
+    } else {
+        if (desktopInterface) desktopInterface.style.display = 'none';
+        if (mobileForm) mobileForm.style.display = 'block';
+        initializeSimpleUpload();
+    }
+});
+
+// ---------------------------------------------------------------
+// Multi-file selection state (post-cropper, validated PNG blobs)
+// ---------------------------------------------------------------
+let selectedFiles = [];          // Array of { name, blob, dimensions }
+let validationResults = new Map(); // name -> { valid, errors }
+
+function initializeDragDrop() {
+    const dropZone = document.getElementById('dragDropZone');
+    const fileInput = document.getElementById('plate_files_multi');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+    if (!dropZone || !fileInput) return;
+
+    dropZone.addEventListener('click', function() { fileInput.click(); });
+    fileInput.addEventListener('change', function(e) {
+        handleSelectedFiles(Array.from(e.target.files));
+        // Reset so selecting the same filename twice still triggers change.
+        fileInput.value = '';
+    });
+
+    dropZone.addEventListener('dragenter', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.style.borderColor = 'var(--accent)';
+        dropZone.style.background = 'var(--hover-bg, var(--form-input-bg))';
+    });
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault(); e.stopPropagation();
+    });
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+    });
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+        handleSelectedFiles(Array.from(e.dataTransfer.files));
+    });
+
+    if (uploadBtn) uploadBtn.addEventListener('click', uploadAllFiles);
+    if (clearBtn) clearBtn.addEventListener('click', function() {
+        selectedFiles = [];
+        validationResults.clear();
+        renderFilesList();
+    });
+}
+
+async function handleSelectedFiles(files) {
+    const remainingSlots = MAX_PLATE_COUNT - CURRENT_PLATE_COUNT - selectedFiles.length;
+    if (remainingSlots <= 0) {
+        alert('Maximum of ' + MAX_PLATE_COUNT + ' license plates allowed. ' +
+              'You already have ' + CURRENT_PLATE_COUNT + ' plates.');
+        return;
+    }
+
+    // Filter to images only.
+    const images = files.filter(f => f.type.startsWith('image/'));
+    if (images.length === 0) {
+        alert('Please select image files (PNG, JPEG, WebP, GIF, BMP).');
+        return;
+    }
+
+    let added = 0;
+    for (const file of images) {
+        if (added >= remainingSlots) {
+            alert('Only ' + remainingSlots + ' slot(s) remaining. ' +
+                  'Some files were not added.');
+            break;
+        }
+        // Each file goes through the cropper (or bypass if already exact dims).
+        const result = await processOneFile(file);
+        if (result) {
+            selectedFiles.push(result);
+            validationResults.set(result.name, validatePlateBlob(result));
+            added++;
+        }
+    }
+    renderFilesList();
+}
+
+function deriveBaseName(originalFilename) {
+    // Strip extension, then strip invalid characters so the user has
+    // a fighting chance of getting an alphanumeric default.
+    const noExt = originalFilename.replace(/\.[^.]+$/, '');
+    const cleaned = noExt.replace(/[^A-Za-z0-9]/g, '');
+    return cleaned.slice(0, MAX_FILENAME_LENGTH) || 'plate';
+}
+
+function loadImageFromFile(file) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = function() {
+            // Don't revoke yet — the cropper still needs the image.
+            img._objectUrl = url;
+            resolve(img);
+        };
+        img.onerror = function() {
+            URL.revokeObjectURL(url);
+            reject(new Error('Failed to load image'));
+        };
+        img.src = url;
+    });
+}
+
+async function processOneFile(file) {
+    let img;
+    try {
+        img = await loadImageFromFile(file);
+    } catch (e) {
+        alert('Could not read ' + file.name + ': ' + e.message);
+        return null;
+    }
+
+    const isExactNa = (img.naturalWidth === PLATE_NA.width &&
+                       img.naturalHeight === PLATE_NA.height);
+    const isExactEu = (img.naturalWidth === PLATE_EU.width &&
+                       img.naturalHeight === PLATE_EU.height);
+
+    // Already-compliant PNGs bypass the cropper entirely.
+    if ((isExactNa || isExactEu) && file.type === 'image/png') {
+        if (img._objectUrl) URL.revokeObjectURL(img._objectUrl);
+        const baseName = deriveBaseName(file.name);
+        return {
+            name: baseName + '.png',
+            originalName: file.name,
+            blob: file,
+            dimensions: {
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+            },
+        };
+    }
+
+    // Otherwise open the cropper — returns a Promise<{name, blob, dims}|null>
+    const cropResult = await openCropper(file, img);
+    if (img._objectUrl) URL.revokeObjectURL(img._objectUrl);
+    return cropResult;
+}
+
+function validatePlateBlob(item) {
+    const errors = [];
+    const baseName = item.name.replace(/\.png$/i, '');
+    if (baseName.length === 0) errors.push('Filename is empty');
+    if (baseName.length > MAX_FILENAME_LENGTH) {
+        errors.push('Filename too long (' + baseName.length + '/' +
+                    MAX_FILENAME_LENGTH + ')');
+    }
+    if (!VALID_FILENAME_RE.test(baseName)) {
+        errors.push('Filename must be letters and numbers only');
+    }
+    if (item.blob.size > MAX_FILE_SIZE) {
+        errors.push('Output is ' + (item.blob.size / 1024).toFixed(1) +
+                    ' KB (limit ' + (MAX_FILE_SIZE / 1024).toFixed(0) +
+                    ' KB) — try a simpler image');
+    }
+    return { valid: errors.length === 0, errors: errors };
+}
+
+function renderFilesList() {
+    const preview = document.getElementById('selectedFilesPreview');
+    const filesList = document.getElementById('filesList');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    if (!preview || !filesList) return;
+
+    if (selectedFiles.length === 0) {
+        preview.style.display = 'none';
+        return;
+    }
+    preview.style.display = 'block';
+
+    filesList.innerHTML = '';
+    let hasValid = false;
+
+    selectedFiles.forEach((item, index) => {
+        const v = validationResults.get(item.name) || { valid: false, errors: [] };
+        if (v.valid) hasValid = true;
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display: flex; flex-direction: column; padding: 10px; ' +
+            'border-bottom: 1px solid ' +
+            (v.valid ? 'var(--border-input)' : 'var(--accent-danger, var(--border-input))') +
+            '; color: var(--text-primary);';
+
+        const top = document.createElement('div');
+        top.style.cssText = 'display: flex; justify-content: space-between; align-items: center; gap: 8px;';
+
+        const left = document.createElement('div');
+        left.style.cssText = 'flex: 1; overflow: hidden; display: flex; align-items: center; gap: 8px;';
+
+        const icon = document.createElement('span');
+        icon.style.color = v.valid ? 'var(--accent-success, var(--text-primary))'
+                                   : 'var(--accent-danger, var(--text-primary))';
+        icon.innerHTML = v.valid
+            ? '<svg class="inline-icon" aria-hidden="true"><use href="{{ url_for("static", filename="icons/lucide-sprite.svg") }}#icon-check-circle"></use></svg>'
+            : '<svg class="inline-icon" aria-hidden="true"><use href="{{ url_for("static", filename="icons/lucide-sprite.svg") }}#icon-x-circle"></use></svg>';
+
+        const name = document.createElement('strong');
+        name.textContent = item.name;
+        name.style.wordBreak = 'break-word';
+
+        const meta = document.createElement('span');
+        meta.style.cssText = 'color: var(--text-secondary); font-size: 12px;';
+        meta.textContent = ' (' + (item.blob.size / 1024).toFixed(1) + ' KB' +
+            (item.dimensions ? ', ' + item.dimensions.width + 'x' + item.dimensions.height : '') +
+            ')';
+
+        left.appendChild(icon);
+        left.appendChild(name);
+        left.appendChild(meta);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.setAttribute('aria-label', 'Remove ' + item.name);
+        removeBtn.style.cssText = 'background: none; border: none; cursor: pointer; ' +
+            'color: var(--accent-danger, var(--text-primary)); padding: 8px; ' +
+            'min-width: 44px; min-height: 44px; flex-shrink: 0;';
+        removeBtn.innerHTML = '<svg class="inline-icon" aria-hidden="true"><use href="{{ url_for("static", filename="icons/lucide-sprite.svg") }}#icon-x"></use></svg>';
+        removeBtn.addEventListener('click', function() {
+            validationResults.delete(item.name);
+            selectedFiles.splice(index, 1);
+            renderFilesList();
+        });
+
+        top.appendChild(left);
+        top.appendChild(removeBtn);
+        row.appendChild(top);
+
+        if (!v.valid && v.errors.length > 0) {
+            const err = document.createElement('div');
+            err.style.cssText = 'margin-top: 5px; font-size: 12px; ' +
+                'color: var(--accent-danger, var(--text-secondary)); padding-left: 24px;';
+            err.textContent = v.errors.join('; ');
+            row.appendChild(err);
+        }
+        filesList.appendChild(row);
+    });
+
+    if (uploadBtn) uploadBtn.disabled = !hasValid;
+}
+
+async function uploadAllFiles() {
+    const valid = selectedFiles.filter(item =>
+        (validationResults.get(item.name) || {}).valid
+    );
+    if (valid.length === 0) {
+        alert('No valid files to upload. Please fix validation errors first.');
+        return;
+    }
+
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+    const progressDiv = document.getElementById('plateUploadProgress');
+    const progressBar = document.getElementById('plateProgressBar');
+    const statusText = document.getElementById('plateUploadStatus');
+
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (clearBtn) clearBtn.disabled = true;
+
+    if (progressDiv) {
+        progressDiv.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        statusText.textContent = 'Preparing upload...';
+    }
+
+    const formData = new FormData();
+    valid.forEach(item => {
+        formData.append('plate_files', item.blob, item.name);
+    });
+
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', function(e) {
+        if (!e.lengthComputable) return;
+        const pct = Math.round((e.loaded / e.total) * 100);
+        progressBar.style.width = pct + '%';
+        progressBar.textContent = pct + '%';
+        statusText.textContent = 'Uploading ' + valid.length + ' file(s)... (' +
+            (e.loaded / 1024).toFixed(1) + ' KB / ' +
+            (e.total / 1024).toFixed(1) + ' KB)';
+    });
+    xhr.addEventListener('load', function() {
+        if (xhr.status === 200) {
+            try {
+                const resp = JSON.parse(xhr.responseText);
+                progressBar.style.width = '100%';
+                progressBar.textContent = '100%';
+                progressBar.style.background = 'var(--accent-success, var(--accent))';
+                statusText.textContent = resp.summary || 'Upload complete';
+                statusText.style.color = 'var(--accent-success, var(--text-primary))';
+                setTimeout(function() { window.location.reload(); }, 1500);
+            } catch (e) {
+                statusText.textContent = 'Upload complete. Reloading...';
+                setTimeout(function() { window.location.reload(); }, 1000);
+            }
+        } else {
+            progressBar.style.background = 'var(--accent-danger, var(--accent))';
+            statusText.textContent = 'Upload failed: ' + xhr.statusText;
+            statusText.style.color = 'var(--accent-danger, var(--text-primary))';
+            if (uploadBtn) uploadBtn.disabled = false;
+            if (clearBtn) clearBtn.disabled = false;
+        }
+    });
+    xhr.addEventListener('error', function() {
+        progressBar.style.background = 'var(--accent-danger, var(--accent))';
+        statusText.textContent = 'Upload failed: network error';
+        statusText.style.color = 'var(--accent-danger, var(--text-primary))';
+        if (uploadBtn) uploadBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+    });
+    xhr.open('POST', '{{ url_for("license_plates.upload_multiple_plates") }}');
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+    xhr.send(formData);
+}
+
+function initializeSimpleUpload() {
+    // Mobile / fallback path — intercept the form submit, run the
+    // cropper (or pass-through if already exact dims), then submit
+    // the resulting blob via fetch.
+    const form = document.getElementById('plateUploadForm');
+    const fileInput = document.getElementById('plate_file');
+    if (!form || !fileInput) return;
+
+    form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        if (!fileInput.files || !fileInput.files[0]) {
+            alert('Please select an image file.');
+            return;
+        }
+        const file = fileInput.files[0];
+        const item = await processOneFile(file);
+        if (!item) return;
+        const v = validatePlateBlob(item);
+        if (!v.valid) {
+            alert('Cannot upload: ' + v.errors.join('; '));
+            return;
+        }
+        // Build a one-file FormData and submit to the single-file endpoint.
+        const fd = new FormData();
+        fd.append('plate_file', item.blob, item.name);
+
+        const btn = document.getElementById('plateUploadBtn');
+        if (btn) btn.disabled = true;
+
+        try {
+            const resp = await fetch('{{ url_for("license_plates.upload_plate") }}', {
+                method: 'POST',
+                body: fd,
+            });
+            // Server redirects on success — the response will be the
+            // re-rendered page. Easiest path: just reload to pick up
+            // the flash message.
+            window.location.reload();
+        } catch (err) {
+            alert('Upload failed: ' + err.message);
+            if (btn) btn.disabled = false;
+        }
+    });
+}
+
+// ---------------------------------------------------------------
+// Cropper modal — vanilla canvas + pointer events
+// ---------------------------------------------------------------
+const cropperState = {
+    file: null,
+    img: null,
+    target: PLATE_NA,         // Active target dimensions
+    rect: { x: 0, y: 0, w: 0, h: 0 }, // Crop rect in source image coords
+    canvasScale: 1,           // Source-px per displayed-px
+    drag: null,               // { mode: 'move'|'resize-XX', anchor: ... }
+    resolve: null,            // Promise resolver for openCropper
+    fileBaseName: 'plate',
+};
+
+function openCropper(file, img) {
+    return new Promise((resolve) => {
+        cropperState.file = file;
+        cropperState.img = img;
+        cropperState.target = PLATE_NA;
+        cropperState.fileBaseName = deriveBaseName(file.name);
+        cropperState.resolve = resolve;
+
+        // Default region: pick the one whose aspect ratio is closer to
+        // the source image.
+        const srcAspect = img.naturalWidth / img.naturalHeight;
+        const naDiff = Math.abs(srcAspect - PLATE_NA.width / PLATE_NA.height);
+        const euDiff = Math.abs(srcAspect - PLATE_EU.width / PLATE_EU.height);
+        const useEu = euDiff < naDiff;
+        document.getElementById('cropperRegionNa').checked = !useEu;
+        document.getElementById('cropperRegionEu').checked = useEu;
+        cropperState.target = useEu ? PLATE_EU : PLATE_NA;
+
+        const info = document.getElementById('cropperFileInfo');
+        if (info) {
+            info.textContent = file.name + ' — source ' + img.naturalWidth +
+                'x' + img.naturalHeight + ' (' +
+                (file.size / 1024).toFixed(1) + ' KB)';
+        }
+
+        setupCropperCanvas();
+        resetCropRect();
+        renderCropper();
+
+        const modal = document.getElementById('cropperModal');
+        modal.style.display = 'flex';
+    });
+}
+
+function closeCropper(result) {
+    document.getElementById('cropperModal').style.display = 'none';
+    const r = cropperState.resolve;
+    cropperState.resolve = null;
+    cropperState.img = null;
+    cropperState.file = null;
+    if (r) r(result);
+}
+
+function setupCropperCanvas() {
+    const canvas = document.getElementById('cropperCanvas');
+    const wrapper = canvas.parentElement;
+    // Fit the source image inside the available wrapper width while
+    // keeping a max display height for usability.
+    const maxW = Math.min(wrapper.clientWidth || 600, 720);
+    const maxH = Math.max(220, Math.min(window.innerHeight * 0.45, 500));
+    const img = cropperState.img;
+    let displayW = img.naturalWidth;
+    let displayH = img.naturalHeight;
+    const widthScale = maxW / displayW;
+    const heightScale = maxH / displayH;
+    const scale = Math.min(1, widthScale, heightScale);
+    displayW = Math.round(displayW * scale);
+    displayH = Math.round(displayH * scale);
+    canvas.width = displayW;
+    canvas.height = displayH;
+    canvas.style.width = displayW + 'px';
+    canvas.style.height = displayH + 'px';
+    cropperState.canvasScale = img.naturalWidth / displayW; // src px / display px
+}
+
+function resetCropRect() {
+    // Center a max-size aspect-locked crop inside the source image.
+    const img = cropperState.img;
+    const target = cropperState.target;
+    const targetAspect = target.width / target.height;
+    let cw = img.naturalWidth;
+    let ch = Math.round(cw / targetAspect);
+    if (ch > img.naturalHeight) {
+        ch = img.naturalHeight;
+        cw = Math.round(ch * targetAspect);
+    }
+    cropperState.rect = {
+        x: Math.round((img.naturalWidth - cw) / 2),
+        y: Math.round((img.naturalHeight - ch) / 2),
+        w: cw,
+        h: ch,
+    };
+}
+
+function maximizeCrop() {
+    resetCropRect();
+    renderCropper();
+}
+
+function renderCropper() {
+    const canvas = document.getElementById('cropperCanvas');
+    const ctx = canvas.getContext('2d');
+    const img = cropperState.img;
+    const scale = cropperState.canvasScale;
+
+    // Read theme-invariant cropper colours from CSS custom properties
+    // (defined in style.css :root and [data-theme="dark"] :root). The
+    // values are intentionally white/black for visibility against
+    // arbitrary user content; centralising them in CSS lets a future
+    // themer override them without touching this JS.
+    const styles = getComputedStyle(document.body);
+    const handleFill = styles.getPropertyValue('--cropper-handle-fill').trim() || '#ffffff';
+    const handleStroke = styles.getPropertyValue('--cropper-handle-stroke').trim() || '#000000';
+    const bgFallback = styles.getPropertyValue('--cropper-bg-fallback').trim() || '#000000';
+
+    ctx.fillStyle = styles.getPropertyValue('--bg-secondary').trim() || bgFallback;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const r = cropperState.rect;
+    const dx = r.x / scale, dy = r.y / scale;
+    const dw = r.w / scale, dh = r.h / scale;
+
+    // Dim the area outside the crop.
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.beginPath();
+    ctx.rect(0, 0, canvas.width, canvas.height);
+    ctx.rect(dx + dw, dy, -dw, dh); // counter-clockwise hole
+    ctx.fill('evenodd');
+    ctx.restore();
+
+    // Crop border + handles.
+    // White-with-black-halo is the standard cropper convention so the
+    // rectangle stays visible against arbitrary user image content.
+    // The hex values come from --cropper-handle-fill / --cropper-handle-stroke
+    // in style.css (theme-invariant by design — see comment there).
+    ctx.strokeStyle = handleFill;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(dx + 1, dy + 1, dw - 2, dh - 2);
+    ctx.strokeStyle = handleStroke;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(dx + 0.5, dy + 0.5, dw - 1, dh - 1);
+
+    // Corner handles (drawn in display-space).
+    drawHandle(ctx, dx, dy, handleFill, handleStroke);
+    drawHandle(ctx, dx + dw, dy, handleFill, handleStroke);
+    drawHandle(ctx, dx, dy + dh, handleFill, handleStroke);
+    drawHandle(ctx, dx + dw, dy + dh, handleFill, handleStroke);
+
+    renderPreview();
+    updateOutputInfo();
+}
+
+function drawHandle(ctx, x, y, fill, stroke) {
+    const s = 12;
+    ctx.fillStyle = fill;
+    ctx.fillRect(x - s/2, y - s/2, s, s);
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - s/2 + 0.5, y - s/2 + 0.5, s - 1, s - 1);
+}
+
+function renderPreview() {
+    const preview = document.getElementById('cropperPreview');
+    preview.width = cropperState.target.width;
+    preview.height = cropperState.target.height;
+    // CSS size: clamp so a 420px canvas still fits on a 375px viewport.
+    const maxCssW = Math.min(cropperState.target.width, 320);
+    const cssScale = maxCssW / cropperState.target.width;
+    preview.style.width = Math.round(cropperState.target.width * cssScale) + 'px';
+    preview.style.height = Math.round(cropperState.target.height * cssScale) + 'px';
+
+    const ctx = preview.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, preview.width, preview.height);
+    const r = cropperState.rect;
+    ctx.drawImage(
+        cropperState.img,
+        r.x, r.y, r.w, r.h,
+        0, 0, preview.width, preview.height
+    );
+}
+
+function updateOutputInfo() {
+    const info = document.getElementById('cropperOutputInfo');
+    if (!info) return;
+    info.textContent = 'Output ' + cropperState.target.width + 'x' +
+        cropperState.target.height + ' PNG, filename ' +
+        cropperState.fileBaseName + '.png. Max ' +
+        (MAX_FILE_SIZE / 1024).toFixed(0) + ' KB.';
+}
+
+// ---------------------------------------------------------------
+// Pointer-based drag (works for mouse + touch + stylus)
+// ---------------------------------------------------------------
+function attachCropperPointerHandlers() {
+    const canvas = document.getElementById('cropperCanvas');
+    if (!canvas) return;
+
+    // 22px half-extent → 44×44px effective hit area, meeting the
+    // design system's minimum touch-target size for the corner handles.
+    // The visual handle (drawn in drawHandle()) stays smaller for
+    // aesthetic reasons; the larger hit area is invisible.
+    const HANDLE_HIT = 22; // px in display coords
+
+    canvas.addEventListener('pointerdown', function(e) {
+        e.preventDefault();
+        canvas.setPointerCapture(e.pointerId);
+        const pt = canvasPoint(e);
+        const r = cropperState.rect;
+        const scale = cropperState.canvasScale;
+        const dx = r.x / scale, dy = r.y / scale;
+        const dw = r.w / scale, dh = r.h / scale;
+        const corners = [
+            { name: 'tl', x: dx, y: dy },
+            { name: 'tr', x: dx + dw, y: dy },
+            { name: 'bl', x: dx, y: dy + dh },
+            { name: 'br', x: dx + dw, y: dy + dh },
+        ];
+        for (const c of corners) {
+            if (Math.abs(c.x - pt.x) <= HANDLE_HIT &&
+                Math.abs(c.y - pt.y) <= HANDLE_HIT) {
+                cropperState.drag = {
+                    mode: 'resize-' + c.name,
+                    startPt: pt,
+                    startRect: { ...r },
+                };
+                return;
+            }
+        }
+        if (pt.x >= dx && pt.x <= dx + dw &&
+            pt.y >= dy && pt.y <= dy + dh) {
+            cropperState.drag = {
+                mode: 'move',
+                startPt: pt,
+                startRect: { ...r },
+            };
+        }
+    });
+
+    canvas.addEventListener('pointermove', function(e) {
+        if (!cropperState.drag) return;
+        e.preventDefault();
+        const pt = canvasPoint(e);
+        const scale = cropperState.canvasScale;
+        const dxSrc = (pt.x - cropperState.drag.startPt.x) * scale;
+        const dySrc = (pt.y - cropperState.drag.startPt.y) * scale;
+        const sr = cropperState.drag.startRect;
+        const img = cropperState.img;
+        const targetAspect = cropperState.target.width / cropperState.target.height;
+
+        if (cropperState.drag.mode === 'move') {
+            let nx = sr.x + dxSrc;
+            let ny = sr.y + dySrc;
+            nx = Math.max(0, Math.min(img.naturalWidth - sr.w, nx));
+            ny = Math.max(0, Math.min(img.naturalHeight - sr.h, ny));
+            cropperState.rect = { x: Math.round(nx), y: Math.round(ny), w: sr.w, h: sr.h };
+        } else {
+            // Resize from a corner; keep aspect locked to target.
+            const corner = cropperState.drag.mode.split('-')[1];
+            // Anchor is the opposite corner.
+            const anchorX = (corner === 'tr' || corner === 'br') ? sr.x : sr.x + sr.w;
+            const anchorY = (corner === 'bl' || corner === 'br') ? sr.y : sr.y + sr.h;
+            // Pointer position in source coords.
+            const px = sr.x + (corner.endsWith('l') ? dxSrc : sr.w + dxSrc);
+            const py = sr.y + (corner.startsWith('t') ? dySrc : sr.h + dySrc);
+            // New width/height = distance from anchor; aspect-lock by
+            // snapping width to height * targetAspect.
+            let newW = Math.abs(px - anchorX);
+            let newH = Math.abs(py - anchorY);
+            if (newW / newH > targetAspect) {
+                newW = newH * targetAspect;
+            } else {
+                newH = newW / targetAspect;
+            }
+            // Compute new origin from anchor + sign.
+            const sx = (corner === 'tr' || corner === 'br') ? 1 : -1;
+            const sy = (corner === 'bl' || corner === 'br') ? 1 : -1;
+            let nx = sx > 0 ? anchorX : anchorX - newW;
+            let ny = sy > 0 ? anchorY : anchorY - newH;
+            // Clamp inside source.
+            if (nx < 0) { newW += nx; nx = 0; newH = newW / targetAspect; }
+            if (ny < 0) { newH += ny; ny = 0; newW = newH * targetAspect; }
+            if (nx + newW > img.naturalWidth) {
+                newW = img.naturalWidth - nx;
+                newH = newW / targetAspect;
+            }
+            if (ny + newH > img.naturalHeight) {
+                newH = img.naturalHeight - ny;
+                newW = newH * targetAspect;
+            }
+            // Floor a minimum size so the crop never collapses to 0.
+            if (newW < 16 || newH < 16) return;
+            cropperState.rect = {
+                x: Math.round(nx), y: Math.round(ny),
+                w: Math.round(newW), h: Math.round(newH),
+            };
+        }
+        renderCropper();
+    });
+
+    function endDrag(e) {
+        if (cropperState.drag) cropperState.drag = null;
+        try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+}
+
+function canvasPoint(e) {
+    const canvas = document.getElementById('cropperCanvas');
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: (e.clientX - rect.left) * (canvas.width / rect.width),
+        y: (e.clientY - rect.top) * (canvas.height / rect.height),
+    };
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    attachCropperPointerHandlers();
+
+    document.getElementById('cropperRegionNa').addEventListener('change', function() {
+        cropperState.target = PLATE_NA;
+        resetCropRect();
+        renderCropper();
+    });
+    document.getElementById('cropperRegionEu').addEventListener('change', function() {
+        cropperState.target = PLATE_EU;
+        resetCropRect();
+        renderCropper();
+    });
+    document.getElementById('cropperResetBtn').addEventListener('click', function() {
+        resetCropRect();
+        renderCropper();
+    });
+    document.getElementById('cropperMaximizeBtn').addEventListener('click', maximizeCrop);
+    document.getElementById('cropperCancelBtn').addEventListener('click', function() {
+        closeCropper(null);
+    });
+    document.getElementById('cropperCloseBtn').addEventListener('click', function() {
+        closeCropper(null);
+    });
+    document.getElementById('cropperConfirmBtn').addEventListener('click', confirmCrop);
+
+    // Re-fit the canvas if the viewport changes while the modal is open.
+    window.addEventListener('resize', function() {
+        if (document.getElementById('cropperModal').style.display !== 'none' &&
+            cropperState.img) {
+            setupCropperCanvas();
+            renderCropper();
+        }
+    });
+});
+
+function confirmCrop() {
+    const r = cropperState.rect;
+    const target = cropperState.target;
+    // Render to an offscreen canvas at exact target dimensions.
+    const out = document.createElement('canvas');
+    out.width = target.width;
+    out.height = target.height;
+    const ctx = out.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(
+        cropperState.img,
+        r.x, r.y, r.w, r.h,
+        0, 0, target.width, target.height
+    );
+    out.toBlob(function(blob) {
+        if (!blob) {
+            alert('Could not create the cropped PNG.');
+            return;
+        }
+        const finalName = cropperState.fileBaseName + '.png';
+        closeCropper({
+            name: finalName,
+            originalName: cropperState.file.name,
+            blob: blob,
+            dimensions: { width: target.width, height: target.height },
+        });
+    }, 'image/png');
+}
+</script>
+{% endblock %}

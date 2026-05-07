@@ -11,7 +11,14 @@ media_bp = Blueprint('media', __name__, url_prefix='/media')
 
 @media_bp.route("/")
 def media_home():
-    """Redirect to the first available media sub-page."""
+    """Redirect to the first available media sub-page.
+
+    The cascade prefers the LightShow drive (chimes/shows/wraps/plates)
+    when present. License plates share the same image as chimes so the
+    same gating applies — chimes remains the primary landing page when
+    the LightShow drive is mounted; the dedicated plates page is reached
+    via the Media pill bar.
+    """
     if os.path.isfile(IMG_LIGHTSHOW_PATH):
         return redirect(url_for('lock_chimes.lock_chimes'))
     if os.path.isfile(IMG_MUSIC_PATH) and MUSIC_ENABLED:

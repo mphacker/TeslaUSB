@@ -185,7 +185,38 @@ def validate_wrap_file(file_bytes, filename):
     return True, None, (width, height)
 
 
-def upload_wrap_file(uploaded_file, filename, part2_mount_path=None):
+def safe_rebind_usb_gadget():
+    """Call ``rebind_usb_gadget()`` and swallow any failure.
+
+    A rebind is a courtesy to Tesla's USB cache — the file is already
+    on disk by the time we get here. If unbind/rebind fails (gadget
+    in an odd state, /sys/kernel/config inaccessible, etc.) the user
+    still gets the new wrap on the next reboot or other rebind.
+    Logging the warning is enough; failing the upload would leave
+    the file written but the API saying "failed", which is worse.
+
+    Returns ``None``. Callers don't act on success/failure of the
+    rebind itself — the disk write is the source of truth, and a
+    failed rebind is logged for operators but not surfaced to users.
+    """
+    from services.partition_mount_service import rebind_usb_gadget
+    try:
+        success, msg = rebind_usb_gadget()
+        if not success:
+            logger.warning(
+                f"USB gadget rebind after wrap change failed: {msg}. "
+                "Tesla will pick up the change on next re-enumeration."
+            )
+    except Exception as e:
+        logger.warning(
+            f"USB gadget rebind raised: {e}. "
+            "Tesla will pick up the change on next re-enumeration.",
+            exc_info=True,
+        )
+
+
+def upload_wrap_file(uploaded_file, filename, part2_mount_path=None,
+                     defer_rebind=False):
     """
     Upload a wrap PNG file to the Wraps/ folder.
 
@@ -193,10 +224,21 @@ def upload_wrap_file(uploaded_file, filename, part2_mount_path=None):
     - In Edit mode: Uses normal file operations
     - In Present mode: Uses quick_edit_part2() to temporarily mount RW
 
+    After a successful present-mode upload the function calls
+    :func:`partition_mount_service.rebind_usb_gadget` so Tesla
+    invalidates its USB file cache and shows the new wrap in the
+    Background selector without requiring a reboot. Edit-mode
+    uploads skip the rebind because the gadget is unbound during
+    edit mode anyway.
+
     Args:
         uploaded_file: Flask file object from request.files
         filename: Name of the file to save
         part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
+        defer_rebind: When True, suppress the post-upload USB rebind.
+            Bulk callers set this to True per file and issue one
+            rebind after the whole batch — otherwise Tesla would
+            disconnect/reconnect once per file in a 10-file upload.
 
     Returns:
         (success: bool, message: str, dimensions: tuple or None)
@@ -258,6 +300,13 @@ def upload_wrap_file(uploaded_file, filename, part2_mount_path=None):
             shutil.rmtree(temp_dir)
 
             if success:
+                # Force Tesla to re-enumerate the USB drive so the new
+                # wrap shows up in the in-car Background selector
+                # without a reboot. Failure here is non-fatal — the
+                # file is already on disk and will be picked up on
+                # the next natural rebind.
+                if not defer_rebind:
+                    safe_rebind_usb_gadget()
                 return True, f"Successfully uploaded {filename} ({dimensions[0]}x{dimensions[1]})", dimensions
             else:
                 return False, copy_msg, None
@@ -297,7 +346,7 @@ def upload_wrap_file(uploaded_file, filename, part2_mount_path=None):
         return _do_upload()
 
 
-def delete_wrap_file(filename, part2_mount_path=None):
+def delete_wrap_file(filename, part2_mount_path=None, defer_rebind=False):
     """
     Delete a wrap PNG file.
 
@@ -305,9 +354,17 @@ def delete_wrap_file(filename, part2_mount_path=None):
     - In Edit mode: Uses normal file operations
     - In Present mode: Uses quick_edit_part2() to temporarily mount RW
 
+    After a successful present-mode deletion the function calls
+    :func:`partition_mount_service.rebind_usb_gadget` so Tesla
+    invalidates its USB cache and removes the wrap from the
+    in-car Background selector without a reboot.
+
     Args:
         filename: Name of the wrap file to delete
         part2_mount_path: Current mount path for part2 (RO or RW), can be None in present mode
+        defer_rebind: When True, suppress the post-delete USB rebind.
+            Provided for symmetry with :func:`upload_wrap_file` so a
+            future bulk-delete caller can batch the rebind.
 
     Returns:
         (success: bool, message: str)
@@ -352,9 +409,14 @@ def delete_wrap_file(filename, part2_mount_path=None):
     if mode == 'present':
         # Use quick edit to temporarily mount RW
         logger.info("Using quick edit part2 for wrap deletion")
-        return quick_edit_part2(_do_delete)
+        success, msg = quick_edit_part2(_do_delete)
+        if success and not defer_rebind:
+            # Force Tesla to invalidate its USB cache so the deleted
+            # wrap disappears from the in-car Background selector.
+            safe_rebind_usb_gadget()
+        return success, msg
     else:
-        # Normal edit mode operation
+        # Normal edit mode operation — gadget is unbound, no rebind needed.
         return _do_delete()
 
 
@@ -383,6 +445,42 @@ def get_wrap_count(mount_path):
         return count
     except OSError:
         return 0
+
+
+def get_wrap_count_any_mode():
+    """
+    Return the wrap-file count from whichever mount is accessible in
+    the current mode.
+
+    Counting and writing are different concerns: writing in present
+    mode requires a temporary RW remount via ``quick_edit_part2``,
+    but counting only needs to read directory entries — the RO mount
+    that is permanently held in present mode is sufficient and
+    avoids a needless RW cycle. In edit mode the RW mount is the
+    only mount, so we use that.
+
+    The original ``get_wrap_count(mount_path)`` returned 0 whenever
+    the caller passed ``None`` (which is what the upload routes did
+    in present mode), silently bypassing ``MAX_WRAP_COUNT``
+    enforcement and letting the user fill the LightShow drive.
+    Callers that need to enforce the limit should use this helper
+    instead.
+
+    Returns:
+        int: Number of wrap files on the LightShow partition.
+    """
+    from services.mode_service import current_mode
+    from config import MNT_DIR
+
+    mode = current_mode()
+    if mode == 'present':
+        # The RO mount is always present in present mode and shows
+        # the same files Tesla sees — perfect source of truth.
+        mount_path = os.path.join(MNT_DIR, 'part2-ro')
+    else:
+        mount_path = os.path.join(MNT_DIR, 'part2')
+
+    return get_wrap_count(mount_path)
 
 
 def list_wrap_files(mount_path):

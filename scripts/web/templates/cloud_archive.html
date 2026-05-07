@@ -481,6 +481,13 @@
                     <li><strong>Persists across reboots and WiFi outages</strong> &mdash; queued events resume automatically</li>
                     <li><strong>Opt-in</strong> &mdash; off by default to avoid surprise data usage</li>
                 </ul>
+                <p style="margin: 10px 0 0; padding: 8px 12px; border-radius: var(--radius-md); background: var(--msg-info-bg); color: var(--msg-info-text); font-size: var(--text-sm);">
+                    <strong>WiFi is required for real-time uploads.</strong>
+                    The car only has WiFi inside your garage / driveway, so events that happen out on the road
+                    won't upload until you reconnect &mdash; <em>unless</em> you give the Pi a persistent connection
+                    (a phone hotspot, a mobile travel router, or a hardwired LTE / 5G modem). Without one, LES
+                    still works, but it queues events and uploads them the moment WiFi is back.
+                </p>
                 {% if not videos_available %}
                 <p style="margin: 10px 0 0; padding: 8px 12px; border-radius: var(--radius-md); background: var(--msg-warning-bg); color: var(--msg-warning-text);">
                     <strong>Camera storage missing:</strong> Live Event Sync needs <code>usb_cam.img</code> to receive Tesla event data.

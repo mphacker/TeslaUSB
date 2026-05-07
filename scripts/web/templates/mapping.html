@@ -864,6 +864,74 @@ function formatLocalTime(isoStr) {
     } catch(e) { return 'Invalid Date'; }
 }
 
+// --- URL state (issue #57) ---
+//
+// Persist the selected day / view-mode in the query string so refresh,
+// share, bookmark, and browser back/forward all work. State on the page
+// (``currentDate`` / ``showingAllTime``) is the source of truth for
+// rendering; the URL is a serialized projection of that state.
+//
+// pushState vs replaceState policy:
+//   - Rapid cycling (chevrons + keyboard arrows) uses ``replaceState``
+//     so back/forward history doesn't flood with one entry per arrow.
+//   - Deliberate cross-day jumps (trip-panel taps, disambig pick,
+//     polyline click in All-time, event-marker "Go to this day", and
+//     the "All time" button itself) use ``pushState`` so the user can
+//     back out of an intentional navigation.
+//   - The popstate handler restores state from the URL with
+//     ``skipHistory: true`` so the restoration does not itself modify
+//     the history stack.
+function readUrlState() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const view = params.get('view');
+        if (view === 'all-time') return { view: 'all-time' };
+        const date = params.get('date');
+        if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            // Reject syntactically-valid but impossible dates (e.g.
+            // 2026-13-99). Round-tripping through Date catches both
+            // out-of-range months/days and Feb-29 in non-leap years.
+            const parts = date.split('-');
+            const y = parseInt(parts[0], 10);
+            const m = parseInt(parts[1], 10);
+            const d = parseInt(parts[2], 10);
+            const dt = new Date(y, m - 1, d);
+            if (!isNaN(dt.getTime()) &&
+                dt.getFullYear() === y &&
+                dt.getMonth() === m - 1 &&
+                dt.getDate() === d) {
+                return { date };
+            }
+        }
+    } catch (e) { /* malformed URL — fall through to default */ }
+    return null;
+}
+
+function writeUrlState(state, options) {
+    const opts = options || {};
+    if (opts.skipHistory) return;
+    try {
+        const params = new URLSearchParams();
+        if (state && state.view === 'all-time') {
+            params.set('view', 'all-time');
+        } else if (state && state.date && /^\d{4}-\d{2}-\d{2}$/.test(state.date)) {
+            params.set('date', state.date);
+        }
+        const qs = params.toString();
+        const url = qs ? (window.location.pathname + '?' + qs)
+                       : window.location.pathname;
+        const stateObj = {
+            view: (state && state.view === 'all-time') ? 'all-time' : 'day',
+            date: (state && state.date) || null,
+        };
+        if (opts.pushHistory) {
+            window.history.pushState(stateObj, '', url);
+        } else {
+            window.history.replaceState(stateObj, '', url);
+        }
+    } catch (e) { /* history API unavailable (e.g. sandboxed iframe) */ }
+}
+
 // Fix Leaflet marker icon path for vendored setup
 L.Icon.Default.imagePath = '{{ url_for("static", filename="vendor/leaflet/images/") }}';
 
@@ -1234,7 +1302,7 @@ function showDisambigPopup(latlng, candidates) {
             const date = trip && trip.date;
             closeDisambigPopup();
             if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
-                loadDay(date);
+                loadDay(date, { pushHistory: true });
             }
             return;
         }
@@ -1432,13 +1500,20 @@ async function loadDays() {
     }
 }
 
-async function loadDay(date) {
+async function loadDay(date, options) {
     // Render all trips and events for ``date`` in a single pass.
     // Increments dayLoadSeq so any in-flight earlier loadDay() call
     // discards its results when it returns — this prevents the
     // indexer-refresh poll from overwriting a day the user just
     // navigated to with stale data from the previous day.
+    //
+    // ``options.pushHistory`` (default false) — when true the URL
+    // change goes onto the browser back stack; callers triggered by
+    // rapid cycling pass nothing to keep history clean.
+    // ``options.skipHistory`` (default false) — true only when the
+    // popstate handler is restoring state from the URL.
     if (!date) return;
+    const opts = options || {};
     closeDisambigPopup();
     // Drop the All time trip cache: leaving All time means the
     // disambiguation search must source from currentDayData.trips,
@@ -1447,6 +1522,10 @@ async function loadDay(date) {
     allTimeTrips = [];
     showingAllTime = false;
     currentDate = date;
+    writeUrlState({ date: date }, {
+        pushHistory: !!opts.pushHistory,
+        skipHistory: !!opts.skipHistory,
+    });
     const seq = ++dayLoadSeq;
 
     renderDayCard();  // immediate paint from cached metadata
@@ -1625,13 +1704,22 @@ function cycleDay(direction) {
     loadDay(allDays[newIdx].date);
 }
 
-function showAllTime() {
+function showAllTime(options) {
     if (!allDays.length) {
         showToast('No mapped drives yet. Try indexing videos first.', 'warning');
         return;
     }
+    const opts = options || {};
     showingAllTime = true;
     currentDate = null;
+    // Default to pushState — the only call site is the user clicking
+    // the "All time" button, which is a deliberate view change the
+    // user should be able to back out of. The popstate handler opts
+    // out via skipHistory.
+    writeUrlState({ view: 'all-time' }, {
+        pushHistory: opts.pushHistory !== false,
+        skipHistory: !!opts.skipHistory,
+    });
     // dayLoadSeq is bumped inside renderAllTime() — that single
     // increment also invalidates any in-flight loadDay() response.
     renderAllTimeCard();
@@ -1673,7 +1761,7 @@ function selectDayForTrip(tripId) {
             });
             allDays.sort((a, b) => b.date.localeCompare(a.date));
         }
-        loadDay(date);
+        loadDay(date, { pushHistory: true });
     }).catch(function (e) {
         if (seq !== tripSelectSeq) return;
         console.error('Failed to resolve trip day:', e);
@@ -2085,7 +2173,7 @@ async function renderAllTime() {
             const targetTrip = (candidates[0] && candidates[0].trip) || trip;
             const date = targetTrip && targetTrip.date;
             if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
-                loadDay(date);
+                loadDay(date, { pushHistory: true });
             }
         };
 
@@ -2555,7 +2643,7 @@ document.addEventListener('click', function(e) {
         const date = dayLink.dataset.date || '';
         if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
             map.closePopup();
-            loadDay(date);
+            loadDay(date, { pushHistory: true });
         }
         return;
     }
@@ -3441,7 +3529,39 @@ document.getElementById('vpList').addEventListener('click', function(e) {
 
 // --- Init ---
 loadStats();
-loadDays();
+
+// Restore selected day / view-mode from the URL before the first
+// loadDays() call so the page lands on the correct view on refresh /
+// shared link / bookmark. loadDays() consults ``currentDate`` and
+// ``showingAllTime`` when deciding what to render and falls back to
+// the most-recent day if the URL-supplied date isn't in allDays.
+(function initFromUrl() {
+    const urlState = readUrlState();
+    if (urlState && urlState.view === 'all-time') {
+        showingAllTime = true;
+    } else if (urlState && urlState.date) {
+        currentDate = urlState.date;
+    }
+    loadDays();
+})();
+
+// Browser back/forward — re-derive state from the URL and dispatch
+// without writing back to history (skipHistory). Guards against
+// firing before the initial loadDays() resolved by waiting for
+// allDays to be populated.
+window.addEventListener('popstate', function () {
+    const state = readUrlState();
+    if (state && state.view === 'all-time') {
+        if (allDays.length) showAllTime({ skipHistory: true });
+        return;
+    }
+    if (!allDays.length) return;
+    const target = (state && state.date &&
+                    allDays.some(d => d.date === state.date))
+        ? state.date
+        : allDays[0].date;
+    loadDay(target, { skipHistory: true });
+});
 
 // Keyboard shortcuts: left/right arrows cycle days. Skip while the
 // user is typing into a form control or has the video overlay open

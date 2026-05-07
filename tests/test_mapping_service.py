@@ -1353,6 +1353,435 @@ class TestIndexVideo:
 
 
 # ---------------------------------------------------------------------------
+# Trip Fragmentation Defense Tests
+# ---------------------------------------------------------------------------
+# These tests guard against the May 2026 phantom-duplicate-trips incident
+# where one round-trip drive was split into 6 fragments because:
+#   1. The indexer paused mid-drive due to archive-lock starvation
+#   2. New files queued during the pause got processed AFTER the pause
+#   3. So files arrived out-of-order: t=0..t=5min, [pause], t=10..t=12min,
+#      then t=6..t=9min
+#   4. The matching SQL's old "ORDER BY ABS(new_start - existing.start)"
+#      tie-breaker mis-assigned the t=6..9 fillers
+#   5. Once split, no code re-merged adjacent trips at runtime (only the
+#      one-shot v2→v3 migration did)
+# Both the matching-order fix AND the post-insert merge are exercised here.
+
+def _index_synthetic_at(conn, tmp_path, filename: str, lat: float = 37.7749,
+                        lon: float = -122.4194, trip_gap_minutes: int = 5):
+    """Index one synthetic single-waypoint clip into ``conn``.
+
+    The waypoint timestamp comes from the filename — see
+    ``_timestamp_from_filename`` — so callers control trip placement
+    purely through the filename.
+    """
+    payloads = [_make_sei_protobuf(lat=lat, lon=lon, speed=20.0)]
+    mp4_data = _make_synthetic_mp4(payloads)
+    teslacam = tmp_path / "TeslaCam" / "RecentClips"
+    teslacam.mkdir(parents=True, exist_ok=True)
+    video_file = teslacam / filename
+    video_file.write_bytes(mp4_data)
+    return _index_video(
+        conn, str(video_file), str(tmp_path / "TeslaCam"),
+        sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
+        trip_gap_minutes=trip_gap_minutes,
+    )
+
+
+class TestTripFragmentationDefense:
+    def test_out_of_order_indexing_produces_one_trip(self, tmp_path):
+        """Out-of-order ingestion of three clips that all belong to one
+        drive must yield exactly one trip, not multiple fragments."""
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # File 1 at 08:00, file 2 at 08:08 (8 min later → > 5 min gap →
+        # would otherwise create a separate trip), file 3 at 08:04
+        # (between, ≤ 5 min from each side → bridges them).
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-00-00-front.mp4")
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-08-00-front.mp4")
+        # Before the bridge clip is indexed, we must have two trips.
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 2
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-04-00-front.mp4")
+        trips = conn.execute("SELECT * FROM trips").fetchall()
+        assert len(trips) == 1, (
+            f"out-of-order bridge clip should merge fragments; "
+            f"got {len(trips)} trip(s)"
+        )
+        # All three waypoints survived and are attached to the survivor.
+        wps = conn.execute(
+            "SELECT trip_id FROM waypoints"
+        ).fetchall()
+        assert len(wps) == 3
+        assert all(w['trip_id'] == trips[0]['id'] for w in wps)
+        conn.close()
+
+    def test_chain_merge_three_trips_collapse(self, tmp_path):
+        """A bridge clip whose insertion creates a chain of mergeable
+        trips (A↔B↔C) must collapse them all in one pass — the merge
+        loop has to refresh survivor bounds inside the loop."""
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # Three trips at 08:00, 08:10, 08:20 — each pair 10 min apart
+        # (> 5 min gap → all separate when created in order).
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-00-00-front.mp4")
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-10-00-front.mp4")
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-20-00-front.mp4")
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 3
+        # Bridge clip at 08:05 — adjacent (5 min) to trip 1 only. After
+        # insert, trip 1 spans 08:00→08:05 → now adjacent to trip 2
+        # (5 min away). After that merge, the survivor spans 08:00→08:10
+        # → now adjacent to trip 3. Chain merge must catch all three.
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-05-00-front.mp4")
+        # Index a second bridge at 08:15 to chain trip 3 onto the
+        # survivor — needed because the first bridge is only directly
+        # adjacent to trips 1 and 2, not 3.
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-15-00-front.mp4")
+        trips = conn.execute("SELECT * FROM trips").fetchall()
+        assert len(trips) == 1, (
+            f"chain merge must collapse all three trips; got {len(trips)}"
+        )
+        wps = conn.execute("SELECT COUNT(*) FROM waypoints").fetchone()[0]
+        assert wps == 5
+        conn.close()
+
+    def test_distant_trips_remain_separate(self, tmp_path):
+        """Two trips with a real gap (> trip_gap) must NOT be merged
+        even if a clip is indexed near one of them."""
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # 2-hour gap — clearly two distinct drives.
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-00-00-front.mp4")
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_10-00-00-front.mp4")
+        # Add another clip very close to the first trip — it should
+        # extend trip 1 only, never reach trip 2.
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-01-00-front.mp4")
+        trips = conn.execute("SELECT * FROM trips").fetchall()
+        assert len(trips) == 2
+        # Trip 1 now has 2 waypoints, trip 2 still has 1.
+        counts = conn.execute(
+            "SELECT trip_id, COUNT(*) AS n FROM waypoints "
+            "GROUP BY trip_id ORDER BY trip_id"
+        ).fetchall()
+        assert [c['n'] for c in counts] == [2, 1]
+        conn.close()
+
+    def test_matching_picks_closest_gap_not_closest_start(self, tmp_path):
+        """When a clip falls between two trips, the matching SQL must
+        pick the temporally adjoining trip (smallest gap), not the trip
+        whose start_time happens to be numerically nearer.
+
+        Regression test for the production bug: the old
+        ``ORDER BY ABS(new_start - existing.start)`` ranking caused the
+        wrong trip to be picked when a filler clip arrived after both
+        neighbouring trips already existed. The new ranking must always
+        pick the trip whose interval the new clip actually adjoins.
+        """
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # Trip A at 08:00 (one waypoint, start=end ≈ 08:00:00).
+        # Trip B at 08:30 (one waypoint, start=end ≈ 08:30:00).
+        # Gap is 30 min → > 5 min so they're separate.
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-00-00-front.mp4")
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-30-00-front.mp4")
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 2
+        a_id, b_id = [r['id'] for r in conn.execute(
+            "SELECT id FROM trips ORDER BY id"
+        ).fetchall()]
+        # Index a filler at 08:04 — only 4 min after trip A's end,
+        # 26 min before trip B's start. With the OLD ranking,
+        # ABS(08:04 - 08:00) = 4 min vs ABS(08:04 - 08:30) = 26 min →
+        # would still pick A correctly. So make this case asymmetric:
+        # use a filler at 08:28 that is much closer to B's *start*
+        # numerically (in seconds-of-day) than A's start, but is
+        # 28 min after A and only 2 min before B → must adjoin B.
+        # 28 min > 5 min trip_gap → won't match A; only B matches.
+        _index_synthetic_at(conn, tmp_path, "2025-11-08_08-28-00-front.mp4")
+        # Filler must be on trip B, not trip A.
+        b_wps = conn.execute(
+            "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?", (b_id,)
+        ).fetchone()[0]
+        assert b_wps == 2, (
+            f"filler at 08:28 must adjoin trip B (08:30); got {b_wps} "
+            f"waypoint(s) on B"
+        )
+        a_wps = conn.execute(
+            "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?", (a_id,)
+        ).fetchone()[0]
+        assert a_wps == 1
+        conn.close()
+
+
+class TestMergeAdjacentTripsHelper:
+    """Unit tests for ``_merge_adjacent_trips_for`` driven directly
+    against the schema, so each merge scenario is isolated from the
+    matching-SQL behaviour exercised in TestTripFragmentationDefense.
+    """
+
+    @staticmethod
+    def _seed_trip(conn, start_iso, end_iso):
+        cur = conn.execute(
+            "INSERT INTO trips (start_time, end_time, source_folder) "
+            "VALUES (?, ?, 'TestFolder')",
+            (start_iso, end_iso),
+        )
+        trip_id = cur.lastrowid
+        # Anchor waypoint at start_time so MIN/MAX match the seeded bounds.
+        conn.execute(
+            "INSERT INTO waypoints (trip_id, timestamp, lat, lon, "
+            "video_path, frame_offset) VALUES (?, ?, 37.0, -122.0, '', 0)",
+            (trip_id, start_iso),
+        )
+        if end_iso != start_iso:
+            conn.execute(
+                "INSERT INTO waypoints (trip_id, timestamp, lat, lon, "
+                "video_path, frame_offset) VALUES (?, ?, 37.0, -122.0, '', 0)",
+                (trip_id, end_iso),
+            )
+        conn.commit()
+        return trip_id
+
+    def test_no_merge_when_no_neighbours(self, tmp_path):
+        from services.mapping_service import _merge_adjacent_trips_for
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        a = self._seed_trip(
+            conn, "2025-11-08T08:00:00", "2025-11-08T08:05:00"
+        )
+        survivor = _merge_adjacent_trips_for(conn, a, gap_seconds=300)
+        assert survivor == a
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 1
+        conn.close()
+
+    def test_merges_with_lower_id_neighbour(self, tmp_path):
+        from services.mapping_service import _merge_adjacent_trips_for
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        a = self._seed_trip(
+            conn, "2025-11-08T08:00:00", "2025-11-08T08:05:00"
+        )
+        b = self._seed_trip(
+            conn, "2025-11-08T08:09:00", "2025-11-08T08:14:00"
+        )
+        # 4 min gap → mergeable.
+        survivor = _merge_adjacent_trips_for(conn, b, gap_seconds=300)
+        assert survivor == a, "lower id must always win"
+        # Trip b is gone; its waypoints (and any events) are now on a.
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 1
+        wps_on_a = conn.execute(
+            "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?", (a,)
+        ).fetchone()[0]
+        assert wps_on_a == 4
+        conn.close()
+
+    def test_chain_merge_refreshes_bounds_each_iteration(self, tmp_path):
+        from services.mapping_service import _merge_adjacent_trips_for
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # A at 08:00-05, B at 08:09-14, C at 08:18-23. Each consecutive
+        # pair is 4 min apart. Without per-iteration bound refresh, A
+        # would absorb B but the original anchor's stale end_time
+        # (08:05) wouldn't reach C (08:18) — even though after the B
+        # merge the survivor extends to 08:14 → 4 min from C.
+        a = self._seed_trip(
+            conn, "2025-11-08T08:00:00", "2025-11-08T08:05:00"
+        )
+        b = self._seed_trip(
+            conn, "2025-11-08T08:09:00", "2025-11-08T08:14:00"
+        )
+        c = self._seed_trip(
+            conn, "2025-11-08T08:18:00", "2025-11-08T08:23:00"
+        )
+        survivor = _merge_adjacent_trips_for(conn, b, gap_seconds=300)
+        # All three collapse — survivor is the lowest id (A).
+        assert survivor == a
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 1
+        conn.close()
+
+    def test_does_not_merge_beyond_gap(self, tmp_path):
+        from services.mapping_service import _merge_adjacent_trips_for
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        a = self._seed_trip(
+            conn, "2025-11-08T08:00:00", "2025-11-08T08:05:00"
+        )
+        # 6 min gap > 5 min → must NOT merge.
+        b = self._seed_trip(
+            conn, "2025-11-08T08:11:00", "2025-11-08T08:14:00"
+        )
+        survivor = _merge_adjacent_trips_for(conn, b, gap_seconds=300)
+        assert survivor == b  # No merge happened
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 2
+        conn.close()
+
+    def test_overlap_is_merged(self, tmp_path):
+        from services.mapping_service import _merge_adjacent_trips_for
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        a = self._seed_trip(
+            conn, "2025-11-08T08:00:00", "2025-11-08T08:10:00"
+        )
+        # B's window overlaps A's — gap is negative; must still merge.
+        b = self._seed_trip(
+            conn, "2025-11-08T08:05:00", "2025-11-08T08:15:00"
+        )
+        survivor = _merge_adjacent_trips_for(conn, b, gap_seconds=300)
+        assert survivor == a
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 1
+        # Survivor bounds extend to cover both originals.
+        bounds = conn.execute(
+            "SELECT start_time, end_time FROM trips WHERE id = ?", (a,)
+        ).fetchone()
+        assert bounds['start_time'] == "2025-11-08T08:00:00"
+        assert bounds['end_time'] == "2025-11-08T08:15:00"
+        conn.close()
+
+    def test_events_are_repointed_not_destroyed(self, tmp_path):
+        """The schema declares ``ON DELETE CASCADE`` on
+        ``detected_events.trip_id``. The merge helper MUST update event
+        rows BEFORE deleting the dropped trip; otherwise the cascade
+        would silently destroy events we wanted to keep."""
+        from services.mapping_service import _merge_adjacent_trips_for
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # Foreign keys must be on for the cascade to fire — _init_db
+        # already enables them, but assert it explicitly so a future
+        # schema change can't silently regress this guarantee.
+        assert conn.execute(
+            "PRAGMA foreign_keys"
+        ).fetchone()[0] == 1
+        a = self._seed_trip(
+            conn, "2025-11-08T08:00:00", "2025-11-08T08:05:00"
+        )
+        b = self._seed_trip(
+            conn, "2025-11-08T08:09:00", "2025-11-08T08:14:00"
+        )
+        # Attach an event to b so we can verify it survives the merge.
+        conn.execute(
+            "INSERT INTO detected_events (trip_id, timestamp, lat, lon, "
+            "event_type, severity, description, video_path, frame_offset) "
+            "VALUES (?, '2025-11-08T08:10:00', 37.0, -122.0, "
+            "'harsh_brake', 'medium', 'test', 'x.mp4', 0)",
+            (b,),
+        )
+        conn.commit()
+        survivor = _merge_adjacent_trips_for(conn, b, gap_seconds=300)
+        assert survivor == a
+        # Event is now on the survivor, not destroyed.
+        rows = conn.execute(
+            "SELECT trip_id FROM detected_events"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]['trip_id'] == a
+        conn.close()
+
+    def test_exact_300s_boundary_merges(self, tmp_path):
+        """A pair exactly 300 s apart must be considered mergeable.
+
+        Regression test for the ``julianday(a)-julianday(b))*86400``
+        floating-point bug: it returned 300.0000223 for a true 300-s
+        gap, silently failing the ``<= 300`` boundary check and
+        leaving phantom-fragmented trips unmerged. The fix uses
+        integer-epoch arithmetic via ``strftime('%s', ...)`` instead.
+        """
+        from services.mapping_service import _merge_adjacent_trips_for
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # Trip A ends at 08:05:00 sharp; trip B starts at 08:10:00
+        # sharp → exactly 300 s apart.
+        a = self._seed_trip(
+            conn, "2025-11-08T08:00:00", "2025-11-08T08:05:00"
+        )
+        b = self._seed_trip(
+            conn, "2025-11-08T08:10:00", "2025-11-08T08:15:00"
+        )
+        survivor = _merge_adjacent_trips_for(conn, b, gap_seconds=300)
+        assert survivor == a, (
+            "exact 300-s boundary must merge — float-arithmetic "
+            "regression?"
+        )
+        assert conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0] == 1
+        conn.close()
+
+
+class TestStartupMergeRepair:
+    """The v8→v9 migration runs ``_merge_all_adjacent_trip_pairs`` on
+    the entire ``trips`` table to repair phantom-fragmented trips left
+    over from the matching-SQL boundary bug. These tests exercise that
+    sweep helper directly so we don't depend on the full _init_db
+    migration plumbing for assertions about the merge behaviour."""
+
+    @staticmethod
+    def _seed(conn, start_iso, end_iso):
+        cur = conn.execute(
+            "INSERT INTO trips (start_time, end_time, source_folder) "
+            "VALUES (?, ?, 'TestFolder')",
+            (start_iso, end_iso),
+        )
+        trip_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO waypoints (trip_id, timestamp, lat, lon, "
+            "video_path, frame_offset) VALUES (?, ?, 37.0, -122.0, '', 0)",
+            (trip_id, start_iso),
+        )
+        if end_iso != start_iso:
+            conn.execute(
+                "INSERT INTO waypoints (trip_id, timestamp, lat, lon, "
+                "video_path, frame_offset) VALUES (?, ?, 37.0, -122.0, "
+                "'', 0)",
+                (trip_id, end_iso),
+            )
+        return trip_id
+
+    def test_global_merge_collapses_phantom_chain(self, tmp_path):
+        from services.mapping_service import _merge_all_adjacent_trip_pairs
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # Five fragments that together describe one drive — every
+        # consecutive pair is exactly 300 s apart (the boundary case
+        # the runtime bug used to mis-handle).
+        a = self._seed(conn, "2025-11-08T08:00:00", "2025-11-08T08:05:00")
+        b = self._seed(conn, "2025-11-08T08:10:00", "2025-11-08T08:15:00")
+        c = self._seed(conn, "2025-11-08T08:20:00", "2025-11-08T08:25:00")
+        d = self._seed(conn, "2025-11-08T08:30:00", "2025-11-08T08:35:00")
+        e = self._seed(conn, "2025-11-08T08:40:00", "2025-11-08T08:45:00")
+        conn.commit()
+        merged = _merge_all_adjacent_trip_pairs(conn, gap_seconds=300)
+        assert merged == 4
+        rows = conn.execute(
+            "SELECT id, start_time, end_time FROM trips"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]['id'] == a  # lower id wins
+        assert rows[0]['start_time'] == "2025-11-08T08:00:00"
+        assert rows[0]['end_time'] == "2025-11-08T08:45:00"
+        # All 10 waypoints (2 per fragment) survived on the survivor.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?", (a,)
+        ).fetchone()[0] == 10
+        conn.close()
+
+    def test_global_merge_preserves_distant_trips(self, tmp_path):
+        from services.mapping_service import _merge_all_adjacent_trip_pairs
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # Two fragments that should merge, plus a distant trip that must
+        # remain separate.
+        a = self._seed(conn, "2025-11-08T08:00:00", "2025-11-08T08:05:00")
+        b = self._seed(conn, "2025-11-08T08:10:00", "2025-11-08T08:15:00")
+        c = self._seed(conn, "2025-11-08T18:00:00", "2025-11-08T18:30:00")
+        conn.commit()
+        _merge_all_adjacent_trip_pairs(conn, gap_seconds=300)
+        ids = sorted(r['id'] for r in conn.execute(
+            "SELECT id FROM trips"
+        ).fetchall())
+        assert ids == sorted([a, c]), (
+            f"morning fragments should collapse to {a}; evening trip "
+            f"{c} must remain"
+        )
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Driving Stats & Event Chart Data Tests
 # ---------------------------------------------------------------------------
 

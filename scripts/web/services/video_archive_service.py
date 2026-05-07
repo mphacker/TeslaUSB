@@ -77,6 +77,15 @@ _PRUNE_GRACE_SECONDS = 6 * 3600  # 6 hours
 _archive_thread: Optional[threading.Thread] = None
 _archive_lock = threading.Lock()
 _archive_cancel = threading.Event()
+# Set as soon as an archive is triggered (manual or timer) and BEFORE
+# we try to acquire the task_coordinator lock. Cleared only when the
+# archive finishes (or its acquire times out). This prevents a second
+# archive thread from being spawned while the first is still waiting
+# inside ``acquire_task('archive', wait_seconds=60.0)`` — which is a
+# new race introduced by switching from a non-blocking acquire to a
+# blocking one. ``_status['running']`` is not enough because it is
+# set only AFTER the lock is acquired.
+_archive_pending = False
 
 _status: Dict = {
     "running": False,
@@ -140,13 +149,20 @@ def stop_archive_timer() -> None:
 def trigger_archive_now() -> bool:
     """Trigger a one-shot archive run (non-blocking).
 
-    Returns True if an archive was started, False if one is already running
-    or if archiving is disabled.
+    Returns True if an archive was started, False if one is already
+    running, pending (waiting for the task_coordinator lock), or if
+    archiving is disabled.
     """
+    global _archive_pending
     if not ARCHIVE_ENABLED:
         return False
-    if _status.get("running"):
-        return False
+    # Atomically claim the "pending" slot to prevent two threads from
+    # racing the same trigger window. The thread that wins clears the
+    # slot inside ``_run_archive``.
+    with _archive_lock:
+        if _archive_pending or _status.get("running"):
+            return False
+        _archive_pending = True
 
     t = threading.Thread(
         target=_run_archive,
@@ -210,16 +226,58 @@ def _archive_timer_loop() -> None:
 
 def _run_archive() -> None:
     """One complete archive run: discover → copy → retention."""
+    global _status, _archive_pending
+
+    # Two callers reach this function: ``trigger_archive_now`` (which
+    # atomically sets ``_archive_pending`` first) and the timer loop
+    # (which calls us directly). For the timer path we still need
+    # mutual exclusion with manual triggers; mark pending if free, or
+    # bail out if another invocation is already in flight. ``_archive_pending``
+    # stays set until this function returns so that no second invocation
+    # can race in between releasing pending and setting ``_status['running']``.
+    with _archive_lock:
+        if _archive_pending or _status.get("running"):
+            owns_pending = False
+        else:
+            _archive_pending = True
+            owns_pending = True
+    if not owns_pending:
+        return
+
+    try:
+        # Acquire the global heavy-task lock — don't run alongside
+        # indexer or sync. Wait up to 60s if the lock is busy. The
+        # indexer's typical lock-hold is ~1 s with ~0.25 s gaps; with
+        # the fairness short-circuit (the indexer passes
+        # ``yield_to_waiters=True``) we'll usually win on the first
+        # poll. The wait-with-timeout is critical: returning False
+        # immediately caused archive starvation in production, with
+        # TeslaCam clips lost when Tesla rotated RecentClips before
+        # the next 5-minute archive cycle could win the lock. See
+        # task_coordinator docstring for the fairness model.
+        from services.task_coordinator import acquire_task, release_task
+        if not acquire_task('archive', wait_seconds=60.0):
+            logger.warning(
+                "Archive skipped: another task held the lock for 60s — "
+                "this may indicate indexer overload"
+            )
+            return
+        try:
+            _do_archive_work()
+        finally:
+            release_task('archive')
+    finally:
+        with _archive_lock:
+            _archive_pending = False
+
+
+def _do_archive_work() -> None:
+    """Inner archive routine — runs while holding the coordinator lock.
+
+    Split out from ``_run_archive`` so that the lock-acquisition and
+    pending-flag bookkeeping above stays linear and easy to audit.
+    """
     global _status
-
-    if _status.get("running"):
-        return
-
-    # Acquire the global heavy-task lock — don't run alongside indexer or sync
-    from services.task_coordinator import acquire_task, release_task
-    if not acquire_task('archive'):
-        logger.info("Archive skipped: another task is running")
-        return
 
     _status.update({
         "running": True,
@@ -432,7 +490,9 @@ def _run_archive() -> None:
         _status["progress"] = f"Error: {e}"
     finally:
         _status["running"] = False
-        release_task('archive')
+        # ``release_task('archive')`` is handled by ``_run_archive``'s
+        # outer try/finally so the lock is released even if
+        # ``_do_archive_work`` raises before reaching its own finally.
 
 
 # ---------------------------------------------------------------------------

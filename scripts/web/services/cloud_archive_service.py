@@ -463,8 +463,32 @@ def _remove_rclone_conf(conf_path: Optional[str] = None) -> None:
     MUST pass the explicit path it received from
     :func:`_write_rclone_conf` so a yield from cloud_archive doesn't
     accidentally delete cloud_archive's still-in-use config.
+
+    Defense in depth (I-5): the resolved ``conf_path`` must lie inside
+    :data:`_RCLONE_TMPFS_DIR`. All current callers derive their path
+    from :func:`_write_rclone_conf` (which scopes to that directory),
+    so this check is a no-op today; it guarantees a future caller can
+    never turn this helper into an arbitrary-file-delete primitive.
     """
     target = conf_path or _RCLONE_CONF_PATH
+    try:
+        target_real = os.path.realpath(target)
+        dir_real = os.path.realpath(_RCLONE_TMPFS_DIR)
+        if os.path.commonpath([dir_real, target_real]) != dir_real:
+            logger.warning(
+                "Refusing to remove rclone conf outside %s: %s",
+                dir_real, target,
+            )
+            return
+    except ValueError:
+        # commonpath raises ValueError when paths are on different
+        # drives (Windows) or otherwise can't be compared. Refuse
+        # rather than risk an unintended delete.
+        logger.warning(
+            "Refusing to remove rclone conf with unresolvable path: %s",
+            target,
+        )
+        return
     try:
         os.remove(target)
     except FileNotFoundError:

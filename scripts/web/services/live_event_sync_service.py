@@ -37,6 +37,7 @@ Public API:
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -198,6 +199,63 @@ def _startup_recovery(conn: sqlite3.Connection) -> int:
                 "to failed", n_exhausted,
             )
     return n_uploading + n_exhausted
+
+
+def _sweep_orphaned_rclone_confs() -> int:
+    """Remove orphaned ``rclone-les-*.conf`` files left in the tmpfs dir.
+
+    The unique-per-attempt rclone config is normally cleaned up in the
+    ``finally`` block of :func:`_process_one`. If a previous worker
+    process was killed via SIGKILL (OOM, power loss before sync, etc.)
+    those finally blocks didn't run and the config file leaks under
+    ``/run/teslausb/``. The tmpfs is wiped on reboot so the leak is
+    bounded, but cleaning up at startup keeps the directory tidy and
+    matches the spirit of :func:`_startup_recovery`.
+
+    Files belonging to the current pid are left alone — they may still
+    be in use by a concurrently-running worker thread.
+
+    Returns the number of files removed. Never raises.
+    """
+    try:
+        from services.cloud_archive_service import _RCLONE_TMPFS_DIR
+    except Exception:
+        # cloud_archive_service unavailable or doesn't expose the
+        # constant — nothing to sweep.
+        return 0
+
+    try:
+        names = os.listdir(_RCLONE_TMPFS_DIR)
+    except OSError:
+        return 0
+
+    own_pid = os.getpid()
+    removed = 0
+    for name in names:
+        if not fnmatch.fnmatch(name, 'rclone-les-*.conf'):
+            continue
+        # Filename pattern: rclone-les-<pid>-<tid>.conf
+        try:
+            mid = name[len('rclone-les-'):-len('.conf')]
+            pid_str = mid.split('-', 1)[0]
+            file_pid = int(pid_str)
+        except (ValueError, IndexError):
+            # Doesn't match the expected pattern — leave it alone.
+            continue
+        if file_pid == own_pid:
+            continue
+        try:
+            os.remove(os.path.join(_RCLONE_TMPFS_DIR, name))
+            removed += 1
+        except OSError:
+            pass
+
+    if removed:
+        logger.info(
+            "LES startup sweep: removed %d orphaned rclone-les-*.conf file(s)",
+            removed,
+        )
+    return removed
 
 
 def _prune_old_uploaded(conn: sqlite3.Connection,
@@ -439,6 +497,12 @@ def _record_attempt_start(conn: sqlite3.Connection, row_id: int) -> int:
     we actually invoke rclone. The returned value is the authoritative
     attempt number to use for retry-exhaustion decisions in
     :func:`_mark_failed`.
+
+    Returns 0 if the row no longer exists (caller must treat as
+    already-deleted and skip). This can happen if an operator runs
+    ``DELETE FROM live_event_queue`` while a worker is mid-claim;
+    returning 0 prevents the caller from recording a phantom failure
+    against a non-existent row.
     """
     conn.execute(
         "UPDATE live_event_queue SET attempts = attempts + 1 WHERE id = ?",
@@ -449,7 +513,7 @@ def _record_attempt_start(conn: sqlite3.Connection, row_id: int) -> int:
         "SELECT attempts FROM live_event_queue WHERE id = ?",
         (row_id,),
     ).fetchone()
-    return int(row['attempts']) if row else 1
+    return int(row['attempts']) if row else 0
 
 
 def _mark_uploaded(conn: sqlite3.Connection, row_id: int,
@@ -825,6 +889,11 @@ _TRANSIENT_NO_MP4_MAX_AGE_SECONDS = 30 * 60   # 30 min
 # How long to wait before re-checking when MP4s are still appearing.
 _TRANSIENT_RETRY_SECONDS = 60
 
+# Max age of event.json mtime to enqueue from the startup catch-up
+# scan. Prevents re-enabling LES from triggering uploads of historical
+# events the user didn't intend.
+LIVE_EVENT_CATCHUP_MAX_AGE_DAYS = 7
+
 
 def _enqueue_age_seconds(enqueued_at: Optional[str]) -> float:
     """Best-effort age-since-enqueue in seconds."""
@@ -841,13 +910,17 @@ def _enqueue_age_seconds(enqueued_at: Optional[str]) -> float:
 
 
 def _process_one(conn: sqlite3.Connection, row: Dict,
-                 cancel_event: threading.Event) -> Tuple[bool, str, int, bool]:
+                 cancel_event: threading.Event) -> Tuple[bool, str, int, bool, int]:
     """Upload one event.
 
-    Returns ``(success, error_msg, bytes_uploaded, transient)``. When
-    ``transient`` is True the caller should requeue without consuming
-    a retry attempt — used for the "MP4s aren't fully written yet" case
-    so we never permanently fail an event because we raced Tesla.
+    Returns ``(success, error_msg, bytes_uploaded, transient,
+    files_uploaded)``. When ``transient`` is True the caller should
+    requeue without consuming a retry attempt — used for the "MP4s
+    aren't fully written yet" case so we never permanently fail an
+    event because we raced Tesla. ``files_uploaded`` is the number of
+    files actually transferred to the cloud (0 on failure / transient
+    defer); the caller reuses it for the webhook payload to avoid
+    re-scanning the event directory.
     """
     from services.cloud_archive_service import (
         load_provider_creds, write_rclone_conf, remove_rclone_conf,
@@ -856,7 +929,7 @@ def _process_one(conn: sqlite3.Connection, row: Dict,
 
     event_dir = row['event_dir']
     if not os.path.isdir(event_dir):
-        return False, "Event directory missing", 0, False
+        return False, "Event directory missing", 0, False, 0
 
     # Refresh the RO mount once before file selection so we see Tesla's
     # latest writes (kernel caches the loop-mount view otherwise).
@@ -882,17 +955,17 @@ def _process_one(conn: sqlite3.Connection, row: Dict,
     if mp4_count == 0:
         if age_seconds < _TRANSIENT_NO_MP4_MAX_AGE_SECONDS:
             return (False, "No MP4 clips visible yet — deferring",
-                    0, True)
+                    0, True, 0)
         # Aged out — give up so the row doesn't sit forever.
         return (False,
                 f"No MP4 clips after {int(age_seconds)}s — giving up",
-                0, False)
+                0, False, 0)
 
     creds = load_provider_creds()
     if not creds:
         # Treat as transient — credentials may come back. Don't consume
         # an attempt for a config issue the user is likely fixing.
-        return False, "Cloud provider credentials unavailable", 0, True
+        return False, "Cloud provider credentials unavailable", 0, True, 0
 
     # Use a UNIQUE conf path so cloud_archive's yield/re-acquire cycle
     # never collides with us on the shared tmpfs file. Include thread
@@ -909,12 +982,12 @@ def _process_one(conn: sqlite3.Connection, row: Dict,
         # event_dir example: /mnt/gadget/part1-ro/TeslaCam/SentryClips/2024-05-07_14-32-10
         rel_event = _relative_event_path(event_dir)
         if rel_event is None:
-            return False, "Could not compute remote path", 0, False
+            return False, "Could not compute remote path", 0, False, 0
         remote_dir = f"teslausb:{CLOUD_ARCHIVE_REMOTE_PATH}/{rel_event}"
 
         for local_path in files:
             if cancel_event.is_set():
-                return False, "Cancelled", bytes_total, False
+                return False, "Cancelled", bytes_total, False, 0
             filename = os.path.basename(local_path)
             remote_dest = f"{remote_dir}/{filename}"
 
@@ -928,13 +1001,13 @@ def _process_one(conn: sqlite3.Connection, row: Dict,
             if returncode != 0:
                 return (False,
                         (stderr or f"rclone exit {returncode}").strip()[:500],
-                        bytes_total, False)
+                        bytes_total, False, 0)
             try:
                 bytes_total += os.path.getsize(local_path)
             except OSError:
                 pass
 
-        return True, "", bytes_total, False
+        return True, "", bytes_total, False, len(files)
     finally:
         remove_rclone_conf(conf_path)
 
@@ -998,6 +1071,17 @@ def _drain_once(cancel_event: threading.Event) -> bool:
 
             attempt_no = _record_attempt_start(conn, row['id'])
             try:
+                if attempt_no == 0:
+                    # I-3: row vanished between claim and attempt-start
+                    # (operator manually deleted from live_event_queue).
+                    # Skip it without recording a phantom failure; the
+                    # finally block below still releases the task lock.
+                    logger.warning(
+                        "LES row %d disappeared between claim and "
+                        "attempt-start; skipping", row['id'],
+                    )
+                    continue
+
                 with _status_lock:
                     _status["running"] = True
                     _status["active_event"] = row.get('event_dir')
@@ -1007,8 +1091,8 @@ def _drain_once(cancel_event: threading.Event) -> bool:
                     row['event_dir'], row.get('event_reason'),
                     attempt_no, LIVE_EVENT_RETRY_MAX_ATTEMPTS,
                 )
-                success, err, bytes_uploaded, transient = _process_one(
-                    conn, row, cancel_event,
+                success, err, bytes_uploaded, transient, files_uploaded = (
+                    _process_one(conn, row, cancel_event)
                 )
                 if success:
                     _mark_uploaded(conn, row['id'], bytes_uploaded)
@@ -1025,14 +1109,12 @@ def _drain_once(cancel_event: threading.Event) -> bool:
                     )
                     # Defer webhook delivery until after we release the
                     # task_coordinator lock (slow webhooks must not
-                    # block the indexer/cloud_archive).
+                    # block the indexer/cloud_archive). Reuse the file
+                    # count returned by _process_one rather than
+                    # re-running select_event_files() (I-1).
                     pending_webhooks.append({
                         "row": dict(row),
-                        "files_uploaded": len(select_event_files(
-                            row['event_dir'],
-                            row.get('upload_scope') or LIVE_EVENT_UPLOAD_SCOPE,
-                            row.get('event_timestamp'),
-                        )),
+                        "files_uploaded": files_uploaded,
                         "bytes_uploaded": bytes_uploaded,
                     })
                 else:
@@ -1101,6 +1183,8 @@ def _startup_catchup_scan() -> int:
     """
     if not LIVE_EVENT_SYNC_ENABLED:
         return 0
+    cutoff_seconds = LIVE_EVENT_CATCHUP_MAX_AGE_DAYS * 86400
+    now_ts = time.time()
     discovered: List[str] = []
     for root in _teslacam_roots():
         for folder in LIVE_EVENT_WATCH_FOLDERS:
@@ -1112,8 +1196,31 @@ def _startup_catchup_scan() -> int:
                     if not entry.is_dir(follow_symlinks=False):
                         continue
                     ej = os.path.join(entry.path, 'event.json')
-                    if os.path.isfile(ej):
-                        discovered.append(ej)
+                    if not os.path.isfile(ej):
+                        continue
+                    # I-4: bound the scan by event.json mtime so
+                    # re-enabling LES doesn't enqueue years of
+                    # historical events the user didn't intend to
+                    # upload.
+                    try:
+                        mtime = os.stat(ej).st_mtime
+                    except OSError:
+                        # Conservative skip: if we can't stat we can't
+                        # safely classify the age.
+                        logger.debug(
+                            "LES catchup scan stat failed for %s — skipping",
+                            ej,
+                        )
+                        continue
+                    age_seconds = now_ts - mtime
+                    if age_seconds > cutoff_seconds:
+                        logger.debug(
+                            "LES catchup scan skipping %s (age %.1fd > %dd)",
+                            ej, age_seconds / 86400,
+                            LIVE_EVENT_CATCHUP_MAX_AGE_DAYS,
+                        )
+                        continue
+                    discovered.append(ej)
             except OSError as e:
                 logger.debug("LES catchup scan skipped %s: %s", base, e)
     if not discovered:
@@ -1142,6 +1249,14 @@ def _worker_loop() -> None:
             conn.close()
     except Exception as e:
         logger.error("LES startup recovery failed: %s", e)
+
+    # Sweep orphaned rclone-les-*.conf files left behind by previous
+    # worker processes that didn't run their finally blocks (SIGKILL,
+    # OOM, power loss before sync, etc.). I-2.
+    try:
+        _sweep_orphaned_rclone_confs()
+    except Exception as e:
+        logger.error("LES startup rclone-conf sweep failed: %s", e)
 
     # One-shot catch-up scan: enqueue any event.json files already on
     # disk that haven't been queued yet (LES was disabled previously,

@@ -86,6 +86,7 @@ _status = {
 # Callbacks registered by other services
 _on_new_file_callbacks: List[Callable] = []
 _on_deleted_file_callbacks: List[Callable] = []
+_on_event_json_callbacks: List[Callable] = []
 
 
 def register_callback(callback: Callable):
@@ -104,6 +105,18 @@ def register_delete_callback(callback: Callable):
     RecentClips circular buffer or the user deletes archived clips.
     """
     _on_deleted_file_callbacks.append(callback)
+
+
+def register_event_json_callback(callback: Callable):
+    """Register a callback for `event.json` arrivals.
+
+    Callback signature: callback(file_paths: List[str])
+    Fired when Tesla writes a new ``event.json`` (Sentry/Saved events).
+    Separate from ``register_callback`` (mp4-only, used by the indexer)
+    so the Live Event Sync subsystem can react to event metadata
+    without being coupled to the indexing path.
+    """
+    _on_event_json_callbacks.append(callback)
 
 
 def get_watcher_status() -> dict:
@@ -247,6 +260,30 @@ def _notify_delete_callbacks(deleted_files: List[str], my_generation: int):
             logger.error("Watcher delete callback error: %s", e)
 
 
+def _notify_event_json_callbacks(paths: List[str], my_generation: int):
+    """Notify event.json subscribers if our generation is current.
+
+    Tesla writes event.json atomically when a Sentry/Saved event finishes
+    recording, so consumers (the Live Event Sync worker) can react
+    immediately — we deliberately do NOT apply the 60s file-age gate
+    that we use for .mp4 files.
+    """
+    if not paths:
+        return
+    if my_generation != _watcher_generation:
+        logger.debug("Dropping %d event.json callbacks (stale generation)",
+                     len(paths))
+        return
+    _status["event_json_detected"] = (
+        _status.get("event_json_detected", 0) + len(paths)
+    )
+    for cb in _on_event_json_callbacks:
+        try:
+            cb(paths)
+        except Exception as e:
+            logger.error("Watcher event.json callback error: %s", e)
+
+
 def _scan_for_new_files(paths: List[str], known_files: Set[str]) -> List[str]:
     """Scan directories for new .mp4 files not in known_files set.
 
@@ -300,6 +337,42 @@ def _scan_for_new_files(paths: List[str], known_files: Set[str]) -> List[str]:
     return new_files
 
 
+def _scan_for_new_event_json(paths: List[str],
+                              known_event_json: Set[str]) -> List[str]:
+    """Scan event subdirectories for new event.json files.
+
+    Used by the polling fallback (when inotify is unavailable). Tesla
+    writes event.json atomically when an event finishes recording, so
+    no age gate is applied. Looks at SentryClips/<event>/event.json
+    and SavedClips/<event>/event.json patterns; quietly ignores
+    everything else.
+    """
+    new_event_jsons: List[str] = []
+    for base_path in paths:
+        if not os.path.isdir(base_path):
+            continue
+        try:
+            for entry in os.scandir(base_path):
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                # entry is e.g. SentryClips/, SavedClips/
+                try:
+                    for sub in os.scandir(entry.path):
+                        if not sub.is_dir(follow_symlinks=False):
+                            continue
+                        # sub is the per-event folder
+                        ej = os.path.join(sub.path, 'event.json')
+                        if (ej not in known_event_json
+                                and os.path.isfile(ej)):
+                            new_event_jsons.append(ej)
+                            known_event_json.add(ej)
+                except PermissionError:
+                    pass
+        except (PermissionError, OSError):
+            pass
+    return new_event_jsons
+
+
 def _parse_inotify_events(data: bytes, wd_map: dict):
     """Yield ``(full_path, mask)`` tuples from a buffer of ``inotify_event``
     structs.
@@ -329,6 +402,7 @@ def _parse_inotify_events(data: bytes, wd_map: dict):
 
 
 def _try_inotify(paths: List[str], known_files: Set[str],
+                 known_event_json: Set[str],
                  my_generation: int) -> bool:
     """Try to use inotify for real-time monitoring. Returns False if unavailable."""
     try:
@@ -391,6 +465,7 @@ def _try_inotify(paths: List[str], known_files: Set[str],
                     break
 
                 deletions: List[str] = []
+                event_json_arrivals: List[str] = []
                 if ready:
                     try:
                         data = os.read(fd, buf_size)
@@ -422,8 +497,36 @@ def _try_inotify(paths: List[str], known_files: Set[str],
                                             "Added inotify watch for "
                                             "new subdir %s", full_path,
                                         )
+                                    # Race-safe scan: if Tesla wrote
+                                    # event.json into the subdir BEFORE
+                                    # our watch was attached we'd miss
+                                    # the IN_CLOSE_WRITE. Cheap one-off
+                                    # readdir surfaces it now.
+                                    try:
+                                        ej_now = os.path.join(
+                                            full_path, 'event.json',
+                                        )
+                                        if (os.path.isfile(ej_now)
+                                                and ej_now not in known_event_json
+                                                and _on_event_json_callbacks):
+                                            event_json_arrivals.append(ej_now)
+                                            known_event_json.add(ej_now)
+                                    except OSError:
+                                        pass
                             except OSError:
                                 pass
+                            continue
+                        # event.json arrival → notify Live Event Sync
+                        # immediately (no 60s age gate; Tesla writes
+                        # this atomically on event finalization).
+                        if (os.path.basename(full_path) == 'event.json'
+                                and mask & (_IN_CLOSE_WRITE | _IN_MOVED_TO)
+                                and _on_event_json_callbacks):
+                            # Track in known_event_json so the periodic
+                            # rescan below doesn't re-emit it.
+                            if full_path not in known_event_json:
+                                event_json_arrivals.append(full_path)
+                                known_event_json.add(full_path)
                             continue
                         if not full_path.lower().endswith('.mp4'):
                             continue
@@ -435,11 +538,38 @@ def _try_inotify(paths: List[str], known_files: Set[str],
                     logger.info("Detected %d file deletion(s)", len(deletions))
                     _notify_delete_callbacks(deletions, my_generation)
 
+                if event_json_arrivals:
+                    logger.info(
+                        "Detected %d event.json arrival(s)",
+                        len(event_json_arrivals),
+                    )
+                    _notify_event_json_callbacks(
+                        event_json_arrivals, my_generation,
+                    )
+
                 # Periodic scan (catches files inotify missed and new subdirs)
                 new_files = _scan_for_new_files(paths, known_files)
                 if new_files:
                     logger.info("Detected %d new files", len(new_files))
                     _notify_callbacks(new_files, my_generation)
+                # Periodic event.json catch-up scan: covers cases where
+                # the watch was attached after Tesla wrote event.json,
+                # IN_CLOSE_WRITE was lost (kernel buffer overflow), or
+                # an event folder was moved in already containing
+                # event.json. Cheap directory walk; always emits via
+                # the same callback.
+                if _on_event_json_callbacks:
+                    catchup = _scan_for_new_event_json(
+                        paths, known_event_json,
+                    )
+                    if catchup:
+                        logger.info(
+                            "inotify periodic scan found %d additional "
+                            "event.json file(s)", len(catchup),
+                        )
+                        _notify_event_json_callbacks(
+                            catchup, my_generation,
+                        )
                 _status["last_scan"] = time.strftime("%Y-%m-%d %H:%M:%S")
         finally:
             try:
@@ -456,16 +586,23 @@ def _watcher_loop(my_generation: int):
     """Main watcher loop — tries inotify, falls back to polling."""
     paths = _status["watch_paths"]
     known_files: Set[str] = set()
+    known_event_json: Set[str] = set()
     scan_count = 0
 
     # Initial scan to build known file set (don't trigger callbacks for
     # existing files — only newly-arrived ones).
     _scan_for_new_files(paths, known_files)
+    # Seed the event.json baseline too, so existing events don't fire on
+    # restart. The Live Event Sync worker handles already-queued events
+    # via its own DB-backed queue.
+    _scan_for_new_event_json(paths, known_event_json)
     _status["last_scan"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    logger.info("Initial scan: %d existing files tracked", len(known_files))
+    logger.info("Initial scan: %d existing files tracked, "
+                "%d existing event.json files tracked",
+                len(known_files), len(known_event_json))
 
     # Try inotify first (blocks until stop or error)
-    if _try_inotify(paths, known_files, my_generation):
+    if _try_inotify(paths, known_files, known_event_json, my_generation):
         _status["running"] = False
         return
 
@@ -482,6 +619,13 @@ def _watcher_loop(my_generation: int):
         if new_files:
             logger.info("Polling detected %d new files", len(new_files))
             _notify_callbacks(new_files, my_generation)
+
+        # Detect new event.json arrivals (Live Event Sync producer).
+        new_event_jsons = _scan_for_new_event_json(paths, known_event_json)
+        if new_event_jsons:
+            logger.info("Polling detected %d new event.json file(s)",
+                        len(new_event_jsons))
+            _notify_event_json_callbacks(new_event_jsons, my_generation)
 
         # Polling-mode delete detection: any file we knew about that no
         # longer exists is a deletion. Cheap once known_files is bounded.
@@ -505,6 +649,10 @@ def _watcher_loop(my_generation: int):
             if pruned > 0:
                 logger.info("Pruned %d stale entries from known_files (now %d)",
                             pruned, len(known_files))
+            # Also prune the event.json set
+            known_event_json = {
+                f for f in known_event_json if os.path.isfile(f)
+            }
             scan_count = 0
 
     _status["running"] = False

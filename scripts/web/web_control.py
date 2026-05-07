@@ -53,6 +53,7 @@ from blueprints import (
     captive_portal_bp,
     catch_all_redirect,
     cloud_archive_bp,
+    live_events_bp,
 )
 
 app.register_blueprint(mapping_bp)
@@ -70,6 +71,7 @@ app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)
 app.register_blueprint(fsck_bp)
 app.register_blueprint(cloud_archive_bp)
+app.register_blueprint(live_events_bp)
 # Register captive portal blueprint LAST to avoid conflicting with other routes
 app.register_blueprint(captive_portal_bp)
 
@@ -128,6 +130,7 @@ if __name__ == "__main__":
     try:
         from services.file_watcher_service import (
             start_watcher, register_callback, register_delete_callback,
+            register_event_json_callback,
         )
         watch_paths = []
         # Watch TeslaCam on USB (RO mount)
@@ -176,6 +179,27 @@ if __name__ == "__main__":
                     print("File watcher → indexing queue producer registered")
             except Exception as e:
                 print(f"Warning: Failed to register watcher callbacks: {e}")
+
+            # Live Event Sync producer: enqueue Sentry/Saved events the
+            # moment Tesla writes event.json. Independent of the
+            # indexing callback above; both fire from the same inotify
+            # watcher with no extra file descriptors.
+            try:
+                from config import LIVE_EVENT_SYNC_ENABLED
+                if LIVE_EVENT_SYNC_ENABLED:
+                    def _on_new_event_json(file_paths):
+                        from services.live_event_sync_service import (
+                            enqueue_event_json,
+                        )
+                        try:
+                            enqueue_event_json(list(file_paths))
+                        except Exception as e:
+                            print(f"Warning: LES enqueue failed: {e}")
+
+                    register_event_json_callback(_on_new_event_json)
+                    print("File watcher → Live Event Sync producer registered")
+            except Exception as e:
+                print(f"Warning: Failed to register LES watcher callback: {e}")
 
             start_watcher(watch_paths)
             print(f"File watcher started for {len(watch_paths)} paths")
@@ -226,9 +250,28 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Warning: Failed to start indexing worker: {e}")
 
+    # Live Event Sync worker: starts BEFORE cloud_archive auto-trigger so
+    # any persistent LES queue (from a prior reboot/WiFi outage) gets
+    # the priority it's contractually owed. The trigger_auto_sync()
+    # call below will then see ready LES work and skip — letting LES
+    # drain first. Worker thread blocks on threading.Event.wait() when
+    # idle (< 0.1% CPU baseline).
+    try:
+        from config import LIVE_EVENT_SYNC_ENABLED
+        if LIVE_EVENT_SYNC_ENABLED:
+            from services.live_event_sync_service import start as _les_start
+            if _les_start():
+                print("Live Event Sync worker started")
+    except Exception as e:
+        # LES failure must NEVER take down gadget_web. Log and continue.
+        print(f"Warning: Failed to start Live Event Sync worker: {e}")
+
     # Auto-start cloud sync if WiFi is already connected and provider is configured.
     # The dispatcher only fires on WiFi connect events — if the Pi boots into WiFi
     # (or the service restarts while on WiFi), sync would never start without this.
+    # NOTE: trigger_auto_sync() consults has_ready_live_event_work() and skips
+    # when LES has work, so the LES start above takes effect even on the very
+    # first dispatcher fire.
     try:
         from config import (
             CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_PROVIDER,

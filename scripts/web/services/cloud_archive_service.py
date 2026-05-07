@@ -420,10 +420,18 @@ def _discover_events(
 # Credential Handling
 # ---------------------------------------------------------------------------
 
-def _write_rclone_conf(provider: str, creds: dict) -> str:
+def _write_rclone_conf(provider: str, creds: dict,
+                       conf_name: Optional[str] = None) -> str:
     """Write a temporary rclone.conf to tmpfs and return its path.
 
-    The caller is responsible for deleting the file after use.
+    The caller is responsible for deleting the file after use by passing
+    the returned path to :func:`_remove_rclone_conf`.
+
+    ``conf_name`` lets callers pin a unique filename so cloud_archive
+    and Live Event Sync don't collide on the shared tmpfs path during a
+    yield/re-acquire cycle. When omitted the legacy fixed path
+    ``/run/teslausb/rclone.conf`` is used (preserves existing
+    cloud_archive behavior; LES MUST pass a unique name).
     """
     os.makedirs(_RCLONE_TMPFS_DIR, exist_ok=True)
 
@@ -433,7 +441,12 @@ def _write_rclone_conf(provider: str, creds: dict) -> str:
     for key, value in creds.items():
         lines.append(f"{key} = {value}")
 
-    conf_path = _RCLONE_CONF_PATH
+    if conf_name:
+        # Disallow path traversal — only a bare filename is acceptable.
+        safe_name = os.path.basename(conf_name)
+        conf_path = os.path.join(_RCLONE_TMPFS_DIR, safe_name)
+    else:
+        conf_path = _RCLONE_CONF_PATH
     fd = os.open(conf_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, "\n".join(lines).encode("utf-8"))
@@ -443,10 +456,17 @@ def _write_rclone_conf(provider: str, creds: dict) -> str:
     return conf_path
 
 
-def _remove_rclone_conf() -> None:
-    """Delete the tmpfs rclone config if it exists."""
+def _remove_rclone_conf(conf_path: Optional[str] = None) -> None:
+    """Delete the tmpfs rclone config if it exists.
+
+    When ``conf_path`` is omitted the legacy fixed path is removed. LES
+    MUST pass the explicit path it received from
+    :func:`_write_rclone_conf` so a yield from cloud_archive doesn't
+    accidentally delete cloud_archive's still-in-use config.
+    """
+    target = conf_path or _RCLONE_CONF_PATH
     try:
-        os.remove(_RCLONE_CONF_PATH)
+        os.remove(target)
     except FileNotFoundError:
         pass
 
@@ -604,6 +624,112 @@ def _is_wifi_connected() -> bool:
     except Exception:
         pass
     return False
+
+
+# ---------------------------------------------------------------------------
+# Reusable rclone upload helper (shared with Live Event Sync)
+# ---------------------------------------------------------------------------
+
+# Memory-safe rclone flags for Pi Zero 2 W. Module-level constant so both
+# the cloud-sync loop and the Live Event Sync worker pin the same envelope.
+RCLONE_MEM_FLAGS: List[str] = [
+    "--buffer-size", "0",
+    "--transfers", "1",
+    "--checkers", "1",
+]
+
+
+def upload_path_via_rclone(
+    local_path: str,
+    remote_dest: str,
+    conf_path: str,
+    max_upload_mbps: int,
+    timeout_seconds: int = 3600,
+    proc_callback=None,
+    mem_flags: Optional[List[str]] = None,
+) -> Tuple[int, str]:
+    """Upload a file or directory via rclone, returning (returncode, stderr).
+
+    Picks ``copyto`` for files and ``copy`` for directories. Wraps the
+    call in ``nice -n 19`` + ``ionice -c 3`` so the gadget endpoint and
+    web service stay responsive.
+
+    The caller passes a ``proc_callback`` to track the live subprocess for
+    cancellation: it is invoked with the ``subprocess.Popen`` instance
+    immediately after spawn, and again with ``None`` when the process
+    exits. Pass ``None`` to disable tracking.
+
+    Designed for one upload at a time. The Pi Zero 2 W cannot afford
+    parallel rclone subprocesses, so callers must ensure only one
+    upload is in flight via the global task_coordinator.
+    """
+    if mem_flags is None:
+        mem_flags = RCLONE_MEM_FLAGS
+
+    is_single_file = os.path.isfile(local_path)
+    rclone_cmd = "copyto" if is_single_file else "copy"
+
+    proc: Optional[subprocess.Popen] = None
+    try:
+        proc = subprocess.Popen(
+            [
+                "nice", "-n", "19",
+                "ionice", "-c", "3",
+                "rclone", rclone_cmd,
+                "--config", conf_path,
+                "--bwlimit", f"{max_upload_mbps}M",
+                "--size-only",
+                "--stats", "0",
+                "--log-level", "ERROR",
+                *mem_flags,
+                local_path,
+                remote_dest,
+            ],
+            # stdout → DEVNULL: rclone prints nothing useful with
+            # --stats 0 and --log-level ERROR, and capturing it would
+            # accumulate in Python memory against the Pi Zero 2 W
+            # peak-RSS budget on long uploads.
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc_callback is not None:
+            try:
+                proc_callback(proc)
+            except Exception as e:
+                logger.warning("proc_callback raised: %s", e)
+        try:
+            _, stderr = proc.communicate(timeout=timeout_seconds)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            returncode = -1
+            stderr = f"Upload timed out ({timeout_seconds}s)"
+    finally:
+        if proc_callback is not None:
+            try:
+                proc_callback(None)
+            except Exception:
+                pass
+
+    # Cap stderr to a bounded tail so a chatty rclone failure can't
+    # blow the Pi Zero 2 W RSS budget. 8 KB is plenty of context for
+    # diagnosing the failure; longer outputs are truncated.
+    out = stderr or ""
+    if len(out) > 8192:
+        out = "...(truncated)...\n" + out[-8000:]
+    return returncode, out
+
+
+# Public re-exports for shared use by the Live Event Sync subsystem.
+# Underscore-prefixed names are kept for internal call-sites that already
+# use them; the public aliases just remove the underscore so other
+# services can ``from services.cloud_archive_service import ...`` cleanly.
+write_rclone_conf = _write_rclone_conf
+remove_rclone_conf = _remove_rclone_conf
+load_provider_creds = _load_provider_creds
+is_wifi_connected = _is_wifi_connected
 
 
 # ---------------------------------------------------------------------------
@@ -824,42 +950,23 @@ def _run_sync(
             )
             _fsync_db(conn)
 
-            # Use rclone copy for event directories, copyto for single files
-            # (ArchivedClips are individual files, not directories)
-            is_single_file = os.path.isfile(event_dir)
-            rclone_cmd = "copyto" if is_single_file else "copy"
+            # Use the shared rclone helper. It handles copy-vs-copyto,
+            # nice/ionice, bwlimit, timeout, and stderr capture.
+            # Default size+mtime check catches partial uploads.
+            def _track_proc(proc):
+                global _sync_rclone_proc
+                _sync_rclone_proc = proc
 
-            # Use ionice to give rclone lowest I/O priority so the USB
-            # gadget and web service stay responsive during uploads.
-            # Default size+mtime check catches partial uploads (no --ignore-existing).
             try:
-                _sync_rclone_proc = subprocess.Popen(
-                    [
-                        "nice", "-n", "19",
-                        "ionice", "-c", "3",
-                        "rclone", rclone_cmd,
-                        "--config", conf_path,
-                        "--bwlimit", f"{max_mbps}M",
-                        "--size-only",
-                        "--stats", "0",
-                        "--log-level", "ERROR",
-                        *mem_flags,
-                        event_dir,
-                        remote_dest,
-                    ],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True,
+                returncode, stderr = upload_path_via_rclone(
+                    event_dir,
+                    remote_dest,
+                    conf_path,
+                    max_mbps,
+                    timeout_seconds=3600,
+                    proc_callback=_track_proc,
+                    mem_flags=mem_flags,
                 )
-                try:
-                    stdout, stderr = _sync_rclone_proc.communicate(timeout=3600)
-                    returncode = _sync_rclone_proc.returncode
-                except subprocess.TimeoutExpired:
-                    _sync_rclone_proc.kill()
-                    _sync_rclone_proc.communicate()
-                    returncode = -1
-                    stderr = "Upload timed out (1h)"
-                finally:
-                    _sync_rclone_proc = None
 
                 if cancel_event.is_set():
                     # Process was killed by stop_sync — don't mark as failed
@@ -907,9 +1014,6 @@ def _run_sync(
                     )
                     _fsync_db(conn)
 
-            except subprocess.TimeoutExpired:
-                # Handled inside Popen.communicate above
-                pass
             except Exception as e:
                 logger.error("Sync: %s error: %s", rel_path, e)
                 conn.execute(
@@ -920,6 +1024,48 @@ def _run_sync(
                     (str(e)[:255], rel_path)
                 )
                 _fsync_db(conn)
+
+            # Yield to Live Event Sync if it has READY pending event work.
+            # LES gets priority over normal cloud_archive uploads when both
+            # want WiFi. The helper checks status, next_retry_at, attempts,
+            # and the daily data cap so a stuck row never blocks us forever.
+            try:
+                from services.live_event_sync_service import (
+                    has_ready_live_event_work,
+                )
+                _les_pending = has_ready_live_event_work(db_path)
+            except Exception:
+                _les_pending = False
+            if _les_pending:
+                logger.info(
+                    "Cloud sync yielding to Live Event Sync (queue has ready events)",
+                )
+                # Drop the heavy-task lock so LES worker can grab it.
+                # We re-acquire on the next loop iteration.
+                from services.task_coordinator import (
+                    acquire_task as _acq, release_task as _rel,
+                )
+                _rel('cloud_sync')
+                # Wait for LES to drain (or up to 5 minutes per yield).
+                yield_deadline = time.time() + 300
+                while time.time() < yield_deadline:
+                    if cancel_event.is_set():
+                        break
+                    time.sleep(2)
+                    try:
+                        if not has_ready_live_event_work(db_path):
+                            break
+                    except Exception:
+                        break
+                # Re-acquire the lock; if a different task grabbed it
+                # while we yielded, we treat that as cooperative and
+                # bail out — the next dispatcher fire will resume.
+                if not _acq('cloud_sync'):
+                    logger.info(
+                        "Cloud sync: another task acquired lock during yield; "
+                        "stopping this run (will resume on next trigger)",
+                    )
+                    break
 
             # Pause between uploads to let the system breathe
             time.sleep(_INTER_UPLOAD_SLEEP)
@@ -1155,6 +1301,10 @@ def trigger_auto_sync(teslacam_path: str, db_path: str) -> None:
 
     Checks that cloud archive is enabled, no sync is already running,
     and WiFi (not AP-only) is connected before starting.
+
+    Skips when the Live Event Sync queue has pending events: LES gets
+    priority when both subsystems want WiFi. Cloud sync will resume on
+    the next dispatcher fire after LES drains.
     """
     if not CLOUD_ARCHIVE_ENABLED:
         return
@@ -1165,6 +1315,20 @@ def trigger_auto_sync(teslacam_path: str, db_path: str) -> None:
     if not _is_wifi_connected():
         logger.debug("Auto-sync skipped: WiFi not connected")
         return
+
+    # Yield to Live Event Sync if it has READY pending event work. Uses
+    # the LES helper so backoff/data-cap/exhausted-retry rows don't
+    # suppress cloud sync forever.
+    try:
+        from services.live_event_sync_service import has_ready_live_event_work
+        if has_ready_live_event_work(db_path):
+            logger.info(
+                "Cloud sync auto-trigger skipped: Live Event Sync has "
+                "ready events (will resume after LES drains)",
+            )
+            return
+    except Exception as e:
+        logger.debug("LES ready-work check failed (continuing): %s", e)
 
     ok, msg = start_sync(teslacam_path, db_path, trigger="auto")
     if ok:

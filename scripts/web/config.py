@@ -114,6 +114,18 @@ CLOUD_MIN_RETENTION_DAYS = int(_cloud.get('cloud_min_retention_days', 30))
 CLOUD_ARCHIVE_DB_PATH = os.path.join(GADGET_DIR, 'cloud_sync.db')
 CLOUD_PROVIDER_CREDS_PATH = os.path.join(GADGET_DIR, 'cloud_provider.enc')
 
+# Live Event Sync Configuration
+# Separate first-class subsystem from cloud_archive — own queue, worker, and config.
+# Shares CLOUD_ARCHIVE_PROVIDER + CLOUD_PROVIDER_CREDS_PATH for credentials only.
+_les = config.get('live_event_sync', {})
+LIVE_EVENT_SYNC_ENABLED = bool(_les.get('enabled', False))
+LIVE_EVENT_WATCH_FOLDERS = list(_les.get('watch_folders', ['SentryClips', 'SavedClips']))
+LIVE_EVENT_UPLOAD_SCOPE = str(_les.get('upload_scope', 'event_minute'))
+LIVE_EVENT_RETRY_MAX_ATTEMPTS = int(_les.get('retry_max_attempts', 5))
+LIVE_EVENT_RETRY_BACKOFF_SECONDS = list(_les.get('retry_backoff_seconds', [30, 120, 300, 900, 3600]))
+LIVE_EVENT_DAILY_DATA_CAP_MB = int(_les.get('daily_data_cap_mb', 0))
+LIVE_EVENT_NOTIFY_WEBHOOK_URL = str(_les.get('notify_webhook_url', '') or '')
+
 # RecentClips Archive Configuration
 _archive = config.get('archive', {})
 ARCHIVE_ENABLED = bool(_archive.get('enabled', True))

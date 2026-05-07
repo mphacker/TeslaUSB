@@ -88,8 +88,11 @@
         border-color: var(--ios-warning-border);
     }
 
-    /* Upload drop zone */
+    /* Upload drop zone — uses a <label> (inline by default), so we
+       must explicitly set display: block to get the full-width centered
+       card layout that other upload pages get from their <div> wrappers. */
     .boombox-drop-zone {
+        display: block;
         border: 2px dashed var(--border-input);
         border-radius: 8px;
         padding: 32px 20px;
@@ -107,10 +110,11 @@
     }
 
     .boombox-drop-zone .drop-icon {
+        display: block;
         width: 40px;
         height: 40px;
         color: var(--btn-primary-bg);
-        margin-bottom: 10px;
+        margin: 0 auto 10px;
     }
 
     .boombox-drop-zone .drop-title {

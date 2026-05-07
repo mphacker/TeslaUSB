@@ -50,6 +50,7 @@ def get_feature_availability():
         'chimes_available': lightshow_exists,
         'shows_available': lightshow_exists,
         'wraps_available': lightshow_exists,
+        'license_plates_available': lightshow_exists,
         'music_available': music_exists,
         'boombox_available': music_exists,
         'cloud_archive_available': CLOUD_ARCHIVE_ENABLED,

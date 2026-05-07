@@ -43,6 +43,7 @@ from blueprints import (
     music_bp,
     boombox_bp,
     wraps_bp,
+    license_plates_bp,
     media_bp,
     analytics_bp,
     mapping_bp,
@@ -62,6 +63,7 @@ app.register_blueprint(light_shows_bp)
 app.register_blueprint(music_bp)
 app.register_blueprint(boombox_bp)
 app.register_blueprint(wraps_bp)
+app.register_blueprint(license_plates_bp)
 app.register_blueprint(media_bp)
 app.register_blueprint(analytics_bp)
 app.register_blueprint(cleanup_bp)

@@ -30,4 +30,10 @@
     Wraps
   </a>
   {% endif %}
+  {% if license_plates_available %}
+  <a href="{{ url_for('license_plates.license_plates') }}" class="media-pill {% if media_tab == 'plates' %}active{% endif %}">
+    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-image"></use></svg>
+    Plates
+  </a>
+  {% endif %}
 </div>

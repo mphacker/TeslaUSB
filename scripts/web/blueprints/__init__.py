@@ -5,6 +5,7 @@ from .videos import videos_bp
 from .lock_chimes import lock_chimes_bp
 from .light_shows import light_shows_bp
 from .wraps import wraps_bp
+from .license_plates import license_plates_bp
 from .analytics import analytics_bp
 from .mapping import mapping_bp
 from .cleanup import cleanup_bp
@@ -22,6 +23,7 @@ __all__ = [
     'lock_chimes_bp',
     'light_shows_bp',
     'wraps_bp',
+    'license_plates_bp',
     'analytics_bp',
     'mapping_bp',
     'cleanup_bp',

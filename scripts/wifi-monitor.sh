@@ -61,12 +61,18 @@ log() {
     logger -t "$LOG_TAG" "$1"
 }
 
-# Prevent multiple instances
+# Prevent multiple instances (PID-aware: a SIGKILL'd previous instance leaves
+# the lock behind because trap doesn't fire on SIGKILL; we must not block on stale locks)
 if [ -f "$LOCK_FILE" ]; then
-    log "Another instance is running, exiting"
-    exit 0
+    OLD_PID="$(cat "$LOCK_FILE" 2>/dev/null || true)"
+    if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        log "Another instance (PID $OLD_PID) is running, exiting"
+        exit 0
+    fi
+    log "Removing stale lock from PID ${OLD_PID:-unknown}"
+    rm -f "$LOCK_FILE"
 fi
-touch "$LOCK_FILE"
+echo "$$" > "$LOCK_FILE"
 
 cleanup() {
     log "Cleaning up wifi-monitor..."

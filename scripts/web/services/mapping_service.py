@@ -143,7 +143,7 @@ def _with_db_retry(fn: Callable) -> Callable:
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -381,6 +381,39 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                 logger.error("Migration v3->v4 failed, leaving schema at v3: %s", e)
                 conn.commit()
                 return conn
+        if current > 0 and current < 9:
+            # v9: one-shot repair pass for trips that were fragmented
+            # by the matching-SQL boundary bug fixed in this version.
+            # The bug: ``ORDER BY ABS(new_start - existing.start)`` plus
+            # the float-imprecise ``(julianday(...)-julianday(...))*86400``
+            # condition caused phantom-fragmented trips when files
+            # arrived out-of-order during indexer pauses (e.g., archive-
+            # lock starvation incident May 2026 — McDonald's drive split
+            # into 6 trips). The runtime ``_merge_adjacent_trips_for``
+            # added in this version prevents future fragmentation, but
+            # only sweeps the just-touched anchor's neighbourhood, so
+            # bad data already in the table will linger unless a future
+            # clip happens to bridge it. This one-shot global merge
+            # repairs the existing damage.
+            try:
+                conn.execute("SAVEPOINT migrate_v9")
+                merged = _merge_all_adjacent_trip_pairs(
+                    conn, _TRIP_GAP_MINUTES_DEFAULT * 60,
+                )
+                conn.execute("RELEASE SAVEPOINT migrate_v9")
+                if merged:
+                    logger.info(
+                        "Migration v8->v9: merged %d phantom-fragmented "
+                        "trip pairs", merged,
+                    )
+            except Exception as e:
+                conn.execute("ROLLBACK TO SAVEPOINT migrate_v9")
+                conn.execute("RELEASE SAVEPOINT migrate_v9")
+                logger.error(
+                    "Migration v8->v9 failed, leaving schema at v8: %s", e,
+                )
+                conn.commit()
+                return conn
         # v5: covering index ``idx_waypoints_trip_video`` for the
         # ``/api/trips`` page-load N+1 fix. The index is created by the
         # ``executescript(_SCHEMA_SQL)`` call above (CREATE INDEX IF NOT
@@ -470,41 +503,7 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
     # --- Phase 2: merge overlapping/close trips ---
     # Repeatedly find any pair of trips whose windows are within gap_seconds
     # of each other (in either direction) and merge the higher-id into the lower.
-    merged = 0
-    iterations = 0
-    while True:
-        iterations += 1
-        if iterations > 10000:
-            # Don't silently continue — that would leave duplicates AND
-            # bump schema_version, making this migration unrunnable on the
-            # next startup. Raising here triggers the SAVEPOINT rollback
-            # in _init_db, leaves schema at v2, and surfaces the failure
-            # in the logs so we can investigate.
-            raise RuntimeError(
-                "v2->v3 trip merge loop exceeded 10000 iterations; "
-                "possible infinite loop or pathological duplicate set"
-            )
-        pair = conn.execute(
-            """SELECT a.id AS keep_id, b.id AS drop_id
-               FROM trips a
-               JOIN trips b
-                 ON a.id < b.id
-                AND a.start_time IS NOT NULL AND a.end_time IS NOT NULL
-                AND b.start_time IS NOT NULL AND b.end_time IS NOT NULL
-                AND ((julianday(b.start_time) - julianday(a.end_time)) * 86400) <= ?
-                AND ((julianday(a.start_time) - julianday(b.end_time)) * 86400) <= ?
-               LIMIT 1""",
-            (gap_seconds, gap_seconds),
-        ).fetchone()
-        if not pair:
-            break
-        keep_id, drop_id = pair['keep_id'], pair['drop_id']
-        conn.execute("UPDATE waypoints SET trip_id = ? WHERE trip_id = ?",
-                     (keep_id, drop_id))
-        conn.execute("UPDATE detected_events SET trip_id = ? WHERE trip_id = ?",
-                     (keep_id, drop_id))
-        conn.execute("DELETE FROM trips WHERE id = ?", (drop_id,))
-        merged += 1
+    merged = _merge_all_adjacent_trip_pairs(conn, gap_seconds)
     log_parts.append(f"merged {merged} overlapping trip pairs")
 
     # --- Phase 3: dedupe waypoints within a trip ---
@@ -612,6 +611,203 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
 # Default trip gap, also used by the migration. Kept here so the migration
 # can run before any per-call ``trip_gap_minutes`` argument is available.
 _TRIP_GAP_MINUTES_DEFAULT = 5
+
+# Safety bound on the post-insert merge loop. The migration uses 10000;
+# match it so the runtime helper can recover from severe accumulated
+# fragmentation (e.g. after a long indexer outage where many small
+# trip fragments built up). Hitting this bound indicates a pathological
+# data set worth investigating.
+_MERGE_MAX_ITERATIONS = 10000
+
+
+def _merge_adjacent_trips_for(conn: sqlite3.Connection,
+                              anchor_trip_id: int,
+                              gap_seconds: float) -> int:
+    """Merge any other trip whose [start_time, end_time] window is within
+    ``gap_seconds`` of the anchor's window. The lower trip id wins so
+    the survivor is stable and references stay valid.
+
+    This is the runtime defense against trip fragmentation when the
+    indexer processes a drive's clips out of order. The matching SQL in
+    :func:`_index_video` picks one trip per insert; this helper runs
+    afterwards and stitches together any trips the new clip's waypoints
+    bridged. Mirrors the v2→v3 migration's merge phase but is scoped to
+    one anchor's neighbourhood per call so it costs only a handful of
+    queries per indexed file.
+
+    Returns the surviving trip id (which equals ``anchor_trip_id`` when
+    anchor is the lowest-id trip in its merged cluster, otherwise the
+    smaller id of the merge pair).
+
+    Important: the caller is responsible for calling ``conn.commit()``
+    after this returns. The helper writes through the connection's
+    current transaction so insert + merge + stats recompute remain
+    atomic — readers see either the pre-insert state or the fully
+    merged state, never a half-merged window.
+
+    Foreign-key safety: the schema declares
+    ``trip_id REFERENCES trips(id) ON DELETE CASCADE`` on both
+    ``waypoints`` and ``detected_events``, so this helper MUST update
+    the child rows BEFORE deleting the dropped trip — otherwise the
+    cascade would destroy waypoints we wanted to preserve.
+    """
+    survivor = anchor_trip_id
+
+    for _ in range(_MERGE_MAX_ITERATIONS):
+        # Refresh the survivor's bounds from waypoints. The bounds may
+        # have changed in two ways since the last iteration: the caller
+        # just inserted new waypoints, or the previous loop iteration
+        # absorbed another trip's waypoints. Without this refresh, a
+        # chain merge (A ↔ B ↔ C) would stop after one step because
+        # the survivor's stale ``end_time`` does not reach C.
+        bounds = conn.execute(
+            "SELECT MIN(timestamp) AS s, MAX(timestamp) AS e "
+            "FROM waypoints WHERE trip_id = ?",
+            (survivor,),
+        ).fetchone()
+        if not bounds or bounds['s'] is None:
+            return survivor
+        conn.execute(
+            "UPDATE trips SET start_time = ?, end_time = ? WHERE id = ?",
+            (bounds['s'], bounds['e'], survivor),
+        )
+
+        # Find the lowest-id mergeable neighbour. Same window logic as
+        # the matching SQL in _index_video and the migration:
+        #   neighbour.start - survivor.end ≤ gap   (neighbour after)
+        #   survivor.start - neighbour.end ≤ gap   (neighbour before)
+        # Negative values (overlap) also satisfy ≤ gap. Order by id so
+        # we always pick the smallest mergeable neighbour first; the
+        # absolute pair we merge is then (min(survivor, candidate),
+        # max(survivor, candidate)).
+        #
+        # Integer-second arithmetic via ``strftime('%s', ...)`` is used
+        # instead of ``(julianday(a) - julianday(b)) * 86400`` because
+        # the latter has floating-point error: a true 300-second gap
+        # can yield 300.000022 and fail the ``<= 300`` boundary check,
+        # silently leaving phantom-fragmented trips unmerged. The
+        # strftime form is precise to one second, which is safely
+        # within the 5-minute trip-gap semantic tolerance.
+        candidate = conn.execute(
+            """
+            SELECT id FROM trips
+            WHERE id != :survivor
+              AND start_time IS NOT NULL AND end_time IS NOT NULL
+              AND (CAST(strftime('%s', start_time) AS INTEGER)
+                   - CAST(strftime('%s', :end_t) AS INTEGER)) <= :gap
+              AND (CAST(strftime('%s', :start_t) AS INTEGER)
+                   - CAST(strftime('%s', end_time) AS INTEGER)) <= :gap
+            ORDER BY id
+            LIMIT 1
+            """,
+            {'survivor': survivor,
+             'start_t': bounds['s'], 'end_t': bounds['e'],
+             'gap': gap_seconds},
+        ).fetchone()
+        if not candidate:
+            return survivor
+
+        keep_id = min(survivor, candidate['id'])
+        drop_id = max(survivor, candidate['id'])
+
+        # Update children first, then delete the parent. Reversing this
+        # order would trip the ON DELETE CASCADE and silently destroy
+        # the very rows we are trying to preserve.
+        conn.execute(
+            "UPDATE waypoints SET trip_id = ? WHERE trip_id = ?",
+            (keep_id, drop_id),
+        )
+        conn.execute(
+            "UPDATE detected_events SET trip_id = ? WHERE trip_id = ?",
+            (keep_id, drop_id),
+        )
+        conn.execute("DELETE FROM trips WHERE id = ?", (drop_id,))
+        survivor = keep_id
+
+    raise RuntimeError(
+        f"_merge_adjacent_trips_for: exceeded {_MERGE_MAX_ITERATIONS} "
+        "iterations — possible infinite loop or pathological data"
+    )
+
+
+def _merge_all_adjacent_trip_pairs(conn: sqlite3.Connection,
+                                    gap_seconds: float) -> int:
+    """Sweep the whole ``trips`` table and merge every pair whose
+    windows are within ``gap_seconds`` of each other.
+
+    Used by:
+      * the v2→v3 migration (cleans up duplicate trips from earlier
+        indexer bugs);
+      * the v8→v9 migration (one-shot repair of phantom-fragmented
+        trips left over from the matching-SQL boundary bug);
+      * future startup repair passes.
+
+    Always uses integer-epoch arithmetic via ``strftime('%s', ...)``
+    instead of ``(julianday(a) - julianday(b)) * 86400`` because the
+    latter has floating-point error that silently leaves true
+    ``gap_seconds``-apart pairs unmerged (see ``_merge_adjacent_trips_for``
+    for the in-depth explanation).
+
+    Foreign-key safety: updates ``waypoints`` and ``detected_events``
+    BEFORE deleting the dropped trip, since both tables declare
+    ``ON DELETE CASCADE`` on ``trip_id``.
+
+    Returns the number of merge operations performed. The caller is
+    responsible for ``conn.commit()``.
+
+    Raises ``RuntimeError`` if more than ``_MERGE_MAX_ITERATIONS`` pairs
+    are merged — a safety bound that triggers the migration's SAVEPOINT
+    rollback rather than silently continuing forever on pathological
+    data.
+    """
+    merged = 0
+    for _ in range(_MERGE_MAX_ITERATIONS):
+        pair = conn.execute(
+            """SELECT a.id AS keep_id, b.id AS drop_id
+               FROM trips a
+               JOIN trips b
+                 ON a.id < b.id
+                AND a.start_time IS NOT NULL AND a.end_time IS NOT NULL
+                AND b.start_time IS NOT NULL AND b.end_time IS NOT NULL
+                AND (CAST(strftime('%s', b.start_time) AS INTEGER)
+                     - CAST(strftime('%s', a.end_time) AS INTEGER)) <= ?
+                AND (CAST(strftime('%s', a.start_time) AS INTEGER)
+                     - CAST(strftime('%s', b.end_time) AS INTEGER)) <= ?
+               LIMIT 1""",
+            (gap_seconds, gap_seconds),
+        ).fetchone()
+        if not pair:
+            return merged
+        keep_id, drop_id = pair['keep_id'], pair['drop_id']
+        conn.execute(
+            "UPDATE waypoints SET trip_id = ? WHERE trip_id = ?",
+            (keep_id, drop_id),
+        )
+        conn.execute(
+            "UPDATE detected_events SET trip_id = ? WHERE trip_id = ?",
+            (keep_id, drop_id),
+        )
+        # Refresh the survivor's bounds so the next iteration considers
+        # the merged window when looking for further mergeable pairs.
+        bounds = conn.execute(
+            "SELECT MIN(timestamp) AS s, MAX(timestamp) AS e "
+            "FROM waypoints WHERE trip_id = ?",
+            (keep_id,),
+        ).fetchone()
+        if bounds and bounds['s'] is not None:
+            conn.execute(
+                "UPDATE trips SET start_time = ?, end_time = ? "
+                "WHERE id = ?",
+                (bounds['s'], bounds['e'], keep_id),
+            )
+        conn.execute("DELETE FROM trips WHERE id = ?", (drop_id,))
+        merged += 1
+
+    raise RuntimeError(
+        f"_merge_all_adjacent_trip_pairs: exceeded "
+        f"{_MERGE_MAX_ITERATIONS} iterations — possible infinite loop "
+        "or pathological duplicate set"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2075,6 +2271,18 @@ def _index_video(
     # Earlier code filtered by source_folder, which fragmented trips when
     # the same drive was ingested from RecentClips vs ArchivedClips, and
     # picked the wrong trip when videos were indexed out of order.
+    #
+    # ORDER BY: pick the trip with the smallest temporal gap to the new
+    # clip (0 for any trip whose window overlaps the new clip's range).
+    # An earlier "ORDER BY ABS(new_start - existing.start)" tie-breaker
+    # caused phantom duplicate trips in production: when the new clip
+    # fell BETWEEN two existing trips, that ranking could prefer the
+    # later trip simply because its start_time was numerically closer
+    # to the new clip's start (even though the clip should clearly
+    # extend the earlier trip). The new ranking always picks the trip
+    # whose interval the new clip actually adjoins. The post-insert
+    # _merge_adjacent_trips_for is still called as defense in depth in
+    # case the chosen trip is itself adjacent to another.
     first_wp = waypoint_dicts[0]
     last_wp = waypoint_dicts[-1]
     new_start = first_wp['timestamp']
@@ -2082,13 +2290,29 @@ def _index_video(
     gap_seconds = trip_gap_minutes * 60
 
     existing_trip = conn.execute(
-        """SELECT id FROM trips
-           WHERE start_time IS NOT NULL AND end_time IS NOT NULL
-             AND ((julianday(?) - julianday(end_time)) * 86400) <= ?
-             AND ((julianday(start_time) - julianday(?)) * 86400) <= ?
-           ORDER BY ABS((julianday(?) - julianday(start_time)) * 86400)
-           LIMIT 1""",
-        (new_start, gap_seconds, new_end, gap_seconds, new_start),
+        """
+        SELECT id FROM trips
+        WHERE start_time IS NOT NULL AND end_time IS NOT NULL
+          AND (CAST(strftime('%s', :ns) AS INTEGER)
+               - CAST(strftime('%s', end_time) AS INTEGER)) <= :gap
+          AND (CAST(strftime('%s', start_time) AS INTEGER)
+               - CAST(strftime('%s', :ne) AS INTEGER)) <= :gap
+        ORDER BY
+          CASE
+            WHEN CAST(strftime('%s', end_time) AS INTEGER)
+                 < CAST(strftime('%s', :ns) AS INTEGER)
+              THEN CAST(strftime('%s', :ns) AS INTEGER)
+                   - CAST(strftime('%s', end_time) AS INTEGER)
+            WHEN CAST(strftime('%s', start_time) AS INTEGER)
+                 > CAST(strftime('%s', :ne) AS INTEGER)
+              THEN CAST(strftime('%s', start_time) AS INTEGER)
+                   - CAST(strftime('%s', :ne) AS INTEGER)
+            ELSE 0
+          END ASC,
+          id ASC
+        LIMIT 1
+        """,
+        {'ns': new_start, 'ne': new_end, 'gap': gap_seconds},
     ).fetchone()
     trip_id = existing_trip['id'] if existing_trip else None
 
@@ -2133,6 +2357,17 @@ def _index_video(
               ev['video_path'], ev['frame_offset'], ev.get('metadata'))
              for ev in events]
         )
+
+    # Defense-in-depth: merge any other trip whose window now adjoins
+    # (or overlaps) this trip's extent. The matching SQL above picks
+    # one trip per insert; if the new clip's waypoints bridged two
+    # existing trips, only the chosen one was extended and the other
+    # remained as a phantom fragment. _merge_adjacent_trips_for stitches
+    # them together using the same gap rule and returns the surviving
+    # id (which is preserved across calls because we always keep the
+    # lower id). All FK children are re-pointed before the dropped
+    # trip is deleted, so cascade does not destroy waypoints.
+    trip_id = _merge_adjacent_trips_for(conn, trip_id, gap_seconds)
 
     # Recompute trip stats from the full waypoint set. The new video may
     # extend the trip in either direction (forward OR backward in time when

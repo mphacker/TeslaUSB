@@ -529,13 +529,27 @@ def _run_worker_loop(db_path: str, teslacam_root: str, worker_id: str) -> None:
 
         # Don't fight other heavy tasks — archive and cloud sync take
         # priority for vehicle-safety reasons (RecentClips preservation
-        # > indexing latency).
-        if not task_coordinator.acquire_task(_COORDINATOR_TASK):
+        # > indexing latency).  ``yield_to_waiters=True`` makes the
+        # indexer immediately back off whenever any other task (archive
+        # or cloud sync) is currently inside ``acquire_task`` waiting
+        # for the lock.  This is the fairness mechanism that prevents
+        # the indexer's tight ~1 Hz acquire/release cycle from starving
+        # the 5-minute archive timer (which led to TeslaCam clip loss
+        # in production).
+        if not task_coordinator.acquire_task(
+                _COORDINATOR_TASK, yield_to_waiters=True):
             if _stop_event.wait(timeout=_BACKOFF_SLEEP_SECONDS):
                 break
             continue
 
+        # Claim a row, process it, then ALWAYS release the lock before
+        # any sleeping. Holding the lock while sleeping (waiting for
+        # the next file or for an empty queue to refill) would re-create
+        # the starvation: the archive timer would see the lock held and
+        # bail out for another 5 minutes even though the indexer is
+        # doing no work.
         row: Optional[Dict[str, Any]] = None
+        claim_failed = False
         try:
             try:
                 row = mapping_service.claim_next_queue_item(
@@ -544,26 +558,32 @@ def _run_worker_loop(db_path: str, teslacam_root: str, worker_id: str) -> None:
             except Exception as e:  # noqa: BLE001
                 logger.warning("claim_next_queue_item raised: %s", e)
                 _set_worker_state(last_error=f'claim: {e!r}')
-                if _stop_event.wait(timeout=_BACKOFF_SLEEP_SECONDS):
-                    break
-                continue
+                claim_failed = True
+                row = None
 
-            if row is None:
+            if row is not None:
+                _process_one(row, db_path, teslacam_root)
+            elif not claim_failed:
                 # Queue genuinely empty — record drain timestamp so the
                 # status API can show "last drained N seconds ago".
                 _set_worker_state(last_drained_at=time.time())
-                if _stop_event.wait(timeout=_IDLE_SLEEP_SECONDS):
-                    break
-                continue
-
-            _process_one(row, db_path, teslacam_root)
         finally:
             task_coordinator.release_task(_COORDINATOR_TASK)
             _record_idle()
 
-        # Inter-file pause — keep the gadget responsive.
-        if _stop_event.wait(timeout=_INTER_FILE_SLEEP_SECONDS):
-            break
+        # All sleeps happen AFTER the lock is released so other tasks
+        # (archive, cloud sync) can grab it during these windows.
+        if claim_failed:
+            if _stop_event.wait(timeout=_BACKOFF_SLEEP_SECONDS):
+                break
+        elif row is None:
+            # Queue empty — sleep longer; nothing useful to do.
+            if _stop_event.wait(timeout=_IDLE_SLEEP_SECONDS):
+                break
+        else:
+            # Inter-file pause — keep the gadget responsive.
+            if _stop_event.wait(timeout=_INTER_FILE_SLEEP_SECONDS):
+                break
 
 
 def _process_one(row: Dict[str, Any], db_path: str,

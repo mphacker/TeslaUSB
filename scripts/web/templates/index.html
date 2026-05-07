@@ -469,7 +469,22 @@ function loadSavedNetworks() {
             const dot = net.active ? '<span style="color:var(--success-text, #22c55e);margin-right:6px">●</span>' : '<span style="margin-right:14px"></span>';
             const signal = net.in_range ? '<span style="font-size:0.8em;color:var(--text-secondary)">' + getSignalIcon(net.signal) + ' ' + net.signal + '%</span>' : '<span style="font-size:0.8em;color:var(--text-secondary)">Not in range</span>';
             const name = (net.ssid || net.name).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            const escapedName = net.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            // Defence against XSS via SSID. The value is embedded inside
+            //   onclick="someFn('VALUE')"
+            // so we have to escape for two contexts in order:
+            //   1. JS string literal: backslash, then single quote (the JS
+            //      string delimiter).
+            //   2. HTML attribute value: ampersand first (must come before
+            //      other &-entities so we don't double-encode), then the
+            //      attribute delimiter (").
+            // Without the HTML attribute pass, an SSID containing `"` or
+            // `&quot;` could close the onclick attribute and inject
+            // arbitrary HTML. The order matters in BOTH passes.
+            const escapedName = net.name
+                .replace(/\\/g, '\\\\')   // JS: backslash
+                .replace(/'/g, "\\'")     // JS: single quote (string delimiter)
+                .replace(/&/g, '&amp;')   // HTML attr: ampersand (first!)
+                .replace(/"/g, '&quot;'); // HTML attr: double quote (delimiter)
             html += '<div style="display:flex;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border-color, var(--border));gap:6px">';
             html += dot;
             html += '<span style="flex:1;font-size:0.875rem;font-weight:' + (net.active ? '600' : '400') + '">' + name + '</span>';

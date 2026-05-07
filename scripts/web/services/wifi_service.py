@@ -620,6 +620,9 @@ def _set_runtime_force_mode(mode: str) -> bool:
         logger.warning("Failed to write runtime force mode %s: %s", mode, e)
         return False
     # Wake wifi-monitor so it observes the change immediately (best-effort).
+    # No sudo: gadget_web.service runs as root (port 80 binding requirement,
+    # see copilot-instructions.md "Web App Patterns"). Any future privilege
+    # drop would have to add sudo here AND update the sudoers policy.
     try:
         subprocess.run(
             ["systemctl", "kill", "-s", "SIGUSR1", "wifi-monitor.service"],

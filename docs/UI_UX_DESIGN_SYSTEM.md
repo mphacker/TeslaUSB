@@ -127,8 +127,10 @@ All icons use [Lucide](https://lucide.dev/) delivered as an inline SVG sprite. D
 | Videos | `video` | |
 | Lock chimes | `bell` | |
 | Music | `music` | |
+| Boombox | `megaphone` | Tesla pedestrian-warning sounds |
 | Light shows | `sparkles` | |
 | Wraps | `palette` | |
+| License plates | `image` | Custom Paint Shop plate backgrounds |
 | Settings | `settings` | |
 | Analytics | `bar-chart-2` | |
 | Mode toggle | `refresh-cw` | |
@@ -312,7 +314,7 @@ The underlying Present/Edit mode distinction is an implementation detail — nev
 ```
 Map (/)              — Primary landing page, full-viewport map
 Analytics (/analytics/) — Storage dashboard, stats, charts
-Media (/media/)      — Lock Chimes, Music, Light Shows, Wraps (sub-tabs)
+Media (/media/)      — Lock Chimes, Music, Boombox, Light Shows, Wraps, License Plates (sub-tabs, gated by available disk images)
 Settings (/settings/) — Mode control, WiFi, AP, system config
 ```
 

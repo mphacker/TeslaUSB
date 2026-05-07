@@ -25,7 +25,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Map-centric dashboard** with GPS trip routes, event markers, and floating trip cards as the landing page
 - **Telemetry HUD** overlay during video playback — speed, gear, steering, pedals, blinkers, Autopilot status
 - Remote access to dashcam footage without physically removing storage
-- Web interface for browsing videos, managing chimes, light shows, wraps, music, and monitoring storage (with dark/light mode)
+- Web interface for browsing videos, managing chimes, music, boombox sounds, light shows, wraps, license plates, and monitoring storage (with dark/light mode)
 - Automatic cleanup policies to manage disk space
 - Scheduled chime changes for holidays, events, or automatic rotation
 - Offline access point for in-car web access when WiFi is unavailable
@@ -93,6 +93,20 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - Automatic validation (512-1024px dimensions, max 1MB, PNG only)
 - Supports up to 10 custom wraps at a time
 - Drag-and-drop upload with progress indicator
+
+### License Plate Management
+- Upload custom license-plate background images for Tesla's Paint Shop visualization (LightShow drive, `/LicensePlate` folder)
+- **Smart auto-cropping**: Drop in any image format (PNG, JPEG, WEBP, GIF, BMP) — the server crops/resizes to one of Tesla's two allowed dimensions: **420×200** (North America) or **420×100** (Europe)
+- Output is always optimized PNG, capped at **512 KB**
+- Up to **10 plates** at a time, alphanumeric filenames (32 characters max — Tesla's plate parser rejects anything else)
+- Drag-and-drop multi-file upload, previews, individual download/delete
+- Read-only at runtime (Tesla reads from the LightShow LUN); writes use the `quick_edit_part2` mechanism
+
+### Boombox Sound Management
+- Manage sounds Tesla plays through the external pedestrian-warning speaker (Music drive, `/Boombox` folder — requires `music_enabled: true`)
+- **Tesla constraints enforced in the UI**: MP3 or WAV only, **1 MiB** maximum (≤ 5 seconds recommended), **64-character** filename limit (letters, numbers, spaces, underscores, dashes, dots), **5 sounds** max — Tesla loads the first 5 alphabetically
+- In-browser preview, drag-and-drop upload, individual delete
+- Prominent **NHTSA safety notice**: Boombox sounds only play while the vehicle is in Park (Feb 2022 NHTSA ruling), and the vehicle must have an external pedestrian-warning speaker — built September 2019 or later for Model 3/Y/S/X, or any Cybertruck
 
 ### Automatic Maintenance
 - **Storage Cleanup**: Age, size, or count-based policies per folder
@@ -270,7 +284,8 @@ The web interface uses a five-tab navigation — sidebar rail on desktop and bot
 - Disambiguation popup when a map location has multiple overlapping clips (lists each clip with trip date/time so the right one can be selected)
 - Telemetry HUD overlay showing speed, gear, steering wheel, brake/gas pedals, blinkers, and Autopilot status (uses pre-indexed server-side waypoint data — instant, no full download)
 - FSD overlay toggle
-- Auto-indexing of dashcam SEI telemetry via a queue-backed background worker (boot catch-up + inotify + post-WiFi archive run); banner shows only during real parse activity
+- **Shareable URLs**: The selected day and active sub-view are encoded in the URL — bookmarks, browser back/forward, and reload all return you to exactly the same state
+- Auto-indexing of dashcam SEI telemetry via a queue-backed background worker (boot catch-up + inotify + post-WiFi archive run); banner shows only during real parse activity and is positioned so it never covers the date/filter controls
 
 **Analytics Tab**:
 - Storage metrics with drive usage gauges and folder-by-folder breakdown (including Music drive when enabled)
@@ -280,8 +295,12 @@ The web interface uses a five-tab navigation — sidebar rail on desktop and bot
 **Media Tab** *(hub with sub-tabs)*:
 - **Lock Chimes**: Upload WAV/MP3 files (auto-converted to Tesla format), preview with in-browser player, set active chime, built-in audio editor with waveform visualization, schedule automatic changes (weekly, date, holiday, recurring)
 - **Music** *(requires `music_enabled: true` and Music disk image)*: Browse folders with breadcrumb navigation, in-browser playback (MP3, FLAC, WAV, AAC, M4A), drag-and-drop uploads with chunked transfer, create/move/delete files and folders, usage gauge
+- **Boombox** *(requires `music_enabled: true`)*: Manage the up to 5 sounds Tesla plays through the external pedestrian-warning speaker, with an NHTSA safety notice ("plays only in Park") prominently displayed. MP3/WAV, 1 MiB max
 - **Light Shows**: Upload and manage FSEQ + MP3/WAV files, grouped display, preview audio in browser, delete complete sets
 - **Wraps**: Upload PNG files for Tesla Paint Shop wraps (512–1024px, max 1MB, up to 10), thumbnail gallery, download or delete
+- **License Plates**: Upload custom plate-background images — server auto-crops to Tesla's 420×200 (NA) or 420×100 (EU) format, outputs optimized PNG ≤ 512 KB, up to 10 plates, alphanumeric filenames
+
+Each Media sub-tab is **automatically hidden** when the disk image it depends on is missing (Boombox/Music require `usb_music.img`; Chimes/Shows/Wraps/Plates require `usb_lightshow.img`).
 
 **Cloud Tab** *(conditional — shown when cloud archive is configured)*:
 - Configure cloud storage provider (Google Drive, S3, Dropbox, etc.) via rclone

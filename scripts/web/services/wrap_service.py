@@ -185,7 +185,7 @@ def validate_wrap_file(file_bytes, filename):
     return True, None, (width, height)
 
 
-def _safe_rebind_usb_gadget():
+def safe_rebind_usb_gadget():
     """Call ``rebind_usb_gadget()`` and swallow any failure.
 
     A rebind is a courtesy to Tesla's USB cache — the file is already
@@ -194,6 +194,10 @@ def _safe_rebind_usb_gadget():
     still gets the new wrap on the next reboot or other rebind.
     Logging the warning is enough; failing the upload would leave
     the file written but the API saying "failed", which is worse.
+
+    Returns ``None``. Callers don't act on success/failure of the
+    rebind itself — the disk write is the source of truth, and a
+    failed rebind is logged for operators but not surfaced to users.
     """
     from services.partition_mount_service import rebind_usb_gadget
     try:
@@ -203,14 +207,12 @@ def _safe_rebind_usb_gadget():
                 f"USB gadget rebind after wrap change failed: {msg}. "
                 "Tesla will pick up the change on next re-enumeration."
             )
-        return success
     except Exception as e:
         logger.warning(
             f"USB gadget rebind raised: {e}. "
             "Tesla will pick up the change on next re-enumeration.",
             exc_info=True,
         )
-        return False
 
 
 def upload_wrap_file(uploaded_file, filename, part2_mount_path=None,
@@ -304,7 +306,7 @@ def upload_wrap_file(uploaded_file, filename, part2_mount_path=None,
                 # file is already on disk and will be picked up on
                 # the next natural rebind.
                 if not defer_rebind:
-                    _safe_rebind_usb_gadget()
+                    safe_rebind_usb_gadget()
                 return True, f"Successfully uploaded {filename} ({dimensions[0]}x{dimensions[1]})", dimensions
             else:
                 return False, copy_msg, None
@@ -411,7 +413,7 @@ def delete_wrap_file(filename, part2_mount_path=None, defer_rebind=False):
         if success and not defer_rebind:
             # Force Tesla to invalidate its USB cache so the deleted
             # wrap disappears from the in-car Background selector.
-            _safe_rebind_usb_gadget()
+            safe_rebind_usb_gadget()
         return success, msg
     else:
         # Normal edit mode operation — gadget is unbound, no rebind needed.

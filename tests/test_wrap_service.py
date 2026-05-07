@@ -355,3 +355,40 @@ class TestRebindAfterDelete:
 
         assert success is True, msg
         rebind.assert_not_called()
+
+    def test_rebind_failure_does_not_fail_delete(
+            self, fake_lightshow, monkeypatch, caplog):
+        # Symmetric to test_rebind_failure_does_not_fail_upload — the
+        # file is already deleted from disk by the time we call
+        # rebind. A rebind failure must not propagate into the delete
+        # result, otherwise the user sees "delete failed" but the
+        # file is actually gone.
+        rebind = MagicMock(return_value=(False, 'gadget busy'))
+        monkeypatch.setattr(
+            'services.partition_mount_service.rebind_usb_gadget',
+            rebind)
+
+        with caplog.at_level('WARNING'):
+            success, msg = self._wrap_delete(
+                fake_lightshow, 'present', monkeypatch)
+
+        assert success is True
+        rebind.assert_called_once()
+        assert any('rebind' in rec.message.lower() for rec in caplog.records)
+
+    def test_rebind_exception_does_not_fail_delete(
+            self, fake_lightshow, monkeypatch, caplog):
+        # And the same for the case where rebind raises rather than
+        # returning (False, msg). Both must be swallowed.
+        rebind = MagicMock(
+            side_effect=RuntimeError('configfs not mounted'))
+        monkeypatch.setattr(
+            'services.partition_mount_service.rebind_usb_gadget',
+            rebind)
+
+        with caplog.at_level('WARNING'):
+            success, msg = self._wrap_delete(
+                fake_lightshow, 'present', monkeypatch)
+
+        assert success is True
+        rebind.assert_called_once()

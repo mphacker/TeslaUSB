@@ -1,6 +1,9 @@
 """Blueprint for custom wrap management routes."""
 
 import os
+# ``time`` is used for cache-busting query strings on redirect URLs
+# (``int(time.time())``), not for sleeps — the post-write sleeps that
+# used to live here were removed when the USB-rebind path landed.
 import time
 import logging
 from flask import Blueprint, render_template, request, redirect, url_for, flash, send_file, jsonify
@@ -17,6 +20,7 @@ from services.wrap_service import (
     delete_wrap_file,
     list_wrap_files,
     get_wrap_count_any_mode,
+    safe_rebind_usb_gadget,
     WRAPS_FOLDER,
     MAX_WRAP_COUNT,
     MAX_WRAP_SIZE,
@@ -197,17 +201,7 @@ def upload_multiple_wraps():
     # Tesla caches USB file contents; without this the new wraps
     # don't appear in the in-car Background selector until a reboot.
     if mode == "present" and total_uploaded > 0:
-        from services.partition_mount_service import rebind_usb_gadget
-        try:
-            ok, msg = rebind_usb_gadget()
-            if not ok:
-                logger.warning(
-                    f"USB gadget rebind after wrap batch failed: {msg}")
-        except Exception as e:
-            logger.warning(
-                f"USB gadget rebind raised after wrap batch: {e}",
-                exc_info=True,
-            )
+        safe_rebind_usb_gadget()
 
     if is_ajax:
         success_count = sum(1 for r in results if r['success'])

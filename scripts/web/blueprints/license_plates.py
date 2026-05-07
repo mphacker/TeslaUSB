@@ -138,6 +138,25 @@ def download_plate(partition, filename):
         return redirect(url_for("license_plates.license_plates"))
 
     file_path = os.path.join(mount_path, LICENSE_PLATE_FOLDER, safe_name)
+
+    # Defense-in-depth: verify the resolved path lives under the
+    # LicensePlate folder before serving it. basename() defangs `..`
+    # traversal in the filename itself, but a symlink under
+    # LicensePlate/ pointing outside the folder would still be served
+    # without this check. realpath() follows symlinks; commonpath()
+    # confirms containment under the expected root.
+    expected_dir = os.path.realpath(os.path.join(mount_path, LICENSE_PLATE_FOLDER))
+    try:
+        resolved = os.path.realpath(file_path)
+        if os.path.commonpath([expected_dir, resolved]) != expected_dir:
+            flash("File not found", "error")
+            return redirect(url_for("license_plates.license_plates"))
+    except ValueError:
+        # commonpath raises ValueError on mixed drives (Windows) or
+        # when paths cannot be compared. Treat as not-found.
+        flash("File not found", "error")
+        return redirect(url_for("license_plates.license_plates"))
+
     if not os.path.isfile(file_path):
         flash("File not found", "error")
         return redirect(url_for("license_plates.license_plates"))

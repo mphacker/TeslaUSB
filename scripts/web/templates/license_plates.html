@@ -818,7 +818,17 @@ function renderCropper() {
     const img = cropperState.img;
     const scale = cropperState.canvasScale;
 
-    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg-secondary') || '#000';
+    // Read theme-invariant cropper colours from CSS custom properties
+    // (defined in style.css :root and [data-theme="dark"] :root). The
+    // values are intentionally white/black for visibility against
+    // arbitrary user content; centralising them in CSS lets a future
+    // themer override them without touching this JS.
+    const styles = getComputedStyle(document.body);
+    const handleFill = styles.getPropertyValue('--cropper-handle-fill').trim() || '#ffffff';
+    const handleStroke = styles.getPropertyValue('--cropper-handle-stroke').trim() || '#000000';
+    const bgFallback = styles.getPropertyValue('--cropper-bg-fallback').trim() || '#000000';
+
+    ctx.fillStyle = styles.getPropertyValue('--bg-secondary').trim() || bgFallback;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
@@ -838,30 +848,30 @@ function renderCropper() {
     // Crop border + handles.
     // White-with-black-halo is the standard cropper convention so the
     // rectangle stays visible against arbitrary user image content.
-    // CSS theme tokens deliberately not used here — those would make
-    // the outline invisible against ~half of possible source images.
-    ctx.strokeStyle = '#ffffff';
+    // The hex values come from --cropper-handle-fill / --cropper-handle-stroke
+    // in style.css (theme-invariant by design — see comment there).
+    ctx.strokeStyle = handleFill;
     ctx.lineWidth = 2;
     ctx.strokeRect(dx + 1, dy + 1, dw - 2, dh - 2);
-    ctx.strokeStyle = '#000000';
+    ctx.strokeStyle = handleStroke;
     ctx.lineWidth = 1;
     ctx.strokeRect(dx + 0.5, dy + 0.5, dw - 1, dh - 1);
 
     // Corner handles (drawn in display-space).
-    drawHandle(ctx, dx, dy);
-    drawHandle(ctx, dx + dw, dy);
-    drawHandle(ctx, dx, dy + dh);
-    drawHandle(ctx, dx + dw, dy + dh);
+    drawHandle(ctx, dx, dy, handleFill, handleStroke);
+    drawHandle(ctx, dx + dw, dy, handleFill, handleStroke);
+    drawHandle(ctx, dx, dy + dh, handleFill, handleStroke);
+    drawHandle(ctx, dx + dw, dy + dh, handleFill, handleStroke);
 
     renderPreview();
     updateOutputInfo();
 }
 
-function drawHandle(ctx, x, y) {
-    const s = 10;
-    ctx.fillStyle = '#ffffff';
+function drawHandle(ctx, x, y, fill, stroke) {
+    const s = 12;
+    ctx.fillStyle = fill;
     ctx.fillRect(x - s/2, y - s/2, s, s);
-    ctx.strokeStyle = '#000000';
+    ctx.strokeStyle = stroke;
     ctx.lineWidth = 1;
     ctx.strokeRect(x - s/2 + 0.5, y - s/2 + 0.5, s - 1, s - 1);
 }
@@ -904,7 +914,11 @@ function attachCropperPointerHandlers() {
     const canvas = document.getElementById('cropperCanvas');
     if (!canvas) return;
 
-    const HANDLE_HIT = 14; // px in display coords
+    // 22px half-extent → 44×44px effective hit area, meeting the
+    // design system's minimum touch-target size for the corner handles.
+    // The visual handle (drawn in drawHandle()) stays smaller for
+    // aesthetic reasons; the larger hit area is invisible.
+    const HANDLE_HIT = 22; // px in display coords
 
     canvas.addEventListener('pointerdown', function(e) {
         e.preventDefault();

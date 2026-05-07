@@ -47,6 +47,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -746,6 +747,23 @@ def _post_webhook(event_row: Dict, files_uploaded: int,
     url = LIVE_EVENT_NOTIFY_WEBHOOK_URL
     if not url:
         return
+    # Defence-in-depth: urllib.request.urlopen will happily honor
+    # file://, ftp://, data://, etc. The webhook URL is admin-supplied
+    # via config.yaml so this is a typo-defense, not an external
+    # exploit vector — but we restrict to http/https either way.
+    try:
+        scheme = (urlparse(url).scheme or '').lower()
+    except Exception:  # noqa: BLE001
+        scheme = ''
+    if scheme not in ('http', 'https'):
+        if not getattr(_post_webhook, '_warned_bad_scheme', False):
+            logger.warning(
+                "LES webhook URL has unsupported scheme %r (must be "
+                "http or https); skipping delivery.",
+                scheme,
+            )
+            _post_webhook._warned_bad_scheme = True  # type: ignore[attr-defined]
+        return
     raw_dir = event_row.get('event_dir') or ''
     rel = _relative_event_path(raw_dir) or os.path.basename(
         raw_dir.rstrip('/').rstrip('\\'),
@@ -1233,6 +1251,15 @@ def get_status() -> Dict:
             conn.close()
     except Exception as e:
         snapshot['queue_counts'] = {'error': str(e)[:200]}
+
+    # Surface the cross-subsystem coordination signal so the
+    # WiFi-connect dispatcher's drain wait can yield correctly when
+    # the only remaining rows are in backoff / over the retry cap /
+    # blocked by the daily data cap.
+    try:
+        snapshot['has_ready_work'] = has_ready_live_event_work()
+    except Exception:
+        snapshot['has_ready_work'] = False
 
     return snapshot
 

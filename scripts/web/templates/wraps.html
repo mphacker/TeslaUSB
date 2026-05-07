@@ -82,15 +82,23 @@
         <table class="video-table" style="table-layout: fixed;">
             <thead>
                 <tr>
-                    <th style="width: 35%;">Filename</th>
-                    <th style="width: 20%;">Dimensions</th>
-                    <th style="width: 15%;">Size</th>
-                    <th style="width: 30%;">Actions</th>
+                    <th style="width: 18%;">Preview</th>
+                    <th style="width: 27%;">Filename</th>
+                    <th style="width: 15%;">Dimensions</th>
+                    <th style="width: 12%;">Size</th>
+                    <th style="width: 28%;">Actions</th>
                 </tr>
             </thead>
             <tbody>
                 {% for wrap in wrap_files %}
                 <tr>
+                    <td>
+                        {# User-uploaded PNG rendered as a thumbnail — exempt from the SVG-only rule per design system #}
+                        <img src="{{ url_for('wraps.download_wrap', partition=wrap.partition_key, filename=wrap.filename) }}"
+                             alt="Wrap preview {{ wrap.filename }}"
+                             style="max-width: 120px; max-height: 120px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);"
+                             loading="lazy">
+                    </td>
                     <td style="word-wrap: break-word; overflow-wrap: break-word;">{{ wrap.filename }}</td>
                     <td>{{ wrap.dimensions }}</td>
                     <td>{{ wrap.size_str }}</td>
@@ -116,6 +124,13 @@
     <div class="mobile-card-container">
         {% for wrap in wrap_files %}
         <div class="mobile-card wrap-card">
+            <div style="text-align: center; margin-bottom: 8px;">
+                {# User-uploaded PNG rendered as a thumbnail — exempt from the SVG-only rule per design system #}
+                <img src="{{ url_for('wraps.download_wrap', partition=wrap.partition_key, filename=wrap.filename) }}"
+                     alt="Wrap preview {{ wrap.filename }}"
+                     style="max-width: 100%; max-height: 200px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);"
+                     loading="lazy">
+            </div>
             <div class="mobile-card-title">
                 <strong>{{ wrap.filename }}</strong>
             </div>

@@ -210,6 +210,14 @@ def _schedule_service_restart() -> bool:
     transient timer **outside** this service's cgroup. That way the
     restart still fires even when our own process is killed during the
     restart sequence. Returns True when scheduling succeeded.
+
+    No sudo: gadget_web.service runs as root (port 80 binding requirement,
+    see copilot-instructions.md "Web App Patterns"), so ``systemd-run``
+    is callable directly. Any future privilege drop would have to either
+    (a) add a sudoers rule for ``systemd-run --on-active=...
+    systemctl restart gadget_web.service`` or (b) replace this with a
+    PolicyKit / dbus call. The settings UI surfaces ``restart_scheduled``
+    in its toast so a scheduling failure is at least visible.
     """
     try:
         subprocess.Popen(

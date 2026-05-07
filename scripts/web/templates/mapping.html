@@ -261,10 +261,14 @@
 
     .event-svg-icon { background: none !important; border: none !important; }
 
-    /* ── Indexer Status (floating on map) ── */
+    /* ── Indexer Status (floating on map) ──
+       Anchored below the .event-filter-pills row (which sits at top: 12px and is
+       ~38 px tall) so the banner never covers the All / FSD Disengage / etc.
+       filter buttons. When the pills row is empty (`:empty { display: none }`)
+       a small visual gap remains above the banner, which is acceptable. */
     .indexer-status {
         position: absolute;
-        top: 12px;
+        top: 60px;
         left: 50%;
         transform: translateX(-50%);
         z-index: 1000;
@@ -276,12 +280,15 @@
         border: 1px solid var(--border-color, var(--border));
         box-shadow: 0 2px 8px rgba(0,0,0,0.15);
         backdrop-filter: blur(8px);
+        max-width: calc(100vw - 120px);
+        overflow: hidden;
+        text-overflow: ellipsis;
         white-space: nowrap;
     }
     [data-theme="dark"] .indexer-status {
         background: rgba(30, 41, 59, 0.9);
     }
-    .indexer-status.running { border-left: 3px solid #f0ad4e; }
+    .indexer-status.running { border-left: 3px solid var(--warning-border, #f0ad4e); }
 
     .popup-video-link { color: var(--accent-primary, #3B82F6); cursor: pointer; text-decoration: underline; }
     .popup-day-link { color: var(--accent-primary, #3B82F6); cursor: pointer; text-decoration: underline; }

@@ -61,12 +61,18 @@ log() {
     logger -t "$LOG_TAG" "$1"
 }
 
-# Prevent multiple instances
+# Prevent multiple instances (PID-aware: a SIGKILL'd previous instance leaves
+# the lock behind because trap doesn't fire on SIGKILL; we must not block on stale locks)
 if [ -f "$LOCK_FILE" ]; then
-    log "Another instance is running, exiting"
-    exit 0
+    OLD_PID="$(cat "$LOCK_FILE" 2>/dev/null || true)"
+    if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        log "Another instance (PID $OLD_PID) is running, exiting"
+        exit 0
+    fi
+    log "Removing stale lock from PID ${OLD_PID:-unknown}"
+    rm -f "$LOCK_FILE"
 fi
-touch "$LOCK_FILE"
+echo "$$" > "$LOCK_FILE"
 
 cleanup() {
     log "Cleaning up wifi-monitor..."
@@ -431,11 +437,11 @@ while true; do
         fi
 
         # WiFi still down while AP is active.
-        # Periodically stop AP and attempt STA reconnect (~every 5 min).
+        # Periodically stop AP and attempt STA reconnect (~every 2 min).
         # Pi Zero 2 W single-radio can't scan/associate while AP holds the channel.
         STA_RETRY_COUNTER=${STA_RETRY_COUNTER:-0}
         STA_RETRY_COUNTER=$((STA_RETRY_COUNTER + 1))
-        if [ $STA_RETRY_COUNTER -ge 15 ]; then
+        if [ $STA_RETRY_COUNTER -ge 6 ]; then
             STA_RETRY_COUNTER=0
             log "Periodic STA retry: stopping AP to attempt home WiFi"
             stop_ap
@@ -443,14 +449,29 @@ while true; do
 
             # Let NetworkManager try to auto-connect (radio is now free)
             nmcli device wifi rescan 2>/dev/null
-            sleep 10
 
-            if check_wifi; then
+            # Poll for STA recovery — give NetworkManager up to 30s to
+            # complete scan + auth + 4-way handshake + DHCP. The previous
+            # fixed 10s sleep was too short: log analysis on this Pi Zero
+            # 2 W consistently showed 15-25s between stop_ap and a fully
+            # connected STA, so 10s almost always declared failure and
+            # restarted the AP, locking the radio for another retry cycle.
+            RETRY_DEADLINE=$(($(date +%s) + 30))
+            sta_ok=0
+            while [ "$(date +%s)" -lt "$RETRY_DEADLINE" ]; do
+                if link_up && ip_ready && ping_ok; then
+                    sta_ok=1
+                    break
+                fi
+                sleep 2
+            done
+
+            if [ "$sta_ok" -eq 1 ]; then
                 log "STA reconnected — AP stays off"
                 FAILURE_COUNT=0
                 LAST_GOOD_TS=$(date +%s)
             else
-                log "STA retry failed — restarting AP"
+                log "STA retry failed after 30s — restarting AP"
                 start_ap || log "AP restart failed"
             fi
         fi

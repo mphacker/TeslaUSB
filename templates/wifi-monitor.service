@@ -11,7 +11,11 @@ Restart=on-failure
 RestartSec=30
 StartLimitBurst=5
 StartLimitIntervalSec=300
-TimeoutStopSec=5
+# Allow the script up to 30s to clean up. Stop sequences can be in the middle of
+# stop_ap (multi-second teardown) or an nmcli rescan poll (25s) when systemctl
+# stop is invoked. With the prior 5s timeout systemd SIGKILL'd mid-cleanup,
+# leaving a stale /var/run/wifi-monitor.lock that blocked the next start.
+TimeoutStopSec=30
 KillMode=mixed
 
 # Memory limit (lightweight script)

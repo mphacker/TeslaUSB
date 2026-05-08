@@ -114,6 +114,90 @@ class TestTriggerArchiveDuplicateGuard:
         # Reset the gate so the next "run" can also exit.
         gate.clear()
         gate.set()
+
+
+class TestArchiveIoniceUsesThreadId:
+    """Issue #72: ``_archive_timer_loop`` was calling
+    ``ionice -c 3 -p <os.getpid()>`` to drop the archive thread's I/O
+    priority — but on Linux ``ioprio_set`` is per-task. Passing the
+    process PID only adjusts the main thread's I/O class, leaving
+    the archive worker thread at default best-effort priority and
+    fully able to starve the gadget endpoint and Flask. The fix
+    passes ``threading.get_native_id()`` instead.
+    """
+
+    def test_archive_ionice_uses_native_tid_not_pid(self, monkeypatch):
+        import sys
+        if not sys.platform.startswith('linux'):
+            pytest.skip("ionice is Linux-only")
+
+        captured = []
+        # Mock subprocess.run to capture the ionice invocation. Then
+        # raise after capturing so the archive timer loop exits early
+        # without waiting 2 minutes for the initial-delay.
+        gate_event = threading.Event()
+
+        def fake_run(cmd, *a, **kw):
+            captured.append(cmd)
+
+            class R:
+                returncode = 0
+                stdout = b''
+                stderr = b''
+            # Trip the cancel after the first ionice call to exit the
+            # loop quickly.
+            gate_event.set()
+            return R()
+
+        import subprocess as sp
+        monkeypatch.setattr(sp, 'run', fake_run)
+
+        # Stop the loop right after the ionice call by setting the
+        # cancel event — that way the for-loop initial delay exits on
+        # its first iteration.
+        cancel = threading.Event()
+        monkeypatch.setattr(vas, '_archive_cancel', cancel)
+
+        def stop_after_first_run():
+            gate_event.wait(timeout=2.0)
+            cancel.set()
+
+        stopper = threading.Thread(target=stop_after_first_run, daemon=True)
+        stopper.start()
+
+        # Run the timer loop directly. It should ionice-then-exit.
+        loop_thread = threading.Thread(
+            target=vas._archive_timer_loop, daemon=True,
+        )
+        loop_thread.start()
+        # Capture the loop thread's TID — that's what should be passed
+        # to ionice. Native TID is set as soon as the thread starts.
+        # Wait briefly for the thread to register its TID and run
+        # ionice.
+        for _ in range(100):
+            if captured:
+                break
+            time.sleep(0.01)
+        loop_thread.join(timeout=5.0)
+
+        ionice_calls = [c for c in captured if c and c[0] == 'ionice']
+        assert ionice_calls, (
+            f"Expected an ionice call from _archive_timer_loop, got: "
+            f"{captured}"
+        )
+        cmd = ionice_calls[0]
+        p_idx = cmd.index('-p')
+        tid_arg = int(cmd[p_idx + 1])
+
+        import os
+        # The TID must NOT be the process PID — that's the bug being
+        # fixed.
+        assert tid_arg != os.getpid(), (
+            f"ionice -p {tid_arg} matches process PID {os.getpid()} "
+            f"— this is the issue #72 bug; archive thread's I/O "
+            f"priority must be set on its OWN native TID, not the "
+            f"process PID"
+        )
         assert vas.trigger_archive_now() is True
         # Two distinct runs occurred.
         assert len(runs) == 2

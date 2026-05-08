@@ -66,6 +66,34 @@ _WAIT_POLL_SECONDS = 0.1
 # Maximum time a task can hold the lock before it's considered stale
 _MAX_TASK_AGE_SECONDS = 1800  # 30 minutes
 
+# Throttle window for the "Task X skipped: Y is running" INFO log.
+# A cyclic caller (e.g. the indexer) hits the skip path every
+# ``_BACKOFF_SLEEP_SECONDS`` (≈ 0.5 s); without throttling, a long
+# archive run produced ~2 logs/sec for ~11 min during a production
+# boot catchup (issue #72). One log per (task, blocker) pair per minute
+# is plenty — the log shows you a contention is in progress, not a
+# blow-by-blow account.
+_SKIPPED_LOG_THROTTLE_SECONDS = 60.0
+# Per (task_name, blocker_name) -> monotonic time of last INFO log.
+# Guarded by ``_lock`` so concurrent acquire_task callers can't
+# double-fire the log.
+_skipped_log_last: dict = {}
+
+
+def _should_log_skipped(task_name: str, blocker_name: str) -> bool:
+    """Return True if "skipped" should be logged at INFO level now.
+
+    Throttled to once per ``_SKIPPED_LOG_THROTTLE_SECONDS`` per
+    (task_name, blocker_name) pair. Caller MUST hold ``_lock``.
+    """
+    now = time.monotonic()
+    key = (task_name, blocker_name)
+    last = _skipped_log_last.get(key, 0.0)
+    if now - last >= _SKIPPED_LOG_THROTTLE_SECONDS:
+        _skipped_log_last[key] = now
+        return True
+    return False
+
 
 def acquire_task(task_name: str, wait_seconds: float = 0.0,
                  *, yield_to_waiters: bool = False) -> bool:
@@ -125,15 +153,29 @@ def acquire_task(task_name: str, wait_seconds: float = 0.0,
                     if am_waiting:
                         _waiter_count = max(0, _waiter_count - 1)
                         am_waiting = False
+                    # On successful acquisition, reset the per-blocker
+                    # throttle map. The "skipped" log should fire on the
+                    # FIRST blocked attempt of the next contention
+                    # period, not stay throttled from the previous one.
+                    _skipped_log_last.clear()
                     logger.info("Task '%s' acquired lock", task_name)
                     return True
 
                 # Lock is held. Decide whether to wait or give up now.
                 if wait_seconds <= 0:
-                    logger.info(
-                        "Task '%s' skipped: '%s' is running (%.0fs)",
-                        task_name, _current_task, age,
-                    )
+                    if _should_log_skipped(task_name, _current_task):
+                        logger.info(
+                            "Task '%s' skipped: '%s' is running (%.0fs)",
+                            task_name, _current_task, age,
+                        )
+                    else:
+                        # Throttled — emit at DEBUG so it's available
+                        # via journalctl -p debug if needed without
+                        # spamming default-level logs at 2 lines/sec.
+                        logger.debug(
+                            "Task '%s' skipped: '%s' is running (%.0fs)",
+                            task_name, _current_task, age,
+                        )
                     return False
 
                 # Register as a waiter on first failed attempt so other

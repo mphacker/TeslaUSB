@@ -184,14 +184,27 @@ def _archive_timer_loop() -> None:
 
     # Set lowest I/O priority so archive doesn't starve the USB gadget.
     # The gadget shares the same SD card I/O bus.
+    #
+    # Critical: ionice MUST target this archive thread's kernel TID
+    # (via ``threading.get_native_id()``), NOT ``os.getpid()``. On
+    # Linux, ``ioprio_set`` is per-task, and passing the process PID
+    # only adjusts the main thread's I/O class — leaving the archive
+    # worker thread at default best-effort priority and fully able to
+    # starve Flask/gadget I/O. This was the second half of issue #72
+    # (the first was os.nice() in the indexer being process-wide).
     try:
         import subprocess
+        tid = threading.get_native_id()
         subprocess.run(
-            ["ionice", "-c", "3", "-p", str(os.getpid())],
-            timeout=5, capture_output=True,
+            ["ionice", "-c", "3", "-p", str(tid)],
+            timeout=5, capture_output=True, check=False,
         )
-        logger.info("Archive thread set to idle I/O priority (ionice -c 3)")
-    except Exception:
+        logger.info(
+            "Archive thread set to idle I/O priority "
+            "(ionice -c 3 -p %d)", tid,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired,
+            OSError, AttributeError):
         pass  # ionice not available — rate limiting still protects us
 
     # Initial delay — let boot finish and other services settle

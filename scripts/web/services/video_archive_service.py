@@ -484,6 +484,26 @@ def _do_archive_work() -> None:
         _update_archive_size()
         _status["progress"] = f"Done — {copied} files archived"
 
+        # Tesla likely just rotated some RecentClips out — give the
+        # mapping stale-scan a nudge so any orphaned indexed_files
+        # rows get cleaned up before the user opens the map page.
+        # The trigger is debounced (10 min) so this is safe to call
+        # every cycle. Issue #75.
+        try:
+            from config import MAPPING_ENABLED, MAPPING_DB_PATH
+            if MAPPING_ENABLED and os.path.isfile(MAPPING_DB_PATH):
+                from services.video_service import get_teslacam_path
+                from services.mapping_service import (
+                    trigger_stale_scan_now,
+                )
+                trigger_stale_scan_now(
+                    MAPPING_DB_PATH,
+                    get_teslacam_path,
+                    source='archive',
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Post-archive stale-scan trigger skipped: %s", e)
+
     except Exception as e:
         logger.exception("Archive run error")
         _status["error"] = str(e)

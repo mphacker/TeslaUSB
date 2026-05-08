@@ -1470,25 +1470,44 @@ def get_sync_queue() -> dict:
 
 
 def remove_from_queue(file_path: str) -> Tuple[bool, str]:
-    """Remove a single item from the sync queue."""
+    """Remove a single item from the sync queue.
+
+    Deletes any non-``synced`` row matching ``file_path``.  The local queue
+    is local data that the user owns, so deletion is allowed regardless of
+    cloud provider configuration, sync worker state, or row status — including
+    rows stuck in ``uploading`` (e.g. when the sync was interrupted before the
+    worker could reset the row back to ``pending``) and ``failed`` rows.
+
+    ``synced`` rows are preserved so deleting from the queue cannot wipe the
+    historical record of files already uploaded; those rows are not exposed
+    via :func:`get_sync_queue` anyway.
+    """
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:
-        conn.execute(
-            "DELETE FROM cloud_synced_files WHERE file_path = ? AND status IN ('queued', 'pending')",
+        result = conn.execute(
+            "DELETE FROM cloud_synced_files WHERE file_path = ? AND status != 'synced'",
             (file_path,),
         )
         conn.commit()
-        return True, "Removed from queue"
+        if result.rowcount:
+            return True, "Removed from queue"
+        return True, "Not in queue"
     finally:
         conn.close()
 
 
 def clear_queue() -> Tuple[bool, str]:
-    """Clear all queued/pending items from the sync queue."""
+    """Clear every non-``synced`` item from the sync queue.
+
+    Includes ``queued``, ``pending``, ``uploading`` and ``failed`` rows so the
+    user can always reset the queue — even after stopping the sync worker or
+    disconnecting the cloud provider, both of which can leave rows stuck in
+    ``uploading`` state.  ``synced`` history rows are preserved.
+    """
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:
         result = conn.execute(
-            "DELETE FROM cloud_synced_files WHERE status IN ('queued', 'pending')"
+            "DELETE FROM cloud_synced_files WHERE status != 'synced'"
         )
         conn.commit()
         return True, "Cleared {} items from queue".format(result.rowcount)

@@ -1735,10 +1735,9 @@
                         '<div style="font-size: var(--text-xs); color: var(--text-muted);">' + size + ' &middot; <span style="color:' + statusColor + ';">' + statusLabel + '</span>' +
                         (item.retry_count > 0 ? ' &middot; retries: ' + item.retry_count : '') + '</div>' +
                     '</div>';
-                if (statusLabel === 'queued' || statusLabel === 'pending') {
-                    html += '<button type="button" class="action-btn danger" style="padding: 4px 10px; font-size: 12px; flex-shrink: 0;" ' +
-                        'onclick="removeFromQueue(\'' + item.file_path.replace(/'/g, "\\'") + '\')">&times;</button>';
-                }
+                html += '<button type="button" class="action-btn danger" style="padding: 4px 10px; font-size: 12px; flex-shrink: 0;" ' +
+                    'aria-label="Remove from queue" ' +
+                    'onclick="removeFromQueue(\'' + item.file_path.replace(/'/g, "\\'") + '\')">&times;</button>';
                 html += '</div>';
             });
             html += '</div>';

@@ -426,6 +426,11 @@ def api_all_routes():
         # few seconds. Debounced to once per 10 min, so subsequent
         # map loads incur no extra work. Issue #75.
         try:
+            # Lazy import: services.mapping_service indirectly imports modules
+            # that import this blueprint, so a top-level import would create
+            # a circular dependency at app start-up. Python caches the module
+            # after the first call so this is effectively free on subsequent
+            # invocations.
             from services.mapping_service import trigger_stale_scan_now
             trigger_stale_scan_now(
                 MAPPING_DB_PATH,

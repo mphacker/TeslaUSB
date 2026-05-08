@@ -2876,6 +2876,15 @@ def _run_stale_scan_blocking(db_path: str, teslacam_path_provider,
     Used by both the scheduled loop and the on-demand
     :func:`trigger_stale_scan_now` so they share debounce state.
 
+    .. note::
+
+        ``_last_stale_scan_at`` is updated **up front**, before the scan
+        runs, and is **not rolled back on failure**. This is intentional:
+        if ``purge_deleted_videos`` fails persistently (e.g. DB lock,
+        disk pressure), subsequent triggers will silently debounce for
+        the configured window so the system doesn't hammer a failing
+        operation. Failures are still surfaced via ``logger.warning``.
+
     Args:
         db_path: Path to the geodata.db.
         teslacam_path_provider: Either a zero-arg callable or a string.

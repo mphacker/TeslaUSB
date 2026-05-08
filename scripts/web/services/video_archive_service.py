@@ -492,6 +492,10 @@ def _do_archive_work() -> None:
         try:
             from config import MAPPING_ENABLED, MAPPING_DB_PATH
             if MAPPING_ENABLED and os.path.isfile(MAPPING_DB_PATH):
+                # Lazy import: services.mapping_service has its own service-layer
+                # imports that touch this module, so a top-level import would
+                # create a circular dependency. Python caches the module after
+                # the first call, so this is effectively free per archive cycle.
                 from services.video_service import get_teslacam_path
                 from services.mapping_service import (
                     trigger_stale_scan_now,

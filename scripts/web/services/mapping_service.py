@@ -2832,20 +2832,174 @@ def boot_catchup_scan(db_path: str, teslacam_path: str,
 # Independent safety net for the case where ``purge_deleted_videos`` calls
 # from the watcher / archive-retention paths missed something. Iterates
 # every ``indexed_files`` row, ``os.path.isfile`` checks each, and removes
-# rows whose underlying file no longer exists. Designed to run once per
-# day with jitter so multiple Pis don't hammer the same minute.
+# rows whose underlying file no longer exists.
+#
+# **Initial delay (issue #75):** First fire is scheduled 5–10 min after
+# boot — short enough that orphans left behind by the previous boot
+# (e.g. files Tesla rotated out of RecentClips while the Pi was off)
+# get cleaned up before the user opens the map page, but long enough
+# that boot-time IO doesn't compete with USB gadget presentation.
+# Subsequent fires happen ~daily with jitter so multiple Pis don't
+# hammer the same minute.
+#
+# Out-of-cycle scans can be triggered with :func:`trigger_stale_scan_now`
+# from high-signal events (after each archive cycle, on the first map
+# page load after a restart). The trigger is debounced so concurrent
+# triggers from different services collapse into a single scan.
 _DAILY_STALE_SCAN_INTERVAL = 24 * 60 * 60  # 24 hours
 _DAILY_STALE_SCAN_JITTER = 60 * 60         # +/- 1 hour
+_INITIAL_STALE_SCAN_BASE = 5 * 60          # 5 minutes after boot
+_INITIAL_STALE_SCAN_JITTER = 5 * 60        # +0..5 min spread
+_TRIGGER_DEBOUNCE_SECONDS = 10 * 60        # 10 minutes between fires
 _daily_stale_scan_thread: Optional[threading.Thread] = None
 _daily_stale_scan_stop: Optional[threading.Event] = None
+_stale_scan_state_lock = threading.Lock()
+_last_stale_scan_at: float = 0.0  # time.monotonic() of last completed slot-claim
+
+
+def _initial_stale_scan_delay() -> float:
+    """Initial seconds to wait before the first stale scan after start.
+
+    Returns a value in ``[300, 600]`` (5–10 min). Factored out so tests
+    can verify the delay range without spinning up a real thread.
+    """
+    import random as _random
+    return _INITIAL_STALE_SCAN_BASE + _random.randint(
+        0, _INITIAL_STALE_SCAN_JITTER,
+    )
+
+
+def _run_stale_scan_blocking(db_path: str, teslacam_path_provider,
+                             source: str) -> Optional[dict]:
+    """Run one stale scan synchronously and update the last-run timestamp.
+
+    Used by both the scheduled loop and the on-demand
+    :func:`trigger_stale_scan_now` so they share debounce state.
+
+    .. note::
+
+        ``_last_stale_scan_at`` is updated **up front**, before the scan
+        runs, and is **not rolled back on failure**. This is intentional:
+        if ``purge_deleted_videos`` fails persistently (e.g. DB lock,
+        disk pressure), subsequent triggers will silently debounce for
+        the configured window so the system doesn't hammer a failing
+        operation. Failures are still surfaced via ``logger.warning``.
+
+    Args:
+        db_path: Path to the geodata.db.
+        teslacam_path_provider: Either a zero-arg callable or a string.
+        source: Short label used in log messages (``'scheduled'``,
+            ``'archive'``, ``'map_load'``, ``'manual'``, ...).
+
+    Returns:
+        The result dict from :func:`purge_deleted_videos`, or ``None``
+        if the TeslaCam path is unavailable or the scan fails.
+    """
+    global _last_stale_scan_at
+    # Claim the slot up front so concurrent triggers see the work as
+    # in-flight and debounce themselves.
+    with _stale_scan_state_lock:
+        _last_stale_scan_at = time.monotonic()
+
+    try:
+        if callable(teslacam_path_provider):
+            tc = teslacam_path_provider()
+        else:
+            tc = teslacam_path_provider
+        if tc and os.path.isdir(tc):
+            result = purge_deleted_videos(db_path, teslacam_path=tc)
+            logger.info(
+                "Stale scan (%s): purged files=%d waypoints=%d "
+                "events=%d trips=%d",
+                source,
+                result.get('purged_files', 0),
+                result.get('purged_waypoints', 0),
+                result.get('purged_events', 0),
+                result.get('purged_trips', 0),
+            )
+            return result
+        logger.debug(
+            "Stale scan (%s): TeslaCam not accessible — skipping",
+            source,
+        )
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Stale scan (%s) failed: %s", source, e)
+        return None
+
+
+def trigger_stale_scan_now(db_path: str, teslacam_path_provider,
+                           source: str = 'manual',
+                           debounce_seconds: float = (
+                               _TRIGGER_DEBOUNCE_SECONDS),
+                           ) -> dict:
+    """Request an out-of-cycle stale scan, debounced.
+
+    Returns immediately. The scan (if not debounced) runs on a daemon
+    thread so callers — request handlers, archive cycle, etc. — never
+    block on database IO.
+
+    Args:
+        db_path: Path to the geodata.db.
+        teslacam_path_provider: Either a zero-arg callable returning
+            the current TeslaCam path, or a string.
+        source: Label for logs/diagnostics. Suggested values:
+            ``'archive'`` (after archive cycle finishes),
+            ``'map_load'`` (first map data hit after restart),
+            ``'wifi_reconnect'``, ``'manual'`` (admin/test trigger).
+        debounce_seconds: Minimum gap between fires (default 10 min).
+            Lower this in tests if needed.
+
+    Returns:
+        Dict with keys:
+            * ``status``: ``'fired'`` if a scan thread was spawned,
+              ``'debounced'`` if the previous scan was too recent.
+            * ``last_run_age_seconds`` (debounced only): age of the
+              previous scan in seconds.
+    """
+    with _stale_scan_state_lock:
+        last = _last_stale_scan_at
+    if last > 0.0:
+        age = time.monotonic() - last
+        if age < debounce_seconds:
+            logger.debug(
+                "Stale scan trigger (%s) debounced "
+                "(age=%.1fs < %.1fs)",
+                source, age, debounce_seconds,
+            )
+            return {'status': 'debounced',
+                    'last_run_age_seconds': age}
+
+    def _runner():
+        _run_stale_scan_blocking(
+            db_path, teslacam_path_provider, source=source,
+        )
+
+    threading.Thread(
+        target=_runner,
+        name=f'stale-scan-{source}',
+        daemon=True,
+    ).start()
+    return {'status': 'fired'}
+
+
+def _reset_stale_scan_state_for_tests() -> None:
+    """Clear last-run timestamp. Intended for unit tests only."""
+    global _last_stale_scan_at
+    with _stale_scan_state_lock:
+        _last_stale_scan_at = 0.0
 
 
 def start_daily_stale_scan(db_path: str, teslacam_path_provider) -> bool:
-    """Start the background daily stale-scan thread (idempotent).
+    """Start the background stale-scan thread (idempotent).
 
     ``teslacam_path_provider`` is a zero-arg callable that returns the
     current TeslaCam path (so we re-resolve on each tick — the path
     can change across mode switches).
+
+    First fire is scheduled 5–10 min after start; subsequent fires
+    happen ~daily with jitter. See module-level commentary above for
+    rationale and out-of-cycle trigger details.
 
     Returns ``True`` if a thread was started, ``False`` if already
     running.
@@ -2860,32 +3014,13 @@ def start_daily_stale_scan(db_path: str, teslacam_path_provider) -> bool:
     _daily_stale_scan_stop = stop_event
 
     def _loop():
-        # Initial wait: between 1h and 1h+24h after boot — boot itself
-        # is busy with USB gadget binding, so give the system time to
-        # settle before scanning.
-        first_delay = 60 * 60 + _random.randint(0, _DAILY_STALE_SCAN_INTERVAL)
+        first_delay = _initial_stale_scan_delay()
         if stop_event.wait(timeout=first_delay):
             return
         while not stop_event.is_set():
-            try:
-                tc = teslacam_path_provider()
-                if tc and os.path.isdir(tc):
-                    result = purge_deleted_videos(db_path, teslacam_path=tc)
-                    logger.info(
-                        "Daily stale scan: purged files=%d waypoints=%d "
-                        "events=%d trips=%d",
-                        result.get('purged_files', 0),
-                        result.get('purged_waypoints', 0),
-                        result.get('purged_events', 0),
-                        result.get('purged_trips', 0),
-                    )
-                else:
-                    logger.debug(
-                        "Daily stale scan: TeslaCam not accessible — "
-                        "skipping this cycle",
-                    )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Daily stale scan failed: %s", e)
+            _run_stale_scan_blocking(
+                db_path, teslacam_path_provider, source='scheduled',
+            )
             # Re-jitter for next cycle so failures don't lock-step.
             jitter = _random.randint(-_DAILY_STALE_SCAN_JITTER,
                                      _DAILY_STALE_SCAN_JITTER)

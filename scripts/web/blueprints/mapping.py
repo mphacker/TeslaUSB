@@ -421,6 +421,24 @@ def api_all_routes():
             min_distance_km=min_distance_km,
             max_points_per_trip=max_points,
         )
+        # Fire-and-forget: nudge the stale-scan so map views built
+        # from a fresh process see any orphans cleaned up within a
+        # few seconds. Debounced to once per 10 min, so subsequent
+        # map loads incur no extra work. Issue #75.
+        try:
+            # Lazy import: services.mapping_service indirectly imports modules
+            # that import this blueprint, so a top-level import would create
+            # a circular dependency at app start-up. Python caches the module
+            # after the first call so this is effectively free on subsequent
+            # invocations.
+            from services.mapping_service import trigger_stale_scan_now
+            trigger_stale_scan_now(
+                MAPPING_DB_PATH,
+                get_teslacam_path,
+                source='map_load',
+            )
+        except Exception:  # noqa: BLE001
+            pass  # Never let the trigger break the map endpoint.
         return jsonify({'trips': trips})
     except Exception as e:  # noqa: BLE001
         logger.error("Failed to query all routes: %s", e)

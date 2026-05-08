@@ -53,6 +53,10 @@ from services.mapping_service import (
     release_claim,
     start_daily_stale_scan,
     stop_daily_stale_scan,
+    trigger_stale_scan_now,
+    _initial_stale_scan_delay,
+    _run_stale_scan_blocking,
+    _reset_stale_scan_state_for_tests,
     DEFAULT_THRESHOLDS,
     _PARSE_ERROR_MAX_ATTEMPTS,
     _PRIORITY_ARCHIVE,
@@ -2887,6 +2891,175 @@ class TestDailyStaleScan:
         # Should be idempotent even when nothing is running.
         assert stop_daily_stale_scan(timeout=1.0) is True
         assert stop_daily_stale_scan(timeout=1.0) is True
+
+    def test_initial_delay_within_5_to_10_minutes(self):
+        # Issue #75: stale scan must fire within ~10 minutes of boot
+        # so orphans left behind by the previous boot get cleaned up
+        # before the user opens the map page.
+        for _ in range(50):
+            d = _initial_stale_scan_delay()
+            assert 5 * 60 <= d <= 10 * 60, (
+                f"Expected delay in [300, 600], got {d}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5b: Out-of-cycle stale-scan trigger (issue #75)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleScanTrigger:
+    """trigger_stale_scan_now() lets services nudge the stale scan
+    after high-signal events (archive cycle, map page load) without
+    waiting for the daily safety net. Debounced so concurrent
+    triggers from different services collapse into one scan.
+    """
+
+    def setup_method(self):
+        _reset_stale_scan_state_for_tests()
+
+    def teardown_method(self):
+        _reset_stale_scan_state_for_tests()
+
+    def test_trigger_fires_when_no_recent_run(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = tmp_path / "TeslaCam"
+        tc.mkdir()
+        result = trigger_stale_scan_now(db, str(tc), source='test')
+        assert result['status'] == 'fired'
+
+    def test_trigger_debounces_within_window(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = tmp_path / "TeslaCam"
+        tc.mkdir()
+        first = trigger_stale_scan_now(
+            db, str(tc), source='archive', debounce_seconds=60.0,
+        )
+        assert first['status'] == 'fired'
+        # Wait for the spawned thread so the timestamp is settled.
+        # The scan against an empty TeslaCam is essentially instant.
+        time.sleep(0.2)
+        second = trigger_stale_scan_now(
+            db, str(tc), source='map_load', debounce_seconds=60.0,
+        )
+        assert second['status'] == 'debounced'
+        assert 'last_run_age_seconds' in second
+        assert second['last_run_age_seconds'] >= 0.0
+
+    def test_trigger_fires_after_debounce_expires(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = tmp_path / "TeslaCam"
+        tc.mkdir()
+        first = trigger_stale_scan_now(
+            db, str(tc), source='archive', debounce_seconds=60.0,
+        )
+        assert first['status'] == 'fired'
+        time.sleep(0.2)
+        # Use a tiny debounce window — should fire again.
+        third = trigger_stale_scan_now(
+            db, str(tc), source='map_load', debounce_seconds=0.0,
+        )
+        assert third['status'] == 'fired'
+
+    def test_trigger_accepts_callable_provider(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = tmp_path / "TeslaCam"
+        tc.mkdir()
+        calls = []
+
+        def _provider():
+            calls.append(1)
+            return str(tc)
+
+        result = trigger_stale_scan_now(db, _provider, source='test')
+        assert result['status'] == 'fired'
+        # Wait for the spawned scan thread to consume the provider.
+        time.sleep(0.3)
+        assert len(calls) == 1
+
+    def test_trigger_with_missing_teslacam_returns_fired(self, tmp_path):
+        # Provider returns None — scan is fired but exits early
+        # without raising. Status is still 'fired' (the trigger
+        # contract is "we attempted a scan", not "the scan found a
+        # path").
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        result = trigger_stale_scan_now(
+            db, lambda: None, source='test',
+        )
+        assert result['status'] == 'fired'
+
+    def test_blocking_helper_purges_orphan_indexed_files_row(
+        self, tmp_path,
+    ):
+        # Synthetic regression test: insert an indexed_files row
+        # pointing to a path that doesn't exist, run the blocking
+        # helper, verify the row is gone. This is the exact scenario
+        # the McDonald's-trip incident (issue #75) created live.
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = tmp_path / "TeslaCam"
+        tc.mkdir()
+        recent_clips = tc / "RecentClips"
+        recent_clips.mkdir()
+        ghost_path = str(
+            recent_clips / "2026-05-07_11-36-00-front.mp4"
+        )
+        with sqlite3.connect(db) as c:
+            c.execute(
+                """INSERT INTO indexed_files
+                   (file_path, file_size, file_mtime, indexed_at,
+                    waypoint_count, event_count)
+                   VALUES (?, 12345, 1700000000, '2026-05-07', 22, 4)""",
+                (ghost_path,),
+            )
+        # Pre-condition: the row exists.
+        with sqlite3.connect(db) as c:
+            n = c.execute(
+                "SELECT COUNT(*) FROM indexed_files",
+            ).fetchone()[0]
+        assert n == 1
+
+        result = _run_stale_scan_blocking(db, str(tc), source='test')
+        assert result is not None
+        assert result.get('purged_files', 0) >= 1
+
+        with sqlite3.connect(db) as c:
+            n = c.execute(
+                "SELECT COUNT(*) FROM indexed_files",
+            ).fetchone()[0]
+        assert n == 0
+
+    def test_blocking_helper_updates_debounce_timestamp(self, tmp_path):
+        # Both the scheduled loop and out-of-cycle triggers go
+        # through _run_stale_scan_blocking, so a scheduled fire
+        # must also debounce subsequent triggers (otherwise a
+        # trigger that arrives moments after the loop wakes would
+        # double the work).
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = tmp_path / "TeslaCam"
+        tc.mkdir()
+        _run_stale_scan_blocking(db, str(tc), source='scheduled')
+        result = trigger_stale_scan_now(
+            db, str(tc), source='archive', debounce_seconds=60.0,
+        )
+        assert result['status'] == 'debounced'
+
+    def test_blocking_helper_handles_missing_teslacam_gracefully(
+        self, tmp_path,
+    ):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        # Path doesn't exist — helper should return None, not raise.
+        result = _run_stale_scan_blocking(
+            db, '/nonexistent/path/abc123', source='test',
+        )
+        assert result is None
 
 
 

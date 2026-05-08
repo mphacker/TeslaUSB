@@ -1456,7 +1456,15 @@ def queue_event_for_sync(folder: str, event_name: str, priority: bool = False) -
 
 
 def get_sync_queue() -> dict:
-    """Return the current sync queue (queued/pending/uploading files)."""
+    """Return the current sync queue (queued/pending/uploading files).
+
+    Note:
+        Rows in ``failed`` state are intentionally excluded from this view —
+        the UI surfaces only the active pipeline (queued / pending /
+        uploading). To scrub historical failures from the underlying
+        table, use :func:`remove_from_queue` or :func:`clear_queue`,
+        both of which match every non-``synced`` row.
+    """
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:
         rows = conn.execute(

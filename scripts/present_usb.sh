@@ -306,68 +306,88 @@ sync
 # Loop devices are only needed for local mounting. If they exist from a previous
 # session, that's fine - the gadget can still access the files.
 
-# Stop conflicting rpi-usb-gadget service if running (Pi OS Bookworm+ default)
-# This service claims the UDC for a USB Ethernet gadget, blocking our mass-storage gadget
-for svc in rpi-usb-gadget.service usb-gadget.service; do
-  if systemctl is-active --quiet "$svc" 2>/dev/null; then
-    echo "Stopping conflicting $svc..."
-    sudo systemctl stop "$svc" 2>/dev/null || true
-    sleep 0.3
-  fi
-done
-
-# Remove legacy gadget module if present
-if lsmod | grep -q '^g_mass_storage'; then
-  echo "Removing existing USB gadget module..."
-  sudo rmmod g_mass_storage || true
-  sleep 1
-fi
-
-# Remove existing gadget configuration if present
+# Path to our configfs gadget (declared up front so the boot-mode skip
+# wrapper below can safely reference it under `set -u`).
 CONFIGFS_GADGET="/sys/kernel/config/usb_gadget/teslausb"
-if [ -d "$CONFIGFS_GADGET" ]; then
-  echo "Removing existing gadget configuration..."
 
-  # Unbind UDC first
-  if [ -f "$CONFIGFS_GADGET/UDC" ]; then
-    echo "" | sudo tee "$CONFIGFS_GADGET/UDC" > /dev/null 2>&1 || true
-    # Brief settle time (reduced from 1s - unbind is synchronous)
-    sleep 0.3
-  fi
-
-  # Clear LUN backing files to release kernel file references
-  for lun in "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.*; do
-    if [ -f "$lun/file" ]; then
-      echo "" | sudo tee "$lun/file" > /dev/null 2>&1 || true
+# At boot, the conflicting-service stop loop, the rmmod check, and the
+# configfs cleanup are all dead work — setup_usb.sh masks rpi-usb-gadget
+# unconditionally, g_mass_storage is never loaded, and no prior teslausb
+# gadget exists yet. Skip them unless we're not in boot mode OR an unexpected
+# leftover gadget is actually present (~700ms saved per boot).
+if [ "$BOOT_MODE" -eq 0 ] || [ -d "$CONFIGFS_GADGET" ]; then
+  # Stop conflicting rpi-usb-gadget service if running (Pi OS Bookworm+ default)
+  # This service claims the UDC for a USB Ethernet gadget, blocking our mass-storage gadget
+  for svc in rpi-usb-gadget.service usb-gadget.service; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      echo "Stopping conflicting $svc..."
+      sudo systemctl stop "$svc" 2>/dev/null || true
+      sleep 0.3
     fi
   done
-  sleep 0.1
 
-  # Remove function links
-  sudo rm -f "$CONFIGFS_GADGET"/configs/*/mass_storage.* 2>/dev/null || true
+  # Remove legacy gadget module if present
+  if lsmod | grep -q '^g_mass_storage'; then
+    echo "Removing existing USB gadget module..."
+    sudo rmmod g_mass_storage || true
+    sleep 1
+  fi
 
-  # Remove configurations
-  sudo rmdir "$CONFIGFS_GADGET"/configs/*/strings/* 2>/dev/null || true
-  sudo rmdir "$CONFIGFS_GADGET"/configs/* 2>/dev/null || true
+  # Remove existing gadget configuration if present
+  if [ -d "$CONFIGFS_GADGET" ]; then
+    echo "Removing existing gadget configuration..."
 
-  # Remove LUNs from functions
-  sudo rmdir "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.* 2>/dev/null || true
+    # Unbind UDC first
+    if [ -f "$CONFIGFS_GADGET/UDC" ]; then
+      echo "" | sudo tee "$CONFIGFS_GADGET/UDC" > /dev/null 2>&1 || true
+      # Brief settle time (reduced from 1s - unbind is synchronous)
+      sleep 0.3
+    fi
 
-  # Remove functions
-  sudo rmdir "$CONFIGFS_GADGET"/functions/* 2>/dev/null || true
+    # Clear LUN backing files to release kernel file references
+    for lun in "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.*; do
+      if [ -f "$lun/file" ]; then
+        echo "" | sudo tee "$lun/file" > /dev/null 2>&1 || true
+      fi
+    done
+    sleep 0.1
 
-  # Remove strings
-  sudo rmdir "$CONFIGFS_GADGET"/strings/* 2>/dev/null || true
+    # Remove function links
+    sudo rm -f "$CONFIGFS_GADGET"/configs/*/mass_storage.* 2>/dev/null || true
 
-  # Remove gadget
-  sudo rmdir "$CONFIGFS_GADGET" 2>/dev/null || true
+    # Remove configurations
+    sudo rmdir "$CONFIGFS_GADGET"/configs/*/strings/* 2>/dev/null || true
+    sudo rmdir "$CONFIGFS_GADGET"/configs/* 2>/dev/null || true
+
+    # Remove LUNs from functions
+    sudo rmdir "$CONFIGFS_GADGET"/functions/mass_storage.usb0/lun.* 2>/dev/null || true
+
+    # Remove functions
+    sudo rmdir "$CONFIGFS_GADGET"/functions/* 2>/dev/null || true
+
+    # Remove strings
+    sudo rmdir "$CONFIGFS_GADGET"/strings/* 2>/dev/null || true
+
+    # Remove gadget
+    sudo rmdir "$CONFIGFS_GADGET" 2>/dev/null || true
+  fi
+else
+  echo "Boot mode: skipping dead teardown (no leftover gadget)"
 fi
 
 log_timing "Gadget removed/cleared"
 
-# Mount configfs if not already mounted
+# Mount configfs if not already mounted. Fail loud if we can't — the
+# subsequent gadget setup writes into /sys/kernel/config and would otherwise
+# produce confusing errors.
 if ! mountpoint -q /sys/kernel/config 2>/dev/null; then
-  sudo mount -t configfs none /sys/kernel/config || true
+  sudo modprobe configfs 2>/dev/null || true
+  sudo modprobe libcomposite 2>/dev/null || true
+  sudo mount -t configfs none /sys/kernel/config 2>/dev/null || true
+fi
+if ! mountpoint -q /sys/kernel/config 2>/dev/null; then
+  echo "Error: configfs is not mounted at /sys/kernel/config" >&2
+  exit 1
 fi
 
 # Present dual-LUN gadget using configfs
@@ -430,10 +450,17 @@ fi
 # Link function to configuration
 sudo ln -s functions/mass_storage.usb0 configs/c.1/
 
-# Find and enable UDC
-UDC_DEVICE=$(ls /sys/class/udc | head -n1)
+# Find and enable UDC. We're now scheduled before multi-user.target, so
+# /sys/class/udc may briefly be empty if dwc2's UDC node hasn't appeared yet.
+# Wait up to 5 seconds (50 * 100ms) using integer math (no `bc` dependency).
+UDC_DEVICE=""
+for _ in $(seq 1 50); do
+  UDC_DEVICE="$(ls /sys/class/udc 2>/dev/null | head -n1 || true)"
+  [ -n "$UDC_DEVICE" ] && break
+  sleep 0.1
+done
 if [ -z "$UDC_DEVICE" ]; then
-  echo "Error: No UDC device found. Is dwc2 module loaded?" >&2
+  echo "Error: No UDC device found after 5s. Is dwc2 module loaded?" >&2
   exit 1
 fi
 

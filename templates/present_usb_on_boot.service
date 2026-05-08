@@ -1,9 +1,17 @@
 [Unit]
 Description=Present USB gadget at boot
-After=teslausb-safe-mode.service multi-user.target
-Wants=multi-user.target
+# Run as soon as basic.target is up — do NOT wait for multi-user.target,
+# which is gated on cloud-init, NetworkManager-wait-online, smbd, nmbd, etc.
+# (~24s on a Pi Zero 2 W). Issue #74 cuts boot-to-UDC from ~27s to ~10s.
+After=teslausb-safe-mode.service
+Wants=teslausb-safe-mode.service
+Before=multi-user.target
 # Skip in safe mode (3+ reboots in 10 min)
 ConditionPathExists=!/run/teslausb-safe-mode
+
+# Restart policy (StartLimit* live in [Unit] in modern systemd)
+StartLimitBurst=3
+StartLimitIntervalSec=600
 
 [Service]
 Type=oneshot
@@ -12,11 +20,12 @@ ExecStart=/bin/bash __GADGET_DIR__/scripts/present_usb.sh --boot
 RemainAfterExit=yes
 User=root
 
-# Restart policy
 Restart=on-failure
 RestartSec=15
-StartLimitBurst=3
-StartLimitIntervalSec=600
+
+# Bound the worst case: even if the script hangs, systemd kills it after 60s
+# and the restart policy kicks in (3 attempts in 600s window).
+TimeoutStartSec=60
 
 # Memory limit
 MemoryMax=100M

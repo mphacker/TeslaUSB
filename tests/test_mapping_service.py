@@ -2672,9 +2672,11 @@ class TestPurgeDeletedVideos:
 
     def test_purge_exact_matches_when_no_surviving_copy(self, tmp_path):
         # Counterpart: with no surviving copy on disk, the targeted
-        # purge SHOULD remove the matching waypoints/indexed_files
-        # rows — using exact-match against canonical candidate paths,
-        # not a basename LIKE.
+        # purge SHOULD remove the matching ``indexed_files`` row and
+        # NULL out the waypoint's ``video_path`` (so the playback
+        # link is severed) — but the waypoint row itself MUST survive.
+        # The user's GPS history is independent of whether the dashcam
+        # clip is still on disk.
         from services.mapping_service import purge_deleted_videos
         db = str(tmp_path / "geo.db")
         _init_db(db)
@@ -2683,7 +2685,7 @@ class TestPurgeDeletedVideos:
                            "2025-01-01_00-bar-front.mp4")
         # No file written anywhere — both Recent and Archived missing.
 
-        self._seed(
+        trip_id = self._seed(
             db,
             waypoint_video_path='RecentClips/'
                                   '2025-01-01_00-bar-front.mp4',
@@ -2706,15 +2708,28 @@ class TestPurgeDeletedVideos:
                 _cfg.ARCHIVE_ENABLED = old_en
 
         assert result['purged_files'] == 1
+        # Waypoint count reflects rows whose video_path was nulled.
         assert result['purged_waypoints'] == 1
+        # Trips are NEVER deleted by reconciliation.
+        assert result['purged_trips'] == 0
 
         with sqlite3.connect(db) as c:
-            assert c.execute(
-                "SELECT COUNT(*) FROM waypoints"
-            ).fetchone()[0] == 0
+            # indexed_files row gone (file truly missing).
             assert c.execute(
                 "SELECT COUNT(*) FROM indexed_files"
             ).fetchone()[0] == 0
+            # Waypoint preserved — GPS history outlives the video.
+            assert c.execute(
+                "SELECT COUNT(*) FROM waypoints"
+            ).fetchone()[0] == 1
+            # video_path nulled so the UI knows playback is unavailable.
+            assert c.execute(
+                "SELECT video_path FROM waypoints"
+            ).fetchone()[0] is None
+            # Trip survives — the user still drove that route.
+            assert c.execute(
+                "SELECT COUNT(*) FROM trips WHERE id = ?", (trip_id,),
+            ).fetchone()[0] == 1
 
     def test_purge_does_not_substring_match_unrelated_basename(
         self, tmp_path,
@@ -2750,6 +2765,109 @@ class TestPurgeDeletedVideos:
             assert c.execute(
                 "SELECT COUNT(*) FROM waypoints"
             ).fetchone()[0] == 1
+
+    def test_purge_preserves_trip_when_all_videos_gone(self, tmp_path):
+        """Regression test for the May 7 trip-loss incident.
+
+        BUG: when stale-scan caught up to RecentClips files Tesla had
+        rotated out before the archive subsystem copied them to SD, the
+        cascade-delete logic removed the corresponding waypoints, then
+        the trip itself when its waypoint count hit zero. Result: the
+        user's drive history vanished from the map even though the GPS
+        evidence was real.
+
+        FIX: ``purge_deleted_videos`` now deletes only the orphan
+        ``indexed_files`` row and NULLs ``waypoints.video_path``.
+        Trips and their waypoints survive even when every video file
+        for the trip is gone.
+        """
+        from services.mapping_service import purge_deleted_videos
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+
+        # Three RecentClips videos all belonging to the same trip
+        # (think: 1-min front-camera segments from a 3-min drive).
+        recent_paths = [
+            str(tmp_path / "TeslaCam" / "RecentClips" /
+                f"2025-05-07_12-{m:02d}-front.mp4")
+            for m in (57, 58, 59)
+        ]
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "INSERT INTO trips "
+                "(start_time, end_time, indexed_at, distance_km) "
+                "VALUES ('2025-05-07T12:57:00', '2025-05-07T13:00:00', "
+                "        '2025-05-07T13:00:00', 8.2)"
+            )
+            trip_id = c.execute(
+                "SELECT id FROM trips ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+            for i, rp in enumerate(recent_paths):
+                rel = 'RecentClips/' + os.path.basename(rp)
+                c.execute(
+                    "INSERT INTO waypoints "
+                    "(trip_id, timestamp, lat, lon, video_path) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (trip_id, f'2025-05-07T12:5{7+i}:30',
+                     37.0 + i * 0.001, -122.0, rel),
+                )
+                c.execute(
+                    "INSERT INTO indexed_files "
+                    "(file_path, file_size, file_mtime, indexed_at, "
+                    " waypoint_count, event_count) "
+                    "VALUES (?, 1024, 100.0, "
+                    "        '2025-05-07T13:00:00', 1, 0)",
+                    (rp,),
+                )
+            c.commit()
+
+        # All RecentClips files vanished (Tesla rotated them out before
+        # archive copied them to SD). No surviving copy on disk.
+        import config as _cfg
+        old_dir = getattr(_cfg, 'ARCHIVE_DIR', None)
+        old_en = getattr(_cfg, 'ARCHIVE_ENABLED', None)
+        _cfg.ARCHIVE_DIR = str(tmp_path / "ArchivedClips")  # nonexistent
+        _cfg.ARCHIVE_ENABLED = True
+        try:
+            result = purge_deleted_videos(db, deleted_paths=recent_paths)
+        finally:
+            if old_dir is not None:
+                _cfg.ARCHIVE_DIR = old_dir
+            if old_en is not None:
+                _cfg.ARCHIVE_ENABLED = old_en
+
+        # All three indexed_files rows purged.
+        assert result['purged_files'] == 3
+        # All three waypoints' video_path nulled.
+        assert result['purged_waypoints'] == 3
+        # The contract: ``purged_trips`` is always 0 — trips are sacred.
+        assert result['purged_trips'] == 0
+
+        with sqlite3.connect(db) as c:
+            # Trip survives intact.
+            row = c.execute(
+                "SELECT id, distance_km FROM trips WHERE id = ?",
+                (trip_id,),
+            ).fetchone()
+            assert row is not None
+            assert row[1] == 8.2
+            # All three waypoints survive.
+            wps = c.execute(
+                "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?",
+                (trip_id,),
+            ).fetchone()[0]
+            assert wps == 3
+            # video_path nulled on every one — UI knows playback is gone.
+            null_count = c.execute(
+                "SELECT COUNT(*) FROM waypoints "
+                "WHERE trip_id = ? AND video_path IS NULL",
+                (trip_id,),
+            ).fetchone()[0]
+            assert null_count == 3
+            # No indexed_files rows left for the missing clips.
+            assert c.execute(
+                "SELECT COUNT(*) FROM indexed_files"
+            ).fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------

@@ -2547,15 +2547,45 @@ def index_single_file(
 
 def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
                          deleted_paths: Optional[List[str]] = None) -> dict:
-    """Remove geodata.db entries for videos that no longer exist on disk.
+    """Reconcile geodata.db with the filesystem when video files are gone.
 
-    Can operate in two modes:
-    - **Targeted**: Pass ``deleted_paths`` (list of absolute or relative video
-      paths) to remove only those specific entries.
-    - **Full scan**: Pass ``teslacam_path`` to scan every ``indexed_files``
-      entry and remove those whose file no longer exists.
+    The video file is the playback source — it is NOT the trip itself.
+    A user's GPS history (waypoints), trip aggregates (trips), and
+    detected events are independent records that must survive video
+    loss. This function therefore:
 
-    Returns dict with counts of purged rows.
+    * **Deletes** the orphan ``indexed_files`` row (the file is gone, so
+      the row is lying about indexing state).
+    * **NULLs out** ``waypoints.video_path`` and
+      ``detected_events.video_path`` for the missing clip — preserving
+      the GPS coordinates, telemetry, and event detections while
+      signaling to the UI that the playback link is broken.
+    * **Never deletes** waypoints, detected_events, or trips.
+
+    This contract is intentional and load-bearing. Earlier behavior
+    cascade-deleted trips when their last waypoint was purged, which
+    caused real driving history to disappear from the map every time
+    the stale-scan caught up to RecentClips files Tesla had rotated
+    out before the archive subsystem copied them to SD. See PR
+    discussion on issue #75 / #76.
+
+    If a user really wants to forget a trip, that needs to be a
+    separate, explicit "Delete Trip" action — not a side effect of a
+    background filesystem reconciliation.
+
+    Two modes:
+
+    * **Targeted**: pass ``deleted_paths`` (list of absolute or
+      relative video paths) to reconcile only those specific entries.
+    * **Full scan**: pass ``teslacam_path`` to walk every
+      ``indexed_files`` entry and reconcile rows whose file no longer
+      exists.
+
+    Returns a dict with keys ``purged_files``, ``purged_waypoints``,
+    ``purged_events``, ``purged_trips``. The ``waypoints``/``events``
+    counts now reflect rows whose ``video_path`` was nulled (not
+    deleted); ``purged_trips`` is always 0 and remains in the dict for
+    backward compatibility.
     """
     conn = _init_db(db_path)
     purged_files = 0
@@ -2629,60 +2659,50 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
                     )
                     continue
 
-                # No surviving copy — safe to purge.
-                # 1) indexed_files: exact-match the absolute path that
-                #    was reported. (The other absolute forms were
-                #    rewritten by ``_update_geodata_paths`` when the
-                #    archive moved the file, so an exact match is
-                #    correct here.)
+                # No surviving copy — the video file is genuinely gone.
+                # We must NOT cascade-delete the trip metadata: GPS
+                # waypoints are the user's record of having driven
+                # somewhere, and that record is independent of whether
+                # the dashcam clip survives. (Tesla rotates RecentClips
+                # at the 1-hour mark; if the archive subsystem missed
+                # a clip, we still want the trip to appear on the map.)
+                #
+                # 1) indexed_files: delete the row — the file is gone,
+                #    so this row is now lying.
                 cur = conn.execute(
                     "DELETE FROM indexed_files WHERE file_path = ?",
                     (path,),
                 )
                 purged_files += cur.rowcount
 
-                # 2) waypoints / detected_events: video_path stores
-                #    relative DB paths from canonical_key. Exact-match
-                #    every candidate so we don't substring-match an
-                #    unrelated clip that happens to share the basename.
+                # 2) waypoints / detected_events: NULL out video_path
+                #    instead of deleting the row. The GPS coordinates,
+                #    speed, telemetry, and detected events are all
+                #    real history — only the playback link is broken.
+                #    The map UI checks for NULL video_path and disables
+                #    the play affordance for orphaned waypoints.
                 rel_paths = candidate_db_paths(key)
                 if not rel_paths:
                     continue
                 placeholders = ','.join('?' * len(rel_paths))
-                trip_ids = [
-                    r['trip_id']
-                    for r in conn.execute(
-                        f"SELECT DISTINCT trip_id FROM waypoints "
-                        f"WHERE video_path IN ({placeholders})",
-                        rel_paths,
-                    ).fetchall()
-                ]
                 wc = conn.execute(
-                    f"DELETE FROM waypoints "
+                    f"UPDATE waypoints SET video_path = NULL "
                     f"WHERE video_path IN ({placeholders})",
                     rel_paths,
                 ).rowcount
                 purged_waypoints += wc
                 ec = conn.execute(
-                    f"DELETE FROM detected_events "
+                    f"UPDATE detected_events SET video_path = NULL "
                     f"WHERE video_path IN ({placeholders})",
                     rel_paths,
                 ).rowcount
                 purged_events += ec
 
-                # 3) Trips with no remaining waypoints get removed.
-                for tid in trip_ids:
-                    if tid is None:
-                        continue
-                    remaining = conn.execute(
-                        "SELECT COUNT(*) FROM waypoints WHERE trip_id = ?",
-                        (tid,),
-                    ).fetchone()[0]
-                    if remaining == 0:
-                        conn.execute(
-                            "DELETE FROM trips WHERE id = ?", (tid,),
-                        )
-                        purged_trips += 1
+                # 3) Trips: NEVER delete from this code path. A trip
+                #    represents real driving that happened; losing the
+                #    video doesn't unhappen the drive. Use a separate,
+                #    user-initiated "Delete Trip" flow if a trip
+                #    actually needs to be removed.
 
         elif teslacam_path:
             # Full scan mode — check every indexed file against disk.
@@ -2737,8 +2757,9 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
 
         conn.commit()
         logger.info(
-            "Purged from geodata.db: %d files, %d waypoints, %d events, %d trips",
-            purged_files, purged_waypoints, purged_events, purged_trips,
+            "Reconciled geodata.db: purged %d indexed_files rows, "
+            "orphaned %d waypoints and %d events (trips preserved)",
+            purged_files, purged_waypoints, purged_events,
         )
     finally:
         conn.close()
@@ -2909,13 +2930,13 @@ def _run_stale_scan_blocking(db_path: str, teslacam_path_provider,
         if tc and os.path.isdir(tc):
             result = purge_deleted_videos(db_path, teslacam_path=tc)
             logger.info(
-                "Stale scan (%s): purged files=%d waypoints=%d "
-                "events=%d trips=%d",
+                "Stale scan (%s): purged %d indexed_files rows, "
+                "orphaned %d waypoints and %d events "
+                "(trips/waypoints preserved)",
                 source,
                 result.get('purged_files', 0),
                 result.get('purged_waypoints', 0),
                 result.get('purged_events', 0),
-                result.get('purged_trips', 0),
             )
             return result
         logger.debug(

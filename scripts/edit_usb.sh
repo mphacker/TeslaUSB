@@ -470,8 +470,11 @@ fi
 if systemctl is-active --quiet smbd; then
   sudo smbcontrol all reload-config 2>/dev/null || true
 else
+  # Cold start: smbd is now disabled at boot (see setup_usb.sh / issue #74)
+  # to save ~4s of boot time, so this path runs every time the user enters
+  # edit mode. Allow up to 10s for startup.
   sudo systemctl start smbd nmbd 2>/dev/null || true
-  wait_until "systemctl is-active --quiet smbd" 2 "Samba startup" || true
+  wait_until "systemctl is-active --quiet smbd" 10 "Samba startup" || true
 fi
 log_timing "Samba refreshed"
 # Verify mounts are accessible

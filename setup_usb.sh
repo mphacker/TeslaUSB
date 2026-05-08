@@ -934,6 +934,31 @@ for svc in rpi-usb-gadget.service usb-gadget.service; do
   fi
 done
 
+# ===== Disable cloud-init (issue #74 boot speed) =====
+# cloud-init delays boot by ~6s on Pi OS Bookworm and is unnecessary for a
+# Pi USB gadget appliance — we don't need cloud metadata, datasource probing,
+# or per-instance config. Drop the disabled flag (recognized by every cloud-init
+# version) and mask the units as defense in depth.
+echo "Checking for cloud-init..."
+if [ -d /etc/cloud ] || \
+   systemctl list-unit-files 'cloud-init*' --no-legend 2>/dev/null | grep -q '.' || \
+   systemctl list-unit-files 'cloud-config*' --no-legend 2>/dev/null | grep -q '.' || \
+   systemctl list-unit-files 'cloud-final*' --no-legend 2>/dev/null | grep -q '.'; then
+  echo "Disabling cloud-init (not needed for Pi USB gadget; saves ~6s at boot)..."
+  mkdir -p /etc/cloud
+  touch /etc/cloud/cloud-init.disabled
+  for svc in cloud-init.target cloud-init.service cloud-init-local.service \
+             cloud-init-main.service cloud-init-network.service \
+             cloud-config.service cloud-final.service; do
+    if systemctl list-unit-files "$svc" --no-legend 2>/dev/null | grep -q '.'; then
+      systemctl mask "$svc" 2>/dev/null || true
+    fi
+  done
+  echo "  ✓ cloud-init disabled"
+else
+  echo "  cloud-init not installed; nothing to do"
+fi
+
 # Also clean up any gadget left behind by rpi-usb-gadget in configfs
 # (it typically creates /sys/kernel/config/usb_gadget/g1)
 for other_gadget in /sys/kernel/config/usb_gadget/*/; do
@@ -1291,8 +1316,19 @@ cat >> "$SMB_CONF" <<EOF
 EOF
 fi
 
-# Restart Samba
+# Restart Samba to pick up the new config
 systemctl restart smbd nmbd 2>/dev/null || systemctl restart smbd || true
+
+# ===== Disable Samba auto-start at boot (issue #74) =====
+# Samba is only needed in edit mode. Booting it eagerly costs ~4s
+# (smbd waits on network-online.target). edit_usb.sh starts smbd/nmbd on
+# demand when the user enters edit mode. Disable here so they don't auto-start
+# at the next reboot. We do NOT stop the running daemons — if the operator
+# happens to be in an edit session right now, that session keeps working.
+echo "Disabling Samba auto-start at boot (will start on demand in edit mode)..."
+systemctl disable smbd 2>/dev/null || true
+systemctl disable nmbd 2>/dev/null || true
+echo "  ✓ Samba auto-start disabled"
 
 # ===== Configure scripts (no copying - run in place) =====
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

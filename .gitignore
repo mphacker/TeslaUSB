@@ -8,6 +8,42 @@ __pycache__/
 # USB disk image files (large, device-specific, not source code)
 *.img
 
+# Runtime data files — NEVER commit. These are produced on-device and contain
+# user trip data, location history, OAuth tokens, etc. They must never appear
+# in git history or on GitHub.
+#
+# Equally important: an untracked data file gets swept into a `git stash -u`
+# during deploy, which has caused production data loss before. Keep this list
+# comprehensive so `git stash`, `git clean`, and `git add .` all skip them.
+
+# SQLite databases (live + journals + backups)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.db.bak
+*.db.bak.*
+*.db.broken*
+*.db.recovered*
+
+# Runtime state files
+state.txt
+boot_cleanup.log
+*.log
+fsck_status.json
+fsck_history.json
+cleanup_config.json
+present_usb_web.log
+edit_usb_web.log
+
+# Crypto material / secrets
+tesla_salt.bin
+*.key
+*.pem
+
+# Config backups (timestamped copies left by setup_usb.sh)
+config.yaml.bak.*
+
 # AI tool configs (managed externally, not part of the repo)
 .claude/
 .agent/

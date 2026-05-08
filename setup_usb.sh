@@ -940,10 +940,10 @@ done
 # or per-instance config. Drop the disabled flag (recognized by every cloud-init
 # version) and mask the units as defense in depth.
 echo "Checking for cloud-init..."
+# One glob is faster than three separate `cloud-init*`/`cloud-config*`/`cloud-final*`
+# probes; the inner masking loop only touches a fixed allowlist of unit names.
 if [ -d /etc/cloud ] || \
-   systemctl list-unit-files 'cloud-init*' --no-legend 2>/dev/null | grep -q '.' || \
-   systemctl list-unit-files 'cloud-config*' --no-legend 2>/dev/null | grep -q '.' || \
-   systemctl list-unit-files 'cloud-final*' --no-legend 2>/dev/null | grep -q '.'; then
+   systemctl list-unit-files 'cloud-*' --no-legend 2>/dev/null | grep -q '.'; then
   echo "Disabling cloud-init (not needed for Pi USB gadget; saves ~6s at boot)..."
   mkdir -p /etc/cloud
   touch /etc/cloud/cloud-init.disabled
@@ -954,7 +954,14 @@ if [ -d /etc/cloud ] || \
       systemctl mask "$svc" 2>/dev/null || true
     fi
   done
-  echo "  ✓ cloud-init disabled"
+  # The disabled flag is the primary mechanism (recognized by every cloud-init
+  # version). Masks are defense in depth. Report status based on the flag,
+  # since mask failures are silently swallowed above.
+  if [ -f /etc/cloud/cloud-init.disabled ]; then
+    echo "  ✓ cloud-init disabled (flag set, units mask-attempted)"
+  else
+    echo "  ⚠ cloud-init disable failed (could not create /etc/cloud/cloud-init.disabled)" >&2
+  fi
 else
   echo "  cloud-init not installed; nothing to do"
 fi
@@ -1328,7 +1335,16 @@ systemctl restart smbd nmbd 2>/dev/null || systemctl restart smbd || true
 echo "Disabling Samba auto-start at boot (will start on demand in edit mode)..."
 systemctl disable smbd 2>/dev/null || true
 systemctl disable nmbd 2>/dev/null || true
-echo "  ✓ Samba auto-start disabled"
+# Verify both services actually disabled — `disable` failures (read-only fs,
+# locked unit, missing perms) are swallowed above so the message must be
+# evidence-based, not blind.
+smbd_state="$(systemctl is-enabled smbd 2>/dev/null || echo unknown)"
+nmbd_state="$(systemctl is-enabled nmbd 2>/dev/null || echo unknown)"
+if [ "$smbd_state" != "enabled" ] && [ "$nmbd_state" != "enabled" ]; then
+  echo "  ✓ Samba auto-start disabled (smbd=$smbd_state nmbd=$nmbd_state)"
+else
+  echo "  ⚠ Samba auto-start not fully disabled (smbd=$smbd_state nmbd=$nmbd_state)" >&2
+fi
 
 # ===== Configure scripts (no copying - run in place) =====
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

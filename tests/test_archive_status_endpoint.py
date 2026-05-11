@@ -123,7 +123,7 @@ class TestArchiveStatusShape:
         'pending_count', 'claimed_count', 'copied_count',
         'source_gone_count', 'dead_letter_count',
         'worker_running', 'paused', 'active_file', 'last_outcome',
-        'last_error', 'files_done_session', 'disk_pause',
+        'last_error', 'files_done_session', 'disk_pause', 'load_pause',
         'disk_total_mb', 'disk_used_mb', 'disk_free_mb',
         'disk_warning_mb', 'disk_critical_mb', 'disk_known',
         'last_successful_copy_at', 'last_successful_copy_age_seconds',
@@ -153,6 +153,30 @@ class TestArchiveStatusShape:
         # Thresholds default to 500/100 from spec.
         assert body['disk_warning_mb'] == 500
         assert body['disk_critical_mb'] == 100
+
+    def test_status_includes_load_pause_block(self, client):
+        # Regression guard: PR #93 added ``load_pause`` to
+        # ``archive_worker.get_status()`` for SDIO-contention
+        # observability, but the blueprint route hand-picks fields
+        # from the worker snapshot and originally missed wiring it
+        # through. Without this shape test, a future refactor of
+        # the route could silently drop it again. The UI's
+        # archive panel needs all four fields to render the
+        # "load-paused" indicator and the most recent loadavg.
+        with patch('blueprints.archive_queue.os.path.isfile',
+                   return_value=True):
+            r = client.get('/api/archive/status')
+        assert r.status_code == 200
+        body = r.get_json()
+        assert 'load_pause' in body, (
+            "/api/archive/status MUST surface the load_pause block "
+            "from archive_worker.get_status() — the UI depends on it."
+        )
+        lp = body['load_pause']
+        assert set(lp.keys()) >= {
+            'paused_until_epoch', 'is_paused_now',
+            'last_pause_at', 'last_loadavg',
+        }, f"load_pause block missing required keys: {set(lp.keys())}"
 
     def test_status_includes_per_priority_queue_depths(
         self, client, db, archive_root, monkeypatch,

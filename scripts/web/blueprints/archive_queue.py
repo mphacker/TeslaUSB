@@ -135,6 +135,14 @@ def archive_status():
         'disk_pause': worker_status.get(
             'disk_pause', {'is_paused_now': False, 'paused_until_epoch': 0.0},
         ),
+        'load_pause': worker_status.get(
+            'load_pause', {
+                'is_paused_now': False,
+                'paused_until_epoch': 0.0,
+                'last_pause_at': None,
+                'last_loadavg': None,
+            },
+        ),
 
         # Disk + retention. ``disk_known=False`` means ``shutil.disk_usage``
         # raised OSError on the most recent watchdog tick; the disk fields

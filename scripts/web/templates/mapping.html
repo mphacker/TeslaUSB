@@ -133,6 +133,7 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        transition: opacity 120ms ease-out;
     }
     .trip-card-indexed {
         font-size: 0.6875rem;
@@ -1074,7 +1075,7 @@ function beginMapLoading() {
             bar.setAttribute('aria-hidden', 'false');
         }
     }, 150);
-    setDayNavBusy(true);
+    disableDayNav();
 }
 
 function endMapLoading() {
@@ -1091,24 +1092,24 @@ function endMapLoading() {
         bar.setAttribute('aria-busy', 'false');
         bar.setAttribute('aria-hidden', 'true');
     }
-    setDayNavBusy(false);
+    // Re-enable of the nav buttons is the responsibility of renderDayCard()
+    // / renderAllTimeCard() — those callers know the new view's edge-state
+    // (e.g. next stays disabled on the most-recent day). Calling them is
+    // the only correct way to restore the buttons.
 }
 
-function setDayNavBusy(busy) {
+function disableDayNav() {
     // Disable the prev/next/all buttons during in-flight loads so
-    // the user can't queue a chain of clicks that race the seq
-    // guard. renderDayCard() and renderAllTimeCard() will re-enable
-    // them based on the new view's state once the load completes.
+    // the user can't queue a chain of clicks that race the seq guard.
+    // The corresponding re-enable happens in renderDayCard() /
+    // renderAllTimeCard() once the load completes — those functions
+    // set the correct enabled state for the new view.
     const prevBtn = document.getElementById('dayPrev');
     const nextBtn = document.getElementById('dayNext');
     const allBtn = document.getElementById('dayAllBtn');
-    if (busy) {
-        if (prevBtn) prevBtn.disabled = true;
-        if (nextBtn) nextBtn.disabled = true;
-        if (allBtn) allBtn.disabled = true;
-    }
-    // Re-enable on busy=false is left to renderDayCard()/renderAllTimeCard
-    // which know whether the surrounding view actually allows nav.
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    if (allBtn) allBtn.disabled = true;
 }
 
 // All-time trips snapshot. Populated by renderAllTime() once the
@@ -2502,9 +2503,9 @@ async function renderAllTime() {
     // visible work is done so the user sees the indicator until the
     // map is actually drawn (not just until the JSON arrived). Then
     // re-render the all-time card so the nav buttons get re-enabled
-    // (beginMapLoading() disabled them; setDayNavBusy(false) defers
-    // re-enable to the card-renderers so each view sets its own
-    // edge-state correctly).
+    // (beginMapLoading() disabled them via disableDayNav(); the card
+    // renderer is the one that knows the correct edge-state for the
+    // restored view, so it owns re-enable).
     endMapLoading();
     renderAllTimeCard();
 }

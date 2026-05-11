@@ -225,6 +225,42 @@ class TestProducerLifecycle:
         assert archive_queue.get_queue_status(db_path=db)['pending'] == 0
         archive_producer.stop_producer(timeout=5.0)
 
+    def test_boot_scan_defer_postpones_first_scan(self, db, teslacam):
+        # boot_scan_defer_seconds > 0 should delay the first scan even
+        # when boot_catchup is enabled. Use a long defer + short total
+        # observation window to confirm the producer hasn't scanned yet.
+        archive_producer.start_producer(
+            teslacam, db_path=db,
+            rescan_interval_seconds=60.0,
+            boot_catchup_enabled=True,
+            boot_scan_defer_seconds=5.0,
+        )
+        time.sleep(0.5)  # Well under the 5s defer
+        status = archive_producer.get_producer_status()
+        assert status['iterations'] == 0, (
+            "First scan should be deferred by boot_scan_defer_seconds; "
+            "running it immediately defeats the SDIO contention guard."
+        )
+        assert archive_queue.get_queue_status(db_path=db)['pending'] == 0
+        archive_producer.stop_producer(timeout=5.0)
+
+    def test_boot_scan_defer_zero_preserves_immediate_scan(self, db, teslacam):
+        # With defer=0, the original immediate-scan behavior must be
+        # preserved (back-compat for callers that don't pass the arg).
+        archive_producer.start_producer(
+            teslacam, db_path=db,
+            rescan_interval_seconds=60.0,
+            boot_catchup_enabled=True,
+            boot_scan_defer_seconds=0.0,
+        )
+        time.sleep(0.8)  # Enough for the first scan to complete
+        status = archive_producer.get_producer_status()
+        assert status['iterations'] >= 1, (
+            "With defer=0 the producer must scan immediately; "
+            "regressed back-compat for the start_producer signature."
+        )
+        archive_producer.stop_producer(timeout=5.0)
+
     def test_periodic_rescan_picks_up_new_files(self, db, teslacam):
         # Short interval so we can observe two scans
         archive_producer.start_producer(

@@ -188,6 +188,21 @@ ARCHIVE_QUEUE_COPY_CHUNK_BYTES = int(
 ARCHIVE_QUEUE_WATCHDOG_CHECK_INTERVAL_SECONDS = float(
     _archive_queue.get('watchdog_check_interval_seconds', 60)
 )
+# SDIO-contention safeguards (issue: archive catch-up triggered hardware
+# watchdog reboot during a 1414-clip backlog drain). See archive_worker
+# docstring and copilot-instructions.md for the full failure mode.
+ARCHIVE_QUEUE_INTER_FILE_SLEEP_SECONDS = float(
+    _archive_queue.get('inter_file_sleep_seconds', 1.0)
+)
+ARCHIVE_QUEUE_LOAD_PAUSE_THRESHOLD = float(
+    _archive_queue.get('load_pause_threshold', 3.5)
+)
+ARCHIVE_QUEUE_LOAD_PAUSE_SECONDS = float(
+    _archive_queue.get('load_pause_seconds', 30)
+)
+ARCHIVE_QUEUE_BOOT_SCAN_DEFER_SECONDS = float(
+    _archive_queue.get('boot_scan_defer_seconds', 30)
+)
 
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)

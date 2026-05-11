@@ -63,7 +63,7 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - **Desktop services disabled**: pipewire, wireplumber, colord masked (saves ~30MB RAM).
 - **Persistent swap**: 1GB swap file at `/var/swap/fsck.swap` in /etc/fstab.
 - **Setup optimization**: `optimize_memory_for_setup()` disables lightdm, enables swap before package install.
-- **Watchdog**: Hardware watchdog configured (15s timeout, monitors load/memory).
+- **Watchdog**: Hardware watchdog configured (90s timeout, `max-load-1=24`, `max-load-5=16`). The 90s timeout (was 60s) gives headroom for transient SDIO bus contention — the Pi Zero 2 W shares one SDIO controller between the SD card and WiFi chip, and a heavy archive catch-up can briefly stall the watchdog daemon. If you change defaults, edit both `setup_usb.sh` and `readme.md`.
 - **Kernel panic**: Auto-reboot after 10 seconds (sysctl kernel.panic=10).
 
 ## Lock Chimes & Light Shows
@@ -233,6 +233,7 @@ LES is a **separate, opt-in subsystem** that uploads Sentry and Saved events to 
 - Creating a standalone Videos page (all video browsing is in the map page panel).
 - Deleting or overwriting `*.img` files in GADGET_DIR from any code path.
 - Running rclone without `nice`/`ionice` (starves the web server and gadget).
+- **Removing or weakening the archive worker's load-pause / inter-file-sleep guards.** The Pi Zero 2 W's SDIO controller is shared between the SD card and the Broadcom WiFi chip; tight back-to-back archive copies (especially during catch-up of a 1000+ clip backlog) can saturate the bus, starve the userspace `watchdog` daemon, and trigger a hardware reset. The `archive_queue.inter_file_sleep_seconds` (default 1.0 s), `load_pause_threshold` (3.5), `load_pause_seconds` (30), and `boot_scan_defer_seconds` (30) defaults are all calibrated against this failure mode — don't lower them without re-validating on hardware. Symptom: watchdog reboot ~3 minutes into a service restart with `mmc1: Controller never released inhibit bit(s)` and `brcmfmac: brcmf_sdio_read_control: ... failed: -5` in the kernel log immediately before the reset.
 - Marking a file as `synced` in the cloud database before rclone confirms the upload completed.
 - Letting `cloud_archive_service` upload a Sentry/Saved event clip when LES has a pending row for that event (cloud_archive yields between files; don't remove or weaken the inter-file `live_event_queue` check).
 - Calling LES from inside `cloud_archive_service` (or vice versa) — they're separate subsystems with separate enable flags. Cross-call only via the documented coordination points (`task_coordinator`, the inter-file LES-pending check, and the `/api/live_events/wake` endpoint).

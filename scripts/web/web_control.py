@@ -290,6 +290,7 @@ if __name__ == "__main__":
             ARCHIVE_QUEUE_ENABLED,
             ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS,
             ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED,
+            ARCHIVE_QUEUE_BOOT_SCAN_DEFER_SECONDS,
             MAPPING_DB_PATH as _ARCHIVE_QUEUE_DB,
         )
         if ARCHIVE_QUEUE_ENABLED:
@@ -305,6 +306,9 @@ if __name__ == "__main__":
                     ),
                     boot_catchup_enabled=(
                         ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED
+                    ),
+                    boot_scan_defer_seconds=(
+                        ARCHIVE_QUEUE_BOOT_SCAN_DEFER_SECONDS
                     ),
                 )
                 print("Archive queue producer started (Phase 2a)")

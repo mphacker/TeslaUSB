@@ -182,7 +182,8 @@ def start_producer(teslacam_root: str,
                    db_path: Optional[str] = None,
                    *,
                    rescan_interval_seconds: float = _DEFAULT_RESCAN_INTERVAL,
-                   boot_catchup_enabled: bool = True) -> bool:
+                   boot_catchup_enabled: bool = True,
+                   boot_scan_defer_seconds: float = 0.0) -> bool:
     """Start the producer thread. Idempotent.
 
     Returns True if a new thread was started, False if one was already
@@ -196,9 +197,17 @@ def start_producer(teslacam_root: str,
         rescan_interval_seconds: Seconds between successive scans.
             The default (60 s) matches the issue spec.
         boot_catchup_enabled: When True (default) the first iteration
-            runs immediately on startup. When False the thread waits
-            ``rescan_interval_seconds`` before its first scan — useful
-            for tests that want to exercise just the periodic path.
+            runs (after ``boot_scan_defer_seconds``) on startup. When
+            False the thread waits ``rescan_interval_seconds`` before
+            its first scan — useful for tests that want to exercise
+            just the periodic path.
+        boot_scan_defer_seconds: When >0 and ``boot_catchup_enabled``,
+            wait this many seconds before the first scan. The default
+            (0) preserves the original immediate-scan behavior; the
+            web app passes a non-zero value (typically 30 s) so the
+            producer's directory walk doesn't pile onto the post-start
+            initialization storm that previously triggered hardware
+            watchdog reboots on the Pi Zero 2 W.
     """
     global _thread
     with _state_lock:
@@ -211,6 +220,7 @@ def start_producer(teslacam_root: str,
         _state['db_path'] = db_path
         _state['rescan_interval_seconds'] = float(rescan_interval_seconds)
         _state['boot_catchup_enabled'] = bool(boot_catchup_enabled)
+        _state['boot_scan_defer_seconds'] = float(boot_scan_defer_seconds)
         _state['iterations'] = 0
         _state['last_scan_at'] = None
         _state['last_enqueued'] = 0
@@ -221,7 +231,8 @@ def start_producer(teslacam_root: str,
             target=_run_loop,
             args=(teslacam_root, db_path,
                   float(rescan_interval_seconds),
-                  bool(boot_catchup_enabled)),
+                  bool(boot_catchup_enabled),
+                  float(boot_scan_defer_seconds)),
             name='archive-producer',
             daemon=True,
         )
@@ -232,8 +243,10 @@ def start_producer(teslacam_root: str,
         # so making the start atomic now keeps the contract simple.
         _thread.start()
     logger.info(
-        "archive_producer started (root=%s, interval=%.1fs, boot_catchup=%s)",
-        teslacam_root, rescan_interval_seconds, boot_catchup_enabled,
+        "archive_producer started (root=%s, interval=%.1fs, "
+        "boot_catchup=%s, boot_defer=%.1fs)",
+        teslacam_root, rescan_interval_seconds,
+        boot_catchup_enabled, boot_scan_defer_seconds,
     )
     return True
 
@@ -275,13 +288,26 @@ def get_producer_status() -> Dict:
 
 def _run_loop(teslacam_root: str, db_path: Optional[str],
               rescan_interval_seconds: float,
-              boot_catchup_enabled: bool) -> None:
+              boot_catchup_enabled: bool,
+              boot_scan_defer_seconds: float = 0.0) -> None:
     """Producer thread body. Catches every exception so a single bad
     scan can't kill the thread.
     """
     if not boot_catchup_enabled:
         # Skip the immediate first-pass; wait the full interval first.
         if _stop_event.wait(rescan_interval_seconds):
+            with _state_lock:
+                _state['running'] = False
+            return
+    elif boot_scan_defer_seconds > 0:
+        # Boot catch-up is enabled, but defer the first scan so the
+        # producer's directory walk doesn't pile onto the post-start
+        # initialization storm (file_watcher initial scan + worker
+        # resuming a backlog drain). Without this defer, a single
+        # service restart could spike SDIO contention enough to
+        # starve the watchdog daemon and trigger a hardware reboot
+        # on the Pi Zero 2 W (see copilot-instructions.md).
+        if _stop_event.wait(boot_scan_defer_seconds):
             with _state_lock:
                 _state['running'] = False
             return

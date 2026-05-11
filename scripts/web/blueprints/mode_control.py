@@ -38,6 +38,14 @@ def _pause_worker_for_mode_switch() -> bool:
     the RO USB mount. If either worker fails to pause, the mode switch
     is refused; both are immediately resumed so neither stays frozen.
 
+    Issue #89: the cleanup is centralized at the end so a partial
+    success — one worker pauses OK but the other fails — fully
+    unwinds the side that did pause. Before this, an indexer pause
+    success followed by an archive pause failure would leave the
+    indexer frozen until the next successful mode switch (and vice
+    versa). For the archive worker this was a bounded data-loss path
+    because Tesla rotates RecentClips after ~60 minutes.
+
     Failure semantics: if mapping is enabled and the pause API itself
     raises an unexpected exception, we treat that as a failure and
     refuse the mode switch — better to surface a 503 to the user than
@@ -51,17 +59,24 @@ def _pause_worker_for_mode_switch() -> bool:
 
     indexer_ok = True
     archive_ok = True
+    indexer_paused = False
+    archive_paused = False
+    indexing_worker = None
+    archive_worker = None
 
     try:
         from services import indexing_worker
         if indexing_worker.is_running():
-            indexer_ok = indexing_worker.pause_worker(
+            if indexing_worker.pause_worker(
                 timeout=_PAUSE_TIMEOUT_SECONDS,
-            )
-            if not indexer_ok:
+            ):
+                indexer_paused = True
+            else:
                 indexing_worker.resume_worker()
+                indexer_ok = False
     except ImportError as e:
         logger.debug("indexing_worker module not available: %s", e)
+        indexing_worker = None
     except Exception as e:  # noqa: BLE001
         if MAPPING_ENABLED:
             logger.error(
@@ -74,13 +89,16 @@ def _pause_worker_for_mode_switch() -> bool:
     try:
         from services import archive_worker
         if archive_worker.is_running():
-            archive_ok = archive_worker.pause_worker(
+            if archive_worker.pause_worker(
                 timeout=_PAUSE_TIMEOUT_SECONDS,
-            )
-            if not archive_ok:
+            ):
+                archive_paused = True
+            else:
                 archive_worker.resume_worker()
+                archive_ok = False
     except ImportError as e:
         logger.debug("archive_worker module not available: %s", e)
+        archive_worker = None
     except Exception as e:  # noqa: BLE001
         # Archive failure is still a refusal — a mid-copy unmount can
         # produce a 0-byte ArchivedClips file (we'd lose the source
@@ -88,7 +106,27 @@ def _pause_worker_for_mode_switch() -> bool:
         logger.error("Pause archive worker failed: %s", e)
         archive_ok = False
 
-    return indexer_ok and archive_ok
+    if not (indexer_ok and archive_ok):
+        # Issue #89: unwind whichever side actually paused so neither
+        # worker stays frozen after a refused mode switch.
+        if indexer_paused and indexing_worker is not None:
+            try:
+                indexing_worker.resume_worker()
+            except Exception as e:  # noqa: BLE001
+                logger.exception(
+                    "Failed to resume indexer after partial pause: %s", e,
+                )
+        if archive_paused and archive_worker is not None:
+            try:
+                archive_worker.resume_worker()
+            except Exception as e:  # noqa: BLE001
+                logger.exception(
+                    "Failed to resume archive worker after partial pause: %s",
+                    e,
+                )
+        return False
+
+    return True
 
 
 def _resume_worker_after_mode_switch() -> None:

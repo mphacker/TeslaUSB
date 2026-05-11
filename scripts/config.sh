@@ -80,6 +80,11 @@ eval "$(yq -r '
   "ARCHIVE_QUEUE_WORKER_CHECK_INTERVAL_SECONDS=\"" + (.archive_queue.worker_check_interval_seconds // 5 | tostring) + "\"",
   "ARCHIVE_QUEUE_RETRY_MAX_ATTEMPTS=\"" + (.archive_queue.retry_max_attempts // 3 | tostring) + "\"",
   "ARCHIVE_QUEUE_COPY_CHUNK_BYTES=\"" + (.archive_queue.copy_chunk_bytes // 1048576 | tostring) + "\"",
+  "ARCHIVE_QUEUE_WATCHDOG_CHECK_INTERVAL_SECONDS=\"" + (.archive_queue.watchdog_check_interval_seconds // 60 | tostring) + "\"",
+  "CLOUD_ARCHIVE_RETENTION_DAYS=\"" + (.cloud_archive.archived_clips_retention_days // .archive.retention_days // 30 | tostring) + "\"",
+  "CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB=\"" + (.cloud_archive.disk_space_warning_mb // 500 | tostring) + "\"",
+  "CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB=\"" + (.cloud_archive.disk_space_critical_mb // 100 | tostring) + "\"",
+  "CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS=\"" + (.cloud_archive.disk_space_pause_seconds // 300 | tostring) + "\"",
   "TESLA_API_CLIENT_ID=\"" + (.tesla_api.client_id // "") + "\""
 ' "$CONFIG_YAML")"
 

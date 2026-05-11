@@ -334,6 +334,22 @@ if __name__ == "__main__":
                 teslacam_root=tc,
             )
             print("Archive queue worker started (Phase 2b)")
+
+            # Phase 2c: archive watchdog + retention prune. Single
+            # daemon thread that observes the queue/worker, exposes
+            # ``/api/archive/status``, and runs the daily retention
+            # prune on ``ArchivedClips``. Pure local-FS observer — it
+            # never touches the USB gadget.
+            try:
+                from services import archive_watchdog
+                archive_watchdog.start_watchdog(
+                    _ARCHIVE_WORKER_DB, ARCHIVE_DIR,
+                )
+                print("Archive watchdog started (Phase 2c)")
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"Warning: Failed to start archive watchdog: {e}"
+                )
     except Exception as e:
         print(f"Warning: Failed to start archive queue worker: {e}")
 

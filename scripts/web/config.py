@@ -114,6 +114,26 @@ CLOUD_MIN_RETENTION_DAYS = int(_cloud.get('cloud_min_retention_days', 30))
 CLOUD_ARCHIVE_DB_PATH = os.path.join(GADGET_DIR, 'cloud_sync.db')
 CLOUD_PROVIDER_CREDS_PATH = os.path.join(GADGET_DIR, 'cloud_provider.enc')
 
+# Phase 2c (issue #76) — local SD-card storage management for ArchivedClips.
+# These are scoped under ``cloud_archive`` in config.yaml per the issue spec.
+# The retention value falls back to the legacy ``archive.retention_days`` so
+# existing installs that already tuned ``archive.retention_days`` keep their
+# preferred value without editing the new key. The disk-space thresholds are
+# new and have no legacy equivalent.
+CLOUD_ARCHIVE_RETENTION_DAYS = int(_cloud.get(
+    'archived_clips_retention_days',
+    int(config.get('archive', {}).get('retention_days', 30)),
+))
+CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB = int(_cloud.get(
+    'disk_space_warning_mb', 500,
+))
+CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB = int(_cloud.get(
+    'disk_space_critical_mb', 100,
+))
+CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = float(_cloud.get(
+    'disk_space_pause_seconds', 300,
+))
+
 # Live Event Sync Configuration
 # Separate first-class subsystem from cloud_archive — own queue, worker, and config.
 # Shares CLOUD_ARCHIVE_PROVIDER + CLOUD_PROVIDER_CREDS_PATH for credentials only.
@@ -164,6 +184,9 @@ ARCHIVE_QUEUE_RETRY_MAX_ATTEMPTS = int(
 )
 ARCHIVE_QUEUE_COPY_CHUNK_BYTES = int(
     _archive_queue.get('copy_chunk_bytes', 1048576)
+)
+ARCHIVE_QUEUE_WATCHDOG_CHECK_INTERVAL_SECONDS = float(
+    _archive_queue.get('watchdog_check_interval_seconds', 60)
 )
 
 # ============================================================================

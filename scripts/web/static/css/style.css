@@ -2698,3 +2698,168 @@ details summary span:first-of-type {
 .btn-sm { padding: 4px 10px; font-size: 0.8125rem; min-height: 36px; }
 .btn-icon { padding: 8px; min-width: 44px; min-height: 44px; justify-content: center; }
 .btn .nav-icon { width: 16px; height: 16px; flex-shrink: 0; }
+
+
+/* ========================================================================
+   Phase 2c — Archive watchdog banner + Settings panels (issue #76)
+   ======================================================================== */
+
+/* Banner — sits between nav and main content, sticky on desktop. Three
+   severity tiers map to existing message-tone tokens so dark+light mode
+   work automatically. */
+.archive-watchdog-banner {
+    padding: 14px 20px;
+    margin-bottom: 16px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    box-shadow: 0 2px 8px var(--shadow, rgba(0,0,0,0.15));
+    position: sticky;
+    top: 0;
+    z-index: 999;
+}
+.archive-watchdog-banner[hidden] { display: none; }
+
+.archive-watchdog-warning {
+    background: var(--msg-warning-bg);
+    color: var(--msg-warning-text);
+    border-color: var(--warning-border, var(--msg-warning-text));
+}
+.archive-watchdog-error {
+    background: var(--msg-error-bg);
+    color: var(--msg-error-text);
+    border-color: var(--msg-error-text);
+}
+.archive-watchdog-critical {
+    background: var(--msg-error-bg);
+    color: var(--msg-error-text);
+    border-color: var(--msg-error-text);
+    animation: archive-watchdog-pulse 2s ease-in-out infinite;
+}
+
+@keyframes archive-watchdog-pulse {
+    0%, 100% { box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+    50%      { box-shadow: 0 2px 18px var(--msg-error-text); }
+}
+
+.archive-watchdog-content {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+.archive-watchdog-icon { flex-shrink: 0; }
+.archive-watchdog-icon .nav-icon {
+    width: 24px;
+    height: 24px;
+}
+.archive-watchdog-message {
+    flex: 1;
+    min-width: 200px;
+    font-weight: 500;
+}
+.archive-watchdog-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.archive-watchdog-btn {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 8px 16px;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.875rem;
+}
+.archive-watchdog-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.15);
+}
+.archive-watchdog-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+.archive-watchdog-btn-secondary {
+    opacity: 0.85;
+}
+
+@media (max-width: 768px) {
+    .archive-watchdog-banner {
+        position: relative;
+        top: auto;
+    }
+    .archive-watchdog-content {
+        flex-direction: column;
+        align-items: stretch;
+        text-align: center;
+    }
+    .archive-watchdog-actions {
+        justify-content: center;
+    }
+}
+
+/* Storage progress bar */
+.storage-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.storage-progress-bar {
+    height: 14px;
+    background: var(--bg-secondary, #f0f0f0);
+    border-radius: 7px;
+    overflow: hidden;
+    border: 1px solid var(--border-color, #e0e0e0);
+}
+.storage-progress-fill {
+    height: 100%;
+    background: var(--accent-color, #2563EB);
+    transition: width 0.3s ease, background 0.3s ease;
+}
+.storage-progress-fill.warning {
+    background: var(--warning-text, var(--msg-warning-text));
+}
+.storage-progress-fill.critical {
+    background: var(--msg-error-text);
+}
+.storage-progress-text {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    display: flex;
+    justify-content: space-between;
+}
+
+/* Archive status panel — chip + table layout */
+.archive-status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.archive-status-chip {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 12px;
+    background: var(--bg-secondary, #f7f7f7);
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-radius: 8px;
+}
+.archive-status-chip .chip-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+}
+.archive-status-chip .chip-value {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+.archive-status-chip.has-issue .chip-value {
+    color: var(--msg-error-text);
+}

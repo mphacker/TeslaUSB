@@ -249,6 +249,133 @@
         </div>
     </details>
 
+    {% if videos_available %}
+    <!-- Archive Status (Phase 2c — issue #76) -->
+    <details class="settings-section">
+        <summary>Archive Status</summary>
+        <div class="section-content">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                Live view of the RecentClips archive subsystem. Updates every 30 seconds.
+                If the worker stalls or dies, a banner appears at the top of every page.
+            </p>
+            <div class="archive-status-grid" id="archive-status-chips">
+                <div class="archive-status-chip">
+                    <span class="chip-label">Worker</span>
+                    <span class="chip-value" id="chip-worker">—</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Pending P1</span>
+                    <span class="chip-value" id="chip-p1">—</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Pending P2</span>
+                    <span class="chip-value" id="chip-p2">—</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Pending P3</span>
+                    <span class="chip-value" id="chip-p3">—</span>
+                </div>
+                <div class="archive-status-chip" id="chip-dl-wrap">
+                    <span class="chip-label">Dead-letter</span>
+                    <span class="chip-value" id="chip-dl">—</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Last copy</span>
+                    <span class="chip-value" id="chip-lastcopy" style="font-size:0.95rem">—</span>
+                </div>
+            </div>
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 8px"
+               id="archive-active-file-row" hidden>
+                <strong>Currently copying:</strong>
+                <span id="archive-active-file" style="font-family:monospace"></span>
+            </p>
+            <p style="font-size:0.85rem; color:var(--msg-error-text); margin:0 0 8px"
+               id="archive-last-error-row" hidden>
+                <strong>Last error:</strong>
+                <span id="archive-last-error"></span>
+            </p>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px">
+                <button type="button" class="btn btn-primary"
+                        id="archive-run-now-btn"
+                        style="min-height:44px">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+                    Run archive now
+                </button>
+                <button type="button" class="btn btn-secondary"
+                        id="archive-view-dl-btn"
+                        style="min-height:44px">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+                    View dead letters
+                </button>
+            </div>
+            <div id="archive-dl-modal" hidden
+                 style="margin-top:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
+                    <strong>Dead-letter queue</strong>
+                    <button type="button" class="btn btn-ghost"
+                            id="archive-dl-close-btn"
+                            aria-label="Close dead-letter list">×</button>
+                </div>
+                <div id="archive-dl-content" style="font-size:0.85rem; max-height:300px; overflow:auto">
+                    Loading…
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <!-- Storage (Phase 2c — issue #76) -->
+    <details class="settings-section">
+        <summary>Storage</summary>
+        <div class="section-content">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                SD card disk usage for ArchivedClips. Files older than the retention window
+                are automatically deleted once a day.
+            </p>
+            <div class="storage-progress" style="margin-bottom:14px">
+                <div class="storage-progress-bar"
+                     role="progressbar"
+                     aria-label="ArchivedClips disk usage"
+                     aria-valuemin="0" aria-valuemax="100"
+                     id="storage-progress-bar-aria">
+                    <div class="storage-progress-fill" id="storage-progress-fill"
+                         style="width:0%"></div>
+                </div>
+                <div class="storage-progress-text">
+                    <span id="storage-used-text">— used</span>
+                    <span id="storage-free-text">— free</span>
+                </div>
+            </div>
+            <div class="archive-status-grid" style="margin-bottom:12px">
+                <div class="archive-status-chip">
+                    <span class="chip-label">Retention</span>
+                    <span class="chip-value" id="chip-retention">—</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Last prune</span>
+                    <span class="chip-value" id="chip-lastprune"
+                          style="font-size:0.95rem">—</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Last freed</span>
+                    <span class="chip-value" id="chip-lastfreed"
+                          style="font-size:0.95rem">—</span>
+                </div>
+            </div>
+            <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 8px">
+                Clips older than the retention window above are automatically deleted.
+                Trips, waypoints, and detected events are <strong>preserved</strong> —
+                only the dashcam clip is removed.
+            </p>
+            <button type="button" class="btn btn-secondary"
+                    id="storage-prune-now-btn"
+                    style="min-height:44px">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                Prune now
+            </button>
+        </div>
+    </details>
+    {% endif %}
+
     <!-- Mapping & Indexing Settings -->
     <details class="settings-section">
         <summary>Mapping & Indexing</summary>
@@ -900,5 +1027,220 @@ function updateFsckHistory() {
 if (document.getElementById('fsck-status-container')) {
     updateLastChecks(); updateFsckHistory(); updateFsckStatus();
 }
+
+// =====================================================================
+// Phase 2c (issue #76) — Archive Status & Storage panels
+// =====================================================================
+(function() {
+    const POLL_MS = 30000;
+    if (!document.getElementById('archive-status-chips')) return;
+
+    function fmtAgo(iso) {
+        if (!iso) return 'never';
+        const t = Date.parse(iso);
+        if (isNaN(t)) return 'never';
+        const ageS = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        if (ageS < 60) return ageS + 's ago';
+        if (ageS < 3600) return Math.floor(ageS / 60) + ' min ago';
+        if (ageS < 86400) return Math.floor(ageS / 3600) + ' h ago';
+        return Math.floor(ageS / 86400) + ' d ago';
+    }
+
+    function fmtBytes(bytes) {
+        if (!bytes || bytes <= 0) return '0 B';
+        const u = ['B','KB','MB','GB','TB'];
+        let n = bytes;
+        let i = 0;
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
+    }
+
+    function fmtMb(mb) {
+        if (!mb && mb !== 0) return '—';
+        if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+        return mb + ' MB';
+    }
+
+    function setText(id, txt) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = txt;
+    }
+
+    function applyStatus(data) {
+        // Worker chip
+        const workerEl = document.getElementById('chip-worker');
+        if (workerEl) {
+            let label = 'Stopped';
+            if (data.paused) label = 'Paused';
+            else if (data.worker_running) label = 'Running';
+            workerEl.textContent = label;
+            workerEl.parentElement.classList.toggle(
+                'has-issue', !data.worker_running);
+        }
+        setText('chip-p1', data.queue_depth_p1);
+        setText('chip-p2', data.queue_depth_p2);
+        setText('chip-p3', data.queue_depth_p3);
+        setText('chip-dl', data.dead_letter_count);
+        const dlWrap = document.getElementById('chip-dl-wrap');
+        if (dlWrap) dlWrap.classList.toggle(
+            'has-issue', (data.dead_letter_count || 0) > 0);
+        setText('chip-lastcopy', fmtAgo(data.last_successful_copy_at));
+
+        const activeRow = document.getElementById('archive-active-file-row');
+        if (activeRow) {
+            if (data.active_file) {
+                activeRow.hidden = false;
+                setText('archive-active-file', data.active_file);
+            } else {
+                activeRow.hidden = true;
+            }
+        }
+        const errRow = document.getElementById('archive-last-error-row');
+        if (errRow) {
+            if (data.last_error) {
+                errRow.hidden = false;
+                setText('archive-last-error', data.last_error);
+            } else {
+                errRow.hidden = true;
+            }
+        }
+
+        // Storage progress bar
+        const fill = document.getElementById('storage-progress-fill');
+        const aria = document.getElementById('storage-progress-bar-aria');
+        if (fill && aria && data.disk_total_mb > 0) {
+            const pct = Math.min(100,
+                Math.round(100 * data.disk_used_mb / data.disk_total_mb));
+            fill.style.width = pct + '%';
+            aria.setAttribute('aria-valuenow', pct);
+            fill.classList.remove('warning', 'critical');
+            if (pct >= 95) fill.classList.add('critical');
+            else if (pct >= 90) fill.classList.add('warning');
+        }
+        setText('storage-used-text',
+            fmtMb(data.disk_used_mb) + ' used (' +
+            fmtMb(data.disk_total_mb) + ' total)');
+        setText('storage-free-text', fmtMb(data.disk_free_mb) + ' free');
+        setText('chip-retention',
+            data.retention_days
+            ? data.retention_days + ' days'
+            : '—');
+        setText('chip-lastprune', fmtAgo(data.last_prune_at));
+        setText('chip-lastfreed',
+            data.last_prune_deleted
+            ? data.last_prune_deleted + ' files (' +
+              fmtBytes(data.last_prune_freed_bytes) + ')'
+            : 'no files');
+    }
+
+    async function poll() {
+        try {
+            const r = await fetch('/api/archive/status', {
+                credentials: 'same-origin',
+            });
+            if (!r.ok) return;
+            const data = await r.json();
+            applyStatus(data);
+        } catch (e) { /* network blip */ }
+    }
+
+    const runBtn = document.getElementById('archive-run-now-btn');
+    if (runBtn) {
+        runBtn.addEventListener('click', async function() {
+            runBtn.disabled = true;
+            try {
+                const r = await fetch('/api/recent_archive/trigger', {
+                    method: 'POST', credentials: 'same-origin'
+                });
+                if (typeof showToast === 'function') {
+                    showToast(
+                        r.ok ? 'Archive run triggered.'
+                             : 'Failed to trigger archive run.',
+                        r.ok ? 'success' : 'error');
+                }
+            } finally {
+                runBtn.disabled = false;
+                setTimeout(poll, 2000);
+            }
+        });
+    }
+
+    const pruneBtn = document.getElementById('storage-prune-now-btn');
+    if (pruneBtn) {
+        pruneBtn.addEventListener('click', async function() {
+            pruneBtn.disabled = true;
+            try {
+                const r = await fetch('/api/archive/prune_now', {
+                    method: 'POST', credentials: 'same-origin'
+                });
+                const data = await r.json().catch(() => ({}));
+                if (typeof showToast === 'function') {
+                    if (r.ok && data.started) {
+                        showToast(
+                            'Prune complete: ' +
+                            (data.deleted_count || 0) + ' files removed.',
+                            'success');
+                    } else {
+                        showToast(
+                            data.message || 'Prune failed.', 'error');
+                    }
+                }
+            } finally {
+                pruneBtn.disabled = false;
+                setTimeout(poll, 1000);
+            }
+        });
+    }
+
+    const dlBtn = document.getElementById('archive-view-dl-btn');
+    const dlModal = document.getElementById('archive-dl-modal');
+    const dlContent = document.getElementById('archive-dl-content');
+    const dlClose = document.getElementById('archive-dl-close-btn');
+    if (dlBtn && dlModal) {
+        dlBtn.addEventListener('click', async function() {
+            dlModal.hidden = false;
+            dlContent.textContent = 'Loading…';
+            try {
+                const r = await fetch('/api/archive/dead_letters', {
+                    credentials: 'same-origin'
+                });
+                const data = await r.json();
+                if (!data.rows || data.rows.length === 0) {
+                    dlContent.innerHTML = '<em>No dead-letter rows.</em>';
+                    return;
+                }
+                let html = '<table style="width:100%; border-collapse:collapse">';
+                html += '<thead><tr>'
+                     + '<th style="text-align:left; padding:4px">Source</th>'
+                     + '<th style="text-align:left; padding:4px">Attempts</th>'
+                     + '<th style="text-align:left; padding:4px">Error</th>'
+                     + '</tr></thead><tbody>';
+                for (const row of data.rows) {
+                    const src = String(row.source_path || '')
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    const err = String(row.last_error || '')
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    html += '<tr>'
+                         + '<td style="padding:4px; font-family:monospace">' + src + '</td>'
+                         + '<td style="padding:4px">' + (row.attempts || 0) + '</td>'
+                         + '<td style="padding:4px">' + err + '</td>'
+                         + '</tr>';
+                }
+                html += '</tbody></table>';
+                dlContent.innerHTML = html;
+            } catch (e) {
+                dlContent.innerHTML = '<em>Failed to load.</em>';
+            }
+        });
+    }
+    if (dlClose && dlModal) {
+        dlClose.addEventListener('click', function() {
+            dlModal.hidden = true;
+        });
+    }
+
+    poll();
+    setInterval(poll, POLL_MS);
+})();
 </script>
 {% endblock %}

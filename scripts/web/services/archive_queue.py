@@ -641,6 +641,57 @@ def mark_failed(row_id: int, error: str, *,
         return 'error'
 
 
+def get_pending_counts_by_priority(db_path: Optional[str] = None) -> Dict[int, int]:
+    """Return a mapping of ``priority -> pending_row_count``.
+
+    Always includes the canonical priorities (1, 2, 3) in the result so
+    callers don't need to deal with missing keys. Phase 2c surfaces this
+    in ``/api/archive/status`` as ``queue_depth_p1/p2/p3`` so the UI can
+    show RecentClips backlog separately from event/other backlogs.
+    """
+    counts: Dict[int, int] = {1: 0, 2: 0, 3: 0}
+    db_path = _resolve_db_path(db_path)
+    try:
+        with _open_archive_conn(db_path) as conn:
+            for row in conn.execute(
+                """
+                SELECT priority, COUNT(*) AS n FROM archive_queue
+                 WHERE status = 'pending'
+                 GROUP BY priority
+                """
+            ).fetchall():
+                prio = int(row['priority'] or 3)
+                counts[prio] = int(row['n'] or 0)
+    except sqlite3.Error as e:
+        logger.warning("get_pending_counts_by_priority failed: %s", e)
+    return counts
+
+
+def get_last_copied_at(db_path: Optional[str] = None) -> Optional[str]:
+    """Return the ISO timestamp of the most recent successful copy.
+
+    Used by :mod:`services.archive_watchdog` to compute staleness
+    severity. Returns ``None`` when no row has been copied yet (fresh
+    install, freshly-cleared queue) — the watchdog treats that as ``ok``
+    when the queue is empty and the worker is running.
+    """
+    db_path = _resolve_db_path(db_path)
+    try:
+        with _open_archive_conn(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT MAX(copied_at) AS m FROM archive_queue
+                 WHERE status = 'copied' AND copied_at IS NOT NULL
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            return row['m']
+    except sqlite3.Error as e:
+        logger.warning("get_last_copied_at failed: %s", e)
+        return None
+
+
 def recover_stale_claims(*,
                          max_age_seconds: float = 600.0,
                          db_path: Optional[str] = None) -> int:

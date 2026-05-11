@@ -126,7 +126,37 @@ _state: Dict[str, Any] = {
     'last_error': None,
     'files_done_session': 0,
     'last_drained_at': None,
+    'last_disk_pause_at': None,
+    'last_disk_pause_free_mb': None,
 }
+
+# Disk-space self-pause epoch (seconds). When set in the future, the
+# worker loop idles instead of claiming new rows. Set when the disk
+# falls below the configured critical threshold during
+# :func:`process_one_claim`; cleared automatically once the deadline
+# passes (the watchdog will re-evaluate on its next tick).
+_disk_space_pause_until: float = 0.0
+# Default duration of the disk-space pause (seconds). Resolved lazily
+# from ``cloud_archive.disk_space_pause_seconds`` at first use so the
+# config import order stays simple; tests monkeypatch this directly.
+_DEFAULT_DISK_SPACE_PAUSE_SECONDS: float = 300.0
+
+
+def _resolve_disk_space_pause_seconds() -> float:
+    """Return the configured disk-space pause duration in seconds.
+
+    Falls back to ``_DEFAULT_DISK_SPACE_PAUSE_SECONDS`` (which tests
+    can monkeypatch) when the config attribute is missing or not a
+    finite positive number.
+    """
+    try:
+        from config import CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS as cfg
+        cfg_val = float(cfg)
+        if cfg_val > 0:
+            return cfg_val
+    except (ImportError, TypeError, ValueError):
+        pass
+    return _DEFAULT_DISK_SPACE_PAUSE_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +194,12 @@ def start_worker(db_path: str, archive_root: str, *,
         _state['last_error'] = None
         _state['last_outcome'] = None
         _state['active_file'] = None
+        _state['last_disk_pause_at'] = None
+        _state['last_disk_pause_free_mb'] = None
+        # Reset the disk-space self-pause; the next iteration will
+        # re-arm it if disk space is still critical.
+        global _disk_space_pause_until
+        _disk_space_pause_until = 0.0
         thread = threading.Thread(
             target=_run_worker_loop,
             args=(db_path, archive_root, teslacam_root, _worker_id),
@@ -317,6 +353,7 @@ def get_status() -> Dict[str, Any]:
     snap['source_gone_count'] = counts.get('source_gone', 0)
     snap['copied_count'] = counts.get('copied', 0)
     snap['error_count'] = counts.get('error', 0)
+    snap['disk_pause'] = get_disk_pause_state()
     return snap
 
 
@@ -505,6 +542,66 @@ def _apply_low_priority() -> None:
         pass
 
 
+def _resolve_disk_thresholds_mb() -> tuple:
+    """Return ``(warning_mb, critical_mb)`` for the disk-space guard.
+
+    Looked up at call time so tests can monkeypatch the config import.
+    Falls back to (500, 100) when the config module isn't importable
+    (unit-test environments).
+    """
+    try:
+        from config import (
+            CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB,
+            CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB,
+        )
+        return (
+            int(CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB),
+            int(CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB),
+        )
+    except Exception:  # noqa: BLE001
+        return (500, 100)
+
+
+def _check_disk_space_guard(archive_root: str) -> str:
+    """Classify free disk space at ``archive_root``.
+
+    Returns one of ``'ok'``, ``'warning'``, ``'critical'``. ``'critical'``
+    means a copy MUST NOT proceed. ``'warning'`` is informational; the
+    copy proceeds but logs a WARNING line. Stat failures return ``'ok'``
+    so a transient FS hiccup doesn't lock the archive subsystem out.
+    """
+    try:
+        usage = shutil.disk_usage(archive_root)
+    except OSError:
+        return 'ok'
+    free_mb = int(usage.free // (1024 * 1024))
+    warn_mb, crit_mb = _resolve_disk_thresholds_mb()
+    if free_mb < crit_mb:
+        logger.critical(
+            "Archive disk-space CRITICAL: %d MB free at %s "
+            "(< %d MB threshold) — refusing new copies for %.0fs",
+            free_mb, archive_root, crit_mb,
+            _resolve_disk_space_pause_seconds(),
+        )
+        return 'critical'
+    if free_mb < warn_mb:
+        logger.warning(
+            "Archive disk-space LOW: %d MB free at %s "
+            "(< %d MB threshold) — proceeding with copy",
+            free_mb, archive_root, warn_mb,
+        )
+        return 'warning'
+    return 'ok'
+
+
+def get_disk_pause_state() -> Dict[str, Any]:
+    """Return the current disk-space pause state for status endpoints."""
+    return {
+        'paused_until_epoch': float(_disk_space_pause_until),
+        'is_paused_now': _disk_space_pause_until > time.time(),
+    }
+
+
 def _set_state(**fields: Any) -> None:
     with _state_lock:
         _state.update(fields)
@@ -597,6 +694,31 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         )
         return 'pending'
 
+    # Disk-space pre-archive guard. We do this AFTER the stable-write
+    # gate (which requires only stat() on the source) but BEFORE any
+    # write attempt to ``archive_root``. A 'critical' verdict releases
+    # the claim back to pending without burning an attempt and arms a
+    # module-level pause so the worker stops claiming for ~5 minutes;
+    # the watchdog re-evaluates on its next tick. 'warning' is logged
+    # but the copy proceeds — we only refuse new copies on critical.
+    global _disk_space_pause_until
+    disk_verdict = _check_disk_space_guard(archive_root)
+    if disk_verdict == 'critical':
+        archive_queue.release_claim(row_id, db_path=db_path)
+        _disk_space_pause_until = (
+            now_fn() + _resolve_disk_space_pause_seconds()
+        )
+        try:
+            free_mb = int(
+                shutil.disk_usage(archive_root).free // (1024 * 1024)
+            )
+        except OSError:
+            free_mb = -1
+        with _state_lock:
+            _state['last_disk_pause_at'] = time.time()
+            _state['last_disk_pause_free_mb'] = free_mb
+        return 'pending'
+
     # Compute destination + atomic copy.
     try:
         dest_path = compute_dest_path(source_path, archive_root, teslacam_root)
@@ -662,6 +784,16 @@ def _run_worker_loop(db_path: str, archive_root: str,
             _idle_event.set()
             if _stop_event.wait(timeout=_INTER_FILE_SLEEP_SECONDS):
                 break
+            continue
+
+        # Honor the disk-space self-pause. ``process_one_claim`` arms
+        # ``_disk_space_pause_until`` when free space crosses the
+        # critical threshold; the loop idles here until the deadline
+        # passes (the watchdog tick will then re-evaluate).
+        if _disk_space_pause_until > time.time():
+            _idle_event.set()
+            remaining = _disk_space_pause_until - time.time()
+            _wait_with_wake(min(remaining, idle_sleep))
             continue
 
         # Acquire the task slot. The archive worker is a periodic

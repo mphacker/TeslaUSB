@@ -134,6 +134,15 @@ cloud_archive:
   cloud_auto_cleanup: false              # Auto-delete old cloud videos when storage is low
   cloud_cleanup_threshold_pct: 90        # Delete when cloud usage exceeds this %
   cloud_min_retention_days: 30           # Keep at least this many days of videos
+  # Phase 2c (issue #76) — local ArchivedClips storage management on the SD card.
+  # The retention prune walks ~/ArchivedClips and deletes *.mp4 files older than
+  # this many days; trip/waypoint/event rows in geodata.db are preserved (only
+  # their video_path pointer is nulled). Disk-space guard refuses new copies and
+  # logs CRITICAL when the SD card free space drops below disk_space_critical_mb.
+  archived_clips_retention_days: 30      # Local SD-card retention for ArchivedClips/*.mp4
+  disk_space_warning_mb: 500             # Log WARNING when SD-card free space drops below this
+  disk_space_critical_mb: 100            # Refuse new archive copies when free space drops below this
+  disk_space_pause_seconds: 300          # How long the worker stays paused after a disk-critical refusal
 
 # ============================================================================
 # Live Event Sync Configuration
@@ -188,3 +197,5 @@ archive_queue:
   worker_check_interval_seconds: 5       # Idle/empty-queue sleep between worker iterations
   retry_max_attempts: 3                  # OSError retries before a row goes to dead_letter
   copy_chunk_bytes: 1048576              # Chunk size (1 MiB) for the temp+fsync+rename copy
+  # Phase 2c (issue #76) — health watchdog cadence.
+  watchdog_check_interval_seconds: 60    # Frequency of the archive-health watchdog tick

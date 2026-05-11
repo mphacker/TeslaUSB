@@ -79,6 +79,60 @@ _SKIPPED_LOG_THROTTLE_SECONDS = 60.0
 # double-fire the log.
 _skipped_log_last: dict = {}
 
+# Per-task acquire/release stats for the rolling 60s INFO summary
+# (Phase 1, item 1.2 — May 11 crash forensics). The bare acquire and
+# release log lines were ~2 lines/sec during normal indexer operation,
+# bloating the journal so badly that ``journalctl`` queries took 90s
+# during the crash investigation. Drop those to DEBUG and emit one
+# summary line per task per minute instead. The summary is emitted
+# from ``release_task`` (every release checks the per-task window),
+# which keeps the work in the same critical section without spawning
+# any extra threads or timers — important on Pi Zero 2 W.
+_SUMMARY_INTERVAL_SECONDS = 60.0
+# task_name -> {'acquires': int, 'total_hold': float, 'max_hold': float,
+#               'last_emit': monotonic_seconds}. Guarded by ``_lock``.
+_task_stats: dict = {}
+
+
+def _record_release_stats(task_name: str, hold_seconds: float) -> None:
+    """Update per-task stats and emit a summary if window elapsed.
+
+    Caller MUST hold ``_lock``. The emit happens here (not in a
+    background thread) so the work stays cheap and lock-local. A task
+    that fires once a minute (e.g. archive) gets one INFO line per
+    iteration, no spam. A task that fires 100x/minute (e.g. indexer)
+    gets one INFO line summarizing the burst. Stats reset on emit.
+    """
+    now = time.monotonic()
+    stats = _task_stats.get(task_name)
+    if stats is None:
+        stats = {
+            'acquires': 0,
+            'total_hold': 0.0,
+            'max_hold': 0.0,
+            'last_emit': now,
+        }
+        _task_stats[task_name] = stats
+    stats['acquires'] += 1
+    stats['total_hold'] += hold_seconds
+    if hold_seconds > stats['max_hold']:
+        stats['max_hold'] = hold_seconds
+    elapsed = now - stats['last_emit']
+    if elapsed < _SUMMARY_INTERVAL_SECONDS:
+        return
+    # Emit + reset. The summary is the user-visible signal that the
+    # task is alive and how much lock-time it consumed.
+    avg = stats['total_hold'] / stats['acquires']
+    logger.info(
+        "task_coordinator: '%s' summary — %d acquire(s) in %.1fs, "
+        "avg hold %.2fs, max hold %.2fs",
+        task_name, stats['acquires'], elapsed, avg, stats['max_hold'],
+    )
+    stats['acquires'] = 0
+    stats['total_hold'] = 0.0
+    stats['max_hold'] = 0.0
+    stats['last_emit'] = now
+
 
 def _should_log_skipped(task_name: str, blocker_name: str) -> bool:
     """Return True if "skipped" should be logged at INFO level now.
@@ -158,7 +212,12 @@ def acquire_task(task_name: str, wait_seconds: float = 0.0,
                     # FIRST blocked attempt of the next contention
                     # period, not stay throttled from the previous one.
                     _skipped_log_last.clear()
-                    logger.info("Task '%s' acquired lock", task_name)
+                    # Per Phase 1 item 1.2: routine acquire/release
+                    # were ~2 INFO lines/sec during normal operation,
+                    # bloating the journal. Drop to DEBUG; the rolling
+                    # summary in release_task carries the user-visible
+                    # signal at INFO level once per minute per task.
+                    logger.debug("Task '%s' acquired lock", task_name)
                     return True
 
                 # Lock is held. Decide whether to wait or give up now.
@@ -211,7 +270,14 @@ def release_task(task_name: str) -> None:
         if _current_task == task_name:
             elapsed = time.time() - _task_started
             _current_task = None
-            logger.info("Task '%s' released lock (%.1fs)", task_name, elapsed)
+            # Per Phase 1 item 1.2: the previous INFO log fired on
+            # every release (~2 lines/sec under normal indexer load).
+            # Drop to DEBUG; emit a rolling 60s summary at INFO via
+            # _record_release_stats so the user still sees activity.
+            logger.debug(
+                "Task '%s' released lock (%.1fs)", task_name, elapsed,
+            )
+            _record_release_stats(task_name, elapsed)
         else:
             logger.warning(
                 "Task '%s' tried to release but '%s' holds the lock",

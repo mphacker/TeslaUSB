@@ -28,6 +28,7 @@ def _reset_coordinator():
         tc._task_started = 0.0
         tc._waiter_count = 0
         tc._skipped_log_last.clear()
+        tc._task_stats.clear()
     yield
     # Post-test cleanup.
     with tc._lock:
@@ -35,6 +36,7 @@ def _reset_coordinator():
         tc._task_started = 0.0
         tc._waiter_count = 0
         tc._skipped_log_last.clear()
+        tc._task_stats.clear()
 
 
 class TestBasicAcquireRelease:
@@ -455,3 +457,116 @@ class TestSkippedLogThrottling:
             assert "'cloud_sync' is running" in info_skips[0].getMessage()
         finally:
             tc.release_task('cloud_sync')
+
+
+class TestAcquireReleaseLogLevels:
+    """Phase 1, item 1.2 — May 11 crash forensics fix.
+
+    The pre-fix code emitted INFO on every acquire AND every release
+    (~2 lines/sec under normal indexer load), bloating the journal so
+    badly that ``journalctl`` queries took 90 s during the crash
+    investigation. Routine acquire/release must now log at DEBUG.
+    The user-visible activity signal is the rolling 60 s summary
+    emitted by ``_record_release_stats`` (covered in TestRollingSummary).
+    """
+
+    def test_acquire_does_not_emit_info(self, caplog):
+        with caplog.at_level('DEBUG', logger='services.task_coordinator'):
+            tc.acquire_task('indexer')
+            tc.release_task('indexer')
+        info_msgs = [
+            r for r in caplog.records
+            if r.levelname == 'INFO'
+            and 'acquired lock' in r.getMessage()
+        ]
+        assert info_msgs == [], (
+            "Routine acquire must log at DEBUG (Phase 1 item 1.2 — "
+            "the May 11 forensics showed ~2 INFO lines/sec from this "
+            "path during normal indexer operation)."
+        )
+
+    def test_release_does_not_emit_info(self, caplog):
+        with caplog.at_level('DEBUG', logger='services.task_coordinator'):
+            tc.acquire_task('indexer')
+            tc.release_task('indexer')
+        info_msgs = [
+            r for r in caplog.records
+            if r.levelname == 'INFO'
+            and 'released lock' in r.getMessage()
+        ]
+        assert info_msgs == [], (
+            "Routine release must log at DEBUG (Phase 1 item 1.2)."
+        )
+
+    def test_acquire_release_still_visible_at_debug(self, caplog):
+        with caplog.at_level('DEBUG', logger='services.task_coordinator'):
+            tc.acquire_task('indexer')
+            tc.release_task('indexer')
+        debug_msgs = [
+            r for r in caplog.records
+            if r.levelname == 'DEBUG'
+            and ('acquired lock' in r.getMessage()
+                 or 'released lock' in r.getMessage())
+        ]
+        assert len(debug_msgs) == 2
+
+
+class TestRollingSummary:
+    """Verify the 60 s rolling INFO summary emitted by
+    ``_record_release_stats``. This is the Phase 1 item 1.2 replacement
+    for the per-cycle acquire/release INFO logs.
+    """
+
+    def test_summary_does_not_fire_within_window(self, caplog):
+        with caplog.at_level('INFO', logger='services.task_coordinator'):
+            tc.acquire_task('indexer')
+            tc.release_task('indexer')
+            tc.acquire_task('indexer')
+            tc.release_task('indexer')
+        summary = [
+            r for r in caplog.records
+            if r.levelname == 'INFO' and 'summary' in r.getMessage()
+        ]
+        assert summary == [], (
+            "Summary fired before the 60 s window elapsed."
+        )
+
+    def test_summary_fires_after_window_elapses(self, caplog, monkeypatch):
+        monkeypatch.setattr(tc, '_SUMMARY_INTERVAL_SECONDS', 0.0)
+        with caplog.at_level('INFO', logger='services.task_coordinator'):
+            tc.acquire_task('indexer')
+            tc.release_task('indexer')
+            tc.acquire_task('indexer')
+            tc.release_task('indexer')
+        summary = [
+            r for r in caplog.records
+            if r.levelname == 'INFO' and 'summary' in r.getMessage()
+        ]
+        assert len(summary) >= 1, (
+            "Summary did not fire after window elapsed."
+        )
+        msg = summary[-1].getMessage()
+        assert "'indexer'" in msg
+        assert 'acquire(s)' in msg
+        assert 'avg hold' in msg
+        assert 'max hold' in msg
+
+    def test_summary_resets_after_emit(self, monkeypatch):
+        monkeypatch.setattr(tc, '_SUMMARY_INTERVAL_SECONDS', 0.0)
+        for _ in range(3):
+            tc.acquire_task('indexer')
+            tc.release_task('indexer')
+        assert tc._task_stats['indexer']['acquires'] == 0
+        assert tc._task_stats['indexer']['total_hold'] == 0.0
+        assert tc._task_stats['indexer']['max_hold'] == 0.0
+
+    def test_summary_tracks_per_task_independently(self, monkeypatch):
+        monkeypatch.setattr(tc, '_SUMMARY_INTERVAL_SECONDS', 999.0)
+        tc.acquire_task('indexer')
+        tc.release_task('indexer')
+        tc.acquire_task('archive')
+        tc.release_task('archive')
+        tc.acquire_task('indexer')
+        tc.release_task('indexer')
+        assert tc._task_stats['indexer']['acquires'] == 2
+        assert tc._task_stats['archive']['acquires'] == 1

@@ -237,14 +237,8 @@ def save_settings():
         sync_non_event = 'sync_non_event_videos' in request.form
         auto_cleanup = 'cloud_auto_cleanup' in request.form
         min_retention = max(1, int(request.form.get('cloud_min_retention_days', 30)))
-        # Phase 1 item 1.3 — UI toggle is positive-framed
-        # ("keep_clips_until_synced"), backend key is its inverse
-        # ("delete_unsynced"). When the form omits the checkbox the
-        # user explicitly turned protection OFF.
-        keep_until_synced = 'keep_clips_until_synced' in request.form
-        delete_unsynced = not keep_until_synced
 
-        _update_config_yaml({
+        config_updates = {
             'cloud_archive.sync_folders': sync_folders,
             'cloud_archive.priority_order': priority_order,
             'cloud_archive.max_upload_mbps': max_upload_mbps,
@@ -252,14 +246,45 @@ def save_settings():
             'cloud_archive.sync_non_event_videos': sync_non_event,
             'cloud_archive.cloud_auto_cleanup': auto_cleanup,
             'cloud_archive.cloud_min_retention_days': min_retention,
-            'cloud_archive.delete_unsynced': delete_unsynced,
-        })
+        }
+
+        # Phase 1 item 1.3 — UI toggle is positive-framed
+        # ("keep_clips_until_synced"), backend key is its inverse
+        # ("delete_unsynced"). Only persist when a cloud provider is
+        # connected: when no provider is configured the template renders
+        # the toggle disabled (browsers do not submit disabled
+        # checkboxes), so the form won't carry the user's intended
+        # state. Writing ``delete_unsynced=true`` in that case would
+        # silently override the documented null/auto-default and break
+        # the auto-protection promised when the user later connects a
+        # provider. PR #96 review fix.
+        #
+        # Provider-connected check mirrors the GET handler at L160:
+        # provider name from cloud_archive.provider in YAML AND a
+        # creds file actually present on disk.
+        try:
+            _cloud_cfg = _get_cloud_config_cached()
+            _provider = (_cloud_cfg.get('provider', '') or '').strip()
+        except Exception:  # noqa: BLE001
+            _provider = ''
+        provider_connected = bool(_provider) and os.path.isfile(
+            CLOUD_PROVIDER_CREDS_PATH
+        )
+
+        delete_unsynced = None  # for log line
+        if provider_connected:
+            keep_until_synced = 'keep_clips_until_synced' in request.form
+            delete_unsynced = not keep_until_synced
+            config_updates['cloud_archive.delete_unsynced'] = delete_unsynced
+
+        _update_config_yaml(config_updates)
 
         flash("Cloud sync settings saved.", "success")
         logger.info(
             "Cloud sync settings updated: folders=%s, priority=%s, "
-            "bw=%d Mbps, delete_unsynced=%s",
-            sync_folders, priority_order, max_upload_mbps, delete_unsynced,
+            "bw=%d Mbps, delete_unsynced=%s (provider_connected=%s)",
+            sync_folders, priority_order, max_upload_mbps,
+            delete_unsynced, provider_connected,
         )
     except Exception:
         logger.exception("Failed to save cloud sync settings")

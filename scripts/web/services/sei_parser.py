@@ -362,6 +362,16 @@ def extract_sei_messages(
     # normal generator exit and early generator close (GC /
     # ``.close()``), which raise GeneratorExit at the yield point.
     f = open(video_path, 'rb')
+    # Initialize mmap_obj BEFORE the try so that if mmap.mmap() raises
+    # an exception we did not anticipate (e.g. ``MemoryError`` — exactly
+    # the Pi Zero 2 W condition this rewrite was meant to mitigate),
+    # the ``finally`` block below still has a defined name to check.
+    # Without this guard the finally would raise ``NameError`` while
+    # also leaking the file descriptor — masking the original
+    # exception. Catching only (ValueError, OSError) is intentional;
+    # anything else (MemoryError, KeyboardInterrupt, etc.) MUST
+    # propagate, but we still need a clean teardown.
+    mmap_obj = None
     try:
         try:
             data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)

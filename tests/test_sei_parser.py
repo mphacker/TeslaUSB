@@ -711,3 +711,36 @@ class TestStreamingMmapParser:
 
         assert mmap_count[0] == 1, "mmap should be the primary read path"
         assert len(msgs) == 10
+
+    def test_unexpected_mmap_exception_propagates_cleanly(self, tmp_path, monkeypatch):
+        """Regression test (PR #96 review): when mmap.mmap() raises a
+        non-OSError/non-ValueError exception (e.g. MemoryError on a Pi
+        Zero 2 W under pressure — exactly the scenario item 1.4 was
+        meant to mitigate), the original exception must propagate AND
+        the file descriptor must close cleanly. Pre-fix the finally
+        block would raise NameError on the unbound ``mmap_obj`` name
+        AND skip ``f.close()``, leaking the fd and masking the original
+        cause.
+        """
+        import mmap as mmap_module
+        from services import sei_parser
+
+        def boom_mmap(*args, **kwargs):
+            raise MemoryError("simulated low-memory condition")
+
+        monkeypatch.setattr(sei_parser.mmap, 'mmap', boom_mmap)
+
+        mp4_data = self._make_test_mp4(3)
+        video_file = tmp_path / "memory_error.mp4"
+        video_file.write_bytes(mp4_data)
+
+        # The MemoryError must propagate — NOT a NameError from a
+        # broken finally clause.
+        with pytest.raises(MemoryError, match="simulated low-memory"):
+            list(extract_sei_messages(str(video_file), sample_rate=1))
+
+        # On Windows, an unclosed file descriptor would block this
+        # delete with PermissionError. Confirms the fd was released
+        # by the finally block even though mmap failed.
+        video_file.unlink()
+        assert not video_file.exists()

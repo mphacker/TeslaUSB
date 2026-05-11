@@ -431,19 +431,42 @@ while true; do
             if [ -n "$rssi" ] && [ "$rssi" -ge "$MIN_RSSI" ]; then
                 log "Auto mode: WiFi healthy (RSSI ${rssi}dBm); stopping AP"
                 stop_ap
+                # Reset the STA-retry backoff so the next outage gets
+                # quick retries again (Phase 1 item 1.1).
+                STA_RETRY_BACKOFF_CYCLES=6
+                STA_RETRY_FAILURES=0
                 sleep_interval
                 continue
             fi
         fi
 
         # WiFi still down while AP is active.
-        # Periodically stop AP and attempt STA reconnect (~every 2 min).
-        # Pi Zero 2 W single-radio can't scan/associate while AP holds the channel.
+        # Periodic STA reconnect attempt with EXPONENTIAL BACKOFF.
+        # Pi Zero 2 W single-radio can't scan/associate while AP holds
+        # the channel, so each retry stops the AP via
+        # brcmf_cfg80211_stop_ap — a heavy SDIO write that blocks the
+        # SDIO controller. Pre-fix forensics from May 11 (issue #95):
+        # 7 unclean shutdowns in 3 days, each preceded by 7
+        # ``brcmf_cfg80211_stop_ap failed -52`` lines in 16 minutes —
+        # the SDIO bus deadlocked long enough to miss the 90s
+        # /dev/watchdog ping → hardware reset.
+        #
+        # Backoff schedule (cycles between retries; ~20s per cycle
+        # while disconnected, see sleep_interval):
+        #   6 cycles ≈ 2 min   (initial)
+        #  12 cycles ≈ 4 min   (after 1st fail)
+        #  24 cycles ≈ 8 min   (after 2nd)
+        #  48 cycles ≈ 16 min  (after 3rd)
+        #  90 cycles ≈ 30 min  (cap — after 4+)
+        # Reset to 6 on STA success (driving home from a long trip
+        # detects the WiFi within ~2 min of arrival).
         STA_RETRY_COUNTER=${STA_RETRY_COUNTER:-0}
+        STA_RETRY_BACKOFF_CYCLES=${STA_RETRY_BACKOFF_CYCLES:-6}
+        STA_RETRY_FAILURES=${STA_RETRY_FAILURES:-0}
         STA_RETRY_COUNTER=$((STA_RETRY_COUNTER + 1))
-        if [ $STA_RETRY_COUNTER -ge 6 ]; then
+        if [ $STA_RETRY_COUNTER -ge $STA_RETRY_BACKOFF_CYCLES ]; then
             STA_RETRY_COUNTER=0
-            log "Periodic STA retry: stopping AP to attempt home WiFi"
+            log "Periodic STA retry (backoff=${STA_RETRY_BACKOFF_CYCLES} cycles, prior failures=${STA_RETRY_FAILURES}): stopping AP to attempt home WiFi"
             stop_ap
             sleep 5
 
@@ -470,8 +493,19 @@ while true; do
                 log "STA reconnected — AP stays off"
                 FAILURE_COUNT=0
                 LAST_GOOD_TS=$(date +%s)
+                # Reset backoff to its minimum so the NEXT outage
+                # gets quick retries again.
+                STA_RETRY_BACKOFF_CYCLES=6
+                STA_RETRY_FAILURES=0
             else
-                log "STA retry failed after 30s — restarting AP"
+                STA_RETRY_FAILURES=$((STA_RETRY_FAILURES + 1))
+                # Double the backoff (cap 90 cycles ≈ 30 min). bash's
+                # built-in arithmetic is fine for this small range.
+                STA_RETRY_BACKOFF_CYCLES=$((STA_RETRY_BACKOFF_CYCLES * 2))
+                if [ $STA_RETRY_BACKOFF_CYCLES -gt 90 ]; then
+                    STA_RETRY_BACKOFF_CYCLES=90
+                fi
+                log "STA retry failed after 30s (consec failures=${STA_RETRY_FAILURES}, next retry in ~${STA_RETRY_BACKOFF_CYCLES} cycles) — restarting AP"
                 start_ap || log "AP restart failed"
             fi
         fi

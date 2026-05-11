@@ -438,6 +438,42 @@
                     </label>
                 </div>
 
+                {# Phase 1 item 1.3 — retention-respects-cloud toggle.
+                   "Keep clips until backed up to cloud" is the
+                   positive-framed UI for the backend
+                   ``cloud_archive.delete_unsynced`` boolean (inverted).
+                   When ON, the local SD-card retention prune will not
+                   delete clips past their retention age until they have
+                   been confirmed uploaded to the cloud — protecting
+                   un-uploaded footage during long WiFi outages. #}
+                <div style="margin-bottom: var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px {% if not provider_connected %}opacity: 0.55; cursor: not-allowed{% endif %}">
+                        <input type="checkbox" name="keep_clips_until_synced"
+                               {% if keep_clips_until_synced %}checked{% endif %}
+                               {% if not provider_connected %}disabled{% endif %}>
+                        <span style="font-weight: 600; color: var(--text-primary);">Keep clips until backed up to cloud</span>
+                    </label>
+                    {% if not provider_connected %}
+                        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
+                            <em>Cloud sync not configured</em> &mdash; this setting only takes effect once a provider is connected above.
+                        </p>
+                    {% elif keep_clips_until_synced %}
+                        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
+                            Old clips that haven't finished uploading will not be deleted, even past the retention age.
+                        </p>
+                    {% else %}
+                        <p style="font-size: var(--text-xs); color: var(--msg-warning-text); margin: 4px 0 0;">
+                            <svg class="nav-icon" aria-hidden="true" style="width: 14px; height: 14px; vertical-align: -2px;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                            Clips will be deleted at the retention age even if they haven't been backed up yet &mdash; <em>risk of losing un-uploaded footage</em>.
+                        </p>
+                    {% endif %}
+                    {% if kept_unsynced_count and kept_unsynced_count > 0 %}
+                        <p style="font-size: var(--text-xs); color: var(--text-secondary); margin: 8px 0 0;">
+                            <strong>{{ kept_unsynced_count }}</strong> clip{{ '' if kept_unsynced_count == 1 else 's' }} currently kept past the retention age, awaiting upload.
+                        </p>
+                    {% endif %}
+                </div>
+
                 <div style="margin-bottom: var(--space-4);">
                     <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
                         Minimum cloud retention (days)

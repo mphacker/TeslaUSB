@@ -134,6 +134,25 @@ CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = float(_cloud.get(
     'disk_space_pause_seconds', 300,
 ))
 
+# Phase 1 item 1.3 — "retention respects cloud". Controls whether the
+# archive_watchdog retention prune may delete clips that have NOT yet
+# been backed up to the cloud (status='synced' in cloud_synced_files).
+#
+#   None  → auto-default: protect un-uploaded clips when a cloud
+#           provider is configured; age-only deletion otherwise.
+#   False → "Keep clips until backed up to cloud" — past-cutoff clips
+#           that aren't synced yet are KEPT (and counted in the
+#           retention summary's kept_unsynced_count).
+#   True  → age-only deletion: clips past the cutoff are deleted
+#           regardless of cloud-sync status.
+#
+# Resolved on every prune; web UI changes take effect on the next pass
+# without a service restart. See ``services.archive_watchdog._resolve_delete_unsynced``.
+_delete_unsynced_raw = _cloud.get('delete_unsynced', None)
+CLOUD_ARCHIVE_DELETE_UNSYNCED = (
+    None if _delete_unsynced_raw is None else bool(_delete_unsynced_raw)
+)
+
 # Live Event Sync Configuration
 # Separate first-class subsystem from cloud_archive — own queue, worker, and config.
 # Shares CLOUD_ARCHIVE_PROVIDER + CLOUD_PROVIDER_CREDS_PATH for credentials only.

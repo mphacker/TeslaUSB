@@ -132,6 +132,7 @@ _retention_state: Dict[str, Any] = {
     'last_prune_at': None,        # ISO timestamp of last completed prune
     'last_prune_deleted': 0,
     'last_prune_freed_bytes': 0,
+    'last_prune_kept_unsynced': 0,  # Phase 1 item 1.3 — held back, awaiting cloud sync
     'last_prune_error': None,
     'next_prune_due_at': None,    # epoch seconds
 }
@@ -263,6 +264,111 @@ def _resolve_retention_days() -> int:
         return int(CLOUD_ARCHIVE_RETENTION_DAYS)
     except Exception:  # noqa: BLE001
         return 30
+
+
+def _resolve_delete_unsynced() -> bool:
+    """Return whether the retention prune may delete clips that aren't yet
+    backed up to the cloud (Phase 1 item 1.3 — "retention respects cloud").
+
+    * ``True``  → age-only deletion. A clip past the retention cutoff is
+      eligible for deletion regardless of its cloud-sync status.
+    * ``False`` → "keep until backed up". A clip past the retention
+      cutoff is **kept** if it has not yet been confirmed uploaded to
+      the cloud (status='synced' in ``cloud_synced_files``).
+
+    Default behavior when the config key is unset (``None`` /
+    ``CLOUD_ARCHIVE_DELETE_UNSYNCED is None``):
+
+    * Cloud configured (provider non-empty AND credentials file present)
+      → return ``False`` (protect un-uploaded clips by default).
+    * Cloud not configured → return ``True`` (no upload mechanism, so
+      age-based deletion is the only option).
+
+    Resolved fresh on every prune so a config-yaml change takes effect
+    on the next pass without restarting the service.
+    """
+    try:
+        from config import CLOUD_ARCHIVE_DELETE_UNSYNCED
+    except Exception:  # noqa: BLE001
+        CLOUD_ARCHIVE_DELETE_UNSYNCED = None  # noqa: N806
+    if CLOUD_ARCHIVE_DELETE_UNSYNCED is None:
+        return not _is_cloud_configured()
+    return bool(CLOUD_ARCHIVE_DELETE_UNSYNCED)
+
+
+def _is_cloud_configured() -> bool:
+    """Return True iff a cloud provider is set AND its creds file exists.
+
+    Used by :func:`_resolve_delete_unsynced` to decide the auto-default,
+    and by :func:`_run_retention_prune` to short-circuit the cloud
+    check when there's no cloud anyway. Never raises.
+    """
+    try:
+        from config import CLOUD_ARCHIVE_PROVIDER, CLOUD_PROVIDER_CREDS_PATH
+        return bool(CLOUD_ARCHIVE_PROVIDER) and os.path.isfile(
+            CLOUD_PROVIDER_CREDS_PATH
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _resolve_cloud_db_path() -> Optional[str]:
+    """Return the cloud_sync.db path, or None if config import fails."""
+    try:
+        from config import CLOUD_ARCHIVE_DB_PATH
+        return CLOUD_ARCHIVE_DB_PATH
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_synced_to_cloud(file_path: str, archive_root: str,
+                       cloud_db_path: str) -> bool:
+    """Return True iff ``file_path`` is recorded as 'synced' in the cloud DB.
+
+    The ``cloud_synced_files`` table currently has rows in mixed
+    formats (some absolute, some relative — see plan item 2.7
+    "p2-cloud-path-canonicalization"). To remain correct under that
+    mismatch, we look up both representations:
+
+    * ``file_path`` as-is (the absolute path the prune walker found)
+    * ``file_path`` as relative to ``archive_root``
+
+    Returns True only when at least one row matches AND its status is
+    'synced'. Returns False on any DB error (fail-safe — when in doubt,
+    keep the file).
+    """
+    if not cloud_db_path or not os.path.isfile(cloud_db_path):
+        # No cloud DB → nothing has been recorded as synced. Conservative.
+        return False
+    candidates = [file_path]
+    try:
+        rel = os.path.relpath(file_path, archive_root)
+        if rel and rel != file_path:
+            candidates.append(rel)
+            # Some legacy rows may be stored with forward slashes on Windows
+            # path separators; normalize for cross-platform safety.
+            candidates.append(rel.replace(os.sep, '/'))
+    except ValueError:
+        pass
+    placeholders = ','.join('?' * len(candidates))
+    query = (
+        f"SELECT 1 FROM cloud_synced_files "
+        f"WHERE file_path IN ({placeholders}) "
+        f"AND status = 'synced' LIMIT 1"
+    )
+    try:
+        conn = sqlite3.connect(cloud_db_path, timeout=5.0)
+        try:
+            row = conn.execute(query, candidates).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.debug(
+            "archive_retention: cloud-sync check failed for %s: %s",
+            file_path, e,
+        )
+        return False
 
 
 def _iso_now() -> str:
@@ -466,6 +572,8 @@ def get_status() -> Dict[str, Any]:
         snap = dict(_last_health)
         snap['retention'] = dict(_retention_state)
         snap['retention']['retention_days'] = _resolve_retention_days()
+        snap['retention']['delete_unsynced'] = _resolve_delete_unsynced()
+        snap['retention']['cloud_configured'] = _is_cloud_configured()
         snap['watchdog_running'] = (
             _thread is not None and _thread.is_alive()
         )
@@ -542,7 +650,15 @@ def _run_retention_prune(archive_root: str, db_path: str,
     ``/api/archive/prune_now`` response::
 
         {'deleted_count': N, 'freed_bytes': M, 'scanned': K,
-         'cutoff_iso': 'YYYY-MM-DD...', 'duration_seconds': S}
+         'kept_unsynced_count': U, 'cutoff_iso': 'YYYY-MM-DD...',
+         'duration_seconds': S}
+
+    Phase 1 item 1.3 — when ``_resolve_delete_unsynced()`` returns
+    ``False`` AND a cloud provider is configured, files past the
+    retention cutoff are checked against ``cloud_synced_files``: those
+    not yet recorded as ``status='synced'`` are kept (and counted in
+    ``kept_unsynced_count``) so an extended WiFi outage cannot cause
+    silent loss of un-uploaded footage.
 
     Holds the ``task_coordinator`` 'retention' slot for the duration so
     the archive worker yields cleanly. Releases the slot before
@@ -551,12 +667,19 @@ def _run_retention_prune(archive_root: str, db_path: str,
     started = time.time()
     cutoff = started - (max(int(retention_days), 1) * 86400)
     cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+    delete_unsynced = _resolve_delete_unsynced()
+    cloud_configured = _is_cloud_configured()
+    cloud_db_path = _resolve_cloud_db_path() if cloud_configured else None
+    enforce_cloud_check = (not delete_unsynced) and cloud_configured
     summary: Dict[str, Any] = {
         'deleted_count': 0,
         'freed_bytes': 0,
         'scanned': 0,
+        'kept_unsynced_count': 0,
         'cutoff_iso': cutoff_iso,
         'retention_days': int(retention_days),
+        'delete_unsynced': bool(delete_unsynced),
+        'cloud_configured': bool(cloud_configured),
         'duration_seconds': 0.0,
     }
     if not archive_root or not os.path.isdir(archive_root):
@@ -582,6 +705,15 @@ def _run_retention_prune(archive_root: str, db_path: str,
             if mtime > cutoff:
                 continue
             age_days = (time.time() - mtime) / 86400.0
+            if enforce_cloud_check:
+                if not _is_synced_to_cloud(path, archive_root, cloud_db_path):
+                    summary['kept_unsynced_count'] += 1
+                    logger.warning(
+                        "archive_retention: KEPT %s past retention "
+                        "(age=%.1f days) — not yet synced to cloud",
+                        path, age_days,
+                    )
+                    continue
             freed = _delete_one_mp4(path, db_path)
             if freed > 0 or not os.path.exists(path):
                 summary['deleted_count'] += 1
@@ -596,6 +728,14 @@ def _run_retention_prune(archive_root: str, db_path: str,
         task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
         summary['duration_seconds'] = round(time.time() - started, 3)
 
+    if summary['kept_unsynced_count'] > 0:
+        logger.info(
+            "archive_retention: kept %d clip(s) past retention because "
+            "they have not yet been backed up to the cloud "
+            "(toggle 'Delete clips even if not backed up' in Settings → "
+            "Cloud Sync to override)",
+            summary['kept_unsynced_count'],
+        )
     return summary
 
 
@@ -624,6 +764,9 @@ def force_prune_now() -> Dict[str, Any]:
         _retention_state['last_prune_at'] = _iso_now()
         _retention_state['last_prune_deleted'] = int(summary['deleted_count'])
         _retention_state['last_prune_freed_bytes'] = int(summary['freed_bytes'])
+        _retention_state['last_prune_kept_unsynced'] = int(
+            summary.get('kept_unsynced_count', 0)
+        )
         _retention_state['last_prune_error'] = None
         _retention_state['next_prune_due_at'] = (
             time.time() + _RETENTION_INTERVAL_SECONDS
@@ -656,15 +799,20 @@ def _maybe_run_retention(archive_root: str, db_path: str) -> None:
             _retention_state['last_prune_freed_bytes'] = int(
                 summary['freed_bytes']
             )
+            _retention_state['last_prune_kept_unsynced'] = int(
+                summary.get('kept_unsynced_count', 0)
+            )
             _retention_state['last_prune_error'] = None
             _retention_state['next_prune_due_at'] = (
                 time.time() + _RETENTION_INTERVAL_SECONDS
             )
         logger.info(
             "archive_retention: prune complete (deleted=%d, freed=%d "
-            "bytes, scanned=%d, %.2fs)",
+            "bytes, scanned=%d, kept_unsynced=%d, %.2fs)",
             summary['deleted_count'], summary['freed_bytes'],
-            summary['scanned'], summary['duration_seconds'],
+            summary['scanned'],
+            summary.get('kept_unsynced_count', 0),
+            summary['duration_seconds'],
         )
     except Exception as e:  # noqa: BLE001
         logger.exception("archive_retention: prune failed")

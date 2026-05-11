@@ -140,6 +140,16 @@ cloud_archive:
   # their video_path pointer is nulled). Disk-space guard refuses new copies and
   # logs CRITICAL when the SD card free space drops below disk_space_critical_mb.
   archived_clips_retention_days: 30      # Local SD-card retention for ArchivedClips/*.mp4
+  # Phase 1 item 1.3 — "retention respects cloud". Controls whether the
+  # retention prune is allowed to delete clips that have NOT yet been
+  # backed up to the cloud (status='synced' in cloud_synced_files.db).
+  #   null  → auto: keep un-uploaded clips when a provider is configured,
+  #           age-only deletion otherwise (recommended default).
+  #   false → "Keep clips until backed up" — protect un-uploaded clips
+  #           past the retention cutoff. Surfaced as the toggle on
+  #           Settings → Cloud Sync.
+  #   true  → age-only deletion (loses footage that was awaiting upload).
+  delete_unsynced: null
   disk_space_warning_mb: 500             # Log WARNING when SD-card free space drops below this
   disk_space_critical_mb: 100            # Refuse new archive copies when free space drops below this
   disk_space_pause_seconds: 300          # How long the worker stays paused after a disk-critical refusal

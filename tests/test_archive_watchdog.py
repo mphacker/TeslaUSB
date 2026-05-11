@@ -79,6 +79,7 @@ def _reset_module_state():
         'last_prune_at': None,
         'last_prune_deleted': 0,
         'last_prune_freed_bytes': 0,
+        'last_prune_kept_unsynced': 0,
         'last_prune_error': None,
         'next_prune_due_at': None,
     }
@@ -796,3 +797,308 @@ class TestNoUSBGadgetCalls:
                 f"archive_watchdog.py must NOT contain DELETE FROM {table}"
                 " — May 7 trip-loss contract"
             )
+
+
+# ---------------------------------------------------------------------------
+# TestRetentionRespectsCloudSync (Phase 1, item 1.3)
+# ---------------------------------------------------------------------------
+
+
+def _make_cloud_db(tmp_path):
+    """Create a minimal cloud_sync.db matching the production schema."""
+    db_path = str(tmp_path / "cloud_sync.db")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cloud_synced_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL UNIQUE,
+                file_size INTEGER,
+                file_mtime REAL,
+                remote_path TEXT,
+                status TEXT DEFAULT 'pending',
+                synced_at TEXT,
+                retry_count INTEGER DEFAULT 0,
+                last_error TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def _record_synced(cloud_db, file_path, status='synced'):
+    conn = sqlite3.connect(cloud_db)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO cloud_synced_files (file_path, status) VALUES (?, ?)",
+            (file_path, status),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestRetentionRespectsCloudSync:
+    """Phase 1 item 1.3 — never delete clips that haven't been backed up.
+
+    When ``delete_unsynced=False`` AND a cloud provider is configured,
+    the retention prune walks the archive but skips any file past the
+    cutoff that does not have ``status='synced'`` in the cloud DB.
+    Surfaces a counter (``kept_unsynced_count``) for the UI.
+    """
+
+    @pytest.fixture
+    def cloud_db(self, tmp_path):
+        return _make_cloud_db(tmp_path)
+
+    def test_unsynced_old_clip_is_kept_when_protection_on(
+        self, db, archive_root, cloud_db, monkeypatch,
+    ):
+        old_mtime = time.time() - (40 * 86400)
+        unsynced = _make_archive_mp4(
+            archive_root, "SentryClips/2024-01-01_00-00-00/front.mp4",
+            mtime=old_mtime,
+        )
+        # Force "protection ON" + cloud configured + use our test cloud DB.
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_cloud_db_path', lambda: cloud_db,
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['deleted_count'] == 0
+        assert summary['kept_unsynced_count'] == 1
+        assert os.path.isfile(unsynced), (
+            "Unsynced clip past retention must be PROTECTED when "
+            "delete_unsynced=False"
+        )
+
+    def test_synced_old_clip_is_deleted_when_protection_on(
+        self, db, archive_root, cloud_db, monkeypatch,
+    ):
+        old_mtime = time.time() - (40 * 86400)
+        synced = _make_archive_mp4(
+            archive_root, "SavedClips/2024-01-01_00-00-00/front.mp4",
+            mtime=old_mtime,
+        )
+        _record_synced(cloud_db, synced, status='synced')
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_cloud_db_path', lambda: cloud_db,
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['deleted_count'] == 1
+        assert summary['kept_unsynced_count'] == 0
+        assert not os.path.exists(synced)
+
+    def test_unsynced_old_clip_is_deleted_when_protection_off(
+        self, db, archive_root, cloud_db, monkeypatch,
+    ):
+        old_mtime = time.time() - (40 * 86400)
+        unsynced = _make_archive_mp4(
+            archive_root, "SentryClips/2024-01-01_00-00-00/front.mp4",
+            mtime=old_mtime,
+        )
+        # Protection OFF — age-only deletion regardless of cloud status.
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_cloud_db_path', lambda: cloud_db,
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['deleted_count'] == 1
+        assert summary['kept_unsynced_count'] == 0
+        assert not os.path.exists(unsynced)
+
+    def test_no_cloud_configured_skips_check(
+        self, db, archive_root, monkeypatch,
+    ):
+        """Even with delete_unsynced=False, when no provider is
+        configured the cloud check is short-circuited and age-only
+        deletion proceeds. Otherwise users without cloud sync would
+        never see retention work.
+        """
+        old_mtime = time.time() - (40 * 86400)
+        clip = _make_archive_mp4(
+            archive_root, "RecentClips/2024-01-01_00-00-00/front.mp4",
+            mtime=old_mtime,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: False,
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['deleted_count'] == 1
+        assert summary['kept_unsynced_count'] == 0
+        assert not os.path.exists(clip)
+
+    def test_relative_path_match_works(
+        self, db, archive_root, cloud_db, monkeypatch,
+    ):
+        """``cloud_synced_files`` rows may be stored as paths relative
+        to the archive root (legacy / pre-canonicalization). The
+        cloud-sync check must match either form.
+        """
+        old_mtime = time.time() - (40 * 86400)
+        clip = _make_archive_mp4(
+            archive_root, "SentryClips/2024-01-01_00-00-00/front.mp4",
+            mtime=old_mtime,
+        )
+        rel = os.path.relpath(clip, archive_root).replace(os.sep, '/')
+        # Record using the RELATIVE path only.
+        _record_synced(cloud_db, rel, status='synced')
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_cloud_db_path', lambda: cloud_db,
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['deleted_count'] == 1, (
+            "Relative-path row in cloud_synced_files must satisfy the "
+            "synced check; otherwise legacy installs would never delete."
+        )
+        assert summary['kept_unsynced_count'] == 0
+        assert not os.path.exists(clip)
+
+    def test_pending_status_is_not_treated_as_synced(
+        self, db, archive_root, cloud_db, monkeypatch,
+    ):
+        old_mtime = time.time() - (40 * 86400)
+        clip = _make_archive_mp4(
+            archive_root, "SentryClips/2024-01-01_00-00-00/front.mp4",
+            mtime=old_mtime,
+        )
+        # Row exists but status is NOT 'synced'.
+        _record_synced(cloud_db, clip, status='pending')
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_cloud_db_path', lambda: cloud_db,
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['deleted_count'] == 0
+        assert summary['kept_unsynced_count'] == 1
+        assert os.path.isfile(clip)
+
+    def test_summary_includes_metadata_keys(
+        self, db, archive_root, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: False,
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        # Every summary must carry the new fields (zero-valued is fine).
+        assert 'kept_unsynced_count' in summary
+        assert 'delete_unsynced' in summary
+        assert 'cloud_configured' in summary
+
+    def test_get_status_surfaces_toggle_state(
+        self, db, archive_root, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        archive_watchdog.start_watchdog(
+            db, archive_root, check_interval_seconds=60.0,
+        )
+        try:
+            status = archive_watchdog.get_status()
+            assert status['retention']['delete_unsynced'] is False
+            assert status['retention']['cloud_configured'] is True
+            assert 'last_prune_kept_unsynced' in status['retention']
+        finally:
+            archive_watchdog.stop_watchdog(timeout=5.0)
+
+
+class TestResolveDeleteUnsynced:
+    """Phase 1 item 1.3 — auto-default resolution when YAML key is unset."""
+
+    def test_none_with_cloud_configured_protects(self, monkeypatch):
+        # Patch via sys.modules so the lazy `from config import` sees them.
+        import config as cfg_module
+        monkeypatch.setattr(
+            cfg_module, 'CLOUD_ARCHIVE_DELETE_UNSYNCED', None,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        assert archive_watchdog._resolve_delete_unsynced() is False
+
+    def test_none_without_cloud_configured_age_only(self, monkeypatch):
+        import config as cfg_module
+        monkeypatch.setattr(
+            cfg_module, 'CLOUD_ARCHIVE_DELETE_UNSYNCED', None,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: False,
+        )
+        assert archive_watchdog._resolve_delete_unsynced() is True
+
+    def test_explicit_true_overrides_cloud_configured(self, monkeypatch):
+        import config as cfg_module
+        monkeypatch.setattr(
+            cfg_module, 'CLOUD_ARCHIVE_DELETE_UNSYNCED', True,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        assert archive_watchdog._resolve_delete_unsynced() is True
+
+    def test_explicit_false_overrides_no_cloud(self, monkeypatch):
+        import config as cfg_module
+        monkeypatch.setattr(
+            cfg_module, 'CLOUD_ARCHIVE_DELETE_UNSYNCED', False,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: False,
+        )
+        assert archive_watchdog._resolve_delete_unsynced() is False

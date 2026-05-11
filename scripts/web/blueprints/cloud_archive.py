@@ -82,6 +82,40 @@ def _get_les_config_cached() -> dict:
     return _cloud_config_cache.get('les_data', {})
 
 
+def _resolve_keep_clips_until_synced(cloud_cfg: dict) -> bool:
+    """Translate ``cloud_archive.delete_unsynced`` into the UI toggle state.
+
+    The web UI exposes a positive-framed toggle ("Keep clips until
+    backed up to cloud") which is the inverse of the backend
+    ``delete_unsynced`` boolean. When the YAML key is unset
+    (``None``), fall back to the same auto-default the watchdog uses:
+    ``True`` when a cloud provider is configured, ``False`` otherwise.
+    """
+    raw = cloud_cfg.get('delete_unsynced', None) if cloud_cfg else None
+    if raw is None:
+        provider_set = bool(CLOUD_ARCHIVE_PROVIDER) and os.path.isfile(
+            CLOUD_PROVIDER_CREDS_PATH
+        )
+        return provider_set
+    return not bool(raw)
+
+
+def _get_last_prune_kept_unsynced_count() -> int:
+    """Return the count of clips held back at the most recent prune.
+
+    Cheap (in-memory state lookup). Returns 0 when the watchdog has
+    not yet run a prune or its module is unavailable.
+    """
+    try:
+        from services import archive_watchdog
+        status = archive_watchdog.get_status()
+        return int(
+            status.get('retention', {}).get('last_prune_kept_unsynced', 0)
+        )
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
@@ -171,6 +205,11 @@ def index():
         sync_non_event_videos=bool(_cloud.get('sync_non_event_videos', False)),
         cloud_auto_cleanup=bool(_cloud.get('cloud_auto_cleanup', False)),
         cloud_min_retention_days=int(_cloud.get('cloud_min_retention_days', 30)),
+        # Phase 1 item 1.3 — retention-respects-cloud toggle + counter.
+        # ``keep_clips_until_synced`` is the UI-friendly inversion of the
+        # backend ``cloud_archive.delete_unsynced`` config key.
+        keep_clips_until_synced=_resolve_keep_clips_until_synced(_cloud),
+        kept_unsynced_count=_get_last_prune_kept_unsynced_count(),
         les_enabled=les_enabled,
         les_watch_folders=les_watch_folders,
         les_upload_scope=les_upload_scope,
@@ -198,6 +237,12 @@ def save_settings():
         sync_non_event = 'sync_non_event_videos' in request.form
         auto_cleanup = 'cloud_auto_cleanup' in request.form
         min_retention = max(1, int(request.form.get('cloud_min_retention_days', 30)))
+        # Phase 1 item 1.3 — UI toggle is positive-framed
+        # ("keep_clips_until_synced"), backend key is its inverse
+        # ("delete_unsynced"). When the form omits the checkbox the
+        # user explicitly turned protection OFF.
+        keep_until_synced = 'keep_clips_until_synced' in request.form
+        delete_unsynced = not keep_until_synced
 
         _update_config_yaml({
             'cloud_archive.sync_folders': sync_folders,
@@ -207,11 +252,15 @@ def save_settings():
             'cloud_archive.sync_non_event_videos': sync_non_event,
             'cloud_archive.cloud_auto_cleanup': auto_cleanup,
             'cloud_archive.cloud_min_retention_days': min_retention,
+            'cloud_archive.delete_unsynced': delete_unsynced,
         })
 
         flash("Cloud sync settings saved.", "success")
-        logger.info("Cloud sync settings updated: folders=%s, priority=%s, bw=%d Mbps",
-                     sync_folders, priority_order, max_upload_mbps)
+        logger.info(
+            "Cloud sync settings updated: folders=%s, priority=%s, "
+            "bw=%d Mbps, delete_unsynced=%s",
+            sync_folders, priority_order, max_upload_mbps, delete_unsynced,
+        )
     except Exception:
         logger.exception("Failed to save cloud sync settings")
         flash("Error saving cloud sync settings.", "danger")

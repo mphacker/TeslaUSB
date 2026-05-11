@@ -77,6 +77,9 @@ eval "$(yq -r '
   "ARCHIVE_QUEUE_ENABLED=\"" + (.archive_queue.enabled // true | tostring) + "\"",
   "ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS=\"" + (.archive_queue.rescan_interval_seconds // 60 | tostring) + "\"",
   "ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED=\"" + (.archive_queue.boot_catchup_enabled // true | tostring) + "\"",
+  "ARCHIVE_QUEUE_WORKER_CHECK_INTERVAL_SECONDS=\"" + (.archive_queue.worker_check_interval_seconds // 5 | tostring) + "\"",
+  "ARCHIVE_QUEUE_RETRY_MAX_ATTEMPTS=\"" + (.archive_queue.retry_max_attempts // 3 | tostring) + "\"",
+  "ARCHIVE_QUEUE_COPY_CHUNK_BYTES=\"" + (.archive_queue.copy_chunk_bytes // 1048576 | tostring) + "\"",
   "TESLA_API_CLIENT_ID=\"" + (.tesla_api.client_id // "") + "\""
 ' "$CONFIG_YAML")"
 

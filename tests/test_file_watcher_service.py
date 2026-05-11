@@ -96,8 +96,13 @@ class TestGenerationGuard:
         received = []
         fws.register_callback(lambda paths: received.extend(paths))
         current = fws._watcher_generation
-        fws._notify_callbacks(["/a/b.mp4"], my_generation=current)
-        assert received == ["/a/b.mp4"]
+        # Phase 2b: indexing callbacks only fire for paths under
+        # ARCHIVE_DIR. Use a real ArchivedClips-prefixed path so the
+        # classifier routes it correctly; otherwise it gets dropped.
+        prefix = fws._archive_dir_prefix() or '/tmp'
+        path = os.path.join(prefix, 'a', 'b.mp4')
+        fws._notify_callbacks([path], my_generation=current)
+        assert received == [path]
 
     def test_stale_delete_callbacks_are_dropped(self):
         deleted = []
@@ -203,14 +208,33 @@ class TestPollingDeleteDetection:
 
 
 class TestArchiveCallback:
-    """Phase 2a archive_queue producer (issue #76).
+    """Phase 2a archive_queue producer + Phase 2b path-classified routing
+    (issue #76).
 
-    The archive callback list is parallel to the existing mp4 callback
-    list — both fire on the same ``_notify_callbacks`` invocation with
-    the same paths. These tests exercise the wire-up; the producer's
-    behavior (DB writes, priority inference) is covered separately in
-    ``test_archive_queue.py`` and ``test_archive_producer.py``.
+    Phase 2a wired the archive callback list parallel to the existing
+    mp4 callback list. Phase 2b changed ``_notify_callbacks`` to
+    classify paths and route them to ONE list or the OTHER (never
+    both): paths under the RO USB mount fire only archive callbacks;
+    paths under ``ARCHIVE_DIR`` fire only indexing callbacks.
+
+    These tests pin both behaviors. Paths use ``_ro_mount_prefixes`` /
+    ``_archive_dir_prefix`` rather than hardcoded strings so the tests
+    survive future changes to the default mount layout.
     """
+
+    @staticmethod
+    def _ro_path(name: str) -> str:
+        prefixes = fws._ro_mount_prefixes()
+        # Use the first candidate (``<MNT_DIR>/part1-ro``); both are
+        # valid but the first matches what production uses.
+        return os.path.join(prefixes[0], 'TeslaCam', 'RecentClips', name)
+
+    @staticmethod
+    def _archive_path(name: str) -> str:
+        prefix = fws._archive_dir_prefix()
+        if not prefix:
+            pytest.skip("ARCHIVE_DIR not configured in this environment")
+        return os.path.join(prefix, 'RecentClips', name)
 
     def test_register_archive_callback_appends_to_list(self):
         before = len(fws._on_archive_callbacks)
@@ -218,18 +242,26 @@ class TestArchiveCallback:
         assert len(fws._on_archive_callbacks) == before + 1
 
     def test_archive_callback_fires_alongside_mp4_callback(self):
+        # Phase 2b: a single batch with one RO-mount path AND one
+        # ArchivedClips path must split — RO fires archive only,
+        # ArchivedClips fires indexing only. The two callback lists
+        # see disjoint subsets of the original batch.
         mp4_received = []
         archive_received = []
         fws.register_callback(lambda paths: mp4_received.extend(paths))
         fws.register_archive_callback(
             lambda paths: archive_received.extend(paths)
         )
+        ro_a = self._ro_path('a.mp4')
+        ro_b = self._ro_path('b.mp4')
+        arch_c = self._archive_path('c.mp4')
         current = fws._watcher_generation
-        fws._notify_callbacks(['/foo/a.mp4', '/foo/b.mp4'],
+        fws._notify_callbacks([ro_a, ro_b, arch_c],
                               my_generation=current)
-        # Both subscribers see exactly the same list.
-        assert mp4_received == ['/foo/a.mp4', '/foo/b.mp4']
-        assert archive_received == ['/foo/a.mp4', '/foo/b.mp4']
+        # RO-mount paths route to archive only.
+        assert archive_received == [ro_a, ro_b]
+        # ArchivedClips path routes to indexing only.
+        assert mp4_received == [arch_c]
 
     def test_archive_callback_dropped_when_generation_stale(self):
         # Same generation guard as the mp4 callbacks: a stale batch
@@ -241,7 +273,8 @@ class TestArchiveCallback:
         captured = fws._watcher_generation
         fws._watcher_generation = captured + 1  # simulate stop_watcher bump
         try:
-            fws._notify_callbacks(['/x.mp4'], my_generation=captured)
+            fws._notify_callbacks([self._ro_path('x.mp4')],
+                                  my_generation=captured)
         finally:
             fws._watcher_generation = captured
         assert archive_received == []
@@ -257,22 +290,31 @@ class TestArchiveCallback:
         fws.register_archive_callback(
             lambda paths: good_received.extend(paths)
         )
+        ro_y = self._ro_path('y.mp4')
         current = fws._watcher_generation
-        fws._notify_callbacks(['/y.mp4'], my_generation=current)
-        assert good_received == ['/y.mp4']
+        fws._notify_callbacks([ro_y], my_generation=current)
+        assert good_received == [ro_y]
 
     def test_no_archive_callback_when_none_registered(self):
-        # Sanity: empty archive list, mp4 callback still fires.
+        # Sanity: empty archive list, mp4 callback still fires for
+        # ArchivedClips paths (RO-mount paths would just be silently
+        # routed to the empty archive list — also fine).
         mp4_received = []
         fws.register_callback(lambda paths: mp4_received.extend(paths))
+        arch_z = self._archive_path('z.mp4')
         current = fws._watcher_generation
         # Should not raise even though _on_archive_callbacks is empty.
-        fws._notify_callbacks(['/z.mp4'], my_generation=current)
-        assert mp4_received == ['/z.mp4']
+        fws._notify_callbacks([arch_z], my_generation=current)
+        assert mp4_received == [arch_z]
 
     def test_mp4_callback_exception_does_not_block_archive(self):
         """The two callback lists are independent — one bad mp4
-        subscriber must not prevent the archive callback from firing."""
+        subscriber must not prevent the archive callback from firing.
+
+        Phase 2b: the bad mp4 subscriber receives ArchivedClips paths;
+        the archive callback receives RO-mount paths. They no longer
+        overlap on the same path, so this test sends one of each and
+        verifies BOTH still fire even when the mp4 side raises."""
         archive_received = []
 
         def bad_mp4(paths):
@@ -282,6 +324,60 @@ class TestArchiveCallback:
         fws.register_archive_callback(
             lambda paths: archive_received.extend(paths)
         )
+        ro_q = self._ro_path('q.mp4')
+        arch_q = self._archive_path('q.mp4')
         current = fws._watcher_generation
-        fws._notify_callbacks(['/q.mp4'], my_generation=current)
-        assert archive_received == ['/q.mp4']
+        fws._notify_callbacks([ro_q, arch_q], my_generation=current)
+        assert archive_received == [ro_q]
+
+
+class TestPathClassification:
+    """Phase 2b routing rule pinned by direct unit tests on
+    :func:`_classify_paths` (issue #76)."""
+
+    def test_ro_mount_path_routes_to_archive(self):
+        ro = os.path.join(fws._ro_mount_prefixes()[0], 'TeslaCam', 'foo.mp4')
+        archive, indexing, dropped = fws._classify_paths([ro])
+        assert archive == [ro]
+        assert indexing == []
+        assert dropped == []
+
+    def test_archive_dir_path_routes_to_indexing(self):
+        prefix = fws._archive_dir_prefix()
+        if not prefix:
+            pytest.skip("ARCHIVE_DIR not configured")
+        arch = os.path.join(prefix, 'RecentClips', 'bar.mp4')
+        archive, indexing, dropped = fws._classify_paths([arch])
+        assert archive == []
+        assert indexing == [arch]
+        assert dropped == []
+
+    def test_unrelated_path_dropped(self):
+        # /tmp/foo.mp4 belongs to neither prefix.
+        archive, indexing, dropped = fws._classify_paths(
+            ['/random/scratch/foo.mp4'],
+        )
+        assert archive == []
+        assert indexing == []
+        assert dropped == ['/random/scratch/foo.mp4']
+
+    def test_empty_string_skipped(self):
+        archive, indexing, dropped = fws._classify_paths(['', None])
+        assert archive == []
+        assert indexing == []
+        assert dropped == []
+
+    def test_archive_prefix_wins_when_both_match(self, monkeypatch):
+        # Defensive: if someone misconfigures ARCHIVE_DIR to live
+        # under the RO mount (it shouldn't, but…), the archive prefix
+        # check runs first and routes to indexing. This stops a
+        # double-enqueue that would otherwise re-archive a file the
+        # worker just wrote.
+        ro_root = fws._ro_mount_prefixes()[0]
+        weird = os.path.join(ro_root, 'ArchivedClips')
+        monkeypatch.setattr(fws, '_archive_dir_prefix', lambda: weird)
+        path = os.path.join(weird, 'RecentClips', 'q.mp4')
+        archive, indexing, dropped = fws._classify_paths([path])
+        assert archive == []
+        assert indexing == [path]
+        assert dropped == []

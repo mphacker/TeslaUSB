@@ -1962,6 +1962,15 @@ def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
       2. SavedClips and SentryClips event subfolders — user-marked clips.
       3. RecentClips — the rolling buffer. Most files written while parked
          (sentry mode) contain no GPS at all, so we process these last.
+
+    .. note::
+
+        After issue #76 Phase 2b the **indexer** no longer walks the RO
+        USB mount: ``boot_catchup_scan`` uses
+        :func:`_find_archived_videos` (ArchivedClips-only). This helper
+        is kept intact for the diagnostics endpoint
+        (``mapping_diagnostics_test``) and for any third-party caller
+        that wants the legacy "everything we can see" view.
     """
     seen_basenames: set = set()
 
@@ -2006,6 +2015,71 @@ def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:
                     yield os.path.join(folder_path, f)
         except OSError:
             pass
+
+
+def _find_archived_videos() -> Generator[str, None, None]:
+    """Yield front-camera MP4s under ``ARCHIVE_DIR`` (and event subfolders).
+
+    The Phase 2b indexer-side catch-up scanner. Walks ONLY the SD-card
+    ``ArchivedClips`` tree — never the RO USB mount. The
+    ``archive_producer`` thread (issue #76 Phase 2a) handles USB-side
+    catch-up by enqueueing into ``archive_queue``; the
+    ``archive_worker`` then copies them into ArchivedClips, where this
+    helper picks them up if the indexer happened to be down at the
+    moment of the worker's enqueue.
+
+    Yields the same flat-files-then-event-subfolders order as
+    :func:`_find_front_camera_videos`'s ArchivedClips section, plus
+    any nested SavedClips/SentryClips that an operator may have
+    rsync'd into the archive directory directly.
+    """
+    try:
+        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+    except ImportError:
+        return
+    if not ARCHIVE_ENABLED or not ARCHIVE_DIR or not os.path.isdir(ARCHIVE_DIR):
+        return
+
+    # Top-level mp4s (legacy archive layout — flat directory).
+    try:
+        for f in sorted(os.listdir(ARCHIVE_DIR)):
+            full = os.path.join(ARCHIVE_DIR, f)
+            if (
+                os.path.isfile(full)
+                and f.lower().endswith('.mp4')
+                and '-front' in f.lower()
+            ):
+                yield full
+    except OSError:
+        return
+
+    # Sub-trees for archived event clips (RecentClips/SavedClips/SentryClips
+    # mirrored under ArchivedClips by the worker's compute_dest_path).
+    for sub in ('RecentClips', 'SavedClips', 'SentryClips'):
+        sub_path = os.path.join(ARCHIVE_DIR, sub)
+        if not os.path.isdir(sub_path):
+            continue
+        try:
+            for entry in sorted(os.listdir(sub_path)):
+                entry_path = os.path.join(sub_path, entry)
+                if os.path.isfile(entry_path):
+                    if (
+                        entry.lower().endswith('.mp4')
+                        and '-front' in entry.lower()
+                    ):
+                        yield entry_path
+                    continue
+                if not os.path.isdir(entry_path):
+                    continue
+                # Event subfolder — yield its front-camera mp4s.
+                try:
+                    for f in sorted(os.listdir(entry_path)):
+                        if f.lower().endswith('.mp4') and '-front' in f.lower():
+                            yield os.path.join(entry_path, f)
+                except OSError:
+                    continue
+        except OSError:
+            continue
 
 
 def _read_event_json(rel_path: str, teslacam_root: str) -> Optional[dict]:
@@ -2817,24 +2891,29 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
     }
 
 
-def boot_catchup_scan(db_path: str, teslacam_path: str,
+def boot_catchup_scan(db_path: str, teslacam_path: str = '',
                       *, source: str = 'catchup') -> Dict[str, int]:
     """Diff filesystem vs ``indexed_files`` and enqueue any orphans.
 
-    Replaces the legacy "auto-index on startup" full re-scan. Cheap by
-    design: one ``os.listdir`` walk via :func:`_find_front_camera_videos`
-    + one bulk SELECT of every indexed canonical_key + an in-memory diff
-    + one batch INSERT into ``indexing_queue``. No video parsing happens
-    here — that's the worker's job.
+    **Phase 2b (issue #76)**: This now walks ONLY ``ARCHIVE_DIR``
+    (``~/ArchivedClips``). The ``archive_producer`` thread handles
+    USB-side catch-up by enqueueing into ``archive_queue``; the
+    ``archive_worker`` then copies clips into ArchivedClips, where
+    this scan picks them up if the indexer happened to be down at the
+    moment of the worker's enqueue (e.g. a manual scp landed a clip
+    while ``gadget_web`` was restarting).
+
+    The ``teslacam_path`` parameter is accepted for backward
+    compatibility but is **ignored** — there is intentionally no path
+    from this function to the RO USB mount any more.
 
     Returns ``{scanned, already_indexed, enqueued}``. The
     ``active_file`` banner stays off during this call (no parsing); the
     banner only lights up when the worker actually picks up an orphan.
     """
+    # ``teslacam_path`` is intentionally ignored — see docstring.
+    del teslacam_path
     result = {'scanned': 0, 'already_indexed': 0, 'enqueued': 0}
-    if not teslacam_path or not os.path.isdir(teslacam_path):
-        logger.debug("boot_catchup_scan: TeslaCam path not accessible")
-        return result
 
     # Build the set of canonical_keys already represented in
     # indexed_files. We diff against canonical keys (not raw paths) so a
@@ -2865,7 +2944,7 @@ def boot_catchup_scan(db_path: str, teslacam_path: str,
     indexed_keys.discard('')
 
     to_enqueue: List[Tuple[str, Optional[int]]] = []
-    for fpath in _find_front_camera_videos(teslacam_path):
+    for fpath in _find_archived_videos():
         result['scanned'] += 1
         key = canonical_key(fpath)
         if not key:

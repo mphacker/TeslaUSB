@@ -182,6 +182,9 @@ archive:
 # section prevents the producers from running, leaving behavior identical
 # to pre-#76 installs.
 archive_queue:
-  enabled: true                          # Run Phase 2a producers (writers; no worker yet)
+  enabled: true                          # Run Phase 2a producers + Phase 2b worker
   rescan_interval_seconds: 60            # Cadence of the periodic full-dir rescan
   boot_catchup_enabled: true             # Run the one-shot scan on producer start
+  worker_check_interval_seconds: 5       # Idle/empty-queue sleep between worker iterations
+  retry_max_attempts: 3                  # OSError retries before a row goes to dead_letter
+  copy_chunk_bytes: 1048576              # Chunk size (1 MiB) for the temp+fsync+rename copy

@@ -139,12 +139,15 @@ ARCHIVE_DIR = _archive_path if _archive_path else os.path.join(
     os.path.expanduser(f"~{TARGET_USER}"), 'ArchivedClips'
 )
 
-# Archive Queue Configuration (issue #76 — Phase 2a producers; worker in 2b)
-# Producer-only at this version: the inotify watcher, the 60-s rescan thread,
-# and the boot catch-up scan all enqueue rows into ``archive_queue`` (in
-# geodata.db). When ``ARCHIVE_QUEUE_ENABLED`` is False the wiring in
-# web_control.py skips both the watcher callback registration and the
-# producer thread, so behavior matches pre-#76 installs exactly.
+# Archive Queue Configuration (issue #76 — Phase 2a producers + Phase 2b worker)
+# Persistent SQLite-backed queue (in geodata.db) for the two-queue
+# archive pipeline. The inotify watcher, the 60-s rescan thread, and the
+# boot catch-up scan all enqueue rows into ``archive_queue``; the Phase
+# 2b worker thread drains them by copying source → ArchivedClips and
+# enqueueing the archived path into ``indexing_queue``. When
+# ``ARCHIVE_QUEUE_ENABLED`` is False the wiring in web_control.py skips
+# the watcher callback registration, the producer thread, and the worker
+# thread, so behavior matches pre-#76 installs exactly.
 _archive_queue = config.get('archive_queue', {})
 ARCHIVE_QUEUE_ENABLED = bool(_archive_queue.get('enabled', True))
 ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS = float(
@@ -152,6 +155,15 @@ ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS = float(
 )
 ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED = bool(
     _archive_queue.get('boot_catchup_enabled', True)
+)
+ARCHIVE_QUEUE_WORKER_CHECK_INTERVAL_SECONDS = float(
+    _archive_queue.get('worker_check_interval_seconds', 5)
+)
+ARCHIVE_QUEUE_RETRY_MAX_ATTEMPTS = int(
+    _archive_queue.get('retry_max_attempts', 3)
+)
+ARCHIVE_QUEUE_COPY_CHUNK_BYTES = int(
+    _archive_queue.get('copy_chunk_bytes', 1048576)
 )
 
 # ============================================================================

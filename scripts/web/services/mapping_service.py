@@ -143,7 +143,7 @@ def _with_db_retry(fn: Callable) -> Callable:
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -271,6 +271,43 @@ CREATE INDEX IF NOT EXISTS idx_queue_ready
 CREATE INDEX IF NOT EXISTS idx_queue_claimed_at
     ON indexing_queue(claimed_at)
     WHERE claimed_by IS NOT NULL;
+
+-- v10: archive_queue. Producer-only in Phase 2a (issue #76); the worker
+-- that drains it lands in Phase 2b. Rows accumulate harmlessly until
+-- then. Keyed by ``source_path`` (UNIQUE) so the inotify producer, the
+-- 60-s rescan producer, and the boot catch-up scan can all use
+-- ``INSERT OR IGNORE`` for cheap idempotent enqueue. ``priority``
+-- follows the issue spec: 1=RecentClips (Tesla rotates these out
+-- after ~60 min, highest urgency), 2=SentryClips/SavedClips
+-- (event clips the user wants ASAP), 3=anything else. ``status``
+-- transitions through pending → claimed → copied (terminal) or
+-- → source_gone / error / dead_letter (terminal). ``expected_size``
+-- and ``expected_mtime`` are captured at enqueue time so the Phase
+-- 2b worker can detect "Tesla still writing" by re-stat-ing before
+-- the copy.
+CREATE TABLE IF NOT EXISTS archive_queue (
+    id INTEGER PRIMARY KEY,
+    source_path TEXT UNIQUE NOT NULL,
+    dest_path TEXT,
+    priority INTEGER DEFAULT 3,
+    status TEXT DEFAULT 'pending',
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    enqueued_at TEXT NOT NULL,
+    claimed_at TEXT,
+    claimed_by TEXT,
+    copied_at TEXT,
+    expected_size INTEGER,
+    expected_mtime REAL
+);
+-- Worker pick-next index: partial over only ready rows, ordered by
+-- priority then mtime (closest-to-TTL first within each priority band).
+-- The worker's pick query is ``SELECT ... WHERE status='pending' ORDER
+-- BY priority ASC, expected_mtime ASC LIMIT 1``; this index makes it
+-- O(log n) regardless of queue depth.
+CREATE INDEX IF NOT EXISTS archive_queue_ready
+    ON archive_queue(status, priority, expected_mtime)
+    WHERE status = 'pending';
 """
 
 
@@ -433,6 +470,14 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         # expression indexes are created by the executescript above
         # (CREATE INDEX IF NOT EXISTS is idempotent); no data
         # migration required.
+        # v10: ``archive_queue`` table + ``archive_queue_ready``
+        # partial index for the Phase 2a producers (issue #76).
+        # Producer-only at this version — the boot catch-up scan,
+        # 60-s rescan, and inotify file watcher all enqueue rows but
+        # nothing drains them yet. The Phase 2b worker (separate PR)
+        # will be the consumer. Created by the executescript above
+        # (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS
+        # are idempotent); no data migration required.
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",

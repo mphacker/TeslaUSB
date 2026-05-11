@@ -87,6 +87,7 @@ _status = {
 _on_new_file_callbacks: List[Callable] = []
 _on_deleted_file_callbacks: List[Callable] = []
 _on_event_json_callbacks: List[Callable] = []
+_on_archive_callbacks: List[Callable] = []
 
 
 def register_callback(callback: Callable):
@@ -117,6 +118,25 @@ def register_event_json_callback(callback: Callable):
     without being coupled to the indexing path.
     """
     _on_event_json_callbacks.append(callback)
+
+
+def register_archive_callback(callback: Callable):
+    """Register a callback for the new ``archive_queue`` producer (issue #76).
+
+    Callback signature: callback(file_paths: List[str])
+    Fired with the same path list as the existing mp4 callbacks
+    (:func:`register_callback`) so the archive producer enqueues every
+    clip the indexer enqueues, in the same call. Separate registration
+    keeps the two subsystems independently togglable: the archive
+    producer is opt-in via ``archive_queue.enabled`` in ``config.yaml``,
+    and a disabled producer just never registers a callback (zero cost
+    on the watcher's hot path beyond an empty-list iteration).
+
+    Phase 2a producer-only — see :mod:`services.archive_queue` and
+    :mod:`services.archive_producer`. The Phase 2b worker will drain
+    rows enqueued by these callbacks.
+    """
+    _on_archive_callbacks.append(callback)
 
 
 def get_watcher_status() -> dict:
@@ -242,6 +262,16 @@ def _notify_callbacks(new_files: List[str], my_generation: int):
             cb(new_files)
         except Exception as e:
             logger.error("Watcher new-file callback error: %s", e)
+    # Phase 2a archive_queue producers (issue #76): fire the archive
+    # callbacks with the same paths the indexer just got. The same
+    # generation guard above already protected the batch from a racing
+    # stop, so we skip a second check. Each archive callback handles
+    # its own errors so one bad subscriber can't starve the other.
+    for cb in _on_archive_callbacks:
+        try:
+            cb(new_files)
+        except Exception as e:
+            logger.error("Watcher archive callback error: %s", e)
 
 
 def _notify_delete_callbacks(deleted_files: List[str], my_generation: int):

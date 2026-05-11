@@ -170,3 +170,18 @@ archive:
   max_size_gb: 0                         # 0 = auto (use all available space minus reserved)
   only_driving: true                     # Only archive clips from active driving trips (skip idle/parked)
   path: ""                               # Archive path (default: ~/ArchivedClips, set by web app)
+
+# ============================================================================
+# Archive Queue Configuration (issue #76 — Phase 2a producer-only)
+# ============================================================================
+# Persistent SQLite-backed queue (in geodata.db) for the upcoming two-queue
+# archive pipeline. Phase 2a populates this queue from three independent
+# producers: the inotify file watcher, a periodic full-directory rescan,
+# and a one-shot boot catch-up scan. **No worker yet** — rows accumulate
+# harmlessly until Phase 2b adds the consumer thread. Disabling this
+# section prevents the producers from running, leaving behavior identical
+# to pre-#76 installs.
+archive_queue:
+  enabled: true                          # Run Phase 2a producers (writers; no worker yet)
+  rescan_interval_seconds: 60            # Cadence of the periodic full-dir rescan
+  boot_catchup_enabled: true             # Run the one-shot scan on producer start

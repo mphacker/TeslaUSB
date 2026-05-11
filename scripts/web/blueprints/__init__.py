@@ -17,6 +17,7 @@ from .media import media_bp
 from .captive_portal import captive_portal_bp, catch_all_redirect
 from .cloud_archive import cloud_archive_bp
 from .live_events import live_events_bp
+from .archive_queue import archive_queue_bp
 
 __all__ = [
     'mode_control_bp',
@@ -37,4 +38,5 @@ __all__ = [
     'catch_all_redirect',
     'cloud_archive_bp',
     'live_events_bp',
+    'archive_queue_bp',
 ]

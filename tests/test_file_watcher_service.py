@@ -22,10 +22,12 @@ def _reset_watcher_state():
     # Clear callback lists so callbacks from one test don't leak.
     fws._on_new_file_callbacks.clear()
     fws._on_deleted_file_callbacks.clear()
+    fws._on_archive_callbacks.clear()
     yield
     fws.stop_watcher(timeout=2.0)
     fws._on_new_file_callbacks.clear()
     fws._on_deleted_file_callbacks.clear()
+    fws._on_archive_callbacks.clear()
 
 
 class TestLifecycle:
@@ -198,3 +200,88 @@ class TestPollingDeleteDetection:
             assert any(p.endswith('-front.mp4') for p in deleted_paths)
         finally:
             fws.stop_watcher(timeout=3.0)
+
+
+class TestArchiveCallback:
+    """Phase 2a archive_queue producer (issue #76).
+
+    The archive callback list is parallel to the existing mp4 callback
+    list — both fire on the same ``_notify_callbacks`` invocation with
+    the same paths. These tests exercise the wire-up; the producer's
+    behavior (DB writes, priority inference) is covered separately in
+    ``test_archive_queue.py`` and ``test_archive_producer.py``.
+    """
+
+    def test_register_archive_callback_appends_to_list(self):
+        before = len(fws._on_archive_callbacks)
+        fws.register_archive_callback(lambda paths: None)
+        assert len(fws._on_archive_callbacks) == before + 1
+
+    def test_archive_callback_fires_alongside_mp4_callback(self):
+        mp4_received = []
+        archive_received = []
+        fws.register_callback(lambda paths: mp4_received.extend(paths))
+        fws.register_archive_callback(
+            lambda paths: archive_received.extend(paths)
+        )
+        current = fws._watcher_generation
+        fws._notify_callbacks(['/foo/a.mp4', '/foo/b.mp4'],
+                              my_generation=current)
+        # Both subscribers see exactly the same list.
+        assert mp4_received == ['/foo/a.mp4', '/foo/b.mp4']
+        assert archive_received == ['/foo/a.mp4', '/foo/b.mp4']
+
+    def test_archive_callback_dropped_when_generation_stale(self):
+        # Same generation guard as the mp4 callbacks: a stale batch
+        # must not fire archive callbacks either.
+        archive_received = []
+        fws.register_archive_callback(
+            lambda paths: archive_received.extend(paths)
+        )
+        captured = fws._watcher_generation
+        fws._watcher_generation = captured + 1  # simulate stop_watcher bump
+        try:
+            fws._notify_callbacks(['/x.mp4'], my_generation=captured)
+        finally:
+            fws._watcher_generation = captured
+        assert archive_received == []
+
+    def test_archive_callback_exception_does_not_block_others(self):
+        # One bad archive subscriber can't starve a second one.
+        good_received = []
+
+        def bad_cb(paths):
+            raise RuntimeError("synthetic bad subscriber")
+
+        fws.register_archive_callback(bad_cb)
+        fws.register_archive_callback(
+            lambda paths: good_received.extend(paths)
+        )
+        current = fws._watcher_generation
+        fws._notify_callbacks(['/y.mp4'], my_generation=current)
+        assert good_received == ['/y.mp4']
+
+    def test_no_archive_callback_when_none_registered(self):
+        # Sanity: empty archive list, mp4 callback still fires.
+        mp4_received = []
+        fws.register_callback(lambda paths: mp4_received.extend(paths))
+        current = fws._watcher_generation
+        # Should not raise even though _on_archive_callbacks is empty.
+        fws._notify_callbacks(['/z.mp4'], my_generation=current)
+        assert mp4_received == ['/z.mp4']
+
+    def test_mp4_callback_exception_does_not_block_archive(self):
+        """The two callback lists are independent — one bad mp4
+        subscriber must not prevent the archive callback from firing."""
+        archive_received = []
+
+        def bad_mp4(paths):
+            raise RuntimeError("bad mp4 subscriber")
+
+        fws.register_callback(bad_mp4)
+        fws.register_archive_callback(
+            lambda paths: archive_received.extend(paths)
+        )
+        current = fws._watcher_generation
+        fws._notify_callbacks(['/q.mp4'], my_generation=current)
+        assert archive_received == ['/q.mp4']

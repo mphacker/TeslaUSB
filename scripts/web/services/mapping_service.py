@@ -3739,7 +3739,12 @@ def _resolve_video_path_on_disk(video_path: str,
     # function from probing arbitrary filesystem locations. The archive
     # basename fallback below still finds genuinely-archived clips.
     if any(p == '..' for p in parts):
-        if archive_dir:
+        # Only probe the archive when the basename is a real filename;
+        # ``parts[-1]`` of ``..`` (e.g. ``foo/..``) would otherwise
+        # cause ``os.path.join`` to probe ``archive_dir``'s parent.
+        # ``os.path.isfile`` on a directory returns False so this is
+        # not exploitable, but the probe pattern is sketchy — gate it.
+        if archive_dir and parts[-1] not in ('..', ''):
             archive_path = os.path.join(archive_dir, parts[-1])
             if os.path.isfile(archive_path):
                 return True
@@ -3868,18 +3873,25 @@ def playable_trips_for_date(db_path: str, date_str: str,
                 break
         result[trip_id] = playable
 
-    with _PLAYABLE_TRIPS_CACHE_LOCK:
-        _PLAYABLE_TRIPS_CACHE[date_str] = (time.monotonic(), result)
-        # Bound cache growth: a single device only ever has a few
-        # hundred days of history, but stale entries are pure ballast.
-        if len(_PLAYABLE_TRIPS_CACHE) > 64:
-            # Drop the oldest entries; cheap heuristic, no LRU needed.
-            oldest = sorted(
-                _PLAYABLE_TRIPS_CACHE.items(),
-                key=lambda kv: kv[1][0],
-            )[: len(_PLAYABLE_TRIPS_CACHE) - 32]
-            for k, _ in oldest:
-                _PLAYABLE_TRIPS_CACHE.pop(k, None)
+    # Skip caching when ``teslacam_path`` is None (mid-mode-transition):
+    # every recent-only RecentClips trip would resolve to ``False`` here,
+    # and caching that all-False payload would hide real trips from the
+    # disambiguation chooser for the full TTL even after the mount is
+    # back up. Recompute on the next call instead — the work is cheap
+    # (single LEFT JOIN + already-cached stats).
+    if teslacam_path is not None:
+        with _PLAYABLE_TRIPS_CACHE_LOCK:
+            _PLAYABLE_TRIPS_CACHE[date_str] = (time.monotonic(), result)
+            # Bound cache growth: a single device only ever has a few
+            # hundred days of history, but stale entries are pure ballast.
+            if len(_PLAYABLE_TRIPS_CACHE) > 64:
+                # Drop the oldest entries; cheap heuristic, no LRU needed.
+                oldest = sorted(
+                    _PLAYABLE_TRIPS_CACHE.items(),
+                    key=lambda kv: kv[1][0],
+                )[: len(_PLAYABLE_TRIPS_CACHE) - 32]
+                for k, _ in oldest:
+                    _PLAYABLE_TRIPS_CACHE.pop(k, None)
 
     return dict(result)
 

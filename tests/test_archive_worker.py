@@ -969,3 +969,57 @@ class TestArchiveWorkerDiskSpaceGuard:
         )
         assert archive_worker._resolve_disk_space_pause_seconds() == 99.0
 
+
+# ---------------------------------------------------------------------------
+# TestArchiveWorkerConfigContract — lock the config-tunables tuple shape so
+# archive_worker.py and config.py don't drift out of sync.
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveWorkerConfigContract:
+    def test_read_config_returns_six_tunables(self):
+        # The worker reads six tunables (chunk, max_attempts, idle,
+        # inter_file, load_threshold, load_pause). Old callers expecting
+        # three would silently break — lock the contract.
+        result = archive_worker._read_config_or_defaults()
+        assert len(result) == 6, (
+            "_read_config_or_defaults must return 6 tunables; "
+            "archive_worker.py and config.py have drifted "
+            "(got %d)" % len(result)
+        )
+        chunk, max_attempts, idle, inter_file, load_thresh, load_pause = result
+        assert chunk > 0
+        assert max_attempts > 0
+        assert idle > 0
+        assert inter_file >= 0       # 0 disables inter-file pause
+        assert load_thresh >= 0      # 0 disables load-pause guard
+        assert load_pause >= 0
+
+    def test_inter_file_sleep_default_is_at_least_one_second(self):
+        # Regression guard: the SDIO contention failure mode that
+        # caused hardware watchdog reboots was triggered with a 0.25s
+        # inter-file sleep. The Pi Zero 2 W needs a minimum of ~1s
+        # between copies to let the kernel flush + the WiFi chip get
+        # SDIO bus time. Don't lower the default below 1s without
+        # re-validating on hardware (see copilot-instructions.md).
+        _, _, _, inter_file, _, _ = archive_worker._read_config_or_defaults()
+        assert inter_file >= 1.0, (
+            "Default inter_file_sleep_seconds must stay >= 1.0 to "
+            "prevent SDIO bus saturation. See copilot-instructions.md."
+        )
+
+    def test_load_pause_threshold_default_is_set(self):
+        # The load-pause guard prevents the archive worker from
+        # piling onto an already-loaded system. Default threshold of
+        # 3.5 was calibrated against the Pi Zero 2 W's 4 cores.
+        _, _, _, _, load_thresh, load_pause = (
+            archive_worker._read_config_or_defaults()
+        )
+        assert load_thresh > 0, (
+            "Load-pause guard must be enabled by default."
+        )
+        assert load_pause >= 10, (
+            "Load-pause sleep must be long enough (>=10s) to actually "
+            "let load drop, not just throttle every iteration."
+        )
+

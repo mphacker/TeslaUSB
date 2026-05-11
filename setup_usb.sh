@@ -1675,9 +1675,13 @@ cat > "$WATCHDOG_CONF" <<'EOF'
 # Watchdog device
 watchdog-device = /dev/watchdog
 
-# Watchdog timeout (hardware reset after 60 seconds of no response)
-# Note: 60s needed for large disk images (400GB+) which take longer to configure
-watchdog-timeout = 60
+# Watchdog timeout (hardware reset after 90 seconds of no response)
+# Note: 90s gives headroom for transient SDIO bus contention on the
+# Pi Zero 2 W (the SD card and WiFi chip share one SDIO controller).
+# A heavy archive catch-up + concurrent Tesla writes + WiFi traffic
+# can briefly stall the watchdog daemon; 60s was sometimes enough to
+# trigger spurious reboots during 1000+ clip backlog drains.
+watchdog-timeout = 90
 
 # Reboot if 1-minute load average exceeds 24 (6x the 4 cores).
 # A spiky-but-recovering workload won't trip this.

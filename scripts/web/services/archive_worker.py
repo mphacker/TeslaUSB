@@ -81,7 +81,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Sleep between successful copies (gives the kernel time to flush).
-_INTER_FILE_SLEEP_SECONDS = 0.25
+# The Pi Zero 2 W shares one SDIO controller between SD card and WiFi;
+# tight back-to-back copies during catch-up can starve the watchdog
+# daemon. Configurable via ``archive_queue.inter_file_sleep_seconds``
+# (default 1.0 s) — read at startup by ``_read_config_or_defaults``.
+_INTER_FILE_SLEEP_SECONDS = 1.0
+# Default 1-min loadavg above which the worker pauses for
+# ``_LOAD_PAUSE_SECONDS`` before claiming the next row. Configurable
+# via ``archive_queue.load_pause_threshold``.
+_LOAD_PAUSE_THRESHOLD = 3.5
+# How long to sleep when the load threshold is exceeded. Configurable
+# via ``archive_queue.load_pause_seconds``.
+_LOAD_PAUSE_SECONDS = 30.0
 # Sleep when the queue is empty. Wake() can shorten this on a producer hit.
 _IDLE_SLEEP_SECONDS = 5.0
 # Sleep on a transient claim error or task_coordinator timeout.
@@ -625,7 +636,7 @@ def _record_idle(*, last_outcome: Optional[str] = None,
 
 
 def _read_config_or_defaults():
-    """Return (chunk_bytes, max_attempts, idle_seconds) from config.
+    """Return tunables from config (chunk_bytes, max_attempts, idle, inter_file, load_threshold, load_pause).
 
     Looked up at call time so tests can monkeypatch the config module
     after import. Falls back to module-level defaults if config isn't
@@ -636,14 +647,25 @@ def _read_config_or_defaults():
             ARCHIVE_QUEUE_COPY_CHUNK_BYTES,
             ARCHIVE_QUEUE_RETRY_MAX_ATTEMPTS,
             ARCHIVE_QUEUE_WORKER_CHECK_INTERVAL_SECONDS,
+            ARCHIVE_QUEUE_INTER_FILE_SLEEP_SECONDS,
+            ARCHIVE_QUEUE_LOAD_PAUSE_THRESHOLD,
+            ARCHIVE_QUEUE_LOAD_PAUSE_SECONDS,
         )
         return (
             int(ARCHIVE_QUEUE_COPY_CHUNK_BYTES),
             int(ARCHIVE_QUEUE_RETRY_MAX_ATTEMPTS),
             float(ARCHIVE_QUEUE_WORKER_CHECK_INTERVAL_SECONDS),
+            float(ARCHIVE_QUEUE_INTER_FILE_SLEEP_SECONDS),
+            float(ARCHIVE_QUEUE_LOAD_PAUSE_THRESHOLD),
+            float(ARCHIVE_QUEUE_LOAD_PAUSE_SECONDS),
         )
     except Exception:  # noqa: BLE001
-        return (_DEFAULT_COPY_CHUNK_BYTES, 3, _IDLE_SLEEP_SECONDS)
+        return (
+            _DEFAULT_COPY_CHUNK_BYTES, 3, _IDLE_SLEEP_SECONDS,
+            _INTER_FILE_SLEEP_SECONDS,
+            _LOAD_PAUSE_THRESHOLD,
+            _LOAD_PAUSE_SECONDS,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -776,15 +798,38 @@ def _run_worker_loop(db_path: str, archive_root: str,
     except Exception as e:  # noqa: BLE001
         logger.warning("recover_stale_claims failed at startup: %s", e)
 
-    chunk_size, max_attempts, idle_sleep = _read_config_or_defaults()
+    chunk_size, max_attempts, idle_sleep, inter_file_sleep, \
+        load_pause_threshold, load_pause_seconds = _read_config_or_defaults()
 
     while not _stop_event.is_set():
         # Honor pause requests at the iteration boundary.
         if _pause_event.is_set():
             _idle_event.set()
-            if _stop_event.wait(timeout=_INTER_FILE_SLEEP_SECONDS):
+            if _stop_event.wait(timeout=inter_file_sleep):
                 break
             continue
+
+        # SDIO-contention guard. The Pi Zero 2 W shares one SDIO
+        # controller between SD card and WiFi; sustained heavy archive
+        # I/O can starve the watchdog daemon and trigger a hardware
+        # reset. When the system is already under load (typically the
+        # combination of archive + indexer + Tesla concurrent writes),
+        # back off so other tasks can drain. Threshold and pause length
+        # are configurable; ``getloadavg`` is a cheap O(1) syscall.
+        if load_pause_threshold > 0:
+            try:
+                load1 = os.getloadavg()[0]
+            except (AttributeError, OSError):
+                load1 = 0.0
+            if load1 > load_pause_threshold:
+                logger.info(
+                    "archive_worker: 1-min loadavg %.2f > %.2f — "
+                    "pausing %.0fs to relieve SDIO/CPU contention",
+                    load1, load_pause_threshold, load_pause_seconds,
+                )
+                _idle_event.set()
+                _wait_with_wake(load_pause_seconds)
+                continue
 
         # Honor the disk-space self-pause. ``process_one_claim`` arms
         # ``_disk_space_pause_until`` when free space crosses the
@@ -878,7 +923,7 @@ def _run_worker_loop(db_path: str, archive_root: str,
             # Inter-file pause. Don't honor wake() here — we just
             # finished work; we want the kernel to flush before the
             # next read-heavy copy.
-            if _stop_event.wait(timeout=_INTER_FILE_SLEEP_SECONDS):
+            if _stop_event.wait(timeout=inter_file_sleep):
                 break
 
 

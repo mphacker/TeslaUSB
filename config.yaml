@@ -199,3 +199,11 @@ archive_queue:
   copy_chunk_bytes: 1048576              # Chunk size (1 MiB) for the temp+fsync+rename copy
   # Phase 2c (issue #76) — health watchdog cadence.
   watchdog_check_interval_seconds: 60    # Frequency of the archive-health watchdog tick
+  # SDIO-bus contention safeguards. The Pi Zero 2 W shares one SDIO
+  # controller between the SD card and the WiFi chip; aggressive
+  # archive copies can starve the kernel watchdog daemon and trigger
+  # a hardware reset. These knobs let the worker back off under load.
+  inter_file_sleep_seconds: 1.0          # Sleep between successful copies (was 0.25)
+  load_pause_threshold: 3.5              # Pause when 1-min loadavg exceeds this
+  load_pause_seconds: 30                 # How long to sleep when load is high
+  boot_scan_defer_seconds: 30            # Producer waits this long after start before its first scan

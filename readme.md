@@ -492,7 +492,7 @@ The hardware watchdog automatically reboots the Pi if the system becomes unrespo
 
 ```bash
 watchdog-device = /dev/watchdog
-watchdog-timeout = 60
+watchdog-timeout = 90
 max-load-1 = 24
 realtime = yes
 priority = 1
@@ -516,7 +516,7 @@ The following options should be **avoided** on Raspberry Pi Zero 2 W (512MB RAM)
 4. Fix `/etc/watchdog.conf` to use the simple configuration above
 5. Remove the mask from `cmdline.txt` and reboot
 
-**Watchdog timeout**: Set to 60 seconds to accommodate large disk images (400GB+) which take longer to configure at boot. Smaller images work fine with 15 seconds, but 60 seconds is safe for all configurations.
+**Watchdog timeout**: Set to 90 seconds to accommodate (a) large disk images (400GB+) which take longer to configure at boot and (b) transient SDIO bus contention on the Pi Zero 2 W during heavy archive catch-up. Smaller images work fine with 15 seconds, but 90 seconds is safe for all configurations and prevents spurious reboots when the watchdog daemon is briefly stalled by the shared SDIO controller (SD card + WiFi chip).
 
 ## Troubleshooting
 

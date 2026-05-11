@@ -1186,4 +1186,59 @@ class TestArchiveWorkerLoadPauseUX:
         finally:
             archive_worker.stop_worker(timeout=5)
 
+    def test_last_pause_at_pinned_within_window(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # Within a single sustained pause window, ``last_pause_at`` must
+        # NOT tick forward on every loop iteration — it represents
+        # "when did THIS pause start", not "last time we checked".
+        # This is parity with disk-pause (``last_disk_pause_at`` is
+        # set inside process_one_claim only on first hit) and is the
+        # natural reading of the field name. Regression guard for the
+        # re-review INFO finding on PR #93.
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (99.0, 99.0, 99.0), raising=False,
+        )
+        # Use a long pause window (5s) so the test stays well inside
+        # one window across multiple iterations.
+        def fake_config(*a, **kw):
+            return (4096, 3, 0.05, 0.05, 0.5, 5.0)
+        monkeypatch.setattr(archive_worker, '_read_config_or_defaults', fake_config)
+
+        clip = make_clip("RecentClips/pin-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+
+        archive_worker.start_worker(
+            db, archive_root, teslacam_root=teslacam_root,
+        )
+        try:
+            # Give the worker a beat to enter the pause branch and
+            # arm last_pause_at.
+            time.sleep(0.2)
+            first = archive_worker.get_load_pause_state()['last_pause_at']
+            assert first is not None, (
+                "Worker didn't enter load-pause within 200ms."
+            )
+            # Now sample several more times within the same 5s window.
+            # If the bug existed, last_pause_at would tick forward as
+            # the worker re-evaluated load on each wakeup. With the
+            # fix, it stays pinned.
+            time.sleep(0.4)
+            second = archive_worker.get_load_pause_state()['last_pause_at']
+            time.sleep(0.4)
+            third = archive_worker.get_load_pause_state()['last_pause_at']
+            assert second == first, (
+                "last_pause_at advanced from %r to %r within the same "
+                "pause window — it must pin to the moment the pause "
+                "started, not the last time the worker re-checked load."
+                % (first, second)
+            )
+            assert third == first, (
+                "last_pause_at advanced from %r to %r within the same "
+                "pause window — must remain pinned." % (first, third)
+            )
+        finally:
+            archive_worker.stop_worker(timeout=5)
+
 

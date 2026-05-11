@@ -817,6 +817,11 @@ def _run_worker_loop(db_path: str, archive_root: str,
                      teslacam_root: Optional[str],
                      worker_id: str) -> None:
     """The thread target. One file at a time, until stop is signaled."""
+    # ``_load_pause_until`` is read AND written below (leading edge sets it,
+    # trailing edge clears it). Declare global at function scope per
+    # Python convention rather than burying it inside a conditional.
+    global _load_pause_until
+
     _apply_low_priority()
     try:
         released = archive_queue.recover_stale_claims(db_path=db_path)
@@ -864,7 +869,6 @@ def _run_worker_loop(db_path: str, archive_root: str,
             except (AttributeError, OSError):
                 load1 = 0.0
             if load1 > load_pause_threshold:
-                global _load_pause_until
                 # Only log INFO on the leading edge of the pause
                 # window so back-to-back high-load iterations don't
                 # spam the journal. ``_load_pause_until`` is the
@@ -873,10 +877,15 @@ def _run_worker_loop(db_path: str, archive_root: str,
                 # window and stay quiet.
                 already_paused = _load_pause_until > time.time()
                 _load_pause_until = time.time() + load_pause_seconds
-                with _state_lock:
-                    _state['last_load_pause_at'] = time.time()
-                    _state['last_load_pause_loadavg'] = float(load1)
                 if not already_paused:
+                    # Pin ``last_pause_at`` to the moment the pause
+                    # actually started — within a sustained pause
+                    # window the field must NOT tick forward on
+                    # every iteration (parity with disk-pause, which
+                    # arms ``last_disk_pause_at`` only on first hit).
+                    with _state_lock:
+                        _state['last_load_pause_at'] = time.time()
+                        _state['last_load_pause_loadavg'] = float(load1)
                     logger.info(
                         "archive_worker: 1-min loadavg %.2f > %.2f — "
                         "pausing %.0fs to relieve SDIO/CPU contention",

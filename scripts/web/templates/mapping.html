@@ -22,6 +22,59 @@
     }
     #map { width: 100%; height: 100%; z-index: 1; }
 
+    /* ── Top progress bar (active during day-load fetches) ──
+       Sits flush with the top of the map container. Hidden by
+       default; .is-loading on .map-container reveals it. The
+       indeterminate animation is a single CSS keyframe — no JS
+       per-frame work — so it stays smooth even while renderDay()
+       is busy laying down ~2k Leaflet polyline points.
+       A 150 ms reveal delay (handled in JS) keeps the bar from
+       flashing on instant loads. */
+    .map-loading-bar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+        z-index: 1100;
+        pointer-events: none;
+        background: transparent;
+        opacity: 0;
+        transition: opacity 120ms ease-out;
+    }
+    .map-loading-bar > .map-loading-bar-fill {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        width: 30%;
+        background: linear-gradient(
+            90deg,
+            transparent 0%,
+            var(--ds-accent-primary, #3B82F6) 20%,
+            var(--ds-accent-primary, #3B82F6) 80%,
+            transparent 100%
+        );
+        animation: map-loading-bar-slide 1.1s linear infinite;
+    }
+    .map-container.is-loading .map-loading-bar {
+        opacity: 1;
+    }
+    .map-container.is-loading .trip-card-stats {
+        opacity: 0.55;
+    }
+    @keyframes map-loading-bar-slide {
+        0%   { transform: translateX(-100%); }
+        100% { transform: translateX(400%); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .map-loading-bar > .map-loading-bar-fill {
+            animation: none;
+            width: 100%;
+            opacity: 0.7;
+        }
+    }
+
     /* ── Trip Card (bottom-left floating) ── */
     .trip-card {
         position: absolute;
@@ -80,6 +133,7 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        transition: opacity 120ms ease-out;
     }
     .trip-card-indexed {
         font-size: 0.6875rem;
@@ -770,6 +824,15 @@
     <!-- Map -->
     <div id="map"></div>
 
+    <!-- Day-load progress bar (hidden until .map-container.is-loading) -->
+    <div class="map-loading-bar" id="mapLoadingBar"
+         role="progressbar"
+         aria-label="Loading map data"
+         aria-busy="false"
+         aria-hidden="true">
+        <div class="map-loading-bar-fill"></div>
+    </div>
+
     <!-- Event-Type Filter Pills (top-center, populated dynamically per day) -->
     <div class="event-filter-pills" id="eventFilterPills" role="toolbar" aria-label="Filter event markers"></div>
 
@@ -982,6 +1045,72 @@ let allEvents = [];
 let dayLoadSeq = 0;
 let tripSelectSeq = 0;
 let showingAllTime = false;
+
+// ── Day-load progress indicator ──
+// Cheap nestable counter: callers wrap each in-flight load in a
+// beginMapLoading() / endMapLoading() pair. The map-container's
+// .is-loading class drops only when the counter reaches zero, so
+// overlapping fetches (e.g. an All-time render kicking off while
+// a prior loadDay() is still in-flight) keep the bar visible
+// without flicker. A 150 ms reveal delay hides the bar entirely
+// for instant loads (cached, sub-second), so the user only ever
+// sees it when there's actually something to wait for.
+let mapLoadingDepth = 0;
+let mapLoadingRevealTimer = null;
+
+function beginMapLoading() {
+    mapLoadingDepth += 1;
+    if (mapLoadingDepth !== 1) return;
+    if (mapLoadingRevealTimer) {
+        clearTimeout(mapLoadingRevealTimer);
+    }
+    mapLoadingRevealTimer = setTimeout(function () {
+        mapLoadingRevealTimer = null;
+        if (mapLoadingDepth <= 0) return;
+        const container = document.querySelector('.map-container');
+        const bar = document.getElementById('mapLoadingBar');
+        if (container) container.classList.add('is-loading');
+        if (bar) {
+            bar.setAttribute('aria-busy', 'true');
+            bar.setAttribute('aria-hidden', 'false');
+        }
+    }, 150);
+    disableDayNav();
+}
+
+function endMapLoading() {
+    mapLoadingDepth = Math.max(0, mapLoadingDepth - 1);
+    if (mapLoadingDepth !== 0) return;
+    if (mapLoadingRevealTimer) {
+        clearTimeout(mapLoadingRevealTimer);
+        mapLoadingRevealTimer = null;
+    }
+    const container = document.querySelector('.map-container');
+    const bar = document.getElementById('mapLoadingBar');
+    if (container) container.classList.remove('is-loading');
+    if (bar) {
+        bar.setAttribute('aria-busy', 'false');
+        bar.setAttribute('aria-hidden', 'true');
+    }
+    // Re-enable of the nav buttons is the responsibility of renderDayCard()
+    // / renderAllTimeCard() — those callers know the new view's edge-state
+    // (e.g. next stays disabled on the most-recent day). Calling them is
+    // the only correct way to restore the buttons.
+}
+
+function disableDayNav() {
+    // Disable the prev/next/all buttons during in-flight loads so
+    // the user can't queue a chain of clicks that race the seq guard.
+    // The corresponding re-enable happens in renderDayCard() /
+    // renderAllTimeCard() once the load completes — those functions
+    // set the correct enabled state for the new view.
+    const prevBtn = document.getElementById('dayPrev');
+    const nextBtn = document.getElementById('dayNext');
+    const allBtn = document.getElementById('dayAllBtn');
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    if (allBtn) allBtn.disabled = true;
+}
 
 // All-time trips snapshot. Populated by renderAllTime() once the
 // race-guard passes; cleared whenever we leave All time. The
@@ -1631,6 +1760,7 @@ async function loadDay(date, options) {
     fsdLayer.clearLayers();
     eventCluster.clearLayers();
 
+    beginMapLoading();
     try {
         // No date-scoped event cap: a busy sentry day can have
         // hundreds of events and silently truncating would hide
@@ -1666,6 +1796,15 @@ async function loadDay(date, options) {
         rebuildEventFilterPills();
         if (typeof showToast === 'function') {
             showToast('Could not load this day. Try again.', 'warning');
+        }
+    } finally {
+        endMapLoading();
+        // Only re-render the day card if we're still the active load
+        // — a stale finally must not re-enable nav buttons that a
+        // newer in-flight loadDay() has intentionally disabled. The
+        // active load will run its own renderDayCard() when it lands.
+        if (seq === dayLoadSeq && date === currentDate) {
+            renderDayCard();
         }
     }
 }
@@ -2240,6 +2379,7 @@ async function renderAllTime() {
     rebuildEventFilterPills();
 
     let routesData, eventsData;
+    beginMapLoading();
     try {
         const [routesResp, eventsResp] = await Promise.all([
             fetch('/api/all-routes'),
@@ -2249,7 +2389,11 @@ async function renderAllTime() {
         eventsData = await eventsResp.json();
     } catch (e) {
         console.error('Failed to load all-time view:', e);
+        endMapLoading();
+        // Only re-render the all-time card if we're still on All
+        // time — a stale failure must not stomp on a newer load.
         if (seq !== dayLoadSeq || !showingAllTime) return;
+        renderAllTimeCard();
         if (typeof showToast === 'function') {
             showToast('Could not load All time view. Try again.', 'warning');
         }
@@ -2258,7 +2402,10 @@ async function renderAllTime() {
 
     // Race guard: user may have cycled out of All time or started
     // a different load while we were waiting. Apply nothing if so.
-    if (seq !== dayLoadSeq || !showingAllTime) return;
+    if (seq !== dayLoadSeq || !showingAllTime) {
+        endMapLoading();
+        return;
+    }
 
     // Re-clear between fetch start and result land in case an
     // earlier load added layers; guarantees no double-render.
@@ -2351,6 +2498,16 @@ async function renderAllTime() {
     if (bounds.length) {
         map.fitBounds(bounds, { padding: [30, 30] });
     }
+
+    // Bar stays up through the polyline build above; release once the
+    // visible work is done so the user sees the indicator until the
+    // map is actually drawn (not just until the JSON arrived). Then
+    // re-render the all-time card so the nav buttons get re-enabled
+    // (beginMapLoading() disabled them via disableDayNav(); the card
+    // renderer is the one that knows the correct edge-state for the
+    // restored view, so it owns re-enable).
+    endMapLoading();
+    renderAllTimeCard();
 }
 
 // --- Video Player Overlay ---

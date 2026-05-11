@@ -74,6 +74,9 @@ eval "$(yq -r '
   "SMB_CONF=\"" + .system.samba_conf + "\"",
   "CLOUD_ARCHIVE_ENABLED=\"" + (.cloud_archive.enabled // false | tostring) + "\"",
   "CLOUD_ARCHIVE_PROVIDER=\"" + (.cloud_archive.provider // "") + "\"",
+  "ARCHIVE_QUEUE_ENABLED=\"" + (.archive_queue.enabled // true | tostring) + "\"",
+  "ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS=\"" + (.archive_queue.rescan_interval_seconds // 60 | tostring) + "\"",
+  "ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED=\"" + (.archive_queue.boot_catchup_enabled // true | tostring) + "\"",
   "TESLA_API_CLIENT_ID=\"" + (.tesla_api.client_id // "") + "\""
 ' "$CONFIG_YAML")"
 

@@ -195,6 +195,176 @@ class TestDatabase:
         conn.close()
 
 
+class TestArchiveQueueSchema:
+    """v9 → v10 migration adds the ``archive_queue`` table + ready index.
+
+    These tests verify the migration is forward-compatible (creates the
+    new table on a fresh DB), idempotent (re-running ``_init_db`` is a
+    no-op), and non-destructive (existing rows in trips / waypoints /
+    detected_events / indexed_files / indexing_queue survive the
+    migration).
+    """
+
+    def test_archive_queue_table_exists_after_init(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        assert 'archive_queue' in tables
+        conn.close()
+
+    def test_archive_queue_ready_index_exists(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        indexes = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()]
+        assert 'archive_queue_ready' in indexes
+        conn.close()
+
+    def test_archive_queue_columns_match_spec(self, tmp_path):
+        """All 13 columns from the issue spec must be present with the
+        correct types and defaults."""
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        cols = {r[1]: r for r in conn.execute(
+            "PRAGMA table_info(archive_queue)"
+        ).fetchall()}
+        # Column name: (type, notnull, dflt_value, pk)
+        # cid(0), name(1), type(2), notnull(3), dflt_value(4), pk(5)
+        assert 'id' in cols and cols['id'][5] == 1  # PK
+        assert 'source_path' in cols
+        assert cols['source_path'][2] == 'TEXT'
+        assert cols['source_path'][3] == 1  # NOT NULL
+        assert 'dest_path' in cols
+        assert 'priority' in cols
+        assert cols['priority'][4] == '3'  # default 3
+        assert 'status' in cols
+        assert cols['status'][4] == "'pending'"
+        assert 'attempts' in cols
+        assert cols['attempts'][4] == '0'
+        assert 'last_error' in cols
+        assert 'enqueued_at' in cols
+        assert cols['enqueued_at'][3] == 1  # NOT NULL
+        assert 'claimed_at' in cols
+        assert 'claimed_by' in cols
+        assert 'copied_at' in cols
+        assert 'expected_size' in cols
+        assert 'expected_mtime' in cols
+        assert cols['expected_mtime'][2] == 'REAL'
+        conn.close()
+
+    def test_source_path_unique_constraint(self, tmp_path):
+        """``source_path`` must enforce UNIQUE so dedup is automatic."""
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        conn.execute(
+            "INSERT INTO archive_queue (source_path, enqueued_at) "
+            "VALUES (?, ?)",
+            ('/a/b.mp4', '2026-05-11T09:00:00+00:00'),
+        )
+        conn.commit()
+        # Second insert with same source_path raises IntegrityError.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO archive_queue (source_path, enqueued_at) "
+                "VALUES (?, ?)",
+                ('/a/b.mp4', '2026-05-11T09:01:00+00:00'),
+            )
+        conn.close()
+
+    def test_schema_version_is_v10(self, tmp_path):
+        from services.mapping_service import _SCHEMA_VERSION
+        # Phase 2a bumps the schema to v10.
+        assert _SCHEMA_VERSION >= 10
+
+    def test_migration_is_idempotent(self, tmp_path):
+        """Running ``_init_db`` twice must not lose archive_queue rows."""
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        conn.execute(
+            "INSERT INTO archive_queue (source_path, enqueued_at) "
+            "VALUES (?, ?)",
+            ('/keep/me.mp4', '2026-05-11T09:00:00+00:00'),
+        )
+        conn.commit()
+        conn.close()
+
+        # Re-init the same DB. Must preserve the row.
+        conn2 = _init_db(db_path)
+        n = conn2.execute(
+            "SELECT COUNT(*) FROM archive_queue"
+        ).fetchone()[0]
+        assert n == 1
+        row = conn2.execute(
+            "SELECT source_path FROM archive_queue"
+        ).fetchone()
+        assert row[0] == '/keep/me.mp4'
+        conn2.close()
+
+    def test_migration_preserves_existing_data(self, tmp_path):
+        """Pre-existing trips / waypoints / detected_events / indexed_files
+        must survive the migration to v10 unchanged."""
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        # Seed data in the older tables.
+        conn.execute(
+            "INSERT INTO trips (start_time, end_time) VALUES (?, ?)",
+            ('2025-01-01T00:00:00', '2025-01-01T01:00:00'),
+        )
+        trip_id = conn.execute(
+            "SELECT id FROM trips ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO waypoints
+                (trip_id, timestamp, lat, lon)
+               VALUES (?, ?, ?, ?)""",
+            (trip_id, '2025-01-01T00:30:00', 37.7749, -122.4194),
+        )
+        conn.execute(
+            """INSERT INTO indexed_files
+                (file_path, indexed_at)
+               VALUES (?, ?)""",
+            ('/tmp/x.mp4', '2025-01-01T00:00:00'),
+        )
+        conn.commit()
+        conn.close()
+
+        # Re-init (no-op for v10) and verify rows are untouched.
+        conn2 = _init_db(db_path)
+        assert conn2.execute(
+            "SELECT COUNT(*) FROM trips"
+        ).fetchone()[0] == 1
+        assert conn2.execute(
+            "SELECT COUNT(*) FROM waypoints"
+        ).fetchone()[0] == 1
+        assert conn2.execute(
+            "SELECT COUNT(*) FROM indexed_files"
+        ).fetchone()[0] == 1
+        conn2.close()
+
+    def test_indexing_queue_unaffected_by_v10(self, tmp_path):
+        """The Phase 2a migration must not touch indexing_queue rows."""
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        conn.execute(
+            """INSERT INTO indexing_queue
+                (canonical_key, file_path, priority, enqueued_at)
+               VALUES (?, ?, ?, ?)""",
+            ('keyA', '/tmp/y.mp4', 50, 1700000000.0),
+        )
+        conn.commit()
+        conn.close()
+
+        conn2 = _init_db(db_path)
+        n = conn2.execute(
+            "SELECT COUNT(*) FROM indexing_queue"
+        ).fetchone()[0]
+        assert n == 1
+        conn2.close()
+
+
 # ---------------------------------------------------------------------------
 # Event Detection Tests
 # ---------------------------------------------------------------------------

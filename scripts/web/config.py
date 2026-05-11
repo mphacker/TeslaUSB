@@ -139,6 +139,21 @@ ARCHIVE_DIR = _archive_path if _archive_path else os.path.join(
     os.path.expanduser(f"~{TARGET_USER}"), 'ArchivedClips'
 )
 
+# Archive Queue Configuration (issue #76 — Phase 2a producers; worker in 2b)
+# Producer-only at this version: the inotify watcher, the 60-s rescan thread,
+# and the boot catch-up scan all enqueue rows into ``archive_queue`` (in
+# geodata.db). When ``ARCHIVE_QUEUE_ENABLED`` is False the wiring in
+# web_control.py skips both the watcher callback registration and the
+# producer thread, so behavior matches pre-#76 installs exactly.
+_archive_queue = config.get('archive_queue', {})
+ARCHIVE_QUEUE_ENABLED = bool(_archive_queue.get('enabled', True))
+ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS = float(
+    _archive_queue.get('rescan_interval_seconds', 60)
+)
+ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED = bool(
+    _archive_queue.get('boot_catchup_enabled', True)
+)
+
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)
 # ============================================================================

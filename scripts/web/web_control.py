@@ -54,6 +54,7 @@ from blueprints import (
     catch_all_redirect,
     cloud_archive_bp,
     live_events_bp,
+    archive_queue_bp,
 )
 
 app.register_blueprint(mapping_bp)
@@ -72,6 +73,7 @@ app.register_blueprint(api_bp)
 app.register_blueprint(fsck_bp)
 app.register_blueprint(cloud_archive_bp)
 app.register_blueprint(live_events_bp)
+app.register_blueprint(archive_queue_bp)
 # Register captive portal blueprint LAST to avoid conflicting with other routes
 app.register_blueprint(captive_portal_bp)
 
@@ -130,7 +132,7 @@ if __name__ == "__main__":
     try:
         from services.file_watcher_service import (
             start_watcher, register_callback, register_delete_callback,
-            register_event_json_callback,
+            register_event_json_callback, register_archive_callback,
         )
         watch_paths = []
         # Watch TeslaCam on USB (RO mount)
@@ -201,6 +203,34 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Warning: Failed to register LES watcher callback: {e}")
 
+            # Archive queue producer (issue #76 Phase 2a): mirror the
+            # mp4 callback into the new archive_queue table. Phase 2a
+            # is producer-only — entries accumulate, no worker drains
+            # them until Phase 2b. Independent enable flag so existing
+            # installs that don't want the queue can disable it cleanly.
+            try:
+                from config import ARCHIVE_QUEUE_ENABLED
+                if ARCHIVE_QUEUE_ENABLED:
+                    def _on_new_videos_for_archive(file_paths):
+                        from services.archive_queue import (
+                            enqueue_many_for_archive,
+                        )
+                        try:
+                            enqueue_many_for_archive(list(file_paths))
+                        except Exception as e:
+                            print(
+                                "Warning: archive_queue enqueue failed: "
+                                f"{e}"
+                            )
+
+                    register_archive_callback(_on_new_videos_for_archive)
+                    print("File watcher → archive_queue producer registered")
+            except Exception as e:
+                print(
+                    "Warning: Failed to register archive_queue watcher "
+                    f"callback: {e}"
+                )
+
             start_watcher(watch_paths)
             print(f"File watcher started for {len(watch_paths)} paths")
     except Exception as e:
@@ -249,6 +279,38 @@ if __name__ == "__main__":
                 print("Daily stale scan scheduled")
     except Exception as e:
         print(f"Warning: Failed to start indexing worker: {e}")
+
+    # Archive queue producer thread (issue #76 Phase 2a). Mirrors the
+    # indexing worker's lifecycle: starts after the watcher is
+    # registered so the boot catch-up scan and the every-60-s rescan
+    # observe the same TeslaCam root. Producer-only — no consumer
+    # exists yet (Phase 2b adds the worker). Failure here must never
+    # take down gadget_web.
+    try:
+        from config import (
+            ARCHIVE_QUEUE_ENABLED,
+            ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS,
+            ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED,
+            MAPPING_DB_PATH as _ARCHIVE_QUEUE_DB,
+        )
+        if ARCHIVE_QUEUE_ENABLED:
+            from services.video_service import get_teslacam_path
+            from services import archive_producer
+            tc = get_teslacam_path()
+            if tc:
+                archive_producer.start_producer(
+                    tc,
+                    db_path=_ARCHIVE_QUEUE_DB,
+                    rescan_interval_seconds=(
+                        ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS
+                    ),
+                    boot_catchup_enabled=(
+                        ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED
+                    ),
+                )
+                print("Archive queue producer started (Phase 2a)")
+    except Exception as e:
+        print(f"Warning: Failed to start archive queue producer: {e}")
 
     # Live Event Sync worker: starts BEFORE cloud_archive auto-trigger so
     # any persistent LES queue (from a prior reboot/WiFi outage) gets

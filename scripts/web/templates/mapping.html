@@ -990,6 +990,17 @@ let showingAllTime = false;
 // rendered All time layers — never let it outlive them.
 let allTimeTrips = [];
 
+// Per-day playability snapshot for the disambiguation chooser.
+// Shape: { date: 'YYYY-MM-DD', trips: { <trip_id>: <bool> } }.
+// Populated by loadPlayableTripsForCurrentDay() after each loadDay()
+// fetch lands. Read by filterPlayableCandidates() to drop ghost trips
+// (waypoints reference video files Tesla has overwritten) before the
+// disambiguation popup is built (issue #77). Null until the first
+// load completes — filtering fails-open in that window so a slow
+// network never hides real trips. Cleared whenever we leave the
+// per-day view so stale state can't bleed into a subsequent day.
+let playableTripsForDay = null;
+
 // Highlight overlay used by the disambiguation popup to flash a
 // candidate trip's polyline on row hover. Drawn into a dedicated
 // layer group (not tripLayer) so we never have to "restore" the
@@ -1193,6 +1204,78 @@ function pickPlayableWaypointForTrip(trip, clickLatLng) {
         if (d2 < bestDist2) { bestDist2 = d2; best = wp; }
     }
     return best;
+}
+
+function filterPlayableCandidates(candidates) {
+    // Drop candidates whose trip is a "ghost" — its waypoints'
+    // video_path values still point at clips Tesla has overwritten,
+    // so the disambiguation popup would offer them and the user's
+    // pick would yield a "No video available" toast. The server's
+    // /api/trips/playable endpoint authoritatively answers this via
+    // os.path.isfile() on the canonical paths (issue #77).
+    //
+    // Fail-open: if the playability snapshot hasn't arrived yet
+    // (slow network, fetch errored, or All time view), pass the
+    // candidate list through unchanged so we never hide a real trip
+    // because of a metadata fetch hiccup. Worst case: the user sees
+    // the same toast they would have seen pre-fix.
+    if (!candidates || !candidates.length) return candidates || [];
+    if (!playableTripsForDay
+        || playableTripsForDay.date !== currentDate
+        || !playableTripsForDay.trips) {
+        return candidates;
+    }
+    const known = playableTripsForDay.trips;
+    const filtered = [];
+    for (const c of candidates) {
+        const tid = c && c.trip && c.trip.trip_id;
+        if (tid == null) {
+            // Trip without an id (defensive) — keep it; we have no
+            // basis to filter.
+            filtered.push(c);
+            continue;
+        }
+        // The server JSON-stringifies trip ids (object keys must be
+        // strings). Look up by string form; treat unknown trips as
+        // playable to avoid hiding any trip the snapshot missed.
+        const entry = known[String(tid)];
+        if (entry === false) continue;
+        filtered.push(c);
+    }
+    return filtered;
+}
+
+async function loadPlayableTripsForCurrentDay(date, seq) {
+    // Fetch /api/trips/playable for ``date`` and stash the result in
+    // playableTripsForDay so the disambiguation chooser can hide
+    // ghost trips (issue #77). Race-guarded against rapid day
+    // navigation: the caller passes the same dayLoadSeq token used
+    // by loadDay(), and we only commit if it's still current.
+    //
+    // The endpoint is cached server-side for 60 s, so repeated
+    // navigation back to the same day is essentially free.
+    if (!date) return;
+    let data;
+    try {
+        const resp = await fetch(
+            `/api/trips/playable?date=${encodeURIComponent(date)}`,
+        );
+        if (!resp.ok) {
+            // Non-200 (e.g. 503 when image is missing or 400 on bad
+            // date) — leave snapshot null so filtering fails-open.
+            return;
+        }
+        data = await resp.json();
+    } catch (e) {
+        // Network error — same fail-open behavior.
+        console.warn('Failed to load playable-trips snapshot:', e);
+        return;
+    }
+    if (seq !== dayLoadSeq || date !== currentDate) return;
+    if (data && data.date === date && data.trips
+            && typeof data.trips === 'object') {
+        playableTripsForDay = { date: date, trips: data.trips };
+    }
 }
 
 function highlightCandidateTrip(trip) {
@@ -1527,6 +1610,10 @@ async function loadDay(date, options) {
     // and the All time waypoints would be stale anyway after a
     // re-render.
     allTimeTrips = [];
+    // Drop the previous day's playability snapshot so a stale
+    // entry can never filter out a real trip on the new day.
+    // loadPlayableTripsForCurrentDay() repopulates this below.
+    playableTripsForDay = null;
     showingAllTime = false;
     currentDate = date;
     writeUrlState({ date: date }, {
@@ -1562,6 +1649,12 @@ async function loadDay(date, options) {
         currentDayData = routesData && routesData.trips ? routesData : { trips: [] };
         allEvents = eventsData.events || [];
         rebuildEventFilterPills();
+        // Kick off the playability snapshot in parallel with
+        // renderDay() — the disambiguation popup only needs it on
+        // user click, and renderDay() doesn't depend on it. A late
+        // arrival is fine; filterPlayableCandidates() fails-open
+        // until the snapshot lands. Race-guarded by ``seq``.
+        loadPlayableTripsForCurrentDay(date, seq);
         await renderDay();
     } catch (e) {
         console.error('Failed to load day routes/events:', e);
@@ -2017,19 +2110,42 @@ function renderTripOnDay(trip, bounds) {
             // picks whichever trip's clickTarget happens to be on top
             // and the user can't choose the drive they wanted.
             const candidates = findCandidatesNearClick(e.latlng);
-            if (candidates.length >= 2) {
-                showDisambigPopup(e.latlng, candidates);
+            // Drop "ghost" trips whose video files no longer exist on
+            // disk so the popup never offers them and the user never
+            // hits a "No video available" toast (issue #77). Filter
+            // fails-open while the playability snapshot is loading.
+            const playableCandidates = filterPlayableCandidates(candidates);
+            if (playableCandidates.length >= 2) {
+                showDisambigPopup(e.latlng, playableCandidates);
                 return;
             }
-            // Single-candidate (or zero) fast path — preserve the
-            // pre-disambiguation behavior of opening the nearest
-            // playable waypoint immediately. Pass the full trip's
-            // valid waypoints (not just this chunk) so the overlay
-            // can navigate the entire trip's video timeline.
-            const trip = (candidates[0] && candidates[0].trip) || { waypoints: valid };
-            const playable = pickPlayableWaypointForTrip(trip, e.latlng);
-            if (playable) {
-                openVideoOverlay(playable, e.containerPoint, trip.waypoints || valid);
+            if (playableCandidates.length === 1) {
+                // Exactly one trip survived the filter — skip the
+                // popup and play directly. Use the original click
+                // latlng (not the candidate's seed) so we pick the
+                // same point the user actually tapped.
+                const trip = playableCandidates[0].trip;
+                const playable = pickPlayableWaypointForTrip(trip, e.latlng);
+                if (playable) {
+                    openVideoOverlay(playable, e.containerPoint, trip.waypoints || valid);
+                }
+                return;
+            }
+            // Zero playable candidates. If the spatial search did
+            // find something but every match was a ghost, tell the
+            // user. Otherwise (no spatial match at all) fall through
+            // to the legacy per-chunk fallback — try this trip's
+            // nearest playable waypoint.
+            if (candidates.length > 0) {
+                if (typeof showToast === 'function') {
+                    showToast('No clips available for this location.', 'warning');
+                }
+                return;
+            }
+            const fallbackTrip = { waypoints: valid };
+            const fallbackPlayable = pickPlayableWaypointForTrip(fallbackTrip, e.latlng);
+            if (fallbackPlayable) {
+                openVideoOverlay(fallbackPlayable, e.containerPoint, valid);
             }
         });
     }
@@ -2108,6 +2224,12 @@ async function renderAllTime() {
     // the fetch doesn't search a half-stale trip set, and so a
     // failed load doesn't leave the previous trips searchable.
     allTimeTrips = [];
+    // All-time view doesn't apply the per-day playable-trips filter
+    // (its candidates resolve to a "go to that day" navigation, not
+    // a video open), but clear the snapshot anyway so a click on
+    // an All-time polyline followed by quick navigation back to a
+    // per-day view can't reuse a stale snapshot from a different day.
+    playableTripsForDay = null;
     tripLayer.clearLayers();
     fsdLayer.clearLayers();
     eventCluster.clearLayers();

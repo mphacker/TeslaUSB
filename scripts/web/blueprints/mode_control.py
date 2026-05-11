@@ -33,6 +33,11 @@ def _pause_worker_for_mode_switch() -> bool:
     keeps making progress instead of staying frozen until the next
     successful mode switch.
 
+    Phase 2b (issue #76): the archive worker is paused with the same
+    contract — its mid-file copies must complete before we can swap
+    the RO USB mount. If either worker fails to pause, the mode switch
+    is refused; both are immediately resumed so neither stays frozen.
+
     Failure semantics: if mapping is enabled and the pause API itself
     raises an unexpected exception, we treat that as a failure and
     refuse the mode switch — better to surface a 503 to the user than
@@ -43,44 +48,60 @@ def _pause_worker_for_mode_switch() -> bool:
         from config import MAPPING_ENABLED
     except ImportError:
         MAPPING_ENABLED = False  # noqa: N806
+
+    indexer_ok = True
+    archive_ok = True
+
     try:
         from services import indexing_worker
-        if not indexing_worker.is_running():
-            return True
-        ok = indexing_worker.pause_worker(timeout=_PAUSE_TIMEOUT_SECONDS)
-        if not ok:
-            # The worker is still mid-file. Clear the pause flag so it
-            # can resume after the current file finishes — otherwise it
-            # would idle forever, breaking all subsequent indexing.
-            indexing_worker.resume_worker()
-        return ok
+        if indexing_worker.is_running():
+            indexer_ok = indexing_worker.pause_worker(
+                timeout=_PAUSE_TIMEOUT_SECONDS,
+            )
+            if not indexer_ok:
+                indexing_worker.resume_worker()
     except ImportError as e:
-        # No worker module available — nothing to pause. Safe to proceed.
         logger.debug("indexing_worker module not available: %s", e)
-        return True
     except Exception as e:  # noqa: BLE001
         if MAPPING_ENABLED:
-            # Worker should be present but pause API failed. Don't
-            # silently let the mode switch proceed — surface the error.
             logger.error(
                 "Pause indexing worker failed (mapping enabled): %s", e,
             )
-            return False
-        logger.warning("Failed to pause indexing worker: %s", e)
-        return True
+            indexer_ok = False
+        else:
+            logger.warning("Failed to pause indexing worker: %s", e)
+
+    try:
+        from services import archive_worker
+        if archive_worker.is_running():
+            archive_ok = archive_worker.pause_worker(
+                timeout=_PAUSE_TIMEOUT_SECONDS,
+            )
+            if not archive_ok:
+                archive_worker.resume_worker()
+    except ImportError as e:
+        logger.debug("archive_worker module not available: %s", e)
+    except Exception as e:  # noqa: BLE001
+        # Archive failure is still a refusal — a mid-copy unmount can
+        # produce a 0-byte ArchivedClips file (we'd lose the source
+        # too if Tesla rotates it before the next archive cycle).
+        logger.error("Pause archive worker failed: %s", e)
+        archive_ok = False
+
+    return indexer_ok and archive_ok
 
 
 def _resume_worker_after_mode_switch() -> None:
-    """Resume the indexing worker (and trigger a catch-up scan).
+    """Resume the indexing + archive workers (and trigger a catch-up scan).
 
     The catch-up scan handles the case where a clip arrived while the
-    worker was paused or while we were swapping mount namespaces — the
+    workers were paused or while we were swapping mount namespaces — the
     file-watcher's inotify subscription is invalidated by the unmount,
     so the watcher alone can't be trusted to notice everything.
 
-    Also lazy-starts the worker if it never started at boot (e.g. the
-    TeslaCam mount wasn't ready when ``web_control.startup`` ran but
-    the user has now switched into present mode).
+    Also lazy-starts both workers if they never started at boot (e.g.
+    the TeslaCam mount wasn't ready when ``web_control.startup`` ran
+    but the user has now switched into present mode).
     """
     try:
         from services import indexing_worker
@@ -104,6 +125,14 @@ def _resume_worker_after_mode_switch() -> None:
         indexing_worker.resume_worker()
     except Exception as e:  # noqa: BLE001
         logger.warning("Failed to resume indexing worker: %s", e)
+    # Resume the archive worker independently so a failure to resume
+    # the indexer doesn't leave the archive frozen (and vice-versa).
+    try:
+        from services import archive_worker
+        archive_worker.ensure_worker_started()
+        archive_worker.resume_worker()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to resume archive worker: %s", e)
 
 
 def _restart_watcher_after_mode_switch() -> None:

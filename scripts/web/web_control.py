@@ -119,12 +119,12 @@ if __name__ == "__main__":
     print(f"Gadget directory: {GADGET_DIR}")
     print(f"Access the interface at: http://0.0.0.0:{WEB_PORT}/")
 
-    # Start RecentClips archive timer (copies clips to SD card before Tesla deletes them)
-    try:
-        from services.video_archive_service import start_archive_timer
-        start_archive_timer()
-    except Exception as e:
-        print(f"Warning: Failed to start archive timer: {e}")
+    # Phase 2b (issue #76): the legacy ``start_archive_timer`` periodic
+    # thread is gone. The new flow is queue-driven: ``archive_producer``
+    # enqueues into ``archive_queue``, and ``archive_worker`` drains
+    # the queue one file at a time. Both are started below, after the
+    # file watcher is wired so the worker's `wake()` from the producer
+    # callback path lands cleanly.
 
     # Start file watcher for new video detection. The callback enqueues
     # individual paths into the indexing_queue table; the indexing
@@ -283,9 +283,8 @@ if __name__ == "__main__":
     # Archive queue producer thread (issue #76 Phase 2a). Mirrors the
     # indexing worker's lifecycle: starts after the watcher is
     # registered so the boot catch-up scan and the every-60-s rescan
-    # observe the same TeslaCam root. Producer-only — no consumer
-    # exists yet (Phase 2b adds the worker). Failure here must never
-    # take down gadget_web.
+    # observe the same TeslaCam root. Failure here must never take
+    # down gadget_web.
     try:
         from config import (
             ARCHIVE_QUEUE_ENABLED,
@@ -311,6 +310,32 @@ if __name__ == "__main__":
                 print("Archive queue producer started (Phase 2a)")
     except Exception as e:
         print(f"Warning: Failed to start archive queue producer: {e}")
+
+    # Archive queue worker thread (issue #76 Phase 2b). Drains
+    # ``archive_queue`` one file at a time, copying USB-side clips
+    # into ``ARCHIVE_DIR`` and enqueueing them into the indexer queue.
+    # The producer above is the only thing that puts rows into the
+    # queue; this worker is the only thing that takes them out. The
+    # legacy ``video_archive_service`` periodic timer has been removed
+    # in favor of this pair.
+    try:
+        from config import (
+            ARCHIVE_QUEUE_ENABLED,
+            ARCHIVE_DIR,
+            MAPPING_DB_PATH as _ARCHIVE_WORKER_DB,
+        )
+        if ARCHIVE_QUEUE_ENABLED:
+            from services.video_service import get_teslacam_path
+            from services import archive_worker
+            tc = get_teslacam_path()
+            archive_worker.start_worker(
+                _ARCHIVE_WORKER_DB,
+                ARCHIVE_DIR,
+                teslacam_root=tc,
+            )
+            print("Archive queue worker started (Phase 2b)")
+    except Exception as e:
+        print(f"Warning: Failed to start archive queue worker: {e}")
 
     # Live Event Sync worker: starts BEFORE cloud_archive auto-trigger so
     # any persistent LES queue (from a prior reboot/WiFi outage) gets

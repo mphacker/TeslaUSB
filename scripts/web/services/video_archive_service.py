@@ -13,11 +13,10 @@ monitoring between files.
 import logging
 import os
 import shutil
-import subprocess
 import threading
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,6 @@ logger = logging.getLogger(__name__)
 from config import (
     ARCHIVE_DIR,
     ARCHIVE_ENABLED,
-    ARCHIVE_INTERVAL_MINUTES,
     ARCHIVE_RETENTION_DAYS,
     ARCHIVE_MIN_FREE_SPACE_GB,
     ARCHIVE_MAX_SIZE_GB,
@@ -79,19 +77,13 @@ _PRUNE_GRACE_SECONDS = 6 * 3600  # 6 hours
 # ---------------------------------------------------------------------------
 # Background Thread State
 # ---------------------------------------------------------------------------
-
-_archive_thread: Optional[threading.Thread] = None
-_archive_lock = threading.Lock()
+#
+# Phase 2b (issue #76): the legacy ``_archive_thread`` periodic timer
+# is gone — the archive flow now runs entirely inside
+# ``services.archive_worker``. ``_archive_cancel`` is kept so
+# ``stop_archive_timer`` and any retention helper that still consults
+# it (defensive abort flag) keep working unchanged.
 _archive_cancel = threading.Event()
-# Set as soon as an archive is triggered (manual or timer) and BEFORE
-# we try to acquire the task_coordinator lock. Cleared only when the
-# archive finishes (or its acquire times out). This prevents a second
-# archive thread from being spawned while the first is still waiting
-# inside ``acquire_task('archive', wait_seconds=60.0)`` — which is a
-# new race introduced by switching from a non-blocking acquire to a
-# blocking one. ``_status['running']`` is not enough because it is
-# set only AFTER the lock is acquired.
-_archive_pending = False
 
 _status: Dict = {
     "running": False,
@@ -124,501 +116,84 @@ def get_archive_dir() -> str:
 
 
 def start_archive_timer() -> None:
-    """Start the periodic background archive thread.
+    """Phase 2b (issue #76): Legacy timer is gone — start the worker instead.
 
-    Safe to call multiple times — only one timer runs at a time.
+    Pre-Phase-2b this spun up ``_archive_timer_loop`` which woke every
+    ``ARCHIVE_INTERVAL_MINUTES`` and walked the RO RecentClips folder.
+    The Phase 2b architecture is queue-driven: the
+    ``archive_producer`` thread (started by ``web_control.startup``)
+    enqueues into ``archive_queue`` from inotify + a 60-second rescan,
+    and the ``archive_worker`` thread drains the queue one file at a
+    time with stable-write gating, atomic copy, and dead-letter
+    handling.
+
+    This shim stays callable so existing call sites in
+    ``web_control.startup`` keep working without a flag dance, but
+    delegates to :func:`services.archive_worker.ensure_worker_started`.
+    The retention/cleanup cascade that used to run after each timer
+    tick is now driven by the periodic ``smart_cleanup_archive`` call
+    that runs from elsewhere (and from the manual cleanup endpoint);
+    see :func:`trigger_archive_cleanup`.
     """
     if not ARCHIVE_ENABLED:
         logger.info("RecentClips archive is disabled in config")
         return
-
-    global _archive_thread
-    with _archive_lock:
-        if _archive_thread and _archive_thread.is_alive():
-            return
-        _archive_cancel.clear()
-        _archive_thread = threading.Thread(
-            target=_archive_timer_loop,
-            name="archive-timer",
-            daemon=True,
-        )
-        _archive_thread.start()
-        logger.info("RecentClips archive timer started (every %d min)",
-                     ARCHIVE_INTERVAL_MINUTES)
+    try:
+        from services import archive_worker
+        archive_worker.ensure_worker_started()
+    except Exception as e:  # noqa: BLE001 — never let startup raise here
+        logger.warning("archive_worker.ensure_worker_started failed: %s", e)
 
 
 def stop_archive_timer() -> None:
-    """Stop the background archive timer."""
+    """Phase 2b: stop the new archive worker (no legacy timer to cancel)."""
     _archive_cancel.set()
+    try:
+        from services import archive_worker
+        archive_worker.stop_worker()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("archive_worker.stop_worker raised: %s", e)
 
 
 def trigger_archive_now() -> bool:
-    """Trigger a one-shot archive run (non-blocking).
+    """Wake the Phase 2b archive worker (was: spawn a one-shot timer thread).
 
-    Returns True if an archive was started, False if one is already
-    running, pending (waiting for the task_coordinator lock), or if
-    archiving is disabled.
+    Returns True if a wake was issued (ARCHIVE_ENABLED and the worker
+    accepted the call), False if archiving is disabled or the worker
+    couldn't be started. The actual draining happens asynchronously in
+    the worker thread.
+
+    Compatibility shim: callers (notably the NM dispatcher's
+    ``/api/recent_archive/trigger`` endpoint and the legacy duplicate-
+    guard tests) get a True/False return that tracks "did we kick the
+    worker?" rather than the old "did we start a thread?" — which is
+    semantically equivalent for every external caller.
     """
-    global _archive_pending
     if not ARCHIVE_ENABLED:
         return False
-    # Atomically claim the "pending" slot to prevent two threads from
-    # racing the same trigger window. The thread that wins clears the
-    # slot inside ``_run_archive``.
-    with _archive_lock:
-        if _archive_pending or _status.get("running"):
-            return False
-        _archive_pending = True
-
-    t = threading.Thread(
-        target=_run_archive,
-        name="archive-oneshot",
-        daemon=True,
-    )
-    t.start()
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Timer Loop
-# ---------------------------------------------------------------------------
-
-
-def _archive_timer_loop() -> None:
-    """Periodically run archive + retention."""
-    interval = ARCHIVE_INTERVAL_MINUTES * 60
-
-    # Set lowest I/O priority so archive doesn't starve the USB gadget.
-    # The gadget shares the same SD card I/O bus.
-    #
-    # Critical: ionice MUST target this archive thread's kernel TID
-    # (via ``threading.get_native_id()``), NOT ``os.getpid()``. On
-    # Linux, ``ioprio_set`` is per-task, and passing the process PID
-    # only adjusts the main thread's I/O class — leaving the archive
-    # worker thread at default best-effort priority and fully able to
-    # starve Flask/gadget I/O. This was the second half of issue #72
-    # (the first was os.nice() in the indexer being process-wide).
     try:
-        tid = threading.get_native_id()
-        subprocess.run(
-            ["ionice", "-c", "3", "-p", str(tid)],
-            timeout=5, capture_output=True, check=False,
-        )
-        logger.info(
-            "Archive thread set to idle I/O priority "
-            "(ionice -c 3 -p %d)", tid,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired,
-            OSError, AttributeError):
-        pass  # ionice not available — rate limiting still protects us
-
-    # Initial delay — let boot finish and other services settle
-    for _ in range(120):  # 2 minutes
-        if _archive_cancel.is_set():
-            return
-        time.sleep(1)
-
-    while not _archive_cancel.is_set():
-        try:
-            _run_archive()
-        except Exception:
-            logger.exception("Archive run failed unexpectedly")
-
-        # Run smart cleanup after each archive cycle
-        try:
-            smart_cleanup_archive(ARCHIVE_DIR, ARCHIVE_MIN_FREE_SPACE_GB, ARCHIVE_MAX_SIZE_GB)
-        except Exception:
-            logger.exception("Smart archive cleanup failed")
-
-        # Sleep in 1-second ticks so cancel is responsive
-        for _ in range(interval):
-            if _archive_cancel.is_set():
-                return
-            time.sleep(1)
+        from services import archive_worker
+        # Lazy-start the worker if it isn't running yet.
+        archive_worker.ensure_worker_started()
+        archive_worker.wake()
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("trigger_archive_now: failed to wake worker: %s", e)
+        return False
 
 
 # ---------------------------------------------------------------------------
-# Core Archive Logic
+# Phase 2b (issue #76): the legacy ``_archive_timer_loop`` /
+# ``_run_archive`` / ``_do_archive_work`` / ``_discover_new_files``
+# code paths have been removed in favor of the queue-driven
+# ``archive_producer`` + ``archive_worker`` pair.
+#
+# The retention/cleanup helpers below (``_purge_corrupt_archives``,
+# ``_prune_non_driving_archives``, ``_enforce_retention``,
+# ``smart_cleanup_archive``, ``trigger_archive_cleanup``) remain
+# callable from the API/cleanup endpoints — they don't depend on the
+# old timer loop and operate purely on ``ARCHIVE_DIR``.
 # ---------------------------------------------------------------------------
-
-
-def _run_archive() -> None:
-    """One complete archive run: discover → copy → retention."""
-    global _status, _archive_pending
-
-    # Two callers reach this function: ``trigger_archive_now`` (which
-    # atomically sets ``_archive_pending`` first) and the timer loop
-    # (which calls us directly). For the timer path we still need
-    # mutual exclusion with manual triggers; mark pending if free, or
-    # bail out if another invocation is already in flight. ``_archive_pending``
-    # stays set until this function returns so that no second invocation
-    # can race in between releasing pending and setting ``_status['running']``.
-    with _archive_lock:
-        if _archive_pending or _status.get("running"):
-            owns_pending = False
-        else:
-            _archive_pending = True
-            owns_pending = True
-    if not owns_pending:
-        return
-
-    try:
-        # Acquire the global heavy-task lock — don't run alongside
-        # indexer or sync. Wait up to 60s if the lock is busy. The
-        # indexer's typical lock-hold is ~1 s with ~0.25 s gaps; with
-        # the fairness short-circuit (the indexer passes
-        # ``yield_to_waiters=True``) we'll usually win on the first
-        # poll. The wait-with-timeout is critical: returning False
-        # immediately caused archive starvation in production, with
-        # TeslaCam clips lost when Tesla rotated RecentClips before
-        # the next archive cycle could win the lock. See
-        # task_coordinator docstring for the fairness model.
-        from services.task_coordinator import acquire_task, release_task
-        if not acquire_task('archive', wait_seconds=60.0):
-            logger.warning(
-                "Archive skipped: another task held the lock for 60s — "
-                "this may indicate indexer overload"
-            )
-            return
-        try:
-            _do_archive_work()
-        finally:
-            release_task('archive')
-    finally:
-        with _archive_lock:
-            _archive_pending = False
-
-
-def _do_archive_work() -> None:
-    """Inner archive routine — runs while holding the coordinator lock.
-
-    Split out from ``_run_archive`` so that the lock-acquisition and
-    pending-flag bookkeeping above stays linear and easy to audit.
-    """
-    global _status
-
-    _status.update({
-        "running": True,
-        "progress": "Starting...",
-        "files_total": 0,
-        "files_done": 0,
-        "bytes_copied": 0,
-        "current_file": "",
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "error": None,
-    })
-
-    try:
-        # Find the RecentClips source path
-        teslacam = _get_teslacam_ro_path()
-        if not teslacam:
-            _status.update({"running": False, "progress": "No TeslaCam path"})
-            return
-
-        recent_clips = os.path.join(teslacam, "RecentClips")
-        if not os.path.isdir(recent_clips):
-            _status.update({"running": False, "progress": "No RecentClips folder"})
-            return
-
-        # Ensure archive directory exists
-        os.makedirs(ARCHIVE_DIR, exist_ok=True)
-
-        # Clean up stale .tmp files from interrupted copies
-        try:
-            for name in os.listdir(ARCHIVE_DIR):
-                if name.endswith('.tmp'):
-                    os.unlink(os.path.join(ARCHIVE_DIR, name))
-        except OSError:
-            pass
-
-        # Remove any corrupt archived files (incomplete MP4s from prior runs)
-        _status["progress"] = "Checking existing archives..."
-        _purge_corrupt_archives()
-
-        # Discover files to copy
-        # Force vfat to re-read directories — the gadget side may have
-        # written new clips without invalidating our local RO mount's
-        # dentry/inode slab cache. ``echo 2`` drops slabs only (NOT the
-        # page cache that backs the gadget's reads of usb_cam.img), so
-        # this is safe to run concurrently with Tesla recording. Cheap
-        # (~100 ms) and bounded. Run once per archive cycle, not per
-        # file. See issue #71. Requires the matching sudoers entry in
-        # setup_usb.sh; if that entry is missing on an old install the
-        # try/except swallows the failure and the scan still works
-        # against whatever the cache currently holds (no regression).
-        try:
-            subprocess.run(
-                ['sudo', 'sh', '-c', 'echo 2 > /proc/sys/vm/drop_caches'],
-                capture_output=True, check=False, timeout=5,
-            )
-        except Exception as exc:  # pragma: no cover — best-effort, log-only
-            logger.debug("vfat slab cache flush failed (best-effort): %s", exc)
-
-        _status["progress"] = "Scanning RecentClips..."
-        to_copy = list(_discover_new_files(recent_clips))
-
-        if not to_copy:
-            _status.update({
-                "running": False,
-                "progress": "Up to date",
-                "last_run": datetime.now(timezone.utc).isoformat(),
-                "last_run_files": 0,
-            })
-            _update_archive_size()
-            return
-
-        _status["files_total"] = len(to_copy)
-        _status["progress"] = f"Copying {len(to_copy)} files..."
-        logger.info("Archive: %d new files to copy from RecentClips", len(to_copy))
-
-        # Proactive retention: free space early (at 2× the floor) so we
-        # never hit the hard limit mid-copy.  Deletes least-valuable
-        # files first when possible.
-        _proactive_retention()
-
-        # If still at the hard floor after proactive cleanup, try the
-        # full retention cascade before giving up.
-        if not _check_disk_space():
-            _status["progress"] = "Retention cleanup (making room)..."
-            _enforce_retention()
-
-        copied = 0
-        for idx, (src_path, rel_path) in enumerate(to_copy):
-            if _archive_cancel.is_set():
-                _status["progress"] = "Cancelled"
-                break
-
-            # Per-cycle cap — yield CPU/IO back to the web server and
-            # gadget so the system stays responsive between cycles.
-            if copied >= _MAX_FILES_PER_CYCLE:
-                logger.info("Archive: pausing at %d files (cycle cap), %d remaining",
-                            copied, len(to_copy) - idx)
-                _status["progress"] = f"Paused at {copied} files (continuing next cycle)"
-                break
-
-            # Memory pressure check
-            if not _check_memory():
-                logger.warning("Archive paused: low memory")
-                _status["progress"] = "Paused (low memory)"
-                break
-
-            # Disk space check — if full, try retention again mid-loop
-            if not _check_disk_space():
-                _enforce_retention()
-                if not _check_disk_space():
-                    logger.info("Archive stopped: disk space limits reached")
-                    _status["progress"] = "Stopped (disk space)"
-                    break
-
-            _status.update({
-                "files_done": idx,
-                "current_file": rel_path,
-            })
-
-            try:
-                dst_path = os.path.join(ARCHIVE_DIR, rel_path)
-                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-
-                _buffered_copy(src_path, dst_path)
-                # Preserve original modification time
-                src_stat = os.stat(src_path)
-                os.utime(dst_path, (src_stat.st_atime, src_stat.st_mtime))
-
-                # Post-copy validation: verify the copy is a complete MP4
-                if dst_path.lower().endswith('.mp4') and not _is_complete_mp4(dst_path):
-                    logger.warning("Archived file incomplete (no moov), removing: %s", rel_path)
-                    try:
-                        os.unlink(dst_path)
-                    except OSError:
-                        pass
-                    continue
-
-                copied += 1
-                _status["bytes_copied"] += src_stat.st_size
-
-                # Update geodata DB to point at the archived copy.
-                # This avoids expensive re-indexing — the GPS data is
-                # already extracted, we just change the file path.
-                _update_geodata_paths(src_path, dst_path, rel_path)
-
-                # Index the archived copy immediately (reads from SD card,
-                # no USB gadget contention). Non-fatal — and even if this
-                # crashes, the safety-net enqueue below means the worker
-                # will pick it up after 120s.
-                try:
-                    from config import MAPPING_ENABLED, MAPPING_DB_PATH, MAPPING_SAMPLE_RATE
-                    if MAPPING_ENABLED:
-                        from services.video_service import get_teslacam_path
-                        from services.mapping_service import (
-                            enqueue_for_indexing,
-                            index_single_file,
-                        )
-                        tc = get_teslacam_path()
-                        if tc:
-                            # Safety net: enqueue with 120s deferral baked
-                            # into the INSERT. If the inline call below
-                            # succeeds, the worker will see ALREADY_INDEXED
-                            # and clear the row cheaply when 120s elapses.
-                            # If the archive job crashes between the copy
-                            # and the inline call, the worker still picks
-                            # up the file after the deferral — no waiting
-                            # until next boot. Atomic with the insert so
-                            # there's no race against a worker that might
-                            # claim the row before we can defer it.
-                            try:
-                                enqueue_for_indexing(
-                                    MAPPING_DB_PATH, dst_path,
-                                    source='archive',
-                                    next_attempt_at=time.time() + 120,
-                                )
-                            except Exception as e:
-                                logger.debug(
-                                    "Safety-net enqueue skipped: %s", e,
-                                )
-                            index_result = index_single_file(
-                                dst_path, MAPPING_DB_PATH, tc,
-                                sample_rate=MAPPING_SAMPLE_RATE,
-                            )
-                            if index_result.waypoints > 0 or index_result.events > 0:
-                                logger.info(
-                                    "Indexed during archive: %s — %d waypoints, %d events",
-                                    rel_path,
-                                    index_result.waypoints,
-                                    index_result.events,
-                                )
-                except ImportError:
-                    pass  # Protobuf missing — worker will pick it up
-                except Exception as e:
-                    logger.debug("Archive post-index skipped for %s: %s", rel_path, e)
-
-            except OSError as e:
-                logger.warning("Failed to copy %s: %s", rel_path, e)
-                continue
-
-            time.sleep(_INTER_FILE_SLEEP)
-
-        _status.update({
-            "files_done": copied,
-            "last_run": datetime.now(timezone.utc).isoformat(),
-            "last_run_files": copied,
-        })
-        logger.info("Archive: copied %d files", copied)
-
-        # Prune clips the indexer has positively identified as non-driving
-        # FIRST, so retention afterwards has fewer "unknown" clips to
-        # potentially evict under disk pressure. The prune is conservative
-        # (positive evidence only), so this is always safe.
-        _status["progress"] = "Pruning non-driving clips..."
-        _prune_non_driving_archives()
-
-        # Run retention cleanup. By running after prune, retention's
-        # oldest-first deletion is less likely to evict still-unprocessed
-        # driving clips: the obvious sentry/parked footage is already gone.
-        _status["progress"] = "Retention cleanup..."
-        _enforce_retention()
-
-        _update_archive_size()
-        _status["progress"] = f"Done — {copied} files archived"
-
-        # Tesla likely just rotated some RecentClips out — give the
-        # mapping stale-scan a nudge so any orphaned indexed_files
-        # rows get cleaned up before the user opens the map page.
-        # The trigger is debounced (10 min) so this is safe to call
-        # every cycle. Issue #75.
-        try:
-            from config import MAPPING_ENABLED, MAPPING_DB_PATH
-            if MAPPING_ENABLED and os.path.isfile(MAPPING_DB_PATH):
-                # Lazy import: services.mapping_service has its own service-layer
-                # imports that touch this module, so a top-level import would
-                # create a circular dependency. Python caches the module after
-                # the first call, so this is effectively free per archive cycle.
-                from services.video_service import get_teslacam_path
-                from services.mapping_service import (
-                    trigger_stale_scan_now,
-                )
-                trigger_stale_scan_now(
-                    MAPPING_DB_PATH,
-                    get_teslacam_path,
-                    source='archive',
-                )
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Post-archive stale-scan trigger skipped: %s", e)
-
-    except Exception as e:
-        logger.exception("Archive run error")
-        _status["error"] = str(e)
-        _status["progress"] = f"Error: {e}"
-    finally:
-        _status["running"] = False
-        # ``release_task('archive')`` is handled by ``_run_archive``'s
-        # outer try/finally so the lock is released even if
-        # ``_do_archive_work`` raises before reaching its own finally.
-
-
-# ---------------------------------------------------------------------------
-# File Discovery
-# ---------------------------------------------------------------------------
-
-
-def _discover_new_files(recent_clips: str) -> Generator[Tuple[str, str], None, None]:
-    """Yield (src_abs_path, relative_path) for files not yet archived.
-
-    Skips files younger than _MIN_FILE_AGE_SECONDS (may be actively written).
-    Always archives fresh RecentClips regardless of whether they fall in a
-    known driving trip — at archive time we don't yet know whether a clip
-    is part of a drive (the indexer creates trips AFTER seeing several
-    sequential GPS-bearing clips). The driving-vs-parked filter is applied
-    later by ``_prune_non_driving_archives`` after the indexer has had a
-    chance to populate trip data. This breaks the chicken-and-egg cycle
-    where new drives were being skipped because no trip existed yet, then
-    Tesla's circular buffer overwrote the source clips before we could
-    process them.
-
-    Uses generators to avoid building large in-memory lists.
-    """
-    now = time.time()
-
-    try:
-        entries = sorted(os.listdir(recent_clips))
-    except OSError:
-        return
-
-    for name in entries:
-        src = os.path.join(recent_clips, name)
-        try:
-            stat = os.stat(src)
-        except OSError:
-            continue
-
-        # Skip directories, non-video files
-        if not os.path.isfile(src):
-            continue
-        if not name.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
-            continue
-
-        # Skip actively-written files
-        if (now - stat.st_mtime) < _MIN_FILE_AGE_SECONDS:
-            continue
-
-        # Skip zero-byte files
-        if stat.st_size == 0:
-            continue
-
-        # Skip incomplete MP4s (Tesla still writing — moov box not yet finalized)
-        if name.lower().endswith('.mp4') and not _is_complete_mp4(src):
-            continue
-
-        # Check if already archived (same name and size)
-        dst = os.path.join(ARCHIVE_DIR, name)
-        if os.path.isfile(dst):
-            try:
-                dst_stat = os.stat(dst)
-                if dst_stat.st_size == stat.st_size:
-                    continue  # Already archived
-            except OSError:
-                pass
-
-        yield (src, name)
 
 
 def _get_driving_time_ranges() -> Optional[List[Tuple[float, float]]]:

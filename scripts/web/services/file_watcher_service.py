@@ -246,8 +246,99 @@ def restart_watcher(watch_paths: List[str],
     return start_watcher(watch_paths)
 
 
+def _classify_paths(paths: List[str]):
+    """Split a batch into (archive_paths, indexing_paths, dropped_paths).
+
+    Phase 2b dispatch routing (issue #76):
+
+    * Files under the RO USB mount (``/mnt/gadget/part1-ro/...`` or
+      whatever ``MNT_DIR``/``-ro`` resolves to in the running app)
+      flow ONLY into the archive callbacks. The archive worker will
+      copy them to ArchivedClips and from there the archived paths
+      enter the indexing_queue. Routing the RO-mount path directly
+      into indexing_queue would re-introduce the indexer's old habit
+      of parsing files out from under Tesla's RecentClips circular
+      buffer.
+    * Files under ``ARCHIVE_DIR`` (typically ``~/ArchivedClips``)
+      flow ONLY into the indexing callbacks. Anything that lands
+      there has already been archived (by the worker, by a manual
+      scp, or by a future operator action) and needs to be indexed.
+    * Anything outside both prefixes is logged once and dropped —
+      the watcher should not be subscribed to such directories in
+      the first place; if it is, surfacing it via debug log makes
+      the misconfiguration easy to spot.
+
+    The classification is done at the dispatch layer (here) rather
+    than inside each subscriber so the rule is local and reviewable
+    in one spot. Subscribers stay simple (``def cb(paths): ...``)
+    and don't need to know about path topology.
+    """
+    archive_paths: List[str] = []
+    indexing_paths: List[str] = []
+    dropped: List[str] = []
+    ro_prefixes = _ro_mount_prefixes()
+    archive_prefix = _archive_dir_prefix()
+    for p in paths:
+        if not p:
+            continue
+        norm = os.path.normpath(p)
+        # Archive prefix wins if both happen to overlap (defensive —
+        # they shouldn't in any real config).
+        if archive_prefix and (
+            norm == archive_prefix or norm.startswith(archive_prefix + os.sep)
+        ):
+            indexing_paths.append(p)
+            continue
+        if any(
+            norm == pre or norm.startswith(pre + os.sep)
+            for pre in ro_prefixes
+        ):
+            archive_paths.append(p)
+            continue
+        dropped.append(p)
+    return archive_paths, indexing_paths, dropped
+
+
+def _ro_mount_prefixes() -> List[str]:
+    """Return absolute, normalized prefixes for the RO USB mount(s).
+
+    Looked up at call time so a config reload (or tests that set
+    ``MNT_DIR``) takes effect without an import-time cache. Falls back
+    to the canonical path if config can't be imported.
+    """
+    candidates: List[str] = []
+    try:
+        from config import MNT_DIR
+        # Both the historical layout (``<MNT_DIR>/part1-ro``) and the
+        # newer convention (``<MNT_DIR>/part1`` — same path in present
+        # mode where part1 is read-only) are accepted.
+        candidates.append(os.path.normpath(os.path.join(MNT_DIR, 'part1-ro')))
+        candidates.append(os.path.normpath(os.path.join(MNT_DIR, 'part1')))
+    except Exception:  # noqa: BLE001
+        candidates.append(os.path.normpath('/mnt/gadget/part1-ro'))
+        candidates.append(os.path.normpath('/mnt/gadget/part1'))
+    return candidates
+
+
+def _archive_dir_prefix() -> Optional[str]:
+    """Return the absolute, normalized ARCHIVE_DIR prefix, or None."""
+    try:
+        from config import ARCHIVE_DIR
+        return os.path.normpath(ARCHIVE_DIR) if ARCHIVE_DIR else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _notify_callbacks(new_files: List[str], my_generation: int):
-    """Notify all registered new-file callbacks if our generation is current."""
+    """Notify registered callbacks, classifying paths by source.
+
+    Phase 2b routing rule (issue #76, see :func:`_classify_paths`):
+    a path under the RO USB mount fires ONLY the archive callbacks;
+    a path under ``ARCHIVE_DIR`` fires ONLY the indexing callbacks.
+    The two lists are now mutually exclusive — a single mp4 never
+    enters both queues directly. The archive worker bridges the two
+    by enqueuing copied paths into the indexing_queue itself.
+    """
     if not new_files:
         return
     if my_generation != _watcher_generation:
@@ -256,22 +347,26 @@ def _notify_callbacks(new_files: List[str], my_generation: int):
         logger.debug("Dropping %d new-file callbacks (stale generation)",
                      len(new_files))
         return
-    _status["files_detected"] += len(new_files)
-    for cb in _on_new_file_callbacks:
-        try:
-            cb(new_files)
-        except Exception as e:
-            logger.error("Watcher new-file callback error: %s", e)
-    # Phase 2a archive_queue producers (issue #76): fire the archive
-    # callbacks with the same paths the indexer just got. The same
-    # generation guard above already protected the batch from a racing
-    # stop, so we skip a second check. Each archive callback handles
-    # its own errors so one bad subscriber can't starve the other.
-    for cb in _on_archive_callbacks:
-        try:
-            cb(new_files)
-        except Exception as e:
-            logger.error("Watcher archive callback error: %s", e)
+
+    archive_paths, indexing_paths, dropped = _classify_paths(new_files)
+    if dropped:
+        logger.debug(
+            "Watcher: %d files dropped — outside RO mount and ArchivedClips: %s",
+            len(dropped), dropped[:3],
+        )
+    _status["files_detected"] += len(archive_paths) + len(indexing_paths)
+    if indexing_paths:
+        for cb in _on_new_file_callbacks:
+            try:
+                cb(indexing_paths)
+            except Exception as e:
+                logger.error("Watcher new-file callback error: %s", e)
+    if archive_paths:
+        for cb in _on_archive_callbacks:
+            try:
+                cb(archive_paths)
+            except Exception as e:
+                logger.error("Watcher archive callback error: %s", e)
 
 
 def _notify_delete_callbacks(deleted_files: List[str], my_generation: int):

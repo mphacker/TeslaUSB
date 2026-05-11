@@ -3046,35 +3046,65 @@ class TestPurgeDeletedVideos:
 
 
 class TestBootCatchupScan:
-    def _make_teslacam(self, root, files):
-        """Create a fake TeslaCam tree with the given relative paths."""
+    """Phase 2b (issue #76): boot_catchup_scan now walks ONLY
+    ``ARCHIVE_DIR`` (the SD-card ArchivedClips), never the RO USB
+    mount. The USB-side catch-up is handled by the
+    ``archive_producer`` thread, which enqueues into ``archive_queue``;
+    the worker then copies into ArchivedClips, where THIS catch-up
+    finds them on the next gadget_web start.
+
+    The legacy test signature ``boot_catchup_scan(db, tc)`` still
+    accepts the ``tc`` argument for back-compat, but it's now ignored.
+    All these tests populate ARCHIVE_DIR via monkeypatch instead.
+    """
+    def _make_archive(self, root, files):
+        """Create a fake ArchivedClips tree with the given relative paths."""
         for rel in files:
             full = root / rel
             full.parent.mkdir(parents=True, exist_ok=True)
             full.write_bytes(b'')
         return str(root)
 
+    def _make_teslacam(self, root, files):
+        """Compatibility helper kept so the dedup test below still works
+        (the test populates BOTH ArchivedClips and a legacy TeslaCam
+        tree, then verifies that only the ArchivedClips side gets
+        enqueued)."""
+        for rel in files:
+            full = root / rel
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_bytes(b'')
+        return str(root)
+
+    @pytest.fixture(autouse=True)
+    def _patch_archive_dir(self, tmp_path, monkeypatch):
+        """Point ARCHIVE_DIR at a per-test tmpdir so the scanner sees
+        a clean slate. This must run BEFORE each test populates files."""
+        archive_root = tmp_path / "ArchivedClips"
+        archive_root.mkdir()
+        import config as _cfg
+        monkeypatch.setattr(_cfg, 'ARCHIVE_DIR', str(archive_root))
+        monkeypatch.setattr(_cfg, 'ARCHIVE_ENABLED', True)
+        self._archive_root = archive_root
+
     def test_no_files_returns_zero_counts(self, tmp_path):
         db = str(tmp_path / "g.db")
         _init_db(db)
-        tc = self._make_teslacam(tmp_path / "TeslaCam", [])
-        result = boot_catchup_scan(db, tc)
+        result = boot_catchup_scan(db, '')
         assert result == {'scanned': 0, 'already_indexed': 0, 'enqueued': 0}
 
     def test_enqueues_orphan_clips(self, tmp_path):
         db = str(tmp_path / "g.db")
         _init_db(db)
-        tc = self._make_teslacam(tmp_path / "TeslaCam", [
+        # Populate the ArchivedClips tree with three distinct
+        # canonical_keys: a flat RecentClips file, a SavedClips event
+        # folder file, and a SentryClips event folder file.
+        self._make_archive(self._archive_root, [
             'RecentClips/2025-11-08_08-15-44-front.mp4',
             'SavedClips/2025-11-08_evt/2025-11-08_08-15-44-front.mp4',
             'SentryClips/2025-11-08_evt2/2025-11-08_08-20-00-front.mp4',
         ])
-        result = boot_catchup_scan(db, tc)
-        # SavedClips and SentryClips entries enqueue (event-folder keys);
-        # RecentClips also enqueues (basename key). Total = 3 distinct
-        # canonical keys. (RecentClips and SavedClips share basename
-        # 2025-11-08_08-15-44-front.mp4 but DIFFERENT canonical_key
-        # because SavedClips is event-folder-keyed.)
+        result = boot_catchup_scan(db, '')
         assert result['scanned'] >= 3
         assert result['enqueued'] == 3
         with sqlite3.connect(db) as c:
@@ -3086,12 +3116,16 @@ class TestBootCatchupScan:
     def test_skips_already_indexed_clips(self, tmp_path):
         db = str(tmp_path / "g.db")
         _init_db(db)
-        tc = self._make_teslacam(tmp_path / "TeslaCam", [
+        self._make_archive(self._archive_root, [
             'RecentClips/2025-11-08_08-15-44-front.mp4',
         ])
-        # Pre-populate indexed_files with the same canonical_key.
+        # Pre-populate indexed_files with the canonical_key matching
+        # the ArchivedClips path. canonical_key for a RecentClips file
+        # is just the basename (so any pre-existing row with the same
+        # basename counts as "already indexed").
         full_path = os.path.join(
-            tc, 'RecentClips', '2025-11-08_08-15-44-front.mp4'
+            str(self._archive_root),
+            'RecentClips', '2025-11-08_08-15-44-front.mp4',
         )
         with sqlite3.connect(db) as c:
             c.execute(
@@ -3101,7 +3135,7 @@ class TestBootCatchupScan:
                    VALUES (?, 0, 0, '2025-01-01', 5, 0)""",
                 (full_path,),
             )
-        result = boot_catchup_scan(db, tc)
+        result = boot_catchup_scan(db, '')
         assert result['scanned'] >= 1
         assert result['already_indexed'] >= 1
         assert result['enqueued'] == 0
@@ -3109,16 +3143,17 @@ class TestBootCatchupScan:
     def test_skips_already_queued_clips(self, tmp_path):
         db = str(tmp_path / "g.db")
         _init_db(db)
-        tc = self._make_teslacam(tmp_path / "TeslaCam", [
+        self._make_archive(self._archive_root, [
             'RecentClips/2025-11-08_08-15-44-front.mp4',
         ])
         full_path = os.path.join(
-            tc, 'RecentClips', '2025-11-08_08-15-44-front.mp4'
+            str(self._archive_root),
+            'RecentClips', '2025-11-08_08-15-44-front.mp4',
         )
         # Pre-queue (e.g. from a watcher event during the scan).
         enqueue_for_indexing(db, full_path)
         # Catch-up must not double-enqueue.
-        result = boot_catchup_scan(db, tc)
+        result = boot_catchup_scan(db, '')
         assert result['enqueued'] == 0
         with sqlite3.connect(db) as c:
             count = c.execute(
@@ -3127,29 +3162,43 @@ class TestBootCatchupScan:
         assert count == 1
 
     def test_recent_and_archived_dedup_by_canonical_key(self, tmp_path):
-        # If a clip exists in both RecentClips and ArchivedClips, the
-        # catch-up should enqueue only once (canonical_key dedup).
+        # Two files with the same basename but DIFFERENT canonical_key
+        # (one flat under RecentClips, one nested under SavedClips/evt)
+        # should both enqueue — they're distinct canonical keys.
         db = str(tmp_path / "g.db")
         _init_db(db)
-        # ArchivedClips lives outside TeslaCam but _find_front_camera_videos
-        # picks it up via config.ARCHIVE_DIR. Without setting that env
-        # we just test the in-memory dedup against duplicate yields.
-        tc = self._make_teslacam(tmp_path / "TeslaCam", [
+        self._make_archive(self._archive_root, [
             'RecentClips/dup-front.mp4',
+            'SavedClips/evt/dup-front.mp4',
         ])
-        # Fake a second yield by also placing the file in a SavedClips
-        # event folder under the same basename — this WILL get a
-        # different canonical_key (event/saved keys are unique). So
-        # this verifies *that's* the case (no false dedup).
-        os.makedirs(os.path.join(tc, 'SavedClips', 'evt'), exist_ok=True)
-        with open(
-            os.path.join(tc, 'SavedClips', 'evt', 'dup-front.mp4'), 'wb'
-        ) as f:
-            f.write(b'')
-        result = boot_catchup_scan(db, tc)
+        result = boot_catchup_scan(db, '')
         # Two distinct canonical keys: bare 'dup-front.mp4' (Recent)
         # and 'SavedClips/evt/dup-front.mp4' (Saved).
         assert result['enqueued'] == 2
+
+    def test_legacy_teslacam_argument_is_ignored(self, tmp_path):
+        """Phase 2b: even if the caller passes a TeslaCam path with
+        clips on it, the scanner walks ArchivedClips ONLY. This is the
+        whole point of the redesign — the indexer must never touch
+        the RO USB mount."""
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        # Populate a legacy TeslaCam tree with clips that should NOT
+        # be enqueued.
+        legacy_tc = self._make_teslacam(tmp_path / "TeslaCam", [
+            'RecentClips/should-not-enqueue-front.mp4',
+            'SavedClips/evt/should-not-enqueue-front.mp4',
+        ])
+        # ArchivedClips is empty — scanner must report zero.
+        result = boot_catchup_scan(db, legacy_tc)
+        assert result == {
+            'scanned': 0, 'already_indexed': 0, 'enqueued': 0,
+        }
+        with sqlite3.connect(db) as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM indexing_queue"
+            ).fetchone()[0]
+        assert count == 0
 
 
 # ---------------------------------------------------------------------------

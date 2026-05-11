@@ -1,219 +1,118 @@
-"""Tests for the archive-trigger duplicate-prevention logic in
-``services.video_archive_service``.
+"""Tests for the Phase 2b ``video_archive_service`` shims (issue #76).
 
-These guard the ``_archive_pending`` flag introduced after the May
-2026 phantom-trips fix: switching ``acquire_task('archive')`` from
-non-blocking to ``wait_seconds=60.0`` opened a window where a second
-``trigger_archive_now()`` could spawn a duplicate archive thread while
-the first was still waiting for the coordinator lock. ``_status['running']``
-is set only AFTER lock acquisition, so it cannot guard that window —
-``_archive_pending`` must.
+The legacy ``_archive_timer_loop`` periodic thread + ``_archive_pending``
+duplicate-guard pattern is gone. ``video_archive_service`` is now a thin
+compatibility layer over ``archive_worker``:
+
+* ``start_archive_timer()`` → ``archive_worker.ensure_worker_started()``
+* ``stop_archive_timer()``  → ``archive_worker.stop_worker()``
+* ``trigger_archive_now()`` → ``archive_worker.wake()``
+
+The old tests asserted on the deleted internals (``_run_archive``,
+``_archive_pending``, ``_archive_timer_loop``, the ionice-on-the-process
+bug). Those are no longer reachable code paths and have been deleted.
+The Phase 2b worker has its own pause/resume/wake/dead-letter test
+coverage in ``test_archive_worker.py``.
 """
 
-import time
-import threading
+from unittest.mock import patch
 
 import pytest
 
 from services import video_archive_service as vas
-from services import task_coordinator as tc
 
 
 @pytest.fixture(autouse=True)
 def _reset_state():
-    """Snapshot and restore module-level state around each test so
-    leakage between tests can't mask real regressions."""
-    saved_status = dict(vas._status)
-    saved_pending = vas._archive_pending
-    saved_enabled = vas.ARCHIVE_ENABLED
-    # Coordinator state too.
-    with tc._lock:
-        tc._current_task = None
-        tc._task_started = 0.0
-        tc._waiter_count = 0
-    vas.ARCHIVE_ENABLED = True
-    vas._archive_pending = False
-    vas._status['running'] = False
-    yield
-    vas._status.clear()
-    vas._status.update(saved_status)
-    vas._archive_pending = saved_pending
-    vas.ARCHIVE_ENABLED = saved_enabled
-    with tc._lock:
-        tc._current_task = None
-        tc._task_started = 0.0
-        tc._waiter_count = 0
+    """Snapshot/restore module-level state so test order doesn't matter.
 
-
-class TestTriggerArchiveDuplicateGuard:
-    def test_disabled_returns_false(self):
-        vas.ARCHIVE_ENABLED = False
-        assert vas.trigger_archive_now() is False
-        assert vas._archive_pending is False
-
-    def test_first_trigger_starts_thread(self, monkeypatch):
-        # Replace _run_archive with a sentinel so we don't actually copy
-        # files. We just want to verify trigger_archive_now's guard logic.
-        called = threading.Event()
-
-        def fake_run():
-            called.set()
-            # Hold "pending" for a moment so we can test the guard.
-            time.sleep(0.2)
-            with vas._archive_lock:
-                vas._archive_pending = False
-
-        monkeypatch.setattr(vas, '_run_archive', fake_run)
-        assert vas.trigger_archive_now() is True
-        assert called.wait(timeout=1.0)
-
-    def test_second_trigger_refused_while_first_is_pending(self, monkeypatch):
-        """Critical race: while the first archive is waiting for the
-        coordinator lock, ``_status['running']`` is still False. The
-        guard must use ``_archive_pending`` to block the second call."""
-        gate = threading.Event()
-
-        def fake_run():
-            # Simulate the first archive sitting in acquire_task waiting
-            # for the lock. Hold _archive_pending until the test releases us.
-            gate.wait(timeout=2.0)
-            with vas._archive_lock:
-                vas._archive_pending = False
-
-        monkeypatch.setattr(vas, '_run_archive', fake_run)
-        assert vas.trigger_archive_now() is True
-        # Second trigger immediately after must be refused even though
-        # _status['running'] is still False.
-        assert vas._status.get('running') is not True
-        assert vas._archive_pending is True
-        assert vas.trigger_archive_now() is False
-        # Let the first archive finish so the fixture can clean up.
-        gate.set()
-        # Give the worker a moment to clear _archive_pending.
-        time.sleep(0.1)
-
-    def test_third_trigger_succeeds_after_first_completes(self, monkeypatch):
-        gate = threading.Event()
-        runs = []
-
-        def fake_run():
-            runs.append(time.monotonic())
-            gate.wait(timeout=2.0)
-            with vas._archive_lock:
-                vas._archive_pending = False
-
-        monkeypatch.setattr(vas, '_run_archive', fake_run)
-        assert vas.trigger_archive_now() is True
-        assert vas.trigger_archive_now() is False
-        gate.set()
-        # Wait for the first run to clear pending.
-        for _ in range(50):
-            if not vas._archive_pending:
-                break
-            time.sleep(0.01)
-        # Reset the gate so the next "run" can also exit.
-        gate.clear()
-        gate.set()
-        assert vas.trigger_archive_now() is True
-        # Two distinct runs occurred.
-        assert len(runs) == 2
-
-
-class TestArchiveIoniceUsesThreadId:
-    """Issue #72: ``_archive_timer_loop`` was calling
-    ``ionice -c 3 -p <os.getpid()>`` to drop the archive thread's I/O
-    priority — but on Linux ``ioprio_set`` is per-task. Passing the
-    process PID only adjusts the main thread's I/O class, leaving
-    the archive worker thread at default best-effort priority and
-    fully able to starve the gadget endpoint and Flask. The fix
-    passes ``threading.get_native_id()`` instead.
+    The shim layer no longer carries ``_archive_pending`` or any other
+    duplicate-guard mutex (the worker is a singleton thread; that IS
+    the guard). All we need to preserve is ``ARCHIVE_ENABLED`` so a
+    test that toggles it doesn't bleed into the next.
     """
+    saved_enabled = vas.ARCHIVE_ENABLED
+    yield
+    vas.ARCHIVE_ENABLED = saved_enabled
 
-    def test_archive_ionice_uses_native_tid_not_pid(self, monkeypatch):
-        import sys
-        if not sys.platform.startswith('linux'):
-            pytest.skip("ionice is Linux-only")
 
-        captured = []
-        # Mock subprocess.run to capture the ionice invocation. Then
-        # raise after capturing so the archive timer loop exits early
-        # without waiting 2 minutes for the initial-delay.
-        gate_event = threading.Event()
+class TestTriggerArchiveNow:
+    """``trigger_archive_now()`` is now a thin wrapper that delegates
+    to ``archive_worker.wake()`` after a short config check."""
 
-        def fake_run(cmd, *a, **kw):
-            captured.append(cmd)
+    def test_disabled_returns_false(self):
+        # When ARCHIVE_ENABLED is False the wrapper short-circuits and
+        # never touches the worker — returning False so callers know
+        # nothing happened.
+        vas.ARCHIVE_ENABLED = False
+        with patch('services.archive_worker.wake') as mock_wake, \
+             patch(
+                 'services.archive_worker.ensure_worker_started',
+             ) as mock_start:
+            assert vas.trigger_archive_now() is False
+            mock_wake.assert_not_called()
+            mock_start.assert_not_called()
 
-            class R:
-                returncode = 0
-                stdout = b''
-                stderr = b''
-            # Trip the cancel after the first ionice call to exit the
-            # loop quickly.
-            gate_event.set()
-            return R()
+    def test_enabled_calls_worker_wake(self):
+        vas.ARCHIVE_ENABLED = True
+        with patch('services.archive_worker.wake') as mock_wake, \
+             patch(
+                 'services.archive_worker.ensure_worker_started',
+             ) as mock_start:
+            assert vas.trigger_archive_now() is True
+            mock_start.assert_called_once()
+            mock_wake.assert_called_once()
 
-        import subprocess as sp
-        monkeypatch.setattr(sp, 'run', fake_run)
+    def test_wake_failure_is_swallowed(self):
+        # The wrapper is called from the NM dispatcher
+        # (``helpers/refresh_cloud_token.py``). A worker-side
+        # exception MUST NOT propagate up — the caller treats False
+        # as "no archive started" and moves on to the cloud sync
+        # trigger. Silent fail keeps WiFi-connect resilient.
+        vas.ARCHIVE_ENABLED = True
+        with patch(
+            'services.archive_worker.ensure_worker_started',
+        ), patch(
+            'services.archive_worker.wake',
+            side_effect=RuntimeError("synthetic"),
+        ):
+            # Should not raise. False return is acceptable.
+            result = vas.trigger_archive_now()
+            assert result is False
 
-        # Stop the loop right after the ionice call by setting the
-        # cancel event — that way the for-loop initial delay exits on
-        # its first iteration.
-        cancel = threading.Event()
-        monkeypatch.setattr(vas, '_archive_cancel', cancel)
 
-        def stop_after_first_run():
-            gate_event.wait(timeout=2.0)
-            cancel.set()
+class TestStartStopShims:
+    """``start_archive_timer`` and ``stop_archive_timer`` are now pure
+    delegations to the worker; the legacy internal thread is gone."""
 
-        stopper = threading.Thread(target=stop_after_first_run, daemon=True)
-        stopper.start()
+    def test_start_archive_timer_starts_worker(self):
+        with patch(
+            'services.archive_worker.ensure_worker_started',
+        ) as mock_start:
+            vas.start_archive_timer()
+            mock_start.assert_called_once()
 
-        # Run the timer loop directly. It should ionice-then-exit.
-        loop_thread = threading.Thread(
-            target=vas._archive_timer_loop, daemon=True,
-        )
-        loop_thread.start()
-        # Capture the loop thread's TID — that's what should be passed
-        # to ionice. Native TID is set as soon as the thread starts.
-        # Wait briefly for the thread to register its TID and run
-        # ionice.
-        for _ in range(100):
-            if captured:
-                break
-            time.sleep(0.01)
-        loop_thread.join(timeout=5.0)
+    def test_start_archive_timer_swallows_worker_failure(self):
+        # Same resilience contract as trigger_archive_now: a worker
+        # startup failure must not crash gadget_web's main thread.
+        with patch(
+            'services.archive_worker.ensure_worker_started',
+            side_effect=RuntimeError("synthetic"),
+        ):
+            # Should not raise.
+            vas.start_archive_timer()
 
-        ionice_calls = [c for c in captured if c and c[0] == 'ionice']
-        assert ionice_calls, (
-            f"Expected an ionice call from _archive_timer_loop, got: "
-            f"{captured}"
-        )
-        cmd = ionice_calls[0]
-        p_idx = cmd.index('-p')
-        tid_arg = int(cmd[p_idx + 1])
+    def test_stop_archive_timer_stops_worker(self):
+        with patch('services.archive_worker.stop_worker') as mock_stop:
+            vas.stop_archive_timer()
+            mock_stop.assert_called_once()
 
-        import os
-        # The TID must NOT be the process PID — that's the bug being
-        # fixed.
-        assert tid_arg != os.getpid(), (
-            f"ionice -p {tid_arg} matches process PID {os.getpid()} "
-            f"— this is the issue #72 bug; archive thread's I/O "
-            f"priority must be set on its OWN native TID, not the "
-            f"process PID"
-        )
-
-    def test_pending_cleared_when_run_returns_normally(self, monkeypatch):
-        def fake_run():
-            with vas._archive_lock:
-                vas._archive_pending = False
-
-        monkeypatch.setattr(vas, '_run_archive', fake_run)
-        assert vas.trigger_archive_now() is True
-        # Worker thread is short-lived; give it a moment.
-        for _ in range(50):
-            if not vas._archive_pending:
-                break
-            time.sleep(0.01)
-        assert vas._archive_pending is False, (
-            "_archive_pending must be cleared by _run_archive's finally"
-        )
+    def test_stop_archive_timer_swallows_worker_failure(self):
+        # Shutdown path needs to be resilient — a worker that's already
+        # gone should not block the rest of the shutdown handler.
+        with patch(
+            'services.archive_worker.stop_worker',
+            side_effect=RuntimeError("synthetic"),
+        ):
+            # Should not raise.
+            vas.stop_archive_timer()

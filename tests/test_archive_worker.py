@@ -1317,3 +1317,162 @@ class TestPartialOrphanSweep:
         assert (archive / "a.mp4.partial").exists()
         assert not (archive / "b.mp4.partial").exists()
 
+
+
+# ---------------------------------------------------------------------------
+# TestDiskCriticalCleanupTrigger (Phase 1, item 1.5)
+# ---------------------------------------------------------------------------
+
+
+class TestDiskCriticalCleanupTrigger:
+    """Verify that disk-critical pause kicks ``archive_watchdog.force_prune_now()``
+    immediately (debounced), instead of waiting up to 24 h for the
+    daily retention timer.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_debounce(self):
+        # Ensure each test starts with debounce cleared.
+        archive_worker._last_disk_critical_cleanup_at = 0.0
+        yield
+        archive_worker._last_disk_critical_cleanup_at = 0.0
+
+    def test_critical_triggers_cleanup_thread(self, monkeypatch):
+        called = threading.Event()
+
+        def fake_force_prune_now():
+            called.set()
+            return {'deleted_count': 5, 'freed_bytes': 100,
+                    'scanned': 10, 'duration_seconds': 0.1}
+
+        # Inject a fake archive_watchdog before the lazy import.
+        import sys
+        fake_module = type(sys)('services.archive_watchdog')
+        fake_module.force_prune_now = fake_force_prune_now
+        monkeypatch.setitem(
+            sys.modules, 'services.archive_watchdog', fake_module,
+        )
+
+        triggered = archive_worker._maybe_trigger_critical_cleanup('/tmp')
+        assert triggered is True
+        # Wait for the daemon thread to fire the fake.
+        assert called.wait(timeout=2.0), (
+            "force_prune_now was not called by the cleanup thread."
+        )
+
+    def test_debounce_prevents_re_trigger(self, monkeypatch):
+        call_count = [0]
+
+        def fake_force_prune_now():
+            call_count[0] += 1
+            return {}
+
+        import sys
+        fake_module = type(sys)('services.archive_watchdog')
+        fake_module.force_prune_now = fake_force_prune_now
+        monkeypatch.setitem(
+            sys.modules, 'services.archive_watchdog', fake_module,
+        )
+
+        # First call fires.
+        assert archive_worker._maybe_trigger_critical_cleanup('/tmp') is True
+        # Second call within debounce window MUST NOT fire.
+        assert archive_worker._maybe_trigger_critical_cleanup('/tmp') is False
+        assert archive_worker._maybe_trigger_critical_cleanup('/tmp') is False
+        # Wait for the first thread to finish so call_count stabilizes.
+        time.sleep(0.2)
+        assert call_count[0] == 1, (
+            f"Debounce failed: {call_count[0]} calls instead of 1"
+        )
+
+    def test_debounce_window_release(self, monkeypatch):
+        # After the debounce window elapses, a new call fires.
+        monkeypatch.setattr(
+            archive_worker, '_DISK_CRITICAL_CLEANUP_DEBOUNCE_SECONDS', 0.0,
+        )
+        call_count = [0]
+
+        def fake_force_prune_now():
+            call_count[0] += 1
+            return {}
+
+        import sys
+        fake_module = type(sys)('services.archive_watchdog')
+        fake_module.force_prune_now = fake_force_prune_now
+        monkeypatch.setitem(
+            sys.modules, 'services.archive_watchdog', fake_module,
+        )
+
+        assert archive_worker._maybe_trigger_critical_cleanup('/tmp') is True
+        time.sleep(0.05)  # let first thread complete
+        assert archive_worker._maybe_trigger_critical_cleanup('/tmp') is True
+        time.sleep(0.2)
+        assert call_count[0] == 2
+
+    def test_import_failure_logs_warning(self, monkeypatch, caplog):
+        # If archive_watchdog can't be imported, log a warning but
+        # don't crash the worker.
+        import sys
+        # Remove archive_watchdog from sys.modules so the lazy import
+        # has a chance to fail. Inject a sentinel that raises.
+        original = sys.modules.pop('services.archive_watchdog', None)
+        try:
+            class _Boom:
+                def __getattr__(self, _name):
+                    raise ImportError("simulated")
+
+            monkeypatch.setitem(
+                sys.modules, 'services.archive_watchdog', _Boom(),
+            )
+            with caplog.at_level('WARNING', logger='services.archive_worker'):
+                archive_worker._maybe_trigger_critical_cleanup('/tmp')
+                # Wait for daemon thread.
+                time.sleep(0.2)
+            warns = [
+                r for r in caplog.records
+                if r.levelname == 'WARNING'
+                and 'disk-critical cleanup' in r.getMessage()
+            ]
+            assert len(warns) >= 1
+        finally:
+            if original is not None:
+                sys.modules['services.archive_watchdog'] = original
+
+    def test_critical_disk_calls_cleanup_via_process_one_claim(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        """End-to-end: a disk-critical verdict in process_one_claim
+        triggers the cleanup helper. Mocks shutil.disk_usage to force
+        critical and asserts _maybe_trigger_critical_cleanup was called.
+        """
+        clip = make_clip("RecentClips/critical-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        # Force disk_usage to report critical (1 MB free).
+        monkeypatch.setattr(
+            archive_worker.shutil, 'disk_usage',
+            lambda p: _FakeUsage(total=10**12, used=10**12 - 10**6, free=10**6),
+        )
+        # Capture the trigger call.
+        triggered_with: List[str] = []
+        original = archive_worker._maybe_trigger_critical_cleanup
+
+        def spy(archive_root_arg):
+            triggered_with.append(archive_root_arg)
+            return False  # short-circuit so we don't spawn a thread in test
+
+        monkeypatch.setattr(
+            archive_worker, '_maybe_trigger_critical_cleanup', spy,
+        )
+
+        from services.archive_queue import claim_next_for_worker
+        row = claim_next_for_worker('t', db_path=db)
+        assert row is not None
+        result = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert result == 'pending'
+        assert triggered_with == [archive_root], (
+            "process_one_claim must call _maybe_trigger_critical_cleanup "
+            "with the archive_root when disk verdict is 'critical'"
+        )

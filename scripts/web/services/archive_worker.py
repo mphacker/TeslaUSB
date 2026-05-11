@@ -161,6 +161,80 @@ _DEFAULT_DISK_SPACE_PAUSE_SECONDS: float = 300.0
 # *why* the worker isn't draining.
 _load_pause_until: float = 0.0
 
+# Debounce timer for the disk-critical → cleanup wire-up (Phase 1
+# item 1.5). When ``_check_disk_space_guard`` reports 'critical', we
+# kick off ``archive_watchdog.force_prune_now()`` in a daemon thread
+# so the worker can release its claim and idle immediately, but only
+# once per ``_DISK_CRITICAL_CLEANUP_DEBOUNCE_SECONDS`` — without
+# this, every claim attempt during the disk-pause window would
+# re-trigger the cleanup. Read/written under ``_state_lock``.
+_DISK_CRITICAL_CLEANUP_DEBOUNCE_SECONDS = 60.0
+_last_disk_critical_cleanup_at: float = 0.0
+
+
+def _maybe_trigger_critical_cleanup(archive_root: str) -> bool:
+    """Trigger ``archive_watchdog.force_prune_now()`` if debounce permits.
+
+    Phase 1 item 1.5: when disk space crosses the critical threshold,
+    don't wait up to 24 h for the daily retention timer — kick a prune
+    now so the worker can resume draining. Spawned in a daemon thread
+    so this function returns immediately; the worker continues to its
+    pause loop without blocking on the prune.
+
+    Debounced to one trigger per
+    ``_DISK_CRITICAL_CLEANUP_DEBOUNCE_SECONDS`` (60 s). Even if the
+    disk-critical signal fires every iteration during the pause
+    window, we only call force_prune_now once per minute.
+
+    Lazy import of ``archive_watchdog`` keeps the dependency one-way
+    at module load (archive_watchdog does not import archive_worker).
+
+    Returns True if a cleanup thread was actually spawned, False if
+    debounced or unavailable.
+    """
+    global _last_disk_critical_cleanup_at
+    now = time.monotonic()
+    with _state_lock:
+        last = _last_disk_critical_cleanup_at
+        if now - last < _DISK_CRITICAL_CLEANUP_DEBOUNCE_SECONDS:
+            return False
+        _last_disk_critical_cleanup_at = now
+
+    def _do_cleanup():
+        try:
+            from services import archive_watchdog
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "archive_worker: disk-critical cleanup — could not "
+                "import archive_watchdog: %s", e,
+            )
+            return
+        try:
+            summary = archive_watchdog.force_prune_now()
+            logger.info(
+                "archive_worker: disk-critical cleanup complete — "
+                "deleted=%d, freed=%d bytes, scanned=%d, %.2fs",
+                int(summary.get('deleted_count', 0)),
+                int(summary.get('freed_bytes', 0)),
+                int(summary.get('scanned', 0)),
+                float(summary.get('duration_seconds', 0.0)),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "archive_worker: disk-critical cleanup raised: %s", e,
+            )
+
+    logger.info(
+        "archive_worker: disk-critical at %s — triggering immediate "
+        "retention cleanup (debounced, daemon thread)", archive_root,
+    )
+    threading.Thread(
+        target=_do_cleanup,
+        name='archive-worker-critical-cleanup',
+        daemon=True,
+    ).start()
+    return True
+
 
 def _resolve_disk_space_pause_seconds() -> float:
     """Return the configured disk-space pause duration in seconds.
@@ -822,6 +896,10 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         with _state_lock:
             _state['last_disk_pause_at'] = time.time()
             _state['last_disk_pause_free_mb'] = free_mb
+        # Phase 1 item 1.5: kick the retention prune NOW (debounced)
+        # so we don't sit at "Archive paused" for up to 24 h waiting
+        # for the daily retention timer.
+        _maybe_trigger_critical_cleanup(archive_root)
         return 'pending'
 
     # Compute destination + atomic copy.

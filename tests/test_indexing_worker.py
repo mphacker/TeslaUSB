@@ -457,3 +457,113 @@ class TestStatus:
             finally:
                 gate.set()
                 indexing_worker.stop_worker(timeout=5.0)
+
+
+class TestApplyLowPriority:
+    """Issue #72: ``_apply_low_priority`` was lowering the WHOLE
+    ``gadget_web`` process priority via ``os.nice(19)``, making the
+    Flask request handlers and every other thread low-priority too.
+    The fix uses thread-local SCHED_IDLE + ``ionice`` against the
+    calling thread's TID instead.
+    """
+
+    def test_does_not_call_os_nice(self, monkeypatch):
+        """``os.nice`` is process-wide on Linux — must NOT be used
+        from a worker thread because it lowers Flask priority too.
+        On Windows ``os.nice`` doesn't even exist; on Linux we must
+        guarantee the function never invokes it.
+        """
+        import sys
+        if not sys.platform.startswith('linux'):
+            # Non-Linux: function early-returns and ``os.nice`` is
+            # missing from stdlib, so the regression cannot occur.
+            indexing_worker._apply_low_priority()
+            return
+
+        called = []
+
+        def fake_nice(_):  # pragma: no cover - just records
+            called.append(True)
+            raise AssertionError(
+                "indexing_worker._apply_low_priority must NOT call "
+                "os.nice() — it's process-wide and would lower "
+                "Flask request handlers' priority too (issue #72)"
+            )
+
+        monkeypatch.setattr(os, 'nice', fake_nice)
+        # Should not raise.
+        indexing_worker._apply_low_priority()
+        assert called == []
+
+    def test_uses_native_tid_for_ionice(self, monkeypatch):
+        """``ionice -p`` must receive the calling thread's TID
+        (``threading.get_native_id()``), not the process PID. On
+        Linux, ioprio_set is per-task — passing the PID only adjusts
+        the main thread's I/O class.
+        """
+        import sys
+        if not sys.platform.startswith('linux'):
+            pytest.skip("ionice is Linux-only")
+
+        captured_args = []
+
+        def fake_run(cmd, *a, **kw):
+            captured_args.append(cmd)
+
+            class R:
+                returncode = 0
+                stdout = b''
+                stderr = b''
+            return R()
+
+        import subprocess as sp
+        monkeypatch.setattr(sp, 'run', fake_run)
+
+        expected_tid = threading.get_native_id()
+        indexing_worker._apply_low_priority()
+
+        ionice_calls = [c for c in captured_args if c and c[0] == 'ionice']
+        assert ionice_calls, (
+            f"Expected an ionice call from _apply_low_priority, got: "
+            f"{captured_args}"
+        )
+        # Find the -p arg.
+        cmd = ionice_calls[0]
+        p_idx = cmd.index('-p')
+        tid_arg = int(cmd[p_idx + 1])
+        # The TID we capture inside the test thread IS the same TID
+        # _apply_low_priority sees because we call it synchronously.
+        assert tid_arg == expected_tid, (
+            f"ionice -p got {tid_arg} but the calling thread's "
+            f"native TID is {expected_tid} — must match for I/O "
+            f"priority to apply to the indexer thread, not the main "
+            f"thread (issue #72)"
+        )
+
+    def test_uses_sched_idle_not_sched_batch(self, monkeypatch):
+        """SCHED_IDLE (5) lowers CPU priority more than SCHED_BATCH (3),
+        and is the right choice for "only run when nothing else wants
+        the CPU" semantics. Earlier code used SCHED_BATCH which still
+        competed normally for the CPU."""
+        import sys
+        if not sys.platform.startswith('linux'):
+            pytest.skip("sched_setscheduler is Linux-only")
+        if not hasattr(os, 'sched_setscheduler'):
+            pytest.skip("os.sched_setscheduler missing on this build")
+
+        captured = []
+
+        def fake_setscheduler(pid, policy, param):
+            captured.append((pid, policy))
+
+        monkeypatch.setattr(os, 'sched_setscheduler', fake_setscheduler)
+        indexing_worker._apply_low_priority()
+
+        assert captured, "Expected sched_setscheduler call"
+        pid_arg, policy_arg = captured[0]
+        assert pid_arg == 0, (
+            "First arg must be 0 (= 'this thread'), not a PID"
+        )
+        assert policy_arg == 5, (
+            f"Policy must be SCHED_IDLE (5), got {policy_arg}"
+        )

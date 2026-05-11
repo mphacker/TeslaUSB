@@ -482,27 +482,61 @@ def _record_idle(last_outcome: Optional[mapping_service.IndexOutcome] = None,
 
 
 def _apply_low_priority() -> None:
-    """Best-effort drop to nice 19 + SCHED_BATCH on Linux.
+    """Best-effort drop the **calling thread** to lowest CPU + I/O priority.
 
-    No-ops on platforms (Windows/macOS) where the syscalls are missing
-    or fail. Any exception is swallowed — priority adjustment is a
-    nice-to-have, not a correctness requirement.
+    Critical: this MUST be thread-local. Earlier versions called
+    ``os.nice(19)``, which on Linux/glibc lowers the WHOLE PROCESS
+    priority — making the Flask request handlers and every other
+    thread in ``gadget_web`` low-priority too. That caused
+    ``/api/index/status`` and ``/`` to time out at 10 s during boot
+    catchup (issue #72).
+
+    What's safe to use from a worker thread:
+
+    * ``os.sched_setscheduler(0, SCHED_IDLE, ...)`` — the ``0`` first
+      argument means "this thread" on Linux (per ``sched_setscheduler(2)``).
+      ``SCHED_IDLE`` (constant 5) only runs when nothing else wants the
+      CPU, which is exactly what we want for indexing.
+    * ``ionice -c 3 -p <native_tid>`` — Linux ``ioprio_set`` is also
+      per-task; we pass ``threading.get_native_id()`` so the I/O-idle
+      class applies to the indexer thread only, not to the Flask
+      handler thread that happens to be processing a request when
+      this gets called.
+
+    No-ops on platforms (Windows/macOS) or Python builds where the
+    syscalls/CLI tools are missing. Any failure is swallowed —
+    priority adjustment is a nice-to-have, not a correctness
+    requirement.
     """
+    if not sys.platform.startswith('linux'):
+        return
+
+    # CPU scheduling — SCHED_IDLE is thread-local with first arg = 0.
     try:
-        os.nice(19)
-    except (OSError, AttributeError, ValueError):
+        SCHED_IDLE = 5
+        if hasattr(os, 'sched_setscheduler') and hasattr(os, 'sched_param'):
+            os.sched_setscheduler(  # type: ignore[attr-defined]
+                0, SCHED_IDLE, os.sched_param(0),  # type: ignore[attr-defined]
+            )
+    except (OSError, PermissionError, AttributeError):
+        # Some kernels/cgroups refuse SCHED_IDLE for non-root; that's
+        # fine — we still get the I/O priority drop below.
         pass
-    if sys.platform.startswith('linux'):
-        try:
-            # SCHED_BATCH = 3 on Linux; not exposed in stdlib for all
-            # Python builds, so we use the raw constant.
-            SCHED_BATCH = 3
-            if hasattr(os, 'sched_setscheduler') and hasattr(os, 'sched_param'):
-                os.sched_setscheduler(  # type: ignore[attr-defined]
-                    0, SCHED_BATCH, os.sched_param(0),  # type: ignore[attr-defined]
-                )
-        except (OSError, PermissionError, AttributeError):
-            pass
+
+    # I/O scheduling — ionice on the calling thread's TID, not the PID.
+    # ``threading.get_native_id()`` returns the kernel TID on Linux
+    # (Python 3.8+); ionice -p accepts a TID transparently because
+    # Linux's ioprio_set syscall operates per-task.
+    try:
+        import subprocess
+        tid = threading.get_native_id()
+        subprocess.run(
+            ["ionice", "-c", "3", "-p", str(tid)],
+            timeout=5, capture_output=True, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired,
+            OSError, AttributeError):
+        pass
 
 
 def _run_worker_loop(db_path: str, teslacam_root: str, worker_id: str) -> None:

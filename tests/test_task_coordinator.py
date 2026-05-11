@@ -27,12 +27,14 @@ def _reset_coordinator():
         tc._current_task = None
         tc._task_started = 0.0
         tc._waiter_count = 0
+        tc._skipped_log_last.clear()
     yield
     # Post-test cleanup.
     with tc._lock:
         tc._current_task = None
         tc._task_started = 0.0
         tc._waiter_count = 0
+        tc._skipped_log_last.clear()
 
 
 class TestBasicAcquireRelease:
@@ -338,3 +340,118 @@ class TestMultipleWaiters:
             "applied to a blocking caller"
         )
         tc.release_task('holder')
+
+
+class TestSkippedLogThrottling:
+    """Issue #72: the cyclic indexer hits the "skipped" log path every
+    ~0.5 s while the archive holds the lock. A long archive run was
+    producing ~2 INFO log lines/sec for ~11 minutes (~1300 entries) on
+    Pi production, filling the journal and obscuring real events.
+    Throttle the INFO log to once per (task, blocker) pair per
+    ``_SKIPPED_LOG_THROTTLE_SECONDS``; demote subsequent attempts to
+    DEBUG so they remain available via ``journalctl -p debug``.
+    """
+
+    def test_repeated_skips_log_info_only_once(self, caplog):
+        tc.acquire_task('archive')
+        try:
+            with caplog.at_level('INFO', logger='services.task_coordinator'):
+                # Hit the skip path 10 times in quick succession.
+                for _ in range(10):
+                    assert tc.acquire_task('indexer') is False
+
+            info_skips = [
+                r for r in caplog.records
+                if r.levelname == 'INFO' and 'skipped' in r.message
+            ]
+            assert len(info_skips) == 1, (
+                f"Expected exactly 1 INFO 'skipped' log, got "
+                f"{len(info_skips)}: "
+                f"{[r.getMessage() for r in info_skips]}"
+            )
+        finally:
+            tc.release_task('archive')
+
+    def test_repeated_skips_emit_debug_after_first(self, caplog):
+        tc.acquire_task('archive')
+        try:
+            with caplog.at_level('DEBUG', logger='services.task_coordinator'):
+                for _ in range(5):
+                    assert tc.acquire_task('indexer') is False
+
+            info_skips = [
+                r for r in caplog.records
+                if r.levelname == 'INFO' and 'skipped' in r.message
+            ]
+            debug_skips = [
+                r for r in caplog.records
+                if r.levelname == 'DEBUG' and 'skipped' in r.message
+            ]
+            assert len(info_skips) == 1
+            # 4 throttled attempts → 4 DEBUG logs.
+            assert len(debug_skips) == 4
+        finally:
+            tc.release_task('archive')
+
+    def test_throttle_resets_on_lock_acquisition(self, caplog):
+        """When the lock changes hands, the throttle map clears so the
+        first skip of the next contention window logs at INFO again."""
+        # First contention period.
+        tc.acquire_task('archive')
+        try:
+            with caplog.at_level('INFO', logger='services.task_coordinator'):
+                tc.acquire_task('indexer')  # INFO log
+                tc.acquire_task('indexer')  # throttled to DEBUG
+        finally:
+            tc.release_task('archive')
+
+        caplog.clear()
+
+        # Lock is now free → next acquire resets the throttle map.
+        assert tc.acquire_task('cloud_sync') is True
+        try:
+            with caplog.at_level('INFO', logger='services.task_coordinator'):
+                # Second contention period: indexer's first skip vs
+                # the new blocker should fire at INFO again.
+                assert tc.acquire_task('indexer') is False
+
+            info_skips = [
+                r for r in caplog.records
+                if r.levelname == 'INFO' and 'skipped' in r.message
+            ]
+            assert len(info_skips) == 1
+            assert "'cloud_sync' is running" in info_skips[0].getMessage()
+        finally:
+            tc.release_task('cloud_sync')
+
+    def test_different_blocker_pair_logs_independently(self, caplog):
+        """Throttling is per (task, blocker) pair, not global. If the
+        same task is skipped by two different blockers in succession,
+        both first occurrences should log at INFO."""
+        # We can't actually have two blockers at once, but we can simulate
+        # the throttle map directly.
+        tc._skipped_log_last[('indexer', 'archive')] = 0.0  # warm cache
+
+        tc.acquire_task('archive')
+        try:
+            with caplog.at_level('INFO', logger='services.task_coordinator'):
+                tc.acquire_task('indexer')
+        finally:
+            tc.release_task('archive')
+
+        # Lock acquisition cleared the throttle map for next contention.
+        # New blocker (cloud_sync), same skipped task (indexer).
+        caplog.clear()
+        tc.acquire_task('cloud_sync')
+        try:
+            with caplog.at_level('INFO', logger='services.task_coordinator'):
+                tc.acquire_task('indexer')
+
+            info_skips = [
+                r for r in caplog.records
+                if r.levelname == 'INFO' and 'skipped' in r.message
+            ]
+            assert len(info_skips) == 1
+            assert "'cloud_sync' is running" in info_skips[0].getMessage()
+        finally:
+            tc.release_task('cloud_sync')

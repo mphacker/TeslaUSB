@@ -136,8 +136,27 @@ _state: Dict[str, Any] = {
 # :func:`process_one_claim`; cleared automatically once the deadline
 # passes (the watchdog will re-evaluate on its next tick).
 _disk_space_pause_until: float = 0.0
-# Default duration of the disk-space pause (seconds). Tests monkeypatch.
-_DEFAULT_DISK_SPACE_PAUSE_SECONDS = 300.0
+# Default duration of the disk-space pause (seconds). Resolved lazily
+# from ``cloud_archive.disk_space_pause_seconds`` at first use so the
+# config import order stays simple; tests monkeypatch this directly.
+_DEFAULT_DISK_SPACE_PAUSE_SECONDS: float = 300.0
+
+
+def _resolve_disk_space_pause_seconds() -> float:
+    """Return the configured disk-space pause duration in seconds.
+
+    Falls back to ``_DEFAULT_DISK_SPACE_PAUSE_SECONDS`` (which tests
+    can monkeypatch) when the config attribute is missing or not a
+    finite positive number.
+    """
+    try:
+        from config import CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS as cfg
+        cfg_val = float(cfg)
+        if cfg_val > 0:
+            return cfg_val
+    except (ImportError, TypeError, ValueError):
+        pass
+    return _DEFAULT_DISK_SPACE_PAUSE_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +581,7 @@ def _check_disk_space_guard(archive_root: str) -> str:
             "Archive disk-space CRITICAL: %d MB free at %s "
             "(< %d MB threshold) — refusing new copies for %.0fs",
             free_mb, archive_root, crit_mb,
-            _DEFAULT_DISK_SPACE_PAUSE_SECONDS,
+            _resolve_disk_space_pause_seconds(),
         )
         return 'critical'
     if free_mb < warn_mb:
@@ -687,7 +706,7 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
     if disk_verdict == 'critical':
         archive_queue.release_claim(row_id, db_path=db_path)
         _disk_space_pause_until = (
-            now_fn() + _DEFAULT_DISK_SPACE_PAUSE_SECONDS
+            now_fn() + _resolve_disk_space_pause_seconds()
         )
         try:
             free_mb = int(

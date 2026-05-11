@@ -928,3 +928,44 @@ class TestArchiveWorkerDiskSpaceGuard:
         verdict = archive_worker._check_disk_space_guard("/anywhere")
         assert verdict == 'ok'
 
+    def test_resolve_disk_space_pause_seconds_uses_config(self, monkeypatch):
+        # PR #90 reviewer Info #4: hardcoded constant promoted to
+        # ``cloud_archive.disk_space_pause_seconds``. The resolver must
+        # read the configured value when present.
+        import sys
+        fake = type(sys)('fake_config')
+        fake.CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = 600.0
+        monkeypatch.setitem(sys.modules, 'config', fake)
+        assert archive_worker._resolve_disk_space_pause_seconds() == 600.0
+
+    def test_resolve_disk_space_pause_seconds_falls_back_on_invalid(
+        self, monkeypatch,
+    ):
+        # Negative or zero values are rejected — fall back to the
+        # module default so tests can monkeypatch it directly.
+        import sys
+        fake = type(sys)('fake_config')
+        fake.CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = 0
+        monkeypatch.setitem(sys.modules, 'config', fake)
+        monkeypatch.setattr(
+            archive_worker, '_DEFAULT_DISK_SPACE_PAUSE_SECONDS', 42.0,
+        )
+        assert archive_worker._resolve_disk_space_pause_seconds() == 42.0
+
+    def test_resolve_disk_space_pause_seconds_falls_back_on_missing_config(
+        self, monkeypatch,
+    ):
+        # If config import raises, the resolver returns the module default.
+        import builtins
+        real_import = builtins.__import__
+
+        def _fail_import(name, *a, **kw):
+            if name == 'config':
+                raise ImportError("simulated")
+            return real_import(name, *a, **kw)
+        monkeypatch.setattr(builtins, '__import__', _fail_import)
+        monkeypatch.setattr(
+            archive_worker, '_DEFAULT_DISK_SPACE_PAUSE_SECONDS', 99.0,
+        )
+        assert archive_worker._resolve_disk_space_pause_seconds() == 99.0
+

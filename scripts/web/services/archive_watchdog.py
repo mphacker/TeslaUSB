@@ -122,6 +122,7 @@ _last_health: Dict[str, Any] = {
     'dead_letter_count': 0,
     'pending_count': 0,
     'disk_free_mb': 0,
+    'disk_known': True,
     'disk_warning': False,
     'checked_at': None,
 }
@@ -293,12 +294,21 @@ def _classify_severity(*,
                        last_copy_age_seconds: Optional[float],
                        disk_free_mb: int,
                        disk_warning_mb: int,
-                       disk_critical_mb: int) -> tuple:
+                       disk_critical_mb: int,
+                       disk_known: bool = True) -> tuple:
     """Return ``(severity, message)`` for the watchdog tick.
 
     Pure function so tests can drive every branch without mocking the
     DB or filesystem. Disk-space severity overrides staleness severity
     when it's higher (CRITICAL beats ERROR beats WARNING beats OK).
+
+    ``disk_known`` is False when ``shutil.disk_usage`` raised OSError
+    (e.g. ``archive_root`` briefly inaccessible). In that case the
+    disk overlay is skipped entirely so a transient stat failure does
+    not pop a misleading "0 MB free, CRITICAL" banner. The companion
+    ``archive_worker._check_disk_space_guard`` likewise fails open on
+    OSError — the watchdog now matches that "fail-quiet on stat
+    error" behavior.
     """
     # Staleness severity. Only escalates when there is pending work in
     # the queue — an idle worker with an empty queue is normal.
@@ -346,8 +356,13 @@ def _classify_severity(*,
             f"pending — videos are being lost!"
         )
 
-    # Disk-space severity overlay.
-    if disk_free_mb < disk_critical_mb:
+    # Disk-space severity overlay. Skip entirely when the disk-usage
+    # stat failed (``disk_known=False``) so a transient OSError does
+    # not surface as "0 MB free, CRITICAL".
+    if not disk_known:
+        disk_sev = 'ok'
+        disk_msg = ''
+    elif disk_free_mb < disk_critical_mb:
         disk_sev = 'critical'
         disk_msg = (
             f"SD card free space is CRITICAL: {disk_free_mb} MB "
@@ -393,6 +408,7 @@ def _compute_health(db_path: str, archive_root: str) -> Dict[str, Any]:
         worker_paused = False
 
     usage = _safe_disk_usage(archive_root)
+    disk_known = usage is not None
     disk_free_mb = int(usage.free // (1024 * 1024)) if usage else 0
     disk_total_mb = int(usage.total // (1024 * 1024)) if usage else 0
     disk_used_mb = max(disk_total_mb - disk_free_mb, 0)
@@ -405,6 +421,7 @@ def _compute_health(db_path: str, archive_root: str) -> Dict[str, Any]:
         disk_free_mb=disk_free_mb,
         disk_warning_mb=disk_warning_mb,
         disk_critical_mb=disk_critical_mb,
+        disk_known=disk_known,
     )
 
     snap: Dict[str, Any] = {
@@ -421,7 +438,12 @@ def _compute_health(db_path: str, archive_root: str) -> Dict[str, Any]:
         'disk_used_mb': disk_used_mb,
         'disk_warning_mb': disk_warning_mb,
         'disk_critical_mb': disk_critical_mb,
-        'disk_warning': severity != 'ok' and disk_free_mb < disk_warning_mb,
+        'disk_known': disk_known,
+        'disk_warning': (
+            disk_known
+            and severity != 'ok'
+            and disk_free_mb < disk_warning_mb
+        ),
         'checked_at': _iso_now(),
     }
     return snap

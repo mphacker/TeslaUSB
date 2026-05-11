@@ -136,12 +136,17 @@ def archive_status():
             'disk_pause', {'is_paused_now': False, 'paused_until_epoch': 0.0},
         ),
 
-        # Disk + retention.
+        # Disk + retention. ``disk_known=False`` means ``shutil.disk_usage``
+        # raised OSError on the most recent watchdog tick; the disk fields
+        # are then stale/zero and the severity overlay was skipped — the
+        # UI should suppress the storage panel rather than render a
+        # misleading "0 of 0 MB" pie.
         'disk_total_mb': int(health.get('disk_total_mb', 0)),
         'disk_used_mb': int(health.get('disk_used_mb', 0)),
         'disk_free_mb': int(health.get('disk_free_mb', 0)),
         'disk_warning_mb': int(health.get('disk_warning_mb', 500)),
         'disk_critical_mb': int(health.get('disk_critical_mb', 100)),
+        'disk_known': bool(health.get('disk_known', True)),
         'last_successful_copy_at': health.get('last_successful_copy_at'),
         'last_successful_copy_age_seconds': health.get(
             'last_successful_copy_age_seconds',

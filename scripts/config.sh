@@ -84,6 +84,7 @@ eval "$(yq -r '
   "CLOUD_ARCHIVE_RETENTION_DAYS=\"" + (.cloud_archive.archived_clips_retention_days // .archive.retention_days // 30 | tostring) + "\"",
   "CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB=\"" + (.cloud_archive.disk_space_warning_mb // 500 | tostring) + "\"",
   "CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB=\"" + (.cloud_archive.disk_space_critical_mb // 100 | tostring) + "\"",
+  "CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS=\"" + (.cloud_archive.disk_space_pause_seconds // 300 | tostring) + "\"",
   "TESLA_API_CLIENT_ID=\"" + (.tesla_api.client_id // "") + "\""
 ' "$CONFIG_YAML")"
 

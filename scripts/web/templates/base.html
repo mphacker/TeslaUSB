@@ -227,9 +227,6 @@
                 } else if (severity === 'error') {
                     banner.classList.add('archive-watchdog-error');
                     icon = 'icon-alert-circle';
-                } else if (severity === 'warning') {
-                    banner.classList.add('archive-watchdog-warning');
-                    icon = 'icon-alert-triangle';
                 }
                 if (iconUse) iconUse.setAttribute('href', SPRITE + '#' + icon);
                 if (messageEl) messageEl.textContent = message || '';

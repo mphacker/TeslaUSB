@@ -323,6 +323,40 @@ class TestArchiveWatchdogSeverity:
         assert archive_watchdog._STALE_ERROR_SECONDS == 10 * 60
         assert archive_watchdog._STALE_CRITICAL_SECONDS == 20 * 60
 
+    def test_disk_known_false_skips_disk_overlay(self):
+        # Regression: PR #90 reviewer Info #1.
+        # When disk_usage stat fails (disk_known=False), the disk
+        # overlay must be skipped entirely so a transient OSError
+        # does NOT escalate severity to 'critical' via disk_free_mb=0.
+        sev, msg = archive_watchdog._classify_severity(
+            worker_running=True,
+            pending_count=0,
+            last_copy_age_seconds=None,
+            disk_free_mb=0,            # would normally be < critical
+            disk_warning_mb=500,
+            disk_critical_mb=100,
+            disk_known=False,          # OSError happened
+        )
+        assert sev == 'ok'
+        assert 'CRITICAL' not in msg
+        assert '0 MB' not in msg
+
+    def test_disk_known_false_does_not_mask_stale_critical(self):
+        # disk_known=False must not suppress a real staleness-driven
+        # critical: the worker is dead with pending work — the user
+        # MUST see that banner regardless of disk-stat health.
+        sev, msg = archive_watchdog._classify_severity(
+            worker_running=False,
+            pending_count=4,
+            last_copy_age_seconds=30,
+            disk_free_mb=0,
+            disk_warning_mb=500,
+            disk_critical_mb=100,
+            disk_known=False,
+        )
+        assert sev == 'critical'
+        assert 'not running' in msg.lower()
+
 
 # ---------------------------------------------------------------------------
 # TestArchiveWatchdogDiskSpace
@@ -371,10 +405,34 @@ class TestArchiveWatchdogDiskSpace:
     ):
         missing = str(tmp_path / "nonexistent_archive_root")
         snap = archive_watchdog._compute_health(db, missing)
-        # Disk fields default to 0; severity should not crash.
+        # Disk fields default to 0 for backward-compat with the JSON
+        # payload, but ``disk_known`` is False so the disk overlay was
+        # skipped (i.e. severity was NOT escalated to 'critical' on a
+        # transient stat failure).
         assert snap['disk_free_mb'] == 0
         assert snap['disk_total_mb'] == 0
-        assert snap['severity'] in ('ok', 'warning', 'error', 'critical')
+        assert snap['disk_known'] is False
+        # The disk overlay was skipped — severity must not be 'critical'
+        # purely because disk_free_mb=0.
+        assert snap['severity'] in ('ok', 'warning', 'error')
+
+    def test_oserror_does_not_escalate_to_disk_critical(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Regression: PR #90 reviewer Info #1.
+        # When ``shutil.disk_usage`` raises OSError (transient FS hiccup),
+        # the watchdog must NOT report a misleading "0 MB free, CRITICAL"
+        # banner. Worker fails open on OSError; watchdog now matches.
+        def _raise(_p):
+            raise OSError("transient stat failure")
+        monkeypatch.setattr(archive_watchdog.shutil, 'disk_usage', _raise)
+        snap = archive_watchdog._compute_health(db, archive_root)
+        assert snap['disk_known'] is False
+        # Severity comes from staleness (idle queue ⇒ ok), not disk.
+        assert snap['severity'] == 'ok'
+        # Critical-disk message must NOT appear.
+        assert 'CRITICAL' not in snap['message']
+        assert '0 MB' not in snap['message']
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +446,7 @@ class TestArchiveWatchdogReporting:
         'last_successful_copy_age_seconds', 'worker_running', 'paused',
         'dead_letter_count', 'pending_count', 'disk_free_mb',
         'disk_total_mb', 'disk_used_mb', 'disk_warning',
-        'disk_warning_mb', 'disk_critical_mb', 'checked_at',
+        'disk_warning_mb', 'disk_critical_mb', 'disk_known', 'checked_at',
     }
 
     def test_get_health_shape(self, db, archive_root, monkeypatch):

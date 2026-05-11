@@ -125,7 +125,7 @@ class TestArchiveStatusShape:
         'worker_running', 'paused', 'active_file', 'last_outcome',
         'last_error', 'files_done_session', 'disk_pause',
         'disk_total_mb', 'disk_used_mb', 'disk_free_mb',
-        'disk_warning_mb', 'disk_critical_mb',
+        'disk_warning_mb', 'disk_critical_mb', 'disk_known',
         'last_successful_copy_at', 'last_successful_copy_age_seconds',
         'retention_days', 'last_prune_at', 'last_prune_deleted',
         'last_prune_freed_bytes', 'last_prune_error', 'next_prune_due_at',

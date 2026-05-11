@@ -130,6 +130,9 @@ CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB = int(_cloud.get(
 CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB = int(_cloud.get(
     'disk_space_critical_mb', 100,
 ))
+CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = float(_cloud.get(
+    'disk_space_pause_seconds', 300,
+))
 
 # Live Event Sync Configuration
 # Separate first-class subsystem from cloud_archive — own queue, worker, and config.

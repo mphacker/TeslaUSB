@@ -142,6 +142,7 @@ cloud_archive:
   archived_clips_retention_days: 30      # Local SD-card retention for ArchivedClips/*.mp4
   disk_space_warning_mb: 500             # Log WARNING when SD-card free space drops below this
   disk_space_critical_mb: 100            # Refuse new archive copies when free space drops below this
+  disk_space_pause_seconds: 300          # How long the worker stays paused after a disk-critical refusal
 
 # ============================================================================
 # Live Event Sync Configuration

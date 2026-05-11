@@ -14,7 +14,7 @@ endpoints will read the same queue.
 Design constraints (Pi Zero 2 W, 512 MB RAM):
 
 * **Lightweight imports only** — ``os``, ``sqlite3``, ``logging``,
-  ``threading``, ``datetime``. Heavy libraries (cv2/av/PIL/numpy/requests)
+  ``datetime``. Heavy libraries (cv2/av/PIL/numpy/requests)
   must never enter this module.
 * **One connection per call** — every public function opens its own
   SQLite connection so the API is thread-safe by construction. No shared
@@ -50,7 +50,6 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-import threading
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
@@ -151,12 +150,14 @@ def _safe_stat(path: str):
         return None
 
 
-# Module-level lock for the single-row enqueue path. SQLite itself is
-# threadsafe at the connection level, but using a Python lock around
-# the rowcount probe lets us return a precise ``True`` / ``False`` for
-# "newly inserted vs. already present" even under concurrent producers
-# without needing an explicit transaction.
-_enqueue_lock = threading.Lock()
+# SQLite's connection-level threadsafety guarantees that ``cur.rowcount``
+# after ``INSERT OR IGNORE`` reflects only that cursor's own outcome:
+# the winning connection sees ``rowcount == 1``, the losing connection
+# sees ``rowcount == 0``. Each enqueue opens its own connection (via
+# the ``_open_archive_conn`` context manager), so no Python-level lock
+# is needed to make the single-row return value reliable. The bulk
+# path (``enqueue_many_for_archive``) uses ``conn.total_changes`` for
+# the same reason — same guarantee, no lock.
 
 
 # ---------------------------------------------------------------------------
@@ -198,19 +199,18 @@ def enqueue_for_archive(source_path: str, *,
     expected_mtime = st.st_mtime if st is not None else None
     enqueued_at = _iso_now()
     try:
-        with _enqueue_lock:
-            with _open_archive_conn(db_path) as conn:
-                cur = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO archive_queue
-                        (source_path, priority, status,
-                         enqueued_at, expected_size, expected_mtime)
-                    VALUES (?, ?, 'pending', ?, ?, ?)
-                    """,
-                    (source_path, int(priority), enqueued_at,
-                     expected_size, expected_mtime),
-                )
-                inserted = cur.rowcount == 1
+        with _open_archive_conn(db_path) as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO archive_queue
+                    (source_path, priority, status,
+                     enqueued_at, expected_size, expected_mtime)
+                VALUES (?, ?, 'pending', ?, ?, ?)
+                """,
+                (source_path, int(priority), enqueued_at,
+                 expected_size, expected_mtime),
+            )
+            inserted = cur.rowcount == 1
         return inserted
     except sqlite3.Error as e:
         logger.warning("enqueue_for_archive failed for %s: %s",

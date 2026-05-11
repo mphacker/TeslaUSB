@@ -225,8 +225,12 @@ def start_producer(teslacam_root: str,
             name='archive-producer',
             daemon=True,
         )
-        thread = _thread
-    thread.start()
+        # Start inside the lock so a concurrent stop_producer cannot
+        # observe _thread before .start() and call join() on an
+        # unstarted thread (RuntimeError). Phase 2b will add more
+        # lifecycle entry points (admin endpoint, mode-switch hook),
+        # so making the start atomic now keeps the contract simple.
+        _thread.start()
     logger.info(
         "archive_producer started (root=%s, interval=%.1fs, boot_catchup=%s)",
         teslacam_root, rescan_interval_seconds, boot_catchup_enabled,

@@ -35,7 +35,7 @@ GADGET_DIR="__GADGET_DIR__"
 LOCK="/run/teslausb-wifi-handler.lock"
 
 # Prevent multiple concurrent runs. The handler is bounded at
-# ~5 min (archive) + ~2 min (indexer drain) + small overhead, so
+# ~one archive cycle + ~one indexer drain + small overhead, so
 # treat any lock newer than 10 minutes as still-valid and skip
 # this fire.
 if [ -f "$LOCK" ]; then

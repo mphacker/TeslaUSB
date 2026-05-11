@@ -114,6 +114,9 @@ class TestTriggerArchiveDuplicateGuard:
         # Reset the gate so the next "run" can also exit.
         gate.clear()
         gate.set()
+        assert vas.trigger_archive_now() is True
+        # Two distinct runs occurred.
+        assert len(runs) == 2
 
 
 class TestArchiveIoniceUsesThreadId:
@@ -198,9 +201,6 @@ class TestArchiveIoniceUsesThreadId:
             f"priority must be set on its OWN native TID, not the "
             f"process PID"
         )
-        assert vas.trigger_archive_now() is True
-        # Two distinct runs occurred.
-        assert len(runs) == 2
 
     def test_pending_cleared_when_run_returns_normally(self, monkeypatch):
         def fake_run():

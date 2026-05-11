@@ -1439,8 +1439,14 @@ $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/nmcli
 
 # Allow cache dropping for exFAT filesystem sync (required for web lock chime updates)
+# and for vfat slab-cache invalidation on the part1 RO mount before each archive
+# scan (issue #71). ``echo 2`` drops slabs only (dentries+inodes) — preserves the
+# page cache that backs the gadget's reads. ``echo 3`` drops both, used after
+# part2 RW remounts where the page cache is already cold.
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sh -c echo 3 > /proc/sys/vm/drop_caches
 $TARGET_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo 3 > /proc/sys/vm/drop_caches
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/sh -c echo 2 > /proc/sys/vm/drop_caches
+$TARGET_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo 2 > /proc/sys/vm/drop_caches
 EOF
 chmod 440 "$SUDOERS_ENTRY"
 

@@ -62,7 +62,7 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **Disambiguation popup**: Tapping the map at a location with multiple overlapping clips (e.g., a road driven multiple times) opens a chooser listing each clip with its trip date/time so the right one can be selected.
 - **Telemetry HUD**: Glassmorphic overlay showing real-time steering wheel angle, brake/gas pedal positions, speed, gear (P/R/N/D), turn signals, and Autopilot status — powered by pre-indexed server-side waypoint data (instant, no full video download needed)
 - **Auto-indexing**: A single low-priority background worker drains a SQLite-backed `indexing_queue` one file at a time. Producers: boot catch-up scan, real-time inotify on new files, the post-WiFi archive run, and manual reindex from the UI. The "Indexing…" banner only appears while a specific file is actively being parsed. Sentry events placed on map using inferred location from nearest trip
-- **RecentClips Archive**: Automatically copies RecentClips to the Pi's SD card every 5 minutes before Tesla's 1-hour circular buffer deletes them — zero USB disruption, videos preserved for 30 days
+- **RecentClips Archive**: Automatically copies RecentClips to the Pi's SD card every 2 minutes before Tesla's 1-hour circular buffer deletes them — zero USB disruption, videos preserved for 30 days
 - **Skeuomorphic event markers**: Balloon-pin map markers — brake pedal, gas pedal, steering wheel, speedometer, eye (sentry) — always visible on the map
 - **Trip navigation**: Floating trip card with prev/next navigation; FSD overlay toggle
 - Download all camera views for an event as a zip file
@@ -396,7 +396,7 @@ web:
 # ============================================================================
 archive:
   enabled: true                      # Enable RecentClips archival to SD card
-  interval_minutes: 5                # How often to check for new clips
+  interval_minutes: 2                # How often to check for new clips
   retention_days: 30                 # Delete archived clips older than this
   min_free_space_gb: 10              # Stop archiving if SD card < this free
   max_size_gb: 50                    # Cap on total archive folder size

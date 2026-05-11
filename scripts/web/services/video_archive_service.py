@@ -13,6 +13,7 @@ monitoring between files.
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -38,9 +39,14 @@ from config import (
 # Constants
 # ---------------------------------------------------------------------------
 
-# Minimum file age before copying (seconds). Files younger than this may
-# still be actively written by Tesla.
-_MIN_FILE_AGE_SECONDS = 300  # 5 minutes
+# Minimum file age before copying (seconds). Files younger than this are
+# assumed to still be actively written by Tesla and skipped this cycle.
+# Tesla's RecentClips are ~60 s long, so by 90 s the clip is finalized.
+# The real safety net against partial reads is ``_is_complete_mp4`` (the
+# moov-atom check at line 405 / 585) — this age gate is belt-and-suspenders
+# and a cheap fast-path that avoids running the moov scan on actively-rotating
+# files. Lowered from 300 s in #70 (was the dominant source of archive lag).
+_MIN_FILE_AGE_SECONDS = 90  # 1.5 minutes — see comment above
 
 # Buffered copy chunk size — keeps memory usage predictable on Pi Zero 2 W
 _COPY_CHUNK_SIZE = 65536  # 64 KB
@@ -58,7 +64,7 @@ _MIN_MEMORY_BYTES = 50 * 1024 * 1024  # 50 MB
 _INTER_FILE_SLEEP = 2.0  # 2 seconds
 
 # Max files to copy per archive cycle. Prevents a large backlog from
-# monopolising I/O and RAM for the entire 5-minute interval, which can
+# monopolising I/O and RAM for the whole archive interval, which can
 # starve the web server and trigger the hardware watchdog on Pi Zero 2 W.
 # Remaining files are picked up in the next cycle.
 _MAX_FILES_PER_CYCLE = 50
@@ -193,7 +199,6 @@ def _archive_timer_loop() -> None:
     # starve Flask/gadget I/O. This was the second half of issue #72
     # (the first was os.nice() in the indexer being process-wide).
     try:
-        import subprocess
         tid = threading.get_native_id()
         subprocess.run(
             ["ionice", "-c", "3", "-p", str(tid)],
@@ -266,7 +271,7 @@ def _run_archive() -> None:
         # poll. The wait-with-timeout is critical: returning False
         # immediately caused archive starvation in production, with
         # TeslaCam clips lost when Tesla rotated RecentClips before
-        # the next 5-minute archive cycle could win the lock. See
+        # the next archive cycle could win the lock. See
         # task_coordinator docstring for the fairness model.
         from services.task_coordinator import acquire_task, release_task
         if not acquire_task('archive', wait_seconds=60.0):
@@ -331,6 +336,24 @@ def _do_archive_work() -> None:
         _purge_corrupt_archives()
 
         # Discover files to copy
+        # Force vfat to re-read directories — the gadget side may have
+        # written new clips without invalidating our local RO mount's
+        # dentry/inode slab cache. ``echo 2`` drops slabs only (NOT the
+        # page cache that backs the gadget's reads of usb_cam.img), so
+        # this is safe to run concurrently with Tesla recording. Cheap
+        # (~100 ms) and bounded. Run once per archive cycle, not per
+        # file. See issue #71. Requires the matching sudoers entry in
+        # setup_usb.sh; if that entry is missing on an old install the
+        # try/except swallows the failure and the scan still works
+        # against whatever the cache currently holds (no regression).
+        try:
+            subprocess.run(
+                ['sudo', 'sh', '-c', 'echo 2 > /proc/sys/vm/drop_caches'],
+                capture_output=True, check=False, timeout=5,
+            )
+        except Exception as exc:  # pragma: no cover — best-effort, log-only
+            logger.debug("vfat slab cache flush failed (best-effort): %s", exc)
+
         _status["progress"] = "Scanning RecentClips..."
         to_copy = list(_discover_new_files(recent_clips))
 

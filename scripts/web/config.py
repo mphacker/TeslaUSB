@@ -129,7 +129,7 @@ LIVE_EVENT_NOTIFY_WEBHOOK_URL = str(_les.get('notify_webhook_url', '') or '')
 # RecentClips Archive Configuration
 _archive = config.get('archive', {})
 ARCHIVE_ENABLED = bool(_archive.get('enabled', True))
-ARCHIVE_INTERVAL_MINUTES = int(_archive.get('interval_minutes', 5))
+ARCHIVE_INTERVAL_MINUTES = int(_archive.get('interval_minutes', 2))
 ARCHIVE_RETENTION_DAYS = int(_archive.get('retention_days', 30))
 ARCHIVE_MIN_FREE_SPACE_GB = int(_archive.get('min_free_space_gb', 10))
 ARCHIVE_MAX_SIZE_GB = int(_archive.get('max_size_gb', 50))

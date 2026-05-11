@@ -213,7 +213,7 @@ LES is a **separate, opt-in subsystem** that uploads Sentry and Saved events to 
 ## Safety & Stability
 - **SSH is sacred**: sshd has a systemd drop-in preventing it from being stopped or masked. Safe-mode boot detection skips TeslaUSB services after 3+ reboots in 10 minutes.
 - **IMG files are never deleted**: `is_protected_file()` guard in all code paths that delete files. `*.img` files in GADGET_DIR are always refused deletion.
-- **RecentClips preservation**: Archive timer runs every 5 minutes regardless of WiFi state, copying clips to SD card before Tesla's circular buffer overwrites them.
+- **RecentClips preservation**: Archive timer runs every 2 minutes regardless of WiFi state, copying clips to SD card before Tesla's circular buffer overwrites them.
 - **WiFi always reconnects**: wifi-monitor.sh uses adaptive check intervals (20s when searching, 60s when connected), always tries to rejoin configured SSID even when AP is active.
 
 ## Pitfalls to avoid

@@ -91,6 +91,9 @@ def make_clip(teslacam_root):
 def _reset_module_state():
     """Stop any running worker between tests so module state stays clean."""
     archive_worker.stop_worker(timeout=5.0)
+    # Reset the disk-space self-pause so a previous test that armed it
+    # doesn't leak into the next test's process_one_claim path.
+    archive_worker._disk_space_pause_until = 0.0
     # Reset task_coordinator too — leftover ownership from an earlier
     # test would block our acquire.
     with task_coordinator._lock:
@@ -99,6 +102,7 @@ def _reset_module_state():
         task_coordinator._waiter_count = 0
     yield
     archive_worker.stop_worker(timeout=5.0)
+    archive_worker._disk_space_pause_until = 0.0
     with task_coordinator._lock:
         task_coordinator._current_task = None
         task_coordinator._task_started = 0.0
@@ -773,3 +777,154 @@ class TestModuleSafety:
                 f"token {tok!r} — Phase 2b hard constraint: no USB "
                 f"gadget interaction."
             )
+
+
+# ---------------------------------------------------------------------------
+# TestArchiveWorkerDiskSpaceGuard (Phase 2c — issue #76, acceptance 7)
+# ---------------------------------------------------------------------------
+
+
+class _FakeUsage:
+    """``shutil.disk_usage``-shaped namedtuple-replacement."""
+    def __init__(self, total: int, used: int, free: int):
+        self.total = total
+        self.used = used
+        self.free = free
+
+
+class TestArchiveWorkerDiskSpaceGuard:
+    """Acceptance criterion 7: disk-full guard refuses copy + releases claim.
+
+    The Phase 2c spec requires:
+      * < 100 MB free → log CRITICAL, do NOT copy, release claim back
+        to pending (no attempt counted), arm a 5-min worker-side pause.
+      * < 500 MB free → log WARNING, proceed (copy still happens).
+      * Both thresholds are configurable via ``cloud_archive.disk_space_*_mb``.
+    """
+
+    def _set_thresholds(self, monkeypatch, *, warning_mb: int, critical_mb: int):
+        monkeypatch.setattr(
+            archive_worker, '_resolve_disk_thresholds_mb',
+            lambda: (warning_mb, critical_mb),
+        )
+
+    def _fake_disk_usage(self, monkeypatch, *, free_mb: int,
+                          total_mb: int = 32_000):
+        used_mb = max(total_mb - free_mb, 0)
+        usage = _FakeUsage(
+            total=total_mb * 1024 * 1024,
+            used=used_mb * 1024 * 1024,
+            free=free_mb * 1024 * 1024,
+        )
+        monkeypatch.setattr(archive_worker.shutil, 'disk_usage',
+                            lambda _path: usage)
+
+    def test_critical_free_refuses_copy_and_releases_claim(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch, caplog,
+    ):
+        clip = make_clip("RecentClips/x-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        self._set_thresholds(monkeypatch, warning_mb=500, critical_mb=100)
+        self._fake_disk_usage(monkeypatch, free_mb=50)  # < critical
+
+        dest_before = os.path.join(
+            archive_root, "RecentClips", "x-front.mp4",
+        )
+        assert not os.path.exists(dest_before)
+
+        with caplog.at_level('CRITICAL', logger='services.archive_worker'):
+            outcome = archive_worker.process_one_claim(
+                row, db, archive_root, teslacam_root,
+                chunk_size=4096, max_attempts=3,
+            )
+
+        assert outcome == 'pending', (
+            "Disk-critical must release the claim back to pending"
+        )
+        # Destination must not have been written.
+        assert not os.path.exists(dest_before)
+
+        # Row reverted to pending; attempts NOT incremented.
+        rows = list_queue(db_path=db)
+        assert len(rows) == 1
+        assert rows[0]['status'] == 'pending'
+        assert rows[0]['claimed_by'] is None
+        assert rows[0]['attempts'] == 0  # no attempt burned
+        # CRITICAL log captured.
+        assert any('CRITICAL' in rec.message or rec.levelname == 'CRITICAL'
+                   for rec in caplog.records), \
+            "Disk-critical refusal must log at CRITICAL level"
+
+        # Module-level pause armed.
+        pause = archive_worker.get_disk_pause_state()
+        assert pause['is_paused_now'] is True
+        assert pause['paused_until_epoch'] > time.time()
+
+    def test_warning_free_proceeds_with_copy(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch, caplog,
+    ):
+        clip = make_clip("RecentClips/y-front.mp4", content=b"X" * 200)
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        self._set_thresholds(monkeypatch, warning_mb=500, critical_mb=100)
+        self._fake_disk_usage(monkeypatch, free_mb=300)  # warn but not critical
+
+        with caplog.at_level('WARNING', logger='services.archive_worker'):
+            outcome = archive_worker.process_one_claim(
+                row, db, archive_root, teslacam_root,
+                chunk_size=4096, max_attempts=3,
+            )
+
+        assert outcome == 'copied'
+        dest = os.path.join(archive_root, "RecentClips", "y-front.mp4")
+        assert os.path.isfile(dest)
+        # Warning level emitted.
+        assert any(rec.levelname == 'WARNING'
+                   for rec in caplog.records), \
+            "Disk-warning copy must log at WARNING level"
+
+    def test_ample_free_no_log_no_pause(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        clip = make_clip("RecentClips/z-front.mp4", content=b"X" * 200)
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        self._set_thresholds(monkeypatch, warning_mb=500, critical_mb=100)
+        self._fake_disk_usage(monkeypatch, free_mb=10_000)  # plenty
+
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'copied'
+        # No pause armed.
+        pause = archive_worker.get_disk_pause_state()
+        assert pause['is_paused_now'] is False
+
+    def test_disk_pause_state_present_in_get_status(
+        self, db, archive_root, teslacam_root,
+    ):
+        archive_worker.start_worker(
+            db, archive_root, teslacam_root=teslacam_root,
+        )
+        try:
+            status = archive_worker.get_status()
+            assert 'disk_pause' in status
+            assert 'is_paused_now' in status['disk_pause']
+            assert 'paused_until_epoch' in status['disk_pause']
+        finally:
+            archive_worker.stop_worker(timeout=5)
+
+    def test_check_disk_space_guard_handles_oserror(self, monkeypatch):
+        # OSError on stat → 'ok' (don't lock the subsystem out on a
+        # transient FS hiccup).
+        def _boom(_path):
+            raise OSError("simulated FS hiccup")
+        monkeypatch.setattr(archive_worker.shutil, 'disk_usage', _boom)
+        verdict = archive_worker._check_disk_space_guard("/anywhere")
+        assert verdict == 'ok'
+

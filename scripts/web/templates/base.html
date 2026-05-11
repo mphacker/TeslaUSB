@@ -109,6 +109,40 @@
     </nav>
 
     <main class="main-content{% if expandable %} expandable{% endif %}" role="main">
+        {% if videos_available %}
+        <!-- Phase 2c: archive watchdog banner. Hidden by default; the
+             polling JS below shows it when /api/archive/status returns
+             severity 'error' or 'critical'. Dismiss is sticky for 1h. -->
+        <div class="archive-watchdog-banner" id="archive-watchdog-banner"
+             role="alert" aria-live="polite" hidden>
+            <div class="archive-watchdog-content">
+                <div class="archive-watchdog-icon">
+                    <svg class="nav-icon" aria-hidden="true">
+                        <use id="archive-watchdog-icon-use"
+                             href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use>
+                    </svg>
+                </div>
+                <div class="archive-watchdog-message" id="archive-watchdog-message">
+                    Archive subsystem health degraded.
+                </div>
+                <div class="archive-watchdog-actions">
+                    <button type="button"
+                            class="archive-watchdog-btn"
+                            id="archive-watchdog-run-btn"
+                            aria-label="Run archive now">
+                        Run archive now
+                    </button>
+                    <button type="button"
+                            class="archive-watchdog-btn archive-watchdog-btn-secondary"
+                            id="archive-watchdog-dismiss-btn"
+                            aria-label="Dismiss banner for 1 hour">
+                        Dismiss
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
         {% if operation_in_progress %}
         <div class="operation-banner" id="operation-banner">
             <div class="operation-content">
@@ -155,6 +189,115 @@
         // Auto-refresh when operation completes
         window.operationInProgress = true;
         window.lockAge = {{ lock_age|default(0) }};
+    </script>
+    {% endif %}
+    {% if videos_available %}
+    <script>
+        // Phase 2c: archive watchdog banner — polls /api/archive/status
+        // every 60 s and shows a sticky bar when severity is 'error' or
+        // 'critical'. Dismiss persists for 1 h via sessionStorage.
+        (function() {
+            const POLL_INTERVAL_MS = 60000;
+            const DISMISS_KEY = 'archiveWatchdogDismissUntil';
+            const banner = document.getElementById('archive-watchdog-banner');
+            if (!banner) return;
+            const messageEl = document.getElementById('archive-watchdog-message');
+            const iconUse = document.getElementById('archive-watchdog-icon-use');
+            const runBtn = document.getElementById('archive-watchdog-run-btn');
+            const dismissBtn = document.getElementById('archive-watchdog-dismiss-btn');
+            const SPRITE = '{{ url_for("static", filename="icons/lucide-sprite.svg") }}';
+
+            function dismissedNow() {
+                try {
+                    const until = parseInt(
+                        sessionStorage.getItem(DISMISS_KEY) || '0', 10);
+                    return Date.now() < until;
+                } catch (e) { return false; }
+            }
+
+            function applySeverity(severity, message) {
+                banner.classList.remove(
+                    'archive-watchdog-warning',
+                    'archive-watchdog-error',
+                    'archive-watchdog-critical');
+                let icon = 'icon-alert-triangle';
+                if (severity === 'critical') {
+                    banner.classList.add('archive-watchdog-critical');
+                    icon = 'icon-shield-alert';
+                } else if (severity === 'error') {
+                    banner.classList.add('archive-watchdog-error');
+                    icon = 'icon-alert-circle';
+                } else if (severity === 'warning') {
+                    banner.classList.add('archive-watchdog-warning');
+                    icon = 'icon-alert-triangle';
+                }
+                if (iconUse) iconUse.setAttribute('href', SPRITE + '#' + icon);
+                if (messageEl) messageEl.textContent = message || '';
+            }
+
+            async function poll() {
+                if (dismissedNow()) {
+                    banner.hidden = true;
+                    return;
+                }
+                try {
+                    const r = await fetch('/api/archive/status', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) { banner.hidden = true; return; }
+                    const data = await r.json();
+                    if (data.severity === 'error'
+                        || data.severity === 'critical') {
+                        applySeverity(data.severity, data.message);
+                        banner.hidden = false;
+                    } else {
+                        banner.hidden = true;
+                    }
+                } catch (e) {
+                    // Network blip — leave the banner state unchanged.
+                }
+            }
+
+            if (runBtn) {
+                runBtn.addEventListener('click', async function() {
+                    runBtn.disabled = true;
+                    try {
+                        const r = await fetch(
+                            '/api/recent_archive/trigger',
+                            { method: 'POST',
+                              credentials: 'same-origin' });
+                        if (typeof showToast === 'function') {
+                            showToast(
+                                r.ok
+                                ? 'Archive run triggered.'
+                                : 'Failed to trigger archive run.',
+                                r.ok ? 'success' : 'error');
+                        }
+                    } catch (e) {
+                        if (typeof showToast === 'function') {
+                            showToast('Network error triggering archive.',
+                                'error');
+                        }
+                    } finally {
+                        runBtn.disabled = false;
+                        setTimeout(poll, 2000);
+                    }
+                });
+            }
+            if (dismissBtn) {
+                dismissBtn.addEventListener('click', function() {
+                    try {
+                        sessionStorage.setItem(
+                            DISMISS_KEY,
+                            String(Date.now() + 60 * 60 * 1000));
+                    } catch (e) {}
+                    banner.hidden = true;
+                });
+            }
+
+            poll();
+            setInterval(poll, POLL_INTERVAL_MS);
+        })();
     </script>
     {% endif %}
     {% block scripts %}{% endblock %}

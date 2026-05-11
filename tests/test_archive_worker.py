@@ -94,6 +94,10 @@ def _reset_module_state():
     # Reset the disk-space self-pause so a previous test that armed it
     # doesn't leak into the next test's process_one_claim path.
     archive_worker._disk_space_pause_until = 0.0
+    archive_worker._load_pause_until = 0.0
+    with archive_worker._state_lock:
+        archive_worker._state['last_load_pause_at'] = None
+        archive_worker._state['last_load_pause_loadavg'] = None
     # Reset task_coordinator too — leftover ownership from an earlier
     # test would block our acquire.
     with task_coordinator._lock:
@@ -103,6 +107,10 @@ def _reset_module_state():
     yield
     archive_worker.stop_worker(timeout=5.0)
     archive_worker._disk_space_pause_until = 0.0
+    archive_worker._load_pause_until = 0.0
+    with archive_worker._state_lock:
+        archive_worker._state['last_load_pause_at'] = None
+        archive_worker._state['last_load_pause_loadavg'] = None
     with task_coordinator._lock:
         task_coordinator._current_task = None
         task_coordinator._task_started = 0.0
@@ -1022,4 +1030,160 @@ class TestArchiveWorkerConfigContract:
             "Load-pause sleep must be long enough (>=10s) to actually "
             "let load drop, not just throttle every iteration."
         )
+
+
+# ---------------------------------------------------------------------------
+# TestArchiveWorkerLoadPauseUX — verify the load-pause guard's user-visible
+# behavior: status visibility, no log spam, wake() is ignored, state
+# resets cleanly across worker starts.
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveWorkerLoadPauseUX:
+    def test_get_load_pause_state_initial(self):
+        # Before any pause has fired, all fields are zero/None.
+        state = archive_worker.get_load_pause_state()
+        assert state['paused_until_epoch'] == 0.0
+        assert state['is_paused_now'] is False
+        assert state['last_pause_at'] is None
+        assert state['last_loadavg'] is None
+
+    def test_status_includes_load_pause_block(self, db, archive_root):
+        # ``get_status()`` must surface a ``load_pause`` block parallel
+        # to ``disk_pause`` so the UI can show *why* the worker isn't
+        # draining. Regression guard against the block being dropped.
+        archive_worker.start_worker(db, archive_root, teslacam_root=None)
+        try:
+            status = archive_worker.get_status()
+            assert 'load_pause' in status, (
+                "get_status() must include a 'load_pause' block "
+                "(parity with 'disk_pause')."
+            )
+            assert 'disk_pause' in status, "Existing disk_pause block lost."
+            lp = status['load_pause']
+            assert set(lp.keys()) >= {
+                'paused_until_epoch', 'is_paused_now',
+                'last_pause_at', 'last_loadavg',
+            }
+        finally:
+            archive_worker.stop_worker(timeout=5)
+
+    def test_start_worker_resets_load_pause_state(self, db, archive_root):
+        # Simulate a previous run that left state populated.
+        archive_worker._load_pause_until = time.time() + 100
+        with archive_worker._state_lock:
+            archive_worker._state['last_load_pause_at'] = time.time()
+            archive_worker._state['last_load_pause_loadavg'] = 5.5
+
+        # A fresh start_worker MUST clear it (parity with disk_pause).
+        # We don't actually need the worker to drain anything for this
+        # test — start + stop is enough.
+        archive_worker.start_worker(db, archive_root, teslacam_root=None)
+        try:
+            assert archive_worker._load_pause_until == 0.0, (
+                "start_worker must reset _load_pause_until."
+            )
+            state = archive_worker.get_load_pause_state()
+            assert state['last_pause_at'] is None
+            assert state['last_loadavg'] is None
+        finally:
+            archive_worker.stop_worker(timeout=5)
+
+    def test_load_pause_logs_only_on_transition(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch, caplog,
+    ):
+        # Force os.getloadavg() to report sustained high load. The
+        # worker must log the "pausing" INFO line ONCE (entering the
+        # window), NOT on every iteration. Even if the load stays high
+        # for many iterations, each subsequent iteration should be
+        # silent because we're still inside the same pause window.
+        # NB: ``getloadavg`` doesn't exist on Windows, so we install
+        # it (raising=False) for the duration of the test.
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (99.0, 99.0, 99.0), raising=False,
+        )
+        # Tighten the pause to keep the test snappy.
+        def fake_config(*a, **kw):
+            return (4096, 3, 0.05, 0.05, 0.5, 0.5)
+        monkeypatch.setattr(archive_worker, '_read_config_or_defaults', fake_config)
+
+        # Enqueue something so the worker has work to do (it'll hit
+        # the load-pause guard before claiming).
+        clip = make_clip("RecentClips/loadpause-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+
+        with caplog.at_level('INFO', logger='services.archive_worker'):
+            archive_worker.start_worker(
+                db, archive_root, teslacam_root=teslacam_root,
+            )
+            # Let the worker iterate several times under sustained load.
+            time.sleep(2.0)
+            archive_worker.stop_worker(timeout=5)
+
+        # Count "pausing" INFO lines. With pause window = 0.5s and
+        # 2.0s observation, we expect ~4 pause windows → 4 entry
+        # logs at most. Without the transition guard this would log
+        # on every iteration (~20+ times).
+        pause_logs = [r for r in caplog.records
+                      if 'pausing' in r.getMessage()
+                      and 'relieve SDIO' in r.getMessage()]
+        # Bound: at most 1 log per (load_pause_seconds + slack). With
+        # 0.5s window over 2s + cleanup, 6 is a generous upper bound.
+        assert len(pause_logs) <= 6, (
+            "Load-pause must log on transition into the window only, "
+            "not on every iteration. Got %d 'pausing' lines under "
+            "sustained high load — that's the spam regression PR #93's "
+            "review flagged." % len(pause_logs)
+        )
+        # And we must have logged AT LEAST one — otherwise the test
+        # didn't actually exercise the guard.
+        assert len(pause_logs) >= 1, (
+            "Load-pause guard didn't fire under simulated load=99.0."
+        )
+
+    def test_load_pause_ignores_wake_event(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # Producers calling ``wake()`` MUST NOT shorten the load-pause
+        # back-off. The whole point of the pause is to give the SDIO
+        # bus a clear runway; producer wakes would defeat that.
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (99.0, 99.0, 99.0), raising=False,
+        )
+        # 1.0s pause window so the test can observe that wake() does
+        # NOT cut it short.
+        def fake_config(*a, **kw):
+            return (4096, 3, 0.05, 0.05, 0.5, 1.0)
+        monkeypatch.setattr(archive_worker, '_read_config_or_defaults', fake_config)
+
+        clip = make_clip("RecentClips/wake-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+
+        archive_worker.start_worker(
+            db, archive_root, teslacam_root=teslacam_root,
+        )
+        try:
+            # Wait a hair so the worker enters the load-pause branch.
+            time.sleep(0.15)
+            t0 = time.time()
+            # Hammer wake() — under the OLD (buggy) code each wake
+            # would cut the 1s pause short within 1s of polling.
+            for _ in range(20):
+                archive_worker.wake()
+                time.sleep(0.02)
+            # Total elapsed under the test loop is ~0.4s. The pause
+            # window is 1.0s; the worker MUST still be paused.
+            elapsed = time.time() - t0
+            assert elapsed < 0.6, "test loop overran"
+            state = archive_worker.get_load_pause_state()
+            assert state['is_paused_now'] is True, (
+                "Load-pause was cut short by wake() — that's the bug "
+                "PR #93's review flagged. The pause MUST honor stop "
+                "events only, not wake events."
+            )
+        finally:
+            archive_worker.stop_worker(timeout=5)
+
 

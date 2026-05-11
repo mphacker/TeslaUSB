@@ -139,6 +139,8 @@ _state: Dict[str, Any] = {
     'last_drained_at': None,
     'last_disk_pause_at': None,
     'last_disk_pause_free_mb': None,
+    'last_load_pause_at': None,
+    'last_load_pause_loadavg': None,
 }
 
 # Disk-space self-pause epoch (seconds). When set in the future, the
@@ -151,6 +153,13 @@ _disk_space_pause_until: float = 0.0
 # from ``cloud_archive.disk_space_pause_seconds`` at first use so the
 # config import order stays simple; tests monkeypatch this directly.
 _DEFAULT_DISK_SPACE_PAUSE_SECONDS: float = 300.0
+
+# Load-pause self-pause epoch (seconds). When set in the future, the
+# worker loop is idling because 1-min loadavg crossed the configured
+# threshold (SDIO bus contention guard — see copilot-instructions.md).
+# Mirrors the disk-pause pattern so the status endpoint can show
+# *why* the worker isn't draining.
+_load_pause_until: float = 0.0
 
 
 def _resolve_disk_space_pause_seconds() -> float:
@@ -207,10 +216,13 @@ def start_worker(db_path: str, archive_root: str, *,
         _state['active_file'] = None
         _state['last_disk_pause_at'] = None
         _state['last_disk_pause_free_mb'] = None
+        _state['last_load_pause_at'] = None
+        _state['last_load_pause_loadavg'] = None
         # Reset the disk-space self-pause; the next iteration will
         # re-arm it if disk space is still critical.
-        global _disk_space_pause_until
+        global _disk_space_pause_until, _load_pause_until
         _disk_space_pause_until = 0.0
+        _load_pause_until = 0.0
         thread = threading.Thread(
             target=_run_worker_loop,
             args=(db_path, archive_root, teslacam_root, _worker_id),
@@ -365,6 +377,7 @@ def get_status() -> Dict[str, Any]:
     snap['copied_count'] = counts.get('copied', 0)
     snap['error_count'] = counts.get('error', 0)
     snap['disk_pause'] = get_disk_pause_state()
+    snap['load_pause'] = get_load_pause_state()
     return snap
 
 
@@ -613,6 +626,23 @@ def get_disk_pause_state() -> Dict[str, Any]:
     }
 
 
+def get_load_pause_state() -> Dict[str, Any]:
+    """Return the current load-pause state for status endpoints.
+
+    ``last_loadavg`` is the most recent reading that triggered the
+    pause (None until the guard fires for the first time). Mirrors
+    :func:`get_disk_pause_state` so the UI can show *why* the worker
+    isn't draining.
+    """
+    with _state_lock:
+        return {
+            'paused_until_epoch': float(_load_pause_until),
+            'is_paused_now': _load_pause_until > time.time(),
+            'last_pause_at': _state.get('last_load_pause_at'),
+            'last_loadavg': _state.get('last_load_pause_loadavg'),
+        }
+
+
 def _set_state(**fields: Any) -> None:
     with _state_lock:
         _state.update(fields)
@@ -816,20 +846,58 @@ def _run_worker_loop(db_path: str, archive_root: str,
         # combination of archive + indexer + Tesla concurrent writes),
         # back off so other tasks can drain. Threshold and pause length
         # are configurable; ``getloadavg`` is a cheap O(1) syscall.
+        #
+        # Two UX rules apply here:
+        #
+        #   1. Log INFO once on entering the pause and once on resume,
+        #      NOT on every iteration. Producers calling ``wake()``
+        #      under sustained high load would otherwise spam
+        #      ``journalctl`` every few seconds (see PR #93 review).
+        #   2. Use ``_stop_event.wait`` (NOT ``_wait_with_wake``) so
+        #      a producer's wake() can't shorten the back-off — the
+        #      whole point of the pause is to give the SDIO bus and
+        #      watchdog daemon a clear runway. Producers will get
+        #      their files drained on the next iteration anyway.
         if load_pause_threshold > 0:
             try:
                 load1 = os.getloadavg()[0]
             except (AttributeError, OSError):
                 load1 = 0.0
             if load1 > load_pause_threshold:
-                logger.info(
-                    "archive_worker: 1-min loadavg %.2f > %.2f — "
-                    "pausing %.0fs to relieve SDIO/CPU contention",
-                    load1, load_pause_threshold, load_pause_seconds,
-                )
+                global _load_pause_until
+                # Only log INFO on the leading edge of the pause
+                # window so back-to-back high-load iterations don't
+                # spam the journal. ``_load_pause_until`` is the
+                # epoch the current pause window expires; if it's
+                # already in the future we're still inside the same
+                # window and stay quiet.
+                already_paused = _load_pause_until > time.time()
+                _load_pause_until = time.time() + load_pause_seconds
+                with _state_lock:
+                    _state['last_load_pause_at'] = time.time()
+                    _state['last_load_pause_loadavg'] = float(load1)
+                if not already_paused:
+                    logger.info(
+                        "archive_worker: 1-min loadavg %.2f > %.2f — "
+                        "pausing %.0fs to relieve SDIO/CPU contention",
+                        load1, load_pause_threshold, load_pause_seconds,
+                    )
                 _idle_event.set()
-                _wait_with_wake(load_pause_seconds)
+                # Stop-only wait. Producers' wake() must NOT cut this
+                # short — we are deliberately giving the SDIO bus
+                # and the watchdog daemon a clear runway.
+                if _stop_event.wait(timeout=load_pause_seconds):
+                    break
                 continue
+            elif _load_pause_until > 0 and _load_pause_until <= time.time():
+                # Trailing edge: log once when we leave the pause
+                # window so the user can see "back to normal".
+                logger.info(
+                    "archive_worker: 1-min loadavg %.2f back below %.2f — "
+                    "resuming archive drain",
+                    load1, load_pause_threshold,
+                )
+                _load_pause_until = 0.0
 
         # Honor the disk-space self-pause. ``process_one_claim`` arms
         # ``_disk_space_pause_until`` when free space crosses the

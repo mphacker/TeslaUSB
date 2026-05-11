@@ -1242,3 +1242,78 @@ class TestArchiveWorkerLoadPauseUX:
             archive_worker.stop_worker(timeout=5)
 
 
+# ---------------------------------------------------------------------------
+# TestPartialOrphanSweep (Phase 1, item 1.7)
+# ---------------------------------------------------------------------------
+
+
+class TestPartialOrphanSweep:
+    """Verify ``_sweep_partial_orphans`` cleans up half-copied files
+    left behind by a prior crash. See ``_sweep_partial_orphans``
+    docstring + #95 for the full motivation.
+    """
+
+    def test_sweep_removes_partial_files(self, tmp_path):
+        archive = tmp_path / "ArchivedClips"
+        archive.mkdir()
+        sub = archive / "2026-05-11_14-44-00"
+        sub.mkdir()
+        # Two .partial orphans + one good .mp4 that must NOT be touched.
+        (sub / "front.mp4.partial").write_bytes(b"x" * 1024)
+        (sub / "back.mp4.partial").write_bytes(b"y" * 2048)
+        (sub / "front.mp4").write_bytes(b"good" * 256)
+        removed = archive_worker._sweep_partial_orphans(str(archive))
+        assert removed == 2
+        # Real .mp4 survives.
+        assert (sub / "front.mp4").exists()
+        # Both partials are gone.
+        assert not (sub / "front.mp4.partial").exists()
+        assert not (sub / "back.mp4.partial").exists()
+
+    def test_sweep_skips_dead_letter_dir(self, tmp_path):
+        archive = tmp_path / "ArchivedClips"
+        archive.mkdir()
+        dead = archive / ".dead_letter"
+        dead.mkdir()
+        # A .partial inside .dead_letter is preserved (forensic).
+        (dead / "preserve.mp4.partial").write_bytes(b"z" * 16)
+        # A .partial outside is removed.
+        (archive / "kill.mp4.partial").write_bytes(b"q" * 32)
+        removed = archive_worker._sweep_partial_orphans(str(archive))
+        assert removed == 1
+        assert (dead / "preserve.mp4.partial").exists()
+        assert not (archive / "kill.mp4.partial").exists()
+
+    def test_sweep_handles_missing_archive_root(self, tmp_path):
+        # A missing / unconfigured archive_root must not raise.
+        assert archive_worker._sweep_partial_orphans(
+            str(tmp_path / "does-not-exist"),
+        ) == 0
+        assert archive_worker._sweep_partial_orphans('') == 0
+        assert archive_worker._sweep_partial_orphans(None) == 0
+
+    def test_sweep_continues_on_per_file_failure(
+        self, tmp_path, monkeypatch,
+    ):
+        archive = tmp_path / "ArchivedClips"
+        archive.mkdir()
+        (archive / "a.mp4.partial").write_bytes(b"a")
+        (archive / "b.mp4.partial").write_bytes(b"b")
+
+        real_remove = os.remove
+        calls: List[str] = []
+
+        def flaky_remove(path):
+            calls.append(path)
+            if path.endswith("a.mp4.partial"):
+                raise OSError("simulated failure")
+            return real_remove(path)
+
+        monkeypatch.setattr(archive_worker.os, 'remove', flaky_remove)
+        removed = archive_worker._sweep_partial_orphans(str(archive))
+        # b.mp4.partial removed; a.mp4.partial was tried and skipped.
+        assert removed == 1
+        assert len(calls) == 2
+        assert (archive / "a.mp4.partial").exists()
+        assert not (archive / "b.mp4.partial").exists()
+

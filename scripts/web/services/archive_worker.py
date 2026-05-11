@@ -424,6 +424,59 @@ def _safe_stat(path: str):
         return None
 
 
+def _sweep_partial_orphans(archive_root: str) -> int:
+    """Remove ``*.partial`` files orphaned by a prior crash.
+
+    ``_atomic_copy`` writes to ``dest_path + '.partial'`` and only
+    renames once the size-verified write succeeds. A power loss or
+    hardware reset (e.g., the May 11 SDIO-watchdog reboots) leaves the
+    partial behind forever — it's missed by retention (different
+    extension), counted toward disk usage, and confuses the indexer if
+    it ever sees the path.
+
+    Walks ``archive_root`` once at worker startup, skipping the
+    ``.dead_letter`` diagnostic dir. Returns the number of orphans
+    removed (0 on a clean tree). Best-effort: per-file failures log a
+    warning and continue.
+
+    Safety: only one archive worker exists at a time (enforced by
+    ``start_worker``), and the worker doesn't begin claiming rows
+    until this sweep completes — so we cannot delete a ``.partial``
+    that another writer is currently producing. Stat failures (file
+    vanished, permissions) are skipped without raising.
+    """
+    if not archive_root or not os.path.isdir(archive_root):
+        return 0
+    removed = 0
+    for dirpath, dirnames, filenames in os.walk(
+        archive_root, followlinks=False,
+    ):
+        # Don't descend into .dead_letter — sidecar .txt files only,
+        # but keep the policy symmetric with the watchdog's prune.
+        dirnames[:] = [d for d in dirnames if d != '.dead_letter']
+        for fn in filenames:
+            if not fn.endswith('.partial'):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                size = 0
+            try:
+                os.remove(full)
+                removed += 1
+                logger.info(
+                    "archive_worker: removed orphan partial %s (%d bytes)",
+                    full, size,
+                )
+            except OSError as e:
+                logger.warning(
+                    "archive_worker: failed to remove orphan partial "
+                    "%s: %s", full, e,
+                )
+    return removed
+
+
 def _atomic_copy(source_path: str, dest_path: str,
                  chunk_size: int) -> int:
     """Copy ``source_path`` → ``dest_path`` atomically. Returns size.
@@ -832,6 +885,24 @@ def _run_worker_loop(db_path: str, archive_root: str,
             )
     except Exception as e:  # noqa: BLE001
         logger.warning("recover_stale_claims failed at startup: %s", e)
+
+    # Sweep .partial orphans left behind by a prior crash. Runs once
+    # at worker startup, before the loop begins claiming rows; safe
+    # because only one worker exists at a time. See
+    # ``_sweep_partial_orphans`` docstring for the safety argument.
+    try:
+        orphans = _sweep_partial_orphans(archive_root)
+        if orphans:
+            logger.info(
+                "Archive worker %s removed %d orphan .partial file(s) "
+                "at startup",
+                worker_id, orphans,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Archive worker %s: orphan .partial sweep failed: %s",
+            worker_id, e,
+        )
 
     chunk_size, max_attempts, idle_sleep, inter_file_sleep, \
         load_pause_threshold, load_pause_seconds = _read_config_or_defaults()

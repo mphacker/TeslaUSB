@@ -1334,8 +1334,30 @@ class TestDiskCriticalCleanupTrigger:
     def _reset_debounce(self):
         # Ensure each test starts with debounce cleared.
         archive_worker._last_disk_critical_cleanup_at = 0.0
-        yield
-        archive_worker._last_disk_critical_cleanup_at = 0.0
+        # When the full test suite runs, ``services.archive_watchdog``
+        # may already be cached as an attribute of the ``services``
+        # package (loaded by tests/test_archive_watchdog.py). The
+        # production helper uses ``from services import archive_watchdog``
+        # which short-circuits to that cached attribute — bypassing any
+        # ``sys.modules`` monkeypatch a test installs. Drop the cached
+        # attribute (and the sys.modules entry) so each test starts
+        # with a clean import slot. Saved + restored in finally so
+        # later tests see the real module again.
+        import services as _services_pkg
+        import sys as _sys
+        saved_attr = getattr(_services_pkg, 'archive_watchdog', None)
+        saved_mod = _sys.modules.get('services.archive_watchdog')
+        if hasattr(_services_pkg, 'archive_watchdog'):
+            delattr(_services_pkg, 'archive_watchdog')
+        _sys.modules.pop('services.archive_watchdog', None)
+        try:
+            yield
+        finally:
+            archive_worker._last_disk_critical_cleanup_at = 0.0
+            if saved_mod is not None:
+                _sys.modules['services.archive_watchdog'] = saved_mod
+            if saved_attr is not None:
+                _services_pkg.archive_watchdog = saved_attr
 
     def test_critical_triggers_cleanup_thread(self, monkeypatch):
         called = threading.Event()

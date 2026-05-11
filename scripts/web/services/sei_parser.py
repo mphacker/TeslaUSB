@@ -7,6 +7,22 @@ telemetry data embedded as protobuf-encoded SEI NAL units in Tesla dashcam MP4 f
 This is a pure-Python port of the client-side JavaScript parser in dashcam-mp4.js.
 Designed for low-memory operation on Pi Zero 2 W (512MB RAM).
 
+Memory model (Phase 1 item 1.4 — streaming SEI parser):
+    The byte buffer used by the walker is a memory-mapped file
+    (``mmap.mmap`` with ``access=ACCESS_READ``), NOT an in-memory
+    ``bytes`` object from ``f.read()``. The previous implementation
+    loaded the entire 30-80 MB clip into RSS, multiplied by however
+    many concurrent indexer/archive operations were running — a key
+    contributor to documented OOM events. With ``mmap``, the kernel
+    pages individual 4 KB chunks in on demand and evicts them under
+    pressure, so the parser's working set is bounded by the I/O
+    pattern (tight sequential walk → ~200 KB resident) regardless of
+    file size. ``mmap`` slicing returns ``bytes`` and indexing returns
+    ``int`` exactly like a real ``bytes`` object, so the existing
+    helpers (``_find_box``, ``_decode_sei_nal``,
+    ``_get_timescale_and_durations``) work unchanged. Output parity
+    is by construction.
+
 Usage:
     from services.sei_parser import extract_sei_messages, parse_video_sei
 
@@ -19,6 +35,7 @@ Usage:
 """
 
 import logging
+import mmap
 import os
 import struct
 from dataclasses import dataclass
@@ -335,89 +352,130 @@ def extract_sei_messages(
             f"max {max_file_size // 1024 // 1024} MB: {video_path}"
         )
 
-    # Read entire file into memory (Tesla clips are typically 30-60 seconds,
-    # ~30-80MB each). For Pi Zero 2 W, process one file at a time.
-    with open(video_path, 'rb') as f:
-        data = f.read()
-
-    # Parse timing information from moov box
+    # Phase 1 item 1.4 — memory-map the file instead of reading it into
+    # RAM. mmap supports slicing/indexing identically to bytes
+    # (data[i] -> int, data[a:b] -> bytes), so the byte-walking
+    # helpers below operate unchanged. The kernel pages individual
+    # 4 KB chunks in on demand and evicts under pressure, so a 60 MB
+    # clip never spikes RSS by 60 MB. Both the file descriptor and
+    # the mapping are released in the finally block — covers both
+    # normal generator exit and early generator close (GC /
+    # ``.close()``), which raise GeneratorExit at the yield point.
+    f = open(video_path, 'rb')
     try:
-        timescale, durations = _get_timescale_and_durations(data)
-    except ValueError as e:
-        logger.warning("Could not parse MP4 metadata for %s: %s", video_path, e)
-        # Fall back to default timing (33ms per frame = ~30fps)
-        timescale = 30000
-        durations = []
-    default_duration_ms = 33.33  # ~30fps fallback
+        try:
+            data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        except (ValueError, OSError) as e:
+            # Empty file (already guarded above) or platform mmap
+            # limitation — fall back to f.read() so we never hard-fail
+            # on a clip that the old code would have parsed.
+            logger.debug(
+                "sei_parser: mmap unavailable for %s (%s); "
+                "falling back to read()", video_path, e,
+            )
+            f.seek(0)
+            data = f.read()
+            mmap_obj = None
+        else:
+            mmap_obj = data
 
-    # Find mdat box (contains video data)
-    mdat = _find_box(data, 0, len(data), 'mdat')
-    if mdat is None:
-        raise ValueError(f"No mdat box found in {video_path}")
+        # Parse timing information from moov box
+        try:
+            timescale, durations = _get_timescale_and_durations(data)
+        except ValueError as e:
+            logger.warning(
+                "Could not parse MP4 metadata for %s: %s", video_path, e,
+            )
+            # Fall back to default timing (33ms per frame = ~30fps)
+            timescale = 30000
+            durations = []
+        default_duration_ms = 33.33  # ~30fps fallback
 
-    # Walk through NAL units in mdat
-    cursor = mdat['start']
-    end = mdat['end']
-    frame_index = 0
-    cumulative_time_ms = 0.0
+        # Find mdat box (contains video data)
+        mdat = _find_box(data, 0, len(data), 'mdat')
+        if mdat is None:
+            raise ValueError(f"No mdat box found in {video_path}")
 
-    while cursor + 4 <= end:
-        # Read 4-byte big-endian NAL unit length
-        nal_size = struct.unpack('>I', data[cursor:cursor + 4])[0]
-        cursor += 4
+        # Walk through NAL units in mdat
+        cursor = mdat['start']
+        end = mdat['end']
+        frame_index = 0
+        cumulative_time_ms = 0.0
 
-        if nal_size < 1 or cursor + nal_size > len(data):
-            break
+        while cursor + 4 <= end:
+            # Read 4-byte big-endian NAL unit length
+            nal_size = struct.unpack('>I', data[cursor:cursor + 4])[0]
+            cursor += 4
 
-        # Extract NAL unit type (lower 5 bits of first byte)
-        nal_type = data[cursor] & 0x1F
+            if nal_size < 1 or cursor + nal_size > len(data):
+                break
 
-        if nal_type == 6:
-            # SEI NAL unit — check if this is a sampled frame
-            if frame_index % sample_rate == 0:
-                nal_data = data[cursor:cursor + nal_size]
-                # Quick check: payload type 5 (user data unregistered)
-                if nal_size >= 2 and nal_data[1] == 5:
-                    sei = _decode_sei_nal(nal_data)
-                    if sei is not None:
-                        # Get frame duration
-                        if frame_index < len(durations):
-                            duration_ms = durations[frame_index]
-                        else:
-                            duration_ms = default_duration_ms
+            # Extract NAL unit type (lower 5 bits of first byte)
+            nal_type = data[cursor] & 0x1F
 
-                        yield SeiMessage(
-                            frame_index=frame_index,
-                            timestamp_ms=cumulative_time_ms,
-                            latitude_deg=sei.latitude_deg,
-                            longitude_deg=sei.longitude_deg,
-                            heading_deg=sei.heading_deg,
-                            vehicle_speed_mps=sei.vehicle_speed_mps,
-                            linear_acceleration_x=sei.linear_acceleration_mps2_x,
-                            linear_acceleration_y=sei.linear_acceleration_mps2_y,
-                            linear_acceleration_z=sei.linear_acceleration_mps2_z,
-                            steering_wheel_angle=sei.steering_wheel_angle,
-                            accelerator_pedal_position=sei.accelerator_pedal_position,
-                            brake_applied=sei.brake_applied,
-                            gear_state=_GEAR_NAMES.get(sei.gear_state, 'UNKNOWN'),
-                            autopilot_state=_AUTOPILOT_NAMES.get(
-                                sei.autopilot_state, 'UNKNOWN'
-                            ),
-                            blinker_on_left=sei.blinker_on_left,
-                            blinker_on_right=sei.blinker_on_right,
-                            frame_seq_no=sei.frame_seq_no,
-                            video_path=video_path,
-                        )
+            if nal_type == 6:
+                # SEI NAL unit — check if this is a sampled frame
+                if frame_index % sample_rate == 0:
+                    nal_data = data[cursor:cursor + nal_size]
+                    # Quick check: payload type 5 (user data unregistered)
+                    if nal_size >= 2 and nal_data[1] == 5:
+                        sei = _decode_sei_nal(nal_data)
+                        if sei is not None:
+                            # Get frame duration
+                            if frame_index < len(durations):
+                                duration_ms = durations[frame_index]
+                            else:
+                                duration_ms = default_duration_ms
 
-        elif nal_type == 5 or nal_type == 1:
-            # IDR (keyframe) or non-IDR slice — advance frame counter and timing
-            if frame_index < len(durations):
-                cumulative_time_ms += durations[frame_index]
-            else:
-                cumulative_time_ms += default_duration_ms
-            frame_index += 1
+                            yield SeiMessage(
+                                frame_index=frame_index,
+                                timestamp_ms=cumulative_time_ms,
+                                latitude_deg=sei.latitude_deg,
+                                longitude_deg=sei.longitude_deg,
+                                heading_deg=sei.heading_deg,
+                                vehicle_speed_mps=sei.vehicle_speed_mps,
+                                linear_acceleration_x=sei.linear_acceleration_mps2_x,
+                                linear_acceleration_y=sei.linear_acceleration_mps2_y,
+                                linear_acceleration_z=sei.linear_acceleration_mps2_z,
+                                steering_wheel_angle=sei.steering_wheel_angle,
+                                accelerator_pedal_position=sei.accelerator_pedal_position,
+                                brake_applied=sei.brake_applied,
+                                gear_state=_GEAR_NAMES.get(sei.gear_state, 'UNKNOWN'),
+                                autopilot_state=_AUTOPILOT_NAMES.get(
+                                    sei.autopilot_state, 'UNKNOWN'
+                                ),
+                                blinker_on_left=sei.blinker_on_left,
+                                blinker_on_right=sei.blinker_on_right,
+                                frame_seq_no=sei.frame_seq_no,
+                                video_path=video_path,
+                            )
 
-        cursor += nal_size
+            elif nal_type == 5 or nal_type == 1:
+                # IDR (keyframe) or non-IDR slice — advance frame counter and timing
+                if frame_index < len(durations):
+                    cumulative_time_ms += durations[frame_index]
+                else:
+                    cumulative_time_ms += default_duration_ms
+                frame_index += 1
+
+            cursor += nal_size
+    finally:
+        # Explicit close on every path — including GeneratorExit
+        # raised when the consumer abandons the generator early.
+        if mmap_obj is not None:
+            try:
+                mmap_obj.close()
+            except (BufferError, ValueError):
+                # BufferError: a previously-yielded slice still has a
+                # live memoryview holding the mapping (uncommon — our
+                # yields produce ``bytes``, not memoryviews, so any
+                # references are decoupled). Safe to ignore — the
+                # mapping is released when the file descriptor closes.
+                pass
+        try:
+            f.close()
+        except OSError:
+            pass
 
 
 def parse_video_sei(

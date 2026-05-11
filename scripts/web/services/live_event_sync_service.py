@@ -97,7 +97,7 @@ _status_lock = threading.Lock()
 _status: Dict = {
     "enabled": LIVE_EVENT_SYNC_ENABLED,
     "running": False,
-    "active_event": None,        # Event currently being uploaded
+    "active_file": None,         # Event dir currently being uploaded — name matches archive/indexer/cloud subsystems
     "last_uploaded_at": None,
     "last_uploaded_event": None,
     "last_error": None,
@@ -1084,7 +1084,7 @@ def _drain_once(cancel_event: threading.Event) -> bool:
 
                 with _status_lock:
                     _status["running"] = True
-                    _status["active_event"] = row.get('event_dir')
+                    _status["active_file"] = row.get('event_dir')
 
                 logger.info(
                     "LES uploading: %s (reason=%s, attempt %d/%d)",
@@ -1134,7 +1134,7 @@ def _drain_once(cancel_event: threading.Event) -> bool:
             finally:
                 with _status_lock:
                     _status["running"] = False
-                    _status["active_event"] = None
+                    _status["active_file"] = None
                 release_task('live_event_sync')
 
             # Pause between events so the gadget endpoint stays snappy.

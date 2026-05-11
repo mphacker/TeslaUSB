@@ -3673,6 +3673,223 @@ def query_day_routes(db_path: str, date_str: str,
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Trip-playability check (Issue #77)
+# ---------------------------------------------------------------------------
+#
+# The map's disambiguation popup needs to know whether a trip's videos still
+# exist on disk so it can hide "ghost" trips whose RecentClips footage Tesla
+# has overwritten. The check is filesystem-bound, so we cache the per-day
+# result for 60 s — clip rotation by Tesla is on the order of hours, and the
+# stale-scan / file-watcher subsystems publish authoritative state changes
+# inside that window anyway.
+#
+# Cache shape: ``{date_str: (computed_at_monotonic, {trip_id: bool})}``.
+# Thread-safe so concurrent Flask request handlers can share results.
+
+_PLAYABLE_TRIPS_CACHE: Dict[str, Tuple[float, Dict[int, bool]]] = {}
+_PLAYABLE_TRIPS_CACHE_LOCK = threading.Lock()
+_PLAYABLE_TRIPS_TTL_SECONDS = 60.0
+
+
+def _resolve_video_path_on_disk(video_path: str,
+                                teslacam_path: Optional[str],
+                                archive_dir: Optional[str]) -> bool:
+    """Return ``True`` if ``video_path`` resolves to a real file on disk.
+
+    Mirrors the resolution that ``videos.stream_video`` performs at
+    playback time, so this check matches what playback would actually
+    serve. Order:
+
+      1. If the path begins with ``ArchivedClips/``, look in
+         ``archive_dir`` (the SD-card archive root).
+      2. Else, look at ``<teslacam_path>/<relative path>`` (handles
+         ``RecentClips/foo.mp4``, ``SavedClips/<event>/foo.mp4``,
+         ``SentryClips/<event>/foo.mp4``, and bare basenames).
+      3. Fall back to ``<archive_dir>/<basename>`` so a clip that was
+         rotated out of RecentClips but copied to ArchivedClips by the
+         archive job is still considered playable.
+
+    Args:
+        video_path: Relative ``waypoints.video_path`` value from the DB.
+            Must be a non-empty string.
+        teslacam_path: TeslaCam mount root (RO in present mode, RW in
+            edit mode), or ``None`` if the gadget is mid-transition.
+        archive_dir: ARCHIVE_DIR from config when ARCHIVE_ENABLED is
+            true, else ``None``.
+
+    Returns:
+        ``True`` iff at least one candidate file exists.
+    """
+    if not video_path:
+        return False
+
+    norm = video_path.replace('\\', '/').lstrip('/')
+    parts = [p for p in norm.split('/') if p]
+    if not parts:
+        return False
+
+    # Defense-in-depth: ``waypoints.video_path`` is written by our own
+    # indexer and is always one of the canonical relative shapes
+    # (``RecentClips/<basename>``, ``ArchivedClips/<basename>``,
+    # ``SavedClips/<event>/<basename>``, ``SentryClips/<event>/<basename>``,
+    # or a bare basename). A path with ``..`` segments or an absolute
+    # form would only appear from a corrupt row or a legacy path —
+    # reject the natural-location lookup in that case to keep this
+    # function from probing arbitrary filesystem locations. The archive
+    # basename fallback below still finds genuinely-archived clips.
+    if any(p == '..' for p in parts):
+        if archive_dir:
+            archive_path = os.path.join(archive_dir, parts[-1])
+            if os.path.isfile(archive_path):
+                return True
+        return False
+
+    # Direct ArchivedClips reference: serve from SD-card archive root.
+    if parts[0] == 'ArchivedClips':
+        if archive_dir:
+            archive_path = os.path.join(archive_dir, parts[-1])
+            if os.path.isfile(archive_path):
+                return True
+        return False
+
+    # Natural location under the TeslaCam mount.
+    if teslacam_path:
+        candidate = os.path.join(teslacam_path, *parts)
+        if os.path.isfile(candidate):
+            return True
+
+    # ArchivedClips fallback: a RecentClips clip that was rotated out
+    # may still exist as an archived copy on the SD card.
+    if archive_dir:
+        archive_path = os.path.join(archive_dir, parts[-1])
+        if os.path.isfile(archive_path):
+            return True
+
+    return False
+
+
+def playable_trips_for_date(db_path: str, date_str: str,
+                            teslacam_path: Optional[str],
+                            archive_dir: Optional[str],
+                            ttl_seconds: float = (
+                                _PLAYABLE_TRIPS_TTL_SECONDS),
+                            ) -> Dict[int, bool]:
+    """Return ``{trip_id: has_playable_video}`` for every trip on ``date_str``.
+
+    A trip is considered playable iff at least one of its waypoints'
+    ``video_path`` values resolves to a real file on disk (see
+    :func:`_resolve_video_path_on_disk` for the resolution rules).
+
+    Results are cached per-date for ``ttl_seconds`` (default 60 s)
+    behind a module-level lock so concurrent Flask request handlers
+    share the work. Within a trip, unique ``video_path`` values are
+    stat'd at most once and the iteration short-circuits on the first
+    hit — a typical trip has a single video referenced by all its
+    waypoints, so the average cost is one ``isfile`` per trip.
+
+    Args:
+        db_path: Path to the geodata.db.
+        date_str: ISO ``YYYY-MM-DD`` day to evaluate. Caller must
+            validate format before calling.
+        teslacam_path: TeslaCam mount root, or ``None`` if unavailable.
+        archive_dir: ARCHIVE_DIR or ``None`` when archive is disabled.
+        ttl_seconds: Cache TTL. Tests can pass a smaller value.
+
+    Returns:
+        Dict mapping ``trip_id`` (int) → ``bool``. Trips with no
+        ``video_path`` waypoints are reported as ``False``. Empty dict
+        when no trips exist on the given date.
+    """
+    now = time.monotonic()
+    with _PLAYABLE_TRIPS_CACHE_LOCK:
+        cached = _PLAYABLE_TRIPS_CACHE.get(date_str)
+        if cached is not None:
+            computed_at, payload = cached
+            if (now - computed_at) < ttl_seconds:
+                return dict(payload)
+
+    conn = _init_db(db_path)
+    try:
+        # Single LEFT JOIN: every trip on the date appears at least
+        # once. Trips with no video_path waypoints come back as a
+        # single row with video_path NULL — we'll surface them as
+        # ``False`` in the result map. This avoids a second round
+        # trip and keeps the iteration order stable.
+        rows = conn.execute(
+            """
+            SELECT t.id AS trip_id,
+                   w.video_path AS video_path
+              FROM trips t
+              LEFT JOIN waypoints w
+                ON w.trip_id = t.id
+               AND w.video_path IS NOT NULL
+               AND w.video_path != ''
+             WHERE substr(t.start_time, 1, 10) = ?
+            """,
+            (date_str,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Group unique video_paths per trip so we stat each clip at most
+    # once. The LEFT JOIN guarantees every qualifying trip has at
+    # least one row, even if all its waypoints had a NULL video_path
+    # (those rows have ``video_path == None`` which we drop here).
+    by_trip: Dict[int, set] = {}
+    for row in rows:
+        trip_id = row['trip_id']
+        if trip_id not in by_trip:
+            by_trip[trip_id] = set()
+        vp = row['video_path']
+        if vp:
+            by_trip[trip_id].add(vp)
+
+    # Per-clip stat cache scoped to this call so two trips referencing
+    # the same clip (rare but possible after a v3 trip merge) don't
+    # double-stat.
+    file_cache: Dict[str, bool] = {}
+
+    def _is_playable(p: str) -> bool:
+        v = file_cache.get(p)
+        if v is None:
+            v = _resolve_video_path_on_disk(
+                p, teslacam_path, archive_dir,
+            )
+            file_cache[p] = v
+        return v
+
+    result: Dict[int, bool] = {}
+    for trip_id, paths in by_trip.items():
+        playable = False
+        for p in paths:
+            if _is_playable(p):
+                playable = True
+                break
+        result[trip_id] = playable
+
+    with _PLAYABLE_TRIPS_CACHE_LOCK:
+        _PLAYABLE_TRIPS_CACHE[date_str] = (time.monotonic(), result)
+        # Bound cache growth: a single device only ever has a few
+        # hundred days of history, but stale entries are pure ballast.
+        if len(_PLAYABLE_TRIPS_CACHE) > 64:
+            # Drop the oldest entries; cheap heuristic, no LRU needed.
+            oldest = sorted(
+                _PLAYABLE_TRIPS_CACHE.items(),
+                key=lambda kv: kv[1][0],
+            )[: len(_PLAYABLE_TRIPS_CACHE) - 32]
+            for k, _ in oldest:
+                _PLAYABLE_TRIPS_CACHE.pop(k, None)
+
+    return dict(result)
+
+
+def _reset_playable_trips_cache_for_tests() -> None:
+    """Clear the playable-trips cache. Intended for unit tests only."""
+    with _PLAYABLE_TRIPS_CACHE_LOCK:
+        _PLAYABLE_TRIPS_CACHE.clear()
+
+
 @_with_db_retry
 def query_all_routes_simplified(
     db_path: str,

@@ -355,6 +355,69 @@ def api_day_routes(date):
         return jsonify({'error': str(e)}), 500
 
 
+@mapping_bp.route("/api/trips/playable")
+def api_trips_playable():
+    """Return which trips on a given day still have playable video on disk.
+
+    Powers the disambiguation popup's ghost-trip filter (issue #77):
+    a trip whose ``waypoints.video_path`` rows reference clips that
+    Tesla has rotated out of RecentClips (and that the archive job
+    didn't copy in time) should not appear in the chooser, because
+    picking one yields an unhelpful "No video available" toast.
+
+    The check is per-trip — a trip is "playable" iff at least one of
+    its waypoints' video paths resolves to a real file on disk via
+    the same fallback rules :func:`videos.stream_video` uses
+    (RecentClips → ArchivedClips). Per-day results are cached
+    server-side for 60 s; subsequent calls within that window are
+    served from memory.
+
+    Query params:
+      * ``date`` — ISO ``YYYY-MM-DD`` (required).
+
+    Response shape::
+
+        {
+          "date": "2026-05-07",
+          "trips": {"62": false, "63": true, ...}
+        }
+
+    Trip ids are JSON-stringified because JSON object keys must be
+    strings; the client coerces them back to numbers.
+    """
+    from services.mapping_service import playable_trips_for_date
+
+    date = request.args.get('date', '')
+    if not _DATE_RE.match(date):
+        return jsonify({'error': 'date must be YYYY-MM-DD'}), 400
+
+    try:
+        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+        archive_dir = ARCHIVE_DIR if ARCHIVE_ENABLED else None
+    except ImportError:
+        archive_dir = None
+
+    teslacam_path = get_teslacam_path()
+
+    try:
+        result = playable_trips_for_date(
+            MAPPING_DB_PATH, date,
+            teslacam_path=teslacam_path,
+            archive_dir=archive_dir,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("Failed to compute playable trips for %s: %s",
+                     date, e)
+        return jsonify({'error': str(e)}), 500
+
+    # Stringify keys for JSON compatibility; the client expects this
+    # and coerces them back via Number() / parseInt().
+    return jsonify({
+        'date': date,
+        'trips': {str(k): v for k, v in result.items()},
+    })
+
+
 # Maximum simplified waypoints per trip in /api/all-routes. With
 # RDP-based simplification (the default for query_all_routes_simplified)
 # this is a safety cap that pathological zigzag trips would hit;

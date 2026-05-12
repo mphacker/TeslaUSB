@@ -11,6 +11,8 @@ rclone credentials to tmpfs only for the duration of each upload.
 
 import logging
 import os
+import posixpath
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -45,12 +47,118 @@ from config import (
 _RETRY_MAX_ATTEMPTS_MIN = 1
 _RETRY_MAX_ATTEMPTS_MAX = 20
 
+# Phase 2.7 — cloud-path canonicalization. The cloud_synced_files table's
+# ``file_path`` column was historically populated by several call sites
+# with inconsistent forms: relative POSIX (``ArchivedClips/foo.mp4``,
+# ``SentryClips/<event>``) from the bulk worker, but absolute filesystem
+# paths from ``queue_event_for_sync`` (which used ``os.scandir().path``).
+# The mix made dedup checks unreliable, broke ``WHERE file_path = ?``
+# lookups across writers, and produced corrupt rows like
+# ``ArchivedClips/foo.mp4/`` (trailing slash from a stray ``rclone lsf``
+# response). The schema version is bumped to 2 and a one-shot migration
+# rewrites every row to canonical relative form. New writes go through
+# ``canonical_cloud_path`` so this can never regress.
+_KNOWN_CLOUD_ROOTS = ("ArchivedClips", "RecentClips", "SentryClips",
+                      "SavedClips", "TeslaTrackMode")
+
+
+def canonical_cloud_path(file_path: str) -> str:
+    """Normalize a cloud-sync ``file_path`` to canonical relative form.
+
+    The canonical form is a POSIX-style path **relative to one of the
+    well-known TeslaCam folders** (``ArchivedClips``, ``RecentClips``,
+    ``SentryClips``, ``SavedClips``, ``TeslaTrackMode``):
+
+    * ``/`` separators only (Windows backslashes converted defensively).
+    * No leading slash.
+    * No trailing slash.
+    * No ``//`` or ``./`` components.
+    * **No ``..`` components** — these are rejected with ``ValueError``
+      because they have no legitimate place in a cloud-sync row name and
+      ``remove_from_queue`` is reachable from raw user input
+      (``cloud_archive.py`` POST handler), so a ``..`` collapse via
+      ``posixpath.normpath`` could be exploited to reference a row the
+      user shouldn't be able to address.
+
+    Absolute paths under any of those known roots have everything before
+    the root segment stripped. Examples::
+
+        /home/pi/ArchivedClips/2026-01-01-front.mp4
+            -> ArchivedClips/2026-01-01-front.mp4
+        /mnt/gadget/part1-ro/TeslaCam/SentryClips/2026-01-01_10-00-00
+            -> SentryClips/2026-01-01_10-00-00
+        ArchivedClips/foo.mp4/      (corrupt trailing slash)
+            -> ArchivedClips/foo.mp4
+        /home/pi/ArchivedClips//bar.mp4
+            -> ArchivedClips/bar.mp4
+
+    Paths that don't contain a known root segment have their leading /
+    and trailing / stripped but are otherwise preserved (this should
+    never happen for legitimate cloud-sync rows; treat such paths as
+    suspect but don't drop them).
+
+    Empty / falsy input is returned unchanged so callers can pass
+    optional values without a guard.
+
+    Raises:
+        ValueError: if ``file_path`` contains a ``..`` segment.
+    """
+    if not file_path:
+        return file_path
+    p = file_path.replace('\\', '/')
+
+    # Reject path-traversal attempts BEFORE any normalization. We check
+    # for the literal '..' segment surrounded by separators (or at the
+    # ends) so a basename like 'foo..bar.mp4' is allowed but
+    # 'ArchivedClips/../foo' is not. Doing this before normpath() is
+    # critical: posixpath.normpath('/x/../etc/passwd') silently
+    # collapses to '/etc/passwd'.
+    for seg in p.split('/'):
+        if seg == '..':
+            raise ValueError(
+                f"Path traversal segment '..' is not permitted in "
+                f"cloud_synced_files.file_path: {file_path!r}"
+            )
+
+    # Find a known root segment and strip everything before it. We use
+    # find('/<root>/') so 'ArchivedClips' inside a basename doesn't
+    # accidentally match (e.g. a hypothetical filename
+    # 'someArchivedClipsthing.mp4' would not be split).
+    stripped = None
+    for root in _KNOWN_CLOUD_ROOTS:
+        # Match 'X/<root>/' so we keep the root segment itself.
+        marker = f"/{root}/"
+        idx = p.find(marker)
+        if idx >= 0:
+            stripped = p[idx + 1:]  # +1 to drop the leading slash
+            break
+        # Or if the whole prefix IS the root (path begins with the root).
+        if p == root or p.startswith(f"{root}/"):
+            stripped = p
+            break
+    if stripped is not None:
+        p = stripped
+
+    # Normalize separators: collapse //, drop ./ components, strip
+    # trailing slash. posixpath.normpath does all of this; it would
+    # ALSO collapse '..' but we've already rejected those above, so
+    # there's no traversal risk from this call.
+    p = posixpath.normpath(p)
+
+    if p == '.':
+        return ''
+    # Strip leading slashes (defensive — normpath leaves a single one).
+    while p.startswith('/'):
+        p = p[1:]
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Database Schema & Versioning
 # ---------------------------------------------------------------------------
 
 _CLOUD_MODULE = "cloud_archive"
-_CLOUD_SCHEMA_VERSION = 1
+_CLOUD_SCHEMA_VERSION = 2
 
 _CLOUD_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS module_versions (
@@ -170,6 +278,163 @@ def _handle_corrupt_db(db_path: str) -> None:
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Phase 2.7 v2 migration: canonicalize cloud_synced_files.file_path
+# ---------------------------------------------------------------------------
+
+# Status priority for merging two rows that collapse to the same canonical
+# path. Higher value wins. ``synced`` always beats anything else (it's the
+# only state that records a successful upload — losing it would make the
+# bulk worker re-upload). ``dead_letter`` outranks ``failed`` because it
+# represents a row that has already exhausted its automatic retries —
+# demoting it back to ``failed`` would re-burn bandwidth on something
+# the operator has implicitly given up on.
+_MIGRATE_STATUS_PRIORITY = {
+    'synced': 5,
+    'dead_letter': 4,
+    'failed': 3,
+    'uploading': 2,
+    'pending': 1,
+    'queued': 0,
+}
+
+
+def _migrate_canonicalize_paths_v2(
+    conn: sqlite3.Connection, db_path: str,
+) -> Tuple[int, int]:
+    """Rewrite all ``cloud_synced_files.file_path`` rows to canonical form.
+
+    Returns ``(rewrites, merges)`` so the caller can log a summary.
+
+    Strategy:
+    1. Snapshot the DB to ``{db_path}.bak.v2-canonical-paths`` BEFORE
+       any writes. Power-loss during the migration leaves both copies on
+       disk; the operator can ``mv`` the .bak back without losing data.
+    2. Walk every row, compute canonical form via
+       :func:`canonical_cloud_path`.
+    3. If the new path is identical to the old, skip.
+    4. Otherwise attempt the UPDATE. On UNIQUE conflict (another row
+       already has the canonical form), MERGE: keep the row with the
+       higher status priority and delete the loser.
+
+    The whole operation runs inside a single transaction so a crash
+    leaves either the old form or the new form — never a half-migrated
+    mix. SQLite holds the WAL until commit, so an incomplete commit on
+    power-loss replays correctly on next open.
+    """
+    if not os.path.exists(db_path):
+        # In-memory or about-to-be-created DB: nothing to migrate.
+        return (0, 0)
+    # Snapshot first.  shutil.copy2 preserves mtime so the operator
+    # can see when the migration ran. Don't copy-2 over an existing
+    # backup file (a re-attempted migration after a partial crash);
+    # the FIRST snapshot is the source of truth.
+    backup_path = f"{db_path}.bak.v2-canonical-paths"
+    if not os.path.exists(backup_path):
+        try:
+            shutil.copy2(db_path, backup_path)
+            # Best-effort: also copy WAL/SHM if they exist, so the
+            # backup is a coherent snapshot.
+            for suffix in ("-wal", "-shm"):
+                src = db_path + suffix
+                if os.path.exists(src):
+                    shutil.copy2(src, backup_path + suffix)
+            logger.info(
+                "Cloud archive v2 migration: snapshotted DB to %s",
+                backup_path,
+            )
+        except OSError as e:
+            logger.warning(
+                "Cloud archive v2 migration: backup to %s failed (%s); "
+                "proceeding without snapshot",
+                backup_path, e,
+            )
+
+    rewrites = 0
+    merges = 0
+    # Defensive: tests may pass a connection without row_factory set.
+    # The production caller (_init_cloud_tables) always sets it, but we
+    # don't want this routine to be picky about its connection state.
+    prior_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT id, file_path, status FROM cloud_synced_files"
+        ).fetchall()
+    finally:
+        conn.row_factory = prior_factory
+
+    for row in rows:
+        new_path = canonical_cloud_path(row["file_path"])
+        if not new_path or new_path == row["file_path"]:
+            continue
+        try:
+            conn.execute(
+                "UPDATE cloud_synced_files SET file_path = ? WHERE id = ?",
+                (new_path, row["id"]),
+            )
+            rewrites += 1
+        except sqlite3.IntegrityError:
+            # Another row already holds the canonical form. Resolve by
+            # status priority: keep the higher-ranked row, delete the
+            # other. Re-run the canonical_cloud_path so we look up by
+            # the same key the conflicting row was inserted with.
+            conn.row_factory = sqlite3.Row
+            try:
+                existing = conn.execute(
+                    "SELECT id, status FROM cloud_synced_files "
+                    "WHERE file_path = ?",
+                    (new_path,),
+                ).fetchone()
+            finally:
+                conn.row_factory = prior_factory
+            if existing is None:
+                # Defensive: the conflict row vanished mid-migration
+                # (parallel writer? shouldn't happen — service is
+                # single-threaded for this DB). Try the update again.
+                conn.execute(
+                    "UPDATE cloud_synced_files SET file_path = ? WHERE id = ?",
+                    (new_path, row["id"]),
+                )
+                rewrites += 1
+                continue
+            existing_pri = _MIGRATE_STATUS_PRIORITY.get(
+                existing["status"], 0,
+            )
+            our_pri = _MIGRATE_STATUS_PRIORITY.get(row["status"], 0)
+            if our_pri > existing_pri:
+                # Promote ours: delete existing, retry the rename.
+                conn.execute(
+                    "DELETE FROM cloud_synced_files WHERE id = ?",
+                    (existing["id"],),
+                )
+                conn.execute(
+                    "UPDATE cloud_synced_files SET file_path = ? WHERE id = ?",
+                    (new_path, row["id"]),
+                )
+            else:
+                # Keep existing: drop our duplicate.
+                conn.execute(
+                    "DELETE FROM cloud_synced_files WHERE id = ?",
+                    (row["id"],),
+                )
+            merges += 1
+            logger.info(
+                "Cloud archive v2 migration: merged duplicate row "
+                "old=%r new=%r (kept status=%s)",
+                row["file_path"], new_path,
+                existing["status"] if our_pri <= existing_pri
+                else row["status"],
+            )
+
+    if rewrites or merges:
+        logger.info(
+            "Cloud archive v2 migration: rewrote %d row(s), merged %d duplicate(s)",
+            rewrites, merges,
+        )
+    return (rewrites, merges)
+
+
 def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
     """Open the cloud sync database and ensure all tables exist.
 
@@ -205,21 +470,53 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
     if current < _CLOUD_SCHEMA_VERSION:
         conn.executescript(_CLOUD_TABLES_SQL)
 
-        # Future migrations would go here:
-        # if current < 2:
-        #     conn.execute("ALTER TABLE cloud_synced_files ADD COLUMN ...")
+        # Phase 2.7 (v2) — canonicalize all cloud_synced_files.file_path
+        # values. Mixed forms (relative POSIX from the bulk worker,
+        # absolute from queue_event_for_sync, plus rare corrupt rows
+        # like trailing-slash) made dedup unreliable across writers.
+        # The migration is idempotent: rows already in canonical form
+        # are skipped, and rows that collapse to the same canonical
+        # path are merged keeping the higher-priority status (a synced
+        # row beats a pending one).
+        #
+        # Atomicity: the migration's UPDATEs/DELETEs and the version
+        # bump that follows MUST commit together. If the migration
+        # raises, we ``conn.rollback()`` to undo any partial rewrites
+        # and SKIP the version bump entirely so the migration retries
+        # on the next process start. The previous behaviour (log and
+        # fall through) left the DB with one rewritten row + the rest
+        # legacy + version=2 — the migration would never run again and
+        # the dedup contract would be silently broken.
+        migration_ok = True
+        if current < 2:
+            try:
+                _migrate_canonicalize_paths_v2(conn, db_path)
+            except Exception as e:
+                migration_ok = False
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logger.error(
+                    "Cloud archive v2 migration failed (%s); rolled "
+                    "back partial rewrites and leaving schema at v%d. "
+                    "Migration will retry on next service start. New "
+                    "writes will still be canonical.",
+                    e, current,
+                )
 
-        conn.execute(
-            "INSERT OR REPLACE INTO module_versions (module, version, updated_at) "
-            "VALUES (?, ?, ?)",
-            (_CLOUD_MODULE, _CLOUD_SCHEMA_VERSION,
-             datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-        logger.info(
-            "Cloud archive tables initialized (v%d) in %s",
-            _CLOUD_SCHEMA_VERSION, db_path,
-        )
+        if migration_ok:
+            conn.execute(
+                "INSERT OR REPLACE INTO module_versions (module, version, updated_at) "
+                "VALUES (?, ?, ?)",
+                (_CLOUD_MODULE, _CLOUD_SCHEMA_VERSION,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            logger.info(
+                "Cloud archive tables initialized (v%d) in %s",
+                _CLOUD_SCHEMA_VERSION, db_path,
+            )
 
     # On first DB access after process start, recover any sessions or
     # uploads left in a transient state by a crash or service restart.
@@ -495,7 +792,7 @@ def _discover_events(
             if not os.path.isdir(event_dir):
                 continue  # Skip flat files — events only
 
-            rel_path = f"{folder}/{entry}"
+            rel_path = canonical_cloud_path(f"{folder}/{entry}")
 
             # Skip events already confirmed synced
             if rel_path in synced_paths:
@@ -527,7 +824,7 @@ def _discover_events(
                 for f in sorted(os.listdir(ARCHIVE_DIR)):
                     fpath = os.path.join(ARCHIVE_DIR, f)
                     if os.path.isfile(fpath) and f.lower().endswith(('.mp4', '.ts')):
-                        rel_path = f"ArchivedClips/{f}"
+                        rel_path = canonical_cloud_path(f"ArchivedClips/{f}")
                         if rel_path in synced_paths:
                             continue
                         fsize = os.path.getsize(fpath)
@@ -703,7 +1000,7 @@ def _reconcile_with_remote(
                 continue
 
             for dirname in remote_dirs:
-                rel_path = f"{folder}/{dirname}"
+                rel_path = canonical_cloud_path(f"{folder}/{dirname}")
                 remote_dest = f"teslausb:{remote_path}/{rel_path}"
 
                 # Update existing pending/failed entries
@@ -745,9 +1042,18 @@ def _reconcile_with_remote(
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode == 0:
-            remote_files = {f.strip() for f in result.stdout.strip().split('\n') if f.strip()}
+            # Strip trailing slashes too — rclone lsf may return directory
+            # entries when a folder gets mistakenly created on the remote
+            # (PRE-2.7 this produced corrupt rows like
+            # ``ArchivedClips/foo.mp4/`` that broke later dedup checks).
+            remote_files = {
+                f.strip().rstrip('/')
+                for f in result.stdout.strip().split('\n') if f.strip()
+            }
             for filename in remote_files:
-                rel_path = f"ArchivedClips/{filename}"
+                if not filename:
+                    continue
+                rel_path = canonical_cloud_path(f"ArchivedClips/{filename}")
                 remote_dest = f"teslausb:{remote_path}/{rel_path}"
 
                 cur = conn.execute(
@@ -1593,10 +1899,18 @@ def queue_event_for_sync(folder: str, event_name: str, priority: bool = False) -
         queued = 0
         for entry in os.scandir(event_dir):
             if entry.name.lower().endswith('.mp4') and event_name in entry.name:
-                # Check if already synced or uploading
+                # Phase 2.7 — store and look up by canonical relative
+                # path. Pre-2.7 this used ``entry.path`` (an absolute
+                # filesystem path) which was inconsistent with the bulk
+                # worker's relative ``f"{folder}/{event_dir}"`` form.
+                # The canonical form is what the bulk worker stores AND
+                # what the v2 migration rewrote existing rows to, so
+                # this lookup now sees the same row the worker created
+                # and the dedup check actually dedups.
+                canonical = canonical_cloud_path(entry.path)
                 existing = conn.execute(
                     "SELECT status FROM cloud_synced_files WHERE file_path = ?",
-                    (entry.path,)
+                    (canonical,)
                 ).fetchone()
                 if existing and existing['status'] in ('synced', 'uploading'):
                     continue
@@ -1606,7 +1920,7 @@ def queue_event_for_sync(folder: str, event_name: str, priority: bool = False) -
                     """INSERT OR REPLACE INTO cloud_synced_files
                        (file_path, file_size, file_mtime, status, retry_count)
                        VALUES (?, ?, ?, 'queued', 0)""",
-                    (entry.path, stat.st_size, stat.st_mtime)
+                    (canonical, stat.st_size, stat.st_mtime)
                 )
                 queued += 1
 
@@ -1653,12 +1967,27 @@ def remove_from_queue(file_path: str) -> Tuple[bool, str]:
     ``synced`` rows are preserved so deleting from the queue cannot wipe the
     historical record of files already uploaded; those rows are not exposed
     via :func:`get_sync_queue` anyway.
+
+    The ``file_path`` argument is canonicalized via
+    :func:`canonical_cloud_path` before lookup so callers passing either
+    the legacy absolute form or the canonical relative form match the
+    same row (post-2.7 migration the DB only contains canonical rows,
+    but the API can still receive legacy paths).
+
+    A path containing ``..`` segments is rejected via
+    :func:`canonical_cloud_path` (raises ``ValueError``) — caught here
+    and surfaced to the caller as ``(False, "Invalid path")`` so the
+    blueprint returns a sane error to the UI rather than crashing.
     """
+    try:
+        canonical = canonical_cloud_path(file_path)
+    except ValueError:
+        return False, "Invalid path"
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:
         result = conn.execute(
             "DELETE FROM cloud_synced_files WHERE file_path = ? AND status != 'synced'",
-            (file_path,),
+            (canonical,),
         )
         conn.commit()
         if result.rowcount:

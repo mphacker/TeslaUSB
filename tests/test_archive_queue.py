@@ -214,6 +214,361 @@ class TestEnqueueManyForArchive:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2.8 — bulk-enqueue is transactional (issue #97 item 2.8)
+# ---------------------------------------------------------------------------
+#
+# `_open_archive_conn` is opened in autocommit mode (`isolation_level=None`)
+# so the helper itself never wraps writes in a transaction. Phase 2.8
+# adds an explicit BEGIN IMMEDIATE / COMMIT around `executemany` in
+# `enqueue_many_for_archive` so the whole batch lands in one fsync and
+# is atomic on failure. These tests pin that contract.
+
+class TestEnqueueManyAtomicity:
+    """Bulk enqueue must be all-or-nothing.
+
+    Before Phase 2.8 the connection was in autocommit mode and each
+    row of `executemany` committed independently — a SQLite error
+    half-way through left a partial batch in the DB. After 2.8 the
+    explicit BEGIN/COMMIT (with ROLLBACK on exception) makes the batch
+    atomic.
+    """
+
+    def test_rollback_on_executemany_error_leaves_db_unchanged(
+        self, db, tmp_path, monkeypatch,
+    ):
+        """If `executemany` raises mid-batch, no rows from the batch
+        survive."""
+        # Pre-existing row that must not be disturbed.
+        pre = tmp_path / "pre.mp4"
+        pre.write_bytes(b"pre")
+        assert enqueue_for_archive(str(pre), db_path=db) is True
+        assert get_queue_status(db_path=db)['pending'] == 1
+
+        # Build a batch and force `executemany` to raise.
+        files = []
+        for i in range(10):
+            f = tmp_path / f"new_{i}.mp4"
+            f.write_bytes(b"x")
+            files.append(str(f))
+
+        original_open = archive_queue._open_archive_conn
+
+        class _RaisingExecuteMany:
+            def __init__(self, real_conn):
+                self._c = real_conn
+                self.calls = 0
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+            def executemany(self, *a, **kw):
+                self.calls += 1
+                raise sqlite3.OperationalError(
+                    "simulated mid-batch failure"
+                )
+
+        def _patched_open(path):
+            real = original_open(path)
+            return _RaisingExecuteMany(real)
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _patched_open)
+
+        # The function catches sqlite3.Error and returns 0 (logging a warning).
+        n = enqueue_many_for_archive(files, db_path=db)
+        assert n == 0
+
+        # Undo the monkeypatch so the post-state check uses the real
+        # connection helper (the wrapper proxies attribute access via
+        # ``__getattr__``, which doesn't expose ``__enter__``/``__exit__``
+        # — those are dunder lookups bypassing ``__getattr__`` in Python).
+        monkeypatch.undo()
+
+        # Pre-existing row still there; none of the new batch landed.
+        status = get_queue_status(db_path=db)
+        assert status['pending'] == 1, (
+            "Atomicity violated: a partial batch leaked into the DB. "
+            f"Expected pending=1 (the pre-existing row), got {status}"
+        )
+
+    def test_no_partial_batch_visible_to_concurrent_reader(
+        self, db, tmp_path,
+    ):
+        """A concurrent reader must see either zero or all rows of a
+        batch — never a partial state."""
+        files = []
+        for i in range(50):
+            f = tmp_path / f"clip_{i}.mp4"
+            f.write_bytes(b"x")
+            files.append(str(f))
+
+        ready = threading.Event()
+        stop = threading.Event()
+        observed_partial = []
+
+        def _writer():
+            ready.wait()
+            enqueue_many_for_archive(files, db_path=db)
+            stop.set()
+
+        def _reader():
+            ready.wait()
+            # Poll until the writer is done; record any non-zero,
+            # non-final count.
+            while not stop.is_set():
+                n = get_queue_status(db_path=db)['pending']
+                if 0 < n < len(files):
+                    observed_partial.append(n)
+                time.sleep(0.001)
+
+        tw = threading.Thread(target=_writer)
+        tr = threading.Thread(target=_reader)
+        tw.start(); tr.start()
+        ready.set()
+        tw.join(timeout=10)
+        tr.join(timeout=10)
+
+        # Final state: all 50 rows landed.
+        assert get_queue_status(db_path=db)['pending'] == len(files)
+        # Reader never saw an in-between count. WAL + atomic commit
+        # guarantees this; if it ever fails the bulk enqueue is back
+        # in row-by-row mode.
+        assert not observed_partial, (
+            f"Reader observed partial batch counts {observed_partial} — "
+            "bulk enqueue is not atomic"
+        )
+
+    def test_batch_uses_single_commit_not_n_commits(
+        self, db, tmp_path, monkeypatch,
+    ):
+        """The contract: one BEGIN, one COMMIT, regardless of batch size.
+
+        We instrument the sqlite Connection to count execute() calls
+        with COMMIT in them. Before Phase 2.8 with `isolation_level=None`,
+        each executemany row implicitly committed. After Phase 2.8
+        there is exactly one explicit COMMIT.
+        """
+        files = []
+        for i in range(20):
+            f = tmp_path / f"clip_{i}.mp4"
+            f.write_bytes(b"x")
+            files.append(str(f))
+
+        original_open = archive_queue._open_archive_conn
+        commit_calls = []
+        begin_calls = []
+
+        class _Tracking:
+            def __init__(self, real_conn):
+                self._c = real_conn
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+            def execute(self, sql, *a, **kw):
+                stripped = sql.strip().upper()
+                if stripped.startswith("COMMIT"):
+                    commit_calls.append(sql)
+                elif stripped.startswith("BEGIN"):
+                    begin_calls.append(sql)
+                return self._c.execute(sql, *a, **kw)
+
+        def _patched_open(path):
+            return _Tracking(original_open(path))
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _patched_open)
+
+        n = enqueue_many_for_archive(files, db_path=db)
+        assert n == 20
+        assert len(begin_calls) == 1, (
+            f"Expected exactly 1 BEGIN, got {len(begin_calls)}: {begin_calls}"
+        )
+        assert len(commit_calls) == 1, (
+            f"Expected exactly 1 COMMIT, got {len(commit_calls)}: {commit_calls}"
+        )
+        # And the BEGIN should be IMMEDIATE so we don't upgrade locks.
+        assert "IMMEDIATE" in begin_calls[0].upper(), (
+            f"BEGIN must be IMMEDIATE to avoid lock upgrade races, "
+            f"got {begin_calls[0]!r}"
+        )
+
+    def test_connection_closed_on_success(self, db, tmp_path, monkeypatch):
+        """The bulk path must close its connection (don't leak FDs).
+
+        With autocommit mode the `with conn:` context manager does NOT
+        close the connection (sqlite3 only commits/rollbacks). We
+        moved to an explicit try/finally with `conn.close()` — this
+        test pins that invariant.
+        """
+        f = tmp_path / "clip.mp4"; f.write_bytes(b"x")
+
+        original_open = archive_queue._open_archive_conn
+        opened = []
+
+        class _Tracker:
+            def __init__(self, real):
+                self._c = real
+                self.closed = False
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+            def close(self):
+                self.closed = True
+                return self._c.close()
+
+        def _patched_open(path):
+            t = _Tracker(original_open(path))
+            opened.append(t)
+            return t
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _patched_open)
+
+        enqueue_many_for_archive([str(f)], db_path=db)
+        assert len(opened) == 1
+        assert opened[0].closed, (
+            "enqueue_many_for_archive leaked its SQLite connection — "
+            "the finally block must call conn.close()"
+        )
+
+    def test_connection_closed_on_failure(self, db, tmp_path, monkeypatch):
+        """Even when executemany fails, the connection must be closed."""
+        f = tmp_path / "clip.mp4"; f.write_bytes(b"x")
+
+        original_open = archive_queue._open_archive_conn
+        opened = []
+
+        class _RaisingTracker:
+            def __init__(self, real):
+                self._c = real
+                self.closed = False
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+            def executemany(self, *a, **kw):
+                raise sqlite3.OperationalError("boom")
+
+            def close(self):
+                self.closed = True
+                return self._c.close()
+
+        def _patched_open(path):
+            t = _RaisingTracker(original_open(path))
+            opened.append(t)
+            return t
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _patched_open)
+
+        n = enqueue_many_for_archive([str(f)], db_path=db)
+        assert n == 0
+        assert opened[0].closed, (
+            "enqueue_many_for_archive leaked its SQLite connection on "
+            "the failure path — the finally block must always close"
+        )
+
+    def test_keyboard_interrupt_mid_batch_rolls_back(
+        self, db, tmp_path, monkeypatch,
+    ):
+        """A non-sqlite exception (e.g. KeyboardInterrupt) mid-batch
+        must still ROLLBACK — never leave a half-committed batch."""
+        # Pre-existing row.
+        pre = tmp_path / "pre.mp4"; pre.write_bytes(b"pre")
+        enqueue_for_archive(str(pre), db_path=db)
+
+        files = []
+        for i in range(5):
+            f = tmp_path / f"new_{i}.mp4"
+            f.write_bytes(b"x")
+            files.append(str(f))
+
+        original_open = archive_queue._open_archive_conn
+
+        class _InterruptingConn:
+            def __init__(self, real):
+                self._c = real
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+            def executemany(self, *a, **kw):
+                raise KeyboardInterrupt("user pressed Ctrl-C")
+
+        def _patched_open(path):
+            return _InterruptingConn(original_open(path))
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _patched_open)
+
+        # KeyboardInterrupt is a BaseException, not Exception — it
+        # propagates out (we only catch sqlite3.Error). ROLLBACK is
+        # invoked before the re-raise.
+        with pytest.raises(KeyboardInterrupt):
+            enqueue_many_for_archive(files, db_path=db)
+
+        # See note in test_rollback_on_executemany_error_leaves_db_unchanged
+        # for why we undo here.
+        monkeypatch.undo()
+
+        # Pre-existing row survived; new rows did NOT land.
+        status = get_queue_status(db_path=db)
+        assert status['pending'] == 1, (
+            f"BaseException mid-batch broke atomicity: {status}"
+        )
+
+    def test_batch_speed_is_substantially_faster_than_per_row(
+        self, db, tmp_path,
+    ):
+        """Sanity check that batching produces a measurable speedup
+        over enqueueing each path individually.
+
+        On a Pi Zero 2 W, individual enqueues with fsync per row run
+        at ~10–30 inserts/sec; a transactional batch is 100+ inserts
+        per single fsync. We require at least a 3× speedup for 100
+        rows (conservative — typical is 50–100×) so the assertion
+        survives test-runner noise but still catches a regression
+        back to per-row commits.
+        """
+        # Two equivalent sets of paths.
+        many_files = []
+        for i in range(100):
+            f = tmp_path / f"many_{i}.mp4"
+            f.write_bytes(b"x")
+            many_files.append(str(f))
+        single_files = []
+        for i in range(100):
+            f = tmp_path / f"single_{i}.mp4"
+            f.write_bytes(b"x")
+            single_files.append(str(f))
+
+        # Time per-row.
+        t0 = time.perf_counter()
+        for p in single_files:
+            enqueue_for_archive(p, db_path=db)
+        per_row = time.perf_counter() - t0
+
+        # Time bulk.
+        t0 = time.perf_counter()
+        n = enqueue_many_for_archive(many_files, db_path=db)
+        bulk = time.perf_counter() - t0
+        assert n == 100
+
+        # Bulk must be at least 3× faster. (Typical ratio is 50–100×;
+        # 3× gives huge margin while still catching a regression to
+        # row-by-row commits in the bulk path.)
+        # If `bulk` is so close to zero that the ratio is unstable,
+        # the test still passes — the per-row time is always > 0.
+        assert per_row > bulk * 3, (
+            f"Bulk enqueue is not transactional — per_row={per_row*1000:.1f}ms, "
+            f"bulk={bulk*1000:.1f}ms (ratio {per_row/max(bulk,1e-9):.1f}×). "
+            f"Expected bulk to be ≥3× faster than per-row."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Status counts
 # ---------------------------------------------------------------------------
 

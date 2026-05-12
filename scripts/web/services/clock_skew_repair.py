@@ -62,6 +62,19 @@ if _WEB_DIR not in sys.path:
 
 from services import mapping_service, sei_parser  # noqa: E402
 
+# Optional config import — falls back to ``/home/pi/TeslaUSB/...`` defaults
+# if the script is invoked from a checkout that hasn't been deployed (so the
+# tests can run without spinning up a full config environment). Production
+# uses the real config module.
+try:
+    import config  # noqa: E402
+    from services import partition_service  # noqa: E402
+    _HAS_CONFIG = True
+except Exception:  # pragma: no cover - defensive
+    _HAS_CONFIG = False
+    config = None
+    partition_service = None
+
 logger = logging.getLogger("clock_skew_repair")
 
 # Skew below this is treated as "noise" and ignored. The mvhd time is
@@ -103,37 +116,74 @@ def _video_paths_in_db(conn: sqlite3.Connection) -> List[str]:
     return [r[0] for r in rows]
 
 
+def _candidate_archive_root() -> Optional[str]:
+    """Return the canonical SD-card archive directory, from config when
+    available; falls back to the deployed default."""
+    if _HAS_CONFIG:
+        try:
+            return config.ARCHIVE_DIR
+        except AttributeError:
+            pass
+    return "/home/pi/ArchivedClips"
+
+
+def _candidate_teslacam_root() -> Optional[str]:
+    """Return the active TeslaCam directory on the gadget RO mount.
+
+    Uses ``partition_service.get_mount_path('part1')`` so the result
+    follows present/edit mode automatically. Falls back to the
+    well-known RO path if config is unavailable (test environments).
+    """
+    if _HAS_CONFIG:
+        try:
+            mount = partition_service.get_mount_path('part1')
+            if mount:
+                return os.path.join(mount, 'TeslaCam')
+        except Exception:
+            pass
+    return "/mnt/gadget/part1-ro/TeslaCam"
+
+
 def _resolve_existing_path(video_path: str) -> Optional[str]:
     """Return a path to the file that exists on disk.
 
-    Tries the recorded path first, then a few common remappings used
-    by the project (canonical SD-card mirror, RO mount, RW mount).
+    Tries cheap remappings first (recorded path, canonical archive
+    location, gadget RO mount); only falls back to a directory walk
+    if every direct candidate misses. The walk is bounded to the
+    archive and TeslaCam roots and breaks on first match per root,
+    so worst-case cost is one ``os.walk`` per missing file — which
+    only happens for genuinely-orphaned waypoint rows.
     """
-    candidates = [video_path]
-    base = os.path.basename(video_path)
-    norm = video_path.replace("\\", "/")
+    if video_path and os.path.isfile(video_path):
+        return video_path
 
-    # Try the canonical archive location.
-    if "ArchivedClips" in norm:
+    base = os.path.basename(video_path) if video_path else ""
+    norm = (video_path or "").replace("\\", "/")
+    archive_root = _candidate_archive_root()
+    teslacam_root = _candidate_teslacam_root()
+
+    # Cheap remappings: take whatever sub-path is anchored on a known
+    # root and re-anchor it against the live root.
+    cheap: List[str] = []
+    if archive_root and "ArchivedClips" in norm:
         idx = norm.find("ArchivedClips")
-        rel = norm[idx:]
-        candidates.append(f"/home/pi/{rel}")
-    # And the gadget-RO mount, used by recent clips.
-    if "TeslaCam" in norm:
+        rel = norm[idx + len("ArchivedClips"):].lstrip("/")
+        cheap.append(os.path.join(archive_root, rel))
+    if teslacam_root and "TeslaCam" in norm:
         idx = norm.find("TeslaCam")
-        rel = norm[idx:]
-        candidates.append(f"/mnt/gadget/part1-ro/{rel}")
-    # Last-ditch: walk a couple of well-known roots looking for the basename.
-    for root in ("/home/pi/ArchivedClips", "/mnt/gadget/part1-ro/TeslaCam"):
-        if os.path.isdir(root):
-            for dirpath, _, filenames in os.walk(root):
-                if base in filenames:
-                    candidates.append(os.path.join(dirpath, base))
-                    break
-
-    for c in candidates:
+        rel = norm[idx + len("TeslaCam"):].lstrip("/")
+        cheap.append(os.path.join(teslacam_root, rel))
+    for c in cheap:
         if c and os.path.isfile(c):
             return c
+
+    # Last-ditch: one walk per known root, break on first basename hit.
+    if base:
+        for root in (archive_root, teslacam_root):
+            if root and os.path.isdir(root):
+                for dirpath, _, filenames in os.walk(root):
+                    if base in filenames:
+                        return os.path.join(dirpath, base)
     return None
 
 
@@ -522,6 +572,10 @@ def repair(db_path: str, dry_run: bool = False) -> dict:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    default_db = (
+        config.MAPPING_DB_PATH if _HAS_CONFIG and hasattr(config, "MAPPING_DB_PATH")
+        else "/home/pi/TeslaUSB/geodata.db"
+    )
     parser = argparse.ArgumentParser(
         description="Repair waypoint/event timestamps poisoned by Tesla "
                     "onboard-clock skew. Reads MP4 mvhd atom for ground-truth "
@@ -530,7 +584,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--db-path",
-        default="/home/pi/TeslaUSB/geodata.db",
+        default=default_db,
         help="Path to geodata.db (default: %(default)s)",
     )
     parser.add_argument(

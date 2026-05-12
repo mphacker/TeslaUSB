@@ -2631,9 +2631,15 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
     const video = document.getElementById('overlayVideo');
     video.src = `/videos/stream/${waypoint.video_path}`;
 
-    // Handle video load error — file may no longer exist on disk
+    // Handle video load error — file may no longer exist on disk.
+    // NOTE: check the raw src ATTRIBUTE, not the .src property. The property
+    // resolves an empty/missing attribute against the document base URL
+    // (e.g. https://host/mapping), which is non-empty and would slip past a
+    // .src-based guard, surfacing a false "video not found" toast when the
+    // overlay is closed or the element is detached mid-load.
     video.addEventListener('error', function onError() {
-        if (!video.src || video.src.endsWith('/')) return;
+        const rawSrc = video.getAttribute('src');
+        if (!rawSrc) return;
         if (typeof showToast === 'function') {
             showToast('Video file not found — Tesla may have overwritten it.', 'warning');
         }
@@ -2945,7 +2951,15 @@ function closeVideoOverlay() {
         const video = existing.querySelector('video');
         if (video) {
             video.removeEventListener('timeupdate', onOverlayTimeUpdate);
-            video.pause(); video.src = '';
+            video.pause();
+            // Properly abort any pending load. Setting src='' resolves to
+            // the document base URL (e.g. https://host/mapping) and the
+            // browser then tries to load THAT as a video, fails, and fires
+            // a spurious 'error' event that surfaced a false "video file
+            // not found" toast every time the overlay was closed. The HTML5
+            // standard reset is removeAttribute('src') + load().
+            video.removeAttribute('src');
+            video.load();
         }
         existing.remove();
     }

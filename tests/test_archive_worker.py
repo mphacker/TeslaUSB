@@ -68,11 +68,49 @@ def teslacam_root(tmp_path):
     return str(p)
 
 
+def _build_minimal_mp4(payload: bytes = b"\x00" * 32) -> bytes:
+    """Build a minimal-but-valid MP4 byte sequence (ftyp + moov + mdat).
+
+    Used by ``make_clip`` so that ``.mp4`` test fixtures pass the Phase
+    2.4 moov verification (``_verify_destination_complete``). Tests that
+    explicitly want an INVALID MP4 (no moov, truncated, etc.) can pass
+    raw ``content=b"..."`` to override.
+
+    The structure is:
+
+    * ``ftyp`` — file type box (16 bytes header+body)
+    * ``moov`` — movie box, minimal empty body (8 bytes)
+    * ``mdat`` — media data box wrapping the caller's payload
+
+    Order doesn't matter for our verifier (we walk all top-level boxes).
+    Tesla puts moov at the END; we put it BEFORE mdat in test fixtures
+    to make the test bytes shorter and easier to inspect, but it
+    exercises the same code path.
+    """
+    def box(typ: bytes, body: bytes) -> bytes:
+        size = len(body) + 8
+        return size.to_bytes(4, 'big') + typ + body
+
+    ftyp_body = b'isom' + b'\x00\x00\x02\x00' + b'isomiso2avc1mp41'
+    return box(b'ftyp', ftyp_body) + box(b'moov', b'') + box(b'mdat', payload)
+
+
 @pytest.fixture
 def make_clip(teslacam_root):
-    """Factory for fake mp4 files. ``rel`` is relative to teslacam_root."""
-    def _factory(rel: str, content: bytes = b"X" * 100,
+    """Factory for fake mp4 files. ``rel`` is relative to teslacam_root.
+
+    For ``.mp4`` paths the default content is a minimal-but-valid MP4
+    so the file passes the Phase 2.4 moov verification. Tests that want
+    a deliberately-invalid MP4 (missing moov, truncated, etc.) must
+    pass ``content=`` explicitly.
+    """
+    def _factory(rel: str, content: bytes = None,
                  mtime: float = None) -> str:
+        if content is None:
+            if rel.lower().endswith('.mp4'):
+                content = _build_minimal_mp4()
+            else:
+                content = b"X" * 100
         full = os.path.join(teslacam_root, rel)
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "wb") as f:
@@ -204,7 +242,11 @@ class TestArchiveWorkerCopy:
     def test_copy_writes_dest_with_matching_size(
         self, db, archive_root, teslacam_root, make_clip,
     ):
-        content = b"abcdef" * 1000  # 6000 bytes
+        # Build a valid MP4 wrapping ~6000 bytes of payload so the Phase
+        # 2.4 moov verification accepts the copy. The byte-equality
+        # assertion below pins that the copy is byte-for-byte identical
+        # to the source.
+        content = _build_minimal_mp4(payload=b"abcdef" * 1000)
         clip = make_clip(
             "RecentClips/2025-01-01_10-00-00-front.mp4", content=content,
         )
@@ -356,8 +398,10 @@ class TestArchiveWorkerStableGate:
     ):
         # A fresh file whose stat() matches the enqueue snapshot
         # should NOT requeue — drift, not freshness, is the trigger.
+        # NOTE: ``make_clip`` builds a valid minimal MP4 by default so
+        # the Phase 2.4 moov-verify pass succeeds.
         clip = make_clip(
-            "RecentClips/z-front.mp4", content=b"x" * 50,
+            "RecentClips/z-front.mp4",
             mtime=time.time(),
         )
         enqueue_for_archive(clip, db_path=db)
@@ -873,7 +917,7 @@ class TestArchiveWorkerDiskSpaceGuard:
     def test_warning_free_proceeds_with_copy(
         self, db, archive_root, teslacam_root, make_clip, monkeypatch, caplog,
     ):
-        clip = make_clip("RecentClips/y-front.mp4", content=b"X" * 200)
+        clip = make_clip("RecentClips/y-front.mp4")
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
 
@@ -897,7 +941,7 @@ class TestArchiveWorkerDiskSpaceGuard:
     def test_ample_free_no_log_no_pause(
         self, db, archive_root, teslacam_root, make_clip, monkeypatch,
     ):
-        clip = make_clip("RecentClips/z-front.mp4", content=b"X" * 200)
+        clip = make_clip("RecentClips/z-front.mp4")
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
 
@@ -1817,3 +1861,179 @@ class TestReadConfigOrDefaults:
         # Last two are the new mid-copy safeguards.
         assert result[6] == archive_worker._CHUNK_PAUSE_SECONDS
         assert result[7] == archive_worker._PER_FILE_TIME_BUDGET_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# TestMoovVerifyAfterCopy (Phase 2.4 — issue #97 item 2.4)
+# ---------------------------------------------------------------------------
+#
+# These tests pin the contract: an .mp4 copy is only declared successful
+# when the destination has both ``ftyp`` and ``moov`` boxes. A
+# size-matching copy of an unplayable MP4 (Tesla still writing → no moov
+# atom yet) must FAIL the copy so the queue retries — never land in
+# ArchivedClips and pollute the indexer.
+#
+# We test ``_verify_destination_complete`` directly (small box-walk
+# correctness) AND end-to-end via ``_atomic_copy`` (raises OSError, leaves
+# no orphan partial, leaves no dest file).
+
+
+class TestMoovVerifyAfterCopy:
+    def test_minimal_valid_mp4_passes(self, tmp_path):
+        good = tmp_path / "good.mp4"
+        good.write_bytes(_build_minimal_mp4())
+        assert archive_worker._verify_destination_complete(str(good)) is True
+
+    def test_no_moov_fails(self, tmp_path):
+        # ftyp + mdat only — Tesla mid-write looks like this.
+        bad = tmp_path / "bad.mp4"
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        mdat = b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        bad.write_bytes(ftyp + mdat)
+        assert archive_worker._verify_destination_complete(str(bad)) is False
+
+    def test_no_ftyp_fails(self, tmp_path):
+        bad = tmp_path / "noftyp.mp4"
+        bad.write_bytes(b'\x00' * 32)
+        assert archive_worker._verify_destination_complete(str(bad)) is False
+
+    def test_too_small_fails(self, tmp_path):
+        bad = tmp_path / "tiny.mp4"
+        bad.write_bytes(b'\x00' * 8)
+        assert archive_worker._verify_destination_complete(str(bad)) is False
+
+    def test_extended_64bit_box_size_handled(self, tmp_path):
+        # box size==1 means: read next 8 bytes as 64-bit size.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        # Build an extended-size mdat: size=1, type='mdat', then 64-bit
+        # size of 32, then 16 bytes of payload.
+        ext_mdat_size = 32  # full box including 16-byte header
+        ext_mdat = (
+            (1).to_bytes(4, 'big') + b'mdat'
+            + ext_mdat_size.to_bytes(8, 'big')
+            + b'\x00' * (ext_mdat_size - 16)
+        )
+        moov = b'\x00\x00\x00\x08moov'
+        f = tmp_path / "ext.mp4"
+        f.write_bytes(ftyp + ext_mdat + moov)
+        assert archive_worker._verify_destination_complete(str(f)) is True
+
+    def test_size_zero_box_at_end_handled(self, tmp_path):
+        # box size==0 means: extends to EOF. If it IS moov, valid.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        moov_eof = (0).to_bytes(4, 'big') + b'moov' + b'\x00' * 100
+        f = tmp_path / "moov_eof.mp4"
+        f.write_bytes(ftyp + moov_eof)
+        assert archive_worker._verify_destination_complete(str(f)) is True
+
+    def test_size_zero_non_moov_fails(self, tmp_path):
+        # mdat that extends to EOF — no moov can follow → reject.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        mdat_eof = (0).to_bytes(4, 'big') + b'mdat' + b'\x00' * 100
+        f = tmp_path / "mdat_eof.mp4"
+        f.write_bytes(ftyp + mdat_eof)
+        assert archive_worker._verify_destination_complete(str(f)) is False
+
+    def test_box_claiming_past_eof_fails(self, tmp_path):
+        # mdat box claims size 1 GiB but file is only 100 bytes.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        liar = (1024 * 1024 * 1024).to_bytes(4, 'big') + b'mdat' + b'\x00' * 16
+        f = tmp_path / "liar.mp4"
+        f.write_bytes(ftyp + liar)
+        assert archive_worker._verify_destination_complete(str(f)) is False
+
+    def test_walk_is_bounded(self, tmp_path, monkeypatch):
+        # Pathological input: thousands of 8-byte ``free`` boxes. The
+        # walker must give up after the configured cap.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        free_box = (8).to_bytes(4, 'big') + b'free'
+        body = ftyp + (free_box * 10_000)  # No moov — should reject.
+        f = tmp_path / "many_free.mp4"
+        f.write_bytes(body)
+        # With cap at 512, the walk reads ftyp + 511 free boxes, then
+        # bails (returns False because moov never seen).
+        assert archive_worker._verify_destination_complete(str(f)) is False
+
+    def test_oserror_returns_false_safely(self, tmp_path):
+        assert archive_worker._verify_destination_complete(
+            str(tmp_path / "nonexistent.mp4")
+        ) is False
+
+    def test_atomic_copy_raises_when_source_lacks_moov(
+            self, tmp_path,
+    ):
+        # End-to-end: source MP4 has size-matching content but no moov.
+        # ``_atomic_copy`` must raise OSError and leave no .partial AND
+        # no dest file behind.
+        src = tmp_path / "source.mp4"
+        src.write_bytes(
+            b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+            + b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        )
+        dst = tmp_path / "dest.mp4"
+        with pytest.raises(OSError, match="missing moov"):
+            archive_worker._atomic_copy(
+                str(src), str(dst), chunk_size=4096,
+            )
+        assert not (tmp_path / "dest.mp4.partial").exists(), \
+            "partial must be cleaned up on moov-verify failure"
+        assert not dst.exists(), \
+            "dest must NOT exist after a moov-verify failure"
+
+    def test_atomic_copy_succeeds_for_well_formed_mp4(self, tmp_path):
+        src = tmp_path / "source.mp4"
+        content = _build_minimal_mp4(payload=b"hello-world" * 50)
+        src.write_bytes(content)
+        dst = tmp_path / "dest.mp4"
+        archive_worker._atomic_copy(
+            str(src), str(dst), chunk_size=4096,
+        )
+        assert dst.exists()
+        assert dst.read_bytes() == content
+        assert not (tmp_path / "dest.mp4.partial").exists()
+
+    def test_non_mp4_extension_skips_verification(self, tmp_path):
+        # ``.ts`` and other archive types must NOT be moov-verified —
+        # they aren't MP4s. A successful size-matching copy is enough.
+        src = tmp_path / "source.ts"
+        src.write_bytes(b"\x47" * 1024)  # MPEG-TS sync byte stream
+        dst = tmp_path / "dest.ts"
+        archive_worker._atomic_copy(
+            str(src), str(dst), chunk_size=4096,
+        )
+        assert dst.exists()
+        assert dst.read_bytes() == b"\x47" * 1024
+
+    def test_process_one_claim_re_queues_on_moov_failure(
+            self, db, archive_root, teslacam_root, make_clip,
+    ):
+        # End-to-end through process_one_claim: a source file that
+        # passes the size check but fails moov-verify must flow through
+        # the OSError handler → mark_failed → status 'pending' (with
+        # one bumped attempt). The dest must not exist.
+        bad_mp4 = (
+            b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+            + b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        )
+        clip = make_clip("RecentClips/halfwritten-front.mp4", content=bad_mp4)
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'pending', (
+            "moov-missing copy must transition back to pending so it can "
+            "be retried after Tesla finishes writing"
+        )
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'pending'
+        assert rows[0]['attempts'] == 1
+        assert 'moov' in (rows[0]['last_error'] or '')
+        # No dest file landed in ArchivedClips.
+        dest = os.path.join(
+            archive_root, "RecentClips", "halfwritten-front.mp4",
+        )
+        assert not os.path.exists(dest), (
+            "Incomplete MP4 must not leak into ArchivedClips"
+        )

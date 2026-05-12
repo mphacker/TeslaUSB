@@ -581,6 +581,112 @@ class _CopyTimeBudgetExceeded(OSError):
     """
 
 
+# ---------------------------------------------------------------------------
+# Phase 2.4 — moov-atom verification after copy
+# ---------------------------------------------------------------------------
+
+# Maximum bytes we'll consume from the box-header walk before giving up.
+# A normal Tesla MP4 has 4-5 top-level boxes (ftyp, free, mdat, moov)
+# so the walk reads ~24-32 bytes. Pathological / non-MP4 files might
+# produce a runaway walk; this cap stops it after ~512 box-header reads
+# (4 KB of seeks). Keeps the verifier strictly bounded regardless of
+# input file shape.
+_MOOV_VERIFY_MAX_HEADER_READS = 512
+
+
+def _verify_destination_complete(dest_path: str) -> bool:
+    """Return True iff ``dest_path`` is an MP4 with both ``ftyp`` and ``moov``.
+
+    Phase 2.4 — A "successful" copy of an unplayable MP4 is worse than
+    a failed copy: the bad file looks complete (size matches), gets
+    indexed (with errors), shows up in the UI, and refuses to play.
+    Tesla writes the ``moov`` atom at the END of the file, so a copy
+    that started before Tesla finished writing will have everything up
+    to and including ``mdat`` but be missing ``moov``.
+
+    Implementation notes (Pi Zero 2 W constraints):
+
+    * **Streaming, not full-file load.** We read 8-byte box headers and
+      ``seek`` past each box's payload. Total IO for a typical Tesla
+      clip is ~24-32 bytes regardless of file size — no risk of mmap
+      pressure on multi-GB recordings.
+    * Handles 32-bit, 64-bit (``size==1``), and to-EOF (``size==0``)
+      box sizes per ISO BMFF. The pre-existing ``_is_complete_mp4``
+      in ``video_archive_service`` did NOT handle the 64-bit / 0
+      cases — this verifier intentionally does, so a future Tesla
+      firmware that emits 64-bit box sizes won't trigger spurious
+      moov-missing failures.
+    * A bounded number of header reads (``_MOOV_VERIFY_MAX_HEADER_READS``)
+      prevents a malformed / non-MP4 input from spinning the walk
+      forever.
+    * Any IO error is treated as ""not verified"" (returns False) so
+      the caller falls back to the retry path — matches the
+      conservative ""verify-or-fail"" contract the issue specifies.
+    """
+    try:
+        file_size = os.path.getsize(dest_path)
+        if file_size < 16:
+            return False  # Too small to contain ftyp + any other box.
+
+        with open(dest_path, 'rb') as f:
+            # ftyp must be the very first box per the MP4 spec.
+            head = f.read(12)
+            if len(head) < 12 or head[4:8] != b'ftyp':
+                return False
+
+            # Walk top-level boxes from offset 0 looking for moov.
+            f.seek(0)
+            pos = 0
+            reads = 0
+            while pos + 8 <= file_size:
+                if reads >= _MOOV_VERIFY_MAX_HEADER_READS:
+                    # Bounded walk — pathological input.
+                    return False
+                reads += 1
+
+                f.seek(pos)
+                header = f.read(8)
+                if len(header) < 8:
+                    return False
+
+                size = int.from_bytes(header[:4], 'big')
+                box_type = header[4:8]
+
+                if size == 1:
+                    # Extended 64-bit size follows the type field.
+                    if pos + 16 > file_size:
+                        return False
+                    ext = f.read(8)
+                    if len(ext) < 8:
+                        return False
+                    size = int.from_bytes(ext, 'big')
+                    if size < 16:
+                        return False  # Malformed extended box.
+                elif size == 0:
+                    # Box extends to end of file. If this IS moov, found.
+                    # Otherwise nothing follows so we're done.
+                    if box_type == b'moov':
+                        return True
+                    return False
+                elif size < 8:
+                    return False  # Malformed normal box.
+
+                if box_type == b'moov':
+                    # Sanity-check the box doesn't claim to extend past EOF.
+                    return pos + size <= file_size
+
+                # Defensive — a box claiming to extend past EOF is
+                # truncated. Bail out (moov can't follow).
+                if pos + size > file_size:
+                    return False
+
+                pos += size
+
+            return False  # Walked to EOF without finding moov.
+    except (OSError, IOError):
+        return False
+
+
 def _atomic_copy(source_path: str, dest_path: str,
                  chunk_size: int, *,
                  load_pause_threshold: float = 0.0,
@@ -673,6 +779,18 @@ def _atomic_copy(source_path: str, dest_path: str,
             raise OSError(
                 f"size mismatch: wrote {written}, expected {expected}"
             )
+        # Phase 2.4 — verify the copied destination is a complete MP4
+        # (has both ftyp and moov atoms). A "successful" size-matching
+        # copy of an unplayable file is worse than a failed copy: the
+        # bad file looks complete, gets indexed (with errors), shows
+        # up in the UI, and refuses to play. Only run on .mp4 files
+        # so .ts segments and other non-MP4 archives are unaffected.
+        if dest_path.lower().endswith('.mp4'):
+            if not _verify_destination_complete(partial):
+                raise OSError(
+                    f"destination MP4 missing moov atom — "
+                    f"source may still be writing: {source_path}"
+                )
         # Copy mtime so downstream consumers (indexer, ZIP exporter)
         # see the original timestamp.
         try:

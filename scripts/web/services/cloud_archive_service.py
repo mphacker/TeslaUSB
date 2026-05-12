@@ -410,10 +410,37 @@ def _discover_events(
     except ImportError:
         pass
 
-    # Sort by priority (lower score = sync first)
-    events.sort(key=lambda t: _score_event_priority(t[0]))
+    # Score every candidate once so we can both filter and sort without
+    # invoking the (relatively expensive) scorer twice. Score >= 200 means
+    # neither an event.json trigger nor any waypoint geolocation hit was
+    # found — i.e. routine driving footage.
+    scored: List[Tuple[Tuple[str, str, int], int]] = [
+        (t, _score_event_priority(t[0])) for t in events
+    ]
 
-    return events
+    # Phase 2.3 — When ``sync_non_event_videos`` is False the picker MUST
+    # actually drop the non-event/non-geo tier from the queue (the previous
+    # behaviour merely demoted them to a lower priority, so they still got
+    # uploaded — which silently consumed the user's bandwidth on top of the
+    # event clips they actually wanted backed up). We re-read the flag from
+    # ``config`` on every call so a Settings change takes effect on the
+    # next sync iteration without a service restart.
+    try:
+        from config import CLOUD_ARCHIVE_SYNC_NON_EVENT as _sync_non_event_now
+    except Exception:
+        _sync_non_event_now = CLOUD_ARCHIVE_SYNC_NON_EVENT
+    if not _sync_non_event_now:
+        before = len(scored)
+        scored = [(t, s) for (t, s) in scored if s < 200]
+        dropped = before - len(scored)
+        if dropped:
+            logger.info(
+                "Cloud sync: filtered %d non-event/non-geo clip(s) "
+                "(sync_non_event_videos=false)", dropped,
+            )
+
+    scored.sort(key=lambda x: x[1])
+    return [t for (t, _s) in scored]
 
 
 # ---------------------------------------------------------------------------

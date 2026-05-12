@@ -341,3 +341,100 @@ class TestDeadLetterExclusion:
             "'failed' rows must still be picked for retry — only "
             "'dead_letter' is permanently excluded from auto-picking."
         )
+
+
+# ---------------------------------------------------------------------------
+# get_sync_stats — dashboard counter must not "self-resolve" on cap promotion
+# ---------------------------------------------------------------------------
+
+
+class TestSyncStatsDeadLetterAccounting:
+    """The dashboard's ``Failed`` tile reads ``total_failed`` from
+    ``get_sync_stats``. Phase 2.6 promotes rows from ``failed`` to
+    ``dead_letter`` when the retry cap is hit; without including
+    dead_letter rows in the failed count, the dashboard counter would
+    silently DECREASE on promotion — making problems look like they
+    self-resolved.
+    """
+
+    def _stats(self, db_path: str):
+        """``get_sync_stats`` is the dashboard data source — call the
+        real function so we exercise the same code path the blueprint
+        does, not an in-test reimplementation.
+        """
+        return svc.get_sync_stats(db_path)
+
+    def test_total_failed_includes_dead_letter(self, tmp_path):
+        db_path = str(tmp_path / "cloud_sync.db")
+        # Use the real init path so the schema matches production.
+        conn = svc._init_cloud_tables(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO cloud_synced_files (file_path, status, "
+                "retry_count) VALUES (?, 'failed', 3)", ("a",))
+            conn.execute(
+                "INSERT INTO cloud_synced_files (file_path, status, "
+                "retry_count) VALUES (?, 'dead_letter', 5)", ("b",))
+            conn.execute(
+                "INSERT INTO cloud_synced_files (file_path, status, "
+                "retry_count) VALUES (?, 'dead_letter', 5)", ("c",))
+            conn.commit()
+        finally:
+            conn.close()
+
+        stats = self._stats(db_path)
+        # 1 failed + 2 dead_letter == 3 broken uploads on the dashboard.
+        assert stats["total_failed"] == 3, (
+            "total_failed must include dead_letter rows so the "
+            "dashboard counter does not silently shrink when cap "
+            "promotion fires."
+        )
+        assert stats["total_dead_letter"] == 2, (
+            "total_dead_letter must be exposed as a subset for any "
+            "future Failed Jobs page."
+        )
+
+    def test_total_failed_does_not_include_synced_or_pending(
+            self, tmp_path):
+        db_path = str(tmp_path / "cloud_sync.db")
+        conn = svc._init_cloud_tables(db_path)
+        try:
+            conn.execute("INSERT INTO cloud_synced_files (file_path, "
+                         "status) VALUES ('a', 'synced')")
+            conn.execute("INSERT INTO cloud_synced_files (file_path, "
+                         "status) VALUES ('b', 'pending')")
+            conn.execute("INSERT INTO cloud_synced_files (file_path, "
+                         "status) VALUES ('c', 'uploading')")
+            conn.commit()
+        finally:
+            conn.close()
+        stats = self._stats(db_path)
+        assert stats["total_failed"] == 0
+        assert stats["total_dead_letter"] == 0
+        assert stats["total_synced"] == 1
+
+    def test_promotion_does_not_decrease_total_failed(self, tmp_path,
+                                                     isolated_yaml):
+        """End-to-end pin: a row that fails then promotes must NOT
+        decrease the dashboard counter. Was the bug — fixing this is
+        the whole reason the dashboard sums failed + dead_letter.
+        """
+        db_path = str(tmp_path / "cloud_sync.db")
+        conn = svc._init_cloud_tables(db_path)
+        try:
+            conn.execute("INSERT INTO cloud_synced_files (file_path, "
+                         "status, retry_count) VALUES (?, 'failed', 4)",
+                         ("a",))
+            conn.commit()
+            before = self._stats(db_path)["total_failed"]
+            assert before == 1
+            # Cap is 5 (isolated_yaml seed) — next failure promotes to dead_letter.
+            svc._mark_upload_failure(conn, "a", "still failing")
+            conn.commit()
+        finally:
+            conn.close()
+        after = self._stats(db_path)["total_failed"]
+        assert after == before, (
+            "total_failed went from %d to %d after dead_letter promotion "
+            "— the dashboard would now hide the broken row." % (before, after)
+        )

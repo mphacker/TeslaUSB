@@ -1429,12 +1429,25 @@ def get_sync_history(db_path: str, limit: int = 20) -> List[dict]:
 def get_sync_stats(db_path: str) -> dict:
     """Return aggregate sync statistics for the UI dashboard.
 
-    Keys: total_synced, total_pending, total_failed, total_bytes.
+    Keys: total_synced, total_pending, total_failed, total_dead_letter,
+    total_bytes.
+
+    ``total_failed`` is the SUM of ``failed`` and ``dead_letter`` rows
+    so the dashboard counter does NOT silently DECREASE when a row hits
+    the Phase 2.6 retry cap and is promoted from ``failed`` →
+    ``dead_letter``. Without this, a permanently broken clip that
+    promotes after retry 5 would make problems look like they
+    self-resolved on the dashboard.
+
+    ``total_dead_letter`` is also exposed as a subset so a future
+    Failed Jobs page (Phase 4) can break the count down by terminal
+    state without changing this aggregate.
     """
     conn = _init_cloud_tables(db_path)
     try:
         counts = {}
-        for status in ("synced", "pending", "failed", "uploading"):
+        for status in ("synced", "pending", "failed", "uploading",
+                       "dead_letter"):
             row = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM cloud_synced_files WHERE status = ?",
                 (status,),
@@ -1462,7 +1475,8 @@ def get_sync_stats(db_path: str) -> dict:
         return {
             "total_synced": counts["synced"],
             "total_pending": effective_pending,
-            "total_failed": counts["failed"],
+            "total_failed": counts["failed"] + counts["dead_letter"],
+            "total_dead_letter": counts["dead_letter"],
             "total_bytes": total_bytes,
         }
     finally:
@@ -1633,7 +1647,8 @@ def remove_from_queue(file_path: str) -> Tuple[bool, str]:
     is local data that the user owns, so deletion is allowed regardless of
     cloud provider configuration, sync worker state, or row status — including
     rows stuck in ``uploading`` (e.g. when the sync was interrupted before the
-    worker could reset the row back to ``pending``) and ``failed`` rows.
+    worker could reset the row back to ``pending``), ``failed`` rows, and
+    Phase 2.6 ``dead_letter`` rows that hit the retry cap.
 
     ``synced`` rows are preserved so deleting from the queue cannot wipe the
     historical record of files already uploaded; those rows are not exposed
@@ -1656,10 +1671,11 @@ def remove_from_queue(file_path: str) -> Tuple[bool, str]:
 def clear_queue() -> Tuple[bool, str]:
     """Clear every non-``synced`` item from the sync queue.
 
-    Includes ``queued``, ``pending``, ``uploading`` and ``failed`` rows so the
-    user can always reset the queue — even after stopping the sync worker or
-    disconnecting the cloud provider, both of which can leave rows stuck in
-    ``uploading`` state.  ``synced`` history rows are preserved.
+    Includes ``queued``, ``pending``, ``uploading``, ``failed``, and Phase 2.6
+    ``dead_letter`` rows so the user can always reset the queue — even after
+    stopping the sync worker or disconnecting the cloud provider, both of
+    which can leave rows stuck in ``uploading`` state.  ``synced`` history
+    rows are preserved.
     """
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:

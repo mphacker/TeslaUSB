@@ -543,3 +543,155 @@ def get_cleanup_service(gadget_dir: str) -> CleanupService:
         CleanupService instance
     """
     return CleanupService(gadget_dir)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3a.2 (#98) — One-shot migration of legacy cleanup_config.json
+# ---------------------------------------------------------------------------
+
+# Folders the storage_retention blueprint accepts as per-folder overrides.
+# Anything outside this set is silently dropped so the migration can't seed
+# typo'd legacy keys into config.yaml's new ``cleanup.policies`` map.
+_MIGRATION_ALLOWED_FOLDERS = (
+    'SentryClips',
+    'SavedClips',
+    'RecentClips',
+    'EncryptedClips',
+    'ArchivedClips',
+)
+
+
+def migrate_legacy_cleanup_config(
+    gadget_dir: str,
+    config_yaml_path: Optional[str] = None,
+    config_filename: str = 'cleanup_config.json',
+) -> Dict[str, Any]:
+    """One-shot migration of the legacy ``cleanup_config.json`` into
+    ``config.yaml`` under the unified ``cleanup`` section.
+
+    Idempotent: the function inspects the YAML's ``cleanup.policies``
+    block first; if it already contains overrides the legacy file is
+    NOT consulted (so a user's UI edits always win). On a successful
+    migration, the legacy file is renamed with a ``.migrated`` suffix
+    so the next boot doesn't redo the work and so a forensic copy
+    remains for diagnosis.
+
+    Returns a small summary dict suitable for INFO-level logging:
+    ``{'migrated': bool, 'imported_folders': [...], 'reason': str}``.
+
+    Safe to call from service startup — never raises. A logged WARNING
+    on failure is preferred over crashing the web service over a
+    legacy-config corner case.
+    """
+    summary: Dict[str, Any] = {
+        'migrated': False,
+        'imported_folders': [],
+        'reason': '',
+    }
+    try:
+        legacy_path = Path(gadget_dir) / config_filename
+        if not legacy_path.exists():
+            summary['reason'] = 'no legacy file'
+            return summary
+
+        # Resolve config.yaml path — fall back to the canonical helper
+        # so this works under tests that monkeypatch the location.
+        if config_yaml_path is None:
+            try:
+                from config import CONFIG_YAML  # type: ignore
+                config_yaml_path = CONFIG_YAML
+            except Exception:  # noqa: BLE001
+                config_yaml_path = str(Path(gadget_dir) / 'config.yaml')
+
+        try:
+            import yaml  # local import keeps import-time cost off the hot path
+            with open(config_yaml_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"migrate_legacy_cleanup_config: cannot read {config_yaml_path}: {e}")
+            summary['reason'] = f'config.yaml unreadable: {e}'
+            return summary
+
+        existing_policies = (
+            cfg.get('cleanup', {}).get('policies') if isinstance(cfg.get('cleanup'), dict) else None
+        )
+        if isinstance(existing_policies, dict) and existing_policies:
+            summary['reason'] = 'cleanup.policies already populated; skipping'
+            # Still rename the legacy file so we don't keep re-checking it
+            # on every boot — the YAML is the source of truth now.
+            try:
+                legacy_path.rename(legacy_path.with_suffix(legacy_path.suffix + '.migrated'))
+            except Exception:  # noqa: BLE001
+                pass
+            return summary
+
+        try:
+            with open(legacy_path, 'r') as f:
+                legacy = json.load(f) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"migrate_legacy_cleanup_config: cannot parse {legacy_path}: {e}")
+            summary['reason'] = f'legacy file unparseable: {e}'
+            return summary
+
+        imported: Dict[str, Dict[str, Any]] = {}
+        for folder, policy in legacy.items():
+            if folder not in _MIGRATION_ALLOWED_FOLDERS or not isinstance(policy, dict):
+                continue
+            age = policy.get('age_based') if isinstance(policy.get('age_based'), dict) else {}
+            try:
+                days = int(age.get('days', 0)) or None
+            except (TypeError, ValueError):
+                days = None
+            if days is None or days < 1:
+                continue
+            imported[folder] = {
+                'enabled': bool(policy.get('enabled', False)),
+                'retention_days': days,
+            }
+
+        if not imported:
+            summary['reason'] = 'no migratable policies in legacy file'
+            try:
+                legacy_path.rename(legacy_path.with_suffix(legacy_path.suffix + '.migrated'))
+            except Exception:  # noqa: BLE001
+                pass
+            return summary
+
+        cleanup_block = cfg.get('cleanup') if isinstance(cfg.get('cleanup'), dict) else {}
+        cleanup_block.setdefault('default_retention_days', 30)
+        cleanup_block.setdefault('free_space_target_pct', 10)
+        cleanup_block.setdefault('max_archive_size_gb', 0)
+        cleanup_block.setdefault('short_retention_warning_days', 7)
+        cleanup_block['policies'] = imported
+        cfg['cleanup'] = cleanup_block
+
+        try:
+            tmp_path = config_yaml_path + '.tmp'
+            with open(tmp_path, 'w') as f:
+                yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, config_yaml_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"migrate_legacy_cleanup_config: failed to write {config_yaml_path}: {e}")
+            summary['reason'] = f'config.yaml write failed: {e}'
+            return summary
+
+        try:
+            legacy_path.rename(legacy_path.with_suffix(legacy_path.suffix + '.migrated'))
+        except Exception:  # noqa: BLE001
+            # Migration succeeded; rename failure is cosmetic.
+            pass
+
+        summary['migrated'] = True
+        summary['imported_folders'] = sorted(imported.keys())
+        summary['reason'] = f"migrated {len(imported)} folder policies"
+        logger.info(
+            f"migrate_legacy_cleanup_config: imported {len(imported)} legacy policies "
+            f"into cleanup.policies ({sorted(imported.keys())})"
+        )
+        return summary
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"migrate_legacy_cleanup_config: unexpected failure: {e}")
+        summary['reason'] = f'unexpected: {e}'
+        return summary

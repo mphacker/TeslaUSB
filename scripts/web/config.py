@@ -141,6 +141,22 @@ CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = float(_cloud.get(
 # time (see cloud_archive_service._read_retry_max_attempts_setting).
 CLOUD_ARCHIVE_RETRY_MAX_ATTEMPTS = int(_cloud.get('retry_max_attempts', 5))
 
+# Phase 3a.2 (#98) — Unified Storage & Retention configuration.
+# Single source of truth for archive retention policies. Replaces the
+# legacy cleanup_config.json (auto-migrated on first boot) and supersedes
+# the scattered archive.retention_days / cloud_archive.archived_clips_retention_days
+# values (which remain as backward-compat fallbacks).
+_cleanup = config.get('cleanup', {}) if isinstance(config.get('cleanup'), dict) else {}
+CLEANUP_DEFAULT_RETENTION_DAYS = int(_cleanup.get('default_retention_days', 0))
+CLEANUP_FREE_SPACE_TARGET_PCT = int(_cleanup.get('free_space_target_pct', 10))
+CLEANUP_MAX_ARCHIVE_SIZE_GB = int(_cleanup.get('max_archive_size_gb', 0))
+CLEANUP_SHORT_RETENTION_WARNING_DAYS = int(_cleanup.get('short_retention_warning_days', 7))
+_cleanup_policies_raw = _cleanup.get('policies', {})
+CLEANUP_POLICIES = (
+    {str(k): dict(v) for k, v in _cleanup_policies_raw.items() if isinstance(v, dict)}
+    if isinstance(_cleanup_policies_raw, dict) else {}
+)
+
 # Phase 1 item 1.3 — "retention respects cloud". Controls whether the
 # archive_watchdog retention prune may delete clips that have NOT yet
 # been backed up to the cloud (status='synced' in cloud_synced_files).

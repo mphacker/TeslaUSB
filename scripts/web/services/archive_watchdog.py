@@ -269,12 +269,44 @@ def _resolve_disk_thresholds() -> tuple:
 
 
 def _resolve_retention_days() -> int:
-    """Return the configured ArchivedClips retention in days."""
+    """Return the configured ArchivedClips retention in days.
+
+    Phase 3a.2 (#98) resolution order — first non-zero / non-empty wins:
+
+    1. ``cleanup.policies.ArchivedClips.retention_days`` (per-folder
+       override in the unified config section).
+    2. ``cleanup.default_retention_days`` (the unified default).
+    3. ``cloud_archive.archived_clips_retention_days`` (legacy SD-card
+       retention key — preserved for backward compat).
+    4. ``archive.retention_days`` (oldest legacy key — preserved for
+       installs that pre-date Phase 2c).
+    5. Hard-coded ``30`` if nothing else resolves.
+
+    Resolved fresh on every prune so Settings → Storage & Retention
+    edits take effect on the next pass without restarting the service.
+    """
+    try:
+        from config import CLEANUP_POLICIES
+        archived = CLEANUP_POLICIES.get('ArchivedClips') if CLEANUP_POLICIES else None
+        if isinstance(archived, dict):
+            override = int(archived.get('retention_days') or 0)
+            if override > 0:
+                return override
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from config import CLEANUP_DEFAULT_RETENTION_DAYS
+        if int(CLEANUP_DEFAULT_RETENTION_DAYS) > 0:
+            return int(CLEANUP_DEFAULT_RETENTION_DAYS)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from config import CLOUD_ARCHIVE_RETENTION_DAYS
-        return int(CLOUD_ARCHIVE_RETENTION_DAYS)
+        if int(CLOUD_ARCHIVE_RETENTION_DAYS) > 0:
+            return int(CLOUD_ARCHIVE_RETENTION_DAYS)
     except Exception:  # noqa: BLE001
-        return 30
+        pass
+    return 30
 
 
 def _resolve_delete_unsynced() -> bool:

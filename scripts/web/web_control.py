@@ -55,6 +55,7 @@ from blueprints import (
     cloud_archive_bp,
     live_events_bp,
     archive_queue_bp,
+    storage_retention_bp,
 )
 
 app.register_blueprint(mapping_bp)
@@ -74,6 +75,7 @@ app.register_blueprint(fsck_bp)
 app.register_blueprint(cloud_archive_bp)
 app.register_blueprint(live_events_bp)
 app.register_blueprint(archive_queue_bp)
+app.register_blueprint(storage_retention_bp)
 # Register captive portal blueprint LAST to avoid conflicting with other routes
 app.register_blueprint(captive_portal_bp)
 
@@ -118,6 +120,20 @@ if __name__ == "__main__":
     print(f"Starting Tesla USB Gadget Web Control")
     print(f"Gadget directory: {GADGET_DIR}")
     print(f"Access the interface at: http://0.0.0.0:{WEB_PORT}/")
+
+    # Phase 3a.2 (#98): one-shot migration of legacy cleanup_config.json
+    # into the unified ``cleanup`` config.yaml section. Idempotent and
+    # never raises — safe to call on every boot.
+    try:
+        from services.cleanup_service import migrate_legacy_cleanup_config
+        migration = migrate_legacy_cleanup_config(GADGET_DIR)
+        if migration.get('migrated'):
+            print(
+                f"cleanup migration: imported {migration['imported_folders']} "
+                f"into config.yaml cleanup.policies"
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: cleanup migration failed (non-fatal): {e}")
 
     # Phase 2b (issue #76): the legacy ``start_archive_timer`` periodic
     # thread is gone. The new flow is queue-driven: ``archive_producer``

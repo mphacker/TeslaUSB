@@ -570,3 +570,90 @@ class TestRollingSummary:
         tc.release_task('indexer')
         assert tc._task_stats['indexer']['acquires'] == 2
         assert tc._task_stats['archive']['acquires'] == 1
+
+
+class TestWatchdogNearMissSummary:
+    """Issue #104 mitigation C: when ``max_hold`` for a summary window
+    crosses :data:`WATCHDOG_NEAR_MISS_THRESHOLD_SECONDS` (60 s — well
+    under the BCM2835 hardware watchdog's 90 s timeout), the summary
+    is logged at WARNING and tagged so the precursor signal to the
+    SDIO-contention crash mode is visible at default journalctl
+    verbosity (no ``-p debug`` required).
+    """
+
+    def test_summary_below_threshold_stays_info(
+        self, caplog, monkeypatch,
+    ):
+        monkeypatch.setattr(tc, '_SUMMARY_INTERVAL_SECONDS', 0.0)
+        # Forge a small hold by injecting into _task_stats directly,
+        # then trigger the emit via _record_release_stats. The hold
+        # we pass (0.5s) is well below 60s, so the level must stay INFO.
+        with caplog.at_level('DEBUG', logger='services.task_coordinator'):
+            with tc._lock:
+                tc._record_release_stats('indexer', 0.5)
+        records = [
+            r for r in caplog.records
+            if 'summary' in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert records[0].levelname == 'INFO'
+        assert 'NEAR-MISS' not in records[0].getMessage()
+
+    def test_summary_at_or_above_threshold_logs_warning_with_tag(
+        self, caplog, monkeypatch,
+    ):
+        monkeypatch.setattr(tc, '_SUMMARY_INTERVAL_SECONDS', 0.0)
+        with caplog.at_level('DEBUG', logger='services.task_coordinator'):
+            with tc._lock:
+                # 75s > 60s threshold → WARNING + tag.
+                tc._record_release_stats('archive', 75.0)
+        records = [
+            r for r in caplog.records
+            if 'summary' in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert records[0].levelname == 'WARNING'
+        msg = records[0].getMessage()
+        assert 'NEAR-MISS hardware watchdog threshold' in msg
+        assert "'archive'" in msg
+        assert '75.00' in msg
+
+    def test_threshold_boundary_inclusive(self, caplog, monkeypatch):
+        # max_hold == threshold (60.0) MUST trigger WARNING (>= check).
+        # If this regresses to a strict > comparison, the boundary
+        # case becomes silent and we miss precursor signals at
+        # exactly the documented threshold.
+        monkeypatch.setattr(tc, '_SUMMARY_INTERVAL_SECONDS', 0.0)
+        with caplog.at_level('DEBUG', logger='services.task_coordinator'):
+            with tc._lock:
+                tc._record_release_stats(
+                    'indexer', tc.WATCHDOG_NEAR_MISS_THRESHOLD_SECONDS,
+                )
+        records = [
+            r for r in caplog.records
+            if 'summary' in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert records[0].levelname == 'WARNING'
+
+    def test_max_hold_carries_through_window(self, caplog, monkeypatch):
+        # A single long hold within a window where most others are
+        # short must still raise the level to WARNING — the threshold
+        # is a NEAR-MISS detector, not an average-load detector.
+        monkeypatch.setattr(tc, '_SUMMARY_INTERVAL_SECONDS', 999.0)
+        with tc._lock:
+            tc._record_release_stats('archive', 0.1)
+            tc._record_release_stats('archive', 90.0)  # the spike
+            tc._record_release_stats('archive', 0.1)
+        # Now flip the interval to 0 so the next call emits.
+        monkeypatch.setattr(tc, '_SUMMARY_INTERVAL_SECONDS', 0.0)
+        with caplog.at_level('DEBUG', logger='services.task_coordinator'):
+            with tc._lock:
+                tc._record_release_stats('archive', 0.1)
+        records = [
+            r for r in caplog.records
+            if 'summary' in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert records[0].levelname == 'WARNING'
+        assert 'NEAR-MISS' in records[0].getMessage()

@@ -406,7 +406,7 @@ class TestArchiveWorkerSourceGone:
 
         original_atomic = archive_worker._atomic_copy
 
-        def _fail_with_fnf(src, dst, chunk):
+        def _fail_with_fnf(src, dst, chunk, **kwargs):
             raise FileNotFoundError(src)
 
         monkeypatch.setattr(archive_worker, '_atomic_copy', _fail_with_fnf)
@@ -433,7 +433,7 @@ class TestArchiveWorkerDeadLetter:
         clip = make_clip("RecentClips/bad-front.mp4")
         enqueue_for_archive(clip, db_path=db)
 
-        def always_fail(src, dst, chunk):
+        def always_fail(src, dst, chunk, **kwargs):
             raise OSError("synthetic disk error")
 
         monkeypatch.setattr(archive_worker, '_atomic_copy', always_fail)
@@ -480,7 +480,7 @@ class TestArchiveWorkerDeadLetter:
         clip = make_clip("RecentClips/mismatch-front.mp4")
         enqueue_for_archive(clip, db_path=db)
 
-        def mismatch(src, dst, chunk):
+        def mismatch(src, dst, chunk, **kwargs):
             raise OSError("size mismatch: wrote 50, expected 100")
 
         monkeypatch.setattr(archive_worker, '_atomic_copy', mismatch)
@@ -985,23 +985,28 @@ class TestArchiveWorkerDiskSpaceGuard:
 
 
 class TestArchiveWorkerConfigContract:
-    def test_read_config_returns_six_tunables(self):
-        # The worker reads six tunables (chunk, max_attempts, idle,
-        # inter_file, load_threshold, load_pause). Old callers expecting
-        # three would silently break — lock the contract.
+    def test_read_config_returns_eight_tunables(self):
+        # The worker reads eight tunables (chunk, max_attempts, idle,
+        # inter_file, load_threshold, load_pause, chunk_pause,
+        # time_budget). Old callers expecting fewer would silently break
+        # — lock the contract. The last two were added by issue #104
+        # (mid-copy SDIO safeguards).
         result = archive_worker._read_config_or_defaults()
-        assert len(result) == 6, (
-            "_read_config_or_defaults must return 6 tunables; "
+        assert len(result) == 8, (
+            "_read_config_or_defaults must return 8 tunables; "
             "archive_worker.py and config.py have drifted "
             "(got %d)" % len(result)
         )
-        chunk, max_attempts, idle, inter_file, load_thresh, load_pause = result
+        (chunk, max_attempts, idle, inter_file, load_thresh,
+         load_pause, chunk_pause, time_budget) = result
         assert chunk > 0
         assert max_attempts > 0
         assert idle > 0
         assert inter_file >= 0       # 0 disables inter-file pause
         assert load_thresh >= 0      # 0 disables load-pause guard
         assert load_pause >= 0
+        assert chunk_pause >= 0      # 0 disables chunk-pause guard
+        assert time_budget >= 0      # 0 disables per-file time budget
 
     def test_inter_file_sleep_default_is_at_least_one_second(self):
         # Regression guard: the SDIO contention failure mode that
@@ -1010,7 +1015,8 @@ class TestArchiveWorkerConfigContract:
         # between copies to let the kernel flush + the WiFi chip get
         # SDIO bus time. Don't lower the default below 1s without
         # re-validating on hardware (see copilot-instructions.md).
-        _, _, _, inter_file, _, _ = archive_worker._read_config_or_defaults()
+        result = archive_worker._read_config_or_defaults()
+        inter_file = result[3]
         assert inter_file >= 1.0, (
             "Default inter_file_sleep_seconds must stay >= 1.0 to "
             "prevent SDIO bus saturation. See copilot-instructions.md."
@@ -1020,15 +1026,43 @@ class TestArchiveWorkerConfigContract:
         # The load-pause guard prevents the archive worker from
         # piling onto an already-loaded system. Default threshold of
         # 3.5 was calibrated against the Pi Zero 2 W's 4 cores.
-        _, _, _, _, load_thresh, load_pause = (
-            archive_worker._read_config_or_defaults()
-        )
+        result = archive_worker._read_config_or_defaults()
+        load_thresh = result[4]
+        load_pause = result[5]
         assert load_thresh > 0, (
             "Load-pause guard must be enabled by default."
         )
         assert load_pause >= 10, (
             "Load-pause sleep must be long enough (>=10s) to actually "
             "let load drop, not just throttle every iteration."
+        )
+
+    def test_per_file_time_budget_default_is_set(self):
+        # Issue #104: the per-file time budget aborts a copy that has
+        # been running for too long (sustained SDIO contention) so the
+        # claim is released back to ``pending`` instead of starving the
+        # userspace watchdog daemon. Default 60s sits at half the
+        # 90 s hardware watchdog timeout — don't raise above 60.
+        result = archive_worker._read_config_or_defaults()
+        time_budget = result[7]
+        assert 0 < time_budget <= 60.0, (
+            "Default per_file_time_budget_seconds must be in (0, 60] "
+            "to keep below the BCM2835 90 s watchdog timeout."
+        )
+
+    def test_chunk_pause_default_is_set(self):
+        # Issue #104: the per-chunk pause yields the SDIO bus to other
+        # readers while loadavg is above threshold. Default 0.25 s is
+        # short enough not to cripple normal copies but long enough to
+        # let the watchdog daemon get scheduled.
+        result = archive_worker._read_config_or_defaults()
+        chunk_pause = result[6]
+        assert chunk_pause > 0, (
+            "Mid-copy chunk-pause guard must be enabled by default."
+        )
+        assert chunk_pause <= 1.0, (
+            "Default chunk_pause_seconds must stay small (<= 1.0); "
+            "larger values needlessly slow normal copies."
         )
 
 
@@ -1105,7 +1139,7 @@ class TestArchiveWorkerLoadPauseUX:
         )
         # Tighten the pause to keep the test snappy.
         def fake_config(*a, **kw):
-            return (4096, 3, 0.05, 0.05, 0.5, 0.5)
+            return (4096, 3, 0.05, 0.05, 0.5, 0.5, 0.0, 0.0)
         monkeypatch.setattr(archive_worker, '_read_config_or_defaults', fake_config)
 
         # Enqueue something so the worker has work to do (it'll hit
@@ -1155,7 +1189,7 @@ class TestArchiveWorkerLoadPauseUX:
         # 1.0s pause window so the test can observe that wake() does
         # NOT cut it short.
         def fake_config(*a, **kw):
-            return (4096, 3, 0.05, 0.05, 0.5, 1.0)
+            return (4096, 3, 0.05, 0.05, 0.5, 1.0, 0.0, 0.0)
         monkeypatch.setattr(archive_worker, '_read_config_or_defaults', fake_config)
 
         clip = make_clip("RecentClips/wake-front.mp4")
@@ -1203,7 +1237,7 @@ class TestArchiveWorkerLoadPauseUX:
         # Use a long pause window (5s) so the test stays well inside
         # one window across multiple iterations.
         def fake_config(*a, **kw):
-            return (4096, 3, 0.05, 0.05, 0.5, 5.0)
+            return (4096, 3, 0.05, 0.05, 0.5, 5.0, 0.0, 0.0)
         monkeypatch.setattr(archive_worker, '_read_config_or_defaults', fake_config)
 
         clip = make_clip("RecentClips/pin-front.mp4")
@@ -1338,7 +1372,7 @@ class TestDiskCriticalCleanupTrigger:
         # may already be cached as an attribute of the ``services``
         # package (loaded by tests/test_archive_watchdog.py). The
         # production helper uses ``from services import archive_watchdog``
-        # which short-circuits to that cached attribute — bypassing any
+        # which short-circuits to that cached attribute â€” bypassing any
         # ``sys.modules`` monkeypatch a test installs. Drop the cached
         # attribute (and the sys.modules entry) so each test starts
         # with a clean import slot. Saved + restored in finally so
@@ -1498,3 +1532,288 @@ class TestDiskCriticalCleanupTrigger:
             "process_one_claim must call _maybe_trigger_critical_cleanup "
             "with the archive_root when disk verdict is 'critical'"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestAtomicCopySdioSafeguards (issue #104 mitigations A + B)
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicCopySdioSafeguards:
+    """Mid-copy SDIO-contention safeguards in ``_atomic_copy``.
+
+    These guard the per-chunk load-aware backoff (mitigation A) and
+    the per-file time budget (mitigation B). Both are part of the
+    fix for issue #104 (hardware-watchdog reboots from sustained
+    archive backlog drains saturating the shared SDIO controller on
+    the Pi Zero 2 W).
+    """
+
+    def test_load_pause_disabled_does_not_invoke_sleep(
+        self, tmp_path, monkeypatch,
+    ):
+        # Default load_pause_threshold=0.0 → no syscall, no sleep.
+        # Even with a getloadavg that screams "overloaded", the copy
+        # finishes without invoking sleep_fn.
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (99.0, 99.0, 99.0), raising=False,
+        )
+        sleep_calls: List[float] = []
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"X" * 4096)
+        dst = tmp_path / "dst.bin"
+        archive_worker._atomic_copy(
+            str(src), str(dst), 1024,
+            sleep_fn=lambda s: sleep_calls.append(s),
+        )
+        assert dst.read_bytes() == b"X" * 4096
+        assert sleep_calls == []
+
+    def test_chunk_pause_fires_when_load_above_threshold(
+        self, tmp_path, monkeypatch,
+    ):
+        # Three chunks of 1024 bytes from a 4096-byte source plus the
+        # final empty read. The load-aware backoff fires after each
+        # non-empty chunk write, so we expect 4 sleep calls (one per
+        # written chunk; the final empty-chunk break exits before the
+        # check).
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (5.0, 5.0, 5.0), raising=False,
+        )
+        sleep_calls: List[float] = []
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"X" * 4096)
+        dst = tmp_path / "dst.bin"
+        archive_worker._atomic_copy(
+            str(src), str(dst), 1024,
+            load_pause_threshold=3.5,
+            chunk_pause_seconds=0.05,
+            sleep_fn=lambda s: sleep_calls.append(s),
+        )
+        assert dst.read_bytes() == b"X" * 4096
+        assert sleep_calls == [0.05, 0.05, 0.05, 0.05]
+
+    def test_chunk_pause_skipped_when_load_below_threshold(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (1.0, 1.0, 1.0), raising=False,
+        )
+        sleep_calls: List[float] = []
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"X" * 4096)
+        dst = tmp_path / "dst.bin"
+        archive_worker._atomic_copy(
+            str(src), str(dst), 1024,
+            load_pause_threshold=3.5,
+            chunk_pause_seconds=0.05,
+            sleep_fn=lambda s: sleep_calls.append(s),
+        )
+        assert dst.read_bytes() == b"X" * 4096
+        assert sleep_calls == []
+
+    def test_getloadavg_failure_falls_back_to_zero(
+        self, tmp_path, monkeypatch,
+    ):
+        # On platforms or containers where getloadavg() raises
+        # AttributeError or OSError, we must NOT propagate — fall
+        # back to 0.0 so the chunk-pause branch never fires.
+        def _raise_oserror():
+            raise OSError("not available")
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg', _raise_oserror, raising=False,
+        )
+        sleep_calls: List[float] = []
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"X" * 4096)
+        dst = tmp_path / "dst.bin"
+        archive_worker._atomic_copy(
+            str(src), str(dst), 1024,
+            load_pause_threshold=3.5,
+            chunk_pause_seconds=0.05,
+            sleep_fn=lambda s: sleep_calls.append(s),
+        )
+        assert dst.read_bytes() == b"X" * 4096
+        assert sleep_calls == []
+
+    def test_time_budget_disabled_does_not_abort(self, tmp_path):
+        # time_budget_seconds=0.0 → no deadline regardless of the clock.
+        clock = [0.0]
+        def fake_now():
+            clock[0] += 1000.0  # explode the clock so any deadline trips
+            return clock[0]
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"X" * 2048)
+        dst = tmp_path / "dst.bin"
+        # Should NOT raise even though our clock jumps by 1000s/chunk.
+        archive_worker._atomic_copy(
+            str(src), str(dst), 1024, now_fn=fake_now,
+        )
+        assert dst.read_bytes() == b"X" * 2048
+
+    def test_time_budget_aborts_and_cleans_partial(
+        self, tmp_path,
+    ):
+        # Inject a clock that crosses the deadline mid-copy. The
+        # exception must be _CopyTimeBudgetExceeded (not bare OSError)
+        # so the caller can distinguish it. The .partial sidecar must
+        # be removed on the abort path.
+        clock = [100.0]
+        def fake_now():
+            # First call (started = now_fn()) returns 100.0.
+            # Subsequent calls advance by 5s each, so after the second
+            # chunk we are at 110.0 > deadline (105.0).
+            ret = clock[0]
+            clock[0] += 5.0
+            return ret
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"X" * 4096)
+        dst = tmp_path / "dst.bin"
+        partial = tmp_path / "dst.bin.partial"
+        with pytest.raises(archive_worker._CopyTimeBudgetExceeded) as exc:
+            archive_worker._atomic_copy(
+                str(src), str(dst), 1024,
+                time_budget_seconds=5.0,
+                now_fn=fake_now,
+            )
+        # OSError subclass — guarantees the existing OSError handlers
+        # in process_one_claim still match, but the more specific one
+        # for time-budget can fire first.
+        assert isinstance(exc.value, OSError)
+        assert "5.0s budget" in str(exc.value)
+        # Final dest never appears (rename never reached).
+        assert not dst.exists()
+        # The .partial sidecar was cleaned up by the except block.
+        assert not partial.exists()
+
+    def test_time_budget_check_happens_before_load_check(
+        self, tmp_path, monkeypatch,
+    ):
+        # Even with load_pause_threshold high enough to fire, a
+        # crossed deadline must take priority — we don't want to add
+        # an extra sleep before raising.
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (99.0, 99.0, 99.0), raising=False,
+        )
+        sleep_calls: List[float] = []
+        clock = [100.0]
+        def fake_now():
+            ret = clock[0]
+            clock[0] += 100.0
+            return ret
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"X" * 4096)
+        dst = tmp_path / "dst.bin"
+        with pytest.raises(archive_worker._CopyTimeBudgetExceeded):
+            archive_worker._atomic_copy(
+                str(src), str(dst), 1024,
+                load_pause_threshold=3.5,
+                chunk_pause_seconds=0.05,
+                time_budget_seconds=10.0,
+                now_fn=fake_now,
+                sleep_fn=lambda s: sleep_calls.append(s),
+            )
+        # The time-budget check is BEFORE the load check in the chunk
+        # body — first chunk crosses the deadline, abort raises with
+        # zero sleep_fn invocations.
+        assert sleep_calls == []
+
+
+# ---------------------------------------------------------------------------
+# TestProcessOneClaimSdioSafeguards (issue #104)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessOneClaimSdioSafeguards:
+    """``process_one_claim`` plumbs the safeguards through to
+    ``_atomic_copy`` and treats ``_CopyTimeBudgetExceeded`` distinctly
+    from other ``OSError`` subclasses: release back to ``pending``
+    without bumping ``attempts``."""
+
+    def test_time_budget_exceeded_releases_without_bumping_attempts(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        clip = make_clip("RecentClips/budget-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+
+        def _budget_exceeded(src, dst, chunk, **kwargs):
+            raise archive_worker._CopyTimeBudgetExceeded(
+                "synthetic budget overrun",
+            )
+
+        monkeypatch.setattr(archive_worker, '_atomic_copy', _budget_exceeded)
+        # Drive the row through process_one_claim several times — it
+        # must NEVER reach dead_letter from a time-budget abort, even
+        # at max_attempts=3.
+        for _ in range(5):
+            row = claim_next_for_worker('w', db_path=db)
+            assert row is not None
+            outcome = archive_worker.process_one_claim(
+                row, db, archive_root, teslacam_root,
+                chunk_size=4096, max_attempts=3,
+                time_budget_seconds=1.0,
+            )
+            assert outcome == 'pending'
+        rows = list_queue(db_path=db)
+        # attempts MUST stay at 0 — no burnt retries from a load
+        # signal that's not the file's fault.
+        assert rows[0]['status'] == 'pending'
+        assert rows[0]['attempts'] == 0
+
+    def test_safeguard_kwargs_are_forwarded_to_atomic_copy(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # Capture the kwargs that process_one_claim passes through.
+        clip = make_clip("RecentClips/forward-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        captured: List[dict] = []
+
+        def _spy(src, dst, chunk, **kwargs):
+            captured.append(kwargs)
+            # Behave like a successful copy so the row reaches 'copied'.
+            # _atomic_copy creates parent dirs; mirror that here.
+            parent = os.path.dirname(dst)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(src, 'rb') as f, open(dst, 'wb') as g:
+                g.write(f.read())
+
+        monkeypatch.setattr(archive_worker, '_atomic_copy', _spy)
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+            load_pause_threshold=3.5,
+            chunk_pause_seconds=0.25,
+            time_budget_seconds=60.0,
+        )
+        assert outcome == 'copied'
+        assert len(captured) == 1
+        assert captured[0]['load_pause_threshold'] == 3.5
+        assert captured[0]['chunk_pause_seconds'] == 0.25
+        assert captured[0]['time_budget_seconds'] == 60.0
+
+
+# ---------------------------------------------------------------------------
+# TestReadConfigOrDefaults (issue #104 — config plumbing)
+# ---------------------------------------------------------------------------
+
+
+class TestReadConfigOrDefaults:
+    def test_defaults_returned_when_config_unavailable(self):
+        # In the test environment ``config`` may not be importable
+        # (no CONFIG_FILE pointed by env). The fallback returns the
+        # 8-tuple of module-level defaults.
+        result = archive_worker._read_config_or_defaults()
+        assert isinstance(result, tuple)
+        assert len(result) == 8, (
+            "Issue #104 added two trailing tunables (chunk_pause, "
+            "time_budget); _read_config_or_defaults must return 8 values."
+        )
+        # Last two are the new mid-copy safeguards.
+        assert result[6] == archive_worker._CHUNK_PAUSE_SECONDS
+        assert result[7] == archive_worker._PER_FILE_TIME_BUDGET_SECONDS

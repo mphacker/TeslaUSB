@@ -222,6 +222,18 @@ ARCHIVE_QUEUE_LOAD_PAUSE_SECONDS = float(
 ARCHIVE_QUEUE_BOOT_SCAN_DEFER_SECONDS = float(
     _archive_queue.get('boot_scan_defer_seconds', 30)
 )
+# Mid-copy SDIO-contention safeguards (issue #104). The between-files
+# guard (load_pause_threshold/_seconds) only fires at the iteration
+# boundary; once _atomic_copy starts, nothing throttles it. These two
+# knobs add per-chunk + per-file safety nets that prevent a single
+# pathological copy from holding the lock long enough to starve the
+# userspace watchdog daemon (BCM2835 90s hardware-watchdog timeout).
+ARCHIVE_QUEUE_CHUNK_PAUSE_SECONDS = float(
+    _archive_queue.get('chunk_pause_seconds', 0.25)
+)
+ARCHIVE_QUEUE_PER_FILE_TIME_BUDGET_SECONDS = float(
+    _archive_queue.get('per_file_time_budget_seconds', 60.0)
+)
 
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)

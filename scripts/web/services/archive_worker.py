@@ -112,6 +112,21 @@ _DEFAULT_STOP_TIMEOUT = 30.0
 _COORDINATOR_TASK = 'archive'
 # Default copy buffer; the worker reads it from config at start.
 _DEFAULT_COPY_CHUNK_BYTES = 1024 * 1024
+# Mid-copy SDIO-contention safeguards (issue #104).
+# When 1-min loadavg crosses ``_LOAD_PAUSE_THRESHOLD`` between chunks,
+# ``_atomic_copy`` sleeps for this duration before reading the next
+# chunk. Cheap O(1) ``getloadavg`` syscall + tiny sleep yields the
+# userspace ``watchdog`` daemon enough CPU + ``/dev/watchdog`` write
+# bandwidth to ping the BCM2835 hardware watchdog (90s timeout).
+# Configurable via ``archive_queue.chunk_pause_seconds`` (default 0.25).
+_CHUNK_PAUSE_SECONDS = 0.25
+# Per-file copy budget. If a single ``_atomic_copy`` exceeds this many
+# wall-clock seconds, raise ``_CopyTimeBudgetExceeded`` so the caller
+# releases the claim back to ``pending`` (without bumping ``attempts``)
+# and the next iteration's between-files load-pause guard gets a chance
+# to fire. ``0.0`` disables the budget. Configurable via
+# ``archive_queue.per_file_time_budget_seconds`` (default 60.0).
+_PER_FILE_TIME_BUDGET_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -551,8 +566,28 @@ def _sweep_partial_orphans(archive_root: str) -> int:
     return removed
 
 
+class _CopyTimeBudgetExceeded(OSError):
+    """Raised by ``_atomic_copy`` when ``time_budget_seconds`` is hit.
+
+    Distinct from ordinary ``OSError`` so the caller in
+    ``process_one_claim`` can recognize a "system overloaded; back off
+    and retry" signal versus a real I/O failure that should burn an
+    attempt and eventually transition to ``dead_letter``. See issue
+    #104 mitigation B for the full rationale: a pathological copy
+    that consistently overruns its budget is a sign of SDIO
+    contention, not a defective file — the row goes back to
+    ``pending`` so the next iteration's between-files load-pause
+    guard fires.
+    """
+
+
 def _atomic_copy(source_path: str, dest_path: str,
-                 chunk_size: int) -> int:
+                 chunk_size: int, *,
+                 load_pause_threshold: float = 0.0,
+                 chunk_pause_seconds: float = 0.25,
+                 time_budget_seconds: float = 0.0,
+                 now_fn: Callable[[], float] = time.monotonic,
+                 sleep_fn: Callable[[float], None] = time.sleep) -> int:
     """Copy ``source_path`` → ``dest_path`` atomically. Returns size.
 
     Pattern: ``dest_path + '.partial'`` → write in chunks → fsync →
@@ -561,6 +596,31 @@ def _atomic_copy(source_path: str, dest_path: str,
 
     Verifies the rendered size matches the source's stat() size; any
     mismatch raises ``OSError`` so the caller bumps attempts.
+
+    Mid-copy SDIO-contention safeguards (issue #104):
+
+    * If ``load_pause_threshold > 0``, between chunks sample
+      ``os.getloadavg()[0]`` and sleep ``chunk_pause_seconds`` when
+      it exceeds the threshold. The Pi Zero 2 W shares one SDIO
+      controller between SD card and WiFi; sustained heavy archive
+      I/O can starve the userspace ``watchdog`` daemon long enough
+      to trigger the BCM2835 hardware watchdog (90s timeout). This
+      yields the daemon enough CPU + ``/dev/watchdog`` write
+      bandwidth to keep pinging the kernel. The ``getloadavg``
+      syscall is O(1) (~1 µs) and the branch is taken only when
+      the box is actually overloaded — zero overhead in the normal
+      case.
+    * If ``time_budget_seconds > 0``, raise
+      :class:`_CopyTimeBudgetExceeded` (an ``OSError`` subclass) if
+      the copy takes longer than that many seconds. The caller
+      catches this BEFORE the generic ``OSError`` handler and
+      releases the claim back to ``pending`` *without* bumping
+      ``attempts`` — the next iteration's between-files load-pause
+      guard gets a chance to fire. A clip that consistently times
+      out is a sign of pathological I/O, not a file defect; we let
+      the system breathe rather than push it to ``dead_letter``.
+
+    ``now_fn`` and ``sleep_fn`` are injectable for tests.
     """
     parent = os.path.dirname(dest_path)
     if parent:
@@ -568,9 +628,15 @@ def _atomic_copy(source_path: str, dest_path: str,
     partial = dest_path + '.partial'
     expected = os.path.getsize(source_path)
     written = 0
+    started = now_fn()
+    deadline = (
+        started + time_budget_seconds
+        if time_budget_seconds > 0 else 0.0
+    )
     try:
         # ``shutil.copyfile`` does buffered chunked copies under the
-        # hood; we wrap manually so we can fsync + size-verify.
+        # hood; we wrap manually so we can fsync + size-verify and
+        # interpose the per-chunk SDIO-contention safeguards.
         with open(source_path, 'rb') as src, open(partial, 'wb') as dst:
             while True:
                 chunk = src.read(chunk_size)
@@ -578,6 +644,24 @@ def _atomic_copy(source_path: str, dest_path: str,
                     break
                 dst.write(chunk)
                 written += len(chunk)
+                # Per-file time-budget check (issue #104 mitigation B).
+                # Done BEFORE the load-aware backoff so a budget-exceeded
+                # condition fires deterministically even when load is
+                # also high (otherwise we'd add an extra sleep before
+                # the abort).
+                if deadline > 0.0 and now_fn() >= deadline:
+                    raise _CopyTimeBudgetExceeded(
+                        f"copy exceeded {time_budget_seconds:.1f}s budget "
+                        f"after {written}/{expected} bytes"
+                    )
+                # Mid-copy load-aware backoff (issue #104 mitigation A).
+                if load_pause_threshold > 0:
+                    try:
+                        load1 = os.getloadavg()[0]
+                    except (AttributeError, OSError):
+                        load1 = 0.0
+                    if load1 > load_pause_threshold:
+                        sleep_fn(chunk_pause_seconds)
             dst.flush()
             try:
                 os.fsync(dst.fileno())
@@ -793,11 +877,16 @@ def _record_idle(*, last_outcome: Optional[str] = None,
 
 
 def _read_config_or_defaults():
-    """Return tunables from config (chunk_bytes, max_attempts, idle, inter_file, load_threshold, load_pause).
+    """Return tunables from config.
+
+    Returns: ``(chunk_bytes, max_attempts, idle, inter_file,
+    load_threshold, load_pause, chunk_pause, time_budget)``.
 
     Looked up at call time so tests can monkeypatch the config module
     after import. Falls back to module-level defaults if config isn't
-    importable (unit-test environments without the full app).
+    importable (unit-test environments without the full app). The
+    last two values are the issue #104 mid-copy safeguards
+    (``chunk_pause_seconds`` and ``per_file_time_budget_seconds``).
     """
     try:
         from config import (
@@ -807,6 +896,8 @@ def _read_config_or_defaults():
             ARCHIVE_QUEUE_INTER_FILE_SLEEP_SECONDS,
             ARCHIVE_QUEUE_LOAD_PAUSE_THRESHOLD,
             ARCHIVE_QUEUE_LOAD_PAUSE_SECONDS,
+            ARCHIVE_QUEUE_CHUNK_PAUSE_SECONDS,
+            ARCHIVE_QUEUE_PER_FILE_TIME_BUDGET_SECONDS,
         )
         return (
             int(ARCHIVE_QUEUE_COPY_CHUNK_BYTES),
@@ -815,6 +906,8 @@ def _read_config_or_defaults():
             float(ARCHIVE_QUEUE_INTER_FILE_SLEEP_SECONDS),
             float(ARCHIVE_QUEUE_LOAD_PAUSE_THRESHOLD),
             float(ARCHIVE_QUEUE_LOAD_PAUSE_SECONDS),
+            float(ARCHIVE_QUEUE_CHUNK_PAUSE_SECONDS),
+            float(ARCHIVE_QUEUE_PER_FILE_TIME_BUDGET_SECONDS),
         )
     except Exception:  # noqa: BLE001
         return (
@@ -822,6 +915,8 @@ def _read_config_or_defaults():
             _INTER_FILE_SLEEP_SECONDS,
             _LOAD_PAUSE_THRESHOLD,
             _LOAD_PAUSE_SECONDS,
+            _CHUNK_PAUSE_SECONDS,
+            _PER_FILE_TIME_BUDGET_SECONDS,
         )
 
 
@@ -834,6 +929,9 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
                       teslacam_root: Optional[str], *,
                       chunk_size: int,
                       max_attempts: int,
+                      load_pause_threshold: float = 0.0,
+                      chunk_pause_seconds: float = 0.25,
+                      time_budget_seconds: float = 0.0,
                       now_fn: Callable[[], float] = time.time) -> str:
     """Process a single claimed row. Returns the new status string.
 
@@ -841,8 +939,15 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
       * ``'copied'``       — file copied + indexer enqueued
       * ``'source_gone'``  — source vanished (no retry, terminal)
       * ``'pending'``      — released back to pending (stable-write
-                             gate, transient error with attempts left)
+                             gate, disk pause, time-budget abort,
+                             transient error with attempts left)
       * ``'dead_letter'``  — attempts exhausted
+
+    The ``load_pause_threshold``, ``chunk_pause_seconds``, and
+    ``time_budget_seconds`` keyword args are forwarded to
+    :func:`_atomic_copy` for the issue #104 mid-copy SDIO-contention
+    safeguards. Defaults are conservative (off / 0.25 s / off) so
+    callers that don't opt in get pre-#104 behavior.
 
     Pure dispatch logic kept separate from the loop so tests can drive
     it directly without a thread or task_coordinator.
@@ -913,12 +1018,31 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         return 'error'
 
     try:
-        _atomic_copy(source_path, dest_path, chunk_size)
+        _atomic_copy(
+            source_path, dest_path, chunk_size,
+            load_pause_threshold=load_pause_threshold,
+            chunk_pause_seconds=chunk_pause_seconds,
+            time_budget_seconds=time_budget_seconds,
+        )
     except FileNotFoundError:
         # Tesla rotated the source between stat() and open() — normal,
         # not retryable.
         archive_queue.mark_source_gone(row_id, db_path=db_path)
         return 'source_gone'
+    except _CopyTimeBudgetExceeded as e:
+        # Issue #104 mitigation B: per-file time budget is a "system
+        # overloaded; back off and retry" signal, not an I/O failure.
+        # Release back to pending WITHOUT bumping attempts so the row
+        # can never reach dead_letter from load alone. The next
+        # iteration's between-files load-pause guard will fire and
+        # give the SDIO bus + watchdog daemon a clear runway.
+        logger.warning(
+            "archive_worker: copy of %s aborted to relieve SDIO "
+            "contention (%s); releasing back to pending",
+            source_path, e,
+        )
+        archive_queue.release_claim(row_id, db_path=db_path)
+        return 'pending'
     except (OSError, shutil.Error) as e:
         new_status = archive_queue.mark_failed(
             row_id, f"copy: {e!r}",
@@ -983,7 +1107,8 @@ def _run_worker_loop(db_path: str, archive_root: str,
         )
 
     chunk_size, max_attempts, idle_sleep, inter_file_sleep, \
-        load_pause_threshold, load_pause_seconds = _read_config_or_defaults()
+        load_pause_threshold, load_pause_seconds, \
+        chunk_pause_seconds, time_budget_seconds = _read_config_or_defaults()
 
     while not _stop_event.is_set():
         # Honor pause requests at the iteration boundary.
@@ -1112,6 +1237,9 @@ def _run_worker_loop(db_path: str, archive_root: str,
                             row, db_path, archive_root, teslacam_root,
                             chunk_size=chunk_size,
                             max_attempts=max_attempts,
+                            load_pause_threshold=load_pause_threshold,
+                            chunk_pause_seconds=chunk_pause_seconds,
+                            time_budget_seconds=time_budget_seconds,
                         )
                         if new_status == 'copied':
                             with _state_lock:

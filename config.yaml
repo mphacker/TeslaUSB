@@ -217,3 +217,12 @@ archive_queue:
   load_pause_threshold: 3.5              # Pause when 1-min loadavg exceeds this
   load_pause_seconds: 30                 # How long to sleep when load is high
   boot_scan_defer_seconds: 30            # Producer waits this long after start before its first scan
+  # Mid-copy SDIO-contention safeguards (issue #104). The
+  # between-files load-pause guard above only fires at the iteration
+  # boundary; once a single _atomic_copy starts, nothing throttles it.
+  # Under sustained SDIO saturation a 25-50 MB clip copy can take
+  # 3-6 minutes, starving the userspace watchdog daemon long enough
+  # to trigger the BCM2835 hardware watchdog (90s timeout). These two
+  # knobs add per-chunk and per-file safety nets inside _atomic_copy.
+  chunk_pause_seconds: 0.25              # Sleep between chunks when 1-min loadavg > load_pause_threshold (issue #104 mitigation A)
+  per_file_time_budget_seconds: 60.0     # Abort + requeue (no attempts bump) any single copy taking longer than this (issue #104 mitigation B)

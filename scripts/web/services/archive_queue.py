@@ -153,11 +153,12 @@ def _safe_stat(path: str):
 # SQLite's connection-level threadsafety guarantees that ``cur.rowcount``
 # after ``INSERT OR IGNORE`` reflects only that cursor's own outcome:
 # the winning connection sees ``rowcount == 1``, the losing connection
-# sees ``rowcount == 0``. Each enqueue opens its own connection (via
-# the ``_open_archive_conn`` context manager), so no Python-level lock
-# is needed to make the single-row return value reliable. The bulk
-# path (``enqueue_many_for_archive``) uses ``conn.total_changes`` for
-# the same reason — same guarantee, no lock.
+# sees ``rowcount == 0``. Each enqueue opens its own connection via
+# :func:`_open_archive_conn`, so no Python-level lock is needed to make
+# the single-row return value reliable. The bulk path
+# (``enqueue_many_for_archive``) uses ``conn.total_changes`` deltas
+# inside an explicit ``BEGIN IMMEDIATE`` … ``COMMIT`` for the same
+# reason — same guarantee, no lock.
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +286,14 @@ def enqueue_many_for_archive(source_paths: Iterable[str], *,
             # handler logs and returns 0.
             try:
                 conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as rollback_err:
+                # Log at debug — the outer handler will surface the
+                # original cause at warning level. We never want a
+                # rollback failure to mask the root exception.
+                logger.debug(
+                    "enqueue_many_for_archive ROLLBACK failed: %s",
+                    rollback_err,
+                )
             raise
         conn.execute("COMMIT")
         after = conn.total_changes

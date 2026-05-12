@@ -1525,6 +1525,86 @@ class TestIndexVideo:
         assert result.outcome == IndexOutcome.NO_GPS_RECORDED
         conn.close()
 
+    def test_indexed_files_fallback_dedup_when_video_path_nulled(self, tmp_path):
+        # Defense-in-depth: when ``waypoints.video_path`` was nulled by
+        # ``purge_deleted_videos`` (because a sibling copy of the clip
+        # was deleted), the primary canonical-key check on
+        # ``waypoints.video_path IN (...)`` returns no rows. Without
+        # this fallback the indexer would re-parse the clip and insert
+        # a SECOND set of waypoints + detected_events, producing the
+        # duplicate event pins we hit on May 10/11.
+        #
+        # The fallback uses ``indexed_files`` as the authoritative
+        # "we processed this physical file" record and refuses to
+        # re-index when a row exists with ``waypoint_count > 0``.
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+
+        payloads = [
+            _make_sei_protobuf(lat=37.7749, lon=-122.4194, speed=25.0),
+            _make_sei_protobuf(lat=37.7750, lon=-122.4195, speed=26.0),
+        ]
+        mp4_data = _make_synthetic_mp4(payloads)
+        teslacam = tmp_path / "TeslaCam" / "RecentClips"
+        teslacam.mkdir(parents=True)
+        video_file = teslacam / "2025-11-08_08-15-44-front.mp4"
+        video_file.write_bytes(mp4_data)
+
+        # First index — populates waypoints and indexed_files normally.
+        first = _index_video(
+            conn, str(video_file), str(tmp_path / "TeslaCam"),
+            sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
+            trip_gap_minutes=5,
+        )
+        assert first.outcome == IndexOutcome.INDEXED
+        assert first.waypoints == 2
+        wp_count_after_first = conn.execute(
+            "SELECT COUNT(*) FROM waypoints"
+        ).fetchone()[0]
+        assert wp_count_after_first == 2
+
+        # ``index_single_file`` (the public entry point) records the
+        # indexed_files row after ``_index_video`` returns. Simulate
+        # that here so the fallback has authoritative state to consult.
+        from datetime import datetime, timezone
+        st = video_file.stat()
+        conn.execute(
+            "INSERT OR REPLACE INTO indexed_files "
+            "(file_path, file_size, file_mtime, indexed_at, "
+            "waypoint_count, event_count) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(video_file), st.st_size, st.st_mtime,
+             datetime.now(timezone.utc).isoformat(), 2, 0),
+        )
+
+        # Simulate the production data anomaly: a prior
+        # purge_deleted_videos run NULLed the video_path on every
+        # waypoint for this clip (e.g., because a sibling copy was
+        # deleted before the surviving-copy check found this one).
+        # ``indexed_files`` keeps its row — that's the asymmetry
+        # the fallback exploits.
+        conn.execute("UPDATE waypoints SET video_path = NULL")
+        conn.execute("UPDATE detected_events SET video_path = NULL")
+        conn.commit()
+
+        # Re-index the same clip. With ONLY the
+        # ``waypoints.video_path IN (...)`` dedup, this would
+        # fall through to SEI extraction and double the row count.
+        # The new fallback should return ALREADY_INDEXED.
+        second = _index_video(
+            conn, str(video_file), str(tmp_path / "TeslaCam"),
+            sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
+            trip_gap_minutes=5,
+        )
+        assert second.outcome == IndexOutcome.ALREADY_INDEXED
+        wp_count_after_second = conn.execute(
+            "SELECT COUNT(*) FROM waypoints"
+        ).fetchone()[0]
+        # Critical: NO new waypoint inserts. The pre-existing
+        # 2 rows (with NULL video_path) are intact, no duplicates
+        # added.
+        assert wp_count_after_second == 2
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Trip Fragmentation Defense Tests

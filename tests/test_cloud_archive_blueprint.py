@@ -301,3 +301,120 @@ class TestSaveSettingsRetryCapClamping:
         assert r.status_code in (302, 303)
         last = captured_updates['last']
         assert last['cloud_archive.retry_max_attempts'] == 5
+
+
+class TestArchiveCleanupHttpContract:
+    """Phase 3a.1 (#98 / closes #91) post-review fix: ``POST /api/archive_cleanup``
+    must preserve the legacy 500-on-error HTTP contract that the endpoint
+    advertised before the refactor.
+
+    Before the refactor: ``trigger_archive_cleanup`` raised on watchdog
+    failure; the blueprint's outer ``try/except`` produced HTTP 500.
+    After the refactor: the shim swallows watchdog exceptions and
+    returns ``{'error': '...'}``; the blueprint must convert that
+    structured error back into an HTTP 500 so external automation /
+    front-end code that keys on the status code keeps working.
+
+    Successful runs (including the watchdog's ``status='already_running'``
+    short-circuit, which is normal control flow, not an error) MUST
+    return HTTP 200.
+    """
+
+    def test_successful_prune_returns_200(self, client):
+        with patch(
+            'services.video_archive_service.trigger_archive_cleanup',
+            return_value={
+                'deleted_count': 7,
+                'freed_bytes': 1_400_000,
+                'scanned': 100,
+                'kept_unsynced_count': 0,
+                'duration_seconds': 0.42,
+            },
+        ):
+            r = client.post('/cloud/api/archive_cleanup')
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body['success'] is True
+        assert body['result']['deleted_count'] == 7
+        assert body['result']['freed_bytes'] == 1_400_000
+
+    def test_already_running_returns_200(self, client):
+        # The watchdog's ``_retention_running`` guard short-circuits with
+        # a synthetic summary carrying ``status='already_running'``.
+        # That's a normal control-flow signal — NOT an error — so the
+        # endpoint MUST return 200 so the front end can render
+        # "Cleanup already in progress" instead of an error toast.
+        with patch(
+            'services.video_archive_service.trigger_archive_cleanup',
+            return_value={
+                'deleted_count': 0,
+                'freed_bytes': 0,
+                'scanned': 0,
+                'status': 'already_running',
+                'duration_seconds': 0.001,
+            },
+        ):
+            r = client.post('/cloud/api/archive_cleanup')
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body['success'] is True
+        assert body['result']['status'] == 'already_running'
+
+    def test_watchdog_error_dict_returns_500(self, client):
+        # The shim catches watchdog exceptions and converts them to
+        # ``{'error': '<exc>', ...}``. The blueprint MUST translate
+        # that back into an HTTP 500 + ``success=False`` so the legacy
+        # contract is preserved. Without this translation, callers
+        # would treat watchdog crashes as silent successes.
+        with patch(
+            'services.video_archive_service.trigger_archive_cleanup',
+            return_value={
+                'deleted_count': 0,
+                'freed_bytes': 0,
+                'scanned': 0,
+                'error': 'watchdog raised: synthetic',
+            },
+        ):
+            r = client.post('/cloud/api/archive_cleanup')
+        assert r.status_code == 500
+        body = r.get_json()
+        assert body['success'] is False
+        assert 'synthetic' in body['message']
+        # The structured error dict is preserved in the response so
+        # debuggers can see the full context (cutoff, scanned, etc.).
+        assert body['result']['error'] == 'watchdog raised: synthetic'
+
+    def test_watchdog_not_started_returns_500(self, client):
+        # ``force_prune_now`` returns ``{'error': 'watchdog not started', ...}``
+        # without raising when the daemon isn't running. Per the legacy
+        # contract this is still an error condition (the user clicked
+        # "Run cleanup now" and nothing happened), so 500 is correct.
+        with patch(
+            'services.video_archive_service.trigger_archive_cleanup',
+            return_value={
+                'deleted_count': 0,
+                'freed_bytes': 0,
+                'scanned': 0,
+                'error': 'watchdog not started',
+            },
+        ):
+            r = client.post('/cloud/api/archive_cleanup')
+        assert r.status_code == 500
+        body = r.get_json()
+        assert body['success'] is False
+        assert body['message'] == 'watchdog not started'
+
+    def test_unexpected_exception_returns_500(self, client):
+        # Defense in depth: even if the shim itself raises (e.g.
+        # ImportError on the local import), the endpoint's outer
+        # try/except must still return a clean 500 rather than
+        # leaking a traceback.
+        with patch(
+            'services.video_archive_service.trigger_archive_cleanup',
+            side_effect=RuntimeError("synthetic"),
+        ):
+            r = client.post('/cloud/api/archive_cleanup')
+        assert r.status_code == 500
+        body = r.get_json()
+        assert body['success'] is False
+        assert 'synthetic' in body['message']

@@ -44,7 +44,7 @@ that callers still depend on:
 * ``get_archive_status()`` — ``GET /api/recent_archive/status``
   (polled by the NM dispatcher to know when archiving has drained
   before triggering cloud sync). Bridges to ``archive_worker.get_status``.
-* ``trigger_archive_cleanup()`` — ``POST /api/archive_cleanup``
+* ``trigger_archive_cleanup()`` — ``POST /cloud/api/archive_cleanup``
   legacy endpoint; one-line wrapper for
   ``archive_watchdog.force_prune_now``. New callers should use
   ``POST /api/archive/prune_now`` directly.
@@ -181,7 +181,7 @@ def trigger_archive_now() -> bool:
 def trigger_archive_cleanup() -> Dict[str, Any]:
     """Phase 3a (#98 / closes #91): one-line wrapper for ``force_prune_now``.
 
-    Backwards-compatible entry point for ``POST /api/archive_cleanup``
+    Backwards-compatible entry point for ``POST /cloud/api/archive_cleanup``
     that previously called the legacy ``smart_cleanup_archive`` /
     ``_proactive_retention`` / ``_enforce_retention`` cascade. All
     three of those are gone — retention is owned by

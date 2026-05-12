@@ -474,20 +474,30 @@ def delete_event(folder, event_name):
 
     try:
         if folder_structure == 'flat':
-            # RecentClips: Delete all videos matching the session timestamp
-            from services.file_safety import is_protected_file
+            # RecentClips / ArchivedClips: delete all videos matching the
+            # session timestamp. ArchivedClips lives on the SD card and IS
+            # an archived video — route through the single Phase 2.1 doorway
+            # so the protected-file guard cannot be bypassed. RecentClips is
+            # on the read-only USB mount in present mode, but we still go
+            # through the helper for uniformity and so the IMG-protection
+            # contract is enforced everywhere.
+            from services.file_safety import (
+                safe_delete_archive_video, DeleteOutcome,
+            )
             session_videos = get_session_videos(folder_path, event_name)
             for video in session_videos:
-                try:
-                    if is_protected_file(video['path']):
-                        logger.error("BLOCKED deletion of protected file: %s", video['path'])
-                        error_count += 1
-                        continue
-                    os.remove(video['path'])
+                result = safe_delete_archive_video(video['path'])
+                if result.outcome is DeleteOutcome.DELETED:
                     deleted_count += 1
                     deleted_files.append(video['name'])
-                except OSError as e:
-                    logger.error(f"Failed to delete {video['path']}: {e}")
+                elif result.outcome is DeleteOutcome.PROTECTED:
+                    # Helper already logged the BLOCKED warning.
+                    error_count += 1
+                else:
+                    logger.error(
+                        "Failed to delete %s: %s",
+                        video['path'], result.outcome.value,
+                    )
                     error_count += 1
         else:
             # SavedClips/SentryClips: Delete the entire event folder

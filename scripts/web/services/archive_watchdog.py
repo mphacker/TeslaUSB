@@ -633,10 +633,13 @@ def _delete_one_mp4(path: str, db_path: str) -> int:
     Routes the actual delete through
     :func:`services.file_safety.safe_delete_archive_video` — the single
     doorway that enforces the protected-file guard (Phase 2.1).
+    Geodata is reconciled only when the helper reports
+    :data:`DeleteOutcome.DELETED` (so a 0-byte clip that was actually
+    removed is still reconciled even though ``bytes_freed`` is 0).
     """
-    from services.file_safety import safe_delete_archive_video
-    freed = safe_delete_archive_video(path)
-    if freed == 0:
+    from services.file_safety import safe_delete_archive_video, DeleteOutcome
+    result = safe_delete_archive_video(path)
+    if result.outcome is not DeleteOutcome.DELETED:
         return 0
     # Reconcile geodata (best-effort — failure here doesn't undo the delete).
     try:
@@ -647,7 +650,7 @@ def _delete_one_mp4(path: str, db_path: str) -> int:
             "archive_retention: purge_deleted_videos failed for %s: %s",
             path, e,
         )
-    return freed
+    return result.bytes_freed
 
 
 def _run_retention_prune(archive_root: str, db_path: str,

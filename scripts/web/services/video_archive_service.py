@@ -381,7 +381,7 @@ def _prune_non_driving_archives() -> int:
     # Second pass: delete all clips (any camera) whose timestamp prefix
     # is marked for deletion. Side/back cams without a front-cam decision
     # are NEVER deleted here — only positive evidence drives deletion.
-    from services.file_safety import safe_delete_archive_video
+    from services.file_safety import safe_delete_archive_video, DeleteOutcome
     deleted = 0
     deleted_paths: List[str] = []
     for name in names:
@@ -393,7 +393,7 @@ def _prune_non_driving_archives() -> int:
         if decision.get(ts_key) is not False:
             continue
         fpath = os.path.join(ARCHIVE_DIR, name)
-        if safe_delete_archive_video(fpath) > 0:
+        if safe_delete_archive_video(fpath).outcome is DeleteOutcome.DELETED:
             deleted += 1
             deleted_paths.append(fpath)
 
@@ -518,7 +518,7 @@ def _purge_corrupt_archives() -> int:
     if not os.path.isdir(ARCHIVE_DIR):
         return 0
 
-    from services.file_safety import safe_delete_archive_video
+    from services.file_safety import safe_delete_archive_video, DeleteOutcome
     removed = 0
     try:
         for name in os.listdir(ARCHIVE_DIR):
@@ -528,7 +528,7 @@ def _purge_corrupt_archives() -> int:
             if not os.path.isfile(fpath):
                 continue
             if not _is_complete_mp4(fpath):
-                if safe_delete_archive_video(fpath) > 0:
+                if safe_delete_archive_video(fpath).outcome is DeleteOutcome.DELETED:
                     removed += 1
     except OSError:
         pass
@@ -595,7 +595,7 @@ def _enforce_retention() -> None:
 
 def _delete_files_older_than(cutoff_timestamp: float) -> List[str]:
     """Delete archived files older than the cutoff. Returns deleted paths."""
-    from services.file_safety import safe_delete_archive_video
+    from services.file_safety import safe_delete_archive_video, DeleteOutcome
     deleted: List[str] = []
     if not os.path.isdir(ARCHIVE_DIR):
         return deleted
@@ -607,7 +607,7 @@ def _delete_files_older_than(cutoff_timestamp: float) -> List[str]:
                 continue
             try:
                 if os.stat(fpath).st_mtime < cutoff_timestamp:
-                    if safe_delete_archive_video(fpath) > 0:
+                    if safe_delete_archive_video(fpath).outcome is DeleteOutcome.DELETED:
                         deleted.append(fpath)
             except OSError:
                 continue
@@ -622,14 +622,14 @@ def _delete_files_older_than(cutoff_timestamp: float) -> List[str]:
 
 def _trim_archive_to_size(max_bytes: int) -> List[str]:
     """Delete oldest files until archive is under max_bytes. Returns deleted paths."""
-    from services.file_safety import safe_delete_archive_video
+    from services.file_safety import safe_delete_archive_video, DeleteOutcome
     files = _get_archived_files_sorted()
     total_size = sum(s for _, s, _ in files)
     deleted: List[str] = []
 
     while total_size > max_bytes and files:
         fpath, fsize, _ = files.pop(0)  # oldest first
-        if safe_delete_archive_video(fpath) > 0:
+        if safe_delete_archive_video(fpath).outcome is DeleteOutcome.DELETED:
             total_size -= fsize
             deleted.append(fpath)
 
@@ -645,7 +645,7 @@ def _trim_archive_for_free_space(min_free_bytes: int) -> List[str]:
     Returns the deleted paths so callers can do a targeted geodata
     purge instead of a full-tree scan.
     """
-    from services.file_safety import safe_delete_archive_video
+    from services.file_safety import safe_delete_archive_video, DeleteOutcome
     files = _get_archived_files_sorted()
     deleted: List[str] = []
 
@@ -657,7 +657,7 @@ def _trim_archive_for_free_space(min_free_bytes: int) -> List[str]:
         if usage.free >= min_free_bytes:
             break
         fpath, _, _ = files.pop(0)
-        if safe_delete_archive_video(fpath) > 0:
+        if safe_delete_archive_video(fpath).outcome is DeleteOutcome.DELETED:
             deleted.append(fpath)
 
     if deleted:

@@ -657,7 +657,19 @@ def api_queue_clear():
 
 @cloud_archive_bp.route('/api/archive_cleanup', methods=['POST'])
 def api_archive_cleanup():
-    """Manually trigger smart archive cleanup."""
+    """Manually trigger archive retention prune.
+
+    Phase 3a (#98 / closes #91): this endpoint is now a thin wrapper
+    around ``archive_watchdog.force_prune_now`` (via the
+    ``video_archive_service.trigger_archive_cleanup`` shim). The legacy
+    ``smart_cleanup_archive`` / ``_proactive_retention`` /
+    ``_enforce_retention`` cascade has been deleted — retention is
+    owned by ``archive_watchdog``.
+
+    New callers should use ``POST /api/archive/prune_now`` directly;
+    this endpoint is kept for backwards compatibility with any
+    external automation.
+    """
     from services.video_archive_service import trigger_archive_cleanup
     try:
         result = trigger_archive_cleanup()

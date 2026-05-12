@@ -1,6 +1,21 @@
-"""
-Cleanup Service for TeslaUSB
-Handles automatic cleanup of old video recordings with safety mechanisms.
+"""Cleanup Service for TeslaUSB — USB-partition video cleanup.
+
+Manages retention of videos that live INSIDE the USB drive image
+(``RecentClips/``, ``SavedClips/``, ``SentryClips/``,
+``EncryptedClips/`` on the part1 filesystem that the gadget exposes
+to Tesla). These deletions happen via the partition mount path
+(present mode: USB RO mount + ``quick_edit_part2`` is NOT used here;
+edit mode: RW mount). Per-folder policies are tracked in
+``cleanup_config.json``.
+
+**Scope boundary (Phase 3a / #98):** This service NEVER touches the
+SD-card ``ArchivedClips/`` folder. Retention of archived clips on the
+Pi's SD card is owned by ``services.archive_watchdog`` —
+``archive_watchdog.force_prune_now`` is the synchronous entry point
+and it honors the ``cloud_archive.delete_unsynced`` toggle, the
+``_retention_running`` duplicate-trigger guard, and the "trips are
+sacred" invariant. Any new "delete archived clips" code path belongs
+in ``archive_watchdog``, never here.
 """
 
 import os

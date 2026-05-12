@@ -657,14 +657,50 @@ def api_queue_clear():
 
 @cloud_archive_bp.route('/api/archive_cleanup', methods=['POST'])
 def api_archive_cleanup():
-    """Manually trigger smart archive cleanup."""
+    """Manually trigger archive retention prune.
+
+    Phase 3a (#98 / closes #91): this endpoint is now a thin wrapper
+    around ``archive_watchdog.force_prune_now`` (via the
+    ``video_archive_service.trigger_archive_cleanup`` shim). The legacy
+    ``smart_cleanup_archive`` / ``_proactive_retention`` /
+    ``_enforce_retention`` cascade has been deleted — retention is
+    owned by ``archive_watchdog``.
+
+    HTTP contract preserved across the refactor:
+      * 200 + ``{"success": True, "result": {...}}`` on a successful
+        prune (including the watchdog's ``status='already_running'``
+        short-circuit, which is a normal control-flow signal — NOT
+        an error).
+      * 500 + ``{"success": False, "message": ...}`` when the
+        retention call itself fails. The shim swallows the
+        underlying exception and returns a structured error dict
+        with an ``error`` key; we re-raise that as a 500 so external
+        callers / automation that key on HTTP status keep working.
+
+    New callers should use ``POST /api/archive/prune_now`` directly;
+    this endpoint is kept for backwards compatibility with any
+    external automation.
+    """
     from services.video_archive_service import trigger_archive_cleanup
     try:
         result = trigger_archive_cleanup()
-        return jsonify({"success": True, "result": result})
     except Exception as exc:
         logger.exception("Failed to run archive cleanup")
         return jsonify({"success": False, "message": str(exc)}), 500
+
+    if isinstance(result, dict) and result.get("error"):
+        # The shim handled the exception internally and returned a
+        # structured error dict. Surface this as the legacy 500 so
+        # callers that check HTTP status (or the top-level
+        # ``success`` flag) continue to treat watchdog crashes as
+        # failures, not silent successes.
+        return jsonify({
+            "success": False,
+            "message": result["error"],
+            "result": result,
+        }), 500
+
+    return jsonify({"success": True, "result": result})
 
 
 # ---------------------------------------------------------------------------

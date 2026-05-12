@@ -1,18 +1,25 @@
-"""Tests for the Phase 2b ``video_archive_service`` shims (issue #76).
+"""Tests for the Phase 2b/3a ``video_archive_service`` shim layer.
 
-The legacy ``_archive_timer_loop`` periodic thread + ``_archive_pending``
-duplicate-guard pattern is gone. ``video_archive_service`` is now a thin
-compatibility layer over ``archive_worker``:
+Phase 2b (issue #76) replaced the legacy ``_archive_timer_loop`` /
+``_run_archive`` / ``_archive_pending`` duplicate-guard internals with
+the queue-driven ``archive_worker``. Phase 3a (issue #98 / closes #91)
+deletes the legacy retention cascade — ``smart_cleanup_archive``,
+``_proactive_retention``, ``_enforce_retention``, ``_purge_corrupt_archives``,
+``_prune_non_driving_archives``, ``_update_geodata_paths``, and the
+helper ladder beneath them — and rewires
+``trigger_archive_cleanup`` to a one-line wrapper around
+``archive_watchdog.force_prune_now``.
 
-* ``start_archive_timer()`` → ``archive_worker.ensure_worker_started()``
-* ``stop_archive_timer()``  → ``archive_worker.stop_worker()``
-* ``trigger_archive_now()`` → ``archive_worker.wake()``
+These tests pin the surviving public API:
 
-The old tests asserted on the deleted internals (``_run_archive``,
-``_archive_pending``, ``_archive_timer_loop``, the ionice-on-the-process
-bug). Those are no longer reachable code paths and have been deleted.
-The Phase 2b worker has its own pause/resume/wake/dead-letter test
-coverage in ``test_archive_worker.py``.
+* ``trigger_archive_now`` — wakes the worker, swallows worker exceptions
+* ``start_archive_timer`` / ``stop_archive_timer`` — delegate to the
+  worker's lifecycle, swallow exceptions
+* ``get_archive_status`` — bridges to ``archive_worker.get_status`` and
+  reports a backwards-compatible ``running`` flag for the dispatcher
+* ``trigger_archive_cleanup`` — Phase 3a wrapper for
+  ``archive_watchdog.force_prune_now``; passes through the watchdog's
+  ``status='already_running'`` short-circuit
 """
 
 from unittest.mock import patch
@@ -86,15 +93,28 @@ class TestStartStopShims:
     delegations to the worker; the legacy internal thread is gone."""
 
     def test_start_archive_timer_starts_worker(self):
+        vas.ARCHIVE_ENABLED = True
         with patch(
             'services.archive_worker.ensure_worker_started',
         ) as mock_start:
             vas.start_archive_timer()
             mock_start.assert_called_once()
 
+    def test_start_archive_timer_disabled_does_not_start_worker(self):
+        # When ARCHIVE_ENABLED is False, start should be a no-op.
+        # Importantly, it must NOT call ensure_worker_started — the
+        # worker shouldn't even be initialised when archiving is off.
+        vas.ARCHIVE_ENABLED = False
+        with patch(
+            'services.archive_worker.ensure_worker_started',
+        ) as mock_start:
+            vas.start_archive_timer()
+            mock_start.assert_not_called()
+
     def test_start_archive_timer_swallows_worker_failure(self):
         # Same resilience contract as trigger_archive_now: a worker
         # startup failure must not crash gadget_web's main thread.
+        vas.ARCHIVE_ENABLED = True
         with patch(
             'services.archive_worker.ensure_worker_started',
             side_effect=RuntimeError("synthetic"),
@@ -118,83 +138,235 @@ class TestStartStopShims:
             vas.stop_archive_timer()
 
 
-class TestUpdateGeodataPaths:
-    """When the archive worker copies a RecentClips file to ArchivedClips,
-    ``_update_geodata_paths`` rewrites the geodata DB to point at the new
-    location. The ``indexed_files`` row gets recreated under the new
-    absolute path (it's the primary key) — earlier versions of this code
-    dropped the ``indexed_at`` column from the INSERT, leaving the new
-    row with ``indexed_at = NULL``. That cosmetic bug confused the daily
-    stale-scan and any UI that displayed indexing recency. Pin the fix.
+class TestGetArchiveStatus:
+    """``get_archive_status()`` bridges to ``archive_worker.get_status()``
+    and reports a backwards-compatible ``running`` flag for the
+    NM dispatcher (``helpers/refresh_cloud_token.py``).
+
+    The dispatcher polls ``/api/recent_archive/status`` after
+    ``/api/recent_archive/trigger`` and waits for ``running == False``
+    before kicking cloud sync. In the queue-driven architecture the
+    worker thread is always alive once started, so ``running`` must
+    track "is there work in flight right now" — the union of an
+    active file being copied AND any pending queue depth.
     """
 
-    def test_indexed_at_is_preserved_across_archive(self, tmp_path):
-        import sqlite3
+    def test_running_true_when_active_file(self):
+        # Worker is mid-file — dispatcher must wait.
+        with patch(
+            'services.archive_worker.get_status',
+            return_value={
+                'worker_running': True,
+                'active_file': '/foo/bar.mp4',
+                'queue_depth': 0,
+                'last_outcome': 'copied',
+            },
+        ):
+            status = vas.get_archive_status()
+            assert status['running'] is True
+            assert status['current_file'] == '/foo/bar.mp4'
 
-        db_path = str(tmp_path / "geo.db")
-        conn = sqlite3.connect(db_path)
-        conn.executescript(
-            """
-            CREATE TABLE indexed_files (
-                file_path TEXT PRIMARY KEY,
-                file_size INTEGER,
-                file_mtime REAL,
-                indexed_at TEXT,
-                waypoint_count INTEGER DEFAULT 0,
-                event_count INTEGER DEFAULT 0
-            );
-            CREATE TABLE waypoints (
-                id INTEGER PRIMARY KEY,
-                trip_id INTEGER, timestamp TEXT, lat REAL, lon REAL,
-                video_path TEXT, frame_offset INTEGER
-            );
-            CREATE TABLE detected_events (
-                id INTEGER PRIMARY KEY,
-                trip_id INTEGER, timestamp TEXT, lat REAL, lon REAL,
-                event_type TEXT, severity REAL, description TEXT,
-                video_path TEXT, frame_offset INTEGER, metadata TEXT
-            );
-            """
-        )
-        old_abs = "/mnt/gadget/part1-ro/TeslaCam/RecentClips/2026-05-10_12-00-00-front.mp4"
-        new_abs = "/home/pi/ArchivedClips/2026-05-10_12-00-00-front.mp4"
-        original_indexed_at = "2026-05-10T12:01:30.123456+00:00"
-        conn.execute(
-            "INSERT INTO indexed_files VALUES (?, ?, ?, ?, ?, ?)",
-            (old_abs, 12345, 1747000000.0, original_indexed_at, 5, 1),
-        )
-        conn.commit()
-        conn.close()
+    def test_running_true_when_queue_has_work(self):
+        # Worker is between files but more work is queued — still busy.
+        with patch(
+            'services.archive_worker.get_status',
+            return_value={
+                'worker_running': True,
+                'active_file': None,
+                'queue_depth': 12,
+                'last_outcome': 'copied',
+            },
+        ):
+            status = vas.get_archive_status()
+            assert status['running'] is True
+            assert status['queue_depth'] == 12
 
-        # Patch the module-level constant the function reads, then run.
-        with patch.object(vas, 'ARCHIVE_ENABLED', True), \
-             patch('config.MAPPING_DB_PATH', db_path):
-            vas._update_geodata_paths(
-                old_abs, new_abs,
-                "2026-05-10_12-00-00-front.mp4",
+    def test_running_false_when_idle(self):
+        # Worker is alive but the queue has drained and no active
+        # file. Dispatcher's wait loop exits and cloud sync proceeds.
+        with patch(
+            'services.archive_worker.get_status',
+            return_value={
+                'worker_running': True,
+                'active_file': None,
+                'queue_depth': 0,
+                'last_outcome': 'copied',
+            },
+        ):
+            status = vas.get_archive_status()
+            assert status['running'] is False
+
+    def test_running_false_when_worker_not_started(self):
+        # Worker thread never started (e.g. ARCHIVE_ENABLED was False
+        # at boot). Don't make the dispatcher wait forever.
+        with patch(
+            'services.archive_worker.get_status',
+            return_value={
+                'worker_running': False,
+                'active_file': None,
+                'queue_depth': 5,
+                'last_outcome': None,
+            },
+        ):
+            status = vas.get_archive_status()
+            assert status['running'] is False
+
+    def test_get_status_failure_returns_safe_default(self):
+        # If the worker module raises (e.g. import error in tests),
+        # return a safe default rather than 500-ing the API. The
+        # dispatcher will see running=False and move on.
+        with patch(
+            'services.archive_worker.get_status',
+            side_effect=RuntimeError("synthetic"),
+        ):
+            status = vas.get_archive_status()
+            assert status['running'] is False
+            assert 'error' in status
+
+    def test_dispatcher_compatible_keys_always_present(self):
+        # Pin the legacy field surface so the dispatcher's
+        # ``status.get("running")`` and any UI poll never KeyError.
+        with patch(
+            'services.archive_worker.get_status',
+            return_value={
+                'worker_running': True,
+                'active_file': None,
+                'queue_depth': 0,
+                'last_outcome': 'copied',
+            },
+        ):
+            status = vas.get_archive_status()
+            for key in (
+                'running', 'current_file', 'queue_depth',
+                'worker_running', 'last_outcome', 'error',
+            ):
+                assert key in status, f"missing legacy key {key!r}"
+
+
+class TestTriggerArchiveCleanup:
+    """Phase 3a (#98 / closes #91): ``trigger_archive_cleanup`` is now
+    a one-line wrapper for ``archive_watchdog.force_prune_now``.
+
+    The legacy implementation called ``smart_cleanup_archive``, which
+    in turn duplicated retention logic that already lives in
+    ``archive_watchdog._run_retention_prune``. Three overlapping
+    retention systems racing each other was the main bug source the
+    Phase 3a refactor closes. These tests pin the new contract:
+
+    * The shim MUST call into ``archive_watchdog.force_prune_now`` —
+      not into the deleted ``smart_cleanup_archive`` (which would
+      AttributeError now).
+    * The watchdog's return shape — including the
+      ``status='already_running'`` short-circuit — passes through
+      unchanged so the ``POST /api/archive_cleanup`` endpoint
+      response stays informative.
+    * Watchdog exceptions are swallowed and converted to a
+      structured error dict so the request thread never 500s.
+    """
+
+    def test_delegates_to_force_prune_now(self):
+        with patch(
+            'services.archive_watchdog.force_prune_now',
+        ) as mock_prune:
+            mock_prune.return_value = {
+                'deleted_count': 3,
+                'freed_bytes': 9_000_000,
+                'scanned': 42,
+                'kept_unsynced_count': 1,
+                'cutoff_iso': '2026-04-12T00:00:00+00:00',
+                'duration_seconds': 0.234,
+            }
+            result = vas.trigger_archive_cleanup()
+            mock_prune.assert_called_once_with()
+            assert result['deleted_count'] == 3
+            assert result['freed_bytes'] == 9_000_000
+            assert result['scanned'] == 42
+            assert result['kept_unsynced_count'] == 1
+            assert 'cutoff_iso' in result
+
+    def test_already_running_status_passthrough(self):
+        # When the watchdog short-circuits via the _retention_running
+        # guard (issue #91 fix), the wrapper must propagate the
+        # status verbatim — the cloud_archive blueprint surfaces it
+        # to the front end so the user sees "Cleanup already in
+        # progress" instead of a confusing zero-result response.
+        with patch(
+            'services.archive_watchdog.force_prune_now',
+            return_value={
+                'deleted_count': 0,
+                'freed_bytes': 0,
+                'scanned': 0,
+                'status': 'already_running',
+                'duration_seconds': 0.001,
+            },
+        ):
+            result = vas.trigger_archive_cleanup()
+            assert result.get('status') == 'already_running'
+            assert result['deleted_count'] == 0
+
+    def test_watchdog_exception_returns_error_dict(self):
+        # The watchdog raising must NOT 500 the endpoint — return a
+        # safe-default summary with an ``error`` key so the UI can
+        # render a clear message.
+        with patch(
+            'services.archive_watchdog.force_prune_now',
+            side_effect=RuntimeError("synthetic"),
+        ):
+            result = vas.trigger_archive_cleanup()
+            assert result['deleted_count'] == 0
+            assert result['freed_bytes'] == 0
+            assert result['scanned'] == 0
+            assert 'error' in result
+            assert 'synthetic' in result['error']
+
+    def test_watchdog_not_started_returns_error_dict(self):
+        # When the watchdog reports it isn't started, force_prune_now
+        # returns ``{'error': 'watchdog not started', ...}`` rather
+        # than raising. Pass the structure through unchanged.
+        with patch(
+            'services.archive_watchdog.force_prune_now',
+            return_value={
+                'deleted_count': 0,
+                'freed_bytes': 0,
+                'scanned': 0,
+                'error': 'watchdog not started',
+            },
+        ):
+            result = vas.trigger_archive_cleanup()
+            assert result['error'] == 'watchdog not started'
+
+    def test_no_legacy_smart_cleanup_attribute(self):
+        # Defensive regression: the old ``smart_cleanup_archive``,
+        # ``_proactive_retention``, ``_enforce_retention``,
+        # ``_prune_non_driving_archives``, and
+        # ``_purge_corrupt_archives`` symbols must NOT exist on the
+        # module. If a future refactor accidentally re-imports them
+        # from a backup, this test catches it before it ships.
+        for symbol in (
+            'smart_cleanup_archive',
+            '_proactive_retention',
+            '_enforce_retention',
+            '_purge_corrupt_archives',
+            '_prune_non_driving_archives',
+            '_update_geodata_paths',
+            '_delete_files_older_than',
+            '_trim_archive_to_size',
+            '_trim_archive_for_free_space',
+            '_get_archived_files_sorted',
+            '_buffered_copy',
+            '_is_complete_mp4',
+            '_check_memory',
+            '_check_disk_space',
+            '_get_archive_size',
+            '_update_archive_size',
+            '_get_teslacam_ro_path',
+            '_get_driving_time_ranges',
+            '_timestamp_from_filename',
+            '_is_during_driving',
+        ):
+            assert not hasattr(vas, symbol), (
+                f"video_archive_service.{symbol} was deleted in Phase 3a "
+                "(#98); reintroducing it would re-enable the racing "
+                "retention systems the refactor removed. Move any new "
+                "logic to archive_worker or archive_watchdog instead."
             )
-
-        conn = sqlite3.connect(db_path)
-        # Old row deleted, new row inserted under the ArchivedClips path.
-        old_row = conn.execute(
-            "SELECT * FROM indexed_files WHERE file_path = ?", (old_abs,)
-        ).fetchone()
-        assert old_row is None
-        new_row = conn.execute(
-            "SELECT file_size, file_mtime, indexed_at, waypoint_count, "
-            "event_count FROM indexed_files WHERE file_path = ?",
-            (new_abs,),
-        ).fetchone()
-        assert new_row is not None
-        # Critical: indexed_at must be carried over, not NULL.
-        assert new_row[2] == original_indexed_at, (
-            "indexed_at was dropped during archive — "
-            "INSERT regressed without the column"
-        )
-        # Other columns also preserved.
-        assert new_row[0] == 12345
-        assert new_row[1] == 1747000000.0
-        assert new_row[3] == 5
-        assert new_row[4] == 1
-        conn.close()
-

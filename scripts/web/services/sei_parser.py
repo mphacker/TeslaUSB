@@ -39,9 +39,15 @@ import mmap
 import os
 import struct
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Generator, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# MP4/QuickTime epoch starts at 1904-01-01 UTC. Unix epoch starts at 1970-01-01.
+# Difference is 2082844800 seconds. Used to convert mvhd creation_time fields
+# (which are seconds since 1904 UTC) into ordinary Unix timestamps.
+_MP4_EPOCH_OFFSET = 2082844800
 
 # Lazy-load protobuf to avoid import cost when not needed
 _SeiMetadata = None
@@ -203,6 +209,120 @@ def _find_box_required(data: bytes, start: int, end: int, name: str) -> dict:
     if box is None:
         raise ValueError(f'MP4 box "{name}" not found')
     return box
+
+
+def extract_mvhd_creation_time(video_path: str) -> Optional[datetime]:
+    """Return the UTC start-of-recording time from an MP4's ``mvhd`` atom.
+
+    The MP4 ``moov``/``mvhd`` (Movie Header) atom carries a 32- or 64-bit
+    ``creation_time`` field, defined by the MP4 / QuickTime spec as
+    "seconds since 1904-01-01 UTC". Tesla writes this with the actual
+    GPS-derived UTC start-of-recording time, **independent** of the
+    car's onboard local clock. This makes it the authoritative source
+    of truth for "when did this clip actually start" — and is the only
+    way to get a correct date when Tesla's onboard clock is glitched
+    (filename uses local-clock time and goes wrong by hours/days when
+    the car loses time sync).
+
+    Why mvhd and not the per-frame SEI ``timestamp_ms``? SEI
+    ``timestamp_ms`` is a frame OFFSET within the clip (~0..60000 ms),
+    not an absolute UTC time. Tesla's SEI does not carry absolute UTC
+    in any per-frame message we have ever observed.
+
+    Returns:
+        Timezone-aware ``datetime`` in UTC on success, or ``None`` if
+        the file is missing, too small, lacks a usable ``mvhd``
+        creation_time, or its creation_time is zero / nonsensical
+        (some pre-2010 firmware).
+
+    The caller decides whether to convert to local time. On TeslaUSB
+    we typically want naive local for DB storage so the rest of the
+    pipeline (which already stores naive local timestamps) is
+    drop-in compatible — see ``mapping_service._resolve_recording_time``.
+    """
+    try:
+        if not os.path.isfile(video_path):
+            return None
+        size = os.path.getsize(video_path)
+        if size < 8:
+            return None
+    except OSError as e:
+        logger.debug("mvhd: cannot stat %s: %s", video_path, e)
+        return None
+
+    f = None
+    mmap_obj = None
+    try:
+        f = open(video_path, 'rb')
+        try:
+            data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            mmap_obj = data
+        except (ValueError, OSError):
+            f.seek(0)
+            data = f.read()
+
+        moov = _find_box(data, 0, len(data), 'moov')
+        if moov is None:
+            logger.debug("mvhd: no moov box in %s", video_path)
+            return None
+        mvhd = _find_box(data, moov['start'], moov['end'], 'mvhd')
+        if mvhd is None:
+            logger.debug("mvhd: no mvhd box in %s", video_path)
+            return None
+
+        # mvhd payload layout:
+        #   1 byte  version
+        #   3 bytes flags
+        #   if version==1:  64-bit creation_time, 64-bit modification_time
+        #   else:           32-bit creation_time, 32-bit modification_time
+        # All values are big-endian, MP4-epoch (seconds since 1904-01-01 UTC).
+        payload_start = mvhd['start']
+        if mvhd['size'] < 4:
+            return None
+        version = data[payload_start]
+        if version == 1:
+            need = 4 + 16
+            if mvhd['size'] < need:
+                return None
+            creation_time = struct.unpack(
+                '>Q', data[payload_start + 4:payload_start + 12]
+            )[0]
+        else:
+            need = 4 + 8
+            if mvhd['size'] < need:
+                return None
+            creation_time = struct.unpack(
+                '>I', data[payload_start + 4:payload_start + 8]
+            )[0]
+
+        # Reject obviously bogus values: zero (uninitialised) or any
+        # value before the MP4 epoch offset (would land before 1970,
+        # which Tesla does not produce).
+        if creation_time <= _MP4_EPOCH_OFFSET:
+            return None
+
+        unix_seconds = creation_time - _MP4_EPOCH_OFFSET
+        try:
+            return datetime.fromtimestamp(unix_seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    except Exception as e:
+        # Defensive: never let an mvhd read crash the indexer. The
+        # caller falls back to filename-derived time, so a None return
+        # here is fully recoverable.
+        logger.debug("mvhd: unexpected error reading %s: %s", video_path, e)
+        return None
+    finally:
+        if mmap_obj is not None:
+            try:
+                mmap_obj.close()
+            except Exception:
+                pass
+        if f is not None:
+            try:
+                f.close()
+            except Exception:
+                pass
 
 
 # --- H.264 NAL Unit Parsing ---

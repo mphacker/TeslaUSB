@@ -1297,10 +1297,16 @@ def _get_worker_status_for_stats() -> dict:
 
 
 def _timestamp_from_filename(filename: str) -> Optional[str]:
-    """Extract ISO timestamp from Tesla video filename.
+    """Extract ISO timestamp from a Tesla video filename.
 
-    Tesla format: YYYY-MM-DD_HH-MM-SS-camera.mp4
-    Returns ISO format: YYYY-MM-DDTHH:MM:SS
+    Tesla format: ``YYYY-MM-DD_HH-MM-SS-camera.mp4``. The embedded
+    timestamp is the car's onboard local clock at the moment Tesla
+    began the recording — **not** UTC, and **not** guaranteed correct
+    (Tesla's clock can drift by hours/days when GPS sync is lost).
+
+    Use ``_resolve_recording_time`` instead for a value you can trust;
+    this helper exists only as the fallback when the MP4 ``mvhd`` atom
+    cannot be read.
     """
     base = os.path.basename(filename)
     # Extract the timestamp portion (first 19 chars: YYYY-MM-DD_HH-MM-SS)
@@ -1312,6 +1318,79 @@ def _timestamp_from_filename(filename: str) -> Optional[str]:
         except ValueError:
             pass
     return None
+
+
+# Threshold for "Tesla onboard clock disagrees with mvhd UTC by more than
+# this many seconds" — when crossed we log a WARNING so operators can spot
+# Tesla clock-glitch incidents in the journal. The indexer always trusts
+# mvhd regardless of the gap; the threshold only controls log verbosity.
+_CLOCK_SKEW_WARN_SECONDS = 300
+
+
+def _resolve_recording_time(video_path: str) -> Optional[str]:
+    """Return the authoritative ISO start-of-recording timestamp for a clip.
+
+    Strategy (in priority order):
+
+    1. **MP4 ``mvhd`` atom (UTC, GPS-derived).** Tesla writes the
+       per-recording start time into the standard MP4 ``mvhd``
+       creation_time field in proper UTC, populated from the GPS
+       satellite clock — this is independent of the car's onboard
+       local clock. When Tesla's onboard clock has glitched (e.g.
+       lost GPS time sync after a firmware update), the filename
+       embeds the wrong local time but ``mvhd`` remains correct.
+       Converted to naive local time so the rest of the pipeline
+       (which has historically stored naive local strings) sees no
+       semantic change.
+
+    2. **Filename fallback.** Older firmware / corrupt MP4 / files
+       Tesla never finished writing may lack a usable ``mvhd``. In
+       that case fall back to the filename — same as the legacy
+       behaviour. We log nothing here because it's the expected
+       behaviour for partial / broken clips.
+
+    Logs a WARNING when both sources are available and disagree by
+    more than ``_CLOCK_SKEW_WARN_SECONDS`` (default 5 minutes), since
+    that pattern indicates a Tesla onboard-clock glitch worth knowing
+    about. The indexer always uses the mvhd value regardless of gap
+    size — mvhd is the truth.
+    """
+    filename_ts = _timestamp_from_filename(video_path)
+    try:
+        mvhd_dt = _get_sei_parser().extract_mvhd_creation_time(video_path)
+    except Exception as e:  # defensive: mvhd reader is best-effort
+        logger.debug("mvhd read failed for %s: %s", video_path, e)
+        mvhd_dt = None
+
+    if mvhd_dt is None:
+        return filename_ts
+
+    # Convert UTC -> naive local. ``datetime.fromtimestamp`` (no tz arg)
+    # uses the system local TZ; mirroring how _timestamp_from_filename
+    # produces a naive value Tesla wrote in the car's local clock.
+    try:
+        local_naive = datetime.fromtimestamp(mvhd_dt.timestamp())
+    except (OverflowError, OSError, ValueError):
+        return filename_ts
+
+    if filename_ts:
+        try:
+            filename_dt = datetime.fromisoformat(filename_ts)
+            skew = abs((filename_dt - local_naive).total_seconds())
+            if skew >= _CLOCK_SKEW_WARN_SECONDS:
+                logger.warning(
+                    "Tesla onboard-clock skew detected for %s: filename "
+                    "says %s, mvhd UTC says %s (delta %.0fs); using mvhd. "
+                    "This typically indicates the car lost GPS time sync.",
+                    os.path.basename(video_path),
+                    filename_ts,
+                    local_naive.isoformat(),
+                    skew,
+                )
+        except (ValueError, TypeError):
+            pass
+
+    return local_naive.isoformat()
 
 
 def canonical_key(video_path: str) -> str:
@@ -2273,7 +2352,7 @@ def _index_video(
             rel_path = os.path.relpath(video_path, teslacam_root)
     except ImportError:
         rel_path = os.path.relpath(video_path, teslacam_root)
-    file_timestamp = _timestamp_from_filename(video_path)
+    file_timestamp = _resolve_recording_time(video_path)
 
     # --- Cross-folder dedup (fast path) ---
     # Tesla videos can exist in both RecentClips and ArchivedClips with the

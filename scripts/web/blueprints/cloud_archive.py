@@ -205,6 +205,11 @@ def index():
         sync_non_event_videos=bool(_cloud.get('sync_non_event_videos', False)),
         cloud_auto_cleanup=bool(_cloud.get('cloud_auto_cleanup', False)),
         cloud_min_retention_days=int(_cloud.get('cloud_min_retention_days', 30)),
+        # Phase 2.6 — bulk cloud sync retry cap. Default 5, range 1-20.
+        # Settings save writes to ``cloud_archive.retry_max_attempts``;
+        # the worker re-reads the value on every failure so a Settings
+        # change takes effect on the next iteration without restart.
+        cloud_retry_max_attempts=int(_cloud.get('retry_max_attempts', 5)),
         # Phase 1 item 1.3 — retention-respects-cloud toggle + counter.
         # ``keep_clips_until_synced`` is the UI-friendly inversion of the
         # backend ``cloud_archive.delete_unsynced`` config key.
@@ -237,6 +242,15 @@ def save_settings():
         sync_non_event = 'sync_non_event_videos' in request.form
         auto_cleanup = 'cloud_auto_cleanup' in request.form
         min_retention = max(1, int(request.form.get('cloud_min_retention_days', 30)))
+        # Phase 2.6 — clamp to 1-20 to match the UI input min/max and the
+        # service's _RETRY_MAX_ATTEMPTS_MIN/MAX. A value outside this
+        # range from a hand-crafted form submission falls back to the
+        # default (5) rather than disabling the cap entirely.
+        try:
+            _raw_retry = int(request.form.get('cloud_retry_max_attempts', 5))
+        except (TypeError, ValueError):
+            _raw_retry = 5
+        cloud_retry_max_attempts = max(1, min(20, _raw_retry))
 
         config_updates = {
             'cloud_archive.sync_folders': sync_folders,
@@ -246,6 +260,7 @@ def save_settings():
             'cloud_archive.sync_non_event_videos': sync_non_event,
             'cloud_archive.cloud_auto_cleanup': auto_cleanup,
             'cloud_archive.cloud_min_retention_days': min_retention,
+            'cloud_archive.retry_max_attempts': cloud_retry_max_attempts,
         }
 
         # Phase 1 item 1.3 — UI toggle is positive-framed

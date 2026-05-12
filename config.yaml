@@ -140,6 +140,12 @@ cloud_archive:
   # their video_path pointer is nulled). Disk-space guard refuses new copies and
   # logs CRITICAL when the SD card free space drops below disk_space_critical_mb.
   archived_clips_retention_days: 30      # Local SD-card retention for ArchivedClips/*.mp4
+  # Phase 2.6 — bulk cloud sync retry cap. After this many consecutive
+  # failures, a row moves from 'failed' to 'dead_letter' and is excluded
+  # from automatic re-picking. Failed rows can still be retried manually
+  # from the Failed Jobs page (Phase 4) or by manually setting status
+  # back to 'pending' in cloud_sync.db. Mirrors live_event_sync.retry_max_attempts.
+  retry_max_attempts: 5                  # 1-20; default 5
   # Phase 1 item 1.3 — "retention respects cloud". Controls whether the
   # retention prune is allowed to delete clips that have NOT yet been
   # backed up to the cloud (status='synced' in cloud_synced_files.db).

@@ -1180,6 +1180,13 @@ if (document.getElementById('fsck-status-container')) {
                             'Prune complete: ' +
                             (data.deleted_count || 0) + ' files removed.',
                             'success');
+                    } else if (r.ok && data.status === 'already_running') {
+                        // Issue #91: another prune (watchdog tick or
+                        // disk-critical cleanup) is in flight.
+                        showToast(
+                            data.message ||
+                            'A retention prune is already running.',
+                            'info');
                     } else {
                         showToast(
                             data.message || 'Prune failed.', 'error');

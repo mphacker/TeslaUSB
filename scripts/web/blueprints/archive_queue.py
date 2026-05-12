@@ -230,6 +230,16 @@ def archive_prune_now():
     except Exception as e:  # noqa: BLE001
         logger.exception("archive_prune_now failed")
         return jsonify({'started': False, 'message': str(e)}), 500
+    # Issue #91: when a prune is already in flight (Settings click +
+    # watchdog tick + disk-critical cleanup race), surface a clear
+    # "already running" status instead of a misleading "0 files
+    # removed" success toast.
+    if summary.get('status') == 'already_running':
+        return jsonify({
+            'started': False,
+            'status': 'already_running',
+            'message': 'A retention prune is already in progress.',
+        }), 200
     return jsonify({
         'started': True,
         'deleted_count': int(summary.get('deleted_count', 0)),

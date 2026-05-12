@@ -137,6 +137,17 @@ _retention_state: Dict[str, Any] = {
     'next_prune_due_at': None,    # epoch seconds
 }
 
+# Issue #91 duplicate-trigger guard. Set to True at the start of any
+# in-flight ``_run_retention_prune`` call, cleared in the outer
+# ``finally``. A second concurrent caller (e.g. Settings UI "Prune now"
+# landing while the watchdog tick is mid-walk, or a debounce-bypassed
+# disk-critical cleanup spawning a daemon thread that races the UI
+# click) sees the flag set and short-circuits with
+# ``status='already_running'`` instead of block-waiting up to 60 s on
+# ``task_coordinator.acquire_task('retention', wait_seconds=60.0)``.
+# Always read/written under ``_state_lock``.
+_retention_running: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Public lifecycle API
@@ -663,7 +674,14 @@ def _run_retention_prune(archive_root: str, db_path: str,
     Holds the ``task_coordinator`` 'retention' slot for the duration so
     the archive worker yields cleanly. Releases the slot before
     returning.
+
+    Issue #91: a module-level ``_retention_running`` flag short-circuits
+    a second concurrent call so a stacked Settings UI click + watchdog
+    tick + disk-critical cleanup can't pile up 60-second waits on the
+    ``task_coordinator`` 'retention' slot. Short-circuited callers get
+    a summary with ``status='already_running'``.
     """
+    global _retention_running
     started = time.time()
     cutoff = started - (max(int(retention_days), 1) * 86400)
     cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
@@ -686,47 +704,69 @@ def _run_retention_prune(archive_root: str, db_path: str,
         summary['duration_seconds'] = round(time.time() - started, 3)
         return summary
 
-    acquired = task_coordinator.acquire_task(
-        _RETENTION_COORDINATOR_TASK,
-        wait_seconds=_RETENTION_COORDINATOR_WAIT_SECONDS,
-    )
-    if not acquired:
-        logger.info(
-            "archive_retention: skipped — could not acquire 'retention' "
-            "task slot within %.1fs",
-            _RETENTION_COORDINATOR_WAIT_SECONDS,
-        )
-        summary['duration_seconds'] = round(time.time() - started, 3)
-        return summary
+    # Issue #91 — duplicate-trigger guard. Atomic check-and-set so two
+    # concurrent callers can't both pass. The flag MUST be set before
+    # ``acquire_task`` (which can block 60 s); otherwise the second
+    # caller would still queue on the lock.
+    with _state_lock:
+        if _retention_running:
+            summary['status'] = 'already_running'
+            summary['duration_seconds'] = round(time.time() - started, 3)
+            logger.info(
+                "archive_retention: skipped — another prune is already "
+                "in flight (returning status='already_running')"
+            )
+            return summary
+        _retention_running = True
 
     try:
-        for path, mtime, _size in _iter_archive_mp4_files(archive_root):
-            summary['scanned'] += 1
-            if mtime > cutoff:
-                continue
-            age_days = (time.time() - mtime) / 86400.0
-            if enforce_cloud_check:
-                if not _is_synced_to_cloud(path, archive_root, cloud_db_path):
-                    summary['kept_unsynced_count'] += 1
-                    logger.warning(
-                        "archive_retention: KEPT %s past retention "
-                        "(age=%.1f days) — not yet synced to cloud",
-                        path, age_days,
-                    )
+        acquired = task_coordinator.acquire_task(
+            _RETENTION_COORDINATOR_TASK,
+            wait_seconds=_RETENTION_COORDINATOR_WAIT_SECONDS,
+        )
+        if not acquired:
+            logger.info(
+                "archive_retention: skipped — could not acquire 'retention' "
+                "task slot within %.1fs",
+                _RETENTION_COORDINATOR_WAIT_SECONDS,
+            )
+            summary['duration_seconds'] = round(time.time() - started, 3)
+            return summary
+
+        try:
+            for path, mtime, _size in _iter_archive_mp4_files(archive_root):
+                summary['scanned'] += 1
+                if mtime > cutoff:
                     continue
-            freed = _delete_one_mp4(path, db_path)
-            if freed > 0 or not os.path.exists(path):
-                summary['deleted_count'] += 1
-                summary['freed_bytes'] += freed
-                logger.info(
-                    "archive_retention: removed %s (age=%.1f days, "
-                    "freed=%d bytes)",
-                    path, age_days, freed,
-                )
+                age_days = (time.time() - mtime) / 86400.0
+                if enforce_cloud_check:
+                    if not _is_synced_to_cloud(path, archive_root, cloud_db_path):
+                        summary['kept_unsynced_count'] += 1
+                        logger.warning(
+                            "archive_retention: KEPT %s past retention "
+                            "(age=%.1f days) — not yet synced to cloud",
+                            path, age_days,
+                        )
+                        continue
+                freed = _delete_one_mp4(path, db_path)
+                if freed > 0 or not os.path.exists(path):
+                    summary['deleted_count'] += 1
+                    summary['freed_bytes'] += freed
+                    logger.info(
+                        "archive_retention: removed %s (age=%.1f days, "
+                        "freed=%d bytes)",
+                        path, age_days, freed,
+                    )
+        finally:
+            # Release BEFORE any further sleep / outside callers.
+            task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
+            summary['duration_seconds'] = round(time.time() - started, 3)
     finally:
-        # Release BEFORE any further sleep / outside callers.
-        task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
-        summary['duration_seconds'] = round(time.time() - started, 3)
+        # Always clear the duplicate-trigger guard, even on exception
+        # or short-circuited acquire_task. Otherwise a single failed
+        # prune would lock out every subsequent attempt.
+        with _state_lock:
+            _retention_running = False
 
     if summary['kept_unsynced_count'] > 0:
         logger.info(
@@ -759,6 +799,13 @@ def force_prune_now() -> Dict[str, Any]:
         }
     retention_days = _resolve_retention_days()
     summary = _run_retention_prune(archive_root, db_path, retention_days)
+    # Issue #91: when short-circuited because another prune is already
+    # running, do NOT touch ``_retention_state`` — overwriting the
+    # in-flight first run's eventual results with zeros would corrupt
+    # the Settings panel's "last prune" display. Caller (the blueprint)
+    # propagates the ``status`` field to the front end.
+    if summary.get('status') == 'already_running':
+        return summary
     # Update bookkeeping so the Settings panel reflects the manual run.
     with _state_lock:
         _retention_state['last_prune_at'] = _iso_now()
@@ -791,6 +838,15 @@ def _maybe_run_retention(archive_root: str, db_path: str) -> None:
     retention_days = _resolve_retention_days()
     try:
         summary = _run_retention_prune(archive_root, db_path, retention_days)
+        # Issue #91: when short-circuited because another prune is in
+        # flight (e.g. a concurrent UI ``Prune now`` click), don't
+        # update bookkeeping or advance ``next_prune_due_at``. The
+        # in-flight prune will update both when it completes; we just
+        # need to retry the tick promptly (the watchdog loops every
+        # ``check_interval`` seconds anyway, and the in-flight run's
+        # completion will reset ``next_prune_due_at`` to "now + 24h").
+        if summary.get('status') == 'already_running':
+            return
         with _state_lock:
             _retention_state['last_prune_at'] = _iso_now()
             _retention_state['last_prune_deleted'] = int(

@@ -9,6 +9,8 @@ Every code path that deletes files MUST call is_protected_file() first.
 
 import logging
 import os
+from enum import Enum
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,98 @@ def safe_remove(path: str) -> bool:
         return True
     except FileNotFoundError:
         return False
+
+
+class DeleteOutcome(Enum):
+    """Three-valued result for :func:`safe_delete_archive_video`.
+
+    Distinguishes the three semantically-different "did not delete"
+    cases so callers can react appropriately without re-probing the
+    filesystem (which would also double-log the BLOCKED warning).
+    """
+
+    DELETED = "deleted"      # File was removed from disk.
+    PROTECTED = "protected"  # is_protected_file refused (e.g. *.img).
+    MISSING = "missing"      # File didn't exist (FileNotFoundError).
+    ERROR = "error"          # Other OSError (permissions, I/O, etc.).
+
+
+class DeleteResult(NamedTuple):
+    """Outcome + bytes freed for :func:`safe_delete_archive_video`.
+
+    ``outcome`` carries the ternary state; ``bytes_freed`` is the size
+    of the deleted file (only meaningful when outcome is DELETED, but
+    will be 0 for an actually-deleted 0-byte file too — callers should
+    use ``outcome is DeleteOutcome.DELETED`` for the boolean test, not
+    ``bytes_freed > 0``).
+    """
+
+    outcome: "DeleteOutcome"
+    bytes_freed: int
+
+
+def safe_delete_archive_video(path: str) -> DeleteResult:
+    """The single doorway for deleting an archived video file.
+
+    Every code path in TeslaUSB that deletes a clip from the local archive
+    (retention prune, size trim, free-space trim, corrupt-file purge,
+    non-driving prune, watchdog retention, manual cleanup, video-panel
+    delete) MUST go through this function. Calling ``os.remove`` /
+    ``os.unlink`` directly on archive files is a contract violation —
+    past data-loss incidents were caused by a delete path that bypassed
+    the protected-file check.
+
+    The helper:
+
+    * Refuses to delete any file flagged by :func:`is_protected_file`
+      (currently: ``*.img`` files inside ``GADGET_DIR``) — returns
+      ``DeleteOutcome.PROTECTED``.
+    * Reads the file size BEFORE removing so the caller can update its
+      bytes-freed accounting.
+    * Returns ``DeleteOutcome.MISSING`` for ``FileNotFoundError`` so
+      loops over many candidate files don't blow up on transient races.
+    * Returns ``DeleteOutcome.ERROR`` (with a WARNING log) for other
+      ``OSError`` so callers can surface "skipped (unwritable)" without
+      re-probing the filesystem.
+
+    Geodata reconciliation (``mapping_service.purge_deleted_videos``)
+    is intentionally NOT done here — it would create a circular-import
+    risk and the May 7 contract requires the caller to control which
+    rows get NULL'd. Callers that hold a list of
+    successfully-deleted paths should call ``purge_deleted_videos``
+    themselves after the loop finishes.
+
+    Args:
+        path: Absolute path to the archived video to delete.
+
+    Returns:
+        :class:`DeleteResult` with ``outcome`` and ``bytes_freed``.
+        ``bytes_freed`` is the file size at the moment of deletion;
+        ``0`` for any non-DELETED outcome (and also for a real 0-byte
+        delete, so use ``outcome is DeleteOutcome.DELETED`` for the
+        boolean test).
+    """
+    if is_protected_file(path):
+        return DeleteResult(DeleteOutcome.PROTECTED, 0)
+    try:
+        size = os.path.getsize(path)
+    except FileNotFoundError:
+        return DeleteResult(DeleteOutcome.MISSING, 0)
+    except OSError as e:
+        logger.warning(
+            "safe_delete_archive_video: stat failed for %s: %s", path, e,
+        )
+        return DeleteResult(DeleteOutcome.ERROR, 0)
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return DeleteResult(DeleteOutcome.MISSING, 0)
+    except OSError as e:
+        logger.warning(
+            "safe_delete_archive_video: failed to remove %s: %s", path, e,
+        )
+        return DeleteResult(DeleteOutcome.ERROR, 0)
+    return DeleteResult(DeleteOutcome.DELETED, int(size))
 
 
 def safe_rmtree(path: str) -> bool:

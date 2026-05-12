@@ -629,17 +629,17 @@ def _delete_one_mp4(path: str, db_path: str) -> int:
     indexed_files row WITHOUT touching trips/waypoints/events. See the
     docstring on ``purge_deleted_videos`` for why that contract is
     load-bearing.
+
+    Routes the actual delete through
+    :func:`services.file_safety.safe_delete_archive_video` — the single
+    doorway that enforces the protected-file guard (Phase 2.1).
+    Geodata is reconciled only when the helper reports
+    :data:`DeleteOutcome.DELETED` (so a 0-byte clip that was actually
+    removed is still reconciled even though ``bytes_freed`` is 0).
     """
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        size = 0
-    try:
-        os.remove(path)
-    except OSError as e:
-        logger.warning(
-            "archive_retention: failed to remove %s: %s", path, e,
-        )
+    from services.file_safety import safe_delete_archive_video, DeleteOutcome
+    result = safe_delete_archive_video(path)
+    if result.outcome is not DeleteOutcome.DELETED:
         return 0
     # Reconcile geodata (best-effort — failure here doesn't undo the delete).
     try:
@@ -650,7 +650,7 @@ def _delete_one_mp4(path: str, db_path: str) -> int:
             "archive_retention: purge_deleted_videos failed for %s: %s",
             path, e,
         )
-    return int(size)
+    return result.bytes_freed
 
 
 def _run_retention_prune(archive_root: str, db_path: str,

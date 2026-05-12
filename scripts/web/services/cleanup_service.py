@@ -418,11 +418,17 @@ class CleanupService:
         for video in cleanup_plan['files']:
             try:
                 if not dry_run:
-                    from services.file_safety import is_protected_file
-                    if is_protected_file(video['path']):
-                        errors.append(f"BLOCKED: {video['path']} is a protected file")
+                    from services.file_safety import safe_delete_archive_video
+                    freed = safe_delete_archive_video(video['path'])
+                    if freed == 0:
+                        # Either protected (already logged) or missing/failed.
+                        # Distinguish for the user-facing error list.
+                        from services.file_safety import is_protected_file
+                        if is_protected_file(video['path']):
+                            errors.append(f"BLOCKED: {video['path']} is a protected file")
+                        else:
+                            errors.append(f"Skipped (missing or unwritable): {video['path']}")
                         continue
-                    os.remove(video['path'])
                     logger.info(f"Deleted: {video['path']}")
                 else:
                     logger.info(f"[DRY RUN] Would delete: {video['path']}")

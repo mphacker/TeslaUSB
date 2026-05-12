@@ -79,6 +79,58 @@ def safe_remove(path: str) -> bool:
         return False
 
 
+def safe_delete_archive_video(path: str) -> int:
+    """The single doorway for deleting an archived video file.
+
+    Every code path in TeslaUSB that deletes a clip from the local archive
+    (retention prune, size trim, free-space trim, corrupt-file purge,
+    non-driving prune, watchdog retention, manual cleanup) MUST go through
+    this function. Calling ``os.remove`` / ``os.unlink`` directly on
+    archive files is a contract violation — past data-loss incidents were
+    caused by a delete path that bypassed the protected-file check.
+
+    The helper:
+
+    * Refuses to delete any file flagged by :func:`is_protected_file`
+      (currently: ``*.img`` files inside ``GADGET_DIR``).
+    * Reads the file size BEFORE removing so the caller can update its
+      bytes-freed accounting.
+    * Swallows ``OSError`` (including FileNotFoundError) and returns 0
+      so loops over many candidate files don't blow up on transient races.
+
+    Geodata reconciliation (``mapping_service.purge_deleted_videos``) is
+    intentionally NOT done here — it would create a circular-import risk
+    and the May 7 contract requires the caller to control which rows get
+    NULL'd. Callers that hold a list of successfully-deleted paths should
+    call ``purge_deleted_videos`` themselves after the loop finishes.
+
+    Args:
+        path: Absolute path to the archived video to delete.
+
+    Returns:
+        Byte count of the deleted file, or 0 if the file was protected,
+        missing, or removal failed for any other reason. A ``> 0`` return
+        means the file was definitively removed from disk.
+    """
+    if is_protected_file(path):
+        return 0
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        # Missing or stat failure — nothing to delete.
+        return 0
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return 0
+    except OSError as e:
+        logger.warning(
+            "safe_delete_archive_video: failed to remove %s: %s", path, e,
+        )
+        return 0
+    return int(size)
+
+
 def safe_rmtree(path: str) -> bool:
     """Remove a directory tree only if it contains no protected files.
 

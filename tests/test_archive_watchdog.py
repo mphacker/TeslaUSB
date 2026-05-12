@@ -83,6 +83,10 @@ def _reset_module_state():
         'last_prune_error': None,
         'next_prune_due_at': None,
     }
+    # Issue #91 — reset duplicate-trigger guard so a test that
+    # exercises the short-circuit path doesn't leak the True flag
+    # into the next test.
+    archive_watchdog._retention_running = False
     yield
     archive_watchdog.stop_watchdog(timeout=5.0)
     archive_worker.stop_worker(timeout=5.0)
@@ -91,6 +95,7 @@ def _reset_module_state():
         task_coordinator._current_task = None
         task_coordinator._task_started = 0.0
         task_coordinator._waiter_count = 0
+    archive_watchdog._retention_running = False
 
 
 # ---------------------------------------------------------------------------
@@ -1102,3 +1107,252 @@ class TestResolveDeleteUnsynced:
             archive_watchdog, '_is_cloud_configured', lambda: False,
         )
         assert archive_watchdog._resolve_delete_unsynced() is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #91 — duplicate-trigger guard for retention prune
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionRunningGuard:
+    """Issue #91: a second concurrent caller of ``_run_retention_prune``
+    (e.g. Settings UI ``Prune now`` click landing while the watchdog
+    tick is mid-walk, OR ``archive_worker._maybe_trigger_critical_cleanup``
+    spawns a daemon thread that races a UI click) must NOT block the
+    request thread for up to 60 s on
+    ``task_coordinator.acquire_task('retention', wait_seconds=60.0)``.
+
+    The fix is a module-level ``_retention_running`` boolean flag set
+    BEFORE ``acquire_task`` and cleared in the outer ``finally``. A
+    second caller sees the flag and short-circuits with a summary
+    carrying ``status='already_running'``.
+    """
+
+    def test_short_circuit_returns_already_running_status(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Pre-set the flag to simulate an in-flight prune.
+        archive_watchdog._retention_running = True
+
+        # Spy on task_coordinator.acquire_task — the short-circuit
+        # MUST happen BEFORE we touch the coordinator. If the spy is
+        # called, the guard is broken.
+        called = []
+
+        def spy_acquire(*a, **kw):
+            called.append((a, kw))
+            return True
+
+        monkeypatch.setattr(
+            archive_watchdog.task_coordinator, 'acquire_task', spy_acquire,
+        )
+
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+
+        assert summary.get('status') == 'already_running', (
+            "When _retention_running is True, the function must return "
+            "a summary with status='already_running'."
+        )
+        assert called == [], (
+            "Short-circuited callers must NOT call task_coordinator."
+            "acquire_task — that's the whole point of the guard."
+        )
+        assert summary['deleted_count'] == 0
+        assert summary['scanned'] == 0
+        # Flag must remain True — we faked the in-flight prune; the
+        # real one (which set it) is still expected to clear it.
+        assert archive_watchdog._retention_running is True
+
+    def test_flag_cleared_on_normal_completion(
+        self, db, archive_root, monkeypatch,
+    ):
+        old = time.time() - (60 * 86400)
+        _make_archive_mp4(archive_root, "RecentClips/old.mp4", mtime=old)
+        # Sanity: flag starts False.
+        assert archive_watchdog._retention_running is False
+        archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert archive_watchdog._retention_running is False, (
+            "Flag must be cleared after a normal run so the next "
+            "caller can proceed."
+        )
+
+    def test_flag_cleared_on_exception(
+        self, db, archive_root, monkeypatch,
+    ):
+        old = time.time() - (60 * 86400)
+        _make_archive_mp4(archive_root, "RecentClips/old.mp4", mtime=old)
+
+        def boom(*a, **kw):
+            raise RuntimeError("synthetic walk failure")
+
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files', boom,
+        )
+        with pytest.raises(RuntimeError, match="synthetic"):
+            archive_watchdog._run_retention_prune(
+                archive_root, db, retention_days=30,
+            )
+        assert archive_watchdog._retention_running is False, (
+            "Flag must be released even when the walk raises — "
+            "otherwise a single failed prune would lock out every "
+            "subsequent attempt forever."
+        )
+
+    def test_flag_cleared_when_acquire_task_fails(
+        self, db, archive_root, monkeypatch,
+    ):
+        # acquire_task returns False (e.g. another heavy task is
+        # holding the slot) — the function returns without doing
+        # work, but MUST still clear the flag.
+        monkeypatch.setattr(
+            archive_watchdog.task_coordinator, 'acquire_task',
+            lambda *a, **kw: False,
+        )
+        # release_task should NOT be called when acquire_task returned
+        # False — guard against a regression that calls release on a
+        # slot we never acquired.
+        released = []
+        monkeypatch.setattr(
+            archive_watchdog.task_coordinator, 'release_task',
+            lambda name: released.append(name),
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['scanned'] == 0
+        assert summary['deleted_count'] == 0
+        # Flag must be cleared so the next call can try again.
+        assert archive_watchdog._retention_running is False
+        # And release_task must NOT have been called for a slot we
+        # never held.
+        assert released == [], (
+            f"release_task called for {released!r} despite "
+            f"acquire_task returning False"
+        )
+
+    def test_force_prune_now_returns_status_when_short_circuited(
+        self, db, archive_root, monkeypatch,
+    ):
+        archive_watchdog._db_path = db
+        archive_watchdog._archive_root = archive_root
+        archive_watchdog._retention_running = True
+        # Snapshot bookkeeping so we can prove it's not overwritten.
+        snap_before = dict(archive_watchdog._retention_state)
+
+        summary = archive_watchdog.force_prune_now()
+        assert summary.get('status') == 'already_running'
+
+        # CRITICAL: bookkeeping must NOT be touched on short-circuit —
+        # otherwise the in-flight first run's eventual results would
+        # be silently overwritten with zeros.
+        snap_after = dict(archive_watchdog._retention_state)
+        assert snap_after == snap_before, (
+            f"_retention_state was mutated on short-circuit: "
+            f"{snap_before!r} -> {snap_after!r}. "
+            f"Bookkeeping updates must be skipped when "
+            f"status='already_running'."
+        )
+
+    def test_maybe_run_retention_skips_bookkeeping_on_short_circuit(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Make the watchdog tick think the prune is due.
+        archive_watchdog._retention_state['next_prune_due_at'] = (
+            time.time() - 1.0
+        )
+        archive_watchdog._retention_running = True
+        snap_before = dict(archive_watchdog._retention_state)
+
+        archive_watchdog._maybe_run_retention(archive_root, db)
+
+        snap_after = dict(archive_watchdog._retention_state)
+        assert snap_after == snap_before, (
+            "Watchdog tick must not advance next_prune_due_at or "
+            "touch any other bookkeeping when the prune was "
+            "short-circuited; otherwise the in-flight prune's "
+            "eventual results would be lost."
+        )
+
+    def test_two_sequential_calls_both_succeed(
+        self, db, archive_root, monkeypatch,
+    ):
+        """Sanity: the guard does not break repeat-after-completion."""
+        old = time.time() - (60 * 86400)
+        _make_archive_mp4(archive_root, "RecentClips/a.mp4", mtime=old)
+        s1 = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert s1['deleted_count'] == 1
+        assert 'status' not in s1
+
+        # Second sequential call (after the first cleared the flag)
+        # must run normally — not be falsely treated as a duplicate.
+        _make_archive_mp4(archive_root, "RecentClips/b.mp4", mtime=old)
+        s2 = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert s2['deleted_count'] == 1
+        assert 'status' not in s2
+
+    def test_concurrent_threaded_call_short_circuits(
+        self, db, archive_root, monkeypatch,
+    ):
+        """Two real threads — verify only one runs the walk and the
+        other observes ``status='already_running'``."""
+        import threading
+        old = time.time() - (60 * 86400)
+        # 5 files so the first walk takes a measurable moment.
+        for i in range(5):
+            _make_archive_mp4(
+                archive_root, f"RecentClips/x{i}.mp4", mtime=old,
+            )
+
+        # Slow down the walk so the second caller is guaranteed to
+        # arrive while the first is in-flight.
+        gate = threading.Event()
+        original_iter = archive_watchdog._iter_archive_mp4_files
+
+        def slow_iter(root):
+            for item in original_iter(root):
+                gate.wait(timeout=2.0)
+                yield item
+
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files', slow_iter,
+        )
+
+        results = {}
+
+        def runner(key):
+            results[key] = archive_watchdog._run_retention_prune(
+                archive_root, db, retention_days=30,
+            )
+
+        t1 = threading.Thread(target=runner, args=('first',), daemon=True)
+        t1.start()
+        # Give t1 a moment to set the flag and enter the walk.
+        time.sleep(0.05)
+        t2 = threading.Thread(target=runner, args=('second',), daemon=True)
+        t2.start()
+        # Second call should short-circuit immediately (no acquire_task
+        # wait, no walk).
+        t2.join(timeout=2.0)
+        assert not t2.is_alive(), (
+            "Second concurrent caller must short-circuit immediately, "
+            "not block on the lock or the walk."
+        )
+        # Now release the gate so t1 can finish.
+        gate.set()
+        t1.join(timeout=10.0)
+        assert not t1.is_alive()
+
+        assert results['second'].get('status') == 'already_running'
+        # First caller did the actual work.
+        assert results['first'].get('status') != 'already_running'
+        assert results['first']['deleted_count'] == 5
+        # Flag must be cleared after the first finishes.
+        assert archive_watchdog._retention_running is False

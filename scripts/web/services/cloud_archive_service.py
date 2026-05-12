@@ -1239,6 +1239,14 @@ def _run_sync(
 
     # Acquire the global heavy-task lock so the indexer and archiver
     # don't run concurrently (Pi Zero has limited CPU/IO).
+    #
+    # Phase 2.9 (#97 item 2.9): track ``lock_held`` so the ``finally``
+    # block only releases when we actually hold the lock. Without this
+    # flag, the yield-to-LES path (below) that fails to re-acquire would
+    # cause ``release_task`` to log a spurious
+    # ``"tried to release but X holds the lock"`` warning. The warning
+    # is harmless (coordinator handles it gracefully) but appears as a
+    # yellow flag in the logs and confuses anyone reading them.
     from services.task_coordinator import acquire_task, release_task
     if not acquire_task('cloud_sync'):
         _sync_status.update({
@@ -1246,6 +1254,7 @@ def _run_sync(
             "progress": "Skipped: another task is running",
         })
         return
+    lock_held = True
 
     _sync_status.update({
         "running": True,
@@ -1525,6 +1534,7 @@ def _run_sync(
                     acquire_task as _acq, release_task as _rel,
                 )
                 _rel('cloud_sync')
+                lock_held = False
                 # Wait for LES to drain (or up to 5 minutes per yield).
                 yield_deadline = time.time() + 300
                 while time.time() < yield_deadline:
@@ -1545,6 +1555,7 @@ def _run_sync(
                         "stopping this run (will resume on next trigger)",
                     )
                     break
+                lock_held = True
 
             # Pause between uploads to let the system breathe
             time.sleep(_INTER_UPLOAD_SLEEP)
@@ -1605,7 +1616,12 @@ def _run_sync(
                 pass
 
         _remove_rclone_conf()
-        release_task('cloud_sync')
+        # Phase 2.9: only release if we still hold the lock. The
+        # yield-to-LES path above can leave us without the lock if the
+        # re-acquire fails; releasing in that state would log a spurious
+        # warning from task_coordinator.
+        if lock_held:
+            release_task('cloud_sync')
 
 
 # ---------------------------------------------------------------------------

@@ -199,10 +199,8 @@ def _atomic_archive_op(db_path: str) -> Iterator[sqlite3.Connection]:
     ``try/finally`` to close.
     """
     conn = _open_archive_conn(db_path)
-    began = False
     try:
         conn.execute("BEGIN IMMEDIATE")
-        began = True
         try:
             yield conn
         except BaseException:
@@ -216,10 +214,9 @@ def _atomic_archive_op(db_path: str) -> Iterator[sqlite3.Connection]:
             raise
         conn.execute("COMMIT")
     finally:
-        if not began:
-            # BEGIN itself failed (very rare — e.g., DB locked beyond
-            # busy_timeout). Nothing to roll back; just close.
-            pass
+        # Always close — covers all four exit paths: clean COMMIT,
+        # body-raised + ROLLBACK, BEGIN-failed (no transaction to
+        # roll back), and COMMIT-failed.
         try:
             conn.close()
         except sqlite3.Error:
@@ -295,8 +292,9 @@ def enqueue_for_archive(source_path: str, *,
     expected_size = st.st_size if st is not None else None
     expected_mtime = st.st_mtime if st is not None else None
     enqueued_at = _iso_now()
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO archive_queue
@@ -313,10 +311,11 @@ def enqueue_for_archive(source_path: str, *,
                        source_path, e)
         return False
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def enqueue_many_for_archive(source_paths: Iterable[str], *,
@@ -394,8 +393,9 @@ def get_queue_status(db_path: Optional[str] = None) -> Dict[str, int]:
     counts: Dict[str, int] = {s: 0 for s in _KNOWN_STATUSES}
     counts['total'] = 0
     db_path = _resolve_db_path(db_path)
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         for row in conn.execute(
             "SELECT status, COUNT(*) AS n FROM archive_queue GROUP BY status"
         ).fetchall():
@@ -410,10 +410,11 @@ def get_queue_status(db_path: Optional[str] = None) -> Dict[str, int]:
     except sqlite3.Error as e:
         logger.warning("get_queue_status failed: %s", e)
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
     return counts
 
 
@@ -433,8 +434,9 @@ def list_queue(limit: int = 50,
     if limit <= 0:
         return []
     db_path = _resolve_db_path(db_path)
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         if status is not None:
             cursor = conn.execute(
                 """
@@ -465,10 +467,11 @@ def list_queue(limit: int = 50,
         logger.warning("list_queue failed: %s", e)
         return []
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -612,8 +615,9 @@ def mark_copied(row_id: int, dest_path: str, *,
         return False
     db_path = _resolve_db_path(db_path)
     copied_at = _iso_now()
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         cur = conn.execute(
             """
             UPDATE archive_queue
@@ -630,10 +634,11 @@ def mark_copied(row_id: int, dest_path: str, *,
         logger.warning("mark_copied failed for id=%s: %s", row_id, e)
         return False
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def mark_source_gone(row_id: int, *,
@@ -648,8 +653,9 @@ def mark_source_gone(row_id: int, *,
     if not row_id:
         return False
     db_path = _resolve_db_path(db_path)
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         cur = conn.execute(
             """
             UPDATE archive_queue
@@ -664,10 +670,11 @@ def mark_source_gone(row_id: int, *,
         logger.warning("mark_source_gone failed for id=%s: %s", row_id, e)
         return False
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def release_claim(row_id: int, *,
@@ -692,8 +699,9 @@ def release_claim(row_id: int, *,
     if not row_id:
         return False
     db_path = _resolve_db_path(db_path)
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         if expected_size is not None or expected_mtime is not None:
             cur = conn.execute(
                 """
@@ -723,10 +731,11 @@ def release_claim(row_id: int, *,
         logger.warning("release_claim failed for id=%s: %s", row_id, e)
         return False
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def mark_failed(row_id: int, error: str, *,
@@ -803,8 +812,9 @@ def get_pending_counts_by_priority(db_path: Optional[str] = None) -> Dict[int, i
     """
     counts: Dict[int, int] = {1: 0, 2: 0, 3: 0}
     db_path = _resolve_db_path(db_path)
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         for row in conn.execute(
             """
             SELECT priority, COUNT(*) AS n FROM archive_queue
@@ -817,10 +827,11 @@ def get_pending_counts_by_priority(db_path: Optional[str] = None) -> Dict[int, i
     except sqlite3.Error as e:
         logger.warning("get_pending_counts_by_priority failed: %s", e)
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
     return counts
 
 
@@ -833,8 +844,9 @@ def get_last_copied_at(db_path: Optional[str] = None) -> Optional[str]:
     when the queue is empty and the worker is running.
     """
     db_path = _resolve_db_path(db_path)
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         row = conn.execute(
             """
             SELECT MAX(copied_at) AS m FROM archive_queue
@@ -848,10 +860,11 @@ def get_last_copied_at(db_path: Optional[str] = None) -> Optional[str]:
         logger.warning("get_last_copied_at failed: %s", e)
         return None
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def recover_stale_claims(*,
@@ -864,8 +877,9 @@ def recover_stale_claims(*,
     ``claimed`` forever. Returns the count of rows recovered.
     """
     db_path = _resolve_db_path(db_path)
-    conn = _open_archive_conn(db_path)
+    conn = None
     try:
+        conn = _open_archive_conn(db_path)
         # Compare ISO-8601 strings lexicographically — works
         # because they're all UTC and same format.
         cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
@@ -887,7 +901,8 @@ def recover_stale_claims(*,
         logger.warning("recover_stale_claims failed: %s", e)
         return 0
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass

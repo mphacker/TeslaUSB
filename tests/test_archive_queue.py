@@ -1352,3 +1352,81 @@ class TestMarkFailedAtomicity:
         # SELECT must come before UPDATE (ordering preserved).
         assert upper.index('SELECT') < upper.index('UPDATE')
 
+
+# ---------------------------------------------------------------------------
+# Phase 2.10 review fix — connect/PRAGMA failures must be caught
+# ---------------------------------------------------------------------------
+
+class TestOpenFailureCaught:
+    """Connection-open failures (sqlite3.Error from connect or initial
+    PRAGMAs) must be caught by every public helper and turned into a
+    safe-default return — not raised to the caller.
+
+    Phase 2.10 first draft hoisted ``conn = _open_archive_conn(db_path)``
+    above the ``try:`` block, which made open-time errors escape. The
+    review fix moved the call back inside the ``try:`` (with
+    ``conn = None`` guard in the ``finally``). These tests pin that
+    contract so it can't regress silently.
+
+    On a Pi Zero 2 W, SQLite open / PRAGMA can fail under SDIO
+    contention (busy bus, transient I/O error). A producer thread
+    raising would crash the file watcher; an archive-worker helper
+    raising would crash the worker loop.
+    """
+
+    @pytest.fixture
+    def patched_open_raises(self, monkeypatch):
+        """Make _open_archive_conn raise a sqlite3.OperationalError
+        on every call — simulating a connect/PRAGMA failure."""
+        def _raising(_path):
+            raise sqlite3.OperationalError("simulated open failure")
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _raising)
+        return _raising
+
+    def test_enqueue_for_archive_returns_false(self, db, sample_file,
+                                               patched_open_raises):
+        assert enqueue_for_archive(sample_file, db_path=db) is False
+
+    def test_enqueue_many_for_archive_returns_zero(self, db, sample_file,
+                                                   patched_open_raises):
+        assert enqueue_many_for_archive([sample_file], db_path=db) == 0
+
+    def test_get_queue_status_returns_zeros(self, db, patched_open_raises):
+        result = get_queue_status(db_path=db)
+        assert result['total'] == 0
+        for s in archive_queue._KNOWN_STATUSES:
+            assert result[s] == 0
+
+    def test_list_queue_returns_empty(self, db, patched_open_raises):
+        assert list_queue(db_path=db) == []
+
+    def test_claim_next_for_worker_returns_none(self, db,
+                                                patched_open_raises):
+        assert claim_next_for_worker('w1', db_path=db) is None
+
+    def test_mark_copied_returns_false(self, db, patched_open_raises):
+        assert mark_copied(1, '/dest', db_path=db) is False
+
+    def test_mark_source_gone_returns_false(self, db, patched_open_raises):
+        assert mark_source_gone(1, db_path=db) is False
+
+    def test_release_claim_returns_false(self, db, patched_open_raises):
+        assert release_claim(1, db_path=db) is False
+
+    def test_mark_failed_returns_error(self, db, patched_open_raises):
+        assert mark_failed(1, 'oops', db_path=db) == 'error'
+
+    def test_recover_stale_claims_returns_zero(self, db,
+                                               patched_open_raises):
+        assert recover_stale_claims(db_path=db) == 0
+
+    def test_get_pending_counts_returns_zeros(self, db,
+                                              patched_open_raises):
+        result = archive_queue.get_pending_counts_by_priority(db_path=db)
+        assert result == {1: 0, 2: 0, 3: 0}
+
+    def test_get_last_copied_at_returns_none(self, db,
+                                             patched_open_raises):
+        assert archive_queue.get_last_copied_at(db_path=db) is None
+

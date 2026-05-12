@@ -1082,11 +1082,24 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
     age = now_fn() - st.st_mtime
     expected_size = row.get('expected_size')
     expected_mtime = row.get('expected_mtime')
+    # Phase 2.5 — When the queue row has NULL ``expected_size`` /
+    # ``expected_mtime`` (e.g., enqueue happened while Tesla was still
+    # writing and the producer's ``stat()`` raced against the partial
+    # write, OR a legacy schema row predates the metadata columns), we
+    # have NO baseline to compare against. The pre-2.5 code computed
+    # ``metadata_drifted = False`` in that case and FELL THROUGH to the
+    # copy step, potentially copying a half-written file. With moov-
+    # verify (2.4) such files now fail post-copy, but it's wasteful to
+    # do the IO and immediately retry. Treat NULL metadata as
+    # "needs settling check" so the freshness gate fires: defer if the
+    # file is too young, proceed if it has been settled long enough.
+    metadata_unknown = (expected_size is None or expected_mtime is None)
     metadata_drifted = (
         (expected_size is not None and expected_size != st.st_size)
         or (expected_mtime is not None and expected_mtime != st.st_mtime)
     )
-    if age < _STABLE_WRITE_AGE_SECONDS and metadata_drifted:
+    needs_settling_check = metadata_drifted or metadata_unknown
+    if age < _STABLE_WRITE_AGE_SECONDS and needs_settling_check:
         # Update the snapshot so the next pick uses fresh values.
         archive_queue.release_claim(
             row_id,

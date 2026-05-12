@@ -413,6 +413,151 @@ class TestArchiveWorkerStableGate:
         )
         assert outcome == 'copied'
 
+    # ------------------------------------------------------------------
+    # Phase 2.5 — NULL expected_size / expected_mtime semantics.
+    #
+    # Pre-2.5 behavior: ``metadata_drifted`` was False when both were
+    # None, so the gate skipped and the worker would copy a possibly-
+    # half-written file. With 2.5, NULL metadata is treated as "needs
+    # settling check": defer if young, proceed if settled, refresh
+    # baseline either way so the next claim has something to compare.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _insert_null_metadata_row(
+        db_path: str, source_path: str, priority: int = 1,
+    ) -> int:
+        """Insert a queue row with NULL expected_size / expected_mtime.
+
+        Mimics the production race condition where the enqueue
+        producer's ``stat()`` raced against Tesla's mid-write (or a
+        legacy schema row predates the columns being populated).
+        """
+        with sqlite3.connect(db_path) as c:
+            cur = c.execute(
+                """INSERT INTO archive_queue
+                       (source_path, priority, status, enqueued_at,
+                        expected_size, expected_mtime)
+                   VALUES (?, ?, 'pending', '2025-01-01T00:00:00+00:00',
+                           NULL, NULL)""",
+                (source_path, int(priority)),
+            )
+            return int(cur.lastrowid)
+
+    def test_null_metadata_with_fresh_file_defers(
+        self, db, archive_root, teslacam_root, make_clip,
+    ):
+        # Fresh file (mtime=now) + NULL expected_size/mtime → MUST be
+        # deferred. Pre-2.5, this case fell through and copied a
+        # potentially half-written file.
+        clip = make_clip(
+            "RecentClips/null-fresh-front.mp4", mtime=time.time(),
+        )
+        self._insert_null_metadata_row(db, clip)
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'pending', (
+            "NULL metadata + fresh file MUST defer to next iteration; "
+            "pre-2.5 this fell through and could copy a half-written file"
+        )
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'pending'
+        assert rows[0]['attempts'] == 0  # not burned
+        # Baseline metadata is now populated for the next claim.
+        assert rows[0]['expected_size'] is not None
+        assert rows[0]['expected_mtime'] is not None
+
+    def test_null_metadata_with_settled_file_proceeds(
+        self, db, archive_root, teslacam_root, make_clip,
+    ):
+        # NULL metadata + file that has been quiet for > 5 s →
+        # treat live stat as authoritative and copy. The moov-verify
+        # added in 2.4 catches any structural incompleteness.
+        clip = make_clip(
+            "RecentClips/null-settled-front.mp4", mtime=1000.0,
+        )
+        self._insert_null_metadata_row(db, clip)
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'copied', (
+            "NULL metadata + settled file should proceed: live stat "
+            "is the authoritative baseline"
+        )
+
+    def test_null_metadata_only_size_null_defers_when_fresh(
+        self, db, archive_root, teslacam_root, make_clip,
+    ):
+        # Defensive: only ONE column NULL (legacy partial-migration
+        # row) should still trigger the settling check, not be
+        # accidentally trusted because the other column matches.
+        clip = make_clip(
+            "RecentClips/null-size-front.mp4", mtime=time.time(),
+        )
+        with sqlite3.connect(db) as c:
+            c.execute(
+                """INSERT INTO archive_queue
+                       (source_path, priority, status, enqueued_at,
+                        expected_size, expected_mtime)
+                   VALUES (?, 1, 'pending', '2025-01-01T00:00:00+00:00',
+                           NULL, ?)""",
+                (clip, os.path.getmtime(clip)),
+            )
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'pending'
+        rows = list_queue(db_path=db)
+        assert rows[0]['expected_size'] is not None  # refreshed
+
+    def test_null_metadata_eventually_drains_after_settling(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # NULL metadata + fresh file → defer. Then simulate the file
+        # settling (mtime moved into the past) and re-claim. The
+        # previous defer populated expected_size/mtime, so the next
+        # claim has a baseline + the file is now stable → copy.
+        clip = make_clip(
+            "RecentClips/null-then-settled-front.mp4",
+            mtime=time.time(),
+        )
+        self._insert_null_metadata_row(db, clip)
+
+        # First claim: NULL + fresh → defer with refreshed metadata.
+        row = claim_next_for_worker('w', db_path=db)
+        assert archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        ) == 'pending'
+
+        # Simulate Tesla finishing the write: backdate mtime so the
+        # file is now older than the 5-s gate. The size matches what
+        # was just written into expected_size on the defer above.
+        os.utime(clip, (1000.0, 1000.0))
+        # release_claim updates expected_mtime to the live stat at
+        # that moment, so we must also refresh the row's
+        # expected_mtime to the now-backdated value to mimic a normal
+        # later "no drift" pickup.
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "UPDATE archive_queue SET expected_mtime=1000.0 "
+                "WHERE source_path=?",
+                (clip,),
+            )
+
+        row = claim_next_for_worker('w', db_path=db)
+        assert archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        ) == 'copied'
+
 
 # ---------------------------------------------------------------------------
 # TestArchiveWorkerSourceGone

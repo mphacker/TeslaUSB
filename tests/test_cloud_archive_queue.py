@@ -72,30 +72,30 @@ class TestRemoveFromQueue:
     """remove_from_queue must succeed for any non-synced row."""
 
     def test_removes_queued_row(self, db):
-        _insert_row(db, "/path/clip.mp4", "queued")
-        ok, _ = svc.remove_from_queue("/path/clip.mp4")
+        _insert_row(db, "path/clip.mp4", "queued")
+        ok, _ = svc.remove_from_queue("path/clip.mp4")
         assert ok is True
         assert _row_count(db) == 0
 
     def test_removes_pending_row(self, db):
-        _insert_row(db, "/path/clip.mp4", "pending")
-        ok, _ = svc.remove_from_queue("/path/clip.mp4")
+        _insert_row(db, "path/clip.mp4", "pending")
+        ok, _ = svc.remove_from_queue("path/clip.mp4")
         assert ok is True
         assert _row_count(db) == 0
 
     def test_removes_uploading_row(self, db):
         """Reproduction for issue #67: 'uploading' rows stuck after
         ``stop_sync`` + provider disconnect must still be deletable."""
-        _insert_row(db, "/path/clip.mp4", "uploading")
-        ok, _ = svc.remove_from_queue("/path/clip.mp4")
+        _insert_row(db, "path/clip.mp4", "uploading")
+        ok, _ = svc.remove_from_queue("path/clip.mp4")
         assert ok is True
         assert _row_count(db) == 0
 
     def test_removes_failed_row(self, db):
         """Failed rows from a disconnected/unreachable provider must be
         deletable."""
-        _insert_row(db, "/path/clip.mp4", "failed")
-        ok, _ = svc.remove_from_queue("/path/clip.mp4")
+        _insert_row(db, "path/clip.mp4", "failed")
+        ok, _ = svc.remove_from_queue("path/clip.mp4")
         assert ok is True
         assert _row_count(db) == 0
 
@@ -103,8 +103,8 @@ class TestRemoveFromQueue:
         """Synced rows are historical records and must NOT be deletable
         through the queue API (they're not exposed via get_sync_queue
         either)."""
-        _insert_row(db, "/path/clip.mp4", "synced")
-        ok, _ = svc.remove_from_queue("/path/clip.mp4")
+        _insert_row(db, "path/clip.mp4", "synced")
+        ok, _ = svc.remove_from_queue("path/clip.mp4")
         # Returns success ("not in queue") but the synced row stays.
         assert ok is True
         assert _row_count(db, "synced") == 1
@@ -113,7 +113,7 @@ class TestRemoveFromQueue:
         """Removing a path that isn't in the queue is a no-op success —
         the UI should never see an error for a row that was already
         cleaned up by the worker."""
-        ok, msg = svc.remove_from_queue("/never/queued.mp4")
+        ok, msg = svc.remove_from_queue("never/queued.mp4")
         assert ok is True
         assert "queue" in msg.lower()
 
@@ -121,16 +121,16 @@ class TestRemoveFromQueue:
         """The local queue is local data — clearing the cloud provider
         from config.yaml must not prevent deletion."""
         monkeypatch.setattr(svc, "CLOUD_ARCHIVE_PROVIDER", "")
-        _insert_row(db, "/path/clip.mp4", "uploading")
-        ok, _ = svc.remove_from_queue("/path/clip.mp4")
+        _insert_row(db, "path/clip.mp4", "uploading")
+        ok, _ = svc.remove_from_queue("path/clip.mp4")
         assert ok is True
         assert _row_count(db) == 0
 
     def test_only_targets_named_path(self, db):
         """remove_from_queue must not touch other rows."""
-        _insert_row(db, "/a/clip.mp4", "uploading")
-        _insert_row(db, "/b/clip.mp4", "uploading")
-        ok, _ = svc.remove_from_queue("/a/clip.mp4")
+        _insert_row(db, "a/clip.mp4", "uploading")
+        _insert_row(db, "b/clip.mp4", "uploading")
+        ok, _ = svc.remove_from_queue("a/clip.mp4")
         assert ok is True
         assert _row_count(db) == 1
         conn = sqlite3.connect(db)
@@ -138,7 +138,7 @@ class TestRemoveFromQueue:
             "SELECT file_path FROM cloud_synced_files"
         ).fetchone()
         conn.close()
-        assert row[0] == "/b/clip.mp4"
+        assert row[0] == "b/clip.mp4"
 
 
 # ---------------------------------------------------------------------------
@@ -150,10 +150,10 @@ class TestClearQueue:
 
     def test_clears_mixed_statuses(self, db):
         """All four queue statuses must be cleared in a single call."""
-        _insert_row(db, "/a.mp4", "queued")
-        _insert_row(db, "/b.mp4", "pending")
-        _insert_row(db, "/c.mp4", "uploading")
-        _insert_row(db, "/d.mp4", "failed")
+        _insert_row(db, "a.mp4", "queued")
+        _insert_row(db, "b.mp4", "pending")
+        _insert_row(db, "c.mp4", "uploading")
+        _insert_row(db, "d.mp4", "failed")
         ok, msg = svc.clear_queue()
         assert ok is True
         assert "4" in msg
@@ -163,9 +163,9 @@ class TestClearQueue:
         """Synced rows are historical records — clear_queue must leave
         them alone so the dashboard's 'total synced' counter stays
         accurate."""
-        _insert_row(db, "/a.mp4", "queued")
-        _insert_row(db, "/b.mp4", "uploading")
-        _insert_row(db, "/c.mp4", "synced")
+        _insert_row(db, "a.mp4", "queued")
+        _insert_row(db, "b.mp4", "uploading")
+        _insert_row(db, "c.mp4", "synced")
         ok, _ = svc.clear_queue()
         assert ok is True
         assert _row_count(db) == 1
@@ -175,8 +175,8 @@ class TestClearQueue:
         """Reproduction for issue #67: clearing the queue must work even
         after the cloud provider has been disconnected."""
         monkeypatch.setattr(svc, "CLOUD_ARCHIVE_PROVIDER", "")
-        _insert_row(db, "/a.mp4", "uploading")
-        _insert_row(db, "/b.mp4", "queued")
+        _insert_row(db, "a.mp4", "uploading")
+        _insert_row(db, "b.mp4", "queued")
         ok, _ = svc.clear_queue()
         assert ok is True
         assert _row_count(db) == 0
@@ -197,14 +197,14 @@ class TestGetSyncQueueAfterDelete:
     def test_uploading_row_disappears_from_queue_after_delete(self, db):
         """The original bug from issue #67: an 'uploading' row was
         visible in get_sync_queue but invisible to the delete API."""
-        _insert_row(db, "/stuck.mp4", "uploading")
+        _insert_row(db, "stuck.mp4", "uploading")
 
         before = svc.get_sync_queue()
         assert before["total"] == 1
-        assert before["queue"][0]["file_path"] == "/stuck.mp4"
+        assert before["queue"][0]["file_path"] == "stuck.mp4"
         assert before["queue"][0]["status"] == "uploading"
 
-        ok, _ = svc.remove_from_queue("/stuck.mp4")
+        ok, _ = svc.remove_from_queue("stuck.mp4")
         assert ok is True
 
         after = svc.get_sync_queue()

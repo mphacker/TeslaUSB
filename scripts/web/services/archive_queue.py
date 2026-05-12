@@ -43,6 +43,36 @@ The schema itself lives in :mod:`services.mapping_service` (the
 ``archive_queue`` CREATE statement is part of ``_SCHEMA_SQL`` so the
 v9 → v10 migration creates it automatically). This module only reads
 and writes rows.
+
+Connection / transaction contract (Phase 2.10 — issue #97 item 2.10)
+--------------------------------------------------------------------
+
+Every public helper opens its own SQLite connection via
+:func:`_open_archive_conn`. **The connection is opened in autocommit
+mode** (``isolation_level=None``) so callers control transaction
+boundaries explicitly. The contract is:
+
+* **Single-statement reads or writes** — call ``conn.execute(...)``
+  directly. Each statement auto-commits. Wrap the open/use/close
+  pattern in ``try/finally`` (NOT ``with conn:``) — see below.
+
+* **Multi-statement atomic operations** — use the
+  :func:`_atomic_archive_op` context manager. It opens an autocommit
+  connection, issues ``BEGIN IMMEDIATE`` (acquiring the write lock up
+  front to avoid SQLITE_BUSY deadlocks), yields the connection, and
+  on exit issues ``COMMIT`` on success or ``ROLLBACK`` on any
+  ``BaseException`` (so ``KeyboardInterrupt`` / ``SystemExit`` also
+  trigger rollback). Connection is always closed on the way out.
+
+**Anti-pattern (do NOT use):** ``with _open_archive_conn(db_path) as conn:``.
+Python's ``sqlite3`` module's ``with conn:`` is a transaction commit/
+rollback context manager — but on an autocommit connection it does
+NOT begin a transaction, only commits/rollbacks (which are no-ops
+because each statement already committed). It also does NOT close
+the connection. So that pattern is misleading on every axis: it
+suggests transaction semantics that don't exist and leaks the
+connection until garbage collection. Use ``try/finally`` for single-
+statement work and :func:`_atomic_archive_op` for multi-statement.
 """
 
 from __future__ import annotations
@@ -50,8 +80,9 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +149,17 @@ def _resolve_db_path(db_path: Optional[str]) -> str:
 def _open_archive_conn(db_path: str) -> sqlite3.Connection:
     """Open a tuned SQLite connection for archive_queue ops.
 
+    **Autocommit mode** (``isolation_level=None``). Each ``conn.execute(...)``
+    statement commits on its own, so single-statement helpers can rely on
+    immediate durability without explicit COMMIT calls.
+
+    For multi-statement atomic operations use :func:`_atomic_archive_op`,
+    which wraps the body in ``BEGIN IMMEDIATE`` / ``COMMIT`` /
+    ``ROLLBACK``. **Do NOT** use ``with _open_archive_conn(db_path) as conn:``
+    — Python's ``sqlite3`` ``with conn:`` is a commit/rollback context
+    manager that's a no-op on autocommit AND does not close the
+    connection. See the module docstring for the full contract.
+
     Mirrors the per-connection pragmas used by
     ``mapping_service._open_queue_conn`` so producers don't trip over
     contended locks and the WAL stays small under concurrent writers.
@@ -128,6 +170,60 @@ def _open_archive_conn(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
+
+
+@contextmanager
+def _atomic_archive_op(db_path: str) -> Iterator[sqlite3.Connection]:
+    """Open an autocommit conn, wrap the body in an explicit transaction.
+
+    On enter: opens the connection via :func:`_open_archive_conn`,
+    issues ``BEGIN IMMEDIATE`` (acquires the write lock up front so we
+    never upgrade from a shared lock mid-transaction — that's a known
+    SQLITE_BUSY deadlock vector under contention).
+
+    On normal exit: issues ``COMMIT``.
+
+    On any exception (including ``KeyboardInterrupt`` / ``SystemExit``):
+    issues ``ROLLBACK`` and re-raises so a partial multi-statement
+    update never lands in the database. Rollback failures are logged
+    at debug level so the original exception remains the surfaced
+    cause.
+
+    Connection is always closed on the way out (even if BEGIN itself
+    failed and we never entered the body).
+
+    Use this for any helper that issues more than one statement that
+    must succeed or fail as a unit — e.g., a SELECT followed by a
+    conditional UPDATE in :func:`mark_failed`. For single-statement
+    helpers, call :func:`_open_archive_conn` directly and use a
+    ``try/finally`` to close.
+    """
+    conn = _open_archive_conn(db_path)
+    began = False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        began = True
+        try:
+            yield conn
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error as rollback_err:
+                logger.debug(
+                    "_atomic_archive_op ROLLBACK failed: %s",
+                    rollback_err,
+                )
+            raise
+        conn.execute("COMMIT")
+    finally:
+        if not began:
+            # BEGIN itself failed (very rare — e.g., DB locked beyond
+            # busy_timeout). Nothing to roll back; just close.
+            pass
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 def _iso_now() -> str:
@@ -199,24 +295,28 @@ def enqueue_for_archive(source_path: str, *,
     expected_size = st.st_size if st is not None else None
     expected_mtime = st.st_mtime if st is not None else None
     enqueued_at = _iso_now()
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO archive_queue
-                    (source_path, priority, status,
-                     enqueued_at, expected_size, expected_mtime)
-                VALUES (?, ?, 'pending', ?, ?, ?)
-                """,
-                (source_path, int(priority), enqueued_at,
-                 expected_size, expected_mtime),
-            )
-            inserted = cur.rowcount == 1
-        return inserted
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO archive_queue
+                (source_path, priority, status,
+                 enqueued_at, expected_size, expected_mtime)
+            VALUES (?, ?, 'pending', ?, ?, ?)
+            """,
+            (source_path, int(priority), enqueued_at,
+             expected_size, expected_mtime),
+        )
+        return cur.rowcount == 1
     except sqlite3.Error as e:
         logger.warning("enqueue_for_archive failed for %s: %s",
                        source_path, e)
         return False
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 def enqueue_many_for_archive(source_paths: Iterable[str], *,
@@ -265,12 +365,9 @@ def enqueue_many_for_archive(source_paths: Iterable[str], *,
             st.st_size if st is not None else None,
             st.st_mtime if st is not None else None,
         ))
-    conn = None
     try:
-        conn = _open_archive_conn(db_path)
-        before = conn.total_changes
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        with _atomic_archive_op(db_path) as conn:
+            before = conn.total_changes
             conn.executemany(
                 """
                 INSERT OR IGNORE INTO archive_queue
@@ -280,33 +377,11 @@ def enqueue_many_for_archive(source_paths: Iterable[str], *,
                 """,
                 rows,
             )
-        except BaseException:
-            # ROLLBACK on any exception (sqlite3.Error, KeyboardInterrupt,
-            # etc.) so a partial batch never lands. Re-raise so the outer
-            # handler logs and returns 0.
-            try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error as rollback_err:
-                # Log at debug — the outer handler will surface the
-                # original cause at warning level. We never want a
-                # rollback failure to mask the root exception.
-                logger.debug(
-                    "enqueue_many_for_archive ROLLBACK failed: %s",
-                    rollback_err,
-                )
-            raise
-        conn.execute("COMMIT")
-        after = conn.total_changes
-        return max(0, after - before)
+            after = conn.total_changes
+            return max(0, after - before)
     except sqlite3.Error as e:
         logger.warning("enqueue_many_for_archive failed: %s", e)
         return 0
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
 
 
 def get_queue_status(db_path: Optional[str] = None) -> Dict[str, int]:
@@ -319,21 +394,26 @@ def get_queue_status(db_path: Optional[str] = None) -> Dict[str, int]:
     counts: Dict[str, int] = {s: 0 for s in _KNOWN_STATUSES}
     counts['total'] = 0
     db_path = _resolve_db_path(db_path)
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            for row in conn.execute(
-                "SELECT status, COUNT(*) AS n FROM archive_queue GROUP BY status"
-            ).fetchall():
-                status = row['status'] or 'pending'
-                n = int(row['n'] or 0)
-                # Fold any unknown status (shouldn't happen, but be
-                # defensive — older rows after a downgrade, manual SQL,
-                # etc.) into the total but not into the named buckets.
-                if status in counts:
-                    counts[status] = n
-                counts['total'] += n
+        for row in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM archive_queue GROUP BY status"
+        ).fetchall():
+            status = row['status'] or 'pending'
+            n = int(row['n'] or 0)
+            # Fold any unknown status (shouldn't happen, but be
+            # defensive — older rows after a downgrade, manual SQL,
+            # etc.) into the total but not into the named buckets.
+            if status in counts:
+                counts[status] = n
+            counts['total'] += n
     except sqlite3.Error as e:
         logger.warning("get_queue_status failed: %s", e)
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
     return counts
 
 
@@ -353,37 +433,42 @@ def list_queue(limit: int = 50,
     if limit <= 0:
         return []
     db_path = _resolve_db_path(db_path)
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            if status is not None:
-                cursor = conn.execute(
-                    """
-                    SELECT * FROM archive_queue
-                    WHERE status = ?
-                    ORDER BY priority ASC,
-                             expected_mtime IS NULL,
-                             expected_mtime ASC,
-                             id ASC
-                    LIMIT ?
-                    """,
-                    (status, int(limit)),
-                )
-            else:
-                cursor = conn.execute(
-                    """
-                    SELECT * FROM archive_queue
-                    ORDER BY priority ASC,
-                             expected_mtime IS NULL,
-                             expected_mtime ASC,
-                             id ASC
-                    LIMIT ?
-                    """,
-                    (int(limit),),
-                )
-            return [dict(r) for r in cursor.fetchall()]
+        if status is not None:
+            cursor = conn.execute(
+                """
+                SELECT * FROM archive_queue
+                WHERE status = ?
+                ORDER BY priority ASC,
+                         expected_mtime IS NULL,
+                         expected_mtime ASC,
+                         id ASC
+                LIMIT ?
+                """,
+                (status, int(limit)),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT * FROM archive_queue
+                ORDER BY priority ASC,
+                         expected_mtime IS NULL,
+                         expected_mtime ASC,
+                         id ASC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+        return [dict(r) for r in cursor.fetchall()]
     except sqlite3.Error as e:
         logger.warning("list_queue failed: %s", e)
         return []
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -441,8 +526,13 @@ def claim_next_for_worker(claimed_by: str, *,
     """
     db_path = _resolve_db_path(db_path)
     claimed_at = _iso_now()
+    # claim_next_for_worker is logically multi-statement in the
+    # RETURNING-fallback branch (SELECT then conditional UPDATE), so
+    # wrap the whole thing in an atomic transaction so the fallback
+    # is genuinely atomic — not just relying on the conditional WHERE
+    # to paper over a race.
     try:
-        with _open_archive_conn(db_path) as conn:
+        with _atomic_archive_op(db_path) as conn:
             try:
                 cur = conn.execute(
                     """
@@ -470,8 +560,9 @@ def claim_next_for_worker(claimed_by: str, *,
                 return None
             except sqlite3.OperationalError:
                 # Older SQLite — no RETURNING clause. Fall back to
-                # SELECT-then-UPDATE; the conditional WHERE keeps the
-                # claim atomic even if another worker raced us.
+                # SELECT-then-UPDATE; the surrounding transaction
+                # plus the conditional WHERE keeps the claim atomic
+                # even if another worker raced us.
                 pass
 
             row = conn.execute(
@@ -521,23 +612,28 @@ def mark_copied(row_id: int, dest_path: str, *,
         return False
     db_path = _resolve_db_path(db_path)
     copied_at = _iso_now()
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            cur = conn.execute(
-                """
-                UPDATE archive_queue
-                   SET status = 'copied',
-                       copied_at = ?,
-                       dest_path = ?,
-                       last_error = NULL
-                 WHERE id = ?
-                """,
-                (copied_at, dest_path, int(row_id)),
-            )
-            return cur.rowcount == 1
+        cur = conn.execute(
+            """
+            UPDATE archive_queue
+               SET status = 'copied',
+                   copied_at = ?,
+                   dest_path = ?,
+                   last_error = NULL
+             WHERE id = ?
+            """,
+            (copied_at, dest_path, int(row_id)),
+        )
+        return cur.rowcount == 1
     except sqlite3.Error as e:
         logger.warning("mark_copied failed for id=%s: %s", row_id, e)
         return False
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 def mark_source_gone(row_id: int, *,
@@ -552,21 +648,26 @@ def mark_source_gone(row_id: int, *,
     if not row_id:
         return False
     db_path = _resolve_db_path(db_path)
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            cur = conn.execute(
-                """
-                UPDATE archive_queue
-                   SET status = 'source_gone',
-                       last_error = NULL
-                 WHERE id = ?
-                """,
-                (int(row_id),),
-            )
-            return cur.rowcount == 1
+        cur = conn.execute(
+            """
+            UPDATE archive_queue
+               SET status = 'source_gone',
+                   last_error = NULL
+             WHERE id = ?
+            """,
+            (int(row_id),),
+        )
+        return cur.rowcount == 1
     except sqlite3.Error as e:
         logger.warning("mark_source_gone failed for id=%s: %s", row_id, e)
         return False
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 def release_claim(row_id: int, *,
@@ -591,36 +692,41 @@ def release_claim(row_id: int, *,
     if not row_id:
         return False
     db_path = _resolve_db_path(db_path)
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            if expected_size is not None or expected_mtime is not None:
-                cur = conn.execute(
-                    """
-                    UPDATE archive_queue
-                       SET status = 'pending',
-                           claimed_at = NULL,
-                           claimed_by = NULL,
-                           expected_size = COALESCE(?, expected_size),
-                           expected_mtime = COALESCE(?, expected_mtime)
-                     WHERE id = ?
-                    """,
-                    (expected_size, expected_mtime, int(row_id)),
-                )
-            else:
-                cur = conn.execute(
-                    """
-                    UPDATE archive_queue
-                       SET status = 'pending',
-                           claimed_at = NULL,
-                           claimed_by = NULL
-                     WHERE id = ?
-                    """,
-                    (int(row_id),),
-                )
-            return cur.rowcount == 1
+        if expected_size is not None or expected_mtime is not None:
+            cur = conn.execute(
+                """
+                UPDATE archive_queue
+                   SET status = 'pending',
+                       claimed_at = NULL,
+                       claimed_by = NULL,
+                       expected_size = COALESCE(?, expected_size),
+                       expected_mtime = COALESCE(?, expected_mtime)
+                 WHERE id = ?
+                """,
+                (expected_size, expected_mtime, int(row_id)),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE archive_queue
+                   SET status = 'pending',
+                       claimed_at = NULL,
+                       claimed_by = NULL
+                 WHERE id = ?
+                """,
+                (int(row_id),),
+            )
+        return cur.rowcount == 1
     except sqlite3.Error as e:
         logger.warning("release_claim failed for id=%s: %s", row_id, e)
         return False
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 def mark_failed(row_id: int, error: str, *,
@@ -640,8 +746,14 @@ def mark_failed(row_id: int, error: str, *,
         return 'error'
     db_path = _resolve_db_path(db_path)
     truncated = (error or '')[:4096]
+    # mark_failed is genuinely multi-statement: it SELECTs the current
+    # attempts count, branches, then UPDATEs. Under autocommit alone
+    # another writer could update ``attempts`` between our SELECT and
+    # UPDATE, causing the UPDATE to use a stale base count. Wrap in
+    # _atomic_archive_op so the SELECT + UPDATE land in one transaction
+    # under a single write lock (BEGIN IMMEDIATE).
     try:
-        with _open_archive_conn(db_path) as conn:
+        with _atomic_archive_op(db_path) as conn:
             row = conn.execute(
                 "SELECT attempts FROM archive_queue WHERE id = ?",
                 (int(row_id),),
@@ -691,19 +803,24 @@ def get_pending_counts_by_priority(db_path: Optional[str] = None) -> Dict[int, i
     """
     counts: Dict[int, int] = {1: 0, 2: 0, 3: 0}
     db_path = _resolve_db_path(db_path)
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            for row in conn.execute(
-                """
-                SELECT priority, COUNT(*) AS n FROM archive_queue
-                 WHERE status = 'pending'
-                 GROUP BY priority
-                """
-            ).fetchall():
-                prio = int(row['priority'] or 3)
-                counts[prio] = int(row['n'] or 0)
+        for row in conn.execute(
+            """
+            SELECT priority, COUNT(*) AS n FROM archive_queue
+             WHERE status = 'pending'
+             GROUP BY priority
+            """
+        ).fetchall():
+            prio = int(row['priority'] or 3)
+            counts[prio] = int(row['n'] or 0)
     except sqlite3.Error as e:
         logger.warning("get_pending_counts_by_priority failed: %s", e)
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
     return counts
 
 
@@ -716,20 +833,25 @@ def get_last_copied_at(db_path: Optional[str] = None) -> Optional[str]:
     when the queue is empty and the worker is running.
     """
     db_path = _resolve_db_path(db_path)
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT MAX(copied_at) AS m FROM archive_queue
-                 WHERE status = 'copied' AND copied_at IS NOT NULL
-                """
-            ).fetchone()
-            if row is None:
-                return None
-            return row['m']
+        row = conn.execute(
+            """
+            SELECT MAX(copied_at) AS m FROM archive_queue
+             WHERE status = 'copied' AND copied_at IS NOT NULL
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return row['m']
     except sqlite3.Error as e:
         logger.warning("get_last_copied_at failed: %s", e)
         return None
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 def recover_stale_claims(*,
@@ -742,25 +864,30 @@ def recover_stale_claims(*,
     ``claimed`` forever. Returns the count of rows recovered.
     """
     db_path = _resolve_db_path(db_path)
+    conn = _open_archive_conn(db_path)
     try:
-        with _open_archive_conn(db_path) as conn:
-            # Compare ISO-8601 strings lexicographically — works
-            # because they're all UTC and same format.
-            cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
-            cutoff_iso = datetime.fromtimestamp(
-                cutoff, tz=timezone.utc).isoformat()
-            cur = conn.execute(
-                """
-                UPDATE archive_queue
-                   SET status = 'pending',
-                       claimed_at = NULL,
-                       claimed_by = NULL
-                 WHERE status = 'claimed'
-                   AND (claimed_at IS NULL OR claimed_at < ?)
-                """,
-                (cutoff_iso,),
-            )
-            return cur.rowcount or 0
+        # Compare ISO-8601 strings lexicographically — works
+        # because they're all UTC and same format.
+        cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
+        cutoff_iso = datetime.fromtimestamp(
+            cutoff, tz=timezone.utc).isoformat()
+        cur = conn.execute(
+            """
+            UPDATE archive_queue
+               SET status = 'pending',
+                   claimed_at = NULL,
+                   claimed_by = NULL
+             WHERE status = 'claimed'
+               AND (claimed_at IS NULL OR claimed_at < ?)
+            """,
+            (cutoff_iso,),
+        )
+        return cur.rowcount or 0
     except sqlite3.Error as e:
         logger.warning("recover_stale_claims failed: %s", e)
         return 0
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass

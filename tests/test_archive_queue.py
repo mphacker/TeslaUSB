@@ -1022,3 +1022,333 @@ class TestRecoverStaleClaims:
             )
         recovered = recover_stale_claims(max_age_seconds=60.0, db_path=db)
         assert recovered == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.10 — _atomic_archive_op transactional context manager
+# ---------------------------------------------------------------------------
+
+class TestAtomicArchiveOp:
+    """The Phase 2.10 transactional helper.
+
+    Contract:
+      * BEGIN IMMEDIATE on enter (acquires write lock up front)
+      * COMMIT on clean exit
+      * ROLLBACK on any BaseException (including KeyboardInterrupt)
+      * Connection always closed in finally
+      * Re-raises the original exception
+    """
+
+    def test_commit_on_success(self, db, sample_file):
+        """Successful body commits all writes."""
+        with archive_queue._atomic_archive_op(db) as conn:
+            conn.execute(
+                """INSERT INTO archive_queue
+                       (source_path, priority, status, enqueued_at)
+                   VALUES (?, ?, 'pending', ?)""",
+                (sample_file, 3, '2026-01-01T00:00:00+00:00'),
+            )
+        # Visible in a fresh connection.
+        rows = list_queue(db_path=db)
+        assert len(rows) == 1
+        assert rows[0]['source_path'] == sample_file
+
+    def test_rollback_on_sqlite_error(self, db, sample_file, tmp_path):
+        """sqlite3.Error inside the body rolls back and re-raises."""
+        # Pre-existing row that must survive.
+        pre = tmp_path / "pre.mp4"
+        pre.write_bytes(b"pre")
+        enqueue_for_archive(str(pre), db_path=db)
+        assert get_queue_status(db_path=db)['pending'] == 1
+
+        class Boom(sqlite3.OperationalError):
+            pass
+
+        with pytest.raises(Boom):
+            with archive_queue._atomic_archive_op(db) as conn:
+                conn.execute(
+                    """INSERT INTO archive_queue
+                           (source_path, priority, status, enqueued_at)
+                       VALUES (?, ?, 'pending', ?)""",
+                    (sample_file, 3, '2026-01-01T00:00:00+00:00'),
+                )
+                raise Boom("simulated")
+        # Pre-existing row still present, new one rolled back.
+        rows = list_queue(db_path=db)
+        assert len(rows) == 1
+        assert rows[0]['source_path'] == str(pre)
+
+    def test_rollback_on_keyboard_interrupt(self, db, sample_file, tmp_path):
+        """BaseException (e.g. KeyboardInterrupt) also rolls back and
+        re-raises — same contract as Phase 2.8 enqueue_many."""
+        pre = tmp_path / "pre.mp4"
+        pre.write_bytes(b"pre")
+        enqueue_for_archive(str(pre), db_path=db)
+
+        with pytest.raises(KeyboardInterrupt):
+            with archive_queue._atomic_archive_op(db) as conn:
+                conn.execute(
+                    """INSERT INTO archive_queue
+                           (source_path, priority, status, enqueued_at)
+                       VALUES (?, ?, 'pending', ?)""",
+                    (sample_file, 3, '2026-01-01T00:00:00+00:00'),
+                )
+                raise KeyboardInterrupt()
+        # New row rolled back; pre-existing row preserved.
+        rows = list_queue(db_path=db)
+        assert len(rows) == 1
+        assert rows[0]['source_path'] == str(pre)
+
+    def test_connection_closed_on_success(self, db, monkeypatch):
+        """Connection is closed after a clean commit."""
+        opened = []
+        original_open = archive_queue._open_archive_conn
+
+        def _spy_open(path):
+            conn = original_open(path)
+            opened.append(conn)
+            return conn
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _spy_open)
+        with archive_queue._atomic_archive_op(db) as conn:
+            conn.execute("SELECT 1")
+        assert len(opened) == 1
+        # Operating on a closed connection raises ProgrammingError.
+        with pytest.raises(sqlite3.ProgrammingError):
+            opened[0].execute("SELECT 1")
+
+    def test_connection_closed_on_exception(self, db, monkeypatch):
+        """Connection is closed even if the body raised."""
+        opened = []
+        original_open = archive_queue._open_archive_conn
+
+        def _spy_open(path):
+            conn = original_open(path)
+            opened.append(conn)
+            return conn
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _spy_open)
+        with pytest.raises(RuntimeError):
+            with archive_queue._atomic_archive_op(db) as conn:
+                conn.execute("SELECT 1")
+                raise RuntimeError("body raised")
+        assert len(opened) == 1
+        with pytest.raises(sqlite3.ProgrammingError):
+            opened[0].execute("SELECT 1")
+
+    def test_connection_closed_on_keyboard_interrupt(self, db, monkeypatch):
+        """Connection is closed even on KeyboardInterrupt — no FD leak."""
+        opened = []
+        original_open = archive_queue._open_archive_conn
+
+        def _spy_open(path):
+            conn = original_open(path)
+            opened.append(conn)
+            return conn
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _spy_open)
+        with pytest.raises(KeyboardInterrupt):
+            with archive_queue._atomic_archive_op(db) as conn:
+                conn.execute("SELECT 1")
+                raise KeyboardInterrupt()
+        assert len(opened) == 1
+        with pytest.raises(sqlite3.ProgrammingError):
+            opened[0].execute("SELECT 1")
+
+    def test_begin_immediate_acquires_write_lock_up_front(self, db,
+                                                          monkeypatch):
+        """The first statement in the body should be BEGIN IMMEDIATE,
+        not a deferred BEGIN. This avoids lock-upgrade SQLITE_BUSY
+        races under load."""
+        executed = []
+        original_open = archive_queue._open_archive_conn
+
+        class _Spy:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def execute(self, sql, *a, **kw):
+                executed.append(sql.strip().split()[0:2])
+                return self._real.execute(sql, *a, **kw)
+
+        def _spy_open(path):
+            return _Spy(original_open(path))
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _spy_open)
+
+        with archive_queue._atomic_archive_op(db) as conn:
+            conn.execute("SELECT 1")
+
+        # First statement should be 'BEGIN IMMEDIATE', not just 'BEGIN'.
+        assert executed[0] == ['BEGIN', 'IMMEDIATE'], (
+            f"expected BEGIN IMMEDIATE first, got {executed[0]!r}"
+        )
+
+    def test_close_failure_in_finally_does_not_mask_body_exception(
+            self, db, monkeypatch):
+        """If conn.close() raises in the finally, the original body
+        exception still propagates — close-failure is swallowed."""
+        original_open = archive_queue._open_archive_conn
+
+        class _BadClose:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def close(self):
+                # Real close first to avoid resource leak in the test.
+                try:
+                    self._real.close()
+                except sqlite3.Error:
+                    pass
+                raise sqlite3.OperationalError("close failed")
+
+        def _spy_open(path):
+            return _BadClose(original_open(path))
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _spy_open)
+
+        # The body's exception (RuntimeError) must be what propagates,
+        # not the close-failure.
+        with pytest.raises(RuntimeError, match="body"):
+            with archive_queue._atomic_archive_op(db):
+                raise RuntimeError("body failed")
+
+
+class TestMarkFailedAtomicity:
+    """Phase 2.10 regression: mark_failed must be atomic.
+
+    Before Phase 2.10 the SELECT(attempts) and the conditional UPDATE
+    ran under autocommit, so two concurrent mark_failed calls could
+    both read the same `attempts` and then race to UPDATE — losing
+    one increment and potentially leaving a row stuck below
+    max_attempts forever.
+
+    After Phase 2.10 the helper wraps both statements in
+    BEGIN IMMEDIATE … COMMIT, serializing concurrent writers via the
+    SQLite write lock.
+    """
+
+    def test_concurrent_mark_failed_does_not_lose_attempts(
+            self, db, sample_file, monkeypatch):
+        """Two threads call mark_failed on the same row simultaneously.
+        After both return, attempts must equal 2 (no lost update).
+
+        Forces the race by injecting a small delay between SELECT and
+        UPDATE inside _atomic_archive_op's body. Under autocommit
+        without a transaction, both threads' SELECTs would read 0
+        and both UPDATEs would write 1 — losing one increment. With
+        BEGIN IMMEDIATE wrapping the whole helper, T2 blocks until
+        T1 commits, so T2 reads 1 and writes 2.
+        """
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        row_id = row['id']
+
+        # Wrap conn.execute so SELECT against archive_queue gets a
+        # 200ms pause AFTER fetch — enough to provoke any race window.
+        original_open = archive_queue._open_archive_conn
+
+        class _SlowSelect:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def __enter__(self):
+                return self._real.__enter__()
+
+            def __exit__(self, *a):
+                return self._real.__exit__(*a)
+
+            def execute(self, sql, *a, **kw):
+                cur = self._real.execute(sql, *a, **kw)
+                if 'SELECT attempts' in sql:
+                    # Force the SELECT-then-UPDATE window wide open.
+                    time.sleep(0.2)
+                return cur
+
+        def _spy_open(path):
+            return _SlowSelect(original_open(path))
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _spy_open)
+
+        results = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(2)
+
+        def worker():
+            barrier.wait()
+            r = mark_failed(row_id, 'race', max_attempts=10, db_path=db)
+            with results_lock:
+                results.append(r)
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+        assert not t1.is_alive() and not t2.is_alive()
+
+        assert results.count('pending') == 2, (
+            f"expected both calls to succeed as 'pending', got {results}"
+        )
+        # The Phase 2.10 contract: SELECT+UPDATE atomicity → no lost
+        # update. attempts must be exactly 2.
+        rows = list_queue(db_path=db)
+        assert rows[0]['attempts'] == 2, (
+            f"lost update detected: attempts={rows[0]['attempts']}, "
+            f"expected 2"
+        )
+
+    def test_mark_failed_select_and_update_are_atomic(
+            self, db, sample_file, monkeypatch):
+        """Verify mark_failed runs SELECT + UPDATE inside one
+        BEGIN IMMEDIATE transaction (the Phase 2.10 contract)."""
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+
+        executed = []
+        original_open = archive_queue._open_archive_conn
+
+        class _Spy:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def execute(self, sql, *a, **kw):
+                executed.append(sql.strip().split()[0])
+                return self._real.execute(sql, *a, **kw)
+
+        def _spy_open(path):
+            return _Spy(original_open(path))
+
+        monkeypatch.setattr(archive_queue,
+                            '_open_archive_conn', _spy_open)
+        mark_failed(row['id'], 'oops', max_attempts=3, db_path=db)
+
+        # Expect: BEGIN, SELECT, UPDATE, COMMIT — in that order.
+        # (The exact case may vary; normalize to upper.)
+        upper = [s.upper() for s in executed]
+        assert upper[0] == 'BEGIN', f"first statement was {upper[0]!r}"
+        assert 'SELECT' in upper
+        assert 'UPDATE' in upper
+        assert upper[-1] == 'COMMIT', f"last statement was {upper[-1]!r}"
+        # SELECT must come before UPDATE (ordering preserved).
+        assert upper.index('SELECT') < upper.index('UPDATE')
+

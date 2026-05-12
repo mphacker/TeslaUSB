@@ -35,7 +35,15 @@ from config import (
     CLOUD_PROVIDER_CREDS_PATH,
     CLOUD_ARCHIVE_SYNC_NON_EVENT,
     CLOUD_ARCHIVE_RESERVE_GB,
+    CLOUD_ARCHIVE_RETRY_MAX_ATTEMPTS,
 )
+
+# Phase 2.6 — clamp range for ``cloud_archive.retry_max_attempts``. The
+# Settings UI restricts input to 1-20; reads outside that range fall back
+# to the import-time default rather than silently disabling the cap (0)
+# or wasting bandwidth on unbounded retries (huge values).
+_RETRY_MAX_ATTEMPTS_MIN = 1
+_RETRY_MAX_ATTEMPTS_MAX = 20
 
 # ---------------------------------------------------------------------------
 # Database Schema & Versioning
@@ -355,6 +363,90 @@ def _read_sync_non_event_setting() -> bool:
         return CLOUD_ARCHIVE_SYNC_NON_EVENT
 
 
+def _read_retry_max_attempts_setting() -> int:
+    """Re-read ``cloud_archive.retry_max_attempts`` from config.yaml.
+
+    Phase 2.6 — same per-call YAML re-read pattern as
+    :func:`_read_sync_non_event_setting`. The Settings save handler
+    only writes YAML; without this re-read, a Settings change would
+    have no effect until ``gadget_web.service`` restarts.
+
+    Range-clamped to ``_RETRY_MAX_ATTEMPTS_MIN`` ..
+    ``_RETRY_MAX_ATTEMPTS_MAX`` so a hand-edited config.yaml with a
+    nonsense value (0, negative, or absurdly large) cannot disable the
+    cap entirely or cause a row to retry forever. The Settings UI
+    enforces the same range via ``min``/``max`` attributes on the
+    number input.
+
+    Falls back to ``CLOUD_ARCHIVE_RETRY_MAX_ATTEMPTS`` (the import-time
+    default) on any IO/parse error so the failure-handling code path
+    never raises.
+    """
+    try:
+        import yaml
+        from config import CONFIG_YAML
+        with open(CONFIG_YAML, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        raw = cfg.get('cloud_archive', {}).get(
+            'retry_max_attempts', CLOUD_ARCHIVE_RETRY_MAX_ATTEMPTS,
+        )
+        value = int(raw)
+        if value < _RETRY_MAX_ATTEMPTS_MIN or value > _RETRY_MAX_ATTEMPTS_MAX:
+            return CLOUD_ARCHIVE_RETRY_MAX_ATTEMPTS
+        return value
+    except Exception:
+        return CLOUD_ARCHIVE_RETRY_MAX_ATTEMPTS
+
+
+def _mark_upload_failure(
+    conn: sqlite3.Connection, rel_path: str, err_msg: str,
+) -> None:
+    """Mark ``rel_path`` failed; promote to ``dead_letter`` when capped.
+
+    Phase 2.6 — atomically increments ``retry_count`` and decides whether
+    the row should remain ``'failed'`` (auto-retry on next sync iteration)
+    or be promoted to ``'dead_letter'`` (excluded from auto-picking,
+    requires manual recovery via Failed Jobs page in Phase 4).
+
+    The cap is read fresh from config.yaml on every call so a Settings
+    change takes effect on the next failure without restarting the
+    service. The decision uses ``CASE`` inside the ``UPDATE`` so the cap
+    check and ``retry_count`` increment happen in the same statement —
+    no read-modify-write race window.
+
+    A promotion is always logged at WARNING level so the operator can
+    see in journalctl which files have been permanently abandoned by
+    auto-sync. The previous (uncapped) behaviour silently retried
+    every cycle forever.
+    """
+    cap = _read_retry_max_attempts_setting()
+    cur = conn.execute(
+        """UPDATE cloud_synced_files
+           SET status = CASE
+                   WHEN retry_count + 1 >= ? THEN 'dead_letter'
+                   ELSE 'failed'
+               END,
+               last_error = ?,
+               retry_count = retry_count + 1
+           WHERE file_path = ?""",
+        (cap, err_msg, rel_path),
+    )
+    if cur.rowcount:
+        # Re-read the row to know which terminal state we landed in so
+        # the log message is accurate. Cheap (single indexed lookup).
+        post = conn.execute(
+            "SELECT status, retry_count FROM cloud_synced_files "
+            "WHERE file_path = ?",
+            (rel_path,),
+        ).fetchone()
+        if post and post["status"] == 'dead_letter':
+            logger.warning(
+                "Cloud sync: %s reached retry cap (%d attempts) — "
+                "moved to dead_letter. Recover via Failed Jobs page.",
+                rel_path, post["retry_count"],
+            )
+
+
 def _discover_events(
     teslacam_path: str,
     conn: Optional[sqlite3.Connection] = None,
@@ -369,12 +461,17 @@ def _discover_events(
     If *conn* is provided, events already marked ``synced`` in the
     database are excluded.
     """
-    # Build set of already-synced event paths for fast lookup
+    # Build set of event paths that are off-limits for auto-picking:
+    #   * status='synced' — already uploaded, never re-pick
+    #   * status='dead_letter' — Phase 2.6: hit retry cap; manual recovery
+    #     only (Failed Jobs page in Phase 4). Re-picking would re-burn
+    #     bandwidth on files that have proven they will not succeed.
     synced_paths: set = set()
     if conn is not None:
         try:
             rows = conn.execute(
-                "SELECT file_path FROM cloud_synced_files WHERE status = 'synced'"
+                "SELECT file_path FROM cloud_synced_files "
+                "WHERE status IN ('synced', 'dead_letter')"
             ).fetchall()
             synced_paths = {r["file_path"] for r in rows}
         except Exception:
@@ -1089,24 +1186,15 @@ def _run_sync(
                     logger.error("Sync: [%d/%d] %s FAILED (exit %d): %s",
                                 idx + 1, len(to_sync), rel_path,
                                 returncode, err_msg[:200])
-                    conn.execute(
-                        """UPDATE cloud_synced_files
-                           SET status = 'failed',
-                               last_error = ?,
-                               retry_count = retry_count + 1
-                           WHERE file_path = ?""",
-                        (err_msg[:255], rel_path)
+                    _mark_upload_failure(
+                        conn, rel_path, err_msg[:255],
                     )
                     _fsync_db(conn)
 
             except Exception as e:
                 logger.error("Sync: %s error: %s", rel_path, e)
-                conn.execute(
-                    """UPDATE cloud_synced_files
-                       SET status = 'failed', last_error = ?,
-                           retry_count = retry_count + 1
-                       WHERE file_path = ?""",
-                    (str(e)[:255], rel_path)
+                _mark_upload_failure(
+                    conn, rel_path, str(e)[:255],
                 )
                 _fsync_db(conn)
 
@@ -1341,12 +1429,25 @@ def get_sync_history(db_path: str, limit: int = 20) -> List[dict]:
 def get_sync_stats(db_path: str) -> dict:
     """Return aggregate sync statistics for the UI dashboard.
 
-    Keys: total_synced, total_pending, total_failed, total_bytes.
+    Keys: total_synced, total_pending, total_failed, total_dead_letter,
+    total_bytes.
+
+    ``total_failed`` is the SUM of ``failed`` and ``dead_letter`` rows
+    so the dashboard counter does NOT silently DECREASE when a row hits
+    the Phase 2.6 retry cap and is promoted from ``failed`` →
+    ``dead_letter``. Without this, a permanently broken clip that
+    promotes after retry 5 would make problems look like they
+    self-resolved on the dashboard.
+
+    ``total_dead_letter`` is also exposed as a subset so a future
+    Failed Jobs page (Phase 4) can break the count down by terminal
+    state without changing this aggregate.
     """
     conn = _init_cloud_tables(db_path)
     try:
         counts = {}
-        for status in ("synced", "pending", "failed", "uploading"):
+        for status in ("synced", "pending", "failed", "uploading",
+                       "dead_letter"):
             row = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM cloud_synced_files WHERE status = ?",
                 (status,),
@@ -1374,7 +1475,8 @@ def get_sync_stats(db_path: str) -> dict:
         return {
             "total_synced": counts["synced"],
             "total_pending": effective_pending,
-            "total_failed": counts["failed"],
+            "total_failed": counts["failed"] + counts["dead_letter"],
+            "total_dead_letter": counts["dead_letter"],
             "total_bytes": total_bytes,
         }
     finally:
@@ -1545,7 +1647,8 @@ def remove_from_queue(file_path: str) -> Tuple[bool, str]:
     is local data that the user owns, so deletion is allowed regardless of
     cloud provider configuration, sync worker state, or row status — including
     rows stuck in ``uploading`` (e.g. when the sync was interrupted before the
-    worker could reset the row back to ``pending``) and ``failed`` rows.
+    worker could reset the row back to ``pending``), ``failed`` rows, and
+    Phase 2.6 ``dead_letter`` rows that hit the retry cap.
 
     ``synced`` rows are preserved so deleting from the queue cannot wipe the
     historical record of files already uploaded; those rows are not exposed
@@ -1568,10 +1671,11 @@ def remove_from_queue(file_path: str) -> Tuple[bool, str]:
 def clear_queue() -> Tuple[bool, str]:
     """Clear every non-``synced`` item from the sync queue.
 
-    Includes ``queued``, ``pending``, ``uploading`` and ``failed`` rows so the
-    user can always reset the queue — even after stopping the sync worker or
-    disconnecting the cloud provider, both of which can leave rows stuck in
-    ``uploading`` state.  ``synced`` history rows are preserved.
+    Includes ``queued``, ``pending``, ``uploading``, ``failed``, and Phase 2.6
+    ``dead_letter`` rows so the user can always reset the queue — even after
+    stopping the sync worker or disconnecting the cloud provider, both of
+    which can leave rows stuck in ``uploading`` state.  ``synced`` history
+    rows are preserved.
     """
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:

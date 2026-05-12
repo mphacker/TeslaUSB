@@ -134,6 +134,13 @@ CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = float(_cloud.get(
     'disk_space_pause_seconds', 300,
 ))
 
+# Phase 2.6 — bulk cloud sync retry cap. After this many consecutive
+# failures, the worker moves a row from 'failed' to 'dead_letter' and
+# excludes it from automatic re-picking. The Settings page allows
+# 1-20; values outside that range are clamped to the default at read
+# time (see cloud_archive_service._read_retry_max_attempts_setting).
+CLOUD_ARCHIVE_RETRY_MAX_ATTEMPTS = int(_cloud.get('retry_max_attempts', 5))
+
 # Phase 1 item 1.3 — "retention respects cloud". Controls whether the
 # archive_watchdog retention prune may delete clips that have NOT yet
 # been backed up to the cloud (status='synced' in cloud_synced_files).

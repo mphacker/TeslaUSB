@@ -184,3 +184,120 @@ class TestSaveSettingsCloudProtectionPersistence:
         last = captured_updates['last']
         assert last['cloud_archive.max_upload_mbps'] == 15
         assert last['cloud_archive.cloud_min_retention_days'] == 45
+
+
+class TestSaveSettingsRetryCapClamping:
+    """Phase 2.6: ``cloud_retry_max_attempts`` must be clamped to 1-20
+    on POST. Out-of-range or non-numeric input must fall back to the
+    documented default (5) — never crash the form handler.
+    """
+
+    def test_in_range_value_persists(
+        self, client, base_form, captured_updates,
+    ):
+        form = dict(base_form)
+        form['cloud_retry_max_attempts'] = '7'
+        with patch(
+            'blueprints.cloud_archive._get_cloud_config_cached',
+            return_value={'provider': ''},
+        ), patch(
+            'blueprints.cloud_archive.os.path.isfile', return_value=False,
+        ):
+            r = client.post('/cloud/settings',
+                            data=form,
+                            follow_redirects=False)
+        assert r.status_code in (302, 303)
+        last = captured_updates['last']
+        assert last['cloud_archive.retry_max_attempts'] == 7
+
+    def test_above_max_clamped_to_twenty(
+        self, client, base_form, captured_updates,
+    ):
+        form = dict(base_form)
+        form['cloud_retry_max_attempts'] = '99'
+        with patch(
+            'blueprints.cloud_archive._get_cloud_config_cached',
+            return_value={'provider': ''},
+        ), patch(
+            'blueprints.cloud_archive.os.path.isfile', return_value=False,
+        ):
+            r = client.post('/cloud/settings',
+                            data=form,
+                            follow_redirects=False)
+        assert r.status_code in (302, 303)
+        last = captured_updates['last']
+        assert last['cloud_archive.retry_max_attempts'] == 20
+
+    def test_below_min_clamped_to_one(
+        self, client, base_form, captured_updates,
+    ):
+        form = dict(base_form)
+        form['cloud_retry_max_attempts'] = '0'
+        with patch(
+            'blueprints.cloud_archive._get_cloud_config_cached',
+            return_value={'provider': ''},
+        ), patch(
+            'blueprints.cloud_archive.os.path.isfile', return_value=False,
+        ):
+            r = client.post('/cloud/settings',
+                            data=form,
+                            follow_redirects=False)
+        assert r.status_code in (302, 303)
+        last = captured_updates['last']
+        assert last['cloud_archive.retry_max_attempts'] == 1
+
+    def test_negative_clamped_to_one(
+        self, client, base_form, captured_updates,
+    ):
+        form = dict(base_form)
+        form['cloud_retry_max_attempts'] = '-5'
+        with patch(
+            'blueprints.cloud_archive._get_cloud_config_cached',
+            return_value={'provider': ''},
+        ), patch(
+            'blueprints.cloud_archive.os.path.isfile', return_value=False,
+        ):
+            r = client.post('/cloud/settings',
+                            data=form,
+                            follow_redirects=False)
+        assert r.status_code in (302, 303)
+        last = captured_updates['last']
+        assert last['cloud_archive.retry_max_attempts'] == 1
+
+    def test_non_numeric_falls_back_to_default(
+        self, client, base_form, captured_updates,
+    ):
+        form = dict(base_form)
+        form['cloud_retry_max_attempts'] = 'abc'
+        with patch(
+            'blueprints.cloud_archive._get_cloud_config_cached',
+            return_value={'provider': ''},
+        ), patch(
+            'blueprints.cloud_archive.os.path.isfile', return_value=False,
+        ):
+            r = client.post('/cloud/settings',
+                            data=form,
+                            follow_redirects=False)
+        assert r.status_code in (302, 303)
+        last = captured_updates['last']
+        # Default is 5 (matches config.yaml seed).
+        assert last['cloud_archive.retry_max_attempts'] == 5
+
+    def test_missing_field_falls_back_to_default(
+        self, client, base_form, captured_updates,
+    ):
+        # base_form does NOT include cloud_retry_max_attempts at all —
+        # POST handler must still write the default rather than crash
+        # or skip the key.
+        with patch(
+            'blueprints.cloud_archive._get_cloud_config_cached',
+            return_value={'provider': ''},
+        ), patch(
+            'blueprints.cloud_archive.os.path.isfile', return_value=False,
+        ):
+            r = client.post('/cloud/settings',
+                            data=base_form,
+                            follow_redirects=False)
+        assert r.status_code in (302, 303)
+        last = captured_updates['last']
+        assert last['cloud_archive.retry_max_attempts'] == 5

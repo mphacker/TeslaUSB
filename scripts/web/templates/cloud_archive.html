@@ -426,6 +426,26 @@
                     <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Keep this much free on cloud — sync stops before filling to 100%.</p>
                 </div>
 
+                {# Phase 2.6 — bulk cloud sync retry cap. Mirrors the
+                   LES retry input below for consistency. Default 5,
+                   range 1-20. Setting writes to
+                   cloud_archive.retry_max_attempts; the worker
+                   re-reads it on every failure so the change takes
+                   effect on the next sync iteration without restart. #}
+                <div style="margin-bottom: var(--space-4);">
+                    <label for="cloudRetryMaxAttempts" style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
+                        Retry attempts before giving up
+                    </label>
+                    <input type="number" id="cloudRetryMaxAttempts" name="cloud_retry_max_attempts"
+                           min="1" max="20" step="1"
+                           value="{{ cloud_retry_max_attempts }}"
+                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary);">
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">
+                        How many times to retry a failed upload before marking it permanently failed.
+                        Failed uploads can still be retried manually from the Failed Jobs page.
+                    </p>
+                </div>
+
                 {# Advanced sync options #}
                 <div style="margin-bottom: var(--space-3);">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">

@@ -326,57 +326,79 @@ def _dedupe_detected_events(conn: sqlite3.Connection) -> int:
     The "keep" ranking matches the waypoint dedup: prefer non-NULL
     ``video_path``, prefer paths under ``ArchivedClips`` (durable SD-card
     location) over ``RecentClips`` (Tesla's rotating buffer), break ties
-    by ``id``. ``trip_id`` is wrapped in ``COALESCE`` because Sentry/Saved
-    events have ``trip_id=NULL`` and SQL ``NULL = NULL`` is false.
+    by ``id``.
+
+    The function runs two passes — one over rows with a real ``trip_id``
+    and one over Sentry/Saved rows with ``trip_id IS NULL`` — instead of
+    using a sentinel value in the GROUP BY. This avoids any risk of
+    colliding with a real ``trip_id`` that someday matches the sentinel
+    and keeps the SQL semantics explicit.
     """
-    dups = conn.execute(
-        """SELECT COALESCE(trip_id, -1) AS trip_key,
-                  timestamp, lat, lon, event_type, COUNT(*) AS cnt
+    deleted = 0
+
+    # --- Pass 1: rows with a concrete trip_id ---------------------
+    dups_with_trip = conn.execute(
+        """SELECT trip_id, timestamp, lat, lon, event_type, COUNT(*) AS cnt
            FROM detected_events
-           WHERE timestamp IS NOT NULL
-           GROUP BY trip_key, timestamp, lat, lon, event_type
+           WHERE timestamp IS NOT NULL AND trip_id IS NOT NULL
+           GROUP BY trip_id, timestamp, lat, lon, event_type
            HAVING cnt > 1"""
     ).fetchall()
-    deleted = 0
-    for d in dups:
+    for d in dups_with_trip:
         # Positional access so the helper works whether or not the
         # caller set ``conn.row_factory = sqlite3.Row`` (the
         # production ``repair()`` does; isolated unit tests may not).
-        trip_key, ts, lat, lon, ev_type = d[0], d[1], d[2], d[3], d[4]
-        if trip_key == -1:
-            rows = conn.execute(
-                """SELECT id, video_path FROM detected_events
-                   WHERE trip_id IS NULL
-                     AND timestamp = ? AND lat = ? AND lon = ?
-                     AND event_type = ?
-                   ORDER BY
-                     CASE WHEN video_path IS NOT NULL AND video_path != ''
-                          THEN 0 ELSE 1 END,
-                     CASE WHEN video_path LIKE '%ArchivedClips%'
-                          THEN 0 ELSE 1 END,
-                     id""",
-                (ts, lat, lon, ev_type),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT id, video_path FROM detected_events
-                   WHERE trip_id = ?
-                     AND timestamp = ? AND lat = ? AND lon = ?
-                     AND event_type = ?
-                   ORDER BY
-                     CASE WHEN video_path IS NOT NULL AND video_path != ''
-                          THEN 0 ELSE 1 END,
-                     CASE WHEN video_path LIKE '%ArchivedClips%'
-                          THEN 0 ELSE 1 END,
-                     id""",
-                (trip_key, ts, lat, lon, ev_type),
-            ).fetchall()
+        trip_id, ts, lat, lon, ev_type = d[0], d[1], d[2], d[3], d[4]
+        rows = conn.execute(
+            """SELECT id FROM detected_events
+               WHERE trip_id = ?
+                 AND timestamp = ? AND lat = ? AND lon = ?
+                 AND event_type = ?
+               ORDER BY
+                 CASE WHEN video_path IS NOT NULL AND video_path != ''
+                      THEN 0 ELSE 1 END,
+                 CASE WHEN video_path LIKE '%ArchivedClips%'
+                      THEN 0 ELSE 1 END,
+                 id""",
+            (trip_id, ts, lat, lon, ev_type),
+        ).fetchall()
         drop_ids = [(r[0],) for r in rows[1:]]
         if drop_ids:
             conn.executemany(
                 "DELETE FROM detected_events WHERE id = ?", drop_ids
             )
             deleted += len(drop_ids)
+
+    # --- Pass 2: Sentry/Saved rows with trip_id IS NULL -----------
+    dups_null_trip = conn.execute(
+        """SELECT timestamp, lat, lon, event_type, COUNT(*) AS cnt
+           FROM detected_events
+           WHERE timestamp IS NOT NULL AND trip_id IS NULL
+           GROUP BY timestamp, lat, lon, event_type
+           HAVING cnt > 1"""
+    ).fetchall()
+    for d in dups_null_trip:
+        ts, lat, lon, ev_type = d[0], d[1], d[2], d[3]
+        rows = conn.execute(
+            """SELECT id FROM detected_events
+               WHERE trip_id IS NULL
+                 AND timestamp = ? AND lat = ? AND lon = ?
+                 AND event_type = ?
+               ORDER BY
+                 CASE WHEN video_path IS NOT NULL AND video_path != ''
+                      THEN 0 ELSE 1 END,
+                 CASE WHEN video_path LIKE '%ArchivedClips%'
+                      THEN 0 ELSE 1 END,
+                 id""",
+            (ts, lat, lon, ev_type),
+        ).fetchall()
+        drop_ids = [(r[0],) for r in rows[1:]]
+        if drop_ids:
+            conn.executemany(
+                "DELETE FROM detected_events WHERE id = ?", drop_ids
+            )
+            deleted += len(drop_ids)
+
     return deleted
 
 

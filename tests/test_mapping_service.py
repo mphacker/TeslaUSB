@@ -1605,6 +1605,57 @@ class TestIndexVideo:
         assert wp_count_after_second == 2
         conn.close()
 
+    def test_indexed_files_fallback_does_not_overmatch_underscore(self, tmp_path):
+        # Tesla filenames contain ``_`` separators (the SQLite LIKE
+        # single-character wildcard). Without an ``ESCAPE`` clause, the
+        # fallback's ``LIKE '%basename'`` could match a different clip
+        # whose basename happens to align character-for-character with
+        # ``_`` standing in for any character. This test seeds an
+        # ``indexed_files`` row whose basename differs from the clip
+        # only at the ``_`` positions and confirms the fallback does
+        # NOT short-circuit (the indexer still runs and produces real
+        # waypoints).
+        from datetime import datetime, timezone
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+
+        payloads = [
+            _make_sei_protobuf(lat=37.7749, lon=-122.4194, speed=25.0),
+        ]
+        mp4_data = _make_synthetic_mp4(payloads)
+        teslacam = tmp_path / "TeslaCam" / "RecentClips"
+        teslacam.mkdir(parents=True)
+        # The clip we're about to index:
+        video_file = teslacam / "2025-11-08_08-15-44-front.mp4"
+        video_file.write_bytes(mp4_data)
+
+        # Seed an indexed_files row for a DIFFERENT clip whose basename
+        # matches the target clip's basename only if ``_`` is treated
+        # as a wildcard (every ``_`` replaced with another character).
+        # Without escaping, the naive ``LIKE '%2025-11-08_08-15-44-...'``
+        # query would mistakenly match this row.
+        impostor_basename = "2025-11-08X08-15-44-front.mp4"
+        impostor_abs = "/some/other/path/" + impostor_basename
+        conn.execute(
+            "INSERT INTO indexed_files "
+            "(file_path, file_size, file_mtime, indexed_at, "
+            "waypoint_count, event_count) VALUES (?, ?, ?, ?, ?, ?)",
+            (impostor_abs, 9999, 1.0,
+             datetime.now(timezone.utc).isoformat(), 5, 0),
+        )
+        conn.commit()
+
+        # The indexer must NOT treat the impostor row as evidence
+        # that THIS clip was already indexed. It should index normally.
+        result = _index_video(
+            conn, str(video_file), str(tmp_path / "TeslaCam"),
+            sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
+            trip_gap_minutes=5,
+        )
+        assert result.outcome == IndexOutcome.INDEXED
+        assert result.waypoints == 1
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Trip Fragmentation Defense Tests

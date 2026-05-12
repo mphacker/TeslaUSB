@@ -2415,17 +2415,34 @@ def _index_video(
     # absolute file path stored in ``indexed_files`` may differ from
     # the current call site (e.g., archive moves change the directory)
     # and the path separator differs by OS.
+    #
+    # Notes:
+    # * Tesla filenames contain underscores (``2025-11-08_08-15-44-front.mp4``)
+    #   which SQLite ``LIKE`` treats as a single-character wildcard. We
+    #   pass an ``ESCAPE '\\'`` clause and escape ``_``, ``%`` in the
+    #   basename so we don't over-match across distinct clips that happen
+    #   to share a similar character pattern.
+    # * The leading ``%`` prevents this query from using an index — but
+    #   ``indexed_files`` has at most one row per indexed clip (low
+    #   thousands across the lifetime of a Pi), so the full scan is
+    #   fast and runs at most once per ``_index_video`` invocation.
     basename_only = os.path.basename(video_path)
     if basename_only:
+        escaped = (
+            basename_only.replace('\\', '\\\\')
+                         .replace('%', '\\%')
+                         .replace('_', '\\_')
+        )
         prior = conn.execute(
             "SELECT 1 FROM indexed_files "
-            "WHERE file_path LIKE ? AND waypoint_count > 0 LIMIT 1",
-            ('%' + basename_only,)
+            "WHERE file_path LIKE ? ESCAPE '\\' "
+            "AND waypoint_count > 0 LIMIT 1",
+            ('%' + escaped,)
         ).fetchone()
         if prior:
             logger.debug(
                 "Skipping %s: indexed_files shows prior index "
-                "(waypoint_path may have been NULLed by purge)",
+                "(video_path may have been NULLed by purge)",
                 rel_path,
             )
             return IndexResult(IndexOutcome.ALREADY_INDEXED)

@@ -504,20 +504,21 @@ def archive_event(folder: str, event_name: str, teslacam_base: str) -> Tuple[boo
         teslacam_base: Base TeslaCam directory.
 
     Returns (success, message).
+
+    Note: the worker thread waits its turn behind higher-priority
+    background work (archive worker, indexer, bulk cloud sync, LES) via
+    the global ``task_coordinator`` (Phase 2.2 of #97). This function
+    returns immediately; if the system is busy the worker blocks for up
+    to 60 s for a slot before reporting "system busy" via the status
+    object. The pre-Phase-2.2 racy ``get_sync_status().running`` check
+    has been removed — the coordinator is the single mutual-exclusion
+    point.
     """
     global _archive_status
 
     with _archive_lock:
         if _archive_status["running"]:
             return False, "Another archive is already in progress."
-
-    # Don't start if a bulk sync is running (shared network/resource constraint)
-    try:
-        from services.cloud_archive_service import get_sync_status
-        if get_sync_status().get("running"):
-            return False, "A cloud sync is in progress. Please wait for it to finish."
-    except Exception:
-        pass
 
     creds = _load_creds()
     if not creds:
@@ -584,8 +585,34 @@ def archive_event(folder: str, event_name: str, teslacam_base: str) -> Tuple[boo
 
 def _archive_worker(local_path: str, rel_path: str, files: list,
                     total_size: int, creds: dict, is_event_dir: bool):
-    """Background thread for event archive."""
+    """Background thread for event archive.
+
+    Phase 2.2 (#97): blocks for up to 60 s on the global
+    ``task_coordinator`` before doing any rclone work, so a manual
+    upload waits its turn behind the indexer / archive worker / bulk
+    cloud sync / LES instead of racing for SD-card bandwidth (the race
+    that contributed to the May 12 06:11 watchdog reset documented in
+    #109). On coordinator timeout the status is set to "system busy"
+    and the worker exits cleanly.
+    """
     global _archive_status
+
+    # Phase 2.2: wait our turn behind higher-priority background work.
+    from services.task_coordinator import acquire_task, release_task
+    _MANUAL_UPLOAD_TASK = 'cloud_manual_upload'
+    if not acquire_task(_MANUAL_UPLOAD_TASK, wait_seconds=60.0):
+        _archive_status.update({
+            "running": False,
+            "error": (
+                "System busy with higher-priority work "
+                "(archive/indexer/cloud sync). Please try again in a moment."
+            ),
+        })
+        logger.warning(
+            "Manual cloud upload: could not acquire task slot after 60s — "
+            "skipping upload of %s", rel_path,
+        )
+        return
 
     try:
         from config import CLOUD_ARCHIVE_REMOTE_PATH, CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
@@ -719,6 +746,8 @@ def _archive_worker(local_path: str, rel_path: str, files: list,
         if _archive_status.get("running"):
             _archive_status["running"] = False
         _remove_temp_conf()
+        # Phase 2.2: release the coordinator slot so other tasks can run.
+        release_task(_MANUAL_UPLOAD_TASK)
 
 
 def get_archive_status() -> Dict:

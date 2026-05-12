@@ -93,6 +93,16 @@ _SUMMARY_INTERVAL_SECONDS = 60.0
 #               'last_emit': monotonic_seconds}. Guarded by ``_lock``.
 _task_stats: dict = {}
 
+# Issue #104 mitigation C: any per-task summary window where ``max_hold``
+# crossed this threshold is logged at WARNING instead of INFO. The
+# BCM2835 hardware watchdog on the Pi Zero 2 W fires after 90 s of no
+# ping; a single task holding the lock for ≥ 60 s is a near-miss
+# precursor to the SDIO-contention crash mode (see
+# ``.github/copilot-instructions.md`` and issue #104). Surfacing it at
+# default journalctl verbosity makes the precursor visible without
+# requiring ``-p debug``.
+WATCHDOG_NEAR_MISS_THRESHOLD_SECONDS = 60.0
+
 
 def _record_release_stats(task_name: str, hold_seconds: float) -> None:
     """Update per-task stats and emit a summary if window elapsed.
@@ -102,6 +112,12 @@ def _record_release_stats(task_name: str, hold_seconds: float) -> None:
     that fires once a minute (e.g. archive) gets one INFO line per
     iteration, no spam. A task that fires 100x/minute (e.g. indexer)
     gets one INFO line summarizing the burst. Stats reset on emit.
+
+    Issue #104 mitigation C: when ``max_hold`` for the window crosses
+    :data:`WATCHDOG_NEAR_MISS_THRESHOLD_SECONDS`, the summary is logged
+    at WARNING and tagged with " (NEAR-MISS hardware watchdog
+    threshold)" so the precursor signal to the SDIO-contention crash
+    mode is visible at default journalctl verbosity.
     """
     now = time.monotonic()
     stats = _task_stats.get(task_name)
@@ -123,10 +139,18 @@ def _record_release_stats(task_name: str, hold_seconds: float) -> None:
     # Emit + reset. The summary is the user-visible signal that the
     # task is alive and how much lock-time it consumed.
     avg = stats['total_hold'] / stats['acquires']
-    logger.info(
+    near_miss = stats['max_hold'] >= WATCHDOG_NEAR_MISS_THRESHOLD_SECONDS
+    log_level = logging.WARNING if near_miss else logging.INFO
+    suffix = (
+        " (NEAR-MISS hardware watchdog threshold)"
+        if near_miss else ""
+    )
+    logger.log(
+        log_level,
         "task_coordinator: '%s' summary — %d acquire(s) in %.1fs, "
-        "avg hold %.2fs, max hold %.2fs",
+        "avg hold %.2fs, max hold %.2fs%s",
         task_name, stats['acquires'], elapsed, avg, stats['max_hold'],
+        suffix,
     )
     stats['acquires'] = 0
     stats['total_hold'] = 0.0

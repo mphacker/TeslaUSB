@@ -1702,6 +1702,39 @@ EOF
 chmod 644 "$WATCHDOG_CONF"
 echo "  Applied TeslaUSB watchdog configuration"
 
+# Issue #104 mitigation D: boost the watchdog daemon's CPU + I/O
+# scheduling so a heavy archive backlog drain (which saturates the
+# shared SDIO controller on the Pi Zero 2 W) cannot starve it long
+# enough to miss its /dev/watchdog ping window. Without this the
+# daemon inherits default Nice=0 + best-effort I/O, which a
+# CPU-bound load 7+ + saturated SDIO can deprive of slices for the
+# ~3-6 minutes a single contended _atomic_copy takes — long enough
+# to exceed the 90s hardware-watchdog timeout. The drop-in is always
+# overwritten so a corrupted prior file can't survive.
+WATCHDOG_DROPIN_DIR="/etc/systemd/system/watchdog.service.d"
+WATCHDOG_DROPIN_FILE="${WATCHDOG_DROPIN_DIR}/teslausb-priority.conf"
+echo "Configuring watchdog.service priority drop-in (issue #104)..."
+mkdir -p "$WATCHDOG_DROPIN_DIR"
+cat > "$WATCHDOG_DROPIN_FILE" <<'EOF'
+# TeslaUSB watchdog.service priority boost (issue #104)
+#
+# Why: the Pi Zero 2 W shares one SDIO controller between the SD card
+# and the WiFi chip. A heavy archive backlog drain (Tesla writing
+# 6 MB/s + archive reads + indexer parses + SD writes) can saturate
+# the bus and CPU long enough to starve the userspace watchdog daemon
+# for several minutes, missing its 90 s /dev/watchdog ping window and
+# triggering a hardware reset. Boosting Nice + giving it realtime I/O
+# priority makes the daemon scheduler-resilient without affecting
+# correctness — it does negligible work per tick.
+[Service]
+Nice=-5
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+EOF
+chmod 644 "$WATCHDOG_DROPIN_FILE"
+systemctl daemon-reload
+echo "  Installed $WATCHDOG_DROPIN_FILE"
+
 # Enable and start watchdog service
 echo "Enabling watchdog service..."
 systemctl enable watchdog.service || true

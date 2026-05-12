@@ -296,3 +296,233 @@ class TestRepairCore:
         ).fetchone()[0]
         assert wp_video == clip
         conn.close()
+
+
+class TestEventDedup:
+    """Tests for ``_dedupe_detected_events`` — the missing pass that lets
+    duplicate ``detected_events`` rows survive a clock-skew repair when the
+    indexer was triggered twice on the same physical clip.
+    """
+
+    def test_dedupe_keeps_row_with_archived_video_path(self, tmp_path):
+        # Repro of the May 10/11 production duplicates: same FSD event,
+        # same trip, same timestamp/lat/lon. One row has video_path=NULL
+        # (left over from a prior purge), the other has the canonical
+        # ``ArchivedClips/...`` path. After dedup, only the ArchivedClips
+        # row should remain.
+        db = _mk_db(tmp_path)
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO trips(id) VALUES (74)")
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(151,74,'2026-05-10T12:06:20.666600',42.901,-83.630,"
+            "'fsd_disengage',1.0,'',NULL,0,'{}')"
+        )
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(156,74,'2026-05-10T12:06:20.666600',42.901,-83.630,"
+            "'fsd_disengage',1.0,'',"
+            "'ArchivedClips/2026-05-11_07-58-40-front.mp4',0,'{}')"
+        )
+        conn.commit()
+
+        deleted = clock_skew_repair._dedupe_detected_events(conn)
+        conn.commit()
+
+        assert deleted == 1
+        rows = conn.execute(
+            "SELECT id, video_path FROM detected_events ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == 156
+        assert rows[0][1] == 'ArchivedClips/2026-05-11_07-58-40-front.mp4'
+        conn.close()
+
+    def test_dedupe_prefers_archivedclips_over_recentclips(self, tmp_path):
+        # When neither row has NULL video_path, prefer the ArchivedClips
+        # path (durable SD-card copy) over RecentClips (Tesla's rolling
+        # buffer that gets rotated out within ~1 hour).
+        db = _mk_db(tmp_path)
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO trips(id) VALUES (74)")
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(1,74,'2026-05-10T12:00:00',42.0,-83.0,"
+            "'sharp_turn',1.0,'','RecentClips/x-front.mp4',0,'{}')"
+        )
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(2,74,'2026-05-10T12:00:00',42.0,-83.0,"
+            "'sharp_turn',1.0,'','ArchivedClips/x-front.mp4',0,'{}')"
+        )
+        conn.commit()
+
+        deleted = clock_skew_repair._dedupe_detected_events(conn)
+        conn.commit()
+
+        assert deleted == 1
+        survivor = conn.execute(
+            "SELECT video_path FROM detected_events"
+        ).fetchone()[0]
+        assert survivor == 'ArchivedClips/x-front.mp4'
+        conn.close()
+
+    def test_dedupe_handles_null_trip_id(self, tmp_path):
+        # Sentry/Saved events have trip_id=NULL. SQL ``NULL = NULL`` is
+        # false, so the dedup must use COALESCE in the GROUP BY and the
+        # subsequent lookup must handle NULL trip_id explicitly.
+        db = _mk_db(tmp_path)
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(1,NULL,'2026-05-10T10:00:00',42.0,-83.0,"
+            "'sentry',1.0,'',NULL,0,'{}')"
+        )
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(2,NULL,'2026-05-10T10:00:00',42.0,-83.0,"
+            "'sentry',1.0,'','SentryClips/2026-05-10_10-14-31/x-front.mp4',"
+            "0,'{}')"
+        )
+        conn.commit()
+
+        deleted = clock_skew_repair._dedupe_detected_events(conn)
+        conn.commit()
+        assert deleted == 1
+        rows = conn.execute(
+            "SELECT id FROM detected_events"
+        ).fetchall()
+        assert [r[0] for r in rows] == [2]
+        conn.close()
+
+    def test_dedupe_keeps_distinct_event_types_at_same_lat_lon(self, tmp_path):
+        # fsd_engage immediately followed by fsd_disengage at the same
+        # GPS coordinate (driver tap-tap on the stalk) MUST NOT be
+        # collapsed into one event — the event_type column is part of
+        # the dedup key.
+        db = _mk_db(tmp_path)
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO trips(id) VALUES (74)")
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(1,74,'2026-05-10T12:00:00',42.0,-83.0,"
+            "'fsd_engage',1.0,'','ArchivedClips/x-front.mp4',0,'{}')"
+        )
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(2,74,'2026-05-10T12:00:00',42.0,-83.0,"
+            "'fsd_disengage',1.0,'','ArchivedClips/x-front.mp4',0,'{}')"
+        )
+        conn.commit()
+
+        deleted = clock_skew_repair._dedupe_detected_events(conn)
+        conn.commit()
+        assert deleted == 0
+        count = conn.execute(
+            "SELECT COUNT(*) FROM detected_events"
+        ).fetchone()[0]
+        assert count == 2
+        conn.close()
+
+    def test_dedupe_idempotent(self, tmp_path):
+        # Running the dedup twice on already-clean data does nothing.
+        db = _mk_db(tmp_path)
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO trips(id) VALUES (74)")
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(1,74,'2026-05-10T12:00:00',42.0,-83.0,"
+            "'fsd_engage',1.0,'','ArchivedClips/x-front.mp4',0,'{}')"
+        )
+        conn.commit()
+
+        first = clock_skew_repair._dedupe_detected_events(conn)
+        conn.commit()
+        second = clock_skew_repair._dedupe_detected_events(conn)
+        conn.commit()
+        assert first == 0
+        assert second == 0
+        count = conn.execute(
+            "SELECT COUNT(*) FROM detected_events"
+        ).fetchone()[0]
+        assert count == 1
+        conn.close()
+
+    def test_repair_removes_event_dups_left_by_re_indexing(self, tmp_path):
+        # End-to-end: a clip that was indexed twice (one set of
+        # waypoints+events with the wrong day, one set with NULL
+        # video_path on the correct day) should end up with exactly one
+        # waypoint AND one event after a single repair pass — not one
+        # waypoint and two events.
+        db = _mk_db(tmp_path)
+        clip = _mk_clip(tmp_path, "2026-05-11_07-50-38-front.mp4", _TRUE_DT)
+        retimed_ts = datetime.fromtimestamp(_TRUE_DT.timestamp()).isoformat()
+
+        conn = sqlite3.connect(db)
+        # Trip 74 — correct day, NULL video_path
+        conn.execute(
+            "INSERT INTO trips(id,start_time,end_time) VALUES "
+            "(74, ?, ?)", (retimed_ts, retimed_ts),
+        )
+        conn.execute(
+            "INSERT INTO waypoints(id,trip_id,timestamp,lat,lon,"
+            "frame_offset,video_path) "
+            "VALUES(101,74, ?, 40.0, -80.0, 0, NULL)",
+            (retimed_ts,),
+        )
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(151,74, ?, 40.0,-80.0,'fsd_disengage',1.0,'',"
+            "NULL,0,'{}')",
+            (retimed_ts,),
+        )
+        # Trip 75 — wrong day, has video_path
+        conn.execute(
+            "INSERT INTO trips(id,start_time,end_time) VALUES "
+            "(75,'2026-05-11T07:50:50','2026-05-11T07:50:50')"
+        )
+        conn.execute(
+            "INSERT INTO waypoints(id,trip_id,timestamp,lat,lon,"
+            "frame_offset,video_path) "
+            "VALUES(201,75,'2026-05-11T07:50:50',40.0,-80.0,0,?)",
+            (clip,),
+        )
+        conn.execute(
+            "INSERT INTO detected_events(id,trip_id,timestamp,lat,lon,"
+            "event_type,severity,description,video_path,frame_offset,metadata)"
+            " VALUES(251,75,'2026-05-11T07:50:50',40.0,-80.0,"
+            "'fsd_disengage',1.0,'',?,0,'{}')",
+            (clip,),
+        )
+        conn.commit()
+        conn.close()
+
+        stats = clock_skew_repair.repair(db, dry_run=False)
+        assert stats["events_deduped"] >= 1
+
+        conn = sqlite3.connect(db)
+        wp_count = conn.execute("SELECT COUNT(*) FROM waypoints").fetchone()[0]
+        ev_count = conn.execute(
+            "SELECT COUNT(*) FROM detected_events"
+        ).fetchone()[0]
+        # One survivor each — both the waypoint dedup AND the new
+        # event dedup ran.
+        assert wp_count == 1
+        assert ev_count == 1
+        # The survivor event carries the real video_path (the NULL
+        # row was the loser).
+        ev_video = conn.execute(
+            "SELECT video_path FROM detected_events"
+        ).fetchone()[0]
+        assert ev_video == clip
+        conn.close()

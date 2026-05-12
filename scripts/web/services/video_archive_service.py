@@ -735,9 +735,12 @@ def _update_geodata_paths(old_abs: str, new_abs: str, filename: str) -> None:
             if row:
                 conn.execute("DELETE FROM indexed_files WHERE file_path = ?", (old_abs,))
                 conn.execute(
-                    "INSERT INTO indexed_files (file_path, file_size, file_mtime, waypoint_count, event_count) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO indexed_files "
+                    "(file_path, file_size, file_mtime, indexed_at, "
+                    "waypoint_count, event_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     (new_abs, row['file_size'], row['file_mtime'],
+                     row['indexed_at'],
                      row['waypoint_count'], row['event_count']),
                 )
 

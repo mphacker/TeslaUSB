@@ -2397,6 +2397,56 @@ def _index_video(
         logger.debug("Skipping %s: canonical key already indexed", rel_path)
         return IndexResult(IndexOutcome.ALREADY_INDEXED)
 
+    # --- Defense-in-depth dedup via indexed_files ---
+    # The waypoints check above misses when ``waypoints.video_path`` was
+    # set to NULL by an earlier ``purge_deleted_videos`` run (which can
+    # happen when a sibling copy of the clip was deleted from disk and
+    # the targeted-purge "surviving copy" check missed a candidate).
+    # When that gap is hit, the indexer would re-parse the clip and
+    # insert a SECOND set of waypoints + detected_events with the same
+    # SEI data, producing duplicate event pins on the map.
+    #
+    # ``indexed_files`` is the authoritative "we processed this physical
+    # file" record and is keyed on the absolute file path. If ANY row
+    # exists for this canonical key with ``waypoint_count > 0``, the
+    # clip was already indexed at some point — even if the surviving
+    # waypoint/event rows have lost their ``video_path``. Bail out
+    # rather than re-insert. We match on basename suffix because the
+    # absolute file path stored in ``indexed_files`` may differ from
+    # the current call site (e.g., archive moves change the directory)
+    # and the path separator differs by OS.
+    #
+    # Notes:
+    # * Tesla filenames contain underscores (``2025-11-08_08-15-44-front.mp4``)
+    #   which SQLite ``LIKE`` treats as a single-character wildcard. We
+    #   pass an ``ESCAPE '\\'`` clause and escape ``_``, ``%`` in the
+    #   basename so we don't over-match across distinct clips that happen
+    #   to share a similar character pattern.
+    # * The leading ``%`` prevents this query from using an index — but
+    #   ``indexed_files`` has at most one row per indexed clip (low
+    #   thousands across the lifetime of a Pi), so the full scan is
+    #   fast and runs at most once per ``_index_video`` invocation.
+    basename_only = os.path.basename(video_path)
+    if basename_only:
+        escaped = (
+            basename_only.replace('\\', '\\\\')
+                         .replace('%', '\\%')
+                         .replace('_', '\\_')
+        )
+        prior = conn.execute(
+            "SELECT 1 FROM indexed_files "
+            "WHERE file_path LIKE ? ESCAPE '\\' "
+            "AND waypoint_count > 0 LIMIT 1",
+            ('%' + escaped,)
+        ).fetchone()
+        if prior:
+            logger.debug(
+                "Skipping %s: indexed_files shows prior index "
+                "(video_path may have been NULLed by purge)",
+                rel_path,
+            )
+            return IndexResult(IndexOutcome.ALREADY_INDEXED)
+
     # Extract SEI messages
     waypoint_dicts = []
     sei_count = 0

@@ -116,3 +116,85 @@ class TestStartStopShims:
         ):
             # Should not raise.
             vas.stop_archive_timer()
+
+
+class TestUpdateGeodataPaths:
+    """When the archive worker copies a RecentClips file to ArchivedClips,
+    ``_update_geodata_paths`` rewrites the geodata DB to point at the new
+    location. The ``indexed_files`` row gets recreated under the new
+    absolute path (it's the primary key) — earlier versions of this code
+    dropped the ``indexed_at`` column from the INSERT, leaving the new
+    row with ``indexed_at = NULL``. That cosmetic bug confused the daily
+    stale-scan and any UI that displayed indexing recency. Pin the fix.
+    """
+
+    def test_indexed_at_is_preserved_across_archive(self, tmp_path):
+        import sqlite3
+
+        db_path = str(tmp_path / "geo.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE indexed_files (
+                file_path TEXT PRIMARY KEY,
+                file_size INTEGER,
+                file_mtime REAL,
+                indexed_at TEXT,
+                waypoint_count INTEGER DEFAULT 0,
+                event_count INTEGER DEFAULT 0
+            );
+            CREATE TABLE waypoints (
+                id INTEGER PRIMARY KEY,
+                trip_id INTEGER, timestamp TEXT, lat REAL, lon REAL,
+                video_path TEXT, frame_offset INTEGER
+            );
+            CREATE TABLE detected_events (
+                id INTEGER PRIMARY KEY,
+                trip_id INTEGER, timestamp TEXT, lat REAL, lon REAL,
+                event_type TEXT, severity REAL, description TEXT,
+                video_path TEXT, frame_offset INTEGER, metadata TEXT
+            );
+            """
+        )
+        old_abs = "/mnt/gadget/part1-ro/TeslaCam/RecentClips/2026-05-10_12-00-00-front.mp4"
+        new_abs = "/home/pi/ArchivedClips/2026-05-10_12-00-00-front.mp4"
+        original_indexed_at = "2026-05-10T12:01:30.123456+00:00"
+        conn.execute(
+            "INSERT INTO indexed_files VALUES (?, ?, ?, ?, ?, ?)",
+            (old_abs, 12345, 1747000000.0, original_indexed_at, 5, 1),
+        )
+        conn.commit()
+        conn.close()
+
+        # Patch the module-level constant the function reads, then run.
+        with patch.object(vas, 'ARCHIVE_ENABLED', True), \
+             patch('config.MAPPING_DB_PATH', db_path):
+            vas._update_geodata_paths(
+                old_abs, new_abs,
+                "2026-05-10_12-00-00-front.mp4",
+            )
+
+        conn = sqlite3.connect(db_path)
+        # Old row deleted, new row inserted under the ArchivedClips path.
+        old_row = conn.execute(
+            "SELECT * FROM indexed_files WHERE file_path = ?", (old_abs,)
+        ).fetchone()
+        assert old_row is None
+        new_row = conn.execute(
+            "SELECT file_size, file_mtime, indexed_at, waypoint_count, "
+            "event_count FROM indexed_files WHERE file_path = ?",
+            (new_abs,),
+        ).fetchone()
+        assert new_row is not None
+        # Critical: indexed_at must be carried over, not NULL.
+        assert new_row[2] == original_indexed_at, (
+            "indexed_at was dropped during archive — "
+            "INSERT regressed without the column"
+        )
+        # Other columns also preserved.
+        assert new_row[0] == 12345
+        assert new_row[1] == 1747000000.0
+        assert new_row[3] == 5
+        assert new_row[4] == 1
+        conn.close()
+

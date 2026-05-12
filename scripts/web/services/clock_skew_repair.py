@@ -25,7 +25,12 @@ This script:
   4. Dedupes waypoints within each surviving trip (one row per
      ``(timestamp, lat, lon)``, keeping the row that has a
      ``video_path``).
-  5. Recomputes per-trip ``start_time``, ``end_time``, start/end
+  5. Dedupes ``detected_events`` rows that became identical after the
+     retime (one row per ``(trip_id, timestamp, lat, lon, event_type)``,
+     keeping the row that has a ``video_path``). Without this pass,
+     events that were inserted twice by the indexer survive the
+     waypoint cleanup and show as duplicate pins on the map.
+  6. Recomputes per-trip ``start_time``, ``end_time``, start/end
      coordinates, ``distance_km`` and ``duration_seconds`` and
      deletes any trip that ended up with zero waypoints.
 
@@ -299,10 +304,109 @@ def _shift_video_timestamps(conn: sqlite3.Connection,
     return len(wp_updates), len(ev_updates)
 
 
-def _dedupe_and_recompute(conn: sqlite3.Connection) -> Tuple[int, int, int]:
+def _dedupe_detected_events(conn: sqlite3.Connection) -> int:
+    """Drop duplicate ``detected_events`` rows produced by re-indexing.
+
+    When the indexer processes the same physical clip twice (which can
+    happen if ``waypoints.video_path`` was nulled by ``purge_deleted_videos``
+    between runs — the dedup at ``mapping_service._index_video`` keys on
+    ``video_path IN (...)`` and misses NULL rows), two sets of events get
+    inserted. Phase A's per-clip retime then shifts both sets to the same
+    timestamp, after which they become exact ``(trip_id, timestamp, lat,
+    lon, event_type)`` duplicates.
+
+    The earlier waypoint dedup catches the matching waypoint duplicates;
+    this function provides the analogous coverage for ``detected_events``.
+    Without it, the map UI shows the same event pin twice (one with a
+    valid ``video_path`` and one with ``video_path=NULL`` left over from
+    a prior purge).
+
+    Returns the count of rows deleted.
+
+    The "keep" ranking matches the waypoint dedup: prefer non-NULL
+    ``video_path``, prefer paths under ``ArchivedClips`` (durable SD-card
+    location) over ``RecentClips`` (Tesla's rotating buffer), break ties
+    by ``id``.
+
+    The function runs two passes — one over rows with a real ``trip_id``
+    and one over Sentry/Saved rows with ``trip_id IS NULL`` — instead of
+    using a sentinel value in the GROUP BY. This avoids any risk of
+    colliding with a real ``trip_id`` that someday matches the sentinel
+    and keeps the SQL semantics explicit.
+    """
+    deleted = 0
+
+    # --- Pass 1: rows with a concrete trip_id ---------------------
+    dups_with_trip = conn.execute(
+        """SELECT trip_id, timestamp, lat, lon, event_type, COUNT(*) AS cnt
+           FROM detected_events
+           WHERE timestamp IS NOT NULL AND trip_id IS NOT NULL
+           GROUP BY trip_id, timestamp, lat, lon, event_type
+           HAVING cnt > 1"""
+    ).fetchall()
+    for d in dups_with_trip:
+        # Positional access so the helper works whether or not the
+        # caller set ``conn.row_factory = sqlite3.Row`` (the
+        # production ``repair()`` does; isolated unit tests may not).
+        trip_id, ts, lat, lon, ev_type = d[0], d[1], d[2], d[3], d[4]
+        rows = conn.execute(
+            """SELECT id FROM detected_events
+               WHERE trip_id = ?
+                 AND timestamp = ? AND lat = ? AND lon = ?
+                 AND event_type = ?
+               ORDER BY
+                 CASE WHEN video_path IS NOT NULL AND video_path != ''
+                      THEN 0 ELSE 1 END,
+                 CASE WHEN video_path LIKE '%ArchivedClips%'
+                      THEN 0 ELSE 1 END,
+                 id""",
+            (trip_id, ts, lat, lon, ev_type),
+        ).fetchall()
+        drop_ids = [(r[0],) for r in rows[1:]]
+        if drop_ids:
+            conn.executemany(
+                "DELETE FROM detected_events WHERE id = ?", drop_ids
+            )
+            deleted += len(drop_ids)
+
+    # --- Pass 2: Sentry/Saved rows with trip_id IS NULL -----------
+    dups_null_trip = conn.execute(
+        """SELECT timestamp, lat, lon, event_type, COUNT(*) AS cnt
+           FROM detected_events
+           WHERE timestamp IS NOT NULL AND trip_id IS NULL
+           GROUP BY timestamp, lat, lon, event_type
+           HAVING cnt > 1"""
+    ).fetchall()
+    for d in dups_null_trip:
+        ts, lat, lon, ev_type = d[0], d[1], d[2], d[3]
+        rows = conn.execute(
+            """SELECT id FROM detected_events
+               WHERE trip_id IS NULL
+                 AND timestamp = ? AND lat = ? AND lon = ?
+                 AND event_type = ?
+               ORDER BY
+                 CASE WHEN video_path IS NOT NULL AND video_path != ''
+                      THEN 0 ELSE 1 END,
+                 CASE WHEN video_path LIKE '%ArchivedClips%'
+                      THEN 0 ELSE 1 END,
+                 id""",
+            (ts, lat, lon, ev_type),
+        ).fetchall()
+        drop_ids = [(r[0],) for r in rows[1:]]
+        if drop_ids:
+            conn.executemany(
+                "DELETE FROM detected_events WHERE id = ?", drop_ids
+            )
+            deleted += len(drop_ids)
+
+    return deleted
+
+
+def _dedupe_and_recompute(conn: sqlite3.Connection) -> Tuple[int, int, int, int]:
     """Run dedup + recompute identical to ``_migrate_v2_to_v3`` phases 3+4.
 
-    Returns ``(deduped_waypoints, recomputed_trips, dropped_empty_trips)``.
+    Returns ``(deduped_waypoints, recomputed_trips, dropped_empty_trips,
+    deduped_events)``.
     """
     # --- Dedupe waypoints by (trip_id, timestamp, lat, lon) -------------
     dups = conn.execute(
@@ -429,7 +533,8 @@ def _dedupe_and_recompute(conn: sqlite3.Connection) -> Tuple[int, int, int]:
              total_dist, dur, t['id']),
         )
         recomputed += 1
-    return deduped, recomputed, dropped_empty
+    events_deduped = _dedupe_detected_events(conn)
+    return deduped, recomputed, dropped_empty, events_deduped
 
 
 def repair(db_path: str, dry_run: bool = False) -> dict:
@@ -454,6 +559,7 @@ def repair(db_path: str, dry_run: bool = False) -> dict:
         "events_shifted": 0,
         "trips_merged": 0,
         "waypoints_deduped": 0,
+        "events_deduped": 0,
         "trips_recomputed": 0,
         "trips_dropped_empty": 0,
         "max_skew_seconds": 0.0,
@@ -553,8 +659,9 @@ def repair(db_path: str, dry_run: bool = False) -> dict:
         stats["trips_merged"] = mapping_service._merge_all_adjacent_trip_pairs(
             conn, gap_seconds,
         )
-        deduped, recomputed, dropped = _dedupe_and_recompute(conn)
+        deduped, recomputed, dropped, events_deduped = _dedupe_and_recompute(conn)
         stats["waypoints_deduped"] = deduped
+        stats["events_deduped"] = events_deduped
         stats["trips_recomputed"] = recomputed
         stats["trips_dropped_empty"] = dropped
 
@@ -624,6 +731,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("  events shifted:      %d", stats["events_shifted"])
     logger.info("  trips merged:        %d", stats["trips_merged"])
     logger.info("  waypoints deduped:   %d", stats["waypoints_deduped"])
+    logger.info("  events deduped:      %d", stats["events_deduped"])
     logger.info("  trips recomputed:    %d", stats["trips_recomputed"])
     logger.info("  trips dropped empty: %d", stats["trips_dropped_empty"])
     if stats["backup_path"]:

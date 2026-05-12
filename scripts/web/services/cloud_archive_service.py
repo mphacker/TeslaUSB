@@ -323,6 +323,38 @@ def _fsync_db(conn: sqlite3.Connection) -> None:
         pass  # Best-effort; WAL mode provides crash safety regardless
 
 
+def _read_sync_non_event_setting() -> bool:
+    """Re-read ``cloud_archive.sync_non_event_videos`` from config.yaml.
+
+    Phase 2.3 — ``config.CLOUD_ARCHIVE_SYNC_NON_EVENT`` is snapshotted at
+    module-import time, and the Settings save handler at
+    ``cloud_archive.py:_update_config_yaml`` only writes YAML; it does not
+    mutate the config module attribute. Re-importing the symbol therefore
+    returns the stale boot-time value and a Settings toggle has no effect
+    until ``gadget_web.service`` restarts. To honour the documented
+    ""effective on next sync iteration without restart"" contract we read
+    the live YAML directly here.
+
+    ``_discover_events`` runs at most once per sync iteration (minutes
+    apart), so a single ~1ms YAML read is invisible to performance and
+    avoids the heavier ``systemd-run`` restart pattern used by LES.
+
+    On any IO/parse error we fall back to the import-time value so the
+    picker never crashes the worker — matching the safe-default
+    behaviour the rest of the service uses for config edge cases.
+    """
+    try:
+        import yaml
+        from config import CONFIG_YAML
+        with open(CONFIG_YAML, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        return bool(
+            cfg.get('cloud_archive', {}).get('sync_non_event_videos', False)
+        )
+    except Exception:
+        return CLOUD_ARCHIVE_SYNC_NON_EVENT
+
+
 def _discover_events(
     teslacam_path: str,
     conn: Optional[sqlite3.Connection] = None,
@@ -410,10 +442,39 @@ def _discover_events(
     except ImportError:
         pass
 
-    # Sort by priority (lower score = sync first)
-    events.sort(key=lambda t: _score_event_priority(t[0]))
+    # Score every candidate once so we can both filter and sort without
+    # invoking the (relatively expensive) scorer twice. Score >= 200 means
+    # neither an event.json trigger nor any waypoint geolocation hit was
+    # found — i.e. routine driving footage.
+    scored: List[Tuple[Tuple[str, str, int], int]] = [
+        (t, _score_event_priority(t[0])) for t in events
+    ]
 
-    return events
+    # Phase 2.3 — When ``sync_non_event_videos`` is False the picker MUST
+    # actually drop the non-event/non-geo tier from the queue (the previous
+    # behaviour merely demoted them to a lower priority, so they still got
+    # uploaded — which silently consumed the user's bandwidth on top of the
+    # event clips they actually wanted backed up).
+    #
+    # We must NOT re-import ``CLOUD_ARCHIVE_SYNC_NON_EVENT`` here: it is
+    # snapshotted at config.py import time and the Settings save handler
+    # only writes YAML — so the import would always return the stale
+    # boot-time value. ``_read_sync_non_event_setting`` reads the live
+    # YAML so a Settings toggle takes effect on the next sync iteration
+    # without a service restart.
+    sync_non_event_now = _read_sync_non_event_setting()
+    if not sync_non_event_now:
+        before = len(scored)
+        scored = [(t, s) for (t, s) in scored if s < 200]
+        dropped = before - len(scored)
+        if dropped:
+            logger.info(
+                "Cloud sync: filtered %d non-event/non-geo clip(s) "
+                "(sync_non_event_videos=false)", dropped,
+            )
+
+    scored.sort(key=lambda x: x[1])
+    return [t for (t, _s) in scored]
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,8 @@ rclone credentials to tmpfs only for the duration of each upload.
 
 import logging
 import os
+import posixpath
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -70,7 +72,13 @@ def canonical_cloud_path(file_path: str) -> str:
     * ``/`` separators only (Windows backslashes converted defensively).
     * No leading slash.
     * No trailing slash.
-    * No ``//``, ``./``, or ``../`` components.
+    * No ``//`` or ``./`` components.
+    * **No ``..`` components** — these are rejected with ``ValueError``
+      because they have no legitimate place in a cloud-sync row name and
+      ``remove_from_queue`` is reachable from raw user input
+      (``cloud_archive.py`` POST handler), so a ``..`` collapse via
+      ``posixpath.normpath`` could be exploited to reference a row the
+      user shouldn't be able to address.
 
     Absolute paths under any of those known roots have everything before
     the root segment stripped. Examples::
@@ -91,10 +99,26 @@ def canonical_cloud_path(file_path: str) -> str:
 
     Empty / falsy input is returned unchanged so callers can pass
     optional values without a guard.
+
+    Raises:
+        ValueError: if ``file_path`` contains a ``..`` segment.
     """
     if not file_path:
         return file_path
     p = file_path.replace('\\', '/')
+
+    # Reject path-traversal attempts BEFORE any normalization. We check
+    # for the literal '..' segment surrounded by separators (or at the
+    # ends) so a basename like 'foo..bar.mp4' is allowed but
+    # 'ArchivedClips/../foo' is not. Doing this before normpath() is
+    # critical: posixpath.normpath('/x/../etc/passwd') silently
+    # collapses to '/etc/passwd'.
+    for seg in p.split('/'):
+        if seg == '..':
+            raise ValueError(
+                f"Path traversal segment '..' is not permitted in "
+                f"cloud_synced_files.file_path: {file_path!r}"
+            )
 
     # Find a known root segment and strip everything before it. We use
     # find('/<root>/') so 'ArchivedClips' inside a basename doesn't
@@ -115,9 +139,10 @@ def canonical_cloud_path(file_path: str) -> str:
     if stripped is not None:
         p = stripped
 
-    # Normalize separators: collapse //, drop ./ and ../ components,
-    # strip trailing slash. posixpath.normpath does all of this.
-    import posixpath
+    # Normalize separators: collapse //, drop ./ components, strip
+    # trailing slash. posixpath.normpath does all of this; it would
+    # ALSO collapse '..' but we've already rejected those above, so
+    # there's no traversal risk from this call.
     p = posixpath.normpath(p)
 
     if p == '.':
@@ -307,7 +332,6 @@ def _migrate_canonicalize_paths_v2(
     backup_path = f"{db_path}.bak.v2-canonical-paths"
     if not os.path.exists(backup_path):
         try:
-            import shutil
             shutil.copy2(db_path, backup_path)
             # Best-effort: also copy WAL/SHM if they exist, so the
             # backup is a coherent snapshot.
@@ -454,29 +478,45 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
         # are skipped, and rows that collapse to the same canonical
         # path are merged keeping the higher-priority status (a synced
         # row beats a pending one).
+        #
+        # Atomicity: the migration's UPDATEs/DELETEs and the version
+        # bump that follows MUST commit together. If the migration
+        # raises, we ``conn.rollback()`` to undo any partial rewrites
+        # and SKIP the version bump entirely so the migration retries
+        # on the next process start. The previous behaviour (log and
+        # fall through) left the DB with one rewritten row + the rest
+        # legacy + version=2 — the migration would never run again and
+        # the dedup contract would be silently broken.
+        migration_ok = True
         if current < 2:
             try:
                 _migrate_canonicalize_paths_v2(conn, db_path)
             except Exception as e:
-                # Migration failures should never lock out the service.
-                # Log loudly so an operator notices, but proceed.
+                migration_ok = False
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 logger.error(
-                    "Cloud archive v2 migration failed (%s); leaving "
-                    "rows as-is. New writes will still be canonical.",
-                    e,
+                    "Cloud archive v2 migration failed (%s); rolled "
+                    "back partial rewrites and leaving schema at v%d. "
+                    "Migration will retry on next service start. New "
+                    "writes will still be canonical.",
+                    e, current,
                 )
 
-        conn.execute(
-            "INSERT OR REPLACE INTO module_versions (module, version, updated_at) "
-            "VALUES (?, ?, ?)",
-            (_CLOUD_MODULE, _CLOUD_SCHEMA_VERSION,
-             datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-        logger.info(
-            "Cloud archive tables initialized (v%d) in %s",
-            _CLOUD_SCHEMA_VERSION, db_path,
-        )
+        if migration_ok:
+            conn.execute(
+                "INSERT OR REPLACE INTO module_versions (module, version, updated_at) "
+                "VALUES (?, ?, ?)",
+                (_CLOUD_MODULE, _CLOUD_SCHEMA_VERSION,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            logger.info(
+                "Cloud archive tables initialized (v%d) in %s",
+                _CLOUD_SCHEMA_VERSION, db_path,
+            )
 
     # On first DB access after process start, recover any sessions or
     # uploads left in a transient state by a crash or service restart.
@@ -1933,8 +1973,16 @@ def remove_from_queue(file_path: str) -> Tuple[bool, str]:
     the legacy absolute form or the canonical relative form match the
     same row (post-2.7 migration the DB only contains canonical rows,
     but the API can still receive legacy paths).
+
+    A path containing ``..`` segments is rejected via
+    :func:`canonical_cloud_path` (raises ``ValueError``) — caught here
+    and surfaced to the caller as ``(False, "Invalid path")`` so the
+    blueprint returns a sane error to the UI rather than crashing.
     """
-    canonical = canonical_cloud_path(file_path)
+    try:
+        canonical = canonical_cloud_path(file_path)
+    except ValueError:
+        return False, "Invalid path"
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:
         result = conn.execute(

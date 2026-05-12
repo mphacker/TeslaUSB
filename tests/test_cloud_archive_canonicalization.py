@@ -171,6 +171,47 @@ class TestCanonicalCloudPathSlashes:
         assert canonical_cloud_path(".") == ""
 
 
+class TestCanonicalCloudPathRejectsTraversal:
+    """``..`` segments are rejected with ``ValueError`` BEFORE
+    posixpath.normpath has a chance to silently collapse them. This
+    matters because ``remove_from_queue`` is reachable from raw user
+    input via the cloud_archive blueprint.
+    """
+
+    def test_dotdot_in_middle_raises(self):
+        with pytest.raises(ValueError, match="traversal"):
+            canonical_cloud_path("ArchivedClips/../etc/passwd")
+
+    def test_dotdot_at_start_raises(self):
+        with pytest.raises(ValueError, match="traversal"):
+            canonical_cloud_path("../ArchivedClips/foo.mp4")
+
+    def test_dotdot_in_absolute_path_raises(self):
+        # The classic exploit: /a/../b becomes /b after normpath,
+        # potentially letting an attacker reference a row they
+        # shouldn't be able to address. Must raise.
+        with pytest.raises(ValueError, match="traversal"):
+            canonical_cloud_path(
+                "/home/pi/ArchivedClips/../../../etc/passwd"
+            )
+
+    def test_dotdot_basename_substring_allowed(self):
+        # A literal '..' inside a basename (e.g. 'foo..bar.mp4') is
+        # NOT a traversal — the segment check only matches '..' as a
+        # full path component.
+        assert canonical_cloud_path("ArchivedClips/foo..bar.mp4") == \
+            "ArchivedClips/foo..bar.mp4"
+
+    def test_single_dot_basename_allowed(self):
+        # 'a.b' is fine; only the literal segment '..' is rejected.
+        assert canonical_cloud_path("ArchivedClips/a.b.mp4") == \
+            "ArchivedClips/a.b.mp4"
+
+    def test_dotdot_at_end_raises(self):
+        with pytest.raises(ValueError, match="traversal"):
+            canonical_cloud_path("ArchivedClips/foo/..")
+
+
 class TestCanonicalCloudPathUnknownRoots:
     """Paths that don't contain a known root segment are still cleaned
     of the leading slash and trailing slash, but otherwise preserved."""
@@ -738,3 +779,148 @@ class TestSchemaVersionBump:
             assert paths == ["ArchivedClips/already.mp4", "ArchivedClips/clip.mp4"]
         finally:
             new_conn.close()
+
+
+class TestMigrationAtomicity:
+    """If the migration raises mid-flight, ALL partial rewrites must be
+    rolled back AND the version must NOT be bumped, so the migration
+    retries on the next process start.
+
+    Pre-fix, ``_init_cloud_tables`` swallowed the exception with
+    ``logger.error`` and fell through to the version bump, leaving the
+    DB with a few rewritten rows + the rest legacy + version=2 — the
+    migration would never run again and the dedup contract would be
+    silently broken on every cloud sync from then on.
+    """
+
+    def test_exception_rolls_back_all_rewrites(self, tmp_path, monkeypatch):
+        # Build a v1 DB with several rows that need rewriting.
+        db = tmp_path / "cloud.db"
+        conn = _seed_cloud_db(db, [
+            ("/home/pi/ArchivedClips/clip_a.mp4", "pending", 0),
+            ("/home/pi/ArchivedClips/clip_b.mp4", "pending", 0),
+            ("/home/pi/ArchivedClips/clip_c.mp4", "pending", 0),
+        ])
+        conn.execute(
+            "CREATE TABLE module_versions "
+            "(module TEXT PRIMARY KEY, version INTEGER NOT NULL, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO module_versions (module, version, updated_at) "
+            "VALUES ('cloud_archive', 1, '2026-01-01T00:00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Patch the migration helper to rewrite one row, then raise.
+        original = svc._migrate_canonicalize_paths_v2
+
+        def faulty_migration(c, path):
+            # Simulate "first row rewritten OK, then an unexpected
+            # error from row 2 onwards" — the exact failure mode the
+            # reviewer demonstrated.
+            c.row_factory = sqlite3.Row
+            c.execute(
+                "UPDATE cloud_synced_files SET file_path = ? WHERE id = 1",
+                ("ArchivedClips/clip_a.mp4",),
+            )
+            raise RuntimeError("simulated migration crash")
+
+        monkeypatch.setattr(svc, "_migrate_canonicalize_paths_v2", faulty_migration)
+
+        new_conn = svc._init_cloud_tables(str(db))
+        try:
+            # Version MUST stay at 1 — migration retries on next start.
+            ver = new_conn.execute(
+                "SELECT version FROM module_versions WHERE module = 'cloud_archive'"
+            ).fetchone()[0]
+            assert ver == 1, (
+                f"Version was bumped to {ver} despite migration failure — "
+                "migration won't retry and dedup is broken"
+            )
+
+            # All three rows must still be in their original (legacy)
+            # form — the partial rewrite of clip_a was rolled back.
+            paths = sorted(
+                r[0] for r in new_conn.execute(
+                    "SELECT file_path FROM cloud_synced_files"
+                )
+            )
+            assert paths == [
+                "/home/pi/ArchivedClips/clip_a.mp4",
+                "/home/pi/ArchivedClips/clip_b.mp4",
+                "/home/pi/ArchivedClips/clip_c.mp4",
+            ], "Partial rewrites were not rolled back"
+        finally:
+            new_conn.close()
+
+        # Restore the real migration and verify it runs successfully on
+        # the next call (proves the retry actually happens).
+        monkeypatch.setattr(svc, "_migrate_canonicalize_paths_v2", original)
+        # Reset startup_recovery_done so _init_cloud_tables re-runs the
+        # version block without the cached side-effect.
+        monkeypatch.setattr(svc, "_startup_recovery_done", False)
+        retry_conn = svc._init_cloud_tables(str(db))
+        try:
+            ver = retry_conn.execute(
+                "SELECT version FROM module_versions WHERE module = 'cloud_archive'"
+            ).fetchone()[0]
+            assert ver == 2
+            paths = sorted(
+                r[0] for r in retry_conn.execute(
+                    "SELECT file_path FROM cloud_synced_files"
+                )
+            )
+            assert paths == [
+                "ArchivedClips/clip_a.mp4",
+                "ArchivedClips/clip_b.mp4",
+                "ArchivedClips/clip_c.mp4",
+            ]
+        finally:
+            retry_conn.close()
+
+
+class TestRemoveFromQueueRejectsTraversal:
+    """``remove_from_queue`` is reachable from raw user input via the
+    cloud_archive blueprint POST handler. A ``..`` segment must surface
+    as a graceful ``(False, "Invalid path")`` result, NOT crash the
+    request handler."""
+
+    def test_dotdot_returns_invalid_path(self, tmp_path, monkeypatch):
+        db = tmp_path / "cloud_sync.db"
+        monkeypatch.setattr(svc, "CLOUD_ARCHIVE_DB_PATH", str(db))
+        # Materialise the schema so the call gets past _init_cloud_tables.
+        conn = svc._init_cloud_tables(str(db))
+        conn.close()
+
+        ok, msg = svc.remove_from_queue("ArchivedClips/../etc/passwd")
+        assert ok is False
+        assert msg == "Invalid path"
+
+    def test_dotdot_does_not_delete_anything(self, tmp_path, monkeypatch):
+        # Defense in depth: prove the early-return short-circuits any
+        # DELETE. Seed an unrelated row and verify it survives.
+        db = tmp_path / "cloud_sync.db"
+        monkeypatch.setattr(svc, "CLOUD_ARCHIVE_DB_PATH", str(db))
+        conn = svc._init_cloud_tables(str(db))
+        conn.execute(
+            "INSERT INTO cloud_synced_files (file_path, status, retry_count) "
+            "VALUES (?, 'pending', 0)",
+            ("ArchivedClips/etc",),  # Plausible victim
+        )
+        conn.commit()
+        conn.close()
+
+        ok, msg = svc.remove_from_queue("ArchivedClips/../etc")
+        assert ok is False
+        assert msg == "Invalid path"
+
+        conn2 = sqlite3.connect(str(db))
+        try:
+            count = conn2.execute(
+                "SELECT COUNT(*) FROM cloud_synced_files"
+            ).fetchone()[0]
+            assert count == 1, "remove_from_queue deleted a row despite returning Invalid path"
+        finally:
+            conn2.close()
+

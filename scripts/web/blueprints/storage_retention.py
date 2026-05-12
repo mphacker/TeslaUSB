@@ -120,7 +120,13 @@ def _load_config_dict() -> Dict[str, Any]:
 
 
 def _resolve_cleanup_block(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Return the ``cleanup`` config block with defaults filled in."""
+    """Return the ``cleanup`` config block as it lives on disk.
+
+    Scalar values are clamped to the UI-safe range. ``default_retention_days``
+    is returned VERBATIM (clamped) — a stored ``0`` means "inherit from the
+    legacy fallback chain" and the API surfaces it as such so the JS can
+    show the resolved value without overwriting the customization on save.
+    """
     if cfg is None:
         cfg = _load_config_dict()
     raw = cfg.get('cleanup') if isinstance(cfg.get('cleanup'), dict) else {}
@@ -137,11 +143,19 @@ def _resolve_cleanup_block(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, An
                     hi=RETENTION_DAYS_MAX,
                 ),
             }
+    # Allow 0 for default_retention_days (means "inherit from legacy") so
+    # we don't shadow the resolver chain on a fresh git pull.
+    raw_default = raw.get('default_retention_days')
+    try:
+        default_days = int(raw_default) if raw_default is not None else 0
+    except (TypeError, ValueError):
+        default_days = 0
+    if default_days < 0:
+        default_days = 0
+    if default_days > RETENTION_DAYS_MAX:
+        default_days = RETENTION_DAYS_MAX
     return {
-        'default_retention_days': _coerce_int(
-            raw.get('default_retention_days'),
-            default=30, lo=RETENTION_DAYS_MIN, hi=RETENTION_DAYS_MAX,
-        ),
+        'default_retention_days': default_days,
         'free_space_target_pct': _coerce_int(
             raw.get('free_space_target_pct'),
             default=10, lo=FREE_SPACE_PCT_MIN, hi=FREE_SPACE_PCT_MAX,
@@ -228,13 +242,23 @@ def api_cleanup_status():
     cleanup = _resolve_cleanup_block(cfg)
     status = _watchdog_status()
     retention_block = status.get('retention') if isinstance(status.get('retention'), dict) else {}
+    # Resolve the days the watchdog will actually use. Prefer the
+    # watchdog's most recent value (always reflects the resolver chain
+    # for the live install). Fall back to calling the resolver directly
+    # if the watchdog hasn't been initialized yet — this matters when
+    # cleanup.default_retention_days==0 ("inherit from legacy") and we
+    # need the UI to show what would resolve.
+    resolved_days = retention_block.get('retention_days')
+    if not resolved_days:
+        try:
+            from services import archive_watchdog
+            resolved_days = int(archive_watchdog._resolve_retention_days())
+        except Exception:  # noqa: BLE001
+            resolved_days = cleanup['default_retention_days'] or 30
     return jsonify({
         'success': True,
         'config': cleanup,
-        'resolved_retention_days': int(
-            retention_block.get('retention_days')
-            or cleanup['default_retention_days']
-        ),
+        'resolved_retention_days': int(resolved_days or 30),
         'last_run': {
             'at': retention_block.get('last_prune_at'),
             'deleted_count': retention_block.get('last_prune_deleted'),
@@ -285,10 +309,23 @@ def api_cleanup_policy():
         if policies:
             payload['policies'] = policies
 
-    default_days = _coerce_int(
-        payload.get('default_retention_days'),
-        default=30, lo=RETENTION_DAYS_MIN, hi=RETENTION_DAYS_MAX,
-    )
+    # default_retention_days accepts 0 ("inherit from legacy fallback chain")
+    # in addition to the normal [MIN, MAX] range. The UI surfaces the
+    # resolved value when stored as 0 so a "save without editing" doesn't
+    # overwrite an existing legacy customization.
+    raw_default = payload.get('default_retention_days')
+    try:
+        default_days = int(raw_default) if raw_default is not None else 0
+    except (TypeError, ValueError):
+        default_days = 0
+    if isinstance(raw_default, bool):
+        default_days = 0
+    if default_days < 0:
+        default_days = 0
+    elif 0 < default_days < RETENTION_DAYS_MIN:
+        default_days = RETENTION_DAYS_MIN
+    elif default_days > RETENTION_DAYS_MAX:
+        default_days = RETENTION_DAYS_MAX
     target_pct = _coerce_int(
         payload.get('free_space_target_pct'),
         default=10, lo=FREE_SPACE_PCT_MIN, hi=FREE_SPACE_PCT_MAX,
@@ -305,14 +342,21 @@ def api_cleanup_policy():
     raw_policies = payload.get('policies') or {}
     sanitized: Dict[str, Dict[str, Any]] = {}
     if isinstance(raw_policies, dict):
-        for name, policy in list(raw_policies.items())[:MAX_POLICY_ROWS]:
+        # Filter BEFORE capping. If the cap was applied to the raw dict,
+        # a payload that begins with ``MAX_POLICY_ROWS`` typo'd folder
+        # names would silently drop every later legitimate entry. Filter
+        # to the allow-list first, then cap on the sanitized result so
+        # the cap only ever truncates real folders.
+        for name, policy in raw_policies.items():
+            if len(sanitized) >= MAX_POLICY_ROWS:
+                break
             if name not in ALLOWED_FOLDER_NAMES or not isinstance(policy, dict):
                 continue
             sanitized[name] = {
                 'enabled': _coerce_bool(policy.get('enabled'), False),
                 'retention_days': _coerce_int(
                     policy.get('retention_days'),
-                    default=default_days,
+                    default=default_days or 30,
                     lo=RETENTION_DAYS_MIN,
                     hi=RETENTION_DAYS_MAX,
                 ),

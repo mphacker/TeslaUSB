@@ -58,14 +58,19 @@ class TestLegacyMigration:
     """Pin the migration contract end-to-end."""
 
     def test_no_legacy_file_is_noop(self, gadget_dir, config_yaml_path):
+        # No legacy JSON, no legacy YAML keys → fully no-op.
         _write_yaml(config_yaml_path, {'cleanup': {}})
         summary = migrate_legacy_cleanup_config(
             str(gadget_dir), config_yaml_path=config_yaml_path,
         )
         assert summary['migrated'] is False
         assert 'no legacy file' in summary['reason']
+        assert summary['seeded_default_retention_days'] is None
         # No .migrated file should appear because none existed.
         assert not (gadget_dir / 'cleanup_config.json.migrated').exists()
+        # config.yaml is unchanged.
+        cfg = _read_yaml(config_yaml_path)
+        assert cfg.get('cleanup') == {}
 
     def test_legacy_imported_into_yaml(self, gadget_dir, config_yaml_path):
         _write_yaml(config_yaml_path, {'cleanup': {}})
@@ -91,7 +96,9 @@ class TestLegacyMigration:
         assert policies['SavedClips']['retention_days'] == 365
         assert policies['SavedClips']['enabled'] is False
         # Defaults seeded so the watchdog has something to fall back on.
-        assert cfg['cleanup']['default_retention_days'] == 30
+        # default_retention_days stays at 0 (= "use legacy fallback chain")
+        # when no legacy YAML key was found to seed it from.
+        assert cfg['cleanup']['default_retention_days'] == 0
         assert cfg['cleanup']['free_space_target_pct'] == 10
         # Legacy file renamed.
         assert not legacy.exists()
@@ -202,3 +209,69 @@ class TestLegacyMigration:
         assert 'no migratable policies' in summary['reason']
         assert not (gadget_dir / 'cleanup_config.json').exists()
         assert (gadget_dir / 'cleanup_config.json.migrated').exists()
+
+
+class TestDefaultRetentionSeedPass:
+    """Pin the Phase 3a.2 (#98) seed pass that preserves customizations
+    of the legacy ``cloud_archive.archived_clips_retention_days`` and
+    ``archive.retention_days`` keys across a ``git pull``."""
+
+    def test_seeds_default_from_cloud_archive_key(self, gadget_dir, config_yaml_path):
+        # Existing install: cleanup section freshly shipped (default=0),
+        # legacy cloud_archive key set to 21. Migration must seed the
+        # unified key so the user's customization survives.
+        _write_yaml(config_yaml_path, {
+            'cleanup': {'default_retention_days': 0, 'policies': {}},
+            'cloud_archive': {'archived_clips_retention_days': 21},
+        })
+        summary = migrate_legacy_cleanup_config(
+            str(gadget_dir), config_yaml_path=config_yaml_path,
+        )
+        assert summary['seeded_default_retention_days'] == 21
+        cfg = _read_yaml(config_yaml_path)
+        assert cfg['cleanup']['default_retention_days'] == 21
+        # Legacy key NOT removed — it still serves installs that
+        # downgrade.
+        assert cfg['cloud_archive']['archived_clips_retention_days'] == 21
+
+    def test_seeds_from_archive_key_when_cloud_archive_absent(self, gadget_dir, config_yaml_path):
+        _write_yaml(config_yaml_path, {
+            'cleanup': {'default_retention_days': 0, 'policies': {}},
+            'archive': {'retention_days': 14},
+        })
+        summary = migrate_legacy_cleanup_config(
+            str(gadget_dir), config_yaml_path=config_yaml_path,
+        )
+        assert summary['seeded_default_retention_days'] == 14
+        cfg = _read_yaml(config_yaml_path)
+        assert cfg['cleanup']['default_retention_days'] == 14
+
+    def test_skips_seed_when_unified_default_already_set(self, gadget_dir, config_yaml_path):
+        # User has set the unified key already. Legacy must NOT
+        # overwrite it.
+        _write_yaml(config_yaml_path, {
+            'cleanup': {'default_retention_days': 45, 'policies': {}},
+            'cloud_archive': {'archived_clips_retention_days': 21},
+        })
+        summary = migrate_legacy_cleanup_config(
+            str(gadget_dir), config_yaml_path=config_yaml_path,
+        )
+        assert summary['seeded_default_retention_days'] is None
+        cfg = _read_yaml(config_yaml_path)
+        assert cfg['cleanup']['default_retention_days'] == 45
+
+    def test_seed_persists_even_without_legacy_json(self, gadget_dir, config_yaml_path):
+        # The seed pass must run regardless of whether the legacy JSON
+        # file exists — the YAML keys are an independent legacy surface.
+        _write_yaml(config_yaml_path, {
+            'cleanup': {'default_retention_days': 0},
+            'cloud_archive': {'archived_clips_retention_days': 60},
+        })
+        # No cleanup_config.json.
+        summary = migrate_legacy_cleanup_config(
+            str(gadget_dir), config_yaml_path=config_yaml_path,
+        )
+        assert summary['migrated'] is False
+        assert summary['seeded_default_retention_days'] == 60
+        cfg = _read_yaml(config_yaml_path)
+        assert cfg['cleanup']['default_retention_days'] == 60

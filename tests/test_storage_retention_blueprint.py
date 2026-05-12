@@ -179,16 +179,26 @@ class TestApiCleanupStatus:
         monkeypatch.setattr(
             'blueprints.storage_retention._disk_free_summary', lambda: {},
         )
+        # Pin the resolver so the test doesn't depend on whatever
+        # CLEANUP_DEFAULT_RETENTION_DAYS / CLOUD_ARCHIVE_RETENTION_DAYS
+        # config.py happens to load at test time.
+        monkeypatch.setattr(
+            'services.archive_watchdog._resolve_retention_days', lambda: 30,
+        )
         r = client.get('/api/cleanup/status')
         assert r.status_code == 200
         body = r.get_json()
         assert body['success'] is True
         # Defaults must be present so the form renders sensibly even on
-        # a brand-new install with no cleanup section yet.
-        assert body['config']['default_retention_days'] == 30
+        # a brand-new install with no cleanup section yet. The persisted
+        # default_retention_days is 0 ("inherit from legacy fallback")
+        # and the API surfaces the resolved value separately so the UI
+        # can show a sensible number without overwriting the customization.
+        assert body['config']['default_retention_days'] == 0
         assert body['config']['free_space_target_pct'] == 10
         assert body['config']['max_archive_size_gb'] == 0
         assert body['config']['policies'] == {}
+        assert body['resolved_retention_days'] == 30
 
     def test_drops_unknown_folder_names_from_config(self, client, monkeypatch):
         # Defense in depth: even if config.yaml gets a typo'd folder
@@ -206,6 +216,9 @@ class TestApiCleanupStatus:
         )
         monkeypatch.setattr(
             'blueprints.storage_retention._disk_free_summary', lambda: {},
+        )
+        monkeypatch.setattr(
+            'services.archive_watchdog._resolve_retention_days', lambda: 30,
         )
         r = client.get('/api/cleanup/status')
         body = r.get_json()
@@ -273,7 +286,10 @@ class TestApiCleanupPolicy:
 
     def test_garbage_payload_uses_defaults(self, client, captured_updates, monkeypatch):
         # Empty/garbage POST must still produce a sane config rather
-        # than crash. Defaults: 30 days, 10%, 0 GB cap, 7-day warning.
+        # than crash. ``default_retention_days`` falls back to 0 (=
+        # "inherit from legacy fallback chain" — the safer choice when
+        # we don't know what the user meant) instead of imposing an
+        # arbitrary 30. Other scalars fall back to their UI defaults.
         monkeypatch.setattr(
             'blueprints.storage_retention._load_config_dict',
             lambda: {'cleanup': {}},
@@ -290,7 +306,7 @@ class TestApiCleanupPolicy:
         )
         assert r.status_code == 200
         last = captured_updates['last']
-        assert last['cleanup.default_retention_days'] == 30
+        assert last['cleanup.default_retention_days'] == 0
         assert last['cleanup.free_space_target_pct'] == 10
         assert last['cleanup.max_archive_size_gb'] == 0
         assert last['cleanup.short_retention_warning_days'] == 7
@@ -321,6 +337,9 @@ class TestApiCleanupPolicy:
         # Even if a malicious client tries to seed thousands of fake
         # folder names, the endpoint only persists the allow-listed
         # ones — and at most ALLOWED_FOLDER_NAMES of them.
+        # Critically: the cap must apply AFTER the allow-list filter,
+        # not before, so legitimate entries that come after garbage
+        # ones survive (Phase 3a.2 PR #124 review fix).
         monkeypatch.setattr(
             'blueprints.storage_retention._load_config_dict',
             lambda: {'cleanup': {}},
@@ -339,6 +358,30 @@ class TestApiCleanupPolicy:
         last = captured_updates['last']
         for k in last['cleanup.policies']:
             assert k in ALLOWED_FOLDER_NAMES
+        # Both legitimate entries must have made it through the
+        # filter, even though they were inserted AFTER 1000 garbage
+        # rows in dict insertion order.
+        assert 'SentryClips' in last['cleanup.policies']
+        assert 'ArchivedClips' in last['cleanup.policies']
+        assert last['cleanup.policies']['SentryClips']['retention_days'] == 90
+        assert last['cleanup.policies']['ArchivedClips']['retention_days'] == 30
+
+    def test_default_retention_zero_is_persisted_verbatim(self, client, captured_updates, monkeypatch):
+        # Phase 3a.2 PR #124 review fix: ``0`` is a meaningful value
+        # ("inherit from legacy fallback chain"), NOT a parse failure.
+        # It must be persisted verbatim, not silently clamped up to 1.
+        monkeypatch.setattr(
+            'blueprints.storage_retention._load_config_dict',
+            lambda: {'cleanup': {}},
+        )
+        r = client.post(
+            '/api/cleanup/policy',
+            data=json.dumps({'default_retention_days': 0}),
+            content_type='application/json',
+        )
+        assert r.status_code == 200
+        last = captured_updates['last']
+        assert last['cleanup.default_retention_days'] == 0
 
 
 # ---------------------------------------------------------------------------

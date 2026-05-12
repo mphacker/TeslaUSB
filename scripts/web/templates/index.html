@@ -207,16 +207,16 @@
 
             <div id="sr-warning-banner" hidden
                  style="margin:0 0 14px; padding:10px 14px; border-radius:8px;
-                        background:var(--accent-warning-bg, #4a3500); color:var(--accent-warning, #ffb347);
-                        border:1px solid var(--accent-warning, #ffb347); font-size:0.85rem;">
+                        background:var(--msg-warning-bg); color:var(--msg-warning-text);
+                        border:1px solid var(--msg-warning-text); font-size:0.85rem;">
                 <strong>Heads up:</strong> short retention may delete footage of incidents that take time
                 to discover (e.g., scratches noticed days later).
             </div>
 
             <div id="sr-error-banner" hidden
                  style="margin:0 0 14px; padding:10px 14px; border-radius:8px;
-                        background:var(--accent-danger-bg, #4a0000); color:var(--accent-danger, #ff6b6b);
-                        border:1px solid var(--accent-danger, #ff6b6b); font-size:0.85rem;"></div>
+                        background:var(--msg-error-bg); color:var(--msg-error-text);
+                        border:1px solid var(--msg-error-text); font-size:0.85rem;"></div>
 
             <form id="storage-retention-form" onsubmit="return false;">
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
@@ -230,24 +230,34 @@
                         </p>
                     </div>
                     <div class="form-group">
-                        <label style="font-size:0.85rem"><strong>Free-space target (% of SD card)</strong></label>
+                        <label style="font-size:0.85rem"><strong>Free-space target (% of SD card)</strong>
+                            <span style="font-weight:normal; color:var(--text-secondary)">
+                                — Phase 5 (preview)
+                            </span>
+                        </label>
                         <input type="number" name="free_space_target_pct" id="sr-free-space-target"
                                min="5" max="50" value="10"
                                style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
-                            Always try to keep at least this much free. Older clips are pruned more aggressively when space runs low.
+                            Saved now; not yet enforced by the prune. Phase 5 will use this to keep at
+                            least the requested free percentage.
                         </p>
                     </div>
                 </div>
 
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
                     <div class="form-group">
-                        <label style="font-size:0.85rem"><strong>Maximum archive size (GB)</strong></label>
+                        <label style="font-size:0.85rem"><strong>Maximum archive size (GB)</strong>
+                            <span style="font-weight:normal; color:var(--text-secondary)">
+                                — Phase 5 (preview)
+                            </span>
+                        </label>
                         <input type="number" name="max_archive_size_gb" id="sr-max-archive"
                                min="0" max="10000" value="0"
                                style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
-                            Hard cap on total ArchivedClips size. Set to <strong>0</strong> to use only the time-based retention rules.
+                            Saved now; not yet enforced by the prune. Phase 5 will treat this as a hard
+                            cap. Leave at <strong>0</strong> to use only time-based retention.
                         </p>
                     </div>
                     <div class="form-group">
@@ -1458,12 +1468,20 @@ if (document.getElementById('fsck-status-container')) {
             .then(function (data) {
                 if (!data || !data.success) return null;
                 var cfg = data.config || {};
-                $('sr-default-retention').value = cfg.default_retention_days || 30;
+                // ``default_retention_days === 0`` in config.yaml means
+                // "inherit from legacy fallback". Show the resolved
+                // value the watchdog will actually use, so a user who
+                // saves without editing doesn't accidentally overwrite
+                // a customized cloud_archive.archived_clips_retention_days.
+                var resolvedDefault = (data.resolved_retention_days != null)
+                    ? data.resolved_retention_days
+                    : (cfg.default_retention_days || 30);
+                $('sr-default-retention').value = resolvedDefault;
                 $('sr-free-space-target').value = cfg.free_space_target_pct || 10;
                 $('sr-max-archive').value = cfg.max_archive_size_gb || 0;
                 $('sr-short-warning').value = cfg.short_retention_warning_days || 7;
-                renderPolicyRows(cfg.policies || {}, cfg.default_retention_days || 30);
-                renderWarning(cfg.default_retention_days, cfg.short_retention_warning_days);
+                renderPolicyRows(cfg.policies || {}, resolvedDefault);
+                renderWarning(resolvedDefault, cfg.short_retention_warning_days);
                 renderLastRun(data);
                 renderDisk(data);
                 return data;
@@ -1575,7 +1593,32 @@ if (document.getElementById('fsck-status-container')) {
     if (warnEl) warnEl.addEventListener('input', refreshWarning);
 
     loadStatus();
-    setInterval(loadStatus, POLL_MS);
+    // Visibility-aware polling — pause when the tab is hidden so a
+    // backgrounded phone doesn't keep hitting the Pi every 30 s for
+    // hours on end.
+    var pollTimer = null;
+    function startPolling() {
+        if (pollTimer != null) return;
+        pollTimer = setInterval(loadStatus, POLL_MS);
+    }
+    function stopPolling() {
+        if (pollTimer == null) return;
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+    if (typeof document.visibilityState === 'string') {
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                stopPolling();
+            } else {
+                loadStatus();
+                startPolling();
+            }
+        });
+        if (!document.hidden) startPolling();
+    } else {
+        startPolling();
+    }
 })();
 </script>
 {% endblock %}

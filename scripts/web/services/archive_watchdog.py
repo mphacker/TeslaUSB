@@ -277,10 +277,12 @@ def _resolve_retention_days() -> int:
        override in the unified config section).
     2. ``cleanup.default_retention_days`` (the unified default).
     3. ``cloud_archive.archived_clips_retention_days`` (legacy SD-card
-       retention key — preserved for backward compat).
-    4. ``archive.retention_days`` (oldest legacy key — preserved for
-       installs that pre-date Phase 2c).
-    5. Hard-coded ``30`` if nothing else resolves.
+       retention key — preserved for backward compat). NOTE:
+       ``CLOUD_ARCHIVE_RETENTION_DAYS`` itself folds the even-older
+       ``archive.retention_days`` legacy key in via ``config.py`` — so
+       the resolver only checks two named tiers but covers three legacy
+       keys in total.
+    4. Hard-coded ``30`` if nothing else resolves.
 
     Resolved fresh on every prune so Settings → Storage & Retention
     edits take effect on the next pass without restarting the service.

@@ -147,7 +147,13 @@ class TestReclaimStationary:
         assert result['kept_has_gps'] == 1
         assert os.path.isfile(path)
 
-    def test_recent_clip_with_events_is_kept(self, db, archive_root):
+    def test_recent_clip_with_events_is_kept_in_event_only_bucket(
+            self, db, archive_root):
+        """Stationary clip with events lands in `kept_has_event_only`,
+        not the `kept_has_gps` bucket. The bucket distinction matters
+        to operators reading the JSON: a Sentry-mode-while-parked
+        event is NOT GPS data.
+        """
         path = _make_archive_mp4(
             archive_root, "RecentClips/has_event.mp4", mtime=OLD_MTIME,
         )
@@ -156,7 +162,8 @@ class TestReclaimStationary:
             db_path=db, archive_root=archive_root, min_age_hours=1,
         )
         assert result['deleted_count'] == 0
-        assert result['kept_has_gps'] == 1
+        assert result['kept_has_event_only'] == 1
+        assert result['kept_has_gps'] == 0
         assert os.path.isfile(path)
 
     def test_unindexed_recent_clip_is_kept(self, db, archive_root):
@@ -292,7 +299,7 @@ class TestReclaimStationary:
         for field in (
             'deleted_count', 'freed_bytes', 'scanned',
             'kept_too_new', 'kept_has_event_counterpart',
-            'kept_unindexed', 'kept_has_gps',
+            'kept_unindexed', 'kept_has_gps', 'kept_has_event_only',
             'min_age_hours', 'duration_seconds',
         ):
             assert field in result, f"missing summary field: {field}"
@@ -411,31 +418,86 @@ class TestReclaimGeodataContract:
 
 
 class TestReclaimSafetyGuards:
-    def test_img_files_are_never_deleted(self, db, archive_root):
-        """``safe_delete_archive_video`` blocks ``*.img`` files at the doorway.
-
-        We don't expect ``*.img`` files in RecentClips, but the
-        protected-file guard is the single source of truth so verify
-        it stays wired up.
+    def test_img_files_excluded_at_walk_stage(self, db, archive_root):
+        """``_iter_archive_mp4_files`` filters by ``.mp4`` extension,
+        so a stray ``.img`` file in RecentClips never enters the
+        candidate loop. This is layer 1 of two-layer protection;
+        ``test_protected_file_doorway_invoked_for_img_candidate`` below
+        covers layer 2 (the ``safe_delete_archive_video`` doorway).
         """
-        # Construct a scenario where the indexer mistakenly recorded an
-        # img file as stationary (defense in depth: even if upstream
-        # ever indexed one, the doorway must refuse).
         path = _make_archive_mp4(
             archive_root, "RecentClips/usb_cam.img", mtime=OLD_MTIME,
         )
-        # We must masquerade as stationary in the index for the function
-        # to even consider it. _index() doesn't validate extension.
         _index(db, path, waypoint_count=0, event_count=0)
-
-        # However, our function only walks .mp4 files via
-        # _iter_archive_mp4_files — so .img is filtered out at the walk
-        # stage too. Both layers should keep the file alive.
         result = archive_watchdog.reclaim_stationary_recent_clips(
             db_path=db, archive_root=archive_root, min_age_hours=1,
         )
         assert result['deleted_count'] == 0
         assert os.path.isfile(path)
+
+    def test_protected_file_doorway_invoked_for_protected_candidate(
+            self, db, archive_root, monkeypatch):
+        """Layer 2 protection: even if a ``.mp4`` candidate makes it
+        into the loop, ``safe_delete_archive_video`` returns
+        ``DeleteOutcome.PROTECTED`` for protected paths, and the
+        function MUST treat that as "not deleted" (no delete count,
+        no freed bytes, no purge_deleted_videos call).
+
+        Exercises the doorway by monkeypatching it to return PROTECTED
+        for one of the candidates. Verifies the count/bytes/purge
+        accounting stays consistent.
+        """
+        protected_path = _make_archive_mp4(
+            archive_root, "RecentClips/protected.mp4",
+            mtime=OLD_MTIME, size=2048,
+        )
+        normal_path = _make_archive_mp4(
+            archive_root, "RecentClips/normal.mp4",
+            mtime=OLD_MTIME, size=4096,
+        )
+        _index(db, protected_path, waypoint_count=0, event_count=0)
+        _index(db, normal_path, waypoint_count=0, event_count=0)
+
+        from services import file_safety
+        real_delete = file_safety.safe_delete_archive_video
+
+        def _patched_delete(path):
+            # Refuse the protected candidate at the doorway.
+            normalized = os.path.normpath(path)
+            if normalized.endswith('protected.mp4'):
+                return file_safety.DeleteResult(
+                    outcome=file_safety.DeleteOutcome.PROTECTED,
+                    bytes_freed=0,
+                )
+            return real_delete(path)
+
+        # Patch the symbol that ``_delete_one_mp4`` looks up at call time.
+        monkeypatch.setattr(
+            file_safety, 'safe_delete_archive_video', _patched_delete,
+        )
+
+        purged: list = []
+        from services import mapping_service
+
+        def _spy(db_path, *, deleted_paths):
+            purged.extend(os.path.normpath(p) for p in deleted_paths)
+        monkeypatch.setattr(
+            mapping_service, 'purge_deleted_videos', _spy,
+        )
+
+        result = archive_watchdog.reclaim_stationary_recent_clips(
+            db_path=db, archive_root=archive_root, min_age_hours=1,
+        )
+        # Only the non-protected candidate was deleted.
+        assert result['deleted_count'] == 1
+        assert result['freed_bytes'] == 4096
+        assert os.path.isfile(protected_path), \
+            "Protected file MUST survive even when listed as a candidate"
+        assert not os.path.exists(normal_path)
+        # purge_deleted_videos called exactly once — for the deleted
+        # file only, never for the doorway-rejected one.
+        assert len(purged) == 1
+        assert purged[0].endswith('normal.mp4')
 
     def test_watchdog_not_started_returns_error(self, archive_root):
         # No db_path supplied AND module-level _db_path is None.
@@ -497,3 +559,51 @@ class TestReclaimSafetyGuards:
             with archive_watchdog._state_lock:
                 archive_watchdog._db_path = None
                 archive_watchdog._archive_root = None
+
+    def test_symlinked_archive_root_does_not_silently_no_op(
+            self, db, tmp_path):
+        """Path-normalization regression guard: an archive_root passed
+        as a symlink must not break the in-loop ``stationary_set``
+        membership check.
+
+        Failure mode that we're guarding against: ``indexed_files``
+        rows store the realpath'd absolute path (because the indexer
+        runs ``os.path.realpath``), so the collector would build a set
+        of realpath'd paths. If the worker loop iterates ``os.walk``
+        results that contain the symlink prefix instead, every
+        membership check returns False and the function silently
+        no-ops. Both sides realpath now.
+        """
+        if not hasattr(os, 'symlink'):
+            pytest.skip("symlinks not supported on this platform")
+        # Real archive root with the actual files.
+        real_root = tmp_path / "real_archives"
+        real_root.mkdir()
+        # Symlink that callers might pass in instead.
+        link_root = tmp_path / "link_archives"
+        try:
+            os.symlink(str(real_root), str(link_root),
+                       target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            pytest.skip(f"cannot create symlink in this env: {e}")
+        # Make a stationary RecentClips file under the REAL root.
+        real_path = _make_archive_mp4(
+            str(real_root), "RecentClips/sym.mp4", mtime=OLD_MTIME,
+        )
+        # Index it under the SYMLINK path (simulating an indexer
+        # invocation with a symlinked archive_root). The collector
+        # realpaths these on read so they end up in the same set.
+        sym_indexed_path = os.path.join(
+            str(link_root), "RecentClips", "sym.mp4",
+        )
+        _index(db, sym_indexed_path, waypoint_count=0, event_count=0)
+        # Now invoke with the SYMLINK as archive_root. The walk yields
+        # link-prefixed paths; the collector realpaths to real-prefixed.
+        # Without the realpath fix (Finding 1), membership returns
+        # False and nothing gets deleted.
+        result = archive_watchdog.reclaim_stationary_recent_clips(
+            db_path=db, archive_root=str(link_root), min_age_hours=1,
+        )
+        assert result['deleted_count'] == 1, \
+            "Symlinked archive_root must not silently no-op"
+        assert not os.path.exists(real_path)

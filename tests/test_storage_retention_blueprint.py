@@ -600,6 +600,23 @@ class TestApiReclaimStationaryRecent:
         assert body['success'] is False
         assert 'min_age_hours' in body['message']
 
+    def test_bool_min_age_hours_returns_400(self, client):
+        """``bool`` is a subclass of ``int`` in Python — reject explicitly
+        so ``{"min_age_hours": true}`` doesn't silently coerce to 1
+        and ``false`` to 0 ("delete every age"). Honors the documented
+        non-integer -> 400 contract.
+        """
+        for raw in (True, False):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent',
+                json={'min_age_hours': raw},
+            )
+            assert r.status_code == 400, \
+                f"bool {raw} should be rejected, got {r.status_code}"
+            body = r.get_json()
+            assert body['success'] is False
+            assert 'min_age_hours' in body['message']
+
     def test_empty_post_body_works(self, client):
         # Some clients send no Content-Type or no body at all.
         with patch(

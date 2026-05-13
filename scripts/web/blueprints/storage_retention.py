@@ -471,6 +471,15 @@ def api_reclaim_stationary_recent():
     if raw_age is None:
         min_age_hours = 1
     else:
+        # bool is a subclass of int in Python — reject explicitly so
+        # ``{"min_age_hours": true}`` doesn't silently coerce to 1
+        # (and ``false`` to 0, i.e. "delete every age"). Honors the
+        # documented "non-integer -> 400" contract.
+        if isinstance(raw_age, bool):
+            return jsonify({
+                'success': False,
+                'message': 'min_age_hours must be an integer',
+            }), 400
         try:
             min_age_hours = int(raw_age)
         except (TypeError, ValueError):

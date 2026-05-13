@@ -953,7 +953,22 @@ def reclaim_stationary_recent_clips(*,
         {'deleted_count': N, 'freed_bytes': M, 'scanned': K,
          'kept_too_new': T, 'kept_has_event_counterpart': E,
          'kept_unindexed': U, 'kept_has_gps': G,
+         'kept_has_event_only': V,
          'duration_seconds': S}
+
+    Bucket semantics:
+
+    * ``kept_has_gps`` — clip has GPS waypoints (``waypoint_count > 0``).
+      Driving footage; keep.
+    * ``kept_has_event_only`` — clip has detected events but no GPS
+      (``waypoint_count = 0 AND event_count > 0``). Stationary
+      Sentry-mode footage Tesla flagged as an event; keep.
+    * ``kept_unindexed`` — indexer hasn't seen the clip yet; keep
+      until it has.
+    * ``kept_has_event_counterpart`` — stationary clip that ALSO
+      exists under SentryClips/SavedClips with the same basename;
+      keep so the user-meaningful event copy is never the only one.
+    * ``kept_too_new`` — clip mtime is newer than ``min_age_hours``.
 
     On any error (missing args, watchdog never started, ``acquire_task``
     timeout) returns the same dict with the relevant ``error`` /
@@ -969,6 +984,7 @@ def reclaim_stationary_recent_clips(*,
         'kept_has_event_counterpart': 0,
         'kept_unindexed': 0,
         'kept_has_gps': 0,
+        'kept_has_event_only': 0,
         'min_age_hours': int(min_age_hours),
         'duration_seconds': 0.0,
     }
@@ -1026,23 +1042,42 @@ def reclaim_stationary_recent_clips(*,
             return summary
 
         try:
-            stationary_paths = _collect_stationary_recent_clips(
-                db_path, archive_root,
+            stationary_set = _collect_indexed_recent_paths(
+                db_path, archive_root, stationary_only=True,
             )
-            stationary_set = {p for p, _meta in stationary_paths}
+            indexed_set = _collect_indexed_recent_paths(
+                db_path, archive_root, stationary_only=False,
+            )
+            event_only_set = _collect_indexed_recent_paths(
+                db_path, archive_root,
+                stationary_only=False, event_only=True,
+            )
             event_basenames = _collect_event_basenames(archive_root)
 
-            for path, mtime, _size in _iter_archive_mp4_files(recent_root):
+            for raw_path, mtime, _size in _iter_archive_mp4_files(
+                recent_root,
+            ):
                 summary['scanned'] += 1
                 if mtime > cutoff_mtime:
                     summary['kept_too_new'] += 1
                     continue
+                # Realpath both sides of the membership check so a
+                # symlinked archive_root (e.g. /mnt/sdcard/archives ->
+                # /home/pi/ArchivedClips) doesn't silently no-op.
+                # On the production Pi neither path is symlinked so
+                # realpath is a cheap stat. Fall back to raw path on
+                # OSError so a transient stat failure doesn't crash
+                # the whole pass.
+                try:
+                    path = os.path.realpath(raw_path)
+                except OSError:
+                    path = raw_path
                 if path not in stationary_set:
-                    # Either the indexer hasn't seen it yet, or it has
-                    # GPS waypoints / events. Either way: don't touch.
-                    # We can tell the two apart cheaply by checking the
-                    # ``indexed_files`` row presence.
-                    if _is_indexed(db_path, path):
+                    if path in event_only_set:
+                        # Indexed, no GPS, but Tesla flagged it as an
+                        # event (e.g. Sentry trigger while parked).
+                        summary['kept_has_event_only'] += 1
+                    elif path in indexed_set:
                         summary['kept_has_gps'] += 1
                     else:
                         summary['kept_unindexed'] += 1
@@ -1069,41 +1104,63 @@ def reclaim_stationary_recent_clips(*,
     logger.info(
         "reclaim_stationary: done — deleted=%d, freed_bytes=%d, "
         "scanned=%d, kept_too_new=%d, kept_event_counterpart=%d, "
-        "kept_unindexed=%d, kept_has_gps=%d, duration=%.2fs",
+        "kept_unindexed=%d, kept_has_gps=%d, kept_has_event_only=%d, "
+        "duration=%.2fs",
         summary['deleted_count'], summary['freed_bytes'],
         summary['scanned'], summary['kept_too_new'],
         summary['kept_has_event_counterpart'],
         summary['kept_unindexed'], summary['kept_has_gps'],
+        summary['kept_has_event_only'],
         summary['duration_seconds'],
     )
     return summary
 
 
-def _collect_stationary_recent_clips(db_path: str,
-                                     archive_root: str,
-                                     ) -> list:
-    """Return a list of ``(abs_path, indexed_meta)`` for every indexed
-    RecentClips clip the indexer classified as stationary
-    (``waypoint_count = 0`` AND ``event_count = 0``).
+def _collect_indexed_recent_paths(db_path: str,
+                                  archive_root: str,
+                                  *,
+                                  stationary_only: bool = False,
+                                  event_only: bool = False,
+                                  ) -> set:
+    """Return the set of realpath'd RecentClips paths in
+    ``indexed_files`` matching the requested classification.
 
-    Reads ``indexed_files`` once, filters paths in Python rather than
-    via a SQL ``LIKE`` so it works across path-separator quirks
-    (Windows tests, edge cases). Returns an empty list on any DB
-    error.
+    One SELECT, filter in Python (the SQL ``LIKE`` over a
+    ``%/RecentClips/%`` literal is buggy on Windows path separators
+    and brittle if Tesla ever changes the folder name). Realpath is
+    applied so callers can use ``in`` for membership against the
+    realpath'd path the worker loop will produce.
+
+    * ``stationary_only=True`` keeps only rows where
+      ``waypoint_count = 0 AND event_count = 0`` (the deletion
+      candidates).
+    * ``event_only=True`` keeps only rows where
+      ``waypoint_count = 0 AND event_count > 0`` (stationary clips
+      Tesla flagged as events). Used for the
+      ``kept_has_event_only`` bucket.
+    * Both False = every RecentClips row regardless of classification
+      (used for the ``kept_has_gps`` vs ``kept_unindexed`` distinction).
+
+    Returns an empty set on any DB error.
     """
-    out = []
+    out: set = set()
     if not db_path or not os.path.isfile(db_path):
         return out
     recent_root_norm = os.path.realpath(
         os.path.join(archive_root, 'RecentClips')
     ) + os.sep
+    if stationary_only:
+        where = "WHERE waypoint_count = 0 AND event_count = 0"
+    elif event_only:
+        where = "WHERE waypoint_count = 0 AND event_count > 0"
+    else:
+        where = ""
     conn = None
     try:
         conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True,
                                timeout=5.0)
         for row in conn.execute(
-            "SELECT file_path, file_size FROM indexed_files "
-            "WHERE waypoint_count = 0 AND event_count = 0"
+            f"SELECT file_path FROM indexed_files {where}"
         ):
             file_path = row[0] or ''
             try:
@@ -1112,9 +1169,13 @@ def _collect_stationary_recent_clips(db_path: str,
                 continue
             if not resolved.startswith(recent_root_norm):
                 continue
-            out.append((resolved, {'file_size': row[1]}))
+            out.add(resolved)
     except sqlite3.Error as e:
-        logger.warning("reclaim_stationary: stationary lookup failed: %s", e)
+        logger.warning(
+            "reclaim_stationary: indexed-paths lookup failed "
+            "(stationary_only=%s, event_only=%s): %s",
+            stationary_only, event_only, e,
+        )
     finally:
         if conn is not None:
             try:
@@ -1151,29 +1212,6 @@ def _collect_event_basenames(archive_root: str) -> set:
                 if fn.lower().endswith('.mp4'):
                     out.add(fn)
     return out
-
-
-def _is_indexed(db_path: str, file_path: str) -> bool:
-    """Return True iff ``indexed_files`` has a row for ``file_path``."""
-    if not db_path or not os.path.isfile(db_path):
-        return False
-    conn = None
-    try:
-        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True,
-                               timeout=2.0)
-        row = conn.execute(
-            "SELECT 1 FROM indexed_files WHERE file_path = ? LIMIT 1",
-            (file_path,),
-        ).fetchone()
-        return row is not None
-    except sqlite3.Error:
-        return False
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
 
 
 # ---------------------------------------------------------------------------

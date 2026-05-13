@@ -1399,3 +1399,28 @@ def list_queue(limit: int = 50) -> List[Dict]:
     except Exception as e:
         logger.error("LES list_queue failed: %s", e)
         return []
+
+
+def count_failed() -> int:
+    """Return the number of ``failed`` rows in the live-event queue.
+
+    Cheap (single ``SELECT COUNT(*)`` over the ``status`` index) so the
+    Failed Jobs counts endpoint and the future status-dot poller can
+    call this every few seconds without touching the row data. Returns
+    ``0`` on any DB error so a failed read can never break the
+    aggregate counts page.
+    """
+    try:
+        conn = _open_db()
+        try:
+            _ensure_schema(conn)
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM live_event_queue "
+                "WHERE status = 'failed'"
+            ).fetchone()
+            return int(row['n']) if row else 0
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("LES count_failed failed: %s", e)
+        return 0

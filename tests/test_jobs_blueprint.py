@@ -101,6 +101,8 @@ def test_archive_retry_dead_letter_single_id(geo_db, tmp_path):
     assert n == 1
 
     # Row should now be back to pending with attempts=0 and clean state.
+    # last_error is intentionally PRESERVED so operators retain failure
+    # context until the next worker attempt overwrites it.
     with sqlite3.connect(geo_db) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -109,7 +111,7 @@ def test_archive_retry_dead_letter_single_id(geo_db, tmp_path):
         ).fetchone()
     assert row['status'] == 'pending'
     assert row['attempts'] == 0
-    assert row['last_error'] is None
+    assert row['last_error'] == 'boom'  # preserved
     assert row['claimed_by'] is None
     assert row['claimed_at'] is None
 
@@ -130,6 +132,17 @@ def test_archive_retry_dead_letter_skips_non_dl(geo_db, tmp_path):
     rid = enqueue_for_archive(str(f), db_path=geo_db)  # stays pending
     n = archive_queue.retry_dead_letter(row_id=rid, db_path=geo_db)
     assert n == 0
+
+
+def test_archive_count_dead_letters(geo_db, tmp_path):
+    assert archive_queue.count_dead_letters(db_path=geo_db) == 0
+    for i in range(3):
+        f = tmp_path / f"f{i}.mp4"; f.write_bytes(b"x")
+        _force_archive_dead_letter(geo_db, str(f))
+    # Add a healthy row to verify it's not counted.
+    healthy = tmp_path / "ok.mp4"; healthy.write_bytes(b"x")
+    enqueue_for_archive(str(healthy), db_path=geo_db)
+    assert archive_queue.count_dead_letters(db_path=geo_db) == 3
 
 
 # --- indexing_queue helpers --------------------------------------------------
@@ -193,6 +206,95 @@ def test_indexer_retry_dead_letter_all(geo_db, cam_clip, tmp_path):
     n = indexing_queue_service.retry_dead_letter(geo_db,
                                                  canonical_key_value=None)
     assert n == 2
+
+
+def test_indexer_count_dead_letters(geo_db, cam_clip, tmp_path):
+    assert indexing_queue_service.count_dead_letters(geo_db) == 0
+    _force_indexer_dead_letter(geo_db, cam_clip)
+    assert indexing_queue_service.count_dead_letters(geo_db) == 1
+    other = tmp_path / "RecentClips" / "other.mp4"
+    other.write_bytes(b"x")
+    _force_indexer_dead_letter(geo_db, str(other))
+    assert indexing_queue_service.count_dead_letters(geo_db) == 2
+
+
+def test_indexer_retry_preserves_last_error(geo_db, cam_clip):
+    """Retry resets attempts but preserves last_error for triage context."""
+    key = _force_indexer_dead_letter(geo_db, cam_clip)
+    indexing_queue_service.retry_dead_letter(geo_db,
+                                             canonical_key_value=key)
+    with sqlite3.connect(geo_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT attempts, last_error FROM indexing_queue "
+            "WHERE canonical_key=?", (key,),
+        ).fetchone()
+    assert row['attempts'] == 0
+    assert row['last_error'] == 'boom'  # preserved
+
+
+# ---------------------------------------------------------------------------
+# Redactor tests
+# ---------------------------------------------------------------------------
+
+def test_redactor_strips_local_paths():
+    from blueprints.jobs import _redact_last_error
+    s = _redact_last_error(
+        "copy: OSError('moov atom missing: /mnt/gadget/part1-ro/TeslaCam/foo.mp4')"
+    )
+    assert '/mnt/gadget/' not in s
+    assert '<path>' in s
+
+
+def test_redactor_strips_home_paths():
+    from blueprints.jobs import _redact_last_error
+    s = _redact_last_error("Permission denied: /home/pi/TeslaUSB/state.txt")
+    assert '/home/pi' not in s
+    assert '<path>' in s
+
+
+def test_redactor_strips_rclone_remote():
+    from blueprints.jobs import _redact_last_error
+    s = _redact_last_error("rclone: 2025/01/01 ERROR myremote:bucket/path/x.mp4 not found")
+    assert 'myremote:bucket' not in s
+    assert '<remote>' in s
+
+
+def test_redactor_caps_length():
+    from blueprints.jobs import _redact_last_error, _REDACT_MAX_LEN
+    s = _redact_last_error('x' * (_REDACT_MAX_LEN + 100))
+    assert len(s) <= _REDACT_MAX_LEN + 5  # allow for the ellipsis suffix
+    assert s.endswith('…')
+
+
+def test_redactor_handles_none_and_empty():
+    from blueprints.jobs import _redact_last_error
+    assert _redact_last_error(None) == ''
+    assert _redact_last_error('') == ''
+
+
+def test_listers_apply_redaction(geo_db, tmp_path, monkeypatch):
+    """Production lister must redact identifiers it gets from the DB."""
+    f = tmp_path / "x.mp4"; f.write_bytes(b"x")
+    rid = enqueue_for_archive(str(f), db_path=geo_db)
+    with sqlite3.connect(geo_db) as conn:
+        conn.execute(
+            "UPDATE archive_queue SET status='dead_letter', attempts=99, "
+            "last_error=? WHERE id=?",
+            ("error from /mnt/gadget/part1-ro/TeslaCam/x.mp4", rid),
+        )
+        conn.commit()
+
+    import config as config_module
+    monkeypatch.setattr(config_module, 'MAPPING_DB_PATH', geo_db,
+                        raising=False)
+    import blueprints.jobs as jobs_module
+    monkeypatch.setattr(jobs_module, 'MAPPING_DB_PATH', geo_db, raising=False)
+
+    rows = jobs_module._archive_rows(10)
+    assert len(rows) == 1
+    assert '/mnt/gadget/' not in rows[0]['last_error']
+    assert '<path>' in rows[0]['last_error']
 
 
 # ---------------------------------------------------------------------------
@@ -260,9 +362,14 @@ def _patch_retrier(monkeypatch, name, fn):
     monkeypatch.setitem(jobs_module._RETRIERS, name, fn)
 
 
+def _patch_counter(monkeypatch, name, value):
+    import blueprints.jobs as jobs_module
+    monkeypatch.setitem(jobs_module._COUNTERS, name, lambda: value)
+
+
 def test_counts_all_zero(client, monkeypatch):
     for name in ('archive', 'indexer', 'cloud_sync', 'live_event_sync'):
-        _patch_lister(monkeypatch, name, [])
+        _patch_counter(monkeypatch, name, 0)
     rv = client.get('/api/jobs/counts')
     assert rv.status_code == 200
     body = rv.get_json()
@@ -271,21 +378,31 @@ def test_counts_all_zero(client, monkeypatch):
 
 
 def test_counts_with_rows(client, monkeypatch):
-    _patch_lister(monkeypatch, 'archive', [{'subsystem': 'archive', 'id': 1,
-                                            'identifier': 'x', 'attempts': 5,
-                                            'last_error': 'e',
-                                            'enqueued_at': None, 'extra': {}}])
-    _patch_lister(monkeypatch, 'indexer', [])
-    _patch_lister(monkeypatch, 'cloud_sync', [{'subsystem': 'cloud_sync',
-                                               'id': 'y', 'identifier': 'y',
-                                               'attempts': 5, 'last_error': '',
-                                               'enqueued_at': None, 'extra': {}}])
-    _patch_lister(monkeypatch, 'live_event_sync', [])
+    _patch_counter(monkeypatch, 'archive', 1)
+    _patch_counter(monkeypatch, 'indexer', 0)
+    _patch_counter(monkeypatch, 'cloud_sync', 1)
+    _patch_counter(monkeypatch, 'live_event_sync', 0)
     rv = client.get('/api/jobs/counts')
     body = rv.get_json()
     assert body['archive'] == 1
     assert body['cloud_sync'] == 1
     assert body['total'] == 2
+
+
+def test_counts_one_subsystem_crashing(client, monkeypatch):
+    """A crashing counter must not break the page — it returns 0."""
+    import blueprints.jobs as jobs_module
+    def boom():
+        raise RuntimeError("boom")
+    monkeypatch.setitem(jobs_module._COUNTERS, 'archive', boom)
+    _patch_counter(monkeypatch, 'indexer', 5)
+    _patch_counter(monkeypatch, 'cloud_sync', 0)
+    _patch_counter(monkeypatch, 'live_event_sync', 0)
+    rv = client.get('/api/jobs/counts')
+    body = rv.get_json()
+    assert body['archive'] == 0  # crashed → 0
+    assert body['indexer'] == 5
+    assert body['total'] == 5
 
 
 def test_failed_all_subsystems(client, monkeypatch):

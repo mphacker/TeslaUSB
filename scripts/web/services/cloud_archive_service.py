@@ -2505,6 +2505,29 @@ def list_dead_letters(limit: int = 100) -> List[Dict[str, Any]]:
         conn.close()
 
 
+def count_dead_letters() -> int:
+    """Return the count of ``dead_letter`` rows in ``cloud_synced_files``.
+
+    Cheap (single ``SELECT COUNT(*)`` over the ``idx_cloud_synced_status``
+    index defined on ``cloud_synced_files(status)``). Used by
+    ``/api/jobs/counts`` so the unified page doesn't fetch every row
+    just to compute ``len()``. Returns ``0`` on any DB error so a
+    failed count never breaks the aggregate page.
+    """
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM cloud_synced_files "
+            "WHERE status = 'dead_letter'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning("count_dead_letters failed: %s", e)
+        return 0
+    finally:
+        conn.close()
+
+
 def retry_dead_letter(file_path: Optional[str] = None) -> int:
     """Reset ``dead_letter`` rows back to ``pending`` for re-pickup.
 
@@ -2514,11 +2537,15 @@ def retry_dead_letter(file_path: Optional[str] = None) -> int:
     row in the table is reset — useful for "Retry all" after fixing a
     cloud auth or quota outage that affected the whole batch.
 
-    Resets ``retry_count`` to zero and clears ``last_error`` so the
-    retry budget starts fresh; the next failure is treated as the
-    first one again. Wakes the cloud worker so the row gets picked up
-    immediately if WiFi + cloud are healthy. Returns the number of
-    rows actually reset (``0`` if nothing matched).
+    Resets ``retry_count`` to zero so the cap-promotion logic in
+    :func:`_mark_upload_failure` starts the next attempt fresh.
+    **Does NOT clear** ``last_error`` — the previous failure reason
+    is the most useful triage context the operator has, and the next
+    failure overwrites it via ``_mark_upload_failure`` anyway (a
+    successful retry leaves the row out of the dead-letter view).
+    Wakes the cloud worker so the row gets picked up immediately if
+    WiFi + cloud are healthy. Returns the number of rows actually
+    reset (``0`` if nothing matched).
     """
     if file_path is not None:
         try:
@@ -2532,15 +2559,13 @@ def retry_dead_letter(file_path: Optional[str] = None) -> int:
         if target is None:
             cur = conn.execute(
                 "UPDATE cloud_synced_files "
-                "SET status = 'pending', retry_count = 0, "
-                "    last_error = NULL "
+                "SET status = 'pending', retry_count = 0 "
                 "WHERE status = 'dead_letter'"
             )
         else:
             cur = conn.execute(
                 "UPDATE cloud_synced_files "
-                "SET status = 'pending', retry_count = 0, "
-                "    last_error = NULL "
+                "SET status = 'pending', retry_count = 0 "
                 "WHERE status = 'dead_letter' AND file_path = ?",
                 (target,),
             )

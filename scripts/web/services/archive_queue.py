@@ -516,6 +516,36 @@ def list_dead_letters(limit: int = 100,
                 pass
 
 
+def count_dead_letters(db_path: Optional[str] = None) -> int:
+    """Return the count of ``dead_letter`` rows in ``archive_queue``.
+
+    Cheap (single ``SELECT COUNT(*)`` over the ``status`` column —
+    schema indexes ``status`` in v10). Used by the unified
+    ``/api/jobs/counts`` endpoint and the future status-dot poller so
+    they don't have to fetch every row just to compute ``len()``.
+    Returns ``0`` on any DB error so a failed count never breaks the
+    aggregate page.
+    """
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM archive_queue "
+            "WHERE status = 'dead_letter'"
+        ).fetchone()
+        return int(row['n']) if row else 0
+    except sqlite3.Error as e:
+        logger.warning("count_dead_letters failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def retry_dead_letter(row_id: Optional[int] = None,
                       db_path: Optional[str] = None) -> int:
     """Reset ``dead_letter`` rows back to ``pending`` for re-pickup.
@@ -525,13 +555,13 @@ def retry_dead_letter(row_id: Optional[int] = None,
     after fixing a transient SD-card / namespace issue that affected
     a whole batch of failed copies.
 
-    Resets ``attempts`` and ``last_error`` so the retry budget starts
-    fresh; the next failure is treated as the first one again. Does
-    NOT change priority or expected_mtime — those are still the
-    correct ordering keys for the worker.
-
-    Returns the number of rows actually reset (``0`` if nothing
-    matched).
+    Resets ``attempts`` to zero and clears any stale claim so the
+    worker re-picks the row on the next cycle. **Does NOT clear**
+    ``last_error`` — the previous failure reason is the most useful
+    triage context the operator has, and the worker will overwrite it
+    on the next failure (and a successful retry leaves the row out of
+    the dead-letter view anyway). Returns the number of rows actually
+    reset (``0`` if nothing matched).
     """
     db_path = _resolve_db_path(db_path)
     conn = None
@@ -541,7 +571,7 @@ def retry_dead_letter(row_id: Optional[int] = None,
             cur = conn.execute(
                 """UPDATE archive_queue
                    SET status = 'pending', attempts = 0,
-                       last_error = NULL, claimed_by = NULL,
+                       claimed_by = NULL,
                        claimed_at = NULL
                    WHERE status = 'dead_letter'"""
             )
@@ -549,7 +579,7 @@ def retry_dead_letter(row_id: Optional[int] = None,
             cur = conn.execute(
                 """UPDATE archive_queue
                    SET status = 'pending', attempts = 0,
-                       last_error = NULL, claimed_by = NULL,
+                       claimed_by = NULL,
                        claimed_at = NULL
                    WHERE status = 'dead_letter' AND id = ?""",
                 (int(row_id),),

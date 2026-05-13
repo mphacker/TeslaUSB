@@ -30,10 +30,23 @@ the page polls the JSON endpoints client-side. No image-gating —
 the page is informational and lists subsystems independently, so it
 must work even when the cam image is missing (it will simply show
 empty lists for the cam-dependent subsystems).
+
+The counts endpoint goes through dedicated ``count_*`` helpers in
+each subsystem (cheap ``SELECT COUNT(*)``) — never through the
+listers. The listers fetch row payloads (``last_error`` strings can
+be hundreds of bytes) and would amplify the request to ~7 000 rows /
+~16 MB on a large dead-letter backlog, which would defeat the
+status-dot polling use case (Phase 4.8).
+
+The ``last_error`` strings returned by the listers are redacted via
+:func:`_redact_last_error` to strip rclone bucket/host names and
+absolute local paths before they leave the process. Originals stay
+in the DB for journalctl / shell triage.
 """
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, jsonify, render_template, request
@@ -65,6 +78,46 @@ _SUBSYSTEMS = (
     'live_event_sync',
 )
 
+# ---------------------------------------------------------------------------
+# Error-message redaction
+# ---------------------------------------------------------------------------
+
+# Strip absolute local paths the user did not pick:
+#   /mnt/gadget/...                 (USB RO mount; reveals device layout)
+#   /home/<user>/...                (login name on the Pi)
+#   /var/..., /run/..., /tmp/...    (system paths an LAN guest doesn't need)
+# AND any rclone-style "remote:bucket/..." reference that could disclose the
+# user's cloud provider, bucket name, or path on the cloud side. Anything
+# that looks like a cloud-host hostname (s3.<region>.amazonaws.com, etc.)
+# gets the host stripped to its TLD-1 component.
+_REDACT_PATTERNS = (
+    (re.compile(r'/(?:mnt|home|var|run|tmp)/[^\s\'"\)]+'), '<path>'),
+    (re.compile(r'\b[A-Za-z][A-Za-z0-9_-]{0,30}:[A-Za-z0-9._/-]+'),
+     '<remote>'),
+    (re.compile(r'\b[A-Za-z0-9-]+\.s3[.-][^\s\'"\)]+\.amazonaws\.com\b'),
+     '<s3-host>'),
+)
+_REDACT_MAX_LEN = 600
+
+
+def _redact_last_error(msg: Any) -> str:
+    """Sanitize a ``last_error`` string for HTTP response.
+
+    Strips absolute local paths and cloud-remote identifiers that an
+    LAN/AP guest viewing the Failed Jobs page does not need to see —
+    bucket names, login user, USB mount paths. Originals stay in the
+    DB for journalctl-side triage. Also caps length so a runaway
+    rclone stack trace can't blow up the JSON payload.
+    """
+    if not msg:
+        return ''
+    s = str(msg)
+    for pat, repl in _REDACT_PATTERNS:
+        s = pat.sub(repl, s)
+    if len(s) > _REDACT_MAX_LEN:
+        s = s[:_REDACT_MAX_LEN].rstrip() + ' …'
+    return s
+
 
 def _safe(fn, default):
     """Call ``fn()``, returning ``default`` on any exception.
@@ -95,7 +148,7 @@ def _archive_rows(limit: int) -> List[Dict[str, Any]]:
             'id': r.get('id'),
             'identifier': r.get('source_path') or r.get('archive_path') or '',
             'attempts': int(r.get('attempts') or 0),
-            'last_error': r.get('last_error') or '',
+            'last_error': _redact_last_error(r.get('last_error')),
             'enqueued_at': r.get('enqueued_at'),
             'extra': {
                 'priority': r.get('priority'),
@@ -117,7 +170,7 @@ def _indexer_rows(limit: int) -> List[Dict[str, Any]]:
             'id': r.get('canonical_key'),  # natural key in this table
             'identifier': r.get('file_path') or r.get('canonical_key') or '',
             'attempts': int(r.get('attempts') or 0),
-            'last_error': r.get('last_error') or '',
+            'last_error': _redact_last_error(r.get('last_error')),
             'enqueued_at': r.get('enqueued_at'),
             'extra': {
                 'next_attempt_at': r.get('next_attempt_at'),
@@ -139,7 +192,7 @@ def _cloud_sync_rows(limit: int) -> List[Dict[str, Any]]:
             'id': r.get('file_path'),  # natural key (UNIQUE)
             'identifier': r.get('file_path') or '',
             'attempts': int(r.get('retry_count') or 0),
-            'last_error': r.get('last_error') or '',
+            'last_error': _redact_last_error(r.get('last_error')),
             'enqueued_at': None,
             'extra': {
                 'file_size': r.get('file_size'),
@@ -166,7 +219,7 @@ def _live_event_rows(limit: int) -> List[Dict[str, Any]]:
             'id': r.get('id'),
             'identifier': r.get('event_dir') or '',
             'attempts': int(r.get('attempts') or 0),
-            'last_error': r.get('last_error') or '',
+            'last_error': _redact_last_error(r.get('last_error')),
             'enqueued_at': r.get('enqueued_at'),
             'extra': {
                 'event_timestamp': r.get('event_timestamp'),
@@ -183,6 +236,44 @@ _LISTERS = {
     'indexer': _indexer_rows,
     'cloud_sync': _cloud_sync_rows,
     'live_event_sync': _live_event_rows,
+}
+
+
+# ---------------------------------------------------------------------------
+# Subsystem-specific count adapters (cheap COUNT(*), used by /counts)
+# ---------------------------------------------------------------------------
+
+def _archive_count() -> int:
+    from services import archive_queue
+    return int(archive_queue.count_dead_letters())
+
+
+def _indexer_count() -> int:
+    if not MAPPING_ENABLED:
+        return 0
+    from services import indexing_queue_service
+    return int(indexing_queue_service.count_dead_letters(MAPPING_DB_PATH))
+
+
+def _cloud_sync_count() -> int:
+    if not CLOUD_ARCHIVE_ENABLED:
+        return 0
+    from services import cloud_archive_service
+    return int(cloud_archive_service.count_dead_letters())
+
+
+def _live_event_count() -> int:
+    if not LIVE_EVENT_SYNC_ENABLED:
+        return 0
+    from services import live_event_sync_service
+    return int(live_event_sync_service.count_failed())
+
+
+_COUNTERS = {
+    'archive': _archive_count,
+    'indexer': _indexer_count,
+    'cloud_sync': _cloud_sync_count,
+    'live_event_sync': _live_event_count,
 }
 
 
@@ -275,12 +366,14 @@ def _parse_limit(default: int = 100, hard_max: int = 1000) -> int:
 def api_counts():
     """Return failed-job counts per subsystem plus a total.
 
-    Cheap (one short query per subsystem). Used by the nav-bar status
-    dot poller (Phase 4.8 will reuse this endpoint) so this MUST stay
-    fast — no joins, no full scans.
+    Cheap by design — every subsystem call goes through a dedicated
+    ``count_*`` helper that runs a single ``SELECT COUNT(*)`` over the
+    indexed status column, never a full row fetch. This MUST stay fast
+    because Phase 4.8 will reuse this endpoint as the status-dot
+    poller (every few seconds).
     """
     counts = {
-        name: len(_safe(lambda n=name: _LISTERS[n](1000), []))
+        name: int(_safe(_COUNTERS[name], 0))
         for name in _SUBSYSTEMS
     }
     counts['total'] = sum(counts.values())

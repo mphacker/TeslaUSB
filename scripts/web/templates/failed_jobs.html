@@ -11,7 +11,7 @@
         </div>
         <div style="display: flex; gap: 8px;">
             <button type="button" id="refreshBtn" class="btn btn-secondary" aria-label="Refresh failed jobs list">
-                <svg class="nav-icon" data-lucide="refresh-cw" aria-hidden="true"></svg>
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
                 <span>Refresh</span>
             </button>
         </div>
@@ -24,22 +24,22 @@
             <span class="pill-count" id="count-all">0</span>
         </button>
         <button type="button" class="failed-pill" data-subsystem="archive" aria-pressed="false">
-            <svg class="nav-icon" data-lucide="hard-drive" aria-hidden="true"></svg>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-hard-drive"></use></svg>
             <span class="pill-label">Archive</span>
             <span class="pill-count" id="count-archive">0</span>
         </button>
         <button type="button" class="failed-pill" data-subsystem="indexer" aria-pressed="false">
-            <svg class="nav-icon" data-lucide="map-pin" aria-hidden="true"></svg>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-map-pin"></use></svg>
             <span class="pill-label">Indexer</span>
             <span class="pill-count" id="count-indexer">0</span>
         </button>
         <button type="button" class="failed-pill" data-subsystem="cloud_sync" aria-pressed="false">
-            <svg class="nav-icon" data-lucide="cloud-upload" aria-hidden="true"></svg>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud-upload"></use></svg>
             <span class="pill-label">Cloud</span>
             <span class="pill-count" id="count-cloud_sync">0</span>
         </button>
         <button type="button" class="failed-pill" data-subsystem="live_event_sync" aria-pressed="false">
-            <svg class="nav-icon" data-lucide="bell" aria-hidden="true"></svg>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bell"></use></svg>
             <span class="pill-label">Live Events</span>
             <span class="pill-count" id="count-live_event_sync">0</span>
         </button>
@@ -49,14 +49,14 @@
     <div id="retryAllBar" style="display: none; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px;">
         <span id="retryAllLabel" style="font-size: 0.875rem; color: var(--text-secondary);"></span>
         <button type="button" id="retryAllBtn" class="btn btn-primary" aria-label="Retry all failed jobs in this subsystem">
-            <svg class="nav-icon" data-lucide="rotate-ccw" aria-hidden="true"></svg>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
             <span>Retry all</span>
         </button>
     </div>
 
     <!-- Empty state / loading state -->
     <div id="emptyState" style="display: none; padding: 40px 20px; text-align: center; background: var(--bg-secondary); border: 1px dashed var(--border-color); border-radius: 8px;">
-        <svg data-lucide="check-circle-2" aria-hidden="true" style="width: 48px; height: 48px; color: var(--accent-success, #22C55E); margin: 0 auto 12px;"></svg>
+        <svg aria-hidden="true" style="width: 48px; height: 48px; color: var(--accent-success, #22C55E); margin: 0 auto 12px;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
         <h2 style="margin: 0 0 4px; font-size: 1.125rem;">No failed jobs</h2>
         <p style="margin: 0; color: var(--text-secondary); font-size: 0.875rem;">Every background task is healthy.</p>
     </div>
@@ -160,11 +160,13 @@
     };
 
     const SUBSYSTEM_META = {
-        archive:        { label: 'Archive',      icon: 'hard-drive' },
-        indexer:        { label: 'Indexer',      icon: 'map-pin' },
-        cloud_sync:     { label: 'Cloud',        icon: 'cloud-upload' },
-        live_event_sync:{ label: 'Live Events',  icon: 'bell' },
+        archive:        { label: 'Archive',      icon: 'icon-hard-drive' },
+        indexer:        { label: 'Indexer',      icon: 'icon-map-pin' },
+        cloud_sync:     { label: 'Cloud',        icon: 'icon-cloud-upload' },
+        live_event_sync:{ label: 'Live Events',  icon: 'icon-bell' },
     };
+
+    const SPRITE_URL = {{ url_for('static', filename='icons/lucide-sprite.svg')|tojson }};
 
     function $(id) { return document.getElementById(id); }
 
@@ -224,7 +226,7 @@
         if (empty) return;
 
         state.rows.forEach(function (r) {
-            const meta = SUBSYSTEM_META[r.subsystem] || { label: r.subsystem, icon: 'alert-triangle' };
+            const meta = SUBSYSTEM_META[r.subsystem] || { label: r.subsystem, icon: 'icon-alert-triangle' };
 
             const card = document.createElement('article');
             card.className = 'job-card';
@@ -234,7 +236,7 @@
             header.className = 'job-card-header';
             header.innerHTML =
                 '<span class="job-subsystem-badge">' +
-                  '<svg class="nav-icon" data-lucide="' + meta.icon + '" aria-hidden="true"></svg>' +
+                  '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#' + meta.icon + '"></use></svg>' +
                   meta.label +
                 '</span>' +
                 '<span class="job-attempts">' + fmtAttempts(r.attempts) + '</span>';
@@ -254,7 +256,7 @@
             retryBtn.type = 'button';
             retryBtn.className = 'btn btn-primary';
             retryBtn.setAttribute('aria-label', 'Retry this job');
-            retryBtn.innerHTML = '<svg class="nav-icon" data-lucide="rotate-ccw" aria-hidden="true"></svg><span>Retry</span>';
+            retryBtn.innerHTML = '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#icon-refresh-cw"></use></svg><span>Retry</span>';
             retryBtn.addEventListener('click', function () { retryRow(r); });
 
             actions.appendChild(retryBtn);
@@ -264,10 +266,6 @@
             card.appendChild(actions);
             list.appendChild(card);
         });
-
-        if (window.lucide && typeof window.lucide.createIcons === 'function') {
-            window.lucide.createIcons();
-        }
     }
 
     function loadCounts() {
@@ -341,9 +339,6 @@
     $('retryAllBtn').addEventListener('click', retryAll);
 
     document.addEventListener('DOMContentLoaded', function () {
-        if (window.lucide && typeof window.lucide.createIcons === 'function') {
-            window.lucide.createIcons();
-        }
         refresh();
     });
 })();

@@ -186,6 +186,14 @@ def archive_status():
     ))
     response['last_prune_error'] = retention.get('last_prune_error')
     response['next_prune_due_at'] = retention.get('next_prune_due_at')
+    # Phase 4.7 (#101) — surface clips withheld by the
+    # "keep until backed up" toggle so the Settings summary line can
+    # tell the user when retention deferred a delete pending cloud
+    # sync. Already tracked in ``_retention_state`` (see Phase 1
+    # item 1.3) but not previously surfaced via this API.
+    response['last_prune_kept_unsynced'] = int(retention.get(
+        'last_prune_kept_unsynced', 0,
+    ))
 
     return jsonify(response)
 

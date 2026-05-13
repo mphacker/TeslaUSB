@@ -234,6 +234,19 @@ archive:
   max_size_gb: 0                         # 0 = auto (use all available space minus reserved)
   only_driving: true                     # Only archive clips from active driving trips (skip idle/parked)
   path: ""                               # Archive path (default: ~/ArchivedClips, set by web app)
+  # Issue #167 sub-deliverable 2 — skip-at-source for stationary RecentClips.
+  # When ``true``, the archive worker peeks at the SEI metadata of each
+  # ``RecentClips`` candidate before copying. If the clip contains no
+  # GPS-bearing SEI message (no movement / no GPS lock), the row is
+  # marked ``skipped_stationary`` instead of being copied. This is the
+  # long-term complement to the one-shot reclaim button (sub-deliverable 1) —
+  # the reclaim button cleans up clips that already landed on the SD card,
+  # this flag prevents new stationary clips from arriving in the first place.
+  # Default: ``false`` so existing installs see zero behavior change. Operators
+  # who don't care about overnight Sentry-while-parked footage can flip this on
+  # to keep the SD card from filling. Sentry/Saved event clips are NEVER skipped
+  # (they are PRIORITY_EVENTS and never enter this code path).
+  skip_stationary_recent_clips: false
 
 # ============================================================================
 # Archive Queue Configuration (issue #76 — Phase 2a producer-only)

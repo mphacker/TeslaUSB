@@ -108,6 +108,7 @@ _KNOWN_STATUSES = (
     'claimed',
     'copied',
     'source_gone',
+    'skipped_stationary',
     'error',
     'dead_letter',
 )
@@ -985,6 +986,169 @@ def mark_source_gone(row_id: int, *,
     except sqlite3.Error as e:
         logger.warning("mark_source_gone failed for id=%s: %s", row_id, e)
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def mark_skipped_stationary(row_id: int, *,
+                            db_path: Optional[str] = None) -> bool:
+    """Mark a row as ``skipped_stationary``.
+
+    Issue #167 sub-deliverable 2 — terminal transition for the case
+    where the archive worker peeked at the source clip's SEI metadata
+    and found no GPS-bearing message (no movement / no GPS lock),
+    indicating the clip is overnight Sentry-while-parked footage that
+    the operator opted not to copy via the
+    ``archive.skip_stationary_recent_clips`` config flag. No retry, no
+    dead-letter — the operator's decision is final.
+
+    Mirrors :func:`mark_source_gone` exactly: same precondition (the
+    row MUST be ``claimed`` so we never produce an unattributable
+    row), same return semantics (True iff the UPDATE matched),
+    same error swallowing. The two terminal "we did not copy this
+    clip" buckets stay parallel so observability code can report them
+    side-by-side.
+
+    The :func:`count_skipped_stationary_recent` companion uses
+    ``claimed_at`` as the timestamp filter so a 24-hour Settings
+    badge can show "how many clips did we save the SD card from in the
+    last day". Enforcing ``status='claimed'`` here keeps that count
+    accurate.
+    """
+    if not row_id:
+        return False
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        cur = conn.execute(
+            """
+            UPDATE archive_queue
+               SET status = 'skipped_stationary',
+                   last_error = NULL
+             WHERE id = ?
+               AND status = 'claimed'
+            """,
+            (int(row_id),),
+        )
+        return cur.rowcount == 1
+    except sqlite3.Error as e:
+        logger.warning(
+            "mark_skipped_stationary failed for id=%s: %s", row_id, e,
+        )
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def count_skipped_stationary_recent(hours: int = 24,
+                                    *, db_path: Optional[str] = None) -> int:
+    """Return the number of ``skipped_stationary`` rows in the last N hours.
+
+    Issue #167 sub-deliverable 2 — companion to
+    :func:`mark_skipped_stationary`. Mirrors
+    :func:`count_source_gone_recent` exactly so the Settings page can
+    show a "stationary clips skipped in the last 24h" badge alongside
+    the existing "files lost" badge.
+
+    Uses ``claimed_at`` as the timestamp filter for the same reason
+    ``count_source_gone_recent`` does: by the time the worker calls
+    :func:`mark_skipped_stationary`, ``claimed_at`` has been
+    populated by :func:`claim_next_for_worker`, and the skip
+    determination happens in the same call. The
+    :func:`mark_skipped_stationary` precondition
+    (``WHERE status='claimed'``) guarantees ``claimed_at`` is never
+    NULL on a ``skipped_stationary`` row, so the counter cannot
+    silently undercount.
+
+    Cheap COUNT(*) — even without a dedicated partial index the table
+    is bounded and the query stays well under 100 ms on the SD card.
+    Returns 0 if the DB is missing, the table doesn't exist yet, or
+    any SQLite error fires — never raises.
+    """
+    if hours <= 0:
+        return 0
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+              FROM archive_queue
+             WHERE status = 'skipped_stationary'
+               AND claimed_at IS NOT NULL
+               AND CAST(strftime('%s', claimed_at) AS INTEGER) >=
+                   CAST(strftime('%s', 'now') AS INTEGER) - ?
+            """,
+            (int(hours) * 3600,),
+        ).fetchone()
+        return int(row['n'] or 0) if row else 0
+    except sqlite3.Error as e:
+        logger.warning("count_skipped_stationary_recent failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def delete_skipped_stationary(*, older_than_hours: Optional[int] = None,
+                              db_path: Optional[str] = None) -> int:
+    """Permanently delete ``skipped_stationary`` rows from ``archive_queue``.
+
+    Issue #167 sub-deliverable 2 — companion to
+    :func:`mark_skipped_stationary` and mirror of
+    :func:`delete_source_gone`. Used by the Settings "Clear skipped"
+    affordance so the operator can wipe the running tally once they've
+    acknowledged it.
+
+    ``skipped_stationary`` is **terminal** — the source clip was
+    intentionally not copied; there is no retry path, no downstream
+    table consumes the row, and the worker never re-claims it.
+    Deleting these rows therefore has zero functional impact on the
+    archive worker, indexer, cloud-sync, or any other subsystem; only
+    the Settings badge changes.
+
+    When ``older_than_hours`` is ``None`` (the default), every
+    ``skipped_stationary`` row is deleted regardless of age. Returns
+    the number of rows actually deleted. Returns 0 on any DB error so
+    a UI Clear click never blows up the request handler.
+    """
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        if older_than_hours is None:
+            cur = conn.execute(
+                "DELETE FROM archive_queue WHERE status = 'skipped_stationary'"
+            )
+        else:
+            cur = conn.execute(
+                """
+                DELETE FROM archive_queue
+                 WHERE status = 'skipped_stationary'
+                   AND claimed_at IS NOT NULL
+                   AND CAST(strftime('%s', claimed_at) AS INTEGER) <
+                       CAST(strftime('%s', 'now') AS INTEGER) - ?
+                """,
+                (int(older_than_hours) * 3600,),
+            )
+        conn.commit()
+        return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("delete_skipped_stationary failed: %s", e)
+        return 0
     finally:
         if conn is not None:
             try:

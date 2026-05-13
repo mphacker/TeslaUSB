@@ -198,6 +198,15 @@ ARCHIVE_RETENTION_DAYS = int(_archive.get('retention_days', 30))
 ARCHIVE_MIN_FREE_SPACE_GB = int(_archive.get('min_free_space_gb', 10))
 ARCHIVE_MAX_SIZE_GB = int(_archive.get('max_size_gb', 50))
 ARCHIVE_ONLY_DRIVING = bool(_archive.get('only_driving', True))
+# Issue #167 sub-deliverable 2 — skip-at-source for stationary RecentClips.
+# Default ``False`` so existing installs see no behavior change. When
+# ``True``, the archive worker peeks at the SEI metadata of each
+# RecentClips candidate before copying; clips with no GPS-bearing SEI
+# message are marked ``skipped_stationary`` instead of consuming SD-card
+# space. Sentry/Saved event clips (priority 2) are NEVER skipped.
+ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS = bool(
+    _archive.get('skip_stationary_recent_clips', False)
+)
 _archive_path = _archive.get('path', '')
 ARCHIVE_DIR = _archive_path if _archive_path else os.path.join(
     os.path.expanduser(f"~{TARGET_USER}"), 'ArchivedClips'

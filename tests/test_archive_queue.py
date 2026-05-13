@@ -577,7 +577,8 @@ class TestGetQueueStatus:
         counts = get_queue_status(db_path=db)
         assert counts == {
             'pending': 0, 'claimed': 0, 'copied': 0,
-            'source_gone': 0, 'error': 0, 'dead_letter': 0,
+            'source_gone': 0, 'skipped_stationary': 0,
+            'error': 0, 'dead_letter': 0,
             'total': 0,
         }
 
@@ -794,8 +795,10 @@ class TestDefaultDbPath:
 
 from services.archive_queue import (  # noqa: E402
     claim_next_for_worker,
+    delete_skipped_stationary,
     mark_copied,
     mark_failed,
+    mark_skipped_stationary,
     mark_source_gone,
     recover_stale_claims,
     release_claim,
@@ -1161,6 +1164,231 @@ class TestDeleteSourceGone:
         assert archive_queue.delete_source_gone(db_path=db) == 2
         # Banner is now 0; clicking Dismiss again must be safe.
         assert archive_queue.delete_source_gone(db_path=db) == 0
+
+
+class TestMarkSkippedStationary:
+    """Issue #167 sub-deliverable 2 — terminal transition for the
+    ``archive.skip_stationary_recent_clips`` peek-and-skip path. Mirror
+    of ``TestMarkSourceGone``: the same precondition/return-value
+    contract so the two terminal "we did not copy" buckets stay
+    parallel.
+    """
+
+    def test_marks_claimed_row(self, db, sample_file):
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        assert mark_skipped_stationary(row['id'], db_path=db) is True
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'skipped_stationary'
+        # last_error must be cleared — skipping is not an error.
+        assert rows[0]['last_error'] is None
+
+    def test_returns_false_for_unknown_id(self, db):
+        assert mark_skipped_stationary(999999, db_path=db) is False
+
+    def test_refuses_to_mark_pending_row(self, db, sample_file):
+        """Same precondition as ``mark_source_gone`` — a row must be
+        ``claimed`` before it can transition to ``skipped_stationary``,
+        so ``count_skipped_stationary_recent``'s ``claimed_at`` filter
+        is never NULL.
+        """
+        assert enqueue_for_archive(sample_file, db_path=db) is True
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'pending'
+        row_id = rows[0]['id']
+        assert mark_skipped_stationary(row_id, db_path=db) is False
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'pending'
+        assert rows[0]['claimed_at'] is None
+
+    def test_refuses_to_mark_copied_row(self, db, sample_file, tmp_path):
+        dest = tmp_path / 'dest.mp4'
+        dest.write_bytes(b'x')
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        assert mark_copied(row['id'], str(dest), db_path=db) is True
+        # Row is now ``copied`` — a stale skip-mark must not regress it.
+        assert mark_skipped_stationary(row['id'], db_path=db) is False
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'copied'
+
+    def test_refuses_to_mark_dead_letter_row(self, db, sample_file):
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "UPDATE archive_queue SET attempts = 99 WHERE id = ?",
+                (row['id'],),
+            )
+        mark_failed(row['id'], 'simulated', db_path=db)
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'dead_letter'
+        assert mark_skipped_stationary(row['id'], db_path=db) is False
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'dead_letter'
+
+    def test_get_queue_status_includes_skipped_stationary_bucket(
+            self, db, sample_file):
+        # The new key must appear in the always-zero default keys
+        # returned by get_queue_status, so the Settings card never
+        # silently drops the metric.
+        counts = get_queue_status(db_path=db)
+        assert 'skipped_stationary' in counts
+        assert counts['skipped_stationary'] == 0
+        # And after a real skip-mark, the count reflects the new row.
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_skipped_stationary(row['id'], db_path=db)
+        counts = get_queue_status(db_path=db)
+        assert counts['skipped_stationary'] == 1
+
+
+class TestCountSkippedStationaryRecent:
+    """Mirror of ``TestCountSourceGoneRecent`` for the new bucket."""
+
+    def test_zero_when_no_skipped_rows(self, db, sample_file, tmp_path):
+        # Mark a row source_gone — must NOT count toward skipped.
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_source_gone(row['id'], db_path=db)
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 0
+
+    def test_counts_recent_skipped_rows(self, db, tmp_path):
+        for i in range(3):
+            f = tmp_path / f"clip_{i}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{i}', db_path=db)
+            mark_skipped_stationary(row['id'], db_path=db)
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 3
+
+    def test_excludes_source_gone(self, db, tmp_path):
+        # The two terminal buckets must NEVER cross-contaminate.
+        f1 = tmp_path / "skip.mp4"
+        f1.write_text("x")
+        enqueue_for_archive(str(f1), db_path=db)
+        r1 = claim_next_for_worker('w1', db_path=db)
+        mark_skipped_stationary(r1['id'], db_path=db)
+
+        f2 = tmp_path / "gone.mp4"
+        f2.write_text("x")
+        enqueue_for_archive(str(f2), db_path=db)
+        r2 = claim_next_for_worker('w2', db_path=db)
+        mark_source_gone(r2['id'], db_path=db)
+
+        # Only the skipped row counts toward skipped_stationary.
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 1
+        # And the source-gone row counts only toward source_gone.
+        assert archive_queue.count_source_gone_recent(
+            24, db_path=db) == 1
+
+    def test_excludes_old_skipped_rows(self, db, sample_file):
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_skipped_stationary(row['id'], db_path=db)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE archive_queue SET claimed_at = "
+                "datetime('now', '-48 hours') WHERE id = ?",
+                (row['id'],),
+            )
+            conn.commit()
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 0
+        # Wider window picks it back up.
+        assert archive_queue.count_skipped_stationary_recent(
+            72, db_path=db) == 1
+
+    def test_zero_hours_returns_zero(self, db, sample_file):
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_skipped_stationary(row['id'], db_path=db)
+        assert archive_queue.count_skipped_stationary_recent(
+            0, db_path=db) == 0
+
+    def test_returns_zero_on_db_failure(self, db, monkeypatch):
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(archive_queue, '_open_archive_conn', boom)
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 0
+
+
+class TestDeleteSkippedStationary:
+    """Issue #167 sub-deliverable 2 — clear-the-tally helper for the
+    Settings UI. Mirror of ``TestDeleteSourceGone``.
+    """
+
+    def _seed_skipped(self, db, tmp_path, n):
+        ids = []
+        for i in range(n):
+            f = tmp_path / f"sk_{i}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{i}', db_path=db)
+            mark_skipped_stationary(row['id'], db_path=db)
+            ids.append(row['id'])
+        return ids
+
+    def test_returns_zero_when_table_empty(self, db):
+        assert delete_skipped_stationary(db_path=db) == 0
+
+    def test_deletes_every_skipped_row_by_default(self, db, tmp_path):
+        self._seed_skipped(db, tmp_path, 5)
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 5
+        assert delete_skipped_stationary(db_path=db) == 5
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 0
+        with sqlite3.connect(db) as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM archive_queue "
+                "WHERE status = 'skipped_stationary'"
+            ).fetchone()[0]
+        assert n == 0
+
+    def test_preserves_other_status_rows(self, db, tmp_path):
+        # 3 skipped + 1 pending + 1 source_gone — only skipped goes.
+        self._seed_skipped(db, tmp_path, 3)
+
+        f_p = tmp_path / "p.mp4"
+        f_p.write_text("x")
+        enqueue_for_archive(str(f_p), db_path=db)
+
+        f_sg = tmp_path / "sg.mp4"
+        f_sg.write_text("x")
+        enqueue_for_archive(str(f_sg), db_path=db)
+        r_sg = claim_next_for_worker('w_sg', db_path=db)
+        mark_source_gone(r_sg['id'], db_path=db)
+
+        assert delete_skipped_stationary(db_path=db) == 3
+        counts = get_queue_status(db_path=db)
+        assert counts['skipped_stationary'] == 0
+        assert counts['pending'] == 1
+        assert counts['source_gone'] == 1
+
+    def test_older_than_hours_keeps_recent(self, db, tmp_path):
+        ids = self._seed_skipped(db, tmp_path, 2)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE archive_queue SET claimed_at = "
+                "datetime('now', '-48 hours') WHERE id = ?",
+                (ids[0],),
+            )
+            conn.commit()
+        assert delete_skipped_stationary(
+            older_than_hours=24, db_path=db) == 1
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 1
+
+    def test_returns_zero_on_db_failure(self, db, monkeypatch):
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(archive_queue, '_open_archive_conn', boom)
+        assert delete_skipped_stationary(db_path=db) == 0
 
 
 class TestReleaseClaim:

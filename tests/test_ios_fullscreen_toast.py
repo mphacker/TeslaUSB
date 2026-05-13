@@ -51,7 +51,10 @@ def mapping_html_text():
 class TestIosDetection:
 
     def test_isios_safari_function_present(self, mapping_html_text):
-        assert 'function isIosSafari()' in mapping_html_text
+        # Backwards-compatible alias preserved AND the canonical
+        # `isIos` name introduced (review fix on PR #140).
+        assert 'function isIos()' in mapping_html_text
+        assert 'const isIosSafari = isIos' in mapping_html_text
 
     def test_detects_iphone_ipad_ipod(self, mapping_html_text):
         """The classic UA tokens (iPhone, iPad, iPod) must trigger
@@ -63,7 +66,7 @@ class TestIosDetection:
         combine the Mac UA with maxTouchPoints to disambiguate iPad
         from a real Mac (which has zero touch points)."""
         block = mapping_html_text[
-            mapping_html_text.index('function isIosSafari()'):
+            mapping_html_text.index('function isIos()'):
         ][:1500]
         assert '/Macintosh/i' in block
         assert 'maxTouchPoints' in block
@@ -72,7 +75,7 @@ class TestIosDetection:
         """Must guard against `navigator` being undefined in headless
         / SSR contexts to avoid a ReferenceError in older renderers."""
         block = mapping_html_text[
-            mapping_html_text.index('function isIosSafari()'):
+            mapping_html_text.index('function isIos()'):
         ][:1500]
         assert "typeof navigator === 'undefined'" in block
 
@@ -113,6 +116,48 @@ class TestOneTimeToast:
                 f"{fn_name} must try-catch localStorage access"
             )
             assert 'catch' in block
+
+    def test_in_memory_fallback_for_private_mode(self, mapping_html_text):
+        """Safari Private Mode has localStorage quota=0 — setItem
+        throws but getItem returns null. Without an in-memory flag the
+        early return in overlayFullscreen() would fire on EVERY tap
+        and the user could never reach webkitEnterFullscreen
+        (softlocking the button despite the toast saying 'tap again').
+        Pin the in-memory flag contract added in the PR #140 review
+        fix.
+        """
+        # Module-scoped flag declaration present.
+        assert '_iosFullscreenToastShownInMemory = false' in mapping_html_text
+
+        # hasShown checks the in-memory flag FIRST so it short-circuits
+        # before touching localStorage.
+        has_block_start = mapping_html_text.index(
+            'function hasShownIosFullscreenToast'
+        )
+        has_block = mapping_html_text[has_block_start:has_block_start + 800]
+        in_memory_idx = has_block.index('_iosFullscreenToastShownInMemory')
+        try_idx = has_block.index('try {')
+        assert in_memory_idx < try_idx, (
+            'hasShownIosFullscreenToast must check the in-memory flag '
+            'BEFORE the try/localStorage block, otherwise Safari '
+            'Private Mode will softlock the Fullscreen button.'
+        )
+
+        # mark…() sets the in-memory flag UNCONDITIONALLY (before the
+        # try/catch around localStorage).
+        mark_block_start = mapping_html_text.index(
+            'function markIosFullscreenToastShown'
+        )
+        mark_block = mapping_html_text[mark_block_start:mark_block_start + 800]
+        mark_set_idx = mark_block.index(
+            '_iosFullscreenToastShownInMemory = true'
+        )
+        mark_try_idx = mark_block.index('try {')
+        assert mark_set_idx < mark_try_idx, (
+            'markIosFullscreenToastShown must set the in-memory flag '
+            'BEFORE attempting localStorage.setItem, so Private Mode '
+            'tap #2 succeeds even if setItem throws.'
+        )
 
     def test_show_helper_falls_back_when_showtoast_missing(self,
                                                            mapping_html_text):
@@ -163,13 +208,13 @@ class TestFirstTapSkipsFullscreen:
 
         # The iOS branch must contain BOTH showIosFullscreenToast and
         # an early return.
-        assert 'isIosSafari()' in body
+        assert 'isIos()' in body
         assert '!hasShownIosFullscreenToast()' in body
         assert 'showIosFullscreenToast()' in body
         assert 'markIosFullscreenToastShown()' in body
         # The early return MUST appear inside the iOS branch — i.e.
         # before the requestFullscreen / webkitEnterFullscreen calls.
-        ios_branch_idx = body.index('isIosSafari()')
+        ios_branch_idx = body.index('isIos()')
         return_idx = body.index('return;', ios_branch_idx)
         fs_call_idx = body.index('requestFullscreen()')
         assert return_idx < fs_call_idx, (

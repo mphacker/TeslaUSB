@@ -2719,15 +2719,92 @@ function overlayFullscreen() {
     // fullscreen — acceptable platform limitation. Use Maximize (the
     // adjacent button) on iOS to get an HUD-visible fill of the
     // browser viewport instead.
+    //
+    // Phase 4.9 (#101): show a one-time toast on first iOS fullscreen
+    // tap so users know the HUD loss is a Safari limitation and that
+    // "Maximize" is the HUD-preserving alternative. Persisted via
+    // localStorage so the user is nagged at most once per browser.
     const stage = document.querySelector('.video-overlay-stage');
     const v = document.getElementById('overlayVideo');
     if (!v) return;
+
+    if (isIosSafari() && !hasShownIosFullscreenToast()) {
+        // Phase 4.9 (#101) — first-tap behaviour on iOS Safari:
+        // SHOW THE TOAST AND SKIP FULLSCREEN. If we entered fullscreen
+        // immediately the toast would be hidden behind the OS player
+        // and the user would never see the explanation. Skipping the
+        // fullscreen on the very first tap is acceptable because the
+        // user's stated intent is "give me a bigger view" and the
+        // toast explicitly recommends Maximize, which delivers that
+        // intent without losing the HUD.
+        //
+        // Subsequent taps (after the localStorage flag is set) proceed
+        // to webkitEnterFullscreen normally for users who deliberately
+        // want OS fullscreen and accept the HUD loss.
+        showIosFullscreenToast();
+        markIosFullscreenToastShown();
+        return;
+    }
+
     if (stage && stage.requestFullscreen) {
         stage.requestFullscreen().catch(() => {});
     } else if (stage && stage.webkitRequestFullscreen) {
         stage.webkitRequestFullscreen();
     } else if (v.webkitEnterFullscreen) {
         v.webkitEnterFullscreen();
+    }
+}
+
+// Phase 4.9 (#101) — iOS Safari detection.
+// iPad on iOS 13+ identifies its UA as "Macintosh" but exposes the
+// touch-event API, so we combine the two signals. Returns true on
+// iPhone, iPad, and iPod across all modern iOS versions.
+function isIosSafari() {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    if (/iPhone|iPad|iPod/i.test(ua)) return true;
+    // iPadOS desktop-mode masquerade: Mac UA + touch support.
+    const isMac = /Macintosh/i.test(ua);
+    const hasTouch = (typeof navigator.maxTouchPoints === 'number' &&
+                      navigator.maxTouchPoints > 1);
+    return isMac && hasTouch;
+}
+
+const IOS_FULLSCREEN_TOAST_KEY = 'iosFullscreenToastShown';
+
+function hasShownIosFullscreenToast() {
+    try {
+        return localStorage.getItem(IOS_FULLSCREEN_TOAST_KEY) === '1';
+    } catch (e) {
+        // Private browsing / disabled storage → re-show every time
+        // rather than crashing. Toast is still polite and one-tap.
+        return false;
+    }
+}
+
+function markIosFullscreenToastShown() {
+    try {
+        localStorage.setItem(IOS_FULLSCREEN_TOAST_KEY, '1');
+    } catch (e) { /* storage disabled — ignore */ }
+}
+
+// Polite, single-line toast pointing iOS users at the Maximize
+// button. Uses the existing showToast() infra (info severity) so
+// dark/light mode + dismiss timing are inherited. Falls back to a
+// console.log if showToast isn't available — never blocks the
+// fullscreen action.
+function showIosFullscreenToast() {
+    const msg = ('iOS Safari hides the HUD in fullscreen. ' +
+                 'Tap Maximize for an HUD-visible view, ' +
+                 'or tap Fullscreen again to continue without HUD.');
+    if (typeof showToast === 'function') {
+        showToast(msg, 'info');
+    } else {
+        // Defensive — base.html owns showToast. If a future refactor
+        // moves it, surface a developer-visible warning rather than
+        // crashing the fullscreen path.
+        try { console.log('TeslaUSB iOS fullscreen toast:', msg); }
+        catch (e) {}
     }
 }
 

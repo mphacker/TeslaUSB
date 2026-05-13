@@ -86,6 +86,8 @@ MAPPING_INDEX_ON_MODE_SWITCH = bool(_mapping.get('index_on_mode_switch', True))
 MAPPING_SAMPLE_RATE = int(_mapping.get('sample_rate', 30))
 MAPPING_TRIP_GAP_MINUTES = int(_mapping.get('trip_gap_minutes', 5))
 MAPPING_ARCHIVE_INDEXING = bool(_mapping.get('archive_indexing', True))
+# Phase 5.9 (issue #102) — too-new gate exposed via Settings → Advanced.
+MAPPING_INDEX_TOO_NEW_SECONDS = float(_mapping.get('index_too_new_seconds', 120))
 MAPPING_DB_PATH = os.path.join(GADGET_DIR, 'geodata.db')
 _event_cfg = _mapping.get('event_detection', {})
 MAPPING_EVENT_THRESHOLDS = {
@@ -256,6 +258,13 @@ ARCHIVE_QUEUE_CHUNK_PAUSE_SECONDS = float(
 )
 ARCHIVE_QUEUE_PER_FILE_TIME_BUDGET_SECONDS = float(
     _archive_queue.get('per_file_time_budget_seconds', 60.0)
+)
+# Phase 5.9 (issue #102) — additional advanced tunables.
+ARCHIVE_QUEUE_STABLE_WRITE_AGE_SECONDS = float(
+    _archive_queue.get('stable_write_age_seconds', 5.0)
+)
+ARCHIVE_QUEUE_STALE_CLAIM_MAX_AGE_SECONDS = float(
+    _archive_queue.get('stale_claim_max_age_seconds', 600.0)
 )
 
 # ============================================================================

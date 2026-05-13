@@ -765,6 +765,16 @@
             {% endif %}
         </div>
     </details>
+
+    <!-- Phase 5.9 (#102): low-key link to the Advanced sub-page. NOT a
+         top-level nav item — buried at the bottom of Settings so casual
+         users don't see it but power users can find it. -->
+    <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border); text-align:right;">
+        <a href="{{ url_for('settings_advanced.index') }}"
+           style="color:var(--text-secondary); font-size:0.85rem; text-decoration:none;">
+            Advanced settings &rarr;
+        </a>
+    </div>
 </div>
 
 <script>

@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+
+{% block title %}Advanced Settings - Tesla USB Gadget Control{% endblock %}
+
+{% block content %}
+<div class="settings-container" style="max-width:900px; margin:0 auto; padding:16px;">
+
+    <header style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+        <a href="{{ url_for('mode_control.index') }}"
+           style="color:var(--text-secondary); text-decoration:none; font-size:0.9rem;">
+            &larr; Back to Settings
+        </a>
+        <h2 style="margin:0; flex:1;">Advanced Settings</h2>
+    </header>
+
+    {# Persistent banner — visible at all times so users can't miss it. #}
+    <div role="alert"
+         style="background:rgba(217, 119, 6, 0.08);
+                color:var(--ds-accent-warning, #D97706);
+                border:1px solid var(--ds-accent-warning, #D97706);
+                padding:12px 16px; border-radius:8px;
+                margin-bottom:20px; font-size:0.9rem;
+                display:flex; gap:10px; align-items:flex-start;">
+        <svg class="inline-icon" aria-hidden="true"
+             style="width:18px; height:18px; flex-shrink:0; margin-top:2px;">
+            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use>
+        </svg>
+        <span>
+            <strong>Advanced settings affect background workers.</strong>
+            Most users should leave these at their defaults. Incorrect values can
+            starve the SDIO bus, trigger the hardware watchdog, or cause clips
+            to be skipped during indexing.
+        </span>
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                {% if category == 'danger' %}
+                    {% set _color = 'var(--ds-accent-danger, #DC2626)' %}
+                    {% set _bg = 'rgba(220, 38, 38, 0.08)' %}
+                {% elif category == 'success' %}
+                    {% set _color = 'var(--ds-accent-success, #16A34A)' %}
+                    {% set _bg = 'rgba(22, 163, 74, 0.08)' %}
+                {% else %}
+                    {% set _color = 'var(--text-primary)' %}
+                    {% set _bg = 'var(--bg-secondary, #f5f5f5)' %}
+                {% endif %}
+                <div role="status"
+                     style="padding:10px 14px; border-radius:8px; margin-bottom:12px;
+                            background:{{ _bg }}; color:{{ _color }};
+                            border:1px solid {{ _color }};">
+                    {{ message }}
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <form method="POST" action="{{ url_for('settings_advanced.save') }}"
+          id="advancedSettingsForm">
+
+        {% for t in tunables %}
+        <div class="advanced-row"
+             style="padding:14px 0; border-bottom:1px solid var(--border-color, #d6d8db);">
+
+            <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-start;">
+                <div style="flex:1; min-width:200px;">
+                    <label for="adv-{{ t.form_name }}"
+                           style="font-weight:600; font-size:0.95rem;">
+                        {{ t.label }}
+                    </label>
+                    <p style="margin:4px 0 0; color:var(--text-secondary); font-size:0.85rem;">
+                        {{ t.description }}
+                    </p>
+                </div>
+
+                <div style="display:flex; gap:8px; align-items:center; min-width:280px;">
+                    <input type="number"
+                           id="adv-{{ t.form_name }}"
+                           name="{{ t.form_name }}"
+                           value="{{ '%g'|format(t.current) }}"
+                           min="{{ t.min }}"
+                           max="{{ t.max }}"
+                           step="{{ t.step }}"
+                           required
+                           data-default="{{ t.default }}"
+                           style="width:110px; padding:6px 10px;
+                                  border:1px solid var(--border-input, #ced4da);
+                                  border-radius:6px;
+                                  background:var(--bg-secondary, #ffffff);
+                                  color:var(--text-primary);
+                                  font-family:inherit; font-size:0.9rem;">
+                    <span style="color:var(--text-secondary); font-size:0.85rem;
+                                 min-width:48px;">{{ t.unit }}</span>
+                </div>
+            </div>
+
+            <div style="display:flex; gap:14px; margin-top:6px;
+                        font-size:0.8rem; color:var(--text-secondary);
+                        flex-wrap:wrap;">
+                <span>Default: <strong>{{ '%g'|format(t.default) }} {{ t.unit }}</strong></span>
+                <span>Range: {{ '%g'|format(t.min) }} – {{ '%g'|format(t.max) }} {{ t.unit }}</span>
+                <button type="button"
+                        onclick="resetAdvancedField('{{ t.form_name }}', '{{ t.default }}')"
+                        style="background:none; border:none;
+                               color:var(--ds-accent-primary, #2563EB);
+                               cursor:pointer; padding:0; font-size:0.8rem;
+                               text-decoration:underline;"
+                        aria-label="Reset {{ t.label }} to default">
+                    Reset to default
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+
+        <div style="display:flex; gap:10px; margin-top:24px;">
+            <button type="submit"
+                    style="padding:10px 24px;
+                           background:var(--ds-accent-primary, #2563EB);
+                           color:white; border:none; border-radius:8px;
+                           font-size:0.95rem; font-weight:600; cursor:pointer;
+                           min-height:44px;">
+                Save advanced settings
+            </button>
+            <a href="{{ url_for('mode_control.index') }}"
+               style="padding:10px 24px; background:var(--bg-secondary, #f5f5f5);
+                      color:var(--text-primary);
+                      border:1px solid var(--border-color, #d6d8db);
+                      border-radius:8px; font-size:0.95rem; text-decoration:none;
+                      display:inline-flex; align-items:center;
+                      min-height:44px; box-sizing:border-box;">
+                Cancel
+            </a>
+        </div>
+    </form>
+</div>
+
+<script>
+function resetAdvancedField(name, defaultValue) {
+    var el = document.getElementById('adv-' + name);
+    if (el) {
+        el.value = defaultValue;
+        el.focus();
+    }
+}
+</script>
+{% endblock %}

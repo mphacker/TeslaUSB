@@ -21,6 +21,7 @@ from .archive_queue import archive_queue_bp
 from .storage_retention import storage_retention_bp
 from .jobs import jobs_bp
 from .system_health import system_health_bp
+from .settings_advanced import settings_advanced_bp
 
 __all__ = [
     'mode_control_bp',
@@ -45,4 +46,5 @@ __all__ = [
     'storage_retention_bp',
     'jobs_bp',
     'system_health_bp',
+    'settings_advanced_bp',
 ]

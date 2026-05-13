@@ -2262,6 +2262,19 @@ class TestDrainRateETA:
             seconds_under_cap, 1.0,
         ) == seconds_under_cap
 
+    def test_compute_eta_sub_second_returns_none(self):
+        """Sub-second ETAs (rate >> queue) must return None to avoid
+        the asymmetric ``eta_seconds: 0`` + ``eta_human: None`` API
+        combination. The user gets no signal from "<1 min" anyway."""
+        # 1 file at 100 files/sec = 0.01 s → suppress.
+        assert archive_worker.compute_eta_seconds(1, 100.0) is None
+        # 5 files at 10 files/sec = 0.5 s → still suppress.
+        assert archive_worker.compute_eta_seconds(5, 10.0) is None
+        # 1 file at exactly 1 file/sec = 1 s → return 1.
+        assert archive_worker.compute_eta_seconds(1, 1.0) == 1
+        # 2 files at 1 file/sec = 2 s → return 2.
+        assert archive_worker.compute_eta_seconds(2, 1.0) == 2
+
     def test_get_status_surfaces_eta_fields(self, tmp_path):
         # End-to-end: build a status with a real DB, populate the deque
         # by hand (no need to drive the full worker loop), and confirm

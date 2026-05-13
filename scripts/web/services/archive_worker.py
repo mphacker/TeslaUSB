@@ -146,10 +146,10 @@ _DRAIN_RATE_WINDOW_SIZE = 50
 # 1 000-row enqueue would render an absurdly low rate estimate.
 _DRAIN_RATE_FRESHNESS_SECONDS = 600.0  # 10 minutes
 # Minimum number of completion samples needed before computing a rate.
-# With < 2 samples there's no time span to divide by; with very few
-# samples the estimate has too much variance to surface. Three is a
-# pragmatic floor: the user sees ETA only after the worker has shown it
-# can sustain the pace.
+# A rate computation needs at least 2 samples to derive an inter-sample
+# span; we require 3 so we have at least 2 inter-sample gaps to average
+# (single-gap variance is too high). The user sees ETA only after the
+# worker has shown it can sustain the pace.
 _DRAIN_RATE_MIN_SAMPLES = 3
 # Cap the displayed ETA so a transient slow start (first few files of a
 # huge backlog drained at sub-second rates after a long pause) doesn't
@@ -509,9 +509,10 @@ def get_status() -> Dict[str, Any]:
     snap['error_count'] = counts.get('error', 0)
     snap['disk_pause'] = get_disk_pause_state()
     snap['load_pause'] = get_load_pause_state()
-    # Phase 4.4 — drain-rate ETA. Surfaced as a sub-dict so the JS UI
-    # can read both the rate and the consumer-friendly ETA without
-    # recomputing.
+    # Phase 4.4 — drain-rate ETA. Flatten the rate/samples/stale/ETA
+    # fields directly into ``snap`` so JS consumers can read them with
+    # a single dict access (no nested lookup, matches the surrounding
+    # flat schema like ``queue_depth``, ``error_count``).
     drain = _compute_drain_rate()
     snap['drain_rate_per_sec'] = drain['rate_per_sec']
     snap['drain_rate_samples'] = drain['samples']
@@ -1107,6 +1108,10 @@ def compute_eta_seconds(queue_depth: int,
       * queue is empty (no ETA needed),
       * no rate is available (e.g. fresh worker, < 3 samples, stale window),
       * rate is non-positive (defensive),
+      * computed ETA is < 1 second (avoids the misleading
+        ``eta_seconds: 0`` + ``eta_human: None`` asymmetry; the
+        ``_format_eta_human`` helper would also render this as
+        "<1 min" which adds no signal),
       * computed ETA exceeds :data:`_DRAIN_RATE_ETA_CAP_SECONDS`.
 
     The cap exists to suppress absurd values from short-window
@@ -1122,6 +1127,8 @@ def compute_eta_seconds(queue_depth: int,
     if drain_rate_per_sec is None or drain_rate_per_sec <= 0:
         return None
     eta = queue_depth / drain_rate_per_sec
+    if eta < 1:
+        return None
     if eta > _DRAIN_RATE_ETA_CAP_SECONDS:
         return None
     return int(round(eta))

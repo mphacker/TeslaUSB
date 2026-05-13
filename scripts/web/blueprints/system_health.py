@@ -181,7 +181,7 @@ def _format_eta_human(eta_seconds: int) -> str:
     Examples:
       * ``45``     → ``"<1 min"``
       * ``120``    → ``"2 min"``
-      * ``3600``   → ``"1 h 0 min"``
+      * ``3600``   → ``"1 h"`` (whole hours drop the "0 min" suffix)
       * ``5400``   → ``"1 h 30 min"``
       * ``86400``  → ``"24 h"`` (cap; ``compute_eta_seconds`` returns
                                  None above this, so 24 h is the

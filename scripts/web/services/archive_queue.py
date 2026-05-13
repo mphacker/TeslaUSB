@@ -399,10 +399,22 @@ def count_source_gone_recent(hours: int = 24,
     set on the row (the worker always claims a row before stat'ing the
     source), and the source-gone determination happens within seconds
     of the claim. So ``claimed_at`` is the closest proxy for "when did
-    Tesla lose this clip from our perspective".
+    Tesla lose this clip from our perspective". The :func:`mark_source_gone`
+    precondition (``WHERE status='claimed'``) guarantees ``claimed_at``
+    is never NULL on a ``source_gone`` row, so the counter cannot
+    silently undercount because of an out-of-flow caller.
 
-    Cheap COUNT(*) — uses the existing index on ``status``. Safe to
-    call on every health-card poll (~30 ms typical).
+    Cheap COUNT(*) — uses the v11 partial index
+    ``archive_queue_source_gone_claimed`` (``ON archive_queue(claimed_at)
+    WHERE status = 'source_gone'``), which keeps the lookup O(log n)
+    even though the ``archive_queue`` table grows monotonically (no
+    retention today). On a v10 DB that hasn't been re-initialized yet
+    this falls back to a full table scan, which is still acceptable
+    because the table is bounded by row count rather than by free
+    disk space (a few thousand ``source_gone`` rows COUNT in well
+    under 100 ms even on the SD card). The ``hours <= 0`` guard plus
+    the silent-on-error contract make this safe to call on every
+    health-card poll.
 
     Returns 0 if the DB is missing, the table doesn't exist yet, or any
     SQLite error fires — never raises.
@@ -830,6 +842,18 @@ def mark_source_gone(row_id: int, *,
     rotated out by Tesla before we got to copy it. No retry, no
     dead-letter sidecar — this is normal behavior on RecentClips after
     ~60 minutes of no clean shutdown.
+
+    Precondition: the row MUST already be ``claimed`` (i.e., a worker
+    has called :func:`claim_next_for_worker` and the row has a
+    populated ``claimed_at``). The Phase 4.3 files-lost banner relies
+    on ``claimed_at`` as the timestamp filter for the 24-hour window;
+    a hypothetical out-of-flow caller that marks a fresh ``pending``
+    row as ``source_gone`` would silently undercount because that row
+    has ``claimed_at IS NULL``. Enforcing the precondition in the
+    UPDATE's ``WHERE`` clause guarantees we never produce an
+    unattributable row. Returns ``False`` (rowcount == 0) if the row
+    is not in ``claimed`` state, which is also what the worker
+    expects when another worker has already terminated the row.
     """
     if not row_id:
         return False
@@ -843,6 +867,7 @@ def mark_source_gone(row_id: int, *,
                SET status = 'source_gone',
                    last_error = NULL
              WHERE id = ?
+               AND status = 'claimed'
             """,
             (int(row_id),),
         )

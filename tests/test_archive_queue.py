@@ -905,6 +905,57 @@ class TestMarkSourceGone:
     def test_returns_false_for_unknown_id(self, db):
         assert mark_source_gone(999999, db_path=db) is False
 
+    def test_refuses_to_mark_pending_row(self, db, sample_file):
+        """PR #134 review-fix: precondition tightening.
+
+        ``mark_source_gone`` MUST require ``status='claimed'`` so the
+        ``count_source_gone_recent`` 24-hour-window query (which filters
+        on ``claimed_at``) cannot silently undercount a hypothetical
+        out-of-flow caller's row that has ``claimed_at IS NULL``.
+        """
+        assert enqueue_for_archive(sample_file, db_path=db) is True
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'pending'
+        row_id = rows[0]['id']
+        # Row is `pending`, claimed_at IS NULL — must refuse.
+        assert mark_source_gone(row_id, db_path=db) is False
+        rows = list_queue(db_path=db)
+        # Row stays pending; status was NOT mutated.
+        assert rows[0]['status'] == 'pending'
+        assert rows[0]['claimed_at'] is None
+
+    def test_refuses_to_mark_already_copied_row(self, db, sample_file, tmp_path):
+        """Once a row is `copied`, mark_source_gone must not regress it."""
+        dest = tmp_path / 'dest.mp4'
+        dest.write_bytes(b'x')
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        assert mark_copied(row['id'], str(dest), db_path=db) is True
+        # Row is now `copied` — mark_source_gone must refuse.
+        assert mark_source_gone(row['id'], db_path=db) is False
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'copied'
+
+    def test_refuses_to_mark_dead_letter_row(self, db, sample_file):
+        """A failed (dead-letter) row must not be re-classifiable."""
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        # mark_failed transitions to dead_letter once attempts hit cap.
+        # Force the cap quickly by pre-bumping attempts via direct DB.
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "UPDATE archive_queue SET attempts = 99 WHERE id = ?",
+                (row['id'],),
+            )
+        mark_failed(row['id'], 'simulated', db_path=db)
+        rows = list_queue(db_path=db)
+        # Confirm the row is now dead_letter (precondition for the test).
+        assert rows[0]['status'] == 'dead_letter'
+        # Now mark_source_gone must refuse.
+        assert mark_source_gone(row['id'], db_path=db) is False
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'dead_letter'
+
 
 class TestCountSourceGoneRecent:
     """Phase 4.3 (#101) — files-lost banner data source."""

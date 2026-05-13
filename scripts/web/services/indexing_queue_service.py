@@ -43,7 +43,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from services.mapping_service import canonical_key
 
@@ -103,6 +104,20 @@ def _open_queue_conn(db_path: str) -> sqlite3.Connection:
 
     Mirrors the per-connection settings used by ``_init_db`` so writers
     don't trip over contended locks. Caller owns close.
+
+    .. note::
+
+        Connection is opened in **autocommit mode**
+        (``isolation_level=None``). The Python ``sqlite3`` driver's
+        ``with conn:`` context manager is a NO-OP in autocommit mode
+        unless a transaction has already been opened explicitly. For
+        any helper that issues more than a single ``execute`` (most
+        notably the ``executemany`` in :func:`enqueue_many_for_indexing`),
+        wrap the body in :func:`_atomic_indexing_op` so the whole
+        batch is one ``BEGIN IMMEDIATE`` … ``COMMIT`` (one fsync, atomic
+        rollback on failure). For single-statement helpers, autocommit
+        is correct — but call ``conn.close()`` in a ``try/finally``
+        because ``with conn:`` won't do it.
     """
     conn = sqlite3.connect(db_path, timeout=15.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
@@ -110,6 +125,54 @@ def _open_queue_conn(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
+
+
+@contextmanager
+def _atomic_indexing_op(db_path: str) -> Iterator[sqlite3.Connection]:
+    """Open an autocommit conn, wrap the body in an explicit transaction.
+
+    Mirrors :func:`services.archive_queue._atomic_archive_op` (added by
+    PR #119 / Phase 2.8 of #97). Use this for any helper that issues
+    more than one statement that must succeed or fail as a unit, or
+    for an ``executemany`` that must commit as a single batch (one
+    fsync instead of one per row).
+
+    On enter: opens the connection via :func:`_open_queue_conn`,
+    issues ``BEGIN IMMEDIATE`` (acquires the write lock up front so we
+    never upgrade from a shared lock mid-transaction — that's a known
+    ``SQLITE_BUSY`` deadlock vector under contention).
+
+    On normal exit: issues ``COMMIT``.
+
+    On any exception (including ``KeyboardInterrupt`` / ``SystemExit``):
+    issues ``ROLLBACK`` and re-raises so a partial multi-statement
+    update never lands in the database. Rollback failures are logged
+    at debug level so the original exception remains the surfaced
+    cause.
+
+    Connection is always closed on the way out (even if BEGIN itself
+    failed and we never entered the body).
+    """
+    conn = _open_queue_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error as rollback_err:
+                logger.debug(
+                    "_atomic_indexing_op ROLLBACK failed: %s",
+                    rollback_err,
+                )
+            raise
+        conn.execute("COMMIT")
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -147,33 +210,44 @@ def enqueue_for_indexing(db_path: str, file_path: str, *,
         priority = priority_for_path(file_path)
     now = time.time()
     next_at = float(next_attempt_at) if next_attempt_at is not None else 0.0
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO indexing_queue
-                    (canonical_key, file_path, priority,
-                     enqueued_at, next_attempt_at, source)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(canonical_key) DO UPDATE SET
-                    priority = MIN(priority, excluded.priority),
-                    file_path = CASE
-                        WHEN claimed_by IS NULL
-                            THEN excluded.file_path
-                        ELSE file_path
-                    END,
-                    source = CASE
-                        WHEN claimed_by IS NULL
-                            THEN excluded.source
-                        ELSE source
-                    END
-                """,
-                (key, file_path, priority, now, next_at, source),
-            )
+        # Single-statement insert — autocommit is correct, but the
+        # ``with conn:`` form leaks the connection on autocommit
+        # connections (it only commits/rollbacks). Use explicit
+        # try/finally to guarantee close.
+        conn = _open_queue_conn(db_path)
+        conn.execute(
+            """
+            INSERT INTO indexing_queue
+                (canonical_key, file_path, priority,
+                 enqueued_at, next_attempt_at, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(canonical_key) DO UPDATE SET
+                priority = MIN(priority, excluded.priority),
+                file_path = CASE
+                    WHEN claimed_by IS NULL
+                        THEN excluded.file_path
+                    ELSE file_path
+                END,
+                source = CASE
+                    WHEN claimed_by IS NULL
+                        THEN excluded.source
+                    ELSE source
+                END
+            """,
+            (key, file_path, priority, now, next_at, source),
+        )
         return True
     except sqlite3.Error as e:
         logger.warning("enqueue_for_indexing failed for %s: %s", file_path, e)
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def enqueue_many_for_indexing(db_path: str,
@@ -183,7 +257,26 @@ def enqueue_many_for_indexing(db_path: str,
 
     A None priority means "use ``priority_for_path``". Returns the
     number of items that were actually written (skipping empty paths).
-    Single transaction so a 200-orphan boot catch-up costs ~10 ms.
+
+    **Transaction semantics (issue #120, mirroring PR #119 for archive
+    queue).** :func:`_open_queue_conn` returns an autocommit connection
+    so callers control transaction boundaries explicitly. This function
+    wraps the whole ``executemany`` in :func:`_atomic_indexing_op`
+    (single ``BEGIN IMMEDIATE`` … ``COMMIT``) so:
+
+    * The whole batch lands in **one fsync**, not one per row. A
+      200-orphan boot catch-up scan now enqueues in ~10 ms instead of
+      ~1.5 s on the Pi Zero 2 W's SD card. The producer thread
+      unblocks promptly and the SDIO bus is freed for the archive
+      worker (issue #104 mitigation).
+    * On any exception (SQLite error or otherwise, including
+      ``KeyboardInterrupt``) the whole batch ROLLBACKs — a producer
+      never sees a half-inserted batch.
+    * ``BEGIN IMMEDIATE`` acquires the write lock up front, so we
+      never upgrade from a shared lock mid-transaction (which can
+      race other writers and produce ``SQLITE_BUSY`` deadlocks under
+      load).
+    * Connection always closes (no FD leak on the failure path).
     """
     if not items:
         return 0
@@ -201,7 +294,7 @@ def enqueue_many_for_indexing(db_path: str,
     if not rows:
         return 0
     try:
-        with _open_queue_conn(db_path) as conn:
+        with _atomic_indexing_op(db_path) as conn:
             conn.executemany(
                 """
                 INSERT INTO indexing_queue

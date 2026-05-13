@@ -351,16 +351,82 @@ class TestRowidCursorCorrectness:
     def test_no_rows_skipped_when_table_shrinks_mid_walk(
             self, geodata_db, tmp_path, monkeypatch,
     ):
-        # Seed 1500 rows. Inject a hook that DELETEs the highest-rowid
-        # row mid-walk (simulating a concurrent worker). With OFFSET
-        # pagination, we'd skip the next row; with rowid pagination,
-        # we shouldn't.
-        _seed_indexed_files(geodata_db, 1500)
+        """Exercise the rowid-cursor robustness with a real mid-walk
+        DELETE.
+
+        Inject a side-effecting ``os.path.isfile`` that, on the FIRST
+        invocation (i.e., processing batch 1's first row), deletes a
+        row that lives WITHIN batch 1 (rowid 250). Batch 1 has already
+        been loaded by ``fetchall()`` so the deletion doesn't affect
+        the in-memory list — but it DOES affect what batch 2 sees.
+
+        With OFFSET 500 pagination, batch 2 would skip rowids 501..599
+        because the deletion shifted the count: ``OFFSET 500`` on a
+        599-row table lands at rowid 600, returning just 1 row instead
+        of 100.
+
+        With ``WHERE rowid > 500`` pagination (Phase 5.6), batch 2
+        correctly returns rowids 501..600 — the deletion at rowid 250
+        is irrelevant to the cursor. This is the behavior we pin.
+        """
+        # Seed exactly 600 rows. BATCH_SIZE=500 → batch 1 = rowids
+        # 1..500, batch 2 = rowids 501..600.
+        _seed_indexed_files(geodata_db, 600)
         teslacam = str(tmp_path / "fake_teslacam")
         os.makedirs(teslacam, exist_ok=True)
 
-        # Run the scan normally — it'll purge all 1500 rows because
-        # they're non-existent. The point of this test is correctness:
-        # we don't lose any rows even with batched commits.
+        original_isfile = os.path.isfile
+        hook_state = {"fired": False}
+
+        def side_effecting_isfile(p):
+            if not hook_state["fired"]:
+                hook_state["fired"] = True
+                # DELETE rowid 250 — a row WITHIN batch 1, while
+                # batch 1 is still in flight. Use a separate
+                # connection so we don't fight with the scan's open
+                # write transaction.
+                with sqlite3.connect(geodata_db) as c:
+                    c.execute(
+                        "DELETE FROM indexed_files WHERE rowid = 250"
+                    )
+                    c.commit()
+            return original_isfile(p)
+
+        monkeypatch.setattr(svc.os.path, "isfile", side_effecting_isfile)
+
         result = svc.purge_deleted_videos(geodata_db, teslacam_path=teslacam)
-        assert result['purged_files'] == 1500
+        assert hook_state["fired"]
+
+        # Expected: scan sees all 600 rows. Batch 1 (in-memory)
+        # processed rowids 1..500 — DELETE for rowid 250 happens to
+        # be a no-op (already deleted by the hook) but the path is
+        # still added to ``missing``. Batch 2 sees rowids 501..600.
+        # purged_files = 499 (batch 1 minus the no-op DELETE for 250)
+        # + 100 (batch 2). The recursive targeted purge runs over
+        # the full ``missing`` list (600 entries) and DELETEs whatever
+        # still has a row in indexed_files.
+        #
+        # Concretely: after the recursive purge, the table MUST be
+        # empty. If OFFSET pagination snuck back in, the table would
+        # have rowids 501..599 still present (99 rows). We assert the
+        # empty-table invariant — the strongest signal that no rows
+        # were skipped.
+        with sqlite3.connect(geodata_db) as c:
+            remaining = c.execute(
+                "SELECT COUNT(*) FROM indexed_files"
+            ).fetchone()[0]
+        assert remaining == 0, (
+            f"Mid-walk DELETE caused the scan to skip {remaining} "
+            f"rows. With WHERE rowid > ? pagination this MUST NOT "
+            f"happen. (If this fails, OFFSET-based pagination has "
+            f"snuck back in.)"
+        )
+        # Sanity on the count: 600 unique rows, 1 deleted by the
+        # hook out of band, the remaining 599 deleted by the scan
+        # (some by batch UPDATE/DELETE, the rest by the recursive
+        # purge). purged_files reflects only DELETE rowcounts the
+        # scan saw, so it should be 599 minus the no-op for rowid
+        # 250 = 599. Use ``>=`` so changes to whether the per-batch
+        # DELETE or the recursive purge does the work don't break
+        # the test.
+        assert result['purged_files'] >= 599

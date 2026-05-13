@@ -38,11 +38,9 @@ from flask import Blueprint, jsonify
 
 from config import (
     ARCHIVE_QUEUE_ENABLED,
-    CLOUD_ARCHIVE_DB_PATH,
     CLOUD_ARCHIVE_ENABLED,
     GADGET_DIR,
     LIVE_EVENT_SYNC_ENABLED,
-    MAPPING_DB_PATH,
     MAPPING_ENABLED,
 )
 
@@ -65,7 +63,6 @@ SEV_UNKNOWN = 'unknown'
 # disabled — but it should outrank a healthy ``ok`` so the dot still
 # turns amber when something is silently broken.
 _SEV_RANK = {SEV_OK: 0, SEV_UNKNOWN: 1, SEV_WARN: 2, SEV_ERROR: 3}
-_SEV_BY_RANK = {v: k for k, v in _SEV_RANK.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +72,12 @@ _SEV_BY_RANK = {v: k for k, v in _SEV_RANK.items()}
 _SHELL_PROBE_TTL_SECONDS = 30.0
 _probe_cache: Dict[str, Tuple[float, Any]] = {}
 _probe_lock = threading.Lock()
+# Per-name in-flight locks: a concurrent cold-cache burst on the same
+# probe name (e.g. two visibility-change events landing simultaneously)
+# would otherwise double-spawn ``nmcli``/``sudo bash`` because we drop
+# the global lock around ``fn()``. The per-name lock serialises probes
+# of the same name without blocking unrelated probes.
+_probe_inflight: Dict[str, threading.Lock] = {}
 
 
 def _cached_probe(name: str, fn: Callable[[], Any]) -> Any:
@@ -83,20 +86,34 @@ def _cached_probe(name: str, fn: Callable[[], Any]) -> Any:
     Also recovers from probe failure: on exception we cache the error
     string for the same TTL so a misbehaving subprocess can't flood
     the page with retries.
+
+    Concurrency: per-probe-name in-flight lock guarantees only one
+    ``fn()`` invocation per name regardless of caller count, so a cold
+    cache burst cannot stack subprocesses.
     """
     now = time.time()
     with _probe_lock:
         cached = _probe_cache.get(name)
         if cached and now - cached[0] < _SHELL_PROBE_TTL_SECONDS:
             return cached[1]
-    try:
-        value = fn()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("system_health probe %s failed: %s", name, e)
-        value = {'_error': str(e)[:120]}
-    with _probe_lock:
-        _probe_cache[name] = (now, value)
-    return value
+        inflight = _probe_inflight.setdefault(name, threading.Lock())
+
+    with inflight:
+        # Re-check cache after acquiring per-name lock — another caller
+        # may have just populated it while we waited.
+        now = time.time()
+        with _probe_lock:
+            cached = _probe_cache.get(name)
+            if cached and now - cached[0] < _SHELL_PROBE_TTL_SECONDS:
+                return cached[1]
+        try:
+            value = fn()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("system_health probe %s failed: %s", name, e)
+            value = {'_error': str(e)[:120]}
+        with _probe_lock:
+            _probe_cache[name] = (time.time(), value)
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +397,7 @@ def _wifi_block() -> Dict[str, Any]:
         }
 
     connected = bool(sta.get('connected'))
-    ssid = sta.get('current_ssid')
+    ssid = sta.get('current_ssid') or 'Unknown'
     signal_raw = sta.get('signal')
     try:
         signal_pct = int(signal_raw) if signal_raw not in (None, '', 'Unknown') else None

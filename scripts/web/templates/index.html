@@ -93,8 +93,10 @@
                     System Health probe failed —
                     <button type="button" class="btn btn-ghost"
                             id="system-health-retry-btn"
-                            style="padding:2px 6px; min-height:0;
-                                   font-size:0.85rem;">retry</button>
+                            aria-label="Retry system health probe"
+                            style="min-height:44px; min-width:44px;
+                                   padding:0 14px; margin-left:6px;
+                                   font-size:0.9rem;">Retry</button>
                 </p>
             </div>
         </div>
@@ -1738,6 +1740,10 @@ if (document.getElementById('fsck-status-container')) {
         rowsBox.innerHTML = html;
     }
 
+    function jumpToJobs() {
+        if (jobsUrl) window.location.href = jobsUrl;
+    }
+
     function renderOverall(payload) {
         var overall = payload.overall || { severity: 'unknown',
                                             message: 'Unknown' };
@@ -1745,13 +1751,19 @@ if (document.getElementById('fsck-status-container')) {
         var color = SEV_COLORS[sev] || SEV_COLORS.unknown;
         overallEl.querySelector('.health-dot').style.background = color;
         overallText.textContent = overall.message || 'Unknown';
-        if (sev !== 'ok' && jobsUrl &&
-                !overallEl.classList.contains('linked')) {
+        // Toggle the click affordance to track the current severity —
+        // a system that recovers to 'ok' must shed both the listener
+        // and the pointer cursor, otherwise it still looks clickable.
+        var shouldLink = sev !== 'ok' && !!jobsUrl;
+        var isLinked = overallEl.classList.contains('linked');
+        if (shouldLink && !isLinked) {
             overallEl.style.cursor = 'pointer';
             overallEl.classList.add('linked');
-            overallEl.addEventListener('click', function() {
-                window.location.href = jobsUrl;
-            });
+            overallEl.addEventListener('click', jumpToJobs);
+        } else if (!shouldLink && isLinked) {
+            overallEl.style.cursor = '';
+            overallEl.classList.remove('linked');
+            overallEl.removeEventListener('click', jumpToJobs);
         }
     }
 

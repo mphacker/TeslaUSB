@@ -290,6 +290,85 @@ def test_wifi_block_no_wifi(monkeypatch):
     assert 'No WiFi' in block['message']
 
 
+def test_wifi_block_connected_none_ssid_no_literal(monkeypatch):
+    """Regression: ssid=None must not render literal 'None' in the message.
+
+    NetworkManager occasionally returns a connected state with a missing
+    SSID field (transient race during reassociation). The card text
+    must fall back to 'Unknown' rather than show the Python repr of None.
+    """
+    import blueprints.system_health as sh
+    sh._probe_cache.clear()
+    monkeypatch.setattr(
+        sh, '_probe_wifi_sta',
+        lambda: {'connected': True, 'current_ssid': None, 'signal': '60'},
+    )
+    monkeypatch.setattr(sh, '_probe_wifi_ap', lambda: {'ap_active': False})
+    block = sh._wifi_block()
+    assert 'None' not in block['message']
+    assert 'Unknown' in block['message']
+
+
+def test_wifi_block_connected_empty_ssid_no_literal(monkeypatch):
+    """Empty-string SSID also falls back to 'Unknown'."""
+    import blueprints.system_health as sh
+    sh._probe_cache.clear()
+    monkeypatch.setattr(
+        sh, '_probe_wifi_sta',
+        lambda: {'connected': True, 'current_ssid': '', 'signal': '60'},
+    )
+    monkeypatch.setattr(sh, '_probe_wifi_ap', lambda: {'ap_active': False})
+    block = sh._wifi_block()
+    assert 'Unknown' in block['message']
+
+
+def test_probe_cache_concurrent_cold_cache_no_duplicate_spawn(monkeypatch):
+    """Regression: cold-cache burst must not double-spawn ``fn()``.
+
+    Without the per-name in-flight lock, two threads that both miss the
+    cache will each release the global lock and call ``fn()`` in
+    parallel — defeating the "never spawn duplicate nmcli/sudo bash"
+    guarantee. With the per-name lock, the second caller waits for the
+    first and returns the freshly cached value.
+    """
+    import threading
+    import blueprints.system_health as sh
+    sh._probe_cache.clear()
+    sh._probe_inflight.clear()
+
+    calls = {'n': 0}
+    started = threading.Event()
+    proceed = threading.Event()
+
+    def slow_probe():
+        calls['n'] += 1
+        started.set()
+        # Hold the probe long enough that all concurrent callers
+        # would observe a cache miss if there were no in-flight lock.
+        proceed.wait(timeout=2.0)
+        return {'value': calls['n']}
+
+    results: list = []
+
+    def worker():
+        results.append(sh._cached_probe('concurrent', slow_probe))
+
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for t in threads:
+        t.start()
+    # Wait for the first thread to enter the probe.
+    assert started.wait(timeout=2.0), "no thread entered the probe"
+    # Let the probe complete; remaining threads must reuse the cache.
+    proceed.set()
+    for t in threads:
+        t.join(timeout=2.0)
+
+    assert calls['n'] == 1, f"probe spawned {calls['n']} times, expected 1"
+    assert len(results) == 5
+    for r in results:
+        assert r == {'value': 1}
+
+
 # ---------------------------------------------------------------------------
 # Indexer block
 # ---------------------------------------------------------------------------

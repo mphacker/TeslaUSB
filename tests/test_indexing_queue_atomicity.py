@@ -79,7 +79,15 @@ class TestEnqueueManyForIndexingAtomicity:
         self, db, tmp_path, monkeypatch,
     ):
         """If ``executemany`` raises mid-batch, no rows from the batch
-        survive. A pre-existing row is preserved."""
+        survive. A pre-existing row is preserved.
+
+        Strengthened (per PR #154 review F3): the mock executes a real
+        ``INSERT`` for the first 5 of the 10 rows BEFORE raising, so
+        the test actually exercises the rollback path. A weaker mock
+        that raises before any insert would pass even with the bug
+        present (since 'no rows visible' is trivially true if no rows
+        were inserted in the first place).
+        """
         pre = _make_front_clip(tmp_path, "pre")
         assert enqueue_for_indexing(db, pre) is True
         assert get_queue_status(db)['queue_depth'] == 1
@@ -89,20 +97,33 @@ class TestEnqueueManyForIndexingAtomicity:
 
         original_open = indexing_queue_service._open_queue_conn
 
-        class _RaisingExecuteMany:
+        class _PartialThenRaiseExecuteMany:
+            """Mock that performs the first 5 inserts as individual
+            ``execute`` calls before raising. This guarantees that
+            those 5 rows would be visible WITHOUT a rollback — so a
+            passing assertion proves the ROLLBACK actually fired."""
+
             def __init__(self, real_conn):
                 self._c = real_conn
+                self._em_calls = 0
 
             def __getattr__(self, name):
                 return getattr(self._c, name)
 
-            def executemany(self, *a, **kw):
+            def executemany(self, sql, seq_of_params):
+                self._em_calls += 1
+                # Materialize the first 5 params as real INSERTs so
+                # they're written into the (open) transaction. Then
+                # raise — a correct ROLLBACK must undo all 5.
+                params_list = list(seq_of_params)
+                for params in params_list[:5]:
+                    self._c.execute(sql, params)
                 raise sqlite3.OperationalError(
-                    "simulated mid-batch failure"
+                    "simulated mid-batch failure (5 rows already inserted)"
                 )
 
         def _patched_open(path):
-            return _RaisingExecuteMany(original_open(path))
+            return _PartialThenRaiseExecuteMany(original_open(path))
 
         monkeypatch.setattr(indexing_queue_service,
                             '_open_queue_conn', _patched_open)
@@ -114,7 +135,8 @@ class TestEnqueueManyForIndexingAtomicity:
 
         status = get_queue_status(db)
         assert status['queue_depth'] == 1, (
-            "Atomicity violated: a partial batch leaked into the DB. "
+            "Atomicity violated: ROLLBACK did not undo the 5 partial "
+            "inserts the mock made before raising. "
             f"Expected queue_depth=1 (the pre-existing row), got {status}"
         )
 

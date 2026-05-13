@@ -335,18 +335,19 @@ def recover_stale_claims(db_path: str,
     lock a row. Returns the number of claims released.
     """
     cutoff = time.time() - max_age_seconds
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            cur = conn.execute(
-                """
-                UPDATE indexing_queue
-                   SET claimed_by = NULL, claimed_at = NULL
-                 WHERE claimed_by IS NOT NULL
-                   AND claimed_at < ?
-                """,
-                (cutoff,),
-            )
-            released = cur.rowcount or 0
+        conn = _open_queue_conn(db_path)
+        cur = conn.execute(
+            """
+            UPDATE indexing_queue
+               SET claimed_by = NULL, claimed_at = NULL
+             WHERE claimed_by IS NOT NULL
+               AND claimed_at < ?
+            """,
+            (cutoff,),
+        )
+        released = cur.rowcount or 0
         if released:
             logger.warning(
                 "Released %d stale indexing claims (>%ds old)",
@@ -356,6 +357,12 @@ def recover_stale_claims(db_path: str,
     except sqlite3.Error as e:
         logger.warning("recover_stale_claims failed: %s", e)
         return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def claim_next_queue_item(db_path: str,
@@ -443,30 +450,37 @@ def complete_queue_item(db_path: str, canonical_key_value: str,
     """
     if not canonical_key_value:
         return False
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            if claimed_by is None:
-                cur = conn.execute(
-                    "DELETE FROM indexing_queue WHERE canonical_key = ?",
-                    (canonical_key_value,),
-                )
-            else:
-                cur = conn.execute(
-                    """
-                    DELETE FROM indexing_queue
-                     WHERE canonical_key = ?
-                       AND claimed_by = ?
-                       AND claimed_at = ?
-                    """,
-                    (canonical_key_value, claimed_by, claimed_at),
-                )
-            return (cur.rowcount or 0) > 0
+        conn = _open_queue_conn(db_path)
+        if claimed_by is None:
+            cur = conn.execute(
+                "DELETE FROM indexing_queue WHERE canonical_key = ?",
+                (canonical_key_value,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                DELETE FROM indexing_queue
+                 WHERE canonical_key = ?
+                   AND claimed_by = ?
+                   AND claimed_at = ?
+                """,
+                (canonical_key_value, claimed_by, claimed_at),
+            )
+        return (cur.rowcount or 0) > 0
     except sqlite3.Error as e:
         logger.warning(
             "complete_queue_item failed for %s: %s",
             canonical_key_value, e,
         )
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def release_claim(db_path: str, canonical_key_value: str,
@@ -484,35 +498,42 @@ def release_claim(db_path: str, canonical_key_value: str,
     """
     if not canonical_key_value:
         return False
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            if claimed_by is None:
-                cur = conn.execute(
-                    """
-                    UPDATE indexing_queue
-                       SET claimed_by = NULL, claimed_at = NULL
-                     WHERE canonical_key = ?
-                    """,
-                    (canonical_key_value,),
-                )
-            else:
-                cur = conn.execute(
-                    """
-                    UPDATE indexing_queue
-                       SET claimed_by = NULL, claimed_at = NULL
-                     WHERE canonical_key = ?
-                       AND claimed_by = ?
-                       AND claimed_at = ?
-                    """,
-                    (canonical_key_value, claimed_by, claimed_at),
-                )
-            return (cur.rowcount or 0) > 0
+        conn = _open_queue_conn(db_path)
+        if claimed_by is None:
+            cur = conn.execute(
+                """
+                UPDATE indexing_queue
+                   SET claimed_by = NULL, claimed_at = NULL
+                 WHERE canonical_key = ?
+                """,
+                (canonical_key_value,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE indexing_queue
+                   SET claimed_by = NULL, claimed_at = NULL
+                 WHERE canonical_key = ?
+                   AND claimed_by = ?
+                   AND claimed_at = ?
+                """,
+                (canonical_key_value, claimed_by, claimed_at),
+            )
+        return (cur.rowcount or 0) > 0
     except sqlite3.Error as e:
         logger.warning(
             "release_claim failed for %s: %s",
             canonical_key_value, e,
         )
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def defer_queue_item(db_path: str, canonical_key_value: str,
@@ -535,60 +556,61 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
     """
     if not canonical_key_value:
         return False
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            if claimed_by is None:
-                if bump_attempts:
-                    sql = """
-                        UPDATE indexing_queue
-                           SET claimed_by = NULL,
-                               claimed_at = NULL,
-                               next_attempt_at = ?,
-                               attempts = attempts + 1,
-                               last_error = ?
-                         WHERE canonical_key = ?
-                    """
-                else:
-                    sql = """
-                        UPDATE indexing_queue
-                           SET claimed_by = NULL,
-                               claimed_at = NULL,
-                               next_attempt_at = ?,
-                               last_error = ?
-                         WHERE canonical_key = ?
-                    """
-                cur = conn.execute(
-                    sql, (next_attempt_at, last_error, canonical_key_value),
-                )
+        conn = _open_queue_conn(db_path)
+        if claimed_by is None:
+            if bump_attempts:
+                sql = """
+                    UPDATE indexing_queue
+                       SET claimed_by = NULL,
+                           claimed_at = NULL,
+                           next_attempt_at = ?,
+                           attempts = attempts + 1,
+                           last_error = ?
+                     WHERE canonical_key = ?
+                """
             else:
-                if bump_attempts:
-                    sql = """
-                        UPDATE indexing_queue
-                           SET claimed_by = NULL,
-                               claimed_at = NULL,
-                               next_attempt_at = ?,
-                               attempts = attempts + 1,
-                               last_error = ?
-                         WHERE canonical_key = ?
-                           AND claimed_by = ?
-                           AND claimed_at = ?
-                    """
-                else:
-                    sql = """
-                        UPDATE indexing_queue
-                           SET claimed_by = NULL,
-                               claimed_at = NULL,
-                               next_attempt_at = ?,
-                               last_error = ?
-                         WHERE canonical_key = ?
-                           AND claimed_by = ?
-                           AND claimed_at = ?
-                    """
-                cur = conn.execute(
-                    sql,
-                    (next_attempt_at, last_error,
-                     canonical_key_value, claimed_by, claimed_at),
-                )
+                sql = """
+                    UPDATE indexing_queue
+                       SET claimed_by = NULL,
+                           claimed_at = NULL,
+                           next_attempt_at = ?,
+                           last_error = ?
+                     WHERE canonical_key = ?
+                """
+            cur = conn.execute(
+                sql, (next_attempt_at, last_error, canonical_key_value),
+            )
+        else:
+            if bump_attempts:
+                sql = """
+                    UPDATE indexing_queue
+                       SET claimed_by = NULL,
+                           claimed_at = NULL,
+                           next_attempt_at = ?,
+                           attempts = attempts + 1,
+                           last_error = ?
+                     WHERE canonical_key = ?
+                       AND claimed_by = ?
+                       AND claimed_at = ?
+                """
+            else:
+                sql = """
+                    UPDATE indexing_queue
+                       SET claimed_by = NULL,
+                           claimed_at = NULL,
+                           next_attempt_at = ?,
+                           last_error = ?
+                     WHERE canonical_key = ?
+                       AND claimed_by = ?
+                       AND claimed_at = ?
+                """
+            cur = conn.execute(
+                sql,
+                (next_attempt_at, last_error,
+                 canonical_key_value, claimed_by, claimed_at),
+            )
         if (cur.rowcount or 0) == 0:
             return False
         return True
@@ -598,6 +620,12 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
             canonical_key_value, e,
         )
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def compute_backoff(attempts: int) -> float:
@@ -624,7 +652,8 @@ def get_queue_status(db_path: str) -> Dict[str, Any]:
     next_ready_at, last_error}``. Cheap (single SQL with aggregates).
     """
     try:
-        with _open_queue_conn(db_path) as conn:
+        conn = _open_queue_conn(db_path)
+        try:
             row = conn.execute(
                 """
                 SELECT
@@ -644,6 +673,11 @@ def get_queue_status(db_path: str) -> Dict[str, Any]:
                  _PARSE_ERROR_MAX_ATTEMPTS,
                  _PARSE_ERROR_MAX_ATTEMPTS),
             ).fetchone()
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
         return {
             'queue_depth': int(row['queue_depth'] or 0),
             'claimed_count': int(row['claimed_count'] or 0),
@@ -670,15 +704,22 @@ def clear_pending_queue(db_path: str) -> int:
     the worker's owner-guarded delete on completion. Returns the count
     of rows actually removed.
     """
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            cur = conn.execute(
-                "DELETE FROM indexing_queue WHERE claimed_by IS NULL"
-            )
-            return cur.rowcount or 0
+        conn = _open_queue_conn(db_path)
+        cur = conn.execute(
+            "DELETE FROM indexing_queue WHERE claimed_by IS NULL"
+        )
+        return cur.rowcount or 0
     except sqlite3.Error as e:
         logger.warning("clear_pending_queue failed: %s", e)
         return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -699,22 +740,29 @@ def list_dead_letters(db_path: str, limit: int = 100) -> List[Dict[str, Any]]:
     if limit <= 0:
         return []
     limit = min(int(limit), 1000)
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            rows = conn.execute(
-                """SELECT canonical_key, file_path, attempts,
-                          next_attempt_at, last_error, enqueued_at,
-                          source
-                   FROM indexing_queue
-                   WHERE attempts >= ?
-                   ORDER BY enqueued_at ASC, canonical_key ASC
-                   LIMIT ?""",
-                (_PARSE_ERROR_MAX_ATTEMPTS, limit),
-            ).fetchall()
-            return [dict(r) for r in rows]
+        conn = _open_queue_conn(db_path)
+        rows = conn.execute(
+            """SELECT canonical_key, file_path, attempts,
+                      next_attempt_at, last_error, enqueued_at,
+                      source
+               FROM indexing_queue
+               WHERE attempts >= ?
+               ORDER BY enqueued_at ASC, canonical_key ASC
+               LIMIT ?""",
+            (_PARSE_ERROR_MAX_ATTEMPTS, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
     except sqlite3.Error as e:
         logger.warning("list_dead_letters failed: %s", e)
         return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def count_dead_letters(db_path: str) -> int:
@@ -726,17 +774,24 @@ def count_dead_letters(db_path: str) -> int:
     fetch every row just to compute ``len()``. Returns ``0`` on any
     DB error so a failed count never breaks the aggregate page.
     """
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS n FROM indexing_queue "
-                "WHERE attempts >= ?",
-                (_PARSE_ERROR_MAX_ATTEMPTS,),
-            ).fetchone()
-            return int(row['n']) if row else 0
+        conn = _open_queue_conn(db_path)
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM indexing_queue "
+            "WHERE attempts >= ?",
+            (_PARSE_ERROR_MAX_ATTEMPTS,),
+        ).fetchone()
+        return int(row['n']) if row else 0
     except sqlite3.Error as e:
         logger.warning("count_dead_letters failed: %s", e)
         return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def retry_dead_letter(db_path: str,
@@ -757,33 +812,40 @@ def retry_dead_letter(db_path: str,
     the original queueing order is preserved. Returns the number of
     rows actually reset.
     """
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            if canonical_key_value is None:
-                cur = conn.execute(
-                    """UPDATE indexing_queue
-                       SET attempts = 0,
-                           next_attempt_at = 0,
-                           claimed_by = NULL,
-                           claimed_at = NULL
-                       WHERE attempts >= ?""",
-                    (_PARSE_ERROR_MAX_ATTEMPTS,),
-                )
-            else:
-                cur = conn.execute(
-                    """UPDATE indexing_queue
-                       SET attempts = 0,
-                           next_attempt_at = 0,
-                           claimed_by = NULL,
-                           claimed_at = NULL
-                       WHERE attempts >= ?
-                         AND canonical_key = ?""",
-                    (_PARSE_ERROR_MAX_ATTEMPTS, str(canonical_key_value)),
-                )
-            return cur.rowcount or 0
+        conn = _open_queue_conn(db_path)
+        if canonical_key_value is None:
+            cur = conn.execute(
+                """UPDATE indexing_queue
+                   SET attempts = 0,
+                       next_attempt_at = 0,
+                       claimed_by = NULL,
+                       claimed_at = NULL
+                   WHERE attempts >= ?""",
+                (_PARSE_ERROR_MAX_ATTEMPTS,),
+            )
+        else:
+            cur = conn.execute(
+                """UPDATE indexing_queue
+                   SET attempts = 0,
+                       next_attempt_at = 0,
+                       claimed_by = NULL,
+                       claimed_at = NULL
+                   WHERE attempts >= ?
+                     AND canonical_key = ?""",
+                (_PARSE_ERROR_MAX_ATTEMPTS, str(canonical_key_value)),
+            )
+        return cur.rowcount or 0
     except sqlite3.Error as e:
         logger.warning("retry_dead_letter failed: %s", e)
         return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def clear_all_queue(db_path: str) -> int:
@@ -795,13 +857,20 @@ def clear_all_queue(db_path: str) -> int:
     out from under it. Callers MUST pause the worker first. Returns
     count of rows removed.
     """
+    conn = None
     try:
-        with _open_queue_conn(db_path) as conn:
-            cur = conn.execute("DELETE FROM indexing_queue")
-            return cur.rowcount or 0
+        conn = _open_queue_conn(db_path)
+        cur = conn.execute("DELETE FROM indexing_queue")
+        return cur.rowcount or 0
     except sqlite3.Error as e:
         logger.warning("clear_all_queue failed: %s", e)
         return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 # Backward-compat alias — same dangerous semantics as the original

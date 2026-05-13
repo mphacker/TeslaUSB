@@ -547,24 +547,32 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
             "AND timestamp = ? ORDER BY id DESC LIMIT 1",
             (t['id'], last_ts),
         ).fetchone()
-        # Distance summed per video file
+        # Distance summed per video file. Batched in a single query
+        # (#142, follows the Phase 5.1 / PR #141 shape used in
+        # mapping_service._index_video). The legacy ``1 + N`` pattern
+        # — one DISTINCT query plus one waypoint fetch per video — is
+        # replaced by a single ``ORDER BY video_path, id`` walk with a
+        # per-video boundary cursor so we never haversine across
+        # different videos (Tesla can write overlapping clips and a
+        # global sort would create phantom GPS jumps).
         total_dist = 0.0
-        videos = conn.execute(
-            "SELECT DISTINCT video_path FROM waypoints "
-            "WHERE trip_id = ? AND video_path IS NOT NULL",
+        rows = conn.execute(
+            "SELECT video_path, lat, lon FROM waypoints "
+            "WHERE trip_id = ? AND video_path IS NOT NULL "
+            "ORDER BY video_path, id",
             (t['id'],),
         ).fetchall()
-        for v in videos:
-            wps = conn.execute(
-                "SELECT lat, lon FROM waypoints "
-                "WHERE trip_id = ? AND video_path = ? ORDER BY id",
-                (t['id'], v['video_path']),
-            ).fetchall()
-            for j in range(1, len(wps)):
+        prev = None
+        prev_video = None
+        for w in rows:
+            video_path = w['video_path']
+            if prev is not None and video_path == prev_video:
                 total_dist += _haversine_km(
-                    wps[j-1]['lat'], wps[j-1]['lon'],
-                    wps[j]['lat'], wps[j]['lon'],
+                    prev['lat'], prev['lon'],
+                    w['lat'], w['lon'],
                 )
+            prev = w
+            prev_video = video_path
         try:
             dur = max(0, int((
                 datetime.fromisoformat(last_ts)

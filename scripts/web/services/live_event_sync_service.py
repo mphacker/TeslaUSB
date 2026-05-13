@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS live_event_queue (
     next_retry_at   REAL,
     attempts        INTEGER DEFAULT 0,
     last_error      TEXT,
+    previous_last_error TEXT,
     bytes_uploaded  INTEGER DEFAULT 0,
     UNIQUE(event_dir)
 );
@@ -154,6 +155,17 @@ def _open_db() -> sqlite3.Connection:
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_LES_TABLES_SQL)
+    # Issue #132: ``previous_last_error`` column. ALTER is idempotent
+    # on retry — duplicate-column OperationalError is caught and
+    # ignored. Existing tables (created by an older version) get the
+    # new column on first open after upgrade.
+    try:
+        conn.execute(
+            "ALTER TABLE live_event_queue "
+            "ADD COLUMN previous_last_error TEXT"
+        )
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
 
 
@@ -549,6 +561,7 @@ def _mark_failed(conn: sqlite3.Connection, row_id: int, attempts: int,
         conn.execute(
             "UPDATE live_event_queue SET status = 'pending', "
             "attempts = MAX(attempts - 1, 0), "
+            "previous_last_error = last_error, "
             "last_error = ?, next_retry_at = ? WHERE id = ?",
             (err[:500], next_retry, row_id),
         )
@@ -560,6 +573,7 @@ def _mark_failed(conn: sqlite3.Connection, row_id: int, attempts: int,
     if attempts >= LIVE_EVENT_RETRY_MAX_ATTEMPTS:
         conn.execute(
             "UPDATE live_event_queue SET status = 'failed', "
+            "previous_last_error = last_error, "
             "last_error = ? WHERE id = ?",
             (err[:500], row_id),
         )
@@ -576,6 +590,7 @@ def _mark_failed(conn: sqlite3.Connection, row_id: int, attempts: int,
         next_retry = time.time() + backoff
         conn.execute(
             "UPDATE live_event_queue SET status = 'pending', "
+            "previous_last_error = last_error, "
             "last_error = ?, next_retry_at = ? WHERE id = ?",
             (err[:500], next_retry, row_id),
         )

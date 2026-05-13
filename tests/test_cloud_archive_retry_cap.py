@@ -78,7 +78,8 @@ def cloud_db(tmp_path):
                status TEXT DEFAULT 'pending',
                synced_at TEXT,
                retry_count INTEGER DEFAULT 0,
-               last_error TEXT
+               last_error TEXT,
+               previous_last_error TEXT
            )"""
     )
     conn.commit()

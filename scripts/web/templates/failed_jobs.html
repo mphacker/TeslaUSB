@@ -140,6 +140,49 @@
     max-height: 200px;
     overflow: auto;
 }
+/* Issue #132 — multi-failure history (prior error revealed on demand) */
+.job-prev-toggle {
+    display: inline-flex; align-items: center; gap: 4px;
+    margin: 0; padding: 4px 8px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    align-self: flex-start;
+    min-height: 28px;
+    transition: background 150ms ease, color 150ms ease;
+}
+.job-prev-toggle:hover { background: var(--bg-primary); color: var(--text-primary); }
+.job-prev-toggle .nav-icon {
+    width: 12px; height: 12px;
+    transition: transform 150ms ease;
+}
+.job-prev-toggle[aria-expanded="true"] .nav-icon { transform: rotate(180deg); }
+.job-prev-error {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    background: var(--bg-primary);
+    padding: 6px 10px;
+    border-radius: 6px;
+    border-left: 3px solid var(--border-color);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 160px;
+    overflow: auto;
+    opacity: 0.85;
+}
+.job-prev-error-label {
+    display: block;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
 .job-actions {
     display: flex; justify-content: flex-end; gap: 8px;
 }
@@ -249,6 +292,41 @@
             error.className = 'job-error';
             error.textContent = r.last_error || '(no error message)';
 
+            // Issue #132 — surface multi-cycle failure history on demand.
+            // Hidden by default to keep the card scannable; the toggle is
+            // only added when there's actually a prior error to show.
+            let prevToggle = null;
+            let prevError = null;
+            if (r.previous_last_error) {
+                prevToggle = document.createElement('button');
+                prevToggle.type = 'button';
+                prevToggle.className = 'job-prev-toggle';
+                prevToggle.setAttribute('aria-expanded', 'false');
+                prevToggle.setAttribute('aria-label', 'Show previous failure');
+                prevToggle.innerHTML =
+                    '<span>Previous failure</span>' +
+                    '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#icon-chevron-down"></use></svg>';
+
+                prevError = document.createElement('div');
+                prevError.className = 'job-prev-error';
+                prevError.style.display = 'none';
+                const label = document.createElement('span');
+                label.className = 'job-prev-error-label';
+                label.textContent = 'Before last retry';
+                const body = document.createElement('div');
+                body.textContent = r.previous_last_error;
+                prevError.appendChild(label);
+                prevError.appendChild(body);
+
+                prevToggle.addEventListener('click', function () {
+                    const open = prevToggle.getAttribute('aria-expanded') === 'true';
+                    prevToggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+                    prevToggle.setAttribute('aria-label',
+                        open ? 'Show previous failure' : 'Hide previous failure');
+                    prevError.style.display = open ? 'none' : '';
+                });
+            }
+
             const actions = document.createElement('div');
             actions.className = 'job-actions';
 
@@ -263,6 +341,10 @@
             card.appendChild(header);
             card.appendChild(identifier);
             card.appendChild(error);
+            if (prevToggle) {
+                card.appendChild(prevToggle);
+                card.appendChild(prevError);
+            }
             card.appendChild(actions);
             list.appendChild(card);
         });

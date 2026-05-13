@@ -158,7 +158,7 @@ def canonical_cloud_path(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 _CLOUD_MODULE = "cloud_archive"
-_CLOUD_SCHEMA_VERSION = 2
+_CLOUD_SCHEMA_VERSION = 3
 
 _CLOUD_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS module_versions (
@@ -176,7 +176,8 @@ CREATE TABLE IF NOT EXISTS cloud_synced_files (
     status TEXT DEFAULT 'pending',
     synced_at TEXT,
     retry_count INTEGER DEFAULT 0,
-    last_error TEXT
+    last_error TEXT,
+    previous_last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS cloud_sync_sessions (
@@ -591,6 +592,21 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
                     e, current,
                 )
 
+        # v3 (#132): ``previous_last_error`` column for multi-cycle
+        # failure history. ALTER is idempotent on retry — duplicate-
+        # column OperationalError is caught and ignored. Skipped only
+        # if the v2 migration above failed (we don't bump the version
+        # in that case anyway, and re-running the v3 ALTER on the
+        # second pass is harmless).
+        if migration_ok and current < 3:
+            try:
+                conn.execute(
+                    "ALTER TABLE cloud_synced_files "
+                    "ADD COLUMN previous_last_error TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
+
         if migration_ok:
             conn.execute(
                 "INSERT OR REPLACE INTO module_versions (module, version, updated_at) "
@@ -963,6 +979,7 @@ def _mark_upload_failure(
                    WHEN retry_count + 1 >= ? THEN 'dead_letter'
                    ELSE 'failed'
                END,
+               previous_last_error = last_error,
                last_error = ?,
                retry_count = retry_count + 1
            WHERE file_path = ?""",

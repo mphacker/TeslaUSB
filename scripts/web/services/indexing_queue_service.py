@@ -568,6 +568,7 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                            claimed_at = NULL,
                            next_attempt_at = ?,
                            attempts = attempts + 1,
+                           previous_last_error = last_error,
                            last_error = ?
                      WHERE canonical_key = ?
                 """
@@ -577,6 +578,7 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                        SET claimed_by = NULL,
                            claimed_at = NULL,
                            next_attempt_at = ?,
+                           previous_last_error = last_error,
                            last_error = ?
                      WHERE canonical_key = ?
                 """
@@ -591,6 +593,7 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                            claimed_at = NULL,
                            next_attempt_at = ?,
                            attempts = attempts + 1,
+                           previous_last_error = last_error,
                            last_error = ?
                      WHERE canonical_key = ?
                        AND claimed_by = ?
@@ -602,6 +605,7 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                        SET claimed_by = NULL,
                            claimed_at = NULL,
                            next_attempt_at = ?,
+                           previous_last_error = last_error,
                            last_error = ?
                      WHERE canonical_key = ?
                        AND claimed_by = ?

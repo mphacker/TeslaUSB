@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS indexing_queue (
     next_attempt_at REAL NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    previous_last_error TEXT,
     claimed_by TEXT,
     claimed_at REAL,
     source TEXT
@@ -196,6 +197,7 @@ CREATE TABLE IF NOT EXISTS archive_queue (
     status TEXT DEFAULT 'pending',
     attempts INTEGER DEFAULT 0,
     last_error TEXT,
+    previous_last_error TEXT,
     enqueued_at TEXT NOT NULL,
     claimed_at TEXT,
     claimed_by TEXT,
@@ -410,6 +412,22 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         # O(log n) and is tiny because only ``source_gone`` rows are
         # included. Created by the executescript above; no data
         # migration required.
+        if current > 0 and current < 12:
+            # v12 (#132): ``previous_last_error`` column on
+            # ``archive_queue`` and ``indexing_queue`` so the Failed
+            # Jobs UI can show multi-cycle failure history (failed →
+            # retried → failed-with-different-error). On the next
+            # failure each worker rotates the prior ``last_error``
+            # into ``previous_last_error`` before writing the new
+            # error. ALTER is idempotent on retry — duplicate-column
+            # OperationalError is caught and ignored.
+            for table in ('archive_queue', 'indexing_queue'):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN previous_last_error TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    pass
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",

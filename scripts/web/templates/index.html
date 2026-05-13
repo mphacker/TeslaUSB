@@ -57,6 +57,51 @@
     </div>
     {% endif %}
 
+    <!-- System Health (Phase 4.2 — issue #101) -->
+    <details class="settings-section" id="system-health-section" open>
+        <summary>System Health</summary>
+        <div class="section-content">
+            <div id="system-health-card"
+                 data-poll-url="{{ url_for('system_health.api_system_health') }}"
+                 data-jobs-url="{{ url_for('jobs.failed_jobs_page') }}"
+                 style="display:flex; flex-direction:column; gap:6px;">
+                <p id="system-health-overall"
+                   style="margin:0 0 6px; padding:8px 12px;
+                          border-radius:8px; font-size:0.95rem;
+                          display:flex; align-items:center; gap:8px;
+                          background:var(--bg-secondary);
+                          border:1px solid var(--border-color);">
+                    <span class="health-dot health-dot-unknown"
+                          aria-hidden="true"
+                          style="width:10px; height:10px; border-radius:50%;
+                                 display:inline-block; flex-shrink:0;
+                                 background:var(--text-secondary);"></span>
+                    <span id="system-health-overall-text">
+                        Loading…
+                    </span>
+                </p>
+                <div id="system-health-rows"
+                     style="display:grid;
+                            grid-template-columns:auto auto 1fr;
+                            gap:6px 12px; align-items:center;
+                            font-size:0.9rem;">
+                    <!-- Rows rendered by JS from /api/system/health -->
+                </div>
+                <p id="system-health-error" hidden
+                   style="font-size:0.85rem; color:var(--msg-error-text);
+                          margin:6px 0 0;">
+                    System Health probe failed —
+                    <button type="button" class="btn btn-ghost"
+                            id="system-health-retry-btn"
+                            aria-label="Retry system health probe"
+                            style="min-height:44px; min-width:44px;
+                                   padding:0 14px; margin-left:6px;
+                                   font-size:0.9rem;">Retry</button>
+                </p>
+            </div>
+        </div>
+    </details>
+
     <!-- WiFi Networks -->
     <details class="settings-section" open>
         <summary>WiFi Networks</summary>
@@ -1628,6 +1673,136 @@ if (document.getElementById('fsck-status-container')) {
     } else {
         startPolling();
     }
+})();
+
+// ---------------------------------------------------------------------------
+// System Health card (Phase 4.2 — issue #101)
+// ---------------------------------------------------------------------------
+(function() {
+    var card = document.getElementById('system-health-card');
+    if (!card) return;
+    var pollUrl = card.getAttribute('data-poll-url');
+    var jobsUrl = card.getAttribute('data-jobs-url');
+    var POLL_MS = 15000;  // 15 s — far below the cached probe TTL
+    var rowsBox = document.getElementById('system-health-rows');
+    var overallText = document.getElementById('system-health-overall-text');
+    var overallEl = document.getElementById('system-health-overall');
+    var errorEl = document.getElementById('system-health-error');
+    var retryBtn = document.getElementById('system-health-retry-btn');
+    var pollHandle = null;
+
+    var SUBSYSTEMS = [
+        { key: 'indexer',         label: 'Video Indexer' },
+        { key: 'archive',         label: 'Local Archive' },
+        { key: 'cloud',           label: 'Cloud Sync' },
+        { key: 'live_event_sync', label: 'Live Event Sync' },
+        { key: 'disk',            label: 'SD Card' },
+        { key: 'wifi',            label: 'WiFi' },
+    ];
+
+    var SEV_COLORS = {
+        ok:      'var(--accent-success, #4caf50)',
+        warn:    'var(--accent-warning, #ff9800)',
+        error:   'var(--accent-error,   #f44336)',
+        unknown: 'var(--text-secondary, #888)',
+    };
+
+    function escapeText(s) {
+        if (s == null) return '';
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    function dotMarkup(severity) {
+        var color = SEV_COLORS[severity] || SEV_COLORS.unknown;
+        return '<span aria-label="' + escapeText(severity) + '" ' +
+               'style="width:10px; height:10px; border-radius:50%; ' +
+               'display:inline-block; flex-shrink:0; background:' + color +
+               ';"></span>';
+    }
+
+    function renderRows(payload) {
+        var html = '';
+        for (var i = 0; i < SUBSYSTEMS.length; i++) {
+            var sub = SUBSYSTEMS[i];
+            var block = payload[sub.key] || {};
+            var sev = block.severity || 'unknown';
+            var msg = escapeText(block.message || '\u2014');
+            html += '<div>' + dotMarkup(sev) + '</div>';
+            html += '<div style="color:var(--text-primary)">' +
+                    escapeText(sub.label) + '</div>';
+            html += '<div style="color:var(--text-secondary); ' +
+                    'overflow:hidden; text-overflow:ellipsis; ' +
+                    'white-space:nowrap;">' + msg + '</div>';
+        }
+        rowsBox.innerHTML = html;
+    }
+
+    function jumpToJobs() {
+        if (jobsUrl) window.location.href = jobsUrl;
+    }
+
+    function renderOverall(payload) {
+        var overall = payload.overall || { severity: 'unknown',
+                                            message: 'Unknown' };
+        var sev = overall.severity || 'unknown';
+        var color = SEV_COLORS[sev] || SEV_COLORS.unknown;
+        overallEl.querySelector('.health-dot').style.background = color;
+        overallText.textContent = overall.message || 'Unknown';
+        // Toggle the click affordance to track the current severity —
+        // a system that recovers to 'ok' must shed both the listener
+        // and the pointer cursor, otherwise it still looks clickable.
+        var shouldLink = sev !== 'ok' && !!jobsUrl;
+        var isLinked = overallEl.classList.contains('linked');
+        if (shouldLink && !isLinked) {
+            overallEl.style.cursor = 'pointer';
+            overallEl.classList.add('linked');
+            overallEl.addEventListener('click', jumpToJobs);
+        } else if (!shouldLink && isLinked) {
+            overallEl.style.cursor = '';
+            overallEl.classList.remove('linked');
+            overallEl.removeEventListener('click', jumpToJobs);
+        }
+    }
+
+    function loadHealth() {
+        fetch(pollUrl, { cache: 'no-store' })
+            .then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function(payload) {
+                errorEl.hidden = true;
+                renderRows(payload);
+                renderOverall(payload);
+            })
+            .catch(function(e) {
+                console.warn('system_health load failed:', e);
+                errorEl.hidden = false;
+            });
+    }
+
+    function startPoll() {
+        if (pollHandle) return;
+        loadHealth();
+        pollHandle = setInterval(loadHealth, POLL_MS);
+    }
+
+    function stopPoll() {
+        if (pollHandle) clearInterval(pollHandle);
+        pollHandle = null;
+    }
+
+    if (retryBtn) retryBtn.addEventListener('click', loadHealth);
+
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) stopPoll();
+        else startPoll();
+    });
+
+    if (!document.hidden) startPoll();
 })();
 </script>
 {% endblock %}

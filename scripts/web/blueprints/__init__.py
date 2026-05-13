@@ -20,6 +20,7 @@ from .live_events import live_events_bp
 from .archive_queue import archive_queue_bp
 from .storage_retention import storage_retention_bp
 from .jobs import jobs_bp
+from .system_health import system_health_bp
 
 __all__ = [
     'mode_control_bp',
@@ -43,4 +44,5 @@ __all__ = [
     'archive_queue_bp',
     'storage_retention_bp',
     'jobs_bp',
+    'system_health_bp',
 ]

@@ -932,43 +932,36 @@ def purge_orphaned_dead_letters(db_path: str) -> int:
                 pass
         return 0
 
-    orphans = [r['canonical_key'] for r in rows
+    # Capture (canonical_key, file_path) so the DELETE can pin BOTH —
+    # closes the narrow SELECT→DELETE race where a row could in theory
+    # be DELETEd + re-INSERTed under the same canonical_key with a
+    # different file_path between our isfile check and the DELETE.
+    orphans = [(r['canonical_key'], r['file_path']) for r in rows
                if r['file_path'] and not os.path.isfile(r['file_path'])]
 
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+
     if not orphans:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
         return 0
 
     purged = 0
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        with _atomic_indexing_op(db_path) as conn:
             cur = conn.executemany(
                 "DELETE FROM indexing_queue "
                 "WHERE canonical_key = ? "
+                "  AND file_path = ? "
                 "  AND attempts >= ? "
                 "  AND claimed_by IS NULL",
-                [(k, _PARSE_ERROR_MAX_ATTEMPTS) for k in orphans],
+                [(k, p, _PARSE_ERROR_MAX_ATTEMPTS) for (k, p) in orphans],
             )
             purged = cur.rowcount or 0
-            conn.execute("COMMIT")
-        except BaseException:
-            try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise
     except sqlite3.Error as e:
         logger.warning("purge_orphaned_dead_letters delete failed: %s", e)
         return 0
-    finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
 
     if purged:
         logger.info(

@@ -2128,6 +2128,65 @@ class TestMoovVerifyAfterCopy:
             "dest must NOT exist after a moov-verify failure"
 
 
+    def test_atomic_copy_succeeds_for_well_formed_mp4(self, tmp_path):
+        src = tmp_path / "source.mp4"
+        content = _build_minimal_mp4(payload=b"hello-world" * 50)
+        src.write_bytes(content)
+        dst = tmp_path / "dest.mp4"
+        archive_worker._atomic_copy(
+            str(src), str(dst), chunk_size=4096,
+        )
+        assert dst.exists()
+        assert dst.read_bytes() == content
+        assert not (tmp_path / "dest.mp4.partial").exists()
+
+    def test_non_mp4_extension_skips_verification(self, tmp_path):
+        # ``.ts`` and other archive types must NOT be moov-verified —
+        # they aren't MP4s. A successful size-matching copy is enough.
+        src = tmp_path / "source.ts"
+        src.write_bytes(b"\x47" * 1024)  # MPEG-TS sync byte stream
+        dst = tmp_path / "dest.ts"
+        archive_worker._atomic_copy(
+            str(src), str(dst), chunk_size=4096,
+        )
+        assert dst.exists()
+        assert dst.read_bytes() == b"\x47" * 1024
+
+    def test_process_one_claim_re_queues_on_moov_failure(
+            self, db, archive_root, teslacam_root, make_clip,
+    ):
+        # End-to-end through process_one_claim: a source file that
+        # passes the size check but fails moov-verify must flow through
+        # the OSError handler → mark_failed → status 'pending' (with
+        # one bumped attempt). The dest must not exist.
+        bad_mp4 = (
+            b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+            + b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        )
+        clip = make_clip("RecentClips/halfwritten-front.mp4", content=bad_mp4)
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'pending', (
+            "moov-missing copy must transition back to pending so it can "
+            "be retried after Tesla finishes writing"
+        )
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'pending'
+        assert rows[0]['attempts'] == 1
+        assert 'moov' in (rows[0]['last_error'] or '')
+        # No dest file landed in ArchivedClips.
+        dest = os.path.join(
+            archive_root, "RecentClips", "halfwritten-front.mp4",
+        )
+        assert not os.path.exists(dest), (
+            "Incomplete MP4 must not leak into ArchivedClips"
+        )
+
+
 class TestMdatRequiredAfterCopy:
     """Issue #110 — verifier must reject MP4s that have ``moov`` but
     are missing ``mdat``. Tesla's RecentClips writer can produce this
@@ -2194,64 +2253,6 @@ class TestMdatRequiredAfterCopy:
             )
         assert not (tmp_path / "dest.mp4.partial").exists()
         assert not dst.exists()
-
-    def test_atomic_copy_succeeds_for_well_formed_mp4(self, tmp_path):
-        src = tmp_path / "source.mp4"
-        content = _build_minimal_mp4(payload=b"hello-world" * 50)
-        src.write_bytes(content)
-        dst = tmp_path / "dest.mp4"
-        archive_worker._atomic_copy(
-            str(src), str(dst), chunk_size=4096,
-        )
-        assert dst.exists()
-        assert dst.read_bytes() == content
-        assert not (tmp_path / "dest.mp4.partial").exists()
-
-    def test_non_mp4_extension_skips_verification(self, tmp_path):
-        # ``.ts`` and other archive types must NOT be moov-verified —
-        # they aren't MP4s. A successful size-matching copy is enough.
-        src = tmp_path / "source.ts"
-        src.write_bytes(b"\x47" * 1024)  # MPEG-TS sync byte stream
-        dst = tmp_path / "dest.ts"
-        archive_worker._atomic_copy(
-            str(src), str(dst), chunk_size=4096,
-        )
-        assert dst.exists()
-        assert dst.read_bytes() == b"\x47" * 1024
-
-    def test_process_one_claim_re_queues_on_moov_failure(
-            self, db, archive_root, teslacam_root, make_clip,
-    ):
-        # End-to-end through process_one_claim: a source file that
-        # passes the size check but fails moov-verify must flow through
-        # the OSError handler → mark_failed → status 'pending' (with
-        # one bumped attempt). The dest must not exist.
-        bad_mp4 = (
-            b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
-            + b'\x00\x00\x00\x10mdat' + b'\x00' * 8
-        )
-        clip = make_clip("RecentClips/halfwritten-front.mp4", content=bad_mp4)
-        enqueue_for_archive(clip, db_path=db)
-        row = claim_next_for_worker('w', db_path=db)
-        outcome = archive_worker.process_one_claim(
-            row, db, archive_root, teslacam_root,
-            chunk_size=4096, max_attempts=3,
-        )
-        assert outcome == 'pending', (
-            "moov-missing copy must transition back to pending so it can "
-            "be retried after Tesla finishes writing"
-        )
-        rows = list_queue(db_path=db)
-        assert rows[0]['status'] == 'pending'
-        assert rows[0]['attempts'] == 1
-        assert 'moov' in (rows[0]['last_error'] or '')
-        # No dest file landed in ArchivedClips.
-        dest = os.path.join(
-            archive_root, "RecentClips", "halfwritten-front.mp4",
-        )
-        assert not os.path.exists(dest), (
-            "Incomplete MP4 must not leak into ArchivedClips"
-        )
 
 
 # ---------------------------------------------------------------------------

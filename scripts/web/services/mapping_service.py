@@ -2067,6 +2067,12 @@ def _run_stale_scan_blocking(db_path: str, teslacam_path_provider,
             # for "No mdat box found"). Same problem class as the
             # ``indexed_files`` orphan sweep, same place to handle it.
             try:
+                # Local import: ``indexing_queue_service`` is at the
+                # bottom of the import graph (depended on by mapping_
+                # service callers in workers); importing it at module
+                # top would create an indirect cycle through worker
+                # boot. Lazy import here is intentional and matches
+                # the pattern used elsewhere in this module.
                 from services.indexing_queue_service import (
                     purge_orphaned_dead_letters,
                 )

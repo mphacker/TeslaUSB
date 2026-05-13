@@ -230,7 +230,7 @@ archive:
   enabled: true                          # Enable RecentClips archival
   interval_minutes: 2                    # How often to check for new clips (tighter = less data loss)
   retention_days: 30                     # Delete archived clips older than this
-  min_free_space_gb: 10                  # Hard floor — stop archiving if SD card < this free
+  min_free_space_gb: 20                  # Hard floor — stop archiving if SD card < this free. Issue #109: raised from 10 → 20 GiB. On a typical 470 GiB SD card, 10 GiB ≈ 2.1% free, which is well below the point at which ext4 free-block-group search starts thrashing and inflates per-write cost 10–100×, starving the watchdog daemon. 20 GiB ≈ 4.2% gives ext4 enough headroom to keep writes cheap.
   max_size_gb: 0                         # 0 = auto (use all available space minus reserved)
   only_driving: true                     # Only archive clips from active driving trips (skip idle/parked)
   path: ""                               # Archive path (default: ~/ArchivedClips, set by web app)

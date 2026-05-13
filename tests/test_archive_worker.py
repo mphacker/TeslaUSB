@@ -2507,3 +2507,332 @@ class TestPauseStateExtensions:
                 assert archive_worker._state['last_disk_pause_total_mb'] is None
         finally:
             archive_worker.stop_worker(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Issue #109 — disk-fullness-adaptive throttling helpers + integration
+# ---------------------------------------------------------------------------
+
+
+class _FakeDiskUsage:
+    """Mimic :func:`shutil.disk_usage` return value.
+
+    Default total is 100 GiB so even at 99% used the free space stays
+    well above the 100 MB ``disk_space_critical_mb`` guard floor.
+    """
+
+    def __init__(self, used_pct: float, total_bytes: int = 100 * 1024 * 1024 * 1024):
+        self.total = total_bytes
+        self.used = int(total_bytes * used_pct / 100.0)
+        self.free = total_bytes - self.used
+
+
+class TestDiskFullnessHelper:
+    """Issue #109 — ``_disk_fullness_pct`` returns used%-of-total or None."""
+
+    def test_returns_correct_percentage(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            archive_worker.shutil, 'disk_usage',
+            lambda p: _FakeDiskUsage(used_pct=42.0),
+        )
+        assert archive_worker._disk_fullness_pct(str(tmp_path)) == pytest.approx(42.0)
+
+    def test_returns_none_on_oserror(self, monkeypatch, tmp_path):
+        def _raise(_p):
+            raise OSError("simulated stat failure")
+        monkeypatch.setattr(archive_worker.shutil, 'disk_usage', _raise)
+        assert archive_worker._disk_fullness_pct(str(tmp_path)) is None
+
+    def test_returns_none_on_zero_total(self, monkeypatch, tmp_path):
+        # Defensive — a degenerate disk_usage report mustn't divide by 0.
+        class _Zero:
+            total = 0
+            used = 0
+            free = 0
+        monkeypatch.setattr(
+            archive_worker.shutil, 'disk_usage', lambda p: _Zero(),
+        )
+        assert archive_worker._disk_fullness_pct(str(tmp_path)) is None
+
+
+class TestAdaptiveLoadThreshold:
+    """Issue #109 mitigation #2 — load_pause_threshold scales DOWN as
+    disk fills."""
+
+    def test_below_80_returns_base_unchanged(self):
+        assert archive_worker._adaptive_load_threshold(3.5, 50.0) == 3.5
+        assert archive_worker._adaptive_load_threshold(3.5, 79.9) == 3.5
+
+    def test_80_to_90_subtracts_half(self):
+        assert archive_worker._adaptive_load_threshold(3.5, 80.0) == 3.0
+        assert archive_worker._adaptive_load_threshold(3.5, 89.9) == 3.0
+
+    def test_90_to_95_subtracts_one(self):
+        assert archive_worker._adaptive_load_threshold(3.5, 90.0) == 2.5
+        assert archive_worker._adaptive_load_threshold(3.5, 94.9) == 2.5
+
+    def test_at_or_above_95_subtracts_one_and_a_half(self):
+        assert archive_worker._adaptive_load_threshold(3.5, 95.0) == 2.0
+        assert archive_worker._adaptive_load_threshold(3.5, 99.0) == 2.0
+        assert archive_worker._adaptive_load_threshold(3.5, 100.0) == 2.0
+
+    def test_floor_at_one_for_low_base(self):
+        # Misconfigured low base must never let the guard fully disable.
+        assert archive_worker._adaptive_load_threshold(1.5, 95.0) == 1.0
+        assert archive_worker._adaptive_load_threshold(2.0, 90.0) == 1.0
+        # base=2.5 at 90%: 2.5 - 1.0 = 1.5, no floor needed
+        assert archive_worker._adaptive_load_threshold(2.5, 90.0) == 1.5
+
+    def test_zero_base_disables_returns_zero(self):
+        assert archive_worker._adaptive_load_threshold(0.0, 95.0) == 0.0
+
+    def test_negative_base_returns_unchanged(self):
+        # Caller treats <=0 as "disabled", helper must not mangle it.
+        assert archive_worker._adaptive_load_threshold(-1.0, 95.0) == -1.0
+
+    def test_unknown_fullness_returns_base_unchanged(self):
+        assert archive_worker._adaptive_load_threshold(3.5, None) == 3.5
+
+
+class TestAdaptiveChunkPause:
+    """Issue #109 mitigation #4 — chunk_pause_seconds scales UP and
+    flips to always-apply at high disk fullness."""
+
+    def test_below_80_returns_base_and_load_gated(self):
+        # Pre-#109 behavior: unchanged duration, gated on loadavg.
+        pause, always = archive_worker._adaptive_chunk_pause(0.25, 50.0)
+        assert pause == 0.25
+        assert always is False
+
+    def test_80_to_95_keeps_duration_but_always_applies(self):
+        pause, always = archive_worker._adaptive_chunk_pause(0.25, 80.0)
+        assert pause == 0.25
+        assert always is True
+        pause, always = archive_worker._adaptive_chunk_pause(0.25, 94.9)
+        assert pause == 0.25
+        assert always is True
+
+    def test_at_or_above_95_doubles_duration_and_always_applies(self):
+        pause, always = archive_worker._adaptive_chunk_pause(0.25, 95.0)
+        assert pause == 0.5
+        assert always is True
+        pause, always = archive_worker._adaptive_chunk_pause(0.25, 99.0)
+        assert pause == 0.5
+        assert always is True
+
+    def test_zero_base_disables_at_all_fullness_levels(self):
+        # base==0 means user explicitly disabled the chunk pause —
+        # respect that even at 99% fullness.
+        pause, always = archive_worker._adaptive_chunk_pause(0.0, 99.0)
+        assert pause == 0.0
+        assert always is False
+
+    def test_floor_for_very_small_base_when_always_apply(self):
+        # 0.001 s base at 80% → max(0.001, 0.05) = 0.05
+        pause, always = archive_worker._adaptive_chunk_pause(0.001, 80.0)
+        assert pause == 0.05
+        assert always is True
+        # 0.001 s base at 95% → max(0.002, 0.05) = 0.05
+        pause, always = archive_worker._adaptive_chunk_pause(0.001, 95.0)
+        assert pause == 0.05
+        assert always is True
+
+    def test_unknown_fullness_returns_base_and_load_gated(self):
+        pause, always = archive_worker._adaptive_chunk_pause(0.25, None)
+        assert pause == 0.25
+        assert always is False
+
+
+class TestAtomicCopyChunkPauseAlways:
+    """Issue #109 mitigation #4 wired through ``_atomic_copy``: when
+    ``chunk_pause_always=True`` the per-chunk pause fires every chunk
+    regardless of current loadavg."""
+
+    def test_always_apply_sleeps_every_chunk(self, tmp_path):
+        # 32 KiB file copied in 8 KiB chunks → 4 chunks → 4 sleeps,
+        # regardless of loadavg (set to 0 here).
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"x" * 32_768)
+        dst = tmp_path / "dst.bin"
+        sleeps: List[float] = []
+        archive_worker._atomic_copy(
+            str(src), str(dst), chunk_size=8192,
+            load_pause_threshold=0.0,
+            chunk_pause_seconds=0.5,
+            chunk_pause_always=True,
+            sleep_fn=lambda s: sleeps.append(s),
+        )
+        assert dst.read_bytes() == b"x" * 32_768
+        assert sleeps == [0.5, 0.5, 0.5, 0.5], (
+            "always_apply must sleep on every chunk"
+        )
+
+    def test_always_apply_skipped_when_pause_zero(self, tmp_path):
+        # If base pause is 0 even in always-apply mode, no sleep.
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"y" * 16_384)
+        dst = tmp_path / "dst.bin"
+        sleeps: List[float] = []
+        archive_worker._atomic_copy(
+            str(src), str(dst), chunk_size=8192,
+            load_pause_threshold=0.0,
+            chunk_pause_seconds=0.0,
+            chunk_pause_always=True,
+            sleep_fn=lambda s: sleeps.append(s),
+        )
+        assert sleeps == []
+
+    def test_load_gated_path_unchanged_when_always_apply_false(self, tmp_path,
+                                                                monkeypatch):
+        # With chunk_pause_always=False, the pre-#109 load-gated path
+        # runs: sleep only when loadavg > load_pause_threshold.
+        # raising=False because Windows ``os`` lacks ``getloadavg``.
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (5.0, 0.0, 0.0), raising=False,
+        )
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"z" * 16_384)
+        dst = tmp_path / "dst.bin"
+        sleeps: List[float] = []
+        archive_worker._atomic_copy(
+            str(src), str(dst), chunk_size=8192,
+            load_pause_threshold=3.5,
+            chunk_pause_seconds=0.25,
+            chunk_pause_always=False,
+            sleep_fn=lambda s: sleeps.append(s),
+        )
+        # 16384 / 8192 = 2 chunks → 2 sleeps because load 5.0 > 3.5.
+        assert sleeps == [0.25, 0.25]
+
+    def test_load_gated_path_skips_when_load_low(self, tmp_path, monkeypatch):
+        # Same as above but loadavg below threshold → no sleeps.
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (1.0, 0.0, 0.0), raising=False,
+        )
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"q" * 16_384)
+        dst = tmp_path / "dst.bin"
+        sleeps: List[float] = []
+        archive_worker._atomic_copy(
+            str(src), str(dst), chunk_size=8192,
+            load_pause_threshold=3.5,
+            chunk_pause_seconds=0.25,
+            chunk_pause_always=False,
+            sleep_fn=lambda s: sleeps.append(s),
+        )
+        assert sleeps == []
+
+
+class TestProcessOneClaimAdaptiveWiring:
+    """Integration — process_one_claim derives adaptive values from
+    ``shutil.disk_usage`` and forwards them to ``_atomic_copy``."""
+
+    def test_high_fullness_enables_always_apply_chunk_pause(
+            self, monkeypatch, db, archive_root, tmp_path,
+    ):
+        # 95% disk fullness → adaptive chunk pause is doubled (0.5s)
+        # AND always-apply. Verify _atomic_copy is invoked with those
+        # values.
+        monkeypatch.setattr(
+            archive_worker.shutil, 'disk_usage',
+            lambda p: _FakeDiskUsage(used_pct=95.0),
+        )
+        captured: dict = {}
+
+        def _spy(*args, **kwargs):
+            captured.update(kwargs)
+            return 1024  # bytes written
+
+        monkeypatch.setattr(archive_worker, '_atomic_copy', _spy)
+        monkeypatch.setattr(
+            archive_worker, 'compute_dest_path',
+            lambda src, root, tcam: os.path.join(root, "dest.mp4"),
+        )
+        monkeypatch.setattr(
+            archive_worker.archive_queue, 'mark_copied',
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            archive_worker, '_enqueue_indexed', lambda *a, **kw: None,
+        )
+
+        # Build a synthetic claimed row with fresh stable mtime so the
+        # stable-write gate doesn't preempt the copy.
+        src = tmp_path / "clip.mp4"
+        src.write_bytes(b"X" * 1024)
+        old_mtime = time.time() - 3600  # 1 hr old → past stable gate
+        os.utime(str(src), (old_mtime, old_mtime))
+
+        row = {
+            'id': 1,
+            'source_path': str(src),
+            'expected_size': 1024,
+            'expected_mtime': old_mtime,
+        }
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root=None,
+            chunk_size=8192, max_attempts=3,
+            load_pause_threshold=3.5,
+            chunk_pause_seconds=0.25,
+            time_budget_seconds=0.0,
+        )
+        assert outcome == 'copied'
+        assert captured['chunk_pause_always'] is True, (
+            "95% fullness must enable always-apply"
+        )
+        assert captured['chunk_pause_seconds'] == 0.5, (
+            "95% fullness must double the chunk pause"
+        )
+        # adaptive load threshold = max(3.5 - 1.5, 1.0) = 2.0
+        assert captured['load_pause_threshold'] == 2.0
+
+    def test_low_fullness_preserves_pre_109_behavior(
+            self, monkeypatch, db, archive_root, tmp_path,
+    ):
+        monkeypatch.setattr(
+            archive_worker.shutil, 'disk_usage',
+            lambda p: _FakeDiskUsage(used_pct=50.0),
+        )
+        captured: dict = {}
+
+        def _spy(*args, **kwargs):
+            captured.update(kwargs)
+            return 1024
+
+        monkeypatch.setattr(archive_worker, '_atomic_copy', _spy)
+        monkeypatch.setattr(
+            archive_worker, 'compute_dest_path',
+            lambda src, root, tcam: os.path.join(root, "dest.mp4"),
+        )
+        monkeypatch.setattr(
+            archive_worker.archive_queue, 'mark_copied',
+            lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            archive_worker, '_enqueue_indexed', lambda *a, **kw: None,
+        )
+
+        src = tmp_path / "clip.mp4"
+        src.write_bytes(b"Y" * 1024)
+        old_mtime = time.time() - 3600
+        os.utime(str(src), (old_mtime, old_mtime))
+
+        row = {
+            'id': 1,
+            'source_path': str(src),
+            'expected_size': 1024,
+            'expected_mtime': old_mtime,
+        }
+        archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root=None,
+            chunk_size=8192, max_attempts=3,
+            load_pause_threshold=3.5,
+            chunk_pause_seconds=0.25,
+            time_budget_seconds=0.0,
+        )
+        # 50% fullness → no adaptive scaling.
+        assert captured['chunk_pause_always'] is False
+        assert captured['chunk_pause_seconds'] == 0.25
+        assert captured['load_pause_threshold'] == 3.5

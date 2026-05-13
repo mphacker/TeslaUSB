@@ -2905,3 +2905,45 @@ details summary span:first-of-type {
 .archive-status-chip.has-issue .chip-value {
     color: var(--msg-error-text);
 }
+
+/* === Settings card form helpers (issue #125) ===
+   Touch-target compliance (>=44x44 px), responsive collapse at
+   the design system's 600px breakpoint, and a single source of
+   truth for input styling so every Settings card stays consistent.
+   See docs/UI_UX_DESIGN_SYSTEM.md (Touch targets, Form Inputs). */
+.settings-form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+@media (max-width: 600px) {
+    .settings-form-grid { grid-template-columns: 1fr; }
+}
+
+.settings-form-policy-row {
+    display: grid;
+    grid-template-columns: auto 1fr 1fr;
+    gap: 10px;
+    align-items: center;
+}
+@media (max-width: 600px) {
+    .settings-form-policy-row { grid-template-columns: 1fr; }
+}
+
+.settings-form-input {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-input);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 16px;
+    box-sizing: border-box;
+}
+.settings-form-input:focus {
+    outline: 2px solid var(--accent-primary, #007bff);
+    outline-offset: 1px;
+    border-color: var(--accent-primary, #007bff);
+}

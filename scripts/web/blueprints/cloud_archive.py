@@ -329,6 +329,45 @@ def api_sync_now():
         return jsonify({"success": False, "message": str(exc)}), 500
 
 
+@cloud_archive_bp.route('/api/wake', methods=['POST'])
+def api_wake():
+    """Wake the continuous cloud archive worker.
+
+    Phase 3b (#99): the lightweight version of ``/api/sync_now`` for
+    producers that just want to nudge the worker without forcing a
+    full ``start_sync`` flow. Used by the NetworkManager dispatcher
+    on WiFi reconnect, the file watcher on new mp4 arrival, and any
+    other context where "the worker should re-check the queue
+    soon" is the right semantic.
+
+    Returns 200 + ``{enabled, worker_running, wake_count}`` on
+    success. The caller can poll ``/cloud/api/sync_status`` to
+    observe the resulting drain.
+    """
+    from services.cloud_archive_service import (
+        wake, get_sync_status, CLOUD_ARCHIVE_ENABLED,
+    )
+    if not CLOUD_ARCHIVE_ENABLED:
+        return jsonify({
+            "success": True,
+            "enabled": False,
+            "message": "Cloud archive disabled",
+        })
+    try:
+        wake()
+        st = get_sync_status()
+        return jsonify({
+            "success": True,
+            "enabled": True,
+            "worker_running": st.get("worker_running", False),
+            "wake_count": st.get("wake_count", 0),
+            "drain_running": st.get("running", False),
+        })
+    except Exception as exc:
+        logger.exception("Failed to wake cloud archive worker")
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
 @cloud_archive_bp.route('/api/sync_stop', methods=['POST'])
 def api_sync_stop():
     """Stop a running cloud sync.

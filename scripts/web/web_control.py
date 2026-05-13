@@ -247,6 +247,39 @@ if __name__ == "__main__":
                     f"callback: {e}"
                 )
 
+            # Cloud archive worker wake (Phase 3b #99): a freshly
+            # archived mp4 is now visible to the cloud sync queue
+            # producer — poke the continuous worker so the upload
+            # starts on the next iteration instead of waiting for the
+            # next 5-minute idle timeout. The wake is a single
+            # threading.Event.set() so any debouncing is unnecessary
+            # (multiple wakes during a drain are coalesced into one).
+            try:
+                from config import (
+                    CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_PROVIDER,
+                )
+                if CLOUD_ARCHIVE_ENABLED and CLOUD_ARCHIVE_PROVIDER:
+                    def _on_new_videos_for_cloud(file_paths):
+                        from services.cloud_archive_service import wake as _cloud_wake
+                        try:
+                            _cloud_wake()
+                        except Exception as e:
+                            print(
+                                "Warning: cloud archive wake failed: "
+                                f"{e}"
+                            )
+
+                    register_callback(_on_new_videos_for_cloud)
+                    print(
+                        "File watcher → cloud archive worker wake "
+                        "registered"
+                    )
+            except Exception as e:
+                print(
+                    "Warning: Failed to register cloud archive wake "
+                    f"callback: {e}"
+                )
+
             start_watcher(watch_paths)
             print(f"File watcher started for {len(watch_paths)} paths")
     except Exception as e:
@@ -389,12 +422,16 @@ if __name__ == "__main__":
         # LES failure must NEVER take down gadget_web. Log and continue.
         print(f"Warning: Failed to start Live Event Sync worker: {e}")
 
-    # Auto-start cloud sync if WiFi is already connected and provider is configured.
-    # The dispatcher only fires on WiFi connect events — if the Pi boots into WiFi
-    # (or the service restarts while on WiFi), sync would never start without this.
-    # NOTE: trigger_auto_sync() consults has_ready_live_event_work() and skips
-    # when LES has work, so the LES start above takes effect even on the very
-    # first dispatcher fire.
+    # Auto-start the continuous cloud archive worker (Phase 3b #99).
+    # The worker is a long-lived daemon thread that idles on
+    # threading.Event.wait() (~0.1% CPU) and drains the queue when
+    # poked by the file watcher, NM dispatcher, mode-switch hook, or
+    # manual UI button. Replaces the old one-shot timer + per-trigger
+    # thread spawn pattern.
+    #
+    # NOTE: the worker yields to LES on every wake (and inside every
+    # drain between files), so the LES start above takes effect even
+    # on the very first wake.
     try:
         from config import (
             CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_PROVIDER,
@@ -402,14 +439,15 @@ if __name__ == "__main__":
         )
         if (CLOUD_ARCHIVE_ENABLED and CLOUD_ARCHIVE_PROVIDER
                 and os.path.isfile(CLOUD_PROVIDER_CREDS_PATH)):
-            from services.cloud_archive_service import trigger_auto_sync
+            from services.cloud_archive_service import start as _cloud_start
             from services.video_service import get_teslacam_path
             teslacam = get_teslacam_path()
-            if teslacam:
-                trigger_auto_sync(teslacam, CLOUD_ARCHIVE_DB_PATH)
-                print("Cloud auto-sync triggered on startup")
+            if teslacam and _cloud_start(
+                teslacam_path=teslacam, db_path=CLOUD_ARCHIVE_DB_PATH,
+            ):
+                print("Cloud archive worker started (continuous)")
     except Exception as e:
-        print(f"Warning: Cloud auto-sync startup failed: {e}")
+        print(f"Warning: Cloud archive worker start failed: {e}")
 
     # NOTE: ``MAPPING_INDEX_ON_STARTUP`` is intentionally no longer
     # honored. The boot catch-up scan above has the same effect with

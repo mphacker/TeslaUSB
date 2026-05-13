@@ -200,9 +200,79 @@ CREATE INDEX IF NOT EXISTS idx_cloud_sessions_started ON cloud_sync_sessions(sta
 # Background Sync State
 # ---------------------------------------------------------------------------
 
-_sync_thread: Optional[threading.Thread] = None
-_sync_lock = threading.Lock()
-_sync_cancel = threading.Event()
+# Phase 3b (#99) — continuous worker model
+# ---------------------------------------
+# The cloud sync used to be a one-shot: every trigger (timer tick, NM
+# dispatcher fire, manual UI button, mode switch) spawned a new daemon
+# thread that ran ``_run_sync`` to completion and exited. That pattern
+# had three structural problems:
+#
+# 1. Newly-archived clips couldn't upload until the *next* trigger.
+#    Inotify saw the file, the indexer caught up — but cloud sync only
+#    woke on the 24h safety timer or on a WiFi reconnect event.
+# 2. The LES priority contract depended on ``trigger_auto_sync`` checking
+#    ``has_ready_live_event_work`` BEFORE starting. Once the bulk sync
+#    was running, the LES yield-between-files path was the only safety
+#    net — fine, but stripping the start-time check off the timer
+#    means LES has no head start.
+# 3. Status was scattered across "sync running?" (in ``_sync_status``)
+#    and "thread alive?" (in ``_sync_thread``) — two different sources
+#    of truth that periodically disagreed.
+#
+# Replaced with the LES pattern: a single long-lived worker thread that
+# blocks on ``_wake.wait(timeout=N)`` when idle (~0.1 % CPU baseline)
+# and drains the queue when poked. Producers (file watcher, NM
+# dispatcher, manual UI, mode switch) call ``wake()`` instead of
+# ``start_sync()``; the worker is always there waiting. ``start_sync``
+# remains as a backward-compat alias that ensures the worker is alive
+# and pokes it.
+_sync_thread: Optional[threading.Thread] = None  # legacy alias for _worker_thread
+_worker_thread: Optional[threading.Thread] = None
+_worker_lock = threading.Lock()
+_worker_stop = threading.Event()
+_wake = threading.Event()
+
+# Idle wait between drain attempts when the worker has nothing to do.
+# We wake on ``_wake.set()`` (file watcher, NM dispatcher, mode switch,
+# manual UI) so this just sets the maximum latency between an unobserved
+# state change (e.g. WiFi came back without a dispatcher event) and a
+# fresh queue check. Five minutes matches the old timer's lower bound
+# and is well below the SDIO load thresholds — a wake-on-empty drain is
+# a few sub-ms DB queries.
+_WAIT_WHEN_IDLE_SECONDS = 300.0
+
+# When a drain bailed out because the task coordinator was busy or WiFi
+# was down, retry sooner so we don't sit on a backlog. Still honors the
+# wake event — any producer can shortcut this.
+_WAIT_WHEN_BUSY_SECONDS = 60.0
+
+
+def _backoff_wait(timeout: float) -> bool:
+    """Sleep up to ``timeout`` seconds, returning early on wake/stop.
+
+    Returns True if either ``_wake`` or ``_worker_stop`` was set during
+    the wait (caller should re-check state); False on natural timeout.
+
+    IMPORTANT: does NOT clear ``_wake``. Only the loop-top
+    ``_wake.wait()`` / ``_wake.clear()`` pair owns the wake event.
+    Using this helper inside backoffs preserves a producer's wake so
+    the next loop iteration drains promptly instead of discarding it.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if _worker_stop.is_set() or _wake.is_set():
+            return True
+        # Poll _wake every 0.25s so we can still see a stop signal
+        # promptly in environments where _worker_stop is set during
+        # the wait (we wouldn't be woken otherwise).
+        if _wake.wait(timeout=min(0.25, remaining)):
+            return True
+
+_sync_lock = threading.Lock()  # legacy: kept for status-read snapshots
+_sync_cancel = threading.Event()  # legacy: aliased to _worker_stop below
 _sync_rclone_proc: Optional[subprocess.Popen] = None
 _startup_recovery_done = False
 
@@ -218,6 +288,13 @@ _sync_status: Dict = {
     "started_at": None,
     "last_run": None,
     "error": None,
+    # Phase 3b — surface worker liveness so the UI can distinguish
+    # "no worker" (configuration / startup failure) from "worker idle"
+    # (queue empty, doing nothing). Both look the same in terms of
+    # ``running: False`` but they need different UI affordances.
+    "worker_running": False,
+    "wake_count": 0,
+    "drain_count": 0,
 }
 
 # Tmpfs directory for short-lived rclone config
@@ -1224,18 +1301,31 @@ is_wifi_connected = _is_wifi_connected
 # Core Sync Engine
 # ---------------------------------------------------------------------------
 
-def _run_sync(
+def _drain_once(
     teslacam_path: str,
     db_path: str,
     trigger: str,
-    cancel_event: threading.Event,
-) -> None:
-    """Background thread target that performs the actual cloud sync.
+) -> bool:
+    """Single drain pass: discover events, upload one at a time, exit.
 
-    Processes one file at a time, updates the SQLite tracking database after
-    each file, and respects the cancellation event between uploads.
+    Phase 3b (#99): split out from the old ``_run_sync`` so the
+    long-lived ``_worker_loop`` can call it on every wake without
+    spawning a new thread. The function body is structurally
+    identical to the old implementation — same task-coordinator
+    contract, same LES yield-between-files contract, same per-row
+    DB updates — only the entry signature changed:
+
+    * Cancellation is read from the module-level ``_worker_stop``
+      event instead of a per-thread ``cancel_event`` parameter.
+    * Returns ``True`` if the drain ran (even if it uploaded zero
+      files), ``False`` if the drain bailed out before doing any
+      meaningful work (no events to sync, lock contention, WiFi
+      down). The worker uses this to decide whether to short-sleep
+      (busy / contended) or long-sleep (genuinely idle).
     """
     global _sync_status
+
+    cancel_event = _worker_stop
 
     # Acquire the global heavy-task lock so the indexer and archiver
     # don't run concurrently (Pi Zero has limited CPU/IO).
@@ -1253,7 +1343,7 @@ def _run_sync(
             "running": False,
             "progress": "Skipped: another task is running",
         })
-        return
+        return False
     lock_held = True
 
     _sync_status.update({
@@ -1313,7 +1403,7 @@ def _run_sync(
                     (datetime.now(timezone.utc).isoformat(), session_id),
                 )
                 conn.commit()
-            return
+            return True
 
         _sync_status["files_total"] = len(to_sync)
         _sync_status["total_bytes"] = sum(s for _, _, s in to_sync)
@@ -1385,7 +1475,7 @@ def _run_sync(
                     (datetime.now(timezone.utc).isoformat(), session_id),
                 )
                 conn.commit()
-            return
+            return True
 
         # Memory-safe flags for Pi Zero 2W
         mem_flags = ["--buffer-size", "0", "--transfers", "1", "--checkers", "1"]
@@ -1578,6 +1668,13 @@ def _run_sync(
             "Cloud sync %s: %d files, %d bytes transferred",
             session_status, files_synced, bytes_transferred,
         )
+        # Phase 3b — return value is consumed by ``_worker_loop`` to
+        # decide between short-sleep (busy / contended / partial) and
+        # long-sleep (genuinely empty queue). A drain that processed
+        # at least one file or that ran a full reconcile counts as
+        # "did real work" and may have woken up new work, so we tell
+        # the loop to short-sleep and immediately re-check.
+        drain_did_work = (files_synced > 0)
 
     except Exception as e:
         logger.error("Cloud sync failed: %s", e)
@@ -1587,6 +1684,7 @@ def _run_sync(
             "progress": f"Error: {e}",
         })
         session_status = "interrupted"
+        drain_did_work = False
 
     finally:
         # Update session record
@@ -1623,69 +1721,365 @@ def _run_sync(
         if lock_held:
             release_task('cloud_sync')
 
+    return bool(drain_did_work)
+
+
+# Backward-compat alias: anything that was importing ``_run_sync``
+# (legacy tests, third-party tooling) still works. New code should
+# call ``_drain_once`` directly or — better — ``wake()`` to let the
+# worker loop schedule the drain. The old ``cancel_event`` parameter
+# is accepted for API compatibility but ignored — cancellation now
+# always flows through the module-level ``_worker_stop`` event.
+def _run_sync(  # noqa: D401 — wraps _drain_once for legacy callers
+    teslacam_path: str,
+    db_path: str,
+    trigger: str,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
+    """Deprecated: use ``_drain_once`` (or ``wake()`` for async).
+
+    The legacy ``cancel_event`` parameter is accepted for backward
+    compatibility but ignored. Real cancellation is via ``stop_sync()``
+    / ``_worker_stop``.
+    """
+    _drain_once(teslacam_path, db_path, trigger)
+
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Public API — Phase 3b continuous worker
+# ---------------------------------------------------------------------------
+
+def _worker_loop(teslacam_path: str, db_path: str) -> None:
+    """Long-lived worker that drains the cloud sync queue on demand.
+
+    Runs in a single daemon thread for the lifetime of the gadget_web
+    process. Idles on ``_wake.wait(timeout=N)`` when there's nothing
+    to do (~0.1 % CPU baseline) and runs a single ``_drain_once``
+    pass when poked. Producers (file watcher, NM dispatcher, mode
+    switch, manual UI) call ``wake()`` instead of starting a fresh
+    thread.
+
+    Containment: every iteration's ``_drain_once`` call is wrapped in
+    try/except so a single bad pass cannot kill the worker. The thread
+    only exits when ``_worker_stop`` is set.
+
+    Wake-event discipline: ONLY the loop-top ``_wake.wait`` consumes
+    the wake event. All other waits inside the loop (post-exception
+    backoff, gate-skip backoff for WiFi-down / LES-pending /
+    archive-running) use ``_worker_stop.wait`` so a producer's wake
+    that lands during the backoff isn't discarded — it's still set
+    when the loop returns to the top.
+    """
+    logger.info(
+        "Cloud archive worker started (teslacam=%s)", teslacam_path,
+    )
+    _sync_status["worker_running"] = True
+    try:
+        # On startup, recover any rows that were marked ``uploading``
+        # when the previous process died. This is cheap (single UPDATE)
+        # and idempotent.
+        try:
+            recover_interrupted_uploads(db_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Cloud archive startup recovery failed (continuing): %s", e,
+            )
+
+        # Wake immediately so an existing pending queue starts draining
+        # without waiting for the first idle timeout.
+        _wake.set()
+
+        while not _worker_stop.is_set():
+            # Block until somebody wakes us (file watcher, NM
+            # dispatcher, mode switch, manual UI, stop, idle timeout).
+            # Using a timed wait so an unobserved state change (WiFi
+            # came back without a dispatcher event) eventually catches
+            # up — but a producer wake short-circuits the wait.
+            _wake.wait(timeout=_WAIT_WHEN_IDLE_SECONDS)
+            _wake.clear()
+            if _worker_stop.is_set():
+                break
+            _sync_status["wake_count"] = _sync_status.get("wake_count", 0) + 1
+
+            # Skip drain entirely if disabled or no provider — but
+            # stay alive so a settings change doesn't require a
+            # service restart. A subsequent wake after the user
+            # reconfigures will succeed.
+            if not CLOUD_ARCHIVE_ENABLED:
+                continue
+            if not CLOUD_ARCHIVE_PROVIDER:
+                continue
+
+            # Yield to LES BEFORE acquiring our own lock — same
+            # contract as the legacy ``trigger_auto_sync``.
+            try:
+                from services.live_event_sync_service import (
+                    has_ready_live_event_work,
+                )
+                if has_ready_live_event_work(db_path):
+                    logger.debug(
+                        "Cloud archive worker yielding wake to LES "
+                        "(ready events in queue)",
+                    )
+                    # Backoff that preserves _wake so a producer's
+                    # wake during the LES window isn't discarded.
+                    _backoff_wait(_WAIT_WHEN_BUSY_SECONDS)
+                    if _worker_stop.is_set():
+                        break
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Skip if WiFi is down — we'll wake again on the next
+            # NM dispatcher event when WiFi comes back. The idle
+            # timeout also catches "WiFi came back silently".
+            if not _is_wifi_connected():
+                logger.debug("Cloud archive worker: WiFi down, idling")
+                continue
+
+            # Skip if a single-file archive is running (shared rclone
+            # subprocess + bandwidth contention).
+            try:
+                from services.cloud_rclone_service import get_archive_status
+                if get_archive_status().get("running"):
+                    logger.debug(
+                        "Cloud archive worker: single-file archive in "
+                        "progress, deferring drain",
+                    )
+                    _backoff_wait(_WAIT_WHEN_BUSY_SECONDS)
+                    if _worker_stop.is_set():
+                        break
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+
+            try:
+                _sync_status["drain_count"] = (
+                    _sync_status.get("drain_count", 0) + 1
+                )
+                did_work = _drain_once(teslacam_path, db_path, "auto")
+                if did_work:
+                    # We just uploaded something — there may be more
+                    # ready now (the file watcher fired during the
+                    # drain). Don't sleep; loop straight back to a
+                    # fresh wake check.
+                    _wake.set()
+            except Exception as e:  # noqa: BLE001
+                # Containment: never let a bad drain kill the worker.
+                logger.exception("Cloud archive drain iteration failed: %s", e)
+                _sync_status["error"] = str(e)[:500]
+                # Short backoff before retrying so we don't hot-loop
+                # on a persistent failure. _backoff_wait preserves
+                # _wake so a producer's wake during the backoff
+                # short-circuits it and triggers a fresh attempt.
+                _backoff_wait(_WAIT_WHEN_BUSY_SECONDS)
+                if _worker_stop.is_set():
+                    break
+
+    finally:
+        _sync_status["worker_running"] = False
+        logger.info("Cloud archive worker stopped")
+
+
+def start(
+    teslacam_path: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Start the cloud archive worker thread. Idempotent.
+
+    Phase 3b (#99): replaces the one-shot ``start_sync`` thread spawn.
+    Called once from ``gadget_web`` startup; subsequent producers
+    poke the running worker via :func:`wake`.
+
+    Args:
+        teslacam_path: TeslaCam directory (RO mount). If omitted,
+            resolved via ``services.video_service.get_teslacam_path``.
+        db_path: Path to the cloud sync DB. Defaults to
+            ``CLOUD_ARCHIVE_DB_PATH`` from config.
+
+    Returns:
+        ``True`` if a new worker thread was started, ``False`` if the
+        worker was already alive or cloud archive is disabled.
+    """
+    global _worker_thread, _sync_thread
+
+    if not CLOUD_ARCHIVE_ENABLED:
+        logger.info("Cloud archive disabled in config — not starting worker")
+        return False
+
+    with _worker_lock:
+        if _worker_thread is not None and _worker_thread.is_alive():
+            return False
+
+        if db_path is None:
+            db_path = CLOUD_ARCHIVE_DB_PATH
+        if teslacam_path is None:
+            try:
+                from services.video_service import get_teslacam_path
+                teslacam_path = get_teslacam_path()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Cannot resolve TeslaCam path; worker not started: %s", e,
+                )
+                return False
+            if not teslacam_path:
+                logger.warning(
+                    "TeslaCam path empty; cloud worker not started",
+                )
+                return False
+
+        _worker_stop.clear()
+        _wake.clear()
+        _worker_thread = threading.Thread(
+            target=_worker_loop,
+            args=(teslacam_path, db_path),
+            name="cloud-archive-worker",
+            daemon=True,
+        )
+        # Legacy alias so callers reading ``_sync_thread`` see the
+        # same object (used by a few status helpers and tests).
+        _sync_thread = _worker_thread
+        _worker_thread.start()
+        return True
+
+
+def stop(timeout: float = 5.0) -> bool:
+    """Stop the worker thread. Best-effort; daemon survives at process exit.
+
+    Sets ``_worker_stop``, wakes the worker out of any pending wait,
+    terminates the active rclone subprocess (if any), and joins the
+    thread up to ``timeout`` seconds.
+
+    Returns ``True`` if the thread exited cleanly (or was never alive),
+    ``False`` if it didn't join within ``timeout``.
+    """
+    global _worker_thread, _sync_rclone_proc
+
+    _worker_stop.set()
+    _wake.set()
+
+    proc = _sync_rclone_proc
+    if proc is not None:
+        try:
+            proc.terminate()
+            logger.info("Sent SIGTERM to rclone during stop (pid=%d)", proc.pid)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                logger.info("Sent SIGKILL to rclone during stop (pid=%d)", proc.pid)
+        except (OSError, ProcessLookupError):
+            pass
+
+    thread = _worker_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
+    return True
+
+
+def wake() -> None:
+    """Wake the worker so it runs a drain pass on the next iteration.
+
+    Idempotent and cheap (a single ``threading.Event.set``). Called by
+    every producer:
+
+    * File watcher new-mp4 callback (a freshly archived clip is now
+      visible to the queue producer).
+    * NetworkManager dispatcher (WiFi connect → ``/cloud/api/wake``).
+    * Mode-switch hook (Tesla USB just came back online; re-check the
+      queue in case Tesla wrote new events while gadget mode was off).
+    * Manual UI ``Sync Now`` button (``/cloud/api/sync_now`` calls
+      ``start_sync`` which in turn calls ``wake``).
+    * Periodic safety: the worker's ``_wake.wait(timeout=300)`` ensures
+      we re-check the queue at least every 5 minutes even if no
+      producer fired.
+
+    Safe to call before :func:`start` — the wake event will be honored
+    on the next worker startup.
+    """
+    _wake.set()
+
 
 def start_sync(
     teslacam_path: str,
     db_path: str,
     trigger: str = "manual",
 ) -> Tuple[bool, str]:
-    """Start a background cloud sync if one is not already running.
+    """Backward-compat wrapper: ensure the worker is alive and poke it.
+
+    Phase 3b (#99): no longer spawns a per-trigger thread. Producers
+    that previously called ``start_sync`` now end up calling
+    :func:`wake` after lazily starting the worker on first use. The
+    return value is preserved so existing callers (the ``/cloud/api/
+    sync_now`` blueprint, mode-switch hooks, NM dispatcher) keep
+    working without changes.
 
     Args:
-        teslacam_path: Absolute path to the TeslaCam directory (RO mount).
-        db_path: Path to the SQLite database file.
-        trigger: What initiated the sync ('manual', 'auto', 'scheduled').
+        teslacam_path: TeslaCam directory (RO mount).
+        db_path: Path to the cloud sync DB.
+        trigger: Diagnostic label (``manual``, ``auto``, ``wifi``).
 
     Returns:
-        ``(success, message)`` tuple.
+        ``(success, message)`` tuple. Success is ``True`` when the
+        wake was delivered (or when the worker is already draining).
+        ``False`` only when cloud archive is disabled or no provider
+        is configured.
     """
-    global _sync_thread
-
     if not CLOUD_ARCHIVE_ENABLED:
         return False, "Cloud archive is disabled in config"
-
     if not CLOUD_ARCHIVE_PROVIDER:
         return False, "No cloud provider configured"
 
-    with _sync_lock:
-        if _sync_status.get("running"):
-            return False, "Sync already running"
-
-        # Don't start if a single-file archive is running (shared resource)
-        try:
-            from services.cloud_rclone_service import get_archive_status
-            if get_archive_status().get("running"):
-                return False, "A file archive is in progress. Please wait for it to finish."
-        except Exception:
-            pass
-
-        _sync_cancel.clear()
-        _sync_thread = threading.Thread(
-            target=_run_sync,
-            args=(teslacam_path, db_path, trigger, _sync_cancel),
-            daemon=True,
+    # Lazy-start the worker if this is the very first sync trigger.
+    # Production startup calls ``start()`` explicitly; this is a
+    # belt-and-suspenders for tests / scripts that import the module
+    # directly.
+    with _worker_lock:
+        worker_alive = (
+            _worker_thread is not None and _worker_thread.is_alive()
         )
-        _sync_thread.start()
-        return True, "Cloud sync started"
+    if not worker_alive:
+        if not start(teslacam_path=teslacam_path, db_path=db_path):
+            return False, "Failed to start cloud archive worker"
+
+    wake()
+    logger.info("Cloud sync wake signal delivered (trigger=%s)", trigger)
+
+    if _sync_status.get("running"):
+        return True, "Cloud sync wake delivered (drain in progress)"
+    return True, "Cloud sync wake delivered"
 
 
 def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
-    """Stop a running sync by killing the active rclone process.
+    """Stop a running drain by killing the active rclone process.
 
-    Always terminates immediately — a single event upload can take 20+
-    minutes, so waiting is impractical. The partial file on the remote
-    will be overwritten on the next sync (--size-only detects mismatch).
+    Phase 3b (#99): the worker thread itself stays alive (use
+    :func:`stop` for full shutdown). Only the in-flight rclone
+    subprocess is terminated, and ``_worker_stop`` is briefly set so
+    the drain bails out at the next inter-file checkpoint, then
+    cleared again. The worker resumes idling normally after the kill.
+
+    Always terminates immediately — a single event upload can take
+    20+ minutes, so waiting is impractical. The partial file on the
+    remote will be overwritten on the next drain (--size-only detects
+    mismatch).
     """
     global _sync_rclone_proc
 
     if not _sync_status.get("running"):
         return False, "Sync is not running"
 
-    _sync_cancel.set()
+    # Briefly raise the stop flag so the in-flight ``_drain_once`` sees
+    # cancellation at its next inter-file check, then lower it so the
+    # worker resumes idling. (We can't keep it raised — that would
+    # exit the worker loop entirely.)
+    _worker_stop.set()
+    _sync_cancel.set()  # legacy alias for any external callers
 
     proc = _sync_rclone_proc
     if proc is not None:
@@ -1699,6 +2093,17 @@ def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
                 logger.info("Sent SIGKILL to rclone (pid=%d)", proc.pid)
         except (OSError, ProcessLookupError):
             pass
+
+    # Schedule a delayed clear so the drain has time to observe the
+    # stop, then lower the flag so the worker keeps running.
+    def _release_stop():
+        time.sleep(2)
+        _worker_stop.clear()
+        _sync_cancel.clear()
+
+    threading.Thread(
+        target=_release_stop, name="cloud-stop-release", daemon=True,
+    ).start()
 
     logger.info("Sync stop requested")
     return True, "Sync stopping"
@@ -1806,44 +2211,29 @@ def get_sync_stats(db_path: str) -> dict:
 
 
 def trigger_auto_sync(teslacam_path: str, db_path: str) -> None:
-    """Conditionally start a sync — safe to call from mode-switch hooks.
+    """Backward-compat wrapper: poke the continuous worker.
 
-    Checks that cloud archive is enabled, no sync is already running,
-    and WiFi (not AP-only) is connected before starting.
+    Phase 3b (#99): the "if not running, kick a one-shot" pattern is
+    gone. The worker is always alive (started once by gadget_web at
+    process startup); producers just need to wake it. The internal
+    LES yield + WiFi check + already-running check now happen *inside*
+    ``_worker_loop`` rather than at the producer side.
 
-    Skips when the Live Event Sync queue has pending events: LES gets
-    priority when both subsystems want WiFi. Cloud sync will resume on
-    the next dispatcher fire after LES drains.
+    Kept as a public alias so existing call sites
+    (``mode_control._trigger_cloud_sync_after_mode_switch``,
+    ``web_control`` startup, anyone who imported the symbol) keep
+    working without changes.
     """
-    if not CLOUD_ARCHIVE_ENABLED:
-        return
-
-    if _sync_status.get("running"):
-        return
-
-    if not _is_wifi_connected():
-        logger.debug("Auto-sync skipped: WiFi not connected")
-        return
-
-    # Yield to Live Event Sync if it has READY pending event work. Uses
-    # the LES helper so backoff/data-cap/exhausted-retry rows don't
-    # suppress cloud sync forever.
-    try:
-        from services.live_event_sync_service import has_ready_live_event_work
-        if has_ready_live_event_work(db_path):
-            logger.info(
-                "Cloud sync auto-trigger skipped: Live Event Sync has "
-                "ready events (will resume after LES drains)",
-            )
-            return
-    except Exception as e:
-        logger.debug("LES ready-work check failed (continuing): %s", e)
-
-    ok, msg = start_sync(teslacam_path, db_path, trigger="auto")
-    if ok:
-        logger.info("Auto cloud sync triggered")
-    else:
-        logger.debug("Auto-sync not started: %s", msg)
+    # Lazy-start safety: every other producer assumes the worker is
+    # alive. If it isn't (e.g. config flipped at runtime), spinning it
+    # up here is cheap and safe.
+    with _worker_lock:
+        worker_alive = (
+            _worker_thread is not None and _worker_thread.is_alive()
+        )
+    if not worker_alive and CLOUD_ARCHIVE_ENABLED and CLOUD_ARCHIVE_PROVIDER:
+        start(teslacam_path=teslacam_path, db_path=db_path)
+    wake()
 
 
 def recover_interrupted_uploads(db_path: str) -> int:

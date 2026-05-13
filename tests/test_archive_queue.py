@@ -2247,8 +2247,6 @@ class TestDeleteSourceGoneWritesTombstone:
             row = claim_next_for_worker(f'w-old-{i}', db_path=db)
             mark_source_gone(row['id'], db_path=db)
         n_before = archive_queue.count_source_gone_recent(
-            24, db_path=db, state_path=None  # uses autouse fixture path
-        ) if False else archive_queue.count_source_gone_recent(
             24, db_path=db, ignore_dismissed=True,
         )
         assert n_before == 2

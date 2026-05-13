@@ -542,8 +542,10 @@ def count_source_gone_recent(hours: int = 24,
     is False, the helper looks up the tombstone via
     :func:`get_lost_dismissed_at` (default behavior — what the banner
     poll wants). Pass ``ignore_dismissed=True`` to bypass the floor
-    entirely (e.g. the Failed Jobs page, where we want the raw count
-    regardless of dismissal state).
+    entirely (forward-looking override for any future caller that
+    wants the raw, dismissal-agnostic count — e.g. a forensic admin
+    view, or wiring the Failed Jobs page through this helper instead
+    of the worker-snapshot ``source_gone_count`` it currently reads).
 
     Cheap COUNT(*) — uses the v11 partial index
     ``archive_queue_source_gone_claimed`` (``ON archive_queue(claimed_at)

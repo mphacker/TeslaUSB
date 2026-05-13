@@ -19,6 +19,7 @@ from .cloud_archive import cloud_archive_bp
 from .live_events import live_events_bp
 from .archive_queue import archive_queue_bp
 from .storage_retention import storage_retention_bp
+from .jobs import jobs_bp
 
 __all__ = [
     'mode_control_bp',
@@ -41,4 +42,5 @@ __all__ = [
     'live_events_bp',
     'archive_queue_bp',
     'storage_retention_bp',
+    'jobs_bp',
 ]

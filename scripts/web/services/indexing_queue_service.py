@@ -588,6 +588,87 @@ def clear_pending_queue(db_path: str) -> int:
         return 0
 
 
+# ---------------------------------------------------------------------------
+# Phase 4.1 — dead-letter inspection + manual retry (Failed Jobs page)
+# ---------------------------------------------------------------------------
+
+def list_dead_letters(db_path: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """Return up to ``limit`` indexer dead-letter rows.
+
+    A row is dead-letter when ``attempts >= _PARSE_ERROR_MAX_ATTEMPTS``.
+    The worker won't pick it again on its own (the ``WHERE attempts < ?``
+    guard in :func:`claim_next_queue_item` skips it). Each row carries
+    ``canonical_key``, ``file_path``, ``last_error``, ``attempts``,
+    ``next_attempt_at`` so the unified Failed Jobs UI can render the why
+    and the retry-after timestamp without a follow-up call. Sorted
+    oldest-first so operators triage the original failure first.
+    """
+    if limit <= 0:
+        return []
+    limit = min(int(limit), 1000)
+    try:
+        with _open_queue_conn(db_path) as conn:
+            rows = conn.execute(
+                """SELECT canonical_key, file_path, attempts,
+                          next_attempt_at, last_error, enqueued_at,
+                          source
+                   FROM indexing_queue
+                   WHERE attempts >= ?
+                   ORDER BY enqueued_at ASC, canonical_key ASC
+                   LIMIT ?""",
+                (_PARSE_ERROR_MAX_ATTEMPTS, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error as e:
+        logger.warning("list_dead_letters failed: %s", e)
+        return []
+
+
+def retry_dead_letter(db_path: str,
+                      canonical_key_value: Optional[str] = None) -> int:
+    """Reset indexer dead-letter rows so the worker picks them up again.
+
+    When ``canonical_key_value`` is given, only that one row is reset.
+    When ``None``, every dead-letter row in the queue is reset — useful
+    after upgrading the SEI parser or fixing a recurring path issue
+    that affected a whole batch of failed parses.
+
+    Resets ``attempts`` to zero, clears ``last_error``, and zeroes
+    ``next_attempt_at`` so the worker re-picks the row on the next
+    cycle. Does not touch the ``priority`` so the original queueing
+    order is preserved. Returns the number of rows actually reset.
+    """
+    try:
+        with _open_queue_conn(db_path) as conn:
+            if canonical_key_value is None:
+                cur = conn.execute(
+                    """UPDATE indexing_queue
+                       SET attempts = 0,
+                           next_attempt_at = 0,
+                           last_error = NULL,
+                           claimed_by = NULL,
+                           claimed_at = NULL
+                       WHERE attempts >= ?""",
+                    (_PARSE_ERROR_MAX_ATTEMPTS,),
+                )
+            else:
+                cur = conn.execute(
+                    """UPDATE indexing_queue
+                       SET attempts = 0,
+                           next_attempt_at = 0,
+                           last_error = NULL,
+                           claimed_by = NULL,
+                           claimed_at = NULL
+                       WHERE attempts >= ?
+                         AND canonical_key = ?""",
+                    (_PARSE_ERROR_MAX_ATTEMPTS, str(canonical_key_value)),
+                )
+            return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("retry_dead_letter failed: %s", e)
+        return 0
+
+
 def clear_all_queue(db_path: str) -> int:
     """Remove every row from the indexing queue, including claimed ones.
 

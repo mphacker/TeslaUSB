@@ -476,6 +476,98 @@ def list_queue(limit: int = 50,
 
 
 # ---------------------------------------------------------------------------
+# Phase 4.1 — dead-letter inspection + manual retry (Failed Jobs page)
+# ---------------------------------------------------------------------------
+
+def list_dead_letters(limit: int = 100,
+                      db_path: Optional[str] = None) -> List[Dict]:
+    """Return up to ``limit`` ``dead_letter`` rows ordered oldest-first.
+
+    Thin wrapper over :func:`list_queue` that fixes the status filter
+    so the unified Failed Jobs blueprint (Phase 4.1) doesn't have to
+    pass it explicitly. Sorted oldest-first by id (the order rows were
+    promoted) so operators see the original failure first when
+    triaging.
+    """
+    if limit <= 0:
+        return []
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        cursor = conn.execute(
+            """
+            SELECT * FROM archive_queue
+            WHERE status = 'dead_letter'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.warning("list_dead_letters failed: %s", e)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def retry_dead_letter(row_id: Optional[int] = None,
+                      db_path: Optional[str] = None) -> int:
+    """Reset ``dead_letter`` rows back to ``pending`` for re-pickup.
+
+    When ``row_id`` is given, only that one row is reset. When
+    ``None``, every dead-letter row in the table is reset — useful
+    after fixing a transient SD-card / namespace issue that affected
+    a whole batch of failed copies.
+
+    Resets ``attempts`` and ``last_error`` so the retry budget starts
+    fresh; the next failure is treated as the first one again. Does
+    NOT change priority or expected_mtime — those are still the
+    correct ordering keys for the worker.
+
+    Returns the number of rows actually reset (``0`` if nothing
+    matched).
+    """
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        if row_id is None:
+            cur = conn.execute(
+                """UPDATE archive_queue
+                   SET status = 'pending', attempts = 0,
+                       last_error = NULL, claimed_by = NULL,
+                       claimed_at = NULL
+                   WHERE status = 'dead_letter'"""
+            )
+        else:
+            cur = conn.execute(
+                """UPDATE archive_queue
+                   SET status = 'pending', attempts = 0,
+                       last_error = NULL, claimed_by = NULL,
+                       claimed_at = NULL
+                   WHERE status = 'dead_letter' AND id = ?""",
+                (int(row_id),),
+            )
+        conn.commit()
+        return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("retry_dead_letter failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Worker-side helpers (Phase 2b — consumed by ``archive_worker``)
 # ---------------------------------------------------------------------------
 #

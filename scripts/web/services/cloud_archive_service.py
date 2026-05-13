@@ -3059,3 +3059,54 @@ def retry_dead_letter(file_path: Optional[str] = None) -> int:
             logger.debug("retry_dead_letter: wake() raised; ignoring",
                          exc_info=True)
     return n
+
+
+def delete_dead_letter(file_path: Optional[str] = None) -> int:
+    """Permanently delete ``dead_letter`` rows from ``cloud_synced_files``.
+
+    When ``file_path`` is given, only that one row is removed (looked
+    up via :func:`canonical_cloud_path` so legacy absolute forms still
+    match the stored canonical form). When ``None``, every dead-letter
+    row in the table is removed — the "Delete all" path on the Failed
+    Jobs page (#161).
+
+    The companion to :func:`retry_dead_letter`: same WHERE filter
+    (``status = 'dead_letter'``), but ``DELETE`` instead of ``UPDATE``.
+    Use when the source video has been deleted from disk (the most
+    common case — Tesla rotated it out, the user emptied an event
+    folder, etc.) or when retrying just keeps failing the same way.
+
+    The inotify file watcher / archive worker may legitimately
+    re-enqueue the same file_path later if it reappears on disk; that's
+    the producer doing its job and the new row starts fresh with
+    ``retry_count=0``. Returns the number of rows actually deleted
+    (``0`` if nothing matched). Returns ``0`` on any DB error so a UI
+    delete-all click never blows up the request handler.
+    """
+    if file_path is not None:
+        try:
+            target = canonical_cloud_path(file_path)
+        except ValueError:
+            return 0
+    else:
+        target = None
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        if target is None:
+            cur = conn.execute(
+                "DELETE FROM cloud_synced_files "
+                "WHERE status = 'dead_letter'"
+            )
+        else:
+            cur = conn.execute(
+                "DELETE FROM cloud_synced_files "
+                "WHERE status = 'dead_letter' AND file_path = ?",
+                (target,),
+            )
+        conn.commit()
+        return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("delete_dead_letter failed: %s", e)
+        return 0
+    finally:
+        conn.close()

@@ -667,6 +667,52 @@ def retry_failed(row_id: Optional[int] = None) -> int:
     return n
 
 
+def delete_failed(row_id: Optional[int] = None) -> int:
+    """Permanently delete failed rows from ``live_event_queue``.
+
+    When ``row_id`` is given, only that one row is removed. When
+    ``None``, every failed row in the queue is removed — the
+    "Delete all" path on the Failed Jobs page (#161).
+
+    The companion to :func:`retry_failed`: same WHERE filter
+    (``status = 'failed'``), but ``DELETE`` instead of ``UPDATE``.
+    Use when retry isn't going to help — the source ``event.json`` /
+    minute is permanently gone, the cloud destination is permanently
+    rejecting the upload, etc.
+
+    The ``register_event_json_callback`` watcher will re-enqueue the
+    event if Tesla writes the same ``event.json`` again, but in
+    practice Tesla doesn't rewrite events for the same minute, so a
+    delete here is effectively permanent. Returns the number of rows
+    actually deleted (``0`` if nothing matched). Returns ``0`` on any
+    DB error so a UI delete-all click never blows up the request
+    handler.
+    """
+    try:
+        conn = _open_db()
+        try:
+            _ensure_schema(conn)
+            if row_id is not None:
+                cur = conn.execute(
+                    "DELETE FROM live_event_queue "
+                    "WHERE id = ? AND status = 'failed'",
+                    (row_id,),
+                )
+            else:
+                cur = conn.execute(
+                    "DELETE FROM live_event_queue WHERE status = 'failed'"
+                )
+            n = cur.rowcount
+            if n:
+                conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error("LES delete_failed failed: %s", e)
+        return 0
+    return n or 0
+
+
 # ---------------------------------------------------------------------------
 # File selection — what gets uploaded for an event
 # ---------------------------------------------------------------------------

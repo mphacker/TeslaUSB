@@ -45,13 +45,19 @@
         </button>
     </nav>
 
-    <!-- "Retry all" bar (shown only when a single subsystem is selected) -->
+    <!-- "Retry all" / "Delete all" bar (shown only when a single subsystem is selected) -->
     <div id="retryAllBar" style="display: none; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px;">
         <span id="retryAllLabel" style="font-size: 0.875rem; color: var(--text-secondary);"></span>
-        <button type="button" id="retryAllBtn" class="btn btn-primary" aria-label="Retry all failed jobs in this subsystem">
-            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
-            <span>Retry all</span>
-        </button>
+        <div style="display: flex; gap: 8px;">
+            <button type="button" id="retryAllBtn" class="btn btn-primary" aria-label="Retry all failed jobs in this subsystem">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+                <span>Retry all</span>
+            </button>
+            <button type="button" id="deleteAllBtn" class="btn btn-danger" aria-label="Permanently delete all failed jobs in this subsystem">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                <span>Delete all</span>
+            </button>
+        </div>
     </div>
 
     <!-- Empty state / loading state -->
@@ -244,6 +250,7 @@
             const n = state.counts[state.subsystem] || 0;
             $('retryAllLabel').textContent = n + ' ' + (meta ? meta.label : state.subsystem) + ' job' + (n === 1 ? '' : 's') + ' failed';
             $('retryAllBtn').disabled = n === 0;
+            $('deleteAllBtn').disabled = n === 0;
             bar.style.display = 'flex';
         }
     }
@@ -338,7 +345,15 @@
             retryBtn.innerHTML = '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#icon-refresh-cw"></use></svg><span>Retry</span>';
             retryBtn.addEventListener('click', function () { retryRow(r); });
 
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'btn btn-danger';
+            deleteBtn.setAttribute('aria-label', 'Permanently delete this failed job');
+            deleteBtn.innerHTML = '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#icon-trash-2"></use></svg><span>Delete</span>';
+            deleteBtn.addEventListener('click', function () { deleteRow(r); });
+
             actions.appendChild(retryBtn);
+            actions.appendChild(deleteBtn);
             card.appendChild(header);
             card.appendChild(identifier);
             card.appendChild(error);
@@ -411,6 +426,42 @@
             });
     }
 
+    function del(payload) {
+        return fetch('/api/jobs/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify(payload),
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); });
+    }
+
+    function deleteRow(row) {
+        if (!window.confirm('Permanently delete this failed job?\n\nThe row will be removed from the queue. The underlying source file is NOT deleted from disk; if a watcher re-discovers it later it may be re-enqueued automatically.')) return;
+        del({ subsystem: row.subsystem, id: row.id })
+            .then(function (res) {
+                if (!res.ok) {
+                    showError('Delete failed: ' + (res.body && res.body.error ? res.body.error : 'unknown'));
+                    return;
+                }
+                return refresh();
+            });
+    }
+
+    function deleteAll() {
+        if (state.subsystem === 'all') return;
+        const meta = SUBSYSTEM_META[state.subsystem];
+        const label = meta ? meta.label : state.subsystem;
+        const n = state.counts[state.subsystem] || 0;
+        if (!window.confirm('Permanently delete all ' + n + ' failed ' + label + ' job' + (n === 1 ? '' : 's') + '?\n\nThe rows will be removed from the queue. Underlying source files are NOT deleted from disk.')) return;
+        del({ subsystem: state.subsystem, id: null })
+            .then(function (res) {
+                if (!res.ok) {
+                    showError('Delete-all failed: ' + (res.body && res.body.error ? res.body.error : 'unknown'));
+                    return;
+                }
+                return refresh();
+            });
+    }
+
     document.querySelectorAll('.failed-pill').forEach(function (b) {
         b.addEventListener('click', function () {
             state.subsystem = b.dataset.subsystem;
@@ -420,6 +471,7 @@
     });
     $('refreshBtn').addEventListener('click', refresh);
     $('retryAllBtn').addEventListener('click', retryAll);
+    $('deleteAllBtn').addEventListener('click', deleteAll);
 
     document.addEventListener('DOMContentLoaded', function () {
         refresh();

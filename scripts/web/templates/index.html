@@ -64,6 +64,23 @@
          could archive them. Lost dashcam footage is unrecoverable, so
          this banner is intentionally loud (red) and links to the
          Failed Jobs page for the full archive history. -->
+    <style>
+        /* Issue #170 follow-up: the banner div carries an inline
+           ``display:flex`` (specificity 1,0,0,0) which overrides the
+           UA stylesheet's ``[hidden] { display:none }`` rule
+           (specificity 0,0,1,0). Without this scoped !important rule,
+           setting ``banner.hidden = true`` from JS leaves the banner
+           visible because the inline display wins — exactly what the
+           user reported when the Dismiss button "did not work" even
+           though the POST to /api/system/clear_lost_clips returned
+           200. Reproduced live with Playwright on
+           cybertruckusb.local: ``element.hidden === true`` but
+           ``getComputedStyle(el).display === "flex"``. The
+           !important + the [hidden] selector match exactly what the
+           UA rule would do, just with enough specificity to defeat
+           the inline style. */
+        #files-lost-banner[hidden] { display: none !important; }
+    </style>
     <div id="files-lost-banner" hidden
          style="margin:12px 0; padding:12px 14px;
                 border-radius:8px;

@@ -395,9 +395,19 @@ class TestSkippedLogThrottling:
         finally:
             tc.release_task('archive')
 
-    def test_throttle_resets_on_lock_acquisition(self, caplog):
-        """When the lock changes hands, the throttle map clears so the
-        first skip of the next contention window logs at INFO again."""
+    def test_new_blocker_pair_logs_at_info_after_lock_change(self, caplog):
+        """Issue #172: when the lock changes hands, a SKIP against a
+        newly-encountered blocker should still fire INFO on its first
+        attempt (because no entry exists in the throttle map for that
+        ``(task, blocker)`` pair).
+
+        Note: prior to issue #172 the throttle map was wiped on every
+        successful acquire, which produced log spam under rapid task
+        interleave. The post-#172 behavior leaves the map intact and
+        relies on the per-pair 60s window, but a brand-new pair like
+        ``(indexer, cloud_sync)`` still has no entry → still fires
+        INFO. This test guards that property.
+        """
         # First contention period.
         tc.acquire_task('archive')
         try:
@@ -409,12 +419,15 @@ class TestSkippedLogThrottling:
 
         caplog.clear()
 
-        # Lock is now free → next acquire resets the throttle map.
+        # Lock is now free → next acquire does NOT clear the throttle
+        # map (post-#172). But the second contention's blocker is
+        # different, so the (indexer, cloud_sync) pair has no entry
+        # and still fires INFO.
         assert tc.acquire_task('cloud_sync') is True
         try:
             with caplog.at_level('INFO', logger='services.task_coordinator'):
                 # Second contention period: indexer's first skip vs
-                # the new blocker should fire at INFO again.
+                # the new blocker should fire at INFO.
                 assert tc.acquire_task('indexer') is False
 
             info_skips = [
@@ -441,8 +454,10 @@ class TestSkippedLogThrottling:
         finally:
             tc.release_task('archive')
 
-        # Lock acquisition cleared the throttle map for next contention.
         # New blocker (cloud_sync), same skipped task (indexer).
+        # Issue #172: the throttle map is no longer cleared on
+        # acquire, but ``(indexer, cloud_sync)`` is a brand-new pair
+        # with no entry, so it still fires INFO independently.
         caplog.clear()
         tc.acquire_task('cloud_sync')
         try:
@@ -457,6 +472,73 @@ class TestSkippedLogThrottling:
             assert "'cloud_sync' is running" in info_skips[0].getMessage()
         finally:
             tc.release_task('cloud_sync')
+
+    def test_rapid_interleave_does_not_spam_info(self, caplog):
+        """Issue #172 regression test — production hot path.
+
+        On a backlogged Pi, ``archive`` and ``indexer`` rapidly
+        interleave (each ~0.5 s of work). Pre-#172, every ``archive``
+        re-acquire wiped the throttle map → next ``indexer`` skip
+        re-fired INFO → ~6 lines/min for the same (indexer, archive)
+        pair. After #172, the throttle map persists across acquires
+        and the per-pair 60s window keeps ≤1 INFO per minute.
+        """
+        # Simulate 20 interleaved cycles of (archive acquires, indexer
+        # rebuffed, archive releases, indexer acquires, indexer releases).
+        # All within sub-second wall time, well inside the 60s throttle.
+        with caplog.at_level('INFO', logger='services.task_coordinator'):
+            for _ in range(20):
+                assert tc.acquire_task('archive') is True
+                # Indexer attempts and is rebuffed — this is the
+                # spam path under the old code.
+                assert tc.acquire_task('indexer') is False
+                tc.release_task('archive')
+                # Indexer acquires (would have wiped throttle pre-#172).
+                assert tc.acquire_task('indexer') is True
+                tc.release_task('indexer')
+
+        info_skips = [
+            r for r in caplog.records
+            if r.levelname == 'INFO' and 'skipped' in r.message
+        ]
+        assert len(info_skips) == 1, (
+            f"Expected exactly 1 INFO 'skipped' log across 20 rapid "
+            f"interleaves (per-pair 60s throttle), got "
+            f"{len(info_skips)}: {[r.getMessage() for r in info_skips]}"
+        )
+
+    def test_throttle_entry_persists_across_acquires(self, caplog):
+        """Issue #172 invariant: ``_skipped_log_last`` is no longer
+        wiped on successful acquire. Verify the entry survives a
+        full acquire/release cycle of the blocker."""
+        # Prime the throttle for (indexer, archive).
+        tc.acquire_task('archive')
+        try:
+            with caplog.at_level('INFO', logger='services.task_coordinator'):
+                tc.acquire_task('indexer')  # → INFO + entry written
+        finally:
+            tc.release_task('archive')
+
+        # Pre-#172 this entry would be wiped by the next successful
+        # acquire below. Post-#172 it persists.
+        original_ts = tc._skipped_log_last.get(('indexer', 'archive'))
+        assert original_ts is not None, "Throttle entry should be set"
+
+        # Fully unrelated task acquires + releases.
+        assert tc.acquire_task('cloud_sync') is True
+        tc.release_task('cloud_sync')
+
+        # Indexer also acquires + releases.
+        assert tc.acquire_task('indexer') is True
+        tc.release_task('indexer')
+
+        # The (indexer, archive) entry MUST still be present (the bug
+        # fix). Pre-#172 it would have been cleared by these acquires.
+        retained_ts = tc._skipped_log_last.get(('indexer', 'archive'))
+        assert retained_ts == original_ts, (
+            "Issue #172 regression: throttle entry was wiped on "
+            "successful acquire — log spam will return."
+        )
 
 
 class TestAcquireReleaseLogLevels:

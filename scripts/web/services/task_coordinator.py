@@ -73,6 +73,15 @@ _MAX_TASK_AGE_SECONDS = 1800  # 30 minutes
 # boot catchup (issue #72). One log per (task, blocker) pair per minute
 # is plenty — the log shows you a contention is in progress, not a
 # blow-by-blow account.
+#
+# Issue #172: the throttle map is NEVER cleared on successful acquire.
+# The previous design did clear it (the theory being "new contention
+# period deserves a fresh INFO"), but on a backlogged device the
+# indexer↔archive interleave at sub-second granularity → every short
+# acquire wiped the throttle → spam returned. The fix is to let
+# entries naturally age out via the per-pair 60s window in
+# ``_should_log_skipped``. A genuinely new (task, blocker) pair has no
+# entry in the map so it still fires INFO on its first encounter.
 _SKIPPED_LOG_THROTTLE_SECONDS = 60.0
 # Per (task_name, blocker_name) -> monotonic time of last INFO log.
 # Guarded by ``_lock`` so concurrent acquire_task callers can't
@@ -231,11 +240,26 @@ def acquire_task(task_name: str, wait_seconds: float = 0.0,
                     if am_waiting:
                         _waiter_count = max(0, _waiter_count - 1)
                         am_waiting = False
-                    # On successful acquisition, reset the per-blocker
-                    # throttle map. The "skipped" log should fire on the
-                    # FIRST blocked attempt of the next contention
-                    # period, not stay throttled from the previous one.
-                    _skipped_log_last.clear()
+                    # Issue #172: do NOT clear ``_skipped_log_last`` on
+                    # successful acquire. The previous design cleared
+                    # the throttle map here on the theory that a new
+                    # contention period deserved a fresh INFO line —
+                    # but on a backlogged Pi the indexer↔archive
+                    # interleave at sub-second granularity, so every
+                    # short successful acquire wiped the throttle and
+                    # the very next "skipped" fired INFO again,
+                    # producing ~6 lines/min for the same (task,
+                    # blocker) pair. The per-pair 60 s window in
+                    # :func:`_should_log_skipped` already gives the
+                    # operator one INFO line per minute per pair which
+                    # is exactly the documented project rule (see
+                    # ``copilot-instructions.md`` "Logging routine
+                    # cyclic-worker activity at INFO"). A genuinely
+                    # NEW (task, blocker) pair has no entry in the
+                    # throttle map and will fire INFO on its first
+                    # encounter regardless. Stale entries cost ~64
+                    # bytes each and there are at most a handful of
+                    # pairs, so the dict stays trivially small.
                     # Per Phase 1 item 1.2: routine acquire/release
                     # were ~2 INFO lines/sec during normal operation,
                     # bloating the journal. Drop to DEBUG; the rolling

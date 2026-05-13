@@ -568,6 +568,7 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                            claimed_at = NULL,
                            next_attempt_at = ?,
                            attempts = attempts + 1,
+                           previous_last_error = last_error,
                            last_error = ?
                      WHERE canonical_key = ?
                 """
@@ -577,6 +578,7 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                        SET claimed_by = NULL,
                            claimed_at = NULL,
                            next_attempt_at = ?,
+                           previous_last_error = last_error,
                            last_error = ?
                      WHERE canonical_key = ?
                 """
@@ -591,6 +593,7 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                            claimed_at = NULL,
                            next_attempt_at = ?,
                            attempts = attempts + 1,
+                           previous_last_error = last_error,
                            last_error = ?
                      WHERE canonical_key = ?
                        AND claimed_by = ?
@@ -602,6 +605,7 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                        SET claimed_by = NULL,
                            claimed_at = NULL,
                            next_attempt_at = ?,
+                           previous_last_error = last_error,
                            last_error = ?
                      WHERE canonical_key = ?
                        AND claimed_by = ?
@@ -746,8 +750,8 @@ def list_dead_letters(db_path: str, limit: int = 100) -> List[Dict[str, Any]]:
         conn = _open_queue_conn(db_path)
         rows = conn.execute(
             """SELECT canonical_key, file_path, attempts,
-                      next_attempt_at, last_error, enqueued_at,
-                      source
+                      next_attempt_at, last_error, previous_last_error,
+                      enqueued_at, source
                FROM indexing_queue
                WHERE attempts >= ?
                ORDER BY enqueued_at ASC, canonical_key ASC

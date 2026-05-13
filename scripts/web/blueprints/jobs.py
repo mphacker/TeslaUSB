@@ -42,6 +42,13 @@ The ``last_error`` strings returned by the listers are redacted via
 :func:`_redact_last_error` to strip rclone bucket/host names and
 absolute local paths before they leave the process. Originals stay
 in the DB for journalctl / shell triage.
+
+Each row also carries ``previous_last_error`` (issue #132): the
+prior failure reason from before the most recent retry. The four
+worker subsystems all rotate ``last_error → previous_last_error``
+each time they record a new failure, so the operator can see whether
+the same error keeps recurring or whether retries are uncovering new
+ones. Same redaction pipeline applies.
 """
 from __future__ import annotations
 
@@ -149,6 +156,7 @@ def _archive_rows(limit: int) -> List[Dict[str, Any]]:
             'identifier': r.get('source_path') or r.get('archive_path') or '',
             'attempts': int(r.get('attempts') or 0),
             'last_error': _redact_last_error(r.get('last_error')),
+            'previous_last_error': _redact_last_error(r.get('previous_last_error')),
             'enqueued_at': r.get('enqueued_at'),
             'extra': {
                 'priority': r.get('priority'),
@@ -171,6 +179,7 @@ def _indexer_rows(limit: int) -> List[Dict[str, Any]]:
             'identifier': r.get('file_path') or r.get('canonical_key') or '',
             'attempts': int(r.get('attempts') or 0),
             'last_error': _redact_last_error(r.get('last_error')),
+            'previous_last_error': _redact_last_error(r.get('previous_last_error')),
             'enqueued_at': r.get('enqueued_at'),
             'extra': {
                 'next_attempt_at': r.get('next_attempt_at'),
@@ -193,6 +202,7 @@ def _cloud_sync_rows(limit: int) -> List[Dict[str, Any]]:
             'identifier': r.get('file_path') or '',
             'attempts': int(r.get('retry_count') or 0),
             'last_error': _redact_last_error(r.get('last_error')),
+            'previous_last_error': _redact_last_error(r.get('previous_last_error')),
             'enqueued_at': None,
             'extra': {
                 'file_size': r.get('file_size'),
@@ -220,6 +230,7 @@ def _live_event_rows(limit: int) -> List[Dict[str, Any]]:
             'identifier': r.get('event_dir') or '',
             'attempts': int(r.get('attempts') or 0),
             'last_error': _redact_last_error(r.get('last_error')),
+            'previous_last_error': _redact_last_error(r.get('previous_last_error')),
             'enqueued_at': r.get('enqueued_at'),
             'extra': {
                 'event_timestamp': r.get('event_timestamp'),

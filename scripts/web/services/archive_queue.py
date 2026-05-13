@@ -982,6 +982,7 @@ def mark_failed(row_id: int, error: str, *,
                     UPDATE archive_queue
                        SET status = 'dead_letter',
                            attempts = ?,
+                           previous_last_error = last_error,
                            last_error = ?,
                            claimed_at = NULL,
                            claimed_by = NULL
@@ -995,6 +996,7 @@ def mark_failed(row_id: int, error: str, *,
                 UPDATE archive_queue
                    SET status = 'pending',
                        attempts = ?,
+                       previous_last_error = last_error,
                        last_error = ?,
                        claimed_at = NULL,
                        claimed_by = NULL

@@ -181,12 +181,19 @@ def _archive_block() -> Dict[str, Any]:
             'enabled': False,
             'paused': False,
             'queue_depth': 0,
+            'lost_24h': 0,
         }
     try:
         from services import archive_queue, archive_watchdog, archive_worker
         watchdog = archive_watchdog.get_status() or {}
         worker = archive_worker.get_status() or {}
         counts = archive_queue.get_queue_status() or {}
+        # Phase 4.3: count files Tesla rotated out before we copied them
+        # in the last 24 h. Cheap indexed COUNT(*); safe on every poll.
+        try:
+            lost_24h = int(archive_queue.count_source_gone_recent(24) or 0)
+        except Exception:  # noqa: BLE001 — never let a counter kill the page
+            lost_24h = 0
     except Exception as e:  # noqa: BLE001
         return {
             'severity': SEV_UNKNOWN,
@@ -194,6 +201,7 @@ def _archive_block() -> Dict[str, Any]:
             'enabled': True,
             'paused': False,
             'queue_depth': 0,
+            'lost_24h': 0,
             '_error': str(e)[:120],
         }
 
@@ -215,6 +223,13 @@ def _archive_block() -> Dict[str, Any]:
     elif wd_sev == SEV_ERROR:
         sev = SEV_ERROR
         msg = (watchdog.get('message') or 'Watchdog error')[:80]
+    elif lost_24h > 0:
+        # Lost-files dominates dead-letters because lost footage is
+        # unrecoverable, whereas a dead-letter row still has the source
+        # data on the SD card and can be retried.
+        sev = SEV_WARN
+        msg = (f'{lost_24h} clip{"s" if lost_24h != 1 else ""} '
+               'lost in last 24h')
     elif dead > 0:
         sev = SEV_WARN
         msg = f'{dead} dead-letter row{"s" if dead != 1 else ""}'
@@ -240,6 +255,7 @@ def _archive_block() -> Dict[str, Any]:
         'paused': paused,
         'queue_depth': pending,
         'dead_letter_count': dead,
+        'lost_24h': lost_24h,
     }
 
 

@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -211,6 +211,18 @@ CREATE TABLE IF NOT EXISTS archive_queue (
 CREATE INDEX IF NOT EXISTS archive_queue_ready
     ON archive_queue(status, priority, expected_mtime)
     WHERE status = 'pending';
+-- Files-lost banner index (Phase 4.3 / v11): the Settings card polls
+-- ``count_source_gone_recent`` every 15 s, which scans rows with
+-- ``status='source_gone'`` filtered by ``claimed_at`` recency. The
+-- ``archive_queue`` table grows monotonically (no retention today),
+-- so without a partial index this becomes a full table scan once
+-- ``source_gone_count`` reaches the thousands (which it already has
+-- on production devices — 2 387 rows seen in the wild). The partial
+-- index keeps the lookup O(log n) and is tiny because only the
+-- ``source_gone`` rows are present.
+CREATE INDEX IF NOT EXISTS archive_queue_source_gone_claimed
+    ON archive_queue(claimed_at)
+    WHERE status = 'source_gone';
 """
 
 
@@ -389,6 +401,15 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         # will be the consumer. Created by the executescript above
         # (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS
         # are idempotent); no data migration required.
+        # v11: ``archive_queue_source_gone_claimed`` partial index for
+        # the Phase 4.3 (#101) files-lost banner. The Settings card
+        # polls ``count_source_gone_recent`` every 15 s, which would
+        # otherwise scan the entire growing-without-bound
+        # ``archive_queue`` table once the ``source_gone`` count
+        # reaches the thousands. The partial index keeps the query
+        # O(log n) and is tiny because only ``source_gone`` rows are
+        # included. Created by the executescript above; no data
+        # migration required.
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",

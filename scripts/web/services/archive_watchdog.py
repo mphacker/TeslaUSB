@@ -284,9 +284,55 @@ def _resolve_retention_days() -> int:
        keys in total.
     4. Hard-coded ``30`` if nothing else resolves.
 
-    Resolved fresh on every prune so Settings → Storage & Retention
-    edits take effect on the next pass without restarting the service.
+    Reads ``config.yaml`` directly on every call so Settings → Storage &
+    Retention edits take effect on the next prune pass without
+    restarting the service. The ``config`` module's cached attributes
+    (``CLEANUP_*``, ``CLOUD_ARCHIVE_RETENTION_DAYS``) are loaded once at
+    startup and would otherwise mask saved YAML changes until restart.
+    Falls back to the cached attributes if the direct read fails.
     """
+    # Direct YAML read — bypass the cached config.* attributes so a save
+    # from the Settings UI is visible on the next prune.
+    try:
+        import yaml
+        from config import CONFIG_YAML
+        with open(CONFIG_YAML, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        cleanup = cfg.get('cleanup') if isinstance(cfg.get('cleanup'), dict) else {}
+        policies = cleanup.get('policies') if isinstance(cleanup.get('policies'), dict) else {}
+        archived = policies.get('ArchivedClips') if isinstance(policies, dict) else None
+        if isinstance(archived, dict):
+            try:
+                override = int(archived.get('retention_days') or 0)
+                if override > 0:
+                    return override
+            except (TypeError, ValueError):
+                pass
+        try:
+            d = int(cleanup.get('default_retention_days') or 0)
+            if d > 0:
+                return d
+        except (TypeError, ValueError):
+            pass
+        cloud_archive = cfg.get('cloud_archive') if isinstance(cfg.get('cloud_archive'), dict) else {}
+        try:
+            c = int(cloud_archive.get('archived_clips_retention_days') or 0)
+            if c > 0:
+                return c
+        except (TypeError, ValueError):
+            pass
+        archive = cfg.get('archive') if isinstance(cfg.get('archive'), dict) else {}
+        try:
+            a = int(archive.get('retention_days') or 0)
+            if a > 0:
+                return a
+        except (TypeError, ValueError):
+            pass
+    except Exception:  # noqa: BLE001
+        # Direct YAML read failed for some reason; fall back to the
+        # cached config module attributes so we never crash the prune.
+        pass
+
     try:
         from config import CLEANUP_POLICIES
         archived = CLEANUP_POLICIES.get('ArchivedClips') if CLEANUP_POLICIES else None

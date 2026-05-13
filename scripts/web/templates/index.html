@@ -1469,13 +1469,16 @@ if (document.getElementById('fsck-status-container')) {
                 if (!data || !data.success) return null;
                 var cfg = data.config || {};
                 // ``default_retention_days === 0`` in config.yaml means
-                // "inherit from legacy fallback". Show the resolved
-                // value the watchdog will actually use, so a user who
-                // saves without editing doesn't accidentally overwrite
-                // a customized cloud_archive.archived_clips_retention_days.
-                var resolvedDefault = (data.resolved_retention_days != null)
-                    ? data.resolved_retention_days
-                    : (cfg.default_retention_days || 30);
+                // "inherit from legacy fallback chain". Show the resolved
+                // value the watchdog will actually use ONLY in that case;
+                // when the user has saved a concrete value, show THEIR value
+                // so subsequent saves don't accidentally write the cached
+                // resolved value back over the customization.
+                var resolvedDefault = (cfg.default_retention_days > 0)
+                    ? cfg.default_retention_days
+                    : ((data.resolved_retention_days != null)
+                        ? data.resolved_retention_days
+                        : 30);
                 $('sr-default-retention').value = resolvedDefault;
                 $('sr-free-space-target').value = cfg.free_space_target_pct || 10;
                 $('sr-max-archive').value = cfg.max_archive_size_gb || 0;

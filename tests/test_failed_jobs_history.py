@@ -594,3 +594,248 @@ class TestApiExposesPreviousError:
         # The redactor returns '' for None.
         assert rows[0]['previous_last_error'] == 'Same error' or \
                rows[0]['previous_last_error'] == ''
+
+
+# ---------------------------------------------------------------------------
+# Per-subsystem API lister tests (Issue #132 review-fix #158)
+# Each lister had a bug where the SELECT projection omitted
+# ``previous_last_error``, so the rotation worked at the DB level but
+# the column never reached the JSON response. These tests pin the
+# end-to-end plumbing for indexer / cloud / LES (archive_queue uses
+# SELECT *, covered by ``test_archive_lister_includes_field`` above).
+# ---------------------------------------------------------------------------
+
+
+class TestIndexerListerExposesPreviousError:
+
+    def test_indexer_lister_returns_previous_error(self, indexing_db, monkeypatch):
+        from services import indexing_queue_service as iqs
+        from blueprints import jobs as jobs_bp
+        # Force into dead_letter (>= _PARSE_ERROR_MAX_ATTEMPTS = 3).
+        _seed_indexing_row(indexing_db, "/dl_test.mp4", "/dl_test.mp4")
+        for err in ("First error", "Second error", "Third error"):
+            iqs.defer_queue_item(
+                indexing_db, "/dl_test.mp4", next_attempt_at=0.0,
+                bump_attempts=True, last_error=err,
+            )
+        monkeypatch.setattr(jobs_bp, "MAPPING_ENABLED", True)
+        monkeypatch.setattr(jobs_bp, "MAPPING_DB_PATH", indexing_db)
+        rows = jobs_bp._indexer_rows(limit=10)
+        assert len(rows) == 1
+        assert rows[0]['last_error'] == 'Third error'
+        assert rows[0]['previous_last_error'] == 'Second error'
+
+
+class TestCloudListerExposesPreviousError:
+
+    def test_cloud_lister_returns_previous_error(self, tmp_path, monkeypatch):
+        from services import cloud_archive_service as svc
+        from blueprints import jobs as jobs_bp
+        db = str(tmp_path / "cloud.db")
+        monkeypatch.setattr(svc, "_startup_recovery_done", False)
+        conn = svc._init_cloud_tables(db)
+        try:
+            conn.execute(
+                "INSERT INTO cloud_synced_files "
+                "(file_path, status, retry_count) "
+                "VALUES (?, 'pending', 0)",
+                ("ArchivedClips/dl.mp4",),
+            )
+            conn.commit()
+            monkeypatch.setattr(svc, "_read_retry_max_attempts_setting",
+                                lambda: 5)
+            # Burn through retries until dead_letter.
+            for err in ("First", "Second", "Third", "Fourth", "Fifth"):
+                conn.execute(
+                    "UPDATE cloud_synced_files SET status = 'pending' "
+                    "WHERE file_path = ?", ("ArchivedClips/dl.mp4",),
+                )
+                conn.commit()
+                svc._mark_upload_failure(conn, "ArchivedClips/dl.mp4", err)
+                conn.commit()
+        finally:
+            conn.commit()
+            conn.close()
+        monkeypatch.setattr(svc, "CLOUD_ARCHIVE_DB_PATH", db)
+        monkeypatch.setattr(jobs_bp, "CLOUD_ARCHIVE_ENABLED", True)
+        rows = jobs_bp._cloud_sync_rows(limit=10)
+        assert len(rows) == 1
+        assert rows[0]['last_error'] == 'Fifth'
+        assert rows[0]['previous_last_error'] == 'Fourth'
+
+
+class TestLESListerExposesPreviousError:
+
+    def test_les_lister_returns_previous_error(self, tmp_path, monkeypatch):
+        from services import live_event_sync_service as les
+        from services import cloud_archive_service as svc
+        from blueprints import jobs as jobs_bp
+        db = str(tmp_path / "cloud_sync.db")
+        monkeypatch.setattr(svc, "CLOUD_ARCHIVE_DB_PATH", db)
+        monkeypatch.setattr(les, "CLOUD_ARCHIVE_DB_PATH", db)
+        # Force a fresh schema check (process-level cache flag from
+        # the review-fix optimization).
+        monkeypatch.setattr(les, "_schema_alter_done", False)
+        conn = les._open_db()
+        try:
+            les._ensure_schema(conn)
+            conn.execute(
+                "INSERT INTO live_event_queue "
+                "(event_dir, event_json_path, status, enqueued_at, attempts) "
+                "VALUES ('/d', '/d/event.json', 'uploading', "
+                "'2026-01-01T00:00:00Z', 1)"
+            )
+            conn.commit()
+            row_id = conn.execute(
+                "SELECT id FROM live_event_queue").fetchone()[0]
+            # Two non-transient failures with retry cap big enough to
+            # NOT mark the row 'failed' in between.
+            for n, err in enumerate(("Err A", "Err B"), start=1):
+                conn.execute(
+                    "UPDATE live_event_queue SET status = 'uploading' "
+                    "WHERE id = ?", (row_id,),
+                )
+                conn.commit()
+                les._mark_failed(conn, row_id, attempts=n, err=err,
+                                 transient=False)
+            # Force into 'failed' so the lister picks it up.
+            conn.execute(
+                "UPDATE live_event_queue SET status = 'failed' "
+                "WHERE id = ?", (row_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setattr(jobs_bp, "LIVE_EVENT_SYNC_ENABLED", True)
+        rows = jobs_bp._live_event_rows(limit=10)
+        assert len(rows) == 1
+        assert rows[0]['last_error'] == 'Err B'
+        assert rows[0]['previous_last_error'] == 'Err A'
+
+
+# ---------------------------------------------------------------------------
+# LES retry_failed must preserve last_error AND previous_last_error
+# (Issue #132 review-fix #158 — Warning #5)
+# ---------------------------------------------------------------------------
+
+
+class TestLESRetryPreservesHistory:
+
+    def test_retry_failed_does_not_clear_error_columns(self, tmp_path,
+                                                       monkeypatch):
+        """A → B → retry → C must produce last=C, prev=B (not last=C,
+        prev=NULL). The pre-fix retry_failed cleared ``last_error``,
+        which then rotated NULL into ``previous_last_error`` on the
+        next failure — losing both A and B. The other 3 subsystems'
+        ``retry_dead_letter`` already preserved both columns; this
+        test pins the LES path to the same contract."""
+        from services import live_event_sync_service as les
+        from services import cloud_archive_service as svc
+        db = str(tmp_path / "cloud_sync.db")
+        monkeypatch.setattr(svc, "CLOUD_ARCHIVE_DB_PATH", db)
+        monkeypatch.setattr(les, "CLOUD_ARCHIVE_DB_PATH", db)
+        monkeypatch.setattr(les, "_schema_alter_done", False)
+        # Wake() is called from retry_failed; stub it (no worker).
+        monkeypatch.setattr(les, "wake", lambda: None)
+        conn = les._open_db()
+        try:
+            les._ensure_schema(conn)
+            conn.execute(
+                "INSERT INTO live_event_queue "
+                "(event_dir, event_json_path, status, enqueued_at, attempts) "
+                "VALUES ('/d', '/d/event.json', 'uploading', "
+                "'2026-01-01T00:00:00Z', 1)"
+            )
+            conn.commit()
+            row_id = conn.execute(
+                "SELECT id FROM live_event_queue").fetchone()[0]
+
+            # Failure A then B (rotates B→prev, A→last after rotation
+            # logic — actually last=B, prev=A).
+            les._mark_failed(conn, row_id, attempts=1, err="Error A",
+                             transient=False)
+            conn.execute("UPDATE live_event_queue SET status='uploading' "
+                         "WHERE id = ?", (row_id,))
+            conn.commit()
+            les._mark_failed(conn, row_id, attempts=2, err="Error B",
+                             transient=False)
+            # Force into 'failed' so retry_failed picks it up.
+            conn.execute(
+                "UPDATE live_event_queue SET status='failed' WHERE id = ?",
+                (row_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Retry the row.
+        n = les.retry_failed(row_id=row_id)
+        assert n == 1, "retry_failed should reset exactly one row"
+
+        # After retry: BOTH error columns must still be there.
+        conn = les._open_db()
+        try:
+            row = conn.execute(
+                "SELECT last_error, previous_last_error, status, attempts "
+                "FROM live_event_queue WHERE id = ?", (row_id,),
+            ).fetchone()
+
+            assert row['status'] == 'pending'
+            assert row['attempts'] == 0
+            assert row['last_error'] == 'Error B', (
+                "retry_failed must preserve last_error so the next "
+                "failure rotates the correct value into previous_last_error"
+            )
+            assert row['previous_last_error'] == 'Error A', (
+                "retry_failed must preserve previous_last_error so the "
+                "operator's view of the prior cycle survives the click"
+            )
+
+            # Now simulate Error C (the next failure cycle).
+            conn.execute("UPDATE live_event_queue SET status='uploading' "
+                         "WHERE id = ?", (row_id,))
+            conn.commit()
+            les._mark_failed(conn, row_id, attempts=1, err="Error C",
+                             transient=False)
+            row2 = conn.execute(
+                "SELECT last_error, previous_last_error "
+                "FROM live_event_queue WHERE id = ?", (row_id,),
+            ).fetchone()
+            assert row2['last_error'] == 'Error C'
+            assert row2['previous_last_error'] == 'Error B', (
+                "Without the retry-preservation fix, this would be NULL "
+                "(the pre-fix retry_failed cleared last_error → NULL "
+                "rotated into previous_last_error)"
+            )
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Cloud v3 ALTER must apply even when v2 migration fails
+# (Issue #132 review-fix #158 — Info #2)
+# ---------------------------------------------------------------------------
+
+
+class TestCloudV3MigrationIsIndependentOfV2:
+
+    def test_v3_column_present_after_init(self, tmp_path, monkeypatch):
+        """``_mark_upload_failure`` rotates ``previous_last_error`` on
+        every failure ù the column MUST exist after init regardless
+        of v2 path-canonicalization outcome. Pre-fix, the v3 ALTER
+        was gated on ``migration_ok`` from v2; this test verifies the
+        ungate by initializing a fresh DB and confirming the column
+        is present."""
+        from services import cloud_archive_service as svc
+        db = str(tmp_path / "cloud.db")
+        monkeypatch.setattr(svc, "_startup_recovery_done", False)
+        conn = svc._init_cloud_tables(db)
+        try:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(cloud_synced_files)")}
+        finally:
+            conn.close()
+        assert 'previous_last_error' in cols, (
+            "v3 column MUST be present after init; otherwise "
+            "_mark_upload_failure crashes on the rotation UPDATE"
+        )

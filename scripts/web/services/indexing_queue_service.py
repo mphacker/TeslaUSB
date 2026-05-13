@@ -750,8 +750,8 @@ def list_dead_letters(db_path: str, limit: int = 100) -> List[Dict[str, Any]]:
         conn = _open_queue_conn(db_path)
         rows = conn.execute(
             """SELECT canonical_key, file_path, attempts,
-                      next_attempt_at, last_error, enqueued_at,
-                      source
+                      next_attempt_at, last_error, previous_last_error,
+                      enqueued_at, source
                FROM indexing_queue
                WHERE attempts >= ?
                ORDER BY enqueued_at ASC, canonical_key ASC

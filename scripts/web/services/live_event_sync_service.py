@@ -153,19 +153,39 @@ def _open_db() -> sqlite3.Connection:
     return conn
 
 
+_schema_alter_done = False
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Initialize LES tables (idempotent) and apply pending ALTERs.
+
+    LES doesn't run a versioned migration table — the schema is small
+    and ALTERs are run inline. To avoid the cost (and per-call
+    journal noise) of the ALTER on every connection open, we use a
+    process-level flag plus a one-time ``PRAGMA table_info`` check:
+    once we've confirmed ``previous_last_error`` exists, every
+    subsequent caller skips the ALTER attempt entirely. The flag
+    resets per-process, so a fresh service start re-checks once.
+    """
+    global _schema_alter_done
     conn.executescript(_LES_TABLES_SQL)
-    # Issue #132: ``previous_last_error`` column. ALTER is idempotent
-    # on retry — duplicate-column OperationalError is caught and
-    # ignored. Existing tables (created by an older version) get the
-    # new column on first open after upgrade.
-    try:
-        conn.execute(
-            "ALTER TABLE live_event_queue "
-            "ADD COLUMN previous_last_error TEXT"
-        )
-    except sqlite3.OperationalError:
-        pass
+    if _schema_alter_done:
+        conn.commit()
+        return
+    # Issue #132: ``previous_last_error`` column. PRAGMA-check first
+    # to avoid blind ALTER attempts on every connection. ALTER stays
+    # wrapped in try/except as defense-in-depth (a concurrent
+    # process could ALTER between our check and execute).
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(live_event_queue)")}
+    if 'previous_last_error' not in cols:
+        try:
+            conn.execute(
+                "ALTER TABLE live_event_queue "
+                "ADD COLUMN previous_last_error TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass
+    _schema_alter_done = True
     conn.commit()
 
 
@@ -607,6 +627,15 @@ def retry_failed(row_id: Optional[int] = None) -> int:
     ``attempts`` already exceeded the cap (defensive — should not
     happen, but if a config change lowered ``retry_max_attempts`` we
     don't want stuck rows). Wakes the worker on success.
+
+    **Preserves ``last_error`` and ``previous_last_error``** so the
+    Failed Jobs UI can keep showing why the row failed before retry —
+    matches the contract used by ``archive_queue.retry_dead_letter``,
+    ``cloud_archive_service.retry_failed``, and
+    ``indexing_queue_service.requeue_dead_letter``. The next genuine
+    failure will rotate the columns through ``_mark_failed`` as
+    usual; a successful retry takes the row out of the failed view
+    so the stale error is no longer rendered.
     """
     try:
         conn = _open_db()
@@ -615,14 +644,14 @@ def retry_failed(row_id: Optional[int] = None) -> int:
             if row_id is not None:
                 cur = conn.execute(
                     "UPDATE live_event_queue SET status = 'pending', "
-                    "attempts = 0, next_retry_at = NULL, last_error = NULL "
+                    "attempts = 0, next_retry_at = NULL "
                     "WHERE id = ? AND status = 'failed'",
                     (row_id,),
                 )
             else:
                 cur = conn.execute(
                     "UPDATE live_event_queue SET status = 'pending', "
-                    "attempts = 0, next_retry_at = NULL, last_error = NULL "
+                    "attempts = 0, next_retry_at = NULL "
                     "WHERE status = 'failed'"
                 )
             n = cur.rowcount
@@ -1432,7 +1461,8 @@ def list_queue(limit: int = 50) -> List[Dict]:
             rows = conn.execute(
                 "SELECT id, event_dir, event_timestamp, event_reason, "
                 "upload_scope, status, enqueued_at, uploaded_at, "
-                "attempts, last_error, bytes_uploaded "
+                "attempts, last_error, previous_last_error, "
+                "bytes_uploaded "
                 "FROM live_event_queue "
                 "ORDER BY enqueued_at DESC LIMIT ?",
                 (int(limit),),

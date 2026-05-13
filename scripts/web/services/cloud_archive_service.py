@@ -593,12 +593,14 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
                 )
 
         # v3 (#132): ``previous_last_error`` column for multi-cycle
-        # failure history. ALTER is idempotent on retry — duplicate-
-        # column OperationalError is caught and ignored. Skipped only
-        # if the v2 migration above failed (we don't bump the version
-        # in that case anyway, and re-running the v3 ALTER on the
-        # second pass is harmless).
-        if migration_ok and current < 3:
+        # failure history. The ALTER is **independent** of the v2 path
+        # canonicalization — ``_mark_upload_failure`` writes this column
+        # on every failure, so it MUST exist even when v2 keeps failing
+        # on a corrupt-row install. Run unconditionally; ALTER is
+        # idempotent (duplicate-column OperationalError is caught).
+        # The version bump below is still gated on ``migration_ok`` so
+        # we don't claim full v3 status while v2 work is incomplete.
+        if current < 3:
             try:
                 conn.execute(
                     "ALTER TABLE cloud_synced_files "
@@ -2969,7 +2971,8 @@ def list_dead_letters(limit: int = 100) -> List[Dict[str, Any]]:
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:
         rows = conn.execute(
-            "SELECT id, file_path, file_size, retry_count, last_error "
+            "SELECT id, file_path, file_size, retry_count, last_error, "
+            "previous_last_error "
             "FROM cloud_synced_files "
             "WHERE status = 'dead_letter' "
             "ORDER BY id ASC "

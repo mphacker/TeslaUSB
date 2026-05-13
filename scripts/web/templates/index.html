@@ -196,13 +196,13 @@
                 <div style="margin-bottom:8px">
                     <label for="newWifiSSID" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">SSID</label>
                     <input type="text" id="newWifiSSID" maxlength="32" placeholder="Network name" list="wifiScanResults"
-                           style="width:100%;max-width:300px;padding:4px;background-color:var(--form-input-bg);color:var(--text-primary);border:1px solid var(--border-input);border-radius:3px">
+                           class="settings-form-input" style="max-width:300px">
                     <datalist id="wifiScanResults"></datalist>
                 </div>
                 <div style="margin-bottom:8px">
                     <label for="newWifiPassword" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">Password</label>
                     <input type="password" id="newWifiPassword" minlength="8" maxlength="63" placeholder="Password (empty for open)"
-                           style="width:100%;max-width:300px;padding:4px;background-color:var(--form-input-bg);color:var(--text-primary);border:1px solid var(--border-input);border-radius:3px">
+                           class="settings-form-input" style="max-width:300px">
                 </div>
                 <button class="edit-btn" onclick="addWifiNetwork()" id="addWifiBtn" style="padding:4px 10px;font-size:0.85em">Connect</button>
             </div>
@@ -234,14 +234,14 @@
                         <div style="margin-bottom: 8px;">
                             <label for="ap_ssid" style="display: inline-block; width: 100px; color: var(--text-primary);">SSID:</label>
                             <input type="text" id="ap_ssid" name="ssid" value="{{ ap_config.ssid }}" maxlength="32" required
-                                   style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                                   class="settings-form-input" style="max-width:300px">
                             <span style="font-size: 0.85em; color: var(--text-secondary);">(1-32 chars)</span>
                         </div>
                         <div style="margin-bottom: 8px;">
                             <label for="ap_passphrase" style="display: inline-block; width: 100px; color: var(--text-primary);">Password:</label>
                             <input type="password" id="ap_passphrase" name="passphrase" value="{{ ap_config.passphrase }}" minlength="8" maxlength="63"
-                                   style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                            <button type="button" onclick="togglePassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                                   class="settings-form-input" style="max-width:300px">
+                            <button type="button" onclick="togglePassword(this)" style="min-height:44px; padding: 8px 12px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
                             <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
                         </div>
                         <button type="submit" class="edit-btn" id="updateApBtn" onclick="return confirm('Changing AP credentials will disconnect all connected clients. Continue?')">Update AP Credentials</button>
@@ -271,13 +271,13 @@
     <details class="settings-section">
         <summary>Auto-Cleanup Settings</summary>
         <div class="section-content">
-            <a href="{{ url_for('cleanup.settings') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:12px; text-decoration:none; color:inherit; border:1px solid var(--border); border-radius:8px;">
-                <div style="font-size:1.5rem">🧹</div>
+            <a href="{{ url_for('cleanup.settings') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
+                <svg class="inline-icon" width="24" height="24" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-sparkles"></use></svg>
                 <div style="flex:1">
                     <strong>Configure Auto-Cleanup</strong>
                     <p style="margin:4px 0 0; font-size:0.85rem; color:var(--text-secondary)">Automatic deletion of old videos to free up space</p>
                 </div>
-                <div style="color:var(--text-secondary)">→</div>
+                <svg class="inline-icon" width="20" height="20" aria-hidden="true" style="color:var(--text-secondary)"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-right"></use></svg>
             </a>
         </div>
     </details>
@@ -306,12 +306,12 @@
                         border:1px solid var(--msg-error-text); font-size:0.85rem;"></div>
 
             <form id="storage-retention-form" onsubmit="return false;">
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
+                <div class="settings-form-grid">
                     <div class="form-group">
                         <label style="font-size:0.85rem"><strong>Default retention (days)</strong></label>
                         <input type="number" name="default_retention_days" id="sr-default-retention"
                                min="1" max="3650" value="30"
-                               style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                               class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             Applied to ArchivedClips and any folder without an override below.
                         </p>
@@ -324,7 +324,7 @@
                         </label>
                         <input type="number" name="free_space_target_pct" id="sr-free-space-target"
                                min="5" max="50" value="10"
-                               style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                               class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             Saved now; not yet enforced by the prune. Phase 5 will use this to keep at
                             least the requested free percentage.
@@ -332,7 +332,7 @@
                     </div>
                 </div>
 
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
+                <div class="settings-form-grid">
                     <div class="form-group">
                         <label style="font-size:0.85rem"><strong>Maximum archive size (GB)</strong>
                             <span style="font-weight:normal; color:var(--text-secondary)">
@@ -341,7 +341,7 @@
                         </label>
                         <input type="number" name="max_archive_size_gb" id="sr-max-archive"
                                min="0" max="10000" value="0"
-                               style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                               class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             Saved now; not yet enforced by the prune. Phase 5 will treat this as a hard
                             cap. Leave at <strong>0</strong> to use only time-based retention.
@@ -351,14 +351,14 @@
                         <label style="font-size:0.85rem"><strong>Short-retention warning (days)</strong></label>
                         <input type="number" name="short_retention_warning_days" id="sr-short-warning"
                                min="1" max="365" value="7"
-                               style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                               class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             Show the yellow warning banner when default retention drops below this.
                         </p>
                     </div>
                 </div>
 
-                <details style="margin-bottom:14px; border:1px solid var(--border); border-radius:8px; padding:10px 14px">
+                <details style="margin-bottom:14px; border:1px solid var(--border-color); border-radius:8px; padding:10px 14px">
                     <summary style="cursor:pointer; font-weight:600">Per-folder overrides (advanced)</summary>
                     <p style="font-size:0.8rem; color:var(--text-secondary); margin:8px 0 12px">
                         Override retention for individual Tesla folders. Leave a row disabled to inherit the default.
@@ -378,7 +378,7 @@
                 </div>
             </form>
 
-            <div id="sr-last-run" style="margin-top:14px; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg-secondary); font-size:0.85rem">
+            <div id="sr-last-run" style="margin-top:14px; padding:10px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary); font-size:0.85rem">
                 <strong>Last cleanup:</strong>
                 <span id="sr-last-run-text">—</span>
             </div>
@@ -422,17 +422,17 @@
                         This can save 50–80% of SD card space. If no trips have been indexed yet, all clips are archived as a safety fallback.
                     </p>
                 </div>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
+                <div class="settings-form-grid">
                     <div class="form-group">
                         <label style="font-size:0.85rem"><strong>Retention (days)</strong></label>
-                        <input type="number" name="retention_days" value="{{ cfg_archive.retention_days }}" min="1" max="365" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <input type="number" name="retention_days" value="{{ cfg_archive.retention_days }}" min="1" max="365" class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             Archived clips older than this are automatically deleted to free up SD card space.
                         </p>
                     </div>
                     <div class="form-group">
                         <label style="font-size:0.85rem"><strong>Min free space (GB)</strong></label>
-                        <input type="number" name="min_free_space_gb" value="{{ cfg_archive.min_free_space_gb }}" min="1" max="100" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <input type="number" name="min_free_space_gb" value="{{ cfg_archive.min_free_space_gb }}" min="1" max="100" class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             Archival stops when SD card free space drops below this. Protects the OS and other services from running out of disk.
                         </p>
@@ -628,10 +628,10 @@
                         Disable if indexing takes too long or you only care about recent trips on the USB drive.
                     </p>
                 </div>
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
+                <div class="settings-form-grid">
                     <div class="form-group">
                         <label style="font-size:0.85rem"><strong>Trip gap (minutes)</strong></label>
-                        <input type="number" name="trip_gap_minutes" value="{{ cfg_mapping.trip_gap_minutes }}" min="1" max="60" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <input type="number" name="trip_gap_minutes" value="{{ cfg_mapping.trip_gap_minutes }}" min="1" max="60" class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             If there's a gap longer than this between GPS waypoints, a new trip is started.
                             Lower values split stops (gas station, drive-through) into separate trips.
@@ -640,7 +640,7 @@
                     </div>
                     <div class="form-group">
                         <label style="font-size:0.85rem"><strong>Speed alert (mph)</strong></label>
-                        <input type="number" name="speed_limit_mph" value="{{ cfg_mapping.speed_limit_mph|int }}" min="0" max="200" step="5" style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <input type="number" name="speed_limit_mph" value="{{ cfg_mapping.speed_limit_mph|int }}" min="0" max="200" step="5" class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
                             Marks a driving event on the map when your speed exceeds this threshold.
                             Set to 0 to disable speed alerts entirely.
@@ -663,8 +663,8 @@
                 <div class="form-group" style="margin-bottom:12px">
                     <label style="font-size:0.85rem">Samba Password</label>
                     <div style="display:flex; gap:8px">
-                        <input type="password" name="samba_password" id="samba_password" value="{{ cfg_network.samba_password }}" style="flex:1; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
-                        <button type="button" onclick="toggleSambaPassword(this)" class="btn btn-secondary" style="padding:6px 12px; font-size:0.85rem">Show</button>
+                        <input type="password" name="samba_password" id="samba_password" value="{{ cfg_network.samba_password }}" class="settings-form-input" style="flex:1">
+                        <button type="button" onclick="toggleSambaPassword(this)" class="btn btn-secondary" style="padding:10px 14px; font-size:0.85rem; min-height:44px">Show</button>
                     </div>
                     <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">Username: <code>pi</code></p>
                 </div>
@@ -748,7 +748,7 @@
             </div>
 
             {% if system_info.disk_images %}
-            <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+            <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border-color);">
                 <strong style="font-size:0.9rem">USB Drive Images</strong>
                 <div style="display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;">
                     {% for img in system_info.disk_images %}
@@ -769,7 +769,7 @@
     <!-- Phase 5.9 (#102): low-key link to the Advanced sub-page. NOT a
          top-level nav item — buried at the bottom of Settings so casual
          users don't see it but power users can find it. -->
-    <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border); text-align:right;">
+    <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border-color); text-align:right;">
         <a href="{{ url_for('settings_advanced.index') }}"
            style="color:var(--text-secondary); font-size:0.85rem; text-decoration:none;">
             Advanced settings &rarr;
@@ -1625,15 +1625,15 @@ if (document.getElementById('fsck-status-container')) {
             var enabled = !!p.enabled;
             var days = (p.retention_days != null) ? p.retention_days : defaultDays;
             var row = document.createElement('div');
-            row.style.cssText = 'display:grid; grid-template-columns:auto 1fr 1fr; gap:10px; align-items:center';
+            row.className = 'settings-form-policy-row';
             row.innerHTML =
-                '<label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.85rem">' +
+                '<label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.85rem; min-height:44px">' +
                   '<input type="checkbox" name="policy_' + name + '_enabled" ' + (enabled ? 'checked' : '') + '>' +
                   '<strong>' + name + '</strong>' +
                 '</label>' +
                 '<span style="font-size:0.8rem; color:var(--text-secondary)">Retention (days)</span>' +
                 '<input type="number" name="policy_' + name + '_days" value="' + days +
-                  '" min="1" max="3650" style="width:100%; padding:4px 8px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">';
+                  '" min="1" max="3650" class="settings-form-input">';
             container.appendChild(row);
         });
     }

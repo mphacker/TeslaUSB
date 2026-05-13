@@ -70,7 +70,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any, Callable, Deque, Dict, Optional
+from typing import Any, Callable, Deque, Dict, Optional, Tuple
 
 from services import archive_queue
 from services import task_coordinator
@@ -775,6 +775,7 @@ def _atomic_copy(source_path: str, dest_path: str,
                  chunk_size: int, *,
                  load_pause_threshold: float = 0.0,
                  chunk_pause_seconds: float = 0.25,
+                 chunk_pause_always: bool = False,
                  time_budget_seconds: float = 0.0,
                  now_fn: Callable[[], float] = time.monotonic,
                  sleep_fn: Callable[[float], None] = time.sleep) -> int:
@@ -787,11 +788,19 @@ def _atomic_copy(source_path: str, dest_path: str,
     Verifies the rendered size matches the source's stat() size; any
     mismatch raises ``OSError`` so the caller bumps attempts.
 
-    Mid-copy SDIO-contention safeguards (issue #104):
+    Mid-copy SDIO-contention safeguards (issue #104, extended in #109):
 
-    * If ``load_pause_threshold > 0``, between chunks sample
-      ``os.getloadavg()[0]`` and sleep ``chunk_pause_seconds`` when
-      it exceeds the threshold. The Pi Zero 2 W shares one SDIO
+    * If ``chunk_pause_always`` is True (issue #109 — disk fullness
+      ≥ 80%), sleep ``chunk_pause_seconds`` between EVERY chunk
+      regardless of current loadavg. At very high fullness ext4
+      thrashing makes every write slow; by the time loadavg crosses
+      ``load_pause_threshold`` the SDIO bus is already saturated.
+      Proactively yielding every chunk gives the userspace
+      ``watchdog`` daemon a reliable scheduling slot.
+    * Otherwise (``chunk_pause_always`` is False, the pre-#109
+      behavior): if ``load_pause_threshold > 0``, between chunks
+      sample ``os.getloadavg()[0]`` and sleep ``chunk_pause_seconds``
+      when it exceeds the threshold. The Pi Zero 2 W shares one SDIO
       controller between SD card and WiFi; sustained heavy archive
       I/O can starve the userspace ``watchdog`` daemon long enough
       to trigger the BCM2835 hardware watchdog (90s timeout). This
@@ -844,8 +853,13 @@ def _atomic_copy(source_path: str, dest_path: str,
                         f"copy exceeded {time_budget_seconds:.1f}s budget "
                         f"after {written}/{expected} bytes"
                     )
-                # Mid-copy load-aware backoff (issue #104 mitigation A).
-                if load_pause_threshold > 0:
+                # Mid-copy load-aware backoff (issue #104 mitigation A,
+                # extended by issue #109 mitigation #4 with always-apply
+                # mode at high disk fullness).
+                if chunk_pause_always:
+                    if chunk_pause_seconds > 0:
+                        sleep_fn(chunk_pause_seconds)
+                elif load_pause_threshold > 0:
                     try:
                         load1 = os.getloadavg()[0]
                     except (AttributeError, OSError):
@@ -1002,6 +1016,100 @@ def _resolve_disk_thresholds_mb() -> tuple:
         )
     except Exception:  # noqa: BLE001
         return (500, 100)
+
+
+# ---------------------------------------------------------------------------
+# Issue #109 — disk-fullness-adaptive throttling helpers
+# ---------------------------------------------------------------------------
+#
+# At very high disk fullness (95%+ on ext4) the free-block-group search
+# inflates per-write cost 10–100×, so the same 1-min loadavg represents
+# far more SDIO contention than it would at 50% disk. The post-#106
+# guards (load_pause_threshold + chunk_pause + per-file budget) are
+# calibrated against healthy disk performance — they pause/abort
+# correctly, but the in-flight copy can still hold the SDIO bus long
+# enough to starve the userspace ``watchdog`` daemon's 90 s ping
+# window before the next iteration's guard fires.
+#
+# These helpers scale the throttling MORE AGGRESSIVELY as fullness
+# climbs, so the worker pauses sooner AND every chunk yields some
+# SDIO time without waiting for load to spike.
+
+def _disk_fullness_pct(path: str) -> Optional[float]:
+    """Return ``used / total * 100`` for the filesystem at ``path``.
+
+    Returns ``None`` if the stat fails (transient filesystem hiccup,
+    path missing, etc.). Callers MUST treat ``None`` as "no adaptive
+    adjustment" so a stat failure can't accidentally lock the worker
+    out — the pre-#109 guards still apply.
+    """
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return None
+    if usage.total <= 0:
+        return None
+    return (usage.used / usage.total) * 100.0
+
+
+def _adaptive_load_threshold(base: float, fullness_pct: Optional[float]) -> float:
+    """Issue #109 mitigation #2 — scale ``load_pause_threshold`` down
+    by disk fullness.
+
+    The same loadavg of 4.0 is a very different situation at 50% disk
+    (healthy ext4, fast writes) vs 98% disk (ext4 thrashing, every
+    write 10–100× slower). At high fullness, pause sooner so a single
+    in-flight copy doesn't starve the watchdog daemon.
+
+    Returns ``base`` unchanged when:
+      * ``base <= 0`` (guard disabled by config),
+      * ``fullness_pct`` is ``None`` (stat failed),
+      * fullness is below 80% (healthy regime).
+
+    Otherwise subtracts 0.5 / 1.0 / 1.5 at 80 / 90 / 95% fullness and
+    floors at 1.0 — even a misconfigured low base can never fully
+    disable the guard.
+    """
+    if base <= 0 or fullness_pct is None:
+        return base
+    if fullness_pct >= 95.0:
+        return max(base - 1.5, 1.0)
+    if fullness_pct >= 90.0:
+        return max(base - 1.0, 1.0)
+    if fullness_pct >= 80.0:
+        return max(base - 0.5, 1.0)
+    return base
+
+
+def _adaptive_chunk_pause(
+        base: float, fullness_pct: Optional[float]) -> Tuple[float, bool]:
+    """Issue #109 mitigation #4 — scale ``chunk_pause_seconds`` and
+    flip its trigger to "always-apply" at high disk fullness.
+
+    Pre-#109 the per-chunk pause inside ``_atomic_copy`` only fires
+    when ``loadavg > load_pause_threshold``. At very high fullness the
+    damage is done by the time loadavg crosses; we need a proactive
+    pause that yields SDIO time on EVERY chunk regardless of current
+    load.
+
+    Returns ``(pause_seconds, always_apply)``:
+      * ``< 80%`` fullness or ``base <= 0`` or unknown fullness:
+        ``(base, False)`` — current behavior, gated on loadavg.
+      * ``80–95%`` fullness: ``(base, True)`` — same duration but
+        applied EVERY chunk (proactive yield).
+      * ``≥ 95%`` fullness: ``(base * 2, True)`` — doubled and
+        always-applied (heaviest yield).
+
+    Floors at 0.05 s when always-applied so a misconfigured 0.0 base
+    can't flat-out disable the proactive yield.
+    """
+    if base <= 0 or fullness_pct is None:
+        return (base, False)
+    if fullness_pct >= 95.0:
+        return (max(base * 2.0, 0.05), True)
+    if fullness_pct >= 80.0:
+        return (max(base, 0.05), True)
+    return (base, False)
 
 
 def _check_disk_space_guard(archive_root: str) -> str:
@@ -1305,6 +1413,13 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
     safeguards. Defaults are conservative (off / 0.25 s / off) so
     callers that don't opt in get pre-#104 behavior.
 
+    Issue #109: the ``load_pause_threshold`` and ``chunk_pause_seconds``
+    actually forwarded to ``_atomic_copy`` are derived from the BASE
+    values via :func:`_adaptive_load_threshold` and
+    :func:`_adaptive_chunk_pause` so the throttling becomes more
+    aggressive as the SD card fills (less load tolerance, longer
+    always-applied chunk pauses at 80%+ fullness).
+
     Pure dispatch logic kept separate from the loop so tests can drive
     it directly without a thread or task_coordinator.
     """
@@ -1389,10 +1504,26 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         return 'error'
 
     try:
+        # Issue #109 — derive adaptive throttling values from current
+        # SD-card fullness. ``shutil.disk_usage`` is one syscall; cheap
+        # to do once per file. At 80%+ we raise the always-apply flag;
+        # at 95%+ we both raise the flag AND double the chunk pause.
+        # The forwarded ``load_pause_threshold`` is also lowered so
+        # later iterations of the worker loop (which re-reads it
+        # per iteration) pause sooner — but inside _atomic_copy the
+        # always-apply chunk pause supersedes the load-gated path.
+        _fullness = _disk_fullness_pct(archive_root)
+        _adaptive_load = _adaptive_load_threshold(
+            load_pause_threshold, _fullness,
+        )
+        _adaptive_pause, _pause_always = _adaptive_chunk_pause(
+            chunk_pause_seconds, _fullness,
+        )
         _atomic_copy(
             source_path, dest_path, chunk_size,
-            load_pause_threshold=load_pause_threshold,
-            chunk_pause_seconds=chunk_pause_seconds,
+            load_pause_threshold=_adaptive_load,
+            chunk_pause_seconds=_adaptive_pause,
+            chunk_pause_always=_pause_always,
             time_budget_seconds=time_budget_seconds,
         )
     except FileNotFoundError:
@@ -1523,7 +1654,13 @@ def _run_worker_loop(db_path: str, archive_root: str,
                 load1 = os.getloadavg()[0]
             except (AttributeError, OSError):
                 load1 = 0.0
-            if load1 > load_pause_threshold:
+            # Issue #109 — adapt the trigger threshold to current SD
+            # fullness BEFORE comparing. At 95%+ disk the same loadavg
+            # of 4.0 represents far more SDIO contention than at 50%.
+            _adaptive_threshold = _adaptive_load_threshold(
+                load_pause_threshold, _disk_fullness_pct(archive_root),
+            )
+            if load1 > _adaptive_threshold:
                 # Only log INFO on the leading edge of the pause
                 # window so back-to-back high-load iterations don't
                 # spam the journal. ``_load_pause_until`` is the
@@ -1542,9 +1679,11 @@ def _run_worker_loop(db_path: str, archive_root: str,
                         _state['last_load_pause_at'] = time.time()
                         _state['last_load_pause_loadavg'] = float(load1)
                     logger.info(
-                        "archive_worker: 1-min loadavg %.2f > %.2f — "
-                        "pausing %.0fs to relieve SDIO/CPU contention",
-                        load1, load_pause_threshold, load_pause_seconds,
+                        "archive_worker: 1-min loadavg %.2f > %.2f "
+                        "(adaptive; base=%.2f) — pausing %.0fs to "
+                        "relieve SDIO/CPU contention",
+                        load1, _adaptive_threshold, load_pause_threshold,
+                        load_pause_seconds,
                     )
                 _idle_event.set()
                 # Stop-only wait. Producers' wake() must NOT cut this
@@ -1557,9 +1696,9 @@ def _run_worker_loop(db_path: str, archive_root: str,
                 # Trailing edge: log once when we leave the pause
                 # window so the user can see "back to normal".
                 logger.info(
-                    "archive_worker: 1-min loadavg %.2f back below %.2f — "
-                    "resuming archive drain",
-                    load1, load_pause_threshold,
+                    "archive_worker: 1-min loadavg %.2f back below %.2f "
+                    "(adaptive; base=%.2f) — resuming archive drain",
+                    load1, _adaptive_threshold, load_pause_threshold,
                 )
                 _load_pause_until = 0.0
 

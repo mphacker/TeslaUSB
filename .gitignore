@@ -33,6 +33,7 @@ boot_cleanup.log
 fsck_status.json
 fsck_history.json
 cleanup_config.json
+archive_lost_dismissed.json
 present_usb_web.log
 edit_usb_web.log
 

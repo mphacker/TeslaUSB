@@ -611,6 +611,423 @@ class TestArchiveWorkerSourceGone:
 
 
 # ---------------------------------------------------------------------------
+# TestArchiveWorkerSkipStationary  (issue #167 sub-deliverable 2)
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveWorkerSkipStationary:
+    """Issue #167 sub-deliverable 2 — peek-and-skip for stationary
+    RecentClips, gated by ``archive.skip_stationary_recent_clips``.
+
+    Tests stub ``_clip_has_gps_signal`` directly so we don't need a
+    real Tesla SEI fixture. The helper itself is exercised by
+    ``test_clip_has_gps_signal_*`` below.
+    """
+
+    def test_skipped_when_flag_on_recent_clips_no_gps(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        clip = make_clip("RecentClips/parked-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        monkeypatch.setattr(
+            archive_worker, '_skip_stationary_recent_clips_enabled',
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_worker, '_clip_has_gps_signal',
+            lambda path: False,
+        )
+        # Set up a tripwire — _atomic_copy must NEVER be called.
+        called = []
+        monkeypatch.setattr(
+            archive_worker, '_atomic_copy',
+            lambda *a, **kw: called.append((a, kw)),
+        )
+
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'skipped_stationary'
+        assert called == [], (
+            "skipped_stationary path must NOT call _atomic_copy"
+        )
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'skipped_stationary'
+        # No attempts burned; no dest file written; no dead-letter sidecar.
+        assert rows[0]['attempts'] == 0
+        sidecar_dir = os.path.join(archive_root, '.dead_letter')
+        assert not os.path.isdir(sidecar_dir) or not os.listdir(sidecar_dir)
+
+    def test_copied_when_flag_on_recent_clips_have_gps(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # GPS-bearing RecentClips clip (e.g., active driving) —
+        # MUST proceed to normal copy, not skip.
+        clip = make_clip("RecentClips/driving-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        monkeypatch.setattr(
+            archive_worker, '_skip_stationary_recent_clips_enabled',
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_worker, '_clip_has_gps_signal',
+            lambda path: True,
+        )
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'copied'
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'copied'
+
+    def test_copied_when_flag_off_no_peek(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # Default install — flag off — must NEVER call the SEI peek
+        # and must always copy.
+        clip = make_clip("RecentClips/parked-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        monkeypatch.setattr(
+            archive_worker, '_skip_stationary_recent_clips_enabled',
+            lambda: False,
+        )
+        peek_called = []
+
+        def fake_peek(path):
+            peek_called.append(path)
+            return False  # would skip if reached
+
+        monkeypatch.setattr(
+            archive_worker, '_clip_has_gps_signal', fake_peek,
+        )
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'copied'
+        assert peek_called == [], (
+            "Flag off must short-circuit BEFORE the SEI peek "
+            "(no I/O wasted on disabled feature)"
+        )
+
+    def test_event_clips_never_skipped_even_with_no_gps(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # Sentry/Saved clips have priority 2 and MUST bypass the skip
+        # branch entirely — even if the SEI peek would say "no GPS"
+        # (which is the common case for stationary Sentry events).
+        # Losing event footage is unacceptable.
+        clip = make_clip("SentryClips/2024-01-01_12-00-00/front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        monkeypatch.setattr(
+            archive_worker, '_skip_stationary_recent_clips_enabled',
+            lambda: True,
+        )
+        peek_called = []
+
+        def fake_peek(path):
+            peek_called.append(path)
+            return False  # would skip if reached
+
+        monkeypatch.setattr(
+            archive_worker, '_clip_has_gps_signal', fake_peek,
+        )
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        # Event clips are PRIORITY_EVENTS (=2), not PRIORITY_RECENT_CLIPS.
+        # They must NEVER enter the skip branch.
+        assert outcome == 'copied'
+        assert peek_called == [], (
+            "Event clips must NEVER call the SEI peek — "
+            "losing Sentry/Saved footage is unacceptable"
+        )
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'copied'
+
+    def test_other_priority_never_skipped(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # PRIORITY_OTHER (=3) clips — back-fill of ArchivedClips, etc.
+        # Must also bypass the skip branch.
+        clip = make_clip("ArchivedClips/back-fill.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        monkeypatch.setattr(
+            archive_worker, '_skip_stationary_recent_clips_enabled',
+            lambda: True,
+        )
+        peek_called = []
+        monkeypatch.setattr(
+            archive_worker, '_clip_has_gps_signal',
+            lambda p: peek_called.append(p) or False,
+        )
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'copied'
+        assert peek_called == []
+
+    def test_ambiguous_peek_falls_through_to_copy(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # ``_clip_has_gps_signal`` returns ``None`` when it can't
+        # decide (parse error, mmap failure, etc.). The data-
+        # preservation default is to fall through to the normal copy
+        # path so a parser bug never silently drops a clip.
+        clip = make_clip("RecentClips/corrupt-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        monkeypatch.setattr(
+            archive_worker, '_skip_stationary_recent_clips_enabled',
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_worker, '_clip_has_gps_signal',
+            lambda path: None,  # ambiguous
+        )
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        # Must NOT skip; must copy.
+        assert outcome == 'copied'
+
+    def test_skip_runs_after_stable_write_gate(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # The skip branch must be AFTER the stable-write gate, so a
+        # half-written file is never SEI-peeked (mmap of an in-flight
+        # file is undefined behavior). Make a clip whose mtime is
+        # fresh AND whose size has drifted since enqueue — that's what
+        # the stable-write gate checks (fresh mtime + size/mtime
+        # mismatch → release with refreshed metadata).
+        clip = make_clip("RecentClips/fresh-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        # Now grow the file AND bump mtime to "now" so:
+        #   age < stable_write_age_seconds (very fresh)
+        #   expected_size != current size (drifted)
+        with open(clip, 'ab') as f:
+            f.write(b'extra-bytes-after-enqueue')
+        os.utime(clip, (time.time(), time.time()))
+        row = claim_next_for_worker('w', db_path=db)
+
+        monkeypatch.setattr(
+            archive_worker, '_skip_stationary_recent_clips_enabled',
+            lambda: True,
+        )
+        peek_called = []
+        monkeypatch.setattr(
+            archive_worker, '_clip_has_gps_signal',
+            lambda p: peek_called.append(p) or False,
+        )
+        # Stable-write gate sees a fresh file with drifted metadata
+        # → release back to pending without ever consulting the peek.
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'pending'
+        assert peek_called == [], (
+            "Skip peek must NOT run on a file the stable-write gate "
+            "would defer — never SEI-peek an in-flight write"
+        )
+
+    def test_skip_short_circuits_when_source_missing(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # If the source vanished between enqueue and process, the
+        # ``_safe_stat`` early-return marks source_gone BEFORE the skip
+        # branch runs. The skip path must not affect this contract.
+        clip = make_clip("RecentClips/gone-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+        os.unlink(clip)
+
+        monkeypatch.setattr(
+            archive_worker, '_skip_stationary_recent_clips_enabled',
+            lambda: True,
+        )
+        peek_called = []
+        monkeypatch.setattr(
+            archive_worker, '_clip_has_gps_signal',
+            lambda p: peek_called.append(p) or False,
+        )
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'source_gone'
+        assert peek_called == [], (
+            "Source-gone short-circuit must run BEFORE the skip peek"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestClipHasGpsSignal  (issue #167 sub-deliverable 2 — peek helper)
+# ---------------------------------------------------------------------------
+
+
+class TestClipHasGpsSignal:
+    """Unit tests for ``_clip_has_gps_signal`` — the SEI peek helper.
+
+    We stub ``services.sei_parser.extract_sei_messages`` rather than
+    crafting real Tesla SEI fixtures; the parser itself has its own
+    test suite. Here we only pin the early-exit / cap / error
+    semantics that the worker's skip branch depends on.
+    """
+
+    @pytest.fixture
+    def fake_msg(self):
+        from types import SimpleNamespace
+
+        def _make(has_gps: bool):
+            return SimpleNamespace(has_gps=has_gps)
+
+        return _make
+
+    def test_returns_true_on_first_gps_message(
+        self, monkeypatch, tmp_path, fake_msg,
+    ):
+        # The peek MUST early-exit on the first GPS-bearing message
+        # (cheap I/O for moving clips).
+        clip = tmp_path / "moving.mp4"
+        clip.write_bytes(b"x" * 100)
+        seen = []
+
+        def fake_extract(path, sample_rate):
+            assert path == str(clip)
+            for i in range(100):
+                seen.append(i)
+                if i == 0:
+                    yield fake_msg(False)
+                elif i == 1:
+                    yield fake_msg(True)
+                else:
+                    yield fake_msg(False)
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
+        result = archive_worker._clip_has_gps_signal(str(clip))
+        assert result is True
+        # Generator must not have been pulled past the first GPS hit.
+        assert seen == [0, 1], (
+            f"peek pulled too many messages: {seen!r}"
+        )
+
+    def test_returns_false_when_no_gps_in_capped_window(
+        self, monkeypatch, tmp_path, fake_msg,
+    ):
+        clip = tmp_path / "stationary.mp4"
+        clip.write_bytes(b"x" * 100)
+
+        def fake_extract(path, sample_rate):
+            # Yield one less than the cap to confirm we walk normally
+            # to exhaustion when no GPS appears.
+            for _ in range(archive_worker._SKIP_GPS_PEEK_MAX_MESSAGES - 1):
+                yield fake_msg(False)
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
+        assert archive_worker._clip_has_gps_signal(str(clip)) is False
+
+    def test_returns_false_when_zero_messages(
+        self, monkeypatch, tmp_path,
+    ):
+        clip = tmp_path / "no-sei.mp4"
+        clip.write_bytes(b"x" * 100)
+
+        def fake_extract(path, sample_rate):
+            return
+            yield  # unreachable; makes this a generator
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
+        # Zero SEIs is treated as stationary (skip). A real Tesla clip
+        # always has SEI; a clip without SEI isn't worth mapping anyway.
+        assert archive_worker._clip_has_gps_signal(str(clip)) is False
+
+    def test_caps_at_max_messages(
+        self, monkeypatch, tmp_path, fake_msg,
+    ):
+        # If the SEI stream is degenerate (e.g., corrupt clip yielding
+        # tens of thousands of NALs), we must bail at the cap.
+        clip = tmp_path / "huge.mp4"
+        clip.write_bytes(b"x" * 100)
+        pulled = []
+
+        def fake_extract(path, sample_rate):
+            for i in range(10000):
+                pulled.append(i)
+                yield fake_msg(False)
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
+        result = archive_worker._clip_has_gps_signal(str(clip))
+        assert result is False
+        assert len(pulled) == archive_worker._SKIP_GPS_PEEK_MAX_MESSAGES
+
+    def test_returns_none_on_parse_error(
+        self, monkeypatch, tmp_path,
+    ):
+        clip = tmp_path / "broken.mp4"
+        clip.write_bytes(b"x" * 100)
+
+        def fake_extract(path, sample_rate):
+            raise ValueError("not a valid MP4")
+            yield  # unreachable
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
+        # Parse error → ambiguous → caller must fall through to copy.
+        # NEVER return False on a parse error (that would silently
+        # drop a potentially-valid clip on a parser bug).
+        assert archive_worker._clip_has_gps_signal(str(clip)) is None
+
+    def test_returns_none_on_file_not_found(
+        self, monkeypatch, tmp_path,
+    ):
+        clip = tmp_path / "vanished.mp4"
+        clip.write_bytes(b"x" * 100)
+
+        def fake_extract(path, sample_rate):
+            raise FileNotFoundError(path)
+            yield  # unreachable
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
+        # File vanished mid-peek → ambiguous → caller will re-stat
+        # and mark source_gone via the existing copy path.
+        assert archive_worker._clip_has_gps_signal(str(clip)) is None
+
+
+# ---------------------------------------------------------------------------
 # TestArchiveWorkerDeadLetter
 # ---------------------------------------------------------------------------
 

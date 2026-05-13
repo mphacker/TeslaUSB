@@ -399,6 +399,29 @@
                     <button type="button" id="sr-reclaim-stationary-btn" class="btn btn-secondary"
                             style="width:100%; min-width:160px">Reclaim stationary RecentClips</button>
                 </div>
+
+                <div style="margin-top:14px; padding:12px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary)">
+                    <div style="font-size:0.9rem; font-weight:600; margin-bottom:4px">
+                        Skip stationary RecentClips at source
+                    </div>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 10px">
+                        When enabled, the archive worker peeks at each new RecentClips file and skips
+                        copying it to the SD card if no GPS movement is detected. This is the long-term
+                        complement to the reclaim button — it prevents stationary overnight Sentry-mode
+                        footage from arriving in the first place. Sentry/Saved event clips are
+                        <strong>never</strong> skipped. Saving this preference restarts the web service.
+                    </p>
+                    <label style="display:flex; align-items:center; gap:10px; font-size:0.9rem; cursor:pointer">
+                        <input type="checkbox" id="sr-skip-stationary-toggle" style="width:18px; height:18px">
+                        <span>Skip stationary RecentClips before they hit the SD card</span>
+                    </label>
+                    <div id="sr-skip-stationary-status" style="font-size:0.8rem; color:var(--text-secondary); margin-top:6px">
+                        Skipped in last 24 hours: <span id="sr-skip-stationary-count">—</span>
+                        <button type="button" id="sr-skip-stationary-clear-btn" class="btn btn-link"
+                                style="padding:0 6px; font-size:0.8rem; vertical-align:baseline" hidden>Clear tally</button>
+                    </div>
+                    <div id="sr-skip-stationary-msg" style="font-size:0.8rem; margin-top:6px" hidden></div>
+                </div>
             </form>
 
             <div id="sr-last-run" style="margin-top:14px; padding:10px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary); font-size:0.85rem">
@@ -1868,6 +1891,123 @@ if (document.getElementById('fsck-status-container')) {
 
     if (!$('storage-retention-section')) return;
 
+    // -----------------------------------------------------------------
+    // Skip-stationary toggle (issue #167 sub 2)
+    // -----------------------------------------------------------------
+
+    var SKIP_STATIONARY_GET_API = '/api/archive/skip_stationary';
+    var SKIP_STATIONARY_SET_API = '/api/archive/skip_stationary';
+    var SKIP_STATIONARY_CLEAR_API = '/api/archive/skip_stationary/clear';
+
+    function setSkipStationaryMsg(text, level) {
+        var box = $('sr-skip-stationary-msg');
+        if (!box) return;
+        if (!text) { box.hidden = true; box.textContent = ''; return; }
+        box.hidden = false;
+        box.textContent = text;
+        box.style.color = (level === 'error')
+            ? 'var(--accent-danger, #DC2626)'
+            : (level === 'success')
+                ? 'var(--accent-success, #16A34A)'
+                : 'var(--text-secondary)';
+    }
+
+    function loadSkipStationary() {
+        var toggle = $('sr-skip-stationary-toggle');
+        var countEl = $('sr-skip-stationary-count');
+        var clearBtn = $('sr-skip-stationary-clear-btn');
+        if (!toggle) return;
+        fetch(SKIP_STATIONARY_GET_API, { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+                if (!data) return;
+                toggle.checked = !!data.enabled;
+                if (countEl) countEl.textContent = (data.skipped_24h != null) ? data.skipped_24h : '0';
+                if (clearBtn) clearBtn.hidden = !((data.skipped_24h | 0) > 0);
+                if (data.restart_pending) {
+                    setSkipStationaryMsg(
+                        'Saved — pending service restart for the change to take effect.',
+                        'info',
+                    );
+                } else {
+                    setSkipStationaryMsg('', null);
+                }
+            })
+            .catch(function () { /* silent — non-critical */ });
+    }
+
+    function onSkipStationaryToggle(ev) {
+        var toggle = ev.target;
+        var newVal = !!toggle.checked;
+        toggle.disabled = true;
+        setSkipStationaryMsg('Saving…', 'info');
+        fetch(SKIP_STATIONARY_SET_API, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: newVal }),
+        })
+            .then(function (r) {
+                return r.json().then(function (data) { return { status: r.status, data: data }; });
+            })
+            .then(function (res) {
+                var d = res.data || {};
+                if (res.status >= 200 && res.status < 300 && d.success) {
+                    var msg = d.restart_scheduled
+                        ? 'Saved — restarting web service in ~2 seconds…'
+                        : 'Saved — restart gadget_web manually for the change to take effect.';
+                    setSkipStationaryMsg(msg, 'success');
+                } else {
+                    toggle.checked = !newVal;
+                    setSkipStationaryMsg(d.message || 'Save failed.', 'error');
+                }
+            })
+            .catch(function (e) {
+                toggle.checked = !newVal;
+                setSkipStationaryMsg('Network error: ' + e.message, 'error');
+            })
+            .finally(function () { toggle.disabled = false; });
+    }
+
+    function onSkipStationaryClear() {
+        var btn = $('sr-skip-stationary-clear-btn');
+        if (!btn) return;
+        btn.disabled = true;
+        var orig = btn.textContent;
+        btn.textContent = 'Clearing…';
+        fetch(SKIP_STATIONARY_CLEAR_API, {
+            method: 'POST',
+            credentials: 'same-origin',
+        })
+            .then(function (r) {
+                return r.json().then(function (data) { return { status: r.status, data: data }; });
+            })
+            .then(function (res) {
+                var d = res.data || {};
+                if (res.status >= 200 && res.status < 300 && d.success) {
+                    var countEl = $('sr-skip-stationary-count');
+                    if (countEl) countEl.textContent = '0';
+                    btn.hidden = true;
+                    setSkipStationaryMsg('Cleared ' + (d.deleted | 0) + ' rows.', 'success');
+                } else {
+                    setSkipStationaryMsg(d.message || 'Clear failed.', 'error');
+                }
+            })
+            .catch(function (e) {
+                setSkipStationaryMsg('Network error: ' + e.message, 'error');
+            })
+            .finally(function () {
+                btn.disabled = false;
+                btn.textContent = orig;
+            });
+    }
+
+    var skipToggle = $('sr-skip-stationary-toggle');
+    var skipClearBtn = $('sr-skip-stationary-clear-btn');
+    if (skipToggle) skipToggle.addEventListener('change', onSkipStationaryToggle);
+    if (skipClearBtn) skipClearBtn.addEventListener('click', onSkipStationaryClear);
+    loadSkipStationary();
+
     var saveBtn = $('sr-save-btn');
     var runBtn = $('sr-run-now-btn');
     var reclaimBtn = $('sr-reclaim-stationary-btn');
@@ -2037,11 +2177,24 @@ if (document.getElementById('fsck-status-container')) {
     if (lostDismiss) {
         lostDismiss.addEventListener('click', function() {
             // Issue #163 — let the operator acknowledge the banner.
-            // Posts to /api/system/clear_lost_clips which deletes
-            // every source_gone row; the banner re-polls and hides
-            // when the count returns to 0. ``source_gone`` is
-            // terminal and has no downstream consumer, so this
-            // affects only the banner number.
+            // Posts to /api/system/clear_lost_clips which:
+            //   1. Writes a server-side dismissal tombstone (PR #169
+            //      follow-up). Subsequent count_source_gone_recent
+            //      calls floor the 24-h window at this timestamp so a
+            //      worker burst on a heavily-backlogged device cannot
+            //      repopulate the banner with already-acknowledged
+            //      losses.
+            //   2. Deletes every existing source_gone row so the
+            //      Failed Jobs page's `source_gone_count` also clears.
+            // ``source_gone`` is terminal and has no downstream
+            // consumer, so this is safe.
+            //
+            // We optimistically hide the banner the instant the POST
+            // succeeds (instead of waiting for the next health poll
+            // to pick up the count change), so the user gets an
+            // immediate visual confirmation that "Dismiss worked".
+            // If a brand-new loss arrives later, the next poll will
+            // re-show the banner.
             if (!window.confirm(
                     'Dismiss the lost-footage banner?\n\n' +
                     'This permanently deletes the records of clips ' +
@@ -2063,8 +2216,12 @@ if (document.getElementById('fsck-status-container')) {
                 return resp.json();
             })
             .then(function() {
-                // Force an immediate health re-poll; the banner
-                // will hide itself when lost_24h drops to 0.
+                // Optimistically hide the banner now. Do this BEFORE
+                // loadHealth() so we never flash "still showing" for
+                // the ~50–200 ms the GET takes to round-trip the Pi.
+                if (lostBanner) lostBanner.hidden = true;
+                // Force an immediate health re-poll so the System
+                // Health card reflects the cleared state.
                 loadHealth();
             })
             .catch(function(e) {

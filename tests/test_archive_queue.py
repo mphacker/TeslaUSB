@@ -47,6 +47,24 @@ def db(tmp_path):
     return db_path
 
 
+@pytest.fixture(autouse=True)
+def _isolate_lost_dismissed_tombstone(tmp_path, monkeypatch):
+    """Redirect the banner-dismiss tombstone to ``tmp_path`` for every test.
+
+    PR #169 follow-up — :func:`services.archive_queue.delete_source_gone`
+    now writes a small JSON file alongside the GADGET_DIR runtime state.
+    Without this fixture, every test that exercises the dismiss path
+    would write ``archive_lost_dismissed.json`` to the real repo root
+    (``GADGET_DIR`` resolves to ``<repo>`` when ``config`` is imported
+    in-tree — see ``conftest.py``), polluting the working tree.
+    """
+    state_path = str(tmp_path / "archive_lost_dismissed.json")
+    monkeypatch.setattr(
+        archive_queue, '_lost_dismissed_path', lambda: state_path,
+    )
+    return state_path
+
+
 @pytest.fixture
 def sample_file(tmp_path):
     """Write a small file we can stat for size/mtime."""
@@ -577,7 +595,8 @@ class TestGetQueueStatus:
         counts = get_queue_status(db_path=db)
         assert counts == {
             'pending': 0, 'claimed': 0, 'copied': 0,
-            'source_gone': 0, 'error': 0, 'dead_letter': 0,
+            'source_gone': 0, 'skipped_stationary': 0,
+            'error': 0, 'dead_letter': 0,
             'total': 0,
         }
 
@@ -794,8 +813,10 @@ class TestDefaultDbPath:
 
 from services.archive_queue import (  # noqa: E402
     claim_next_for_worker,
+    delete_skipped_stationary,
     mark_copied,
     mark_failed,
+    mark_skipped_stationary,
     mark_source_gone,
     recover_stale_claims,
     release_claim,
@@ -1161,6 +1182,231 @@ class TestDeleteSourceGone:
         assert archive_queue.delete_source_gone(db_path=db) == 2
         # Banner is now 0; clicking Dismiss again must be safe.
         assert archive_queue.delete_source_gone(db_path=db) == 0
+
+
+class TestMarkSkippedStationary:
+    """Issue #167 sub-deliverable 2 — terminal transition for the
+    ``archive.skip_stationary_recent_clips`` peek-and-skip path. Mirror
+    of ``TestMarkSourceGone``: the same precondition/return-value
+    contract so the two terminal "we did not copy" buckets stay
+    parallel.
+    """
+
+    def test_marks_claimed_row(self, db, sample_file):
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        assert mark_skipped_stationary(row['id'], db_path=db) is True
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'skipped_stationary'
+        # last_error must be cleared — skipping is not an error.
+        assert rows[0]['last_error'] is None
+
+    def test_returns_false_for_unknown_id(self, db):
+        assert mark_skipped_stationary(999999, db_path=db) is False
+
+    def test_refuses_to_mark_pending_row(self, db, sample_file):
+        """Same precondition as ``mark_source_gone`` — a row must be
+        ``claimed`` before it can transition to ``skipped_stationary``,
+        so ``count_skipped_stationary_recent``'s ``claimed_at`` filter
+        is never NULL.
+        """
+        assert enqueue_for_archive(sample_file, db_path=db) is True
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'pending'
+        row_id = rows[0]['id']
+        assert mark_skipped_stationary(row_id, db_path=db) is False
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'pending'
+        assert rows[0]['claimed_at'] is None
+
+    def test_refuses_to_mark_copied_row(self, db, sample_file, tmp_path):
+        dest = tmp_path / 'dest.mp4'
+        dest.write_bytes(b'x')
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        assert mark_copied(row['id'], str(dest), db_path=db) is True
+        # Row is now ``copied`` — a stale skip-mark must not regress it.
+        assert mark_skipped_stationary(row['id'], db_path=db) is False
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'copied'
+
+    def test_refuses_to_mark_dead_letter_row(self, db, sample_file):
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "UPDATE archive_queue SET attempts = 99 WHERE id = ?",
+                (row['id'],),
+            )
+        mark_failed(row['id'], 'simulated', db_path=db)
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'dead_letter'
+        assert mark_skipped_stationary(row['id'], db_path=db) is False
+        rows = list_queue(db_path=db)
+        assert rows[0]['status'] == 'dead_letter'
+
+    def test_get_queue_status_includes_skipped_stationary_bucket(
+            self, db, sample_file):
+        # The new key must appear in the always-zero default keys
+        # returned by get_queue_status, so the Settings card never
+        # silently drops the metric.
+        counts = get_queue_status(db_path=db)
+        assert 'skipped_stationary' in counts
+        assert counts['skipped_stationary'] == 0
+        # And after a real skip-mark, the count reflects the new row.
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_skipped_stationary(row['id'], db_path=db)
+        counts = get_queue_status(db_path=db)
+        assert counts['skipped_stationary'] == 1
+
+
+class TestCountSkippedStationaryRecent:
+    """Mirror of ``TestCountSourceGoneRecent`` for the new bucket."""
+
+    def test_zero_when_no_skipped_rows(self, db, sample_file, tmp_path):
+        # Mark a row source_gone — must NOT count toward skipped.
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_source_gone(row['id'], db_path=db)
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 0
+
+    def test_counts_recent_skipped_rows(self, db, tmp_path):
+        for i in range(3):
+            f = tmp_path / f"clip_{i}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{i}', db_path=db)
+            mark_skipped_stationary(row['id'], db_path=db)
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 3
+
+    def test_excludes_source_gone(self, db, tmp_path):
+        # The two terminal buckets must NEVER cross-contaminate.
+        f1 = tmp_path / "skip.mp4"
+        f1.write_text("x")
+        enqueue_for_archive(str(f1), db_path=db)
+        r1 = claim_next_for_worker('w1', db_path=db)
+        mark_skipped_stationary(r1['id'], db_path=db)
+
+        f2 = tmp_path / "gone.mp4"
+        f2.write_text("x")
+        enqueue_for_archive(str(f2), db_path=db)
+        r2 = claim_next_for_worker('w2', db_path=db)
+        mark_source_gone(r2['id'], db_path=db)
+
+        # Only the skipped row counts toward skipped_stationary.
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 1
+        # And the source-gone row counts only toward source_gone.
+        assert archive_queue.count_source_gone_recent(
+            24, db_path=db) == 1
+
+    def test_excludes_old_skipped_rows(self, db, sample_file):
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_skipped_stationary(row['id'], db_path=db)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE archive_queue SET claimed_at = "
+                "datetime('now', '-48 hours') WHERE id = ?",
+                (row['id'],),
+            )
+            conn.commit()
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 0
+        # Wider window picks it back up.
+        assert archive_queue.count_skipped_stationary_recent(
+            72, db_path=db) == 1
+
+    def test_zero_hours_returns_zero(self, db, sample_file):
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_skipped_stationary(row['id'], db_path=db)
+        assert archive_queue.count_skipped_stationary_recent(
+            0, db_path=db) == 0
+
+    def test_returns_zero_on_db_failure(self, db, monkeypatch):
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(archive_queue, '_open_archive_conn', boom)
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 0
+
+
+class TestDeleteSkippedStationary:
+    """Issue #167 sub-deliverable 2 — clear-the-tally helper for the
+    Settings UI. Mirror of ``TestDeleteSourceGone``.
+    """
+
+    def _seed_skipped(self, db, tmp_path, n):
+        ids = []
+        for i in range(n):
+            f = tmp_path / f"sk_{i}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{i}', db_path=db)
+            mark_skipped_stationary(row['id'], db_path=db)
+            ids.append(row['id'])
+        return ids
+
+    def test_returns_zero_when_table_empty(self, db):
+        assert delete_skipped_stationary(db_path=db) == 0
+
+    def test_deletes_every_skipped_row_by_default(self, db, tmp_path):
+        self._seed_skipped(db, tmp_path, 5)
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 5
+        assert delete_skipped_stationary(db_path=db) == 5
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 0
+        with sqlite3.connect(db) as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM archive_queue "
+                "WHERE status = 'skipped_stationary'"
+            ).fetchone()[0]
+        assert n == 0
+
+    def test_preserves_other_status_rows(self, db, tmp_path):
+        # 3 skipped + 1 pending + 1 source_gone — only skipped goes.
+        self._seed_skipped(db, tmp_path, 3)
+
+        f_p = tmp_path / "p.mp4"
+        f_p.write_text("x")
+        enqueue_for_archive(str(f_p), db_path=db)
+
+        f_sg = tmp_path / "sg.mp4"
+        f_sg.write_text("x")
+        enqueue_for_archive(str(f_sg), db_path=db)
+        r_sg = claim_next_for_worker('w_sg', db_path=db)
+        mark_source_gone(r_sg['id'], db_path=db)
+
+        assert delete_skipped_stationary(db_path=db) == 3
+        counts = get_queue_status(db_path=db)
+        assert counts['skipped_stationary'] == 0
+        assert counts['pending'] == 1
+        assert counts['source_gone'] == 1
+
+    def test_older_than_hours_keeps_recent(self, db, tmp_path):
+        ids = self._seed_skipped(db, tmp_path, 2)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE archive_queue SET claimed_at = "
+                "datetime('now', '-48 hours') WHERE id = ?",
+                (ids[0],),
+            )
+            conn.commit()
+        assert delete_skipped_stationary(
+            older_than_hours=24, db_path=db) == 1
+        assert archive_queue.count_skipped_stationary_recent(
+            24, db_path=db) == 1
+
+    def test_returns_zero_on_db_failure(self, db, monkeypatch):
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(archive_queue, '_open_archive_conn', boom)
+        assert delete_skipped_stationary(db_path=db) == 0
 
 
 class TestReleaseClaim:
@@ -1687,3 +1933,339 @@ class TestOpenFailureCaught:
                                              patched_open_raises):
         assert archive_queue.get_last_copied_at(db_path=db) is None
 
+
+# ===========================================================================
+# Lost-banner dismissal tombstone — PR #169 follow-up
+# ===========================================================================
+#
+# Background: dismissing the home-page "Footage may have been lost" banner
+# used to feel broken to the operator on a heavily-backlogged device. The
+# POST → DELETE chain worked correctly server-side (verified live on
+# cybertruckusb), but with 1200+ pending RecentClips queued and many of
+# them already aged out of Tesla's circular buffer, the worker would mark
+# fresh source_gone rows within a second of the user's click — and the
+# banner would re-appear on the next 30 s health poll. From the operator's
+# perspective: "I clicked Dismiss, the banner stays."
+#
+# Fix: a server-side dismissal tombstone (small JSON in GADGET_DIR) that
+# clamps :func:`count_source_gone_recent`'s ``claimed_at`` lower bound to
+# ``MAX(now-24h, dismissed_at)``. Old rows the operator acknowledged stay
+# hidden forever; brand-new losses incurred *after* the dismissal still
+# show up so the operator notices ongoing loss patterns.
+# ===========================================================================
+
+
+class TestLostDismissedAtRoundtrip:
+    """Read/write semantics of the tombstone file."""
+
+    def test_get_returns_none_when_file_missing(self, tmp_path):
+        sp = str(tmp_path / "missing.json")
+        assert archive_queue.get_lost_dismissed_at(state_path=sp) is None
+
+    def test_set_then_get_returns_value(self, tmp_path):
+        sp = str(tmp_path / "tomb.json")
+        archive_queue.set_lost_dismissed_at(
+            '2026-05-13T17:00:00+00:00', state_path=sp,
+        )
+        assert (
+            archive_queue.get_lost_dismissed_at(state_path=sp)
+            == '2026-05-13T17:00:00+00:00'
+        )
+
+    def test_set_default_uses_iso_now(self, tmp_path):
+        sp = str(tmp_path / "tomb.json")
+        before = archive_queue._iso_now()
+        archive_queue.set_lost_dismissed_at(state_path=sp)
+        after = archive_queue._iso_now()
+        got = archive_queue.get_lost_dismissed_at(state_path=sp)
+        assert got is not None
+        assert before <= got <= after  # ISO-8601 ordering matches lexicographic
+
+    def test_set_overwrites_existing(self, tmp_path):
+        sp = str(tmp_path / "tomb.json")
+        archive_queue.set_lost_dismissed_at(
+            '2026-01-01T00:00:00+00:00', state_path=sp,
+        )
+        archive_queue.set_lost_dismissed_at(
+            '2026-06-06T12:00:00+00:00', state_path=sp,
+        )
+        assert (
+            archive_queue.get_lost_dismissed_at(state_path=sp)
+            == '2026-06-06T12:00:00+00:00'
+        )
+
+    def test_get_returns_none_on_corrupt_json(self, tmp_path):
+        sp = str(tmp_path / "tomb.json")
+        # Write garbage; a half-written file should never crash the poll.
+        with open(sp, 'w', encoding='utf-8') as f:
+            f.write('{not valid json')
+        assert archive_queue.get_lost_dismissed_at(state_path=sp) is None
+
+    def test_get_returns_none_when_key_missing(self, tmp_path):
+        sp = str(tmp_path / "tomb.json")
+        with open(sp, 'w', encoding='utf-8') as f:
+            f.write('{"some_other_key": "value"}')
+        assert archive_queue.get_lost_dismissed_at(state_path=sp) is None
+
+    def test_get_returns_none_when_value_blank(self, tmp_path):
+        sp = str(tmp_path / "tomb.json")
+        with open(sp, 'w', encoding='utf-8') as f:
+            f.write('{"dismissed_at": "   "}')
+        assert archive_queue.get_lost_dismissed_at(state_path=sp) is None
+
+    def test_set_atomic_write_via_replace(self, tmp_path):
+        # The temp file from the atomic-write path must not linger after
+        # a successful replace. Catches a regression where set_ would
+        # forget to .replace() and instead leave both files behind.
+        sp = str(tmp_path / "tomb.json")
+        archive_queue.set_lost_dismissed_at(
+            '2026-05-13T17:00:00+00:00', state_path=sp,
+        )
+        assert os.path.isfile(sp)
+        assert not os.path.isfile(sp + '.tmp')
+
+
+class TestEpochFromIso:
+    """Internal helper: ISO timestamp → integer epoch seconds."""
+
+    def test_offset_aware_iso(self):
+        # _iso_now writes ``2026-...+00:00`` style strings.
+        assert (
+            archive_queue._epoch_from_iso('2026-01-01T00:00:00+00:00')
+            == 1767225600
+        )
+
+    def test_naive_iso_assumed_utc(self):
+        # SQLite ``datetime('now')`` writes naive strings — our parser
+        # must treat them as UTC, not as local time.
+        assert (
+            archive_queue._epoch_from_iso('2026-01-01 00:00:00')
+            == 1767225600
+        )
+
+    def test_garbage_returns_none(self):
+        assert archive_queue._epoch_from_iso('not-a-date') is None
+        assert archive_queue._epoch_from_iso('') is None
+        assert archive_queue._epoch_from_iso(None) is None
+
+
+class TestCountSourceGoneRecentRespectsTombstone:
+    """The whole point of PR #169 follow-up: rows older than the
+    tombstone must not count toward the banner."""
+
+    def _seed_source_gone_with_claimed_at(self, db, tmp_path, claimed_iso):
+        """Insert a single source_gone row with a custom ``claimed_at``."""
+        f = tmp_path / f"sg_{claimed_iso.replace(':','-')}.mp4"
+        f.write_text("x")
+        enqueue_for_archive(str(f), db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+        mark_source_gone(row['id'], db_path=db)
+        # Backdate the row's ``claimed_at`` so the count's recency
+        # filter and the tombstone floor have something to bite on.
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE archive_queue SET claimed_at = ? WHERE id = ?",
+                (claimed_iso, row['id']),
+            )
+            conn.commit()
+        return row['id']
+
+    def test_no_tombstone_counts_all_recent(self, db, tmp_path):
+        # 3 rows in the last 24 h, no dismissal → count is 3.
+        for i in range(3):
+            self._seed_source_gone_with_claimed_at(
+                db, tmp_path,
+                f'2099-12-31T0{i}:00:00+00:00',  # well in the future = "recent" forever
+            )
+        # Pin a known floor via the kwarg path so the result is
+        # reproducible regardless of the autouse fixture's tmp file.
+        assert archive_queue.count_source_gone_recent(
+            24 * 365 * 100, db_path=db,
+            ignore_dismissed=True,
+        ) == 3
+
+    def test_tombstone_excludes_older_rows(self, db, tmp_path):
+        # 2 rows BEFORE the tombstone, 1 row AFTER. With the tombstone
+        # applied, only the AFTER row counts.
+        self._seed_source_gone_with_claimed_at(
+            db, tmp_path, '2026-01-01T00:00:00+00:00')
+        self._seed_source_gone_with_claimed_at(
+            db, tmp_path, '2026-02-01T00:00:00+00:00')
+        self._seed_source_gone_with_claimed_at(
+            db, tmp_path, '2026-04-01T00:00:00+00:00')
+
+        assert archive_queue.count_source_gone_recent(
+            hours=24 * 365 * 100, db_path=db,
+            dismissed_at='2026-03-01T00:00:00+00:00',
+        ) == 1
+
+    def test_tombstone_in_future_excludes_everything(self, db, tmp_path):
+        # Edge case: clock skew or test setting the tombstone to a
+        # future time — every row is older than the tombstone.
+        for i in range(5):
+            self._seed_source_gone_with_claimed_at(
+                db, tmp_path,
+                f'2026-01-0{i+1}T00:00:00+00:00',
+            )
+        assert archive_queue.count_source_gone_recent(
+            hours=24 * 365 * 100, db_path=db,
+            dismissed_at='2099-12-31T23:59:59+00:00',
+        ) == 0
+
+    def test_24h_window_still_applies_when_tombstone_older(
+        self, db, tmp_path,
+    ):
+        # 1 row from 2 days ago + 1 row from 30 min ago. Tombstone
+        # from 1 year ago. 24-h window should still hide the 2-day-old
+        # row even though it's after the tombstone.
+        self._seed_source_gone_with_claimed_at(
+            db, tmp_path, '2026-01-01T00:00:00+00:00')  # 2 days ago, hypothetically
+
+        # Grab a row from 30 min ago via _iso_now() then UPDATE.
+        f = tmp_path / "recent.mp4"
+        f.write_text("x")
+        enqueue_for_archive(str(f), db_path=db)
+        row = claim_next_for_worker('w-recent', db_path=db)
+        mark_source_gone(row['id'], db_path=db)
+        # claimed_at defaults to ~now() in mark_source_gone — leave as is.
+
+        # 24-h recency window + 1-year-old tombstone → only the recent row counts.
+        n = archive_queue.count_source_gone_recent(
+            hours=24, db_path=db,
+            dismissed_at='2025-01-01T00:00:00+00:00',  # well over a year ago
+        )
+        assert n == 1  # only the recent.mp4 row
+
+    def test_ignore_dismissed_bypasses_tombstone(self, db, tmp_path):
+        # The Failed Jobs page wants the raw count regardless of the
+        # banner dismissal — wired via ``ignore_dismissed=True``.
+        for _ in range(4):
+            f = tmp_path / f"sg_{_}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{_}', db_path=db)
+            mark_source_gone(row['id'], db_path=db)
+        n = archive_queue.count_source_gone_recent(
+            hours=24, db_path=db,
+            dismissed_at='2099-12-31T23:59:59+00:00',
+            ignore_dismissed=True,
+        )
+        assert n == 4
+
+    def test_garbage_tombstone_falls_through_to_window_only(
+        self, db, tmp_path,
+    ):
+        # A corrupt tombstone string must not crash the count — it
+        # degrades to "no floor, 24-h window only".
+        for _ in range(3):
+            f = tmp_path / f"sg_{_}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{_}', db_path=db)
+            mark_source_gone(row['id'], db_path=db)
+        assert archive_queue.count_source_gone_recent(
+            hours=24, db_path=db,
+            dismissed_at='garbage-date-string',
+        ) == 3
+
+
+class TestDeleteSourceGoneWritesTombstone:
+    """:func:`delete_source_gone` is the main producer of the tombstone."""
+
+    def _seed(self, db, tmp_path, n=3):
+        for i in range(n):
+            f = tmp_path / f"sg_{i}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{i}', db_path=db)
+            mark_source_gone(row['id'], db_path=db)
+
+    def test_dismiss_writes_tombstone(self, db, tmp_path):
+        sp = str(tmp_path / "tomb.json")
+        self._seed(db, tmp_path, 3)
+        before = archive_queue._iso_now()
+        deleted = archive_queue.delete_source_gone(db_path=db, state_path=sp)
+        after = archive_queue._iso_now()
+
+        assert deleted == 3
+        ts = archive_queue.get_lost_dismissed_at(state_path=sp)
+        assert ts is not None
+        assert before <= ts <= after
+
+    def test_dismiss_with_set_tombstone_false_skips_write(
+        self, db, tmp_path,
+    ):
+        sp = str(tmp_path / "tomb.json")
+        self._seed(db, tmp_path, 2)
+        archive_queue.delete_source_gone(
+            db_path=db, state_path=sp,
+            set_dismissal_tombstone=False,
+        )
+        assert archive_queue.get_lost_dismissed_at(state_path=sp) is None
+
+    def test_older_than_hours_purge_skips_tombstone(self, db, tmp_path):
+        # Forensic / time-window purges aren't user acknowledgments so
+        # they MUST NOT write the tombstone (otherwise an admin housekeeping
+        # run would silently suppress the banner for all subsequent users).
+        sp = str(tmp_path / "tomb.json")
+        self._seed(db, tmp_path, 2)
+        archive_queue.delete_source_gone(
+            db_path=db, state_path=sp,
+            older_than_hours=1,
+        )
+        assert archive_queue.get_lost_dismissed_at(state_path=sp) is None
+
+    def test_tombstone_write_failure_does_not_abort_delete(
+        self, db, tmp_path, monkeypatch,
+    ):
+        # If the tombstone write raises (disk full, permission denied,
+        # state dir missing), the DELETE must still proceed — the
+        # operator's primary intent is "clear the count NOW".
+        self._seed(db, tmp_path, 2)
+        monkeypatch.setattr(
+            archive_queue, 'set_lost_dismissed_at',
+            lambda *a, **kw: (_ for _ in ()).throw(
+                OSError('synthetic'),
+            ),
+        )
+        deleted = archive_queue.delete_source_gone(db_path=db)
+        assert deleted == 2
+
+    def test_dismiss_then_immediate_new_loss_is_visible(
+        self, db, tmp_path,
+    ):
+        """Acceptance test: after a dismiss, brand-new losses still
+        show up so the operator sees ongoing loss patterns. Only the
+        previously-acknowledged ones stay hidden."""
+        import time
+        sp = str(tmp_path / "tomb.json")
+        # Old losses (2 rows) — about to be dismissed.
+        for i in range(2):
+            f = tmp_path / f"old_{i}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w-old-{i}', db_path=db)
+            mark_source_gone(row['id'], db_path=db)
+        n_before = archive_queue.count_source_gone_recent(
+            24, db_path=db, ignore_dismissed=True,
+        )
+        assert n_before == 2
+
+        # Operator dismisses.
+        archive_queue.delete_source_gone(db_path=db, state_path=sp)
+        # Sleep 1 s so the new row's claimed_at is strictly after the tombstone.
+        time.sleep(1.1)
+
+        # A brand-new loss arrives.
+        f = tmp_path / "fresh.mp4"
+        f.write_text("x")
+        enqueue_for_archive(str(f), db_path=db)
+        row = claim_next_for_worker('w-fresh', db_path=db)
+        mark_source_gone(row['id'], db_path=db)
+
+        # The fresh loss must count even though we dismissed.
+        ts = archive_queue.get_lost_dismissed_at(state_path=sp)
+        assert ts is not None
+        assert archive_queue.count_source_gone_recent(
+            24, db_path=db, dismissed_at=ts,
+        ) == 1

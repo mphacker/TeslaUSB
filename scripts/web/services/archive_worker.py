@@ -511,6 +511,11 @@ def get_status() -> Dict[str, Any]:
     snap['claimed_count'] = counts.get('claimed', 0)
     snap['dead_letter_count'] = counts.get('dead_letter', 0)
     snap['source_gone_count'] = counts.get('source_gone', 0)
+    # Issue #167 sub-deliverable 2 — observability for the
+    # skip-at-source counter. Always present in the snapshot (zero
+    # when the flag is off) so the Settings UI can show a "skipped
+    # N stationary clips today" badge without conditional plumbing.
+    snap['skipped_stationary_count'] = counts.get('skipped_stationary', 0)
     snap['copied_count'] = counts.get('copied', 0)
     snap['error_count'] = counts.get('error', 0)
     snap['disk_pause'] = get_disk_pause_state()
@@ -1340,6 +1345,128 @@ def _stable_write_age_seconds() -> float:
         return _STABLE_WRITE_AGE_SECONDS
 
 
+# ---------------------------------------------------------------------------
+# Issue #167 sub-deliverable 2 — skip-at-source for stationary RecentClips
+# ---------------------------------------------------------------------------
+
+# Cap on SEI messages scanned by ``_clip_has_gps_signal`` before declaring
+# "no GPS". Tesla writes one SEI NAL per frame at ~30 fps; with sample_rate=30
+# one SeiMessage is yielded per ~1 s of video. A typical RecentClips clip is
+# 60 s of video (one minute), so 60 messages covers the whole clip. We cap at
+# 90 to allow a small safety margin for slightly-longer clips and clips that
+# yield SEI at slightly higher cadence, but bail out fast on degenerate inputs
+# (e.g., a corrupted clip that yields tens of thousands of SEI NALs).
+_SKIP_GPS_PEEK_MAX_MESSAGES = 90
+# Sample rate for the peek. ``30`` matches what the indexer uses — one SEI
+# per ~1 s of video — so the I/O footprint of the peek is on the same order
+# as one indexer pass.
+_SKIP_GPS_PEEK_SAMPLE_RATE = 30
+
+
+def _skip_stationary_recent_clips_enabled() -> bool:
+    """Return the runtime value of
+    ``archive.skip_stationary_recent_clips``.
+
+    Looked up at call time so tests can monkeypatch the config module
+    after import. Falls back to ``False`` if config isn't importable
+    (unit-test environments without the full app), which matches the
+    documented default — operators must opt in.
+    """
+    try:
+        from config import ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS
+        return bool(ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _clip_has_gps_signal(source_path: str) -> Optional[bool]:
+    """Return whether a RecentClips candidate has any GPS-bearing SEI.
+
+    Issue #167 sub-deliverable 2 — fast SEI peek used by
+    :func:`process_one_claim` to decide whether to skip a stationary
+    overnight RecentClips clip before copying it.
+
+    Returns:
+      * ``True``  — at least one SEI message with non-zero lat/lon was
+        found in the first ``_SKIP_GPS_PEEK_MAX_MESSAGES`` samples.
+        The clip is "moving"; the worker should copy it.
+      * ``False`` — every sampled SEI message had ``has_gps == False``,
+        or the file has no SEI messages at all (e.g., a non-camera
+        recording), or the file has fewer than the cap. The clip is
+        "stationary"; the worker can mark it ``skipped_stationary``.
+      * ``None``  — we couldn't decisively determine GPS presence
+        (parse error, file missing, etc.). The caller MUST treat
+        ``None`` as "fall through to normal copy" so ambiguous clips
+        are never silently dropped — the existing copy-then-index
+        path will handle them safely.
+
+    Memory model: re-uses the same ``mmap``-backed
+    :func:`sei_parser.extract_sei_messages` generator the indexer
+    uses, with an early ``break`` on the first GPS-bearing message.
+    For a moving clip the peek returns after ~1 s of video; for a
+    stationary 60-s clip the peek scans the whole clip, but the
+    walker only pages in SEI NAL bytes (skipping past video NAL
+    payloads), so the actual I/O footprint stays in the low MB
+    range. Net I/O is dramatically lower than the 30-50 MB write +
+    sync we avoid by skipping the copy.
+    """
+    try:
+        from services import sei_parser
+    except Exception as e:  # noqa: BLE001
+        # Parser missing in this environment (e.g., a unit-test stub
+        # without the parser path). Be safe — fall through to copy.
+        logger.debug(
+            "_clip_has_gps_signal: sei_parser unavailable (%s); "
+            "deferring to copy", e,
+        )
+        return None
+
+    scanned = 0
+    try:
+        for msg in sei_parser.extract_sei_messages(
+                source_path, sample_rate=_SKIP_GPS_PEEK_SAMPLE_RATE):
+            scanned += 1
+            if msg.has_gps:
+                return True
+            if scanned >= _SKIP_GPS_PEEK_MAX_MESSAGES:
+                break
+        # Generator exhausted (or hit cap) without a GPS-bearing
+        # message. Two sub-cases — both decisive:
+        #   * scanned == 0 — no SEI at all. For a Tesla dashcam clip
+        #     this is vanishingly rare (every Tesla clip has SEI),
+        #     and a clip with no SEI is by definition not a clip
+        #     we'd want to map. Treat as stationary (skip).
+        #   * scanned > 0 — clip has SEI but no GPS. This is the
+        #     stationary signature. Skip.
+        return False
+    except FileNotFoundError:
+        # Tesla rotated the source between the stable-write gate and
+        # the peek. Caller will re-stat and mark source_gone.
+        return None
+    except Exception as e:  # noqa: BLE001
+        # Any parse error (corrupt MP4, mmap failure, protobuf decode
+        # blow-up) — fall through to the existing copy path so we
+        # never lose data on a parser bug.
+        logger.warning(
+            "_clip_has_gps_signal: peek failed for %s (%s); "
+            "deferring to copy", source_path, e,
+        )
+        return None
+
+
+def _is_recent_clips_priority(row: Dict[str, Any]) -> bool:
+    """Return True iff the queue row is a RecentClips candidate.
+
+    Phase 2a tagged each row at enqueue time with the priority value
+    from :func:`archive_queue._infer_priority`, so we can decide
+    purely from the row dict without re-walking the path.
+    """
+    try:
+        return int(row.get('priority', 0)) == archive_queue.PRIORITY_RECENT_CLIPS
+    except (TypeError, ValueError):
+        return False
+
+
 def _read_config_or_defaults():
     """Return tunables from config.
 
@@ -1402,6 +1529,11 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
     Possible return values:
       * ``'copied'``       — file copied + indexer enqueued
       * ``'source_gone'``  — source vanished (no retry, terminal)
+      * ``'skipped_stationary'`` — issue #167 sub-deliverable 2:
+                             RecentClips clip with no GPS-bearing SEI
+                             message; opted out via the
+                             ``archive.skip_stationary_recent_clips``
+                             config flag (no retry, terminal)
       * ``'pending'``      — released back to pending (stable-write
                              gate, disk pause, time-budget abort,
                              transient error with attempts left)
@@ -1461,6 +1593,34 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
             db_path=db_path,
         )
         return 'pending'
+
+    # Issue #167 sub-deliverable 2 — skip-at-source for stationary
+    # RecentClips. Runs AFTER the stable-write gate (so we never peek
+    # at a half-written file) and BEFORE the disk-space guard (so a
+    # successful skip can't be falsely paused by a 'critical' disk
+    # verdict — the skip frees no bytes itself but neither does it
+    # consume any). Sentry/Saved event clips have priority 2 and
+    # never enter this branch — they bypass the SEI peek entirely
+    # and follow the normal copy path. ``_clip_has_gps_signal``
+    # returns ``None`` for any ambiguous case (parse error, mmap
+    # failure, file vanished mid-peek), and we fall through to the
+    # normal copy path so a parser bug can never silently drop a
+    # clip we should have copied.
+    if (_skip_stationary_recent_clips_enabled()
+            and _is_recent_clips_priority(row)):
+        gps_signal = _clip_has_gps_signal(source_path)
+        if gps_signal is False:
+            archive_queue.mark_skipped_stationary(row_id, db_path=db_path)
+            logger.info(
+                "archive_worker: skipped stationary RecentClips %s "
+                "(no GPS-bearing SEI in first ~%d s)",
+                source_path,
+                _SKIP_GPS_PEEK_MAX_MESSAGES,
+            )
+            return 'skipped_stationary'
+        # gps_signal True → has GPS, fall through to normal copy.
+        # gps_signal None → couldn't decide, fall through to copy
+        # (data-preservation default).
 
     # Disk-space pre-archive guard. We do this AFTER the stable-write
     # gate (which requires only stat() on the source) but BEFORE any

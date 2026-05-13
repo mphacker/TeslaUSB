@@ -1245,3 +1245,99 @@ def test_clear_lost_clips_accepts_empty_body(health_app, monkeypatch):
     rv = client.post('/api/system/clear_lost_clips')
     assert rv.status_code == 200
     assert rv.get_json()['rows_deleted'] == 0
+
+
+# ===========================================================================
+# /api/system/clear_lost_clips — tombstone (PR #169 follow-up)
+# ===========================================================================
+#
+# The dismiss endpoint now returns ``dismissed_at`` so the UI can
+# confirm the suppression took, and a tombstone-read failure must NOT
+# 500 a DELETE that already committed.
+
+
+def test_clear_lost_clips_returns_tombstone(health_app, monkeypatch):
+    """A successful dismiss returns ``dismissed_at`` so the UI can
+    show "Dismissed at HH:MM:SS" if it wants to (and so a smoke test
+    can confirm the tombstone was written)."""
+    import blueprints.system_health as sh
+    import services
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
+
+    class _FakeArchiveQueue:
+        @staticmethod
+        def delete_source_gone(*, older_than_hours=None, db_path=None):
+            return 12
+
+        @staticmethod
+        def get_lost_dismissed_at():
+            return '2026-05-13T17:00:00+00:00'
+
+    monkeypatch.setattr(services, 'archive_queue', _FakeArchiveQueue)
+    client = health_app.test_client()
+    rv = client.post('/api/system/clear_lost_clips', json={})
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body['rows_deleted'] == 12
+    assert body['dismissed_at'] == '2026-05-13T17:00:00+00:00'
+
+
+def test_clear_lost_clips_tombstone_read_failure_still_returns_200(
+    health_app, monkeypatch,
+):
+    """If the tombstone-read raises (disk error, missing helper),
+    the DELETE has already committed — the endpoint MUST still return
+    200 with ``dismissed_at: null`` so the UI doesn't show an error
+    for a dismiss that actually succeeded."""
+    import blueprints.system_health as sh
+    import services
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
+
+    class _FakeArchiveQueue:
+        @staticmethod
+        def delete_source_gone(*, older_than_hours=None, db_path=None):
+            return 5
+
+        @staticmethod
+        def get_lost_dismissed_at():
+            raise OSError('synthetic state-file error')
+
+    monkeypatch.setattr(services, 'archive_queue', _FakeArchiveQueue)
+    client = health_app.test_client()
+    rv = client.post('/api/system/clear_lost_clips', json={})
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body['rows_deleted'] == 5
+    assert body['dismissed_at'] is None
+
+
+def test_clear_lost_clips_older_than_hours_skips_tombstone_lookup(
+    health_app, monkeypatch,
+):
+    """Forensic ``older_than_hours`` purges aren't user
+    acknowledgments and don't write a tombstone — so the response
+    omits the lookup too (returns ``dismissed_at: null``)."""
+    import blueprints.system_health as sh
+    import services
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
+    lookup_called = {'flag': False}
+
+    class _FakeArchiveQueue:
+        @staticmethod
+        def delete_source_gone(*, older_than_hours=None, db_path=None):
+            return 9
+
+        @staticmethod
+        def get_lost_dismissed_at():
+            lookup_called['flag'] = True
+            return '2026-01-01T00:00:00+00:00'
+
+    monkeypatch.setattr(services, 'archive_queue', _FakeArchiveQueue)
+    client = health_app.test_client()
+    rv = client.post(
+        '/api/system/clear_lost_clips', json={'older_than_hours': 48})
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body['rows_deleted'] == 9
+    assert body['dismissed_at'] is None
+    assert lookup_called['flag'] is False

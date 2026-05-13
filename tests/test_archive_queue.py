@@ -1043,6 +1043,126 @@ class TestCountSourceGoneRecent:
         assert archive_queue.count_source_gone_recent(24, db_path=db) == 0
 
 
+class TestDeleteSourceGone:
+    """Issue #163 — Dismiss button for the "Footage may have been lost"
+    home-page banner. The companion to ``count_source_gone_recent``;
+    deletes the rows the banner counts so the operator can clear the
+    24-h banner immediately instead of waiting for the rows to age out.
+    """
+
+    def _seed_source_gone(self, db, tmp_path, n):
+        """Insert ``n`` ``source_gone`` rows; return list of row ids."""
+        ids = []
+        for i in range(n):
+            f = tmp_path / f"sg_{i}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{i}', db_path=db)
+            mark_source_gone(row['id'], db_path=db)
+            ids.append(row['id'])
+        return ids
+
+    def test_returns_zero_when_table_empty(self, db):
+        assert archive_queue.delete_source_gone(db_path=db) == 0
+
+    def test_deletes_every_source_gone_row_by_default(self, db, tmp_path):
+        self._seed_source_gone(db, tmp_path, 5)
+        assert archive_queue.count_source_gone_recent(
+            24, db_path=db) == 5
+        assert archive_queue.delete_source_gone(db_path=db) == 5
+        assert archive_queue.count_source_gone_recent(
+            24, db_path=db) == 0
+        # And the rows are physically gone, not just status-changed.
+        with sqlite3.connect(db) as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM archive_queue "
+                "WHERE status = 'source_gone'"
+            ).fetchone()[0]
+        assert n == 0
+
+    def test_preserves_non_source_gone_rows(self, db, tmp_path):
+        # 3 source_gone + 1 pending + 1 copied + 1 dead_letter.
+        self._seed_source_gone(db, tmp_path, 3)
+
+        f_pending = tmp_path / "pending.mp4"
+        f_pending.write_text("x")
+        enqueue_for_archive(str(f_pending), db_path=db)
+
+        f_copied = tmp_path / "copied.mp4"
+        f_copied.write_text("x")
+        enqueue_for_archive(str(f_copied), db_path=db)
+        r_copied = claim_next_for_worker('w_copied', db_path=db)
+        archive_queue.mark_copied(
+            r_copied['id'], '/tmp/copied.mp4', db_path=db)
+
+        f_dl = tmp_path / "dl.mp4"
+        f_dl.write_text("x")
+        enqueue_for_archive(str(f_dl), db_path=db)
+        r_dl = claim_next_for_worker('w_dl', db_path=db)
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "UPDATE archive_queue SET attempts = 99 WHERE id = ?",
+                (r_dl['id'],),
+            )
+        mark_failed(r_dl['id'], 'simulated', db_path=db)
+
+        # Sanity: 3 source_gone, 1 pending, 1 copied, 1 dead_letter.
+        counts = archive_queue.get_queue_status(db_path=db)
+        assert counts['source_gone'] == 3
+        assert counts['pending'] == 1
+        assert counts['copied'] == 1
+        assert counts['dead_letter'] == 1
+
+        # Delete just the source_gone rows.
+        assert archive_queue.delete_source_gone(db_path=db) == 3
+
+        counts_after = archive_queue.get_queue_status(db_path=db)
+        assert counts_after['source_gone'] == 0
+        assert counts_after['pending'] == 1
+        assert counts_after['copied'] == 1
+        assert counts_after['dead_letter'] == 1
+
+    def test_older_than_hours_keeps_recent(self, db, tmp_path):
+        # 2 source_gone rows: one fresh, one backdated 48 h.
+        ids = self._seed_source_gone(db, tmp_path, 2)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE archive_queue SET claimed_at = "
+                "datetime('now', '-48 hours') WHERE id = ?",
+                (ids[0],),
+            )
+            conn.commit()
+
+        # older_than_hours=24 should delete only the 48 h-old row.
+        assert archive_queue.delete_source_gone(
+            older_than_hours=24, db_path=db) == 1
+
+        # The recent row survives and is still counted.
+        assert archive_queue.count_source_gone_recent(
+            24, db_path=db) == 1
+        with sqlite3.connect(db) as conn:
+            remaining = conn.execute(
+                "SELECT id FROM archive_queue "
+                "WHERE status = 'source_gone'"
+            ).fetchall()
+        assert len(remaining) == 1
+        assert remaining[0][0] == ids[1]
+
+    def test_returns_zero_on_db_failure(self, db, monkeypatch):
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(archive_queue, '_open_archive_conn', boom)
+        # Must never raise — Dismiss click on a broken DB just returns
+        # 0 rather than 500-ing the request.
+        assert archive_queue.delete_source_gone(db_path=db) == 0
+
+    def test_idempotent_second_call_returns_zero(self, db, tmp_path):
+        self._seed_source_gone(db, tmp_path, 2)
+        assert archive_queue.delete_source_gone(db_path=db) == 2
+        # Banner is now 0; clicking Dismiss again must be safe.
+        assert archive_queue.delete_source_gone(db_path=db) == 0
+
+
 class TestReleaseClaim:
     def test_returns_to_pending_without_metadata(self, db, sample_file):
         enqueue_for_archive(sample_file, db_path=db)

@@ -717,6 +717,252 @@ def test_format_eta_human_boundaries():
 
 
 # ---------------------------------------------------------------------------
+# Phase 4.5 (#101) — pause-reason in archive block
+# ---------------------------------------------------------------------------
+
+def test_format_pause_reason_load_only():
+    """Spec quote: 'Archive paused: load 4.2 > 3.5 threshold'."""
+    import blueprints.system_health as sh
+    out = sh._format_pause_reason(
+        load_pause={
+            'is_paused_now': True,
+            'last_loadavg': 4.2,
+            'threshold': 3.5,
+        },
+        disk_pause={'is_paused_now': False},
+    )
+    assert out == 'load 4.2 > 3.5'
+
+
+def test_format_pause_reason_disk_only_with_total():
+    """Spec quote: 'Archive paused: SD card 96% full'."""
+    import blueprints.system_health as sh
+    # 96% full = 4% free → e.g. 1024 MB free of 25600 MB total.
+    out = sh._format_pause_reason(
+        load_pause={'is_paused_now': False},
+        disk_pause={
+            'is_paused_now': True,
+            'last_free_mb': 1024,
+            'last_total_mb': 25600,
+            'critical_threshold_mb': 100,
+        },
+    )
+    assert out == 'SD card 96% full'
+
+
+def test_format_pause_reason_disk_only_without_total():
+    """When ``last_total_mb`` is unknown, fall back to MB-free
+    rendering with the threshold for context."""
+    import blueprints.system_health as sh
+    out = sh._format_pause_reason(
+        load_pause={'is_paused_now': False},
+        disk_pause={
+            'is_paused_now': True,
+            'last_free_mb': 50,
+            'last_total_mb': None,
+            'critical_threshold_mb': 100,
+        },
+    )
+    assert out == 'SD card 50 MB free (threshold 100 MB)'
+
+
+def test_format_pause_reason_disk_full_capped_at_99():
+    """100% full claims would be misleading — the OS always reserves
+    a few MB. Cap at 99% so the message stays honest."""
+    import blueprints.system_health as sh
+    out = sh._format_pause_reason(
+        load_pause={'is_paused_now': False},
+        disk_pause={
+            'is_paused_now': True,
+            'last_free_mb': 0,
+            'last_total_mb': 25600,
+            'critical_threshold_mb': 100,
+        },
+    )
+    assert out == 'SD card 99% full'
+
+
+def test_format_pause_reason_both_armed():
+    """Concurrent load + disk pauses join with a semicolon."""
+    import blueprints.system_health as sh
+    out = sh._format_pause_reason(
+        load_pause={
+            'is_paused_now': True,
+            'last_loadavg': 5.1,
+            'threshold': 3.5,
+        },
+        disk_pause={
+            'is_paused_now': True,
+            'last_free_mb': 1024,
+            'last_total_mb': 25600,
+            'critical_threshold_mb': 100,
+        },
+    )
+    assert out == 'load 5.1 > 3.5; SD card 96% full'
+
+
+def test_format_pause_reason_neither_armed_returns_background():
+    """When neither auto-pause has armed (e.g. ``pause_worker()``
+    was called for a mode switch), don't claim false specificity —
+    return ``'background'`` so the caller can render a generic
+    message."""
+    import blueprints.system_health as sh
+    assert sh._format_pause_reason(
+        load_pause={'is_paused_now': False},
+        disk_pause={'is_paused_now': False},
+    ) == 'background'
+
+
+def test_format_pause_reason_load_armed_but_no_loadavg_yet():
+    """Defensive: if the worker reports paused but ``last_loadavg``
+    is None (cold-start race), don't synthesize a fake number — fall
+    through to ``'background'``."""
+    import blueprints.system_health as sh
+    out = sh._format_pause_reason(
+        load_pause={
+            'is_paused_now': True,
+            'last_loadavg': None,
+            'threshold': 3.5,
+        },
+        disk_pause={'is_paused_now': False},
+    )
+    assert out == 'background'
+
+
+def test_format_pause_reason_disk_negative_free_falls_through():
+    """``last_free_mb = -1`` is the sentinel for OSError on
+    ``shutil.disk_usage``. Don't render '-1 MB free'."""
+    import blueprints.system_health as sh
+    out = sh._format_pause_reason(
+        load_pause={'is_paused_now': False},
+        disk_pause={
+            'is_paused_now': True,
+            'last_free_mb': -1,
+            'last_total_mb': -1,
+            'critical_threshold_mb': 100,
+        },
+    )
+    assert out == 'background'
+
+
+def test_archive_block_paused_load_message(monkeypatch):
+    """End-to-end: load pause armed → message includes the loadavg
+    and the threshold."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 10, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': True,
+        'load_pause': {
+            'is_paused_now': True, 'last_loadavg': 4.2, 'threshold': 3.5,
+        },
+        'disk_pause': {'is_paused_now': False},
+    })
+    block = sh._archive_block()
+    assert block['severity'] == 'warn'
+    assert block['message'] == 'Paused: load 4.2 > 3.5'
+    assert block['pause_reason'] == 'load 4.2 > 3.5'
+
+
+def test_archive_block_paused_disk_message(monkeypatch):
+    """End-to-end: disk pause armed → message includes the % full."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 0, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': True,
+        'load_pause': {'is_paused_now': False},
+        'disk_pause': {
+            'is_paused_now': True,
+            'last_free_mb': 1024, 'last_total_mb': 25600,
+            'critical_threshold_mb': 100,
+        },
+    })
+    block = sh._archive_block()
+    assert block['severity'] == 'warn'
+    assert block['message'] == 'Paused: SD card 96% full'
+    assert block['pause_reason'] == 'SD card 96% full'
+
+
+def test_archive_block_paused_background_message(monkeypatch):
+    """When the worker reports ``paused`` but no auto-guard has
+    armed (manual ``pause_worker()`` from a mode switch), render the
+    generic 'Paused (background task)' fallback."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 5, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': True,
+        'load_pause': {'is_paused_now': False},
+        'disk_pause': {'is_paused_now': False},
+    })
+    block = sh._archive_block()
+    assert block['severity'] == 'warn'
+    assert block['message'] == 'Paused (background task)'
+    assert block['pause_reason'] == 'background'
+
+
+def test_archive_block_pause_reason_field_present_in_all_paths(monkeypatch):
+    """The ``pause_reason`` key must appear in every return path
+    (disabled, error, normal) so JS consumers don't crash on missing
+    keys (mirrors the Phase 4.3 lost_24h / Phase 4.4 ETA contracts)."""
+    import blueprints.system_health as sh
+    # Disabled path
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False, raising=False)
+    assert 'pause_reason' in sh._archive_block()
+    assert sh._archive_block()['pause_reason'] is None
+    # Error path
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    from services import archive_queue
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    block = sh._archive_block()
+    assert 'pause_reason' in block
+    assert block['pause_reason'] is None
+
+
+def test_archive_block_pause_reason_null_when_not_paused(monkeypatch):
+    """``pause_reason`` should be ``None`` when ``paused=False``,
+    not a stale value, so the UI doesn't render 'Paused: ...' next to
+    a green status."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 0, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': False,
+        'load_pause': {'is_paused_now': False},
+        'disk_pause': {'is_paused_now': False},
+    })
+    block = sh._archive_block()
+    assert block['paused'] is False
+    assert block['pause_reason'] is None
+
+
+# ---------------------------------------------------------------------------
 # Cloud block
 # ---------------------------------------------------------------------------
 

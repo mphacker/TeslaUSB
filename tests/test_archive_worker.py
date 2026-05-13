@@ -2320,3 +2320,119 @@ class TestDrainRateETA:
 
         finally:
             archive_worker._db_path = None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.5 (#101) — pause-state helpers expose threshold + total
+# ---------------------------------------------------------------------------
+
+class TestPauseStateExtensions:
+    """Phase 4.5 extends ``get_disk_pause_state`` and
+    ``get_load_pause_state`` with the configured thresholds and (for
+    disk) the total bytes so the System Health card can render
+    ``"load 4.2 > 3.5"`` and ``"SD card 96% full"`` instead of an
+    opaque ``"Paused (load or disk)"``.
+
+    These tests pin the dict shape; the human-readable formatting is
+    pinned separately in ``test_system_health_blueprint.py``.
+    """
+
+    def setup_method(self):
+        # Module-level ``_state`` leaks between tests in the file.
+        # Reset the disk/load pause slots so we observe a clean default.
+        with archive_worker._state_lock:
+            archive_worker._state['last_disk_pause_at'] = None
+            archive_worker._state['last_disk_pause_free_mb'] = None
+            archive_worker._state['last_disk_pause_total_mb'] = None
+            archive_worker._state['last_load_pause_at'] = None
+            archive_worker._state['last_load_pause_loadavg'] = None
+        archive_worker._disk_space_pause_until = 0.0
+        archive_worker._load_pause_until = 0.0
+
+    teardown_method = setup_method
+
+    def test_get_disk_pause_state_includes_thresholds(self):
+        # Default state (no pause has armed). Both thresholds are
+        # positive integers resolved from config (or fallback
+        # constants); the last_* fields are None.
+        state = archive_worker.get_disk_pause_state()
+        assert isinstance(state['critical_threshold_mb'], int)
+        assert isinstance(state['warning_threshold_mb'], int)
+        assert state['critical_threshold_mb'] > 0
+        # Warning threshold must be >= critical (the watchdog turns
+        # warn before it turns critical).
+        assert state['warning_threshold_mb'] >= state['critical_threshold_mb']
+        # Phase 4.5 fields default to None when no pause has fired.
+        assert state['last_pause_at'] is None
+        assert state['last_free_mb'] is None
+        assert state['last_total_mb'] is None
+        # Existing fields still present (regression guard).
+        assert state['paused_until_epoch'] == 0.0
+        assert state['is_paused_now'] is False
+
+    def test_get_disk_pause_state_after_pause_includes_total(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Simulate the pause-arming side-effect by populating
+        # ``_state`` directly the way ``process_one_claim`` does
+        # under the disk-space guard. Phase 4.5 added the
+        # ``last_disk_pause_total_mb`` slot so the formatter can
+        # render "% full".
+        with archive_worker._state_lock:
+            archive_worker._state['last_disk_pause_at'] = 1234.5
+            archive_worker._state['last_disk_pause_free_mb'] = 1024
+            archive_worker._state['last_disk_pause_total_mb'] = 25600
+        try:
+            state = archive_worker.get_disk_pause_state()
+            assert state['last_pause_at'] == 1234.5
+            assert state['last_free_mb'] == 1024
+            assert state['last_total_mb'] == 25600
+        finally:
+            with archive_worker._state_lock:
+                archive_worker._state['last_disk_pause_at'] = None
+                archive_worker._state['last_disk_pause_free_mb'] = None
+                archive_worker._state['last_disk_pause_total_mb'] = None
+
+    def test_get_load_pause_state_includes_threshold(self):
+        # Phase 4.5 added ``threshold`` so the System Health card
+        # can render ``"load 4.2 > 3.5"`` without re-reading config.
+        state = archive_worker.get_load_pause_state()
+        assert 'threshold' in state
+        assert isinstance(state['threshold'], (int, float))
+        assert state['threshold'] > 0
+        # Threshold value must match what
+        # ``_read_config_or_defaults()`` returns (so config edits flow
+        # through without a service restart). Position [4] is
+        # ``load_pause_threshold``.
+        assert state['threshold'] == \
+            archive_worker._read_config_or_defaults()[4]
+
+    def test_get_load_pause_state_threshold_falls_back_on_config_error(
+        self, monkeypatch,
+    ):
+        # If config import fails (e.g. config.yaml missing), the
+        # helper must fall back to the module-level constant rather
+        # than raising — the System Health card poll happens every
+        # 5 s and a single bad poll should never break the page.
+        def boom(*_a, **_kw):
+            raise RuntimeError("config import failed")
+
+        monkeypatch.setattr(
+            archive_worker, '_read_config_or_defaults', boom,
+        )
+        state = archive_worker.get_load_pause_state()
+        assert state['threshold'] == archive_worker._LOAD_PAUSE_THRESHOLD
+
+    def test_start_worker_resets_disk_total_mb(self, db, archive_root):
+        # Parity with the Phase 1 reset of ``last_disk_pause_free_mb``.
+        # Without this the new total would leak across worker
+        # restarts (e.g. mode switch → restart).
+        with archive_worker._state_lock:
+            archive_worker._state['last_disk_pause_total_mb'] = 12345
+
+        archive_worker.start_worker(db, archive_root, teslacam_root=None)
+        try:
+            with archive_worker._state_lock:
+                assert archive_worker._state['last_disk_pause_total_mb'] is None
+        finally:
+            archive_worker.stop_worker(timeout=5)

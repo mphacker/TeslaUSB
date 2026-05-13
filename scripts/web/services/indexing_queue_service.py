@@ -853,6 +853,53 @@ def retry_dead_letter(db_path: str,
                 pass
 
 
+def delete_dead_letter(db_path: str,
+                       canonical_key_value: Optional[str] = None) -> int:
+    """Permanently delete indexer dead-letter rows from ``indexing_queue``.
+
+    When ``canonical_key_value`` is given, only that one row is
+    removed. When ``None``, every dead-letter row in the queue is
+    removed — the "Delete all" path on the Failed Jobs page (#161).
+
+    The companion to :func:`retry_dead_letter`: same WHERE filter
+    (``attempts >= _PARSE_ERROR_MAX_ATTEMPTS``), but ``DELETE``
+    instead of ``UPDATE``. Use when the source file is permanently
+    unparseable (corrupt MP4, truncated download, etc.) and retrying
+    will just fail again.
+
+    The inotify file watcher / boot catch-up scan may legitimately
+    re-enqueue the same canonical_key later (with ``attempts=0``);
+    that's the producer doing its job. Does not touch ``indexed_files``
+    (preserves whatever GPS history was already extracted), nor
+    ``trips`` / ``waypoints`` / ``detected_events``. Returns the
+    number of rows actually deleted.
+    """
+    conn = None
+    try:
+        conn = _open_queue_conn(db_path)
+        if canonical_key_value is None:
+            cur = conn.execute(
+                "DELETE FROM indexing_queue WHERE attempts >= ?",
+                (_PARSE_ERROR_MAX_ATTEMPTS,),
+            )
+        else:
+            cur = conn.execute(
+                "DELETE FROM indexing_queue "
+                "WHERE attempts >= ? AND canonical_key = ?",
+                (_PARSE_ERROR_MAX_ATTEMPTS, str(canonical_key_value)),
+            )
+        return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("delete_dead_letter failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def clear_all_queue(db_path: str) -> int:
     """Remove every row from the indexing queue, including claimed ones.
 

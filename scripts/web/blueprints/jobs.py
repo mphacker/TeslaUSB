@@ -342,6 +342,63 @@ _RETRIERS = {
 
 
 # ---------------------------------------------------------------------------
+# Subsystem-specific delete adapters (mirror the retry adapters above)
+# ---------------------------------------------------------------------------
+#
+# Each adapter delegates to the matching service-layer
+# ``delete_dead_letter`` / ``delete_failed`` function. Same id-typing
+# rules as the retry adapters so the route-level handler is symmetric.
+
+def _delete_archive(row_id: Optional[Any]) -> int:
+    from services import archive_queue
+    if row_id is None:
+        return archive_queue.delete_dead_letter(row_id=None)
+    try:
+        rid = int(row_id)
+    except (TypeError, ValueError):
+        return 0
+    return archive_queue.delete_dead_letter(row_id=rid)
+
+
+def _delete_indexer(row_id: Optional[Any]) -> int:
+    if not MAPPING_ENABLED:
+        return 0
+    from services import indexing_queue_service
+    key = None if row_id is None else str(row_id)
+    return indexing_queue_service.delete_dead_letter(MAPPING_DB_PATH,
+                                                     canonical_key_value=key)
+
+
+def _delete_cloud_sync(row_id: Optional[Any]) -> int:
+    if not CLOUD_ARCHIVE_ENABLED:
+        return 0
+    from services import cloud_archive_service
+    path = None if row_id is None else str(row_id)
+    return cloud_archive_service.delete_dead_letter(file_path=path)
+
+
+def _delete_live_event_sync(row_id: Optional[Any]) -> int:
+    if not LIVE_EVENT_SYNC_ENABLED:
+        return 0
+    from services import live_event_sync_service
+    if row_id is None:
+        return live_event_sync_service.delete_failed(None)
+    try:
+        rid = int(row_id)
+    except (TypeError, ValueError):
+        return 0
+    return live_event_sync_service.delete_failed(rid)
+
+
+_DELETERS = {
+    'archive': _delete_archive,
+    'indexer': _delete_indexer,
+    'cloud_sync': _delete_cloud_sync,
+    'live_event_sync': _delete_live_event_sync,
+}
+
+
+# ---------------------------------------------------------------------------
 # HTML route
 # ---------------------------------------------------------------------------
 
@@ -455,3 +512,48 @@ def api_retry():
         return jsonify({'error': 'retry failed', 'subsystem': subsystem}), 500
 
     return jsonify({'subsystem': subsystem, 'rows_reset': int(n)})
+
+
+@jobs_bp.route('/api/jobs/delete', methods=['POST'])
+def api_delete():
+    """Permanently delete failed/dead-letter rows.
+
+    Request body (JSON):
+      * ``subsystem`` (required) — one of the four subsystem names.
+      * ``id`` (optional) — omit / pass ``null`` to delete **every**
+        failed row in that subsystem; otherwise the natural id for
+        that subsystem (int row id for archive / live_event_sync,
+        canonical_key string for indexer, file_path string for
+        cloud_sync).
+
+    Mirrors :func:`api_retry` exactly, but routes through ``_DELETERS``
+    instead of ``_RETRIERS``. Returns ``{subsystem, rows_deleted}``
+    (HTTP 200) on success, ``{error}`` (HTTP 400) on bad input,
+    ``{error, subsystem}`` (HTTP 500) on adapter crash.
+
+    The delete only affects the named subsystem's queue table — it
+    does NOT delete the underlying source file from disk, and it does
+    NOT touch any other table (e.g. indexer delete preserves
+    ``indexed_files`` / trips / waypoints / detected_events for the
+    same source). Producers (inotify watcher, boot catch-up scan,
+    archive worker) may legitimately re-enqueue the same source path
+    later if it still exists; that's the producer doing its job and
+    the new row starts fresh with ``attempts=0``.
+    """
+    payload = request.get_json(silent=True) or {}
+    subsystem = (payload.get('subsystem') or '').lower()
+    if subsystem not in _DELETERS:
+        return jsonify({
+            'error': 'unknown or missing subsystem',
+            'allowed': list(_SUBSYSTEMS),
+        }), 400
+
+    row_id = payload.get('id')
+    try:
+        n = _DELETERS[subsystem](row_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("/api/jobs/delete crashed (subsystem=%s, id=%r)",
+                         subsystem, row_id)
+        return jsonify({'error': 'delete failed', 'subsystem': subsystem}), 500
+
+    return jsonify({'subsystem': subsystem, 'rows_deleted': int(n)})

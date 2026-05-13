@@ -667,6 +667,54 @@ def retry_dead_letter(row_id: Optional[int] = None,
                 pass
 
 
+def delete_dead_letter(row_id: Optional[int] = None,
+                       db_path: Optional[str] = None) -> int:
+    """Permanently delete ``dead_letter`` rows from ``archive_queue``.
+
+    When ``row_id`` is given, only that one row is removed. When
+    ``None``, every dead-letter row in the table is removed — the
+    "Delete all" path on the Failed Jobs page (#161).
+
+    The companion to :func:`retry_dead_letter`: same WHERE filter
+    (``status = 'dead_letter'``), but ``DELETE`` instead of
+    ``UPDATE``. Use when retry isn't going to help — the source file
+    is permanently gone, or the row's failure reason is structural and
+    re-archiving will just fail again. The inotify file watcher / boot
+    catch-up scan may legitimately re-enqueue the same source path
+    later (with ``attempts=0``); that's the producer doing its job
+    and the user can delete again if needed.
+
+    Returns the number of rows actually deleted (``0`` if nothing
+    matched). Returns ``0`` on any DB error so a UI delete-all click
+    never blows up the request handler.
+    """
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        if row_id is None:
+            cur = conn.execute(
+                "DELETE FROM archive_queue WHERE status = 'dead_letter'"
+            )
+        else:
+            cur = conn.execute(
+                "DELETE FROM archive_queue "
+                "WHERE status = 'dead_letter' AND id = ?",
+                (int(row_id),),
+            )
+        conn.commit()
+        return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("delete_dead_letter failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Worker-side helpers (Phase 2b — consumed by ``archive_worker``)
 # ---------------------------------------------------------------------------

@@ -776,46 +776,53 @@ def candidate_db_paths(canonical_key_value: str) -> List[str]:
 
 
 def _refresh_ro_mount(teslacam_path: str) -> None:
-    """Cycle the read-only mount to refresh exFAT filesystem cache.
+    """Invalidate the VFS slab cache so ``readdir`` sees Tesla's latest
+    writes via the gadget LUN.
 
-    When in present mode, Tesla writes to the USB image through the gadget
-    while the Pi has a read-only mount of the same image.  exFAT caches
-    directory entries and won't see new/changed files until the mount is
-    refreshed.  A quick umount + mount cycle (~200ms) fixes this.
+    Tesla writes to the USB image through the gadget while the Pi has a
+    read-only mount of the same image; the kernel's dentry + inode cache
+    on the Pi side hides those new files from ``readdir`` until evicted.
+
+    This used to ``umount + mount -o ro`` the RO mount to force the
+    eviction (issue #127) — but per ``.github/copilot-instructions.md``
+    that's forbidden: any disruption of the present-mode RO mount can
+    race with Tesla's gadget reads and produce a transient I/O error,
+    losing footage if Tesla is actively recording.
+
+    The kernel-supported replacement is ``echo 2 > /proc/sys/vm/drop_caches``
+    (slabs only — dentry + inode cache). It is sub-10ms, idempotent, and
+    does NOT touch the mount, loop device, image file, or gadget
+    binding. After the slab eviction, the next ``open`` / ``readdir``
+    re-resolves through the loop device and sees Tesla's freshly-written
+    metadata.
+
+    The ``current_mode() != 'present'`` early return is preserved: in
+    edit mode the local mount IS the write path, so the cache is fresh
+    by definition and the call is a no-op.
     """
     from services.mode_service import current_mode
     if current_mode() != 'present':
-        return  # Only needed in present mode
-
-    mount_point = os.path.dirname(teslacam_path)  # e.g. /mnt/gadget/part1-ro
-    if not os.path.ismount(mount_point):
-        return
+        return  # Only meaningful in present mode
 
     try:
-        # Find the loop device backing this mount
-        result = subprocess.run(
-            ["sudo", "nsenter", "--mount=/proc/1/ns/mnt",
-             "findmnt", "-n", "-o", "SOURCE", mount_point],
-            capture_output=True, text=True, timeout=5,
-        )
-        source = result.stdout.strip()
-        if not source:
-            return
-
-        # Umount and remount
+        # ``sudo tee`` is the standard pattern for writing to a root-owned
+        # /proc file from an unprivileged process. ``input="2\n"`` writes
+        # exactly the byte the kernel expects (slab-only invalidation).
         subprocess.run(
-            ["sudo", "nsenter", "--mount=/proc/1/ns/mnt",
-             "umount", mount_point],
-            capture_output=True, timeout=10,
+            ["sudo", "tee", "/proc/sys/vm/drop_caches"],
+            input="2\n",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=True,
         )
-        subprocess.run(
-            ["sudo", "nsenter", "--mount=/proc/1/ns/mnt",
-             "mount", "-o", "ro", source, mount_point],
-            capture_output=True, timeout=10,
-        )
-        logger.info("Refreshed RO mount at %s", mount_point)
-    except Exception as e:
-        logger.warning("Failed to refresh RO mount (non-fatal): %s", e)
+        logger.debug("VFS cache refreshed (drop_caches=2)")
+    except Exception as e:  # noqa: BLE001
+        # Non-fatal — worst case is the next read path doesn't see Tesla's
+        # most recent files until the kernel evicts the cache on its own
+        # (memory pressure or normal LRU). All callers are read-only
+        # consumers that retry on the next worker tick.
+        logger.warning("VFS cache refresh failed (non-fatal): %s", e)
 
 
 def _find_front_camera_videos(teslacam_path: str) -> Generator[str, None, None]:

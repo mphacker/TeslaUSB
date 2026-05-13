@@ -984,6 +984,42 @@ def _mark_upload_failure(
             )
 
 
+def _is_path_skipped(
+    conn: Optional[sqlite3.Connection],
+    rel_path: str,
+) -> bool:
+    """Phase 5.3 — streaming dedup check.
+
+    Replaces the legacy ``synced_paths`` in-memory set (which loaded EVERY
+    ``cloud_synced_files`` row matching ``status IN ('synced', 'dead_letter')``
+    into Python — ~8 MB on a year-old database). Now does one indexed
+    point-lookup per candidate event:
+
+    * The ``file_path TEXT NOT NULL UNIQUE`` constraint creates an implicit
+      unique index, so the lookup is O(log n) on the underlying B-tree.
+    * SQLite's prepared-statement cache on the connection means the SQL text
+      is parsed once and reused for every subsequent call.
+    * Memory overhead is the per-row tuple/dict the cursor returns — bounded
+      and freed immediately, vs the unbounded set that grew with database age.
+
+    Returns ``False`` when *conn* is ``None`` (matches legacy behaviour: no
+    connection means "we can't tell, don't filter") or when the query raises
+    (best-effort — the picker continues even if the DB is briefly busy).
+    """
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM cloud_synced_files "
+            "WHERE file_path = ? AND status IN ('synced', 'dead_letter') "
+            "LIMIT 1",
+            (rel_path,),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
 def _discover_events(
     teslacam_path: str,
     conn: Optional[sqlite3.Connection] = None,
@@ -995,24 +1031,16 @@ def _discover_events(
     ``(event_dir_path, relative_path, total_size)`` sorted **oldest-first**
     so the most at-risk clips get preserved first.
 
-    If *conn* is provided, events already marked ``synced`` in the
-    database are excluded.
+    If *conn* is provided, events already marked ``synced`` or ``dead_letter``
+    in the database are excluded via ``_is_path_skipped`` (Phase 5.3
+    streaming dedup — one indexed point-lookup per candidate, no in-memory
+    snapshot of the table).
     """
-    # Build set of event paths that are off-limits for auto-picking:
-    #   * status='synced' — already uploaded, never re-pick
-    #   * status='dead_letter' — Phase 2.6: hit retry cap; manual recovery
-    #     only (Failed Jobs page in Phase 4). Re-picking would re-burn
-    #     bandwidth on files that have proven they will not succeed.
-    synced_paths: set = set()
-    if conn is not None:
-        try:
-            rows = conn.execute(
-                "SELECT file_path FROM cloud_synced_files "
-                "WHERE status IN ('synced', 'dead_letter')"
-            ).fetchall()
-            synced_paths = {r["file_path"] for r in rows}
-        except Exception:
-            pass
+    # Phase 5.3 — streaming dedup. Each candidate event is checked with a
+    # single indexed ``_is_path_skipped`` lookup; we no longer load the
+    # entire ``cloud_synced_files`` history into a Python set up-front.
+    # ``conn=None`` keeps the legacy "don't filter" semantics (helpers /
+    # tests that don't pass a connection see every event).
 
     events: List[Tuple[str, str, int]] = []
 
@@ -1034,8 +1062,8 @@ def _discover_events(
 
             rel_path = canonical_cloud_path(f"{folder}/{entry}")
 
-            # Skip events already confirmed synced
-            if rel_path in synced_paths:
+            # Skip events already confirmed synced (Phase 5.3 streaming check)
+            if _is_path_skipped(conn, rel_path):
                 continue
 
             # Calculate total size of all files in this event
@@ -1065,7 +1093,7 @@ def _discover_events(
                     fpath = os.path.join(ARCHIVE_DIR, f)
                     if os.path.isfile(fpath) and f.lower().endswith(('.mp4', '.ts')):
                         rel_path = canonical_cloud_path(f"ArchivedClips/{f}")
-                        if rel_path in synced_paths:
+                        if _is_path_skipped(conn, rel_path):
                             continue
                         fsize = os.path.getsize(fpath)
                         # Use the individual file path (not ARCHIVE_DIR)

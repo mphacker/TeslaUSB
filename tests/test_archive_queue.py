@@ -906,6 +906,92 @@ class TestMarkSourceGone:
         assert mark_source_gone(999999, db_path=db) is False
 
 
+class TestCountSourceGoneRecent:
+    """Phase 4.3 (#101) — files-lost banner data source."""
+
+    def test_zero_when_no_source_gone_rows(self, db, sample_file):
+        # Just claim+copy a row, no source_gone events.
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        archive_queue.mark_copied(row['id'], '/tmp/dest.mp4', db_path=db)
+        assert archive_queue.count_source_gone_recent(24, db_path=db) == 0
+
+    def test_counts_recent_source_gone(self, db, tmp_path):
+        # Three source_gone rows, all recent.
+        for i in range(3):
+            f = tmp_path / f"clip_{i}.mp4"
+            f.write_text("x")
+            enqueue_for_archive(str(f), db_path=db)
+            row = claim_next_for_worker(f'w{i}', db_path=db)
+            mark_source_gone(row['id'], db_path=db)
+        assert archive_queue.count_source_gone_recent(24, db_path=db) == 3
+
+    def test_excludes_non_source_gone(self, db, tmp_path):
+        f1 = tmp_path / "a.mp4"
+        f1.write_text("x")
+        enqueue_for_archive(str(f1), db_path=db)
+        r1 = claim_next_for_worker('w1', db_path=db)
+        mark_source_gone(r1['id'], db_path=db)
+
+        f2 = tmp_path / "b.mp4"
+        f2.write_text("x")
+        enqueue_for_archive(str(f2), db_path=db)
+        r2 = claim_next_for_worker('w2', db_path=db)
+        archive_queue.mark_copied(r2['id'], '/tmp/b.mp4', db_path=db)
+
+        # Only the source_gone row counts.
+        assert archive_queue.count_source_gone_recent(24, db_path=db) == 1
+
+    def test_excludes_old_source_gone(self, db, sample_file):
+        # Insert a source_gone row but backdate claimed_at to 48 h ago.
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_source_gone(row['id'], db_path=db)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE archive_queue SET claimed_at = "
+                "datetime('now', '-48 hours') WHERE id = ?",
+                (row['id'],),
+            )
+            conn.commit()
+        assert archive_queue.count_source_gone_recent(24, db_path=db) == 0
+        # Wider window picks it back up.
+        assert archive_queue.count_source_gone_recent(72, db_path=db) == 1
+
+    def test_zero_hours_returns_zero(self, db, sample_file):
+        # Defensive: a 0-hour window must short-circuit, not return all.
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_source_gone(row['id'], db_path=db)
+        assert archive_queue.count_source_gone_recent(0, db_path=db) == 0
+
+    def test_handles_iso_with_t_separator(self, db, sample_file):
+        """``_iso_now`` writes ``YYYY-MM-DDTHH:MM:SS+00:00`` — the
+        ``T`` separator and tz suffix must not break the SQLite
+        ``strftime('%s', ...)`` filter.
+        """
+        enqueue_for_archive(sample_file, db_path=db)
+        row = claim_next_for_worker('w1', db_path=db)
+        mark_source_gone(row['id'], db_path=db)
+        # Confirm the stored claimed_at is the ISO-T format.
+        with sqlite3.connect(db) as conn:
+            ts = conn.execute(
+                "SELECT claimed_at FROM archive_queue WHERE id = ?",
+                (row['id'],),
+            ).fetchone()[0]
+        assert 'T' in ts
+        assert '+' in ts or 'Z' in ts
+        assert archive_queue.count_source_gone_recent(24, db_path=db) == 1
+
+    def test_returns_zero_on_db_failure(self, db, monkeypatch):
+        def boom(*a, **kw):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(archive_queue, '_open_archive_conn', boom)
+        # Must never raise — health card poll on a broken DB should
+        # show 0 lost rather than 500 the dashboard.
+        assert archive_queue.count_source_gone_recent(24, db_path=db) == 0
+
+
 class TestReleaseClaim:
     def test_returns_to_pending_without_metadata(self, db, sample_file):
         enqueue_for_archive(sample_file, db_path=db)

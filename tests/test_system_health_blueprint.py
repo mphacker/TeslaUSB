@@ -478,6 +478,118 @@ def test_archive_block_watchdog_error(monkeypatch):
     assert 'Disk almost full' in block['message']
 
 
+def test_archive_block_files_lost_24h_warns(monkeypatch):
+    """Phase 4.3 — non-zero lost_24h must surface as warn with a
+    user-facing message that includes the count."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 0, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 12)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok', 'message': ''})
+    monkeypatch.setattr(archive_worker, 'get_status',
+                        lambda: {'worker_running': True, 'paused': False})
+
+    block = sh._archive_block()
+    assert block['severity'] == 'warn'
+    assert block['lost_24h'] == 12
+    assert '12' in block['message']
+    assert 'lost' in block['message'].lower()
+
+
+def test_archive_block_files_lost_pluralization(monkeypatch):
+    """Singular vs plural messages for 1 vs N clips lost."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 0, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 1)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status',
+                        lambda: {'worker_running': True, 'paused': False})
+
+    block = sh._archive_block()
+    assert '1 clip lost' in block['message']
+    assert '1 clips' not in block['message']
+
+
+def test_archive_block_files_lost_takes_precedence_over_dead_letters(
+        monkeypatch):
+    """Lost files dominate dead-letter rows because lost footage is
+    unrecoverable, while DL rows still have the source on disk."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 0, 'dead_letter': 5})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 3)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status',
+                        lambda: {'worker_running': True, 'paused': False})
+
+    block = sh._archive_block()
+    assert 'lost' in block['message'].lower()
+    assert 'dead-letter' not in block['message'].lower()
+
+
+def test_archive_block_lost_24h_zero_means_ok(monkeypatch):
+    """Zero lost files must not bump severity."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 0, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status',
+                        lambda: {'worker_running': True, 'paused': False})
+
+    block = sh._archive_block()
+    assert block['severity'] == 'ok'
+    assert block['lost_24h'] == 0
+
+
+def test_archive_block_count_source_gone_failure_safe(monkeypatch):
+    """If count_source_gone_recent throws, _archive_block must
+    degrade to lost_24h=0, not 500 the dashboard."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 0, 'dead_letter': 0})
+    def boom(hours=24):
+        raise RuntimeError("DB locked")
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent', boom)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status',
+                        lambda: {'worker_running': True, 'paused': False})
+
+    block = sh._archive_block()
+    assert block['lost_24h'] == 0
+    assert block['severity'] == 'ok'
+
+
+def test_archive_block_disabled_includes_lost_24h_field(monkeypatch):
+    """The disabled block must still include lost_24h: 0 so JS
+    consumers don't have to special-case missing keys."""
+    import blueprints.system_health as sh
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False, raising=False)
+    block = sh._archive_block()
+    assert block['lost_24h'] == 0
+
+
 # ---------------------------------------------------------------------------
 # Cloud block
 # ---------------------------------------------------------------------------

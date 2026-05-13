@@ -57,6 +57,48 @@
     </div>
     {% endif %}
 
+    <!-- Files-Lost banner (Phase 4.3 — issue #101).
+         Hidden by default; shown by JS poller when archive.lost_24h > 0.
+         This is the user-facing version of the worker's source_gone
+         counter — clips Tesla rotated out of RecentClips before we
+         could archive them. Lost dashcam footage is unrecoverable, so
+         this banner is intentionally loud (red) and links to the
+         Failed Jobs page for the full archive history. -->
+    <div id="files-lost-banner" hidden
+         style="margin:12px 0; padding:12px 14px;
+                border-radius:8px;
+                background:var(--msg-error-bg, #4a1f1f);
+                color:var(--msg-error-text, #ffd7d7);
+                border:1px solid var(--accent-error, #f44336);
+                display:flex; align-items:center; gap:10px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" style="flex-shrink:0;">
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <div style="flex:1;">
+            <strong id="files-lost-title">
+                Footage may have been lost
+            </strong>
+            <div id="files-lost-detail"
+                 style="font-size:0.9rem; margin-top:2px;
+                        opacity:0.92;">
+                Tesla rotated clips out of RecentClips before
+                we could copy them. Check Failed Jobs for details.
+            </div>
+        </div>
+        <a id="files-lost-link" href="#"
+           style="color:inherit; text-decoration:underline;
+                  font-size:0.9rem; min-height:44px; min-width:44px;
+                  display:inline-flex; align-items:center;
+                  padding:0 10px;">
+            Details
+        </a>
+    </div>
+
     <!-- System Health (Phase 4.2 — issue #101) -->
     <details class="settings-section" id="system-health-section" open>
         <summary>System Health</summary>
@@ -1777,11 +1819,45 @@ if (document.getElementById('fsck-status-container')) {
                 errorEl.hidden = true;
                 renderRows(payload);
                 renderOverall(payload);
+                renderFilesLostBanner(payload);
             })
             .catch(function(e) {
                 console.warn('system_health load failed:', e);
                 errorEl.hidden = false;
             });
+    }
+
+    // Phase 4.3 (issue #101) — files-lost banner. Surfaces the
+    // archive worker's source_gone counter (clips Tesla rotated out
+    // before we could copy them) when the 24 h count is non-zero.
+    // Lost dashcam footage is unrecoverable, so the banner is
+    // intentionally loud and persistent until the count drops back
+    // to zero (which happens automatically as old source_gone rows
+    // age past the 24 h window, or sooner if the user purges them).
+    var lostBanner   = document.getElementById('files-lost-banner');
+    var lostDetail   = document.getElementById('files-lost-detail');
+    var lostLink     = document.getElementById('files-lost-link');
+    if (lostLink && jobsUrl) lostLink.href = jobsUrl;
+
+    function renderFilesLostBanner(payload) {
+        if (!lostBanner) return;
+        var arc = payload.archive || {};
+        var n = parseInt(arc.lost_24h, 10) || 0;
+        if (n <= 0) {
+            lostBanner.hidden = true;
+            return;
+        }
+        if (lostDetail) {
+            lostDetail.textContent =
+                n === 1
+                ? '1 clip lost in the last 24 hours — Tesla ' +
+                  'rotated it out of RecentClips before it could ' +
+                  'be archived. Device may be overloaded.'
+                : n + ' clips lost in the last 24 hours — Tesla ' +
+                  'rotated them out of RecentClips before they ' +
+                  'could be archived. Device may be overloaded.';
+        }
+        lostBanner.hidden = false;
     }
 
     function startPoll() {

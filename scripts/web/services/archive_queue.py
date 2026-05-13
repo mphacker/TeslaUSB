@@ -384,6 +384,64 @@ def enqueue_many_for_archive(source_paths: Iterable[str], *,
         return 0
 
 
+def count_source_gone_recent(hours: int = 24,
+                             *, db_path: Optional[str] = None) -> int:
+    """Return the number of ``source_gone`` rows in the last N hours.
+
+    Phase 4.3 (issue #101) — surface "files Tesla rotated out before we
+    could copy them" as a Settings banner. The truth signal is the
+    archive_queue rows that the worker terminated as ``source_gone``
+    (file vanished between enqueue and copy attempt — Tesla's
+    RecentClips circular buffer rolled them off).
+
+    Uses ``claimed_at`` as the timestamp filter. Rationale: by the time
+    the worker calls :func:`mark_source_gone`, ``claimed_at`` has been
+    set on the row (the worker always claims a row before stat'ing the
+    source), and the source-gone determination happens within seconds
+    of the claim. So ``claimed_at`` is the closest proxy for "when did
+    Tesla lose this clip from our perspective".
+
+    Cheap COUNT(*) — uses the existing index on ``status``. Safe to
+    call on every health-card poll (~30 ms typical).
+
+    Returns 0 if the DB is missing, the table doesn't exist yet, or any
+    SQLite error fires — never raises.
+    """
+    if hours <= 0:
+        return 0
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        # ``CAST(strftime('%s', x) AS INTEGER)`` works for both ISO-8601
+        # text (the format ``_iso_now`` writes — includes ``T`` and
+        # ``+00:00``) and SQLite's own ``datetime('now')`` format.
+        # Using integer-second arithmetic instead of julianday floats
+        # avoids the precision foot-gun documented in the project-wide
+        # gotchas (see ``copilot-instructions.md``).
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+              FROM archive_queue
+             WHERE status = 'source_gone'
+               AND claimed_at IS NOT NULL
+               AND CAST(strftime('%s', claimed_at) AS INTEGER) >=
+                   CAST(strftime('%s', 'now') AS INTEGER) - ?
+            """,
+            (int(hours) * 3600,),
+        ).fetchone()
+        return int(row['n'] or 0) if row else 0
+    except sqlite3.Error as e:
+        logger.warning("count_source_gone_recent failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def get_queue_status(db_path: Optional[str] = None) -> Dict[str, int]:
     """Return per-status counts for the queue.
 

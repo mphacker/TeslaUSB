@@ -230,6 +230,132 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# ---------------------------------------------------------------------------
+# Lost-banner dismiss tombstone (issue: PR #169 follow-up)
+# ---------------------------------------------------------------------------
+#
+# When the operator dismisses the home-page "Footage may have been lost"
+# banner, ``delete_source_gone`` removes every existing ``source_gone``
+# row — but during a major catch-up backlog the worker keeps creating
+# *new* ``source_gone`` rows within seconds (1 200+ pending clips of
+# which many have already aged out of Tesla's RecentClips circular
+# buffer). Without a server-side tombstone the user sees the banner
+# pop right back, which reads as "dismiss is broken."
+#
+# We persist the dismissal timestamp to a small JSON file alongside the
+# other GADGET_DIR runtime state (``fsck_status.json``,
+# ``chime_schedules.json``, etc.) so a subsequent ``count_source_gone``
+# poll can clamp its ``claimed_at`` lower bound to ``MAX(now-24h, dismissed_at)``.
+# Net effect: the banner stays hidden until brand-new losses occur
+# *after* the dismissal — which is the user's actual mental model.
+
+_LOST_DISMISSED_FILENAME = 'archive_lost_dismissed.json'
+
+
+def _lost_dismissed_path() -> str:
+    """Return the absolute path of the tombstone JSON file.
+
+    Lazy-imports ``GADGET_DIR`` (matches the pattern in
+    :func:`_resolve_db_path`) so this module is still safe to import
+    in unit tests where ``config`` may not be on ``sys.path``. Tests
+    can override the path by passing ``state_path=`` to the public
+    helpers.
+    """
+    from config import GADGET_DIR
+    return os.path.join(GADGET_DIR, _LOST_DISMISSED_FILENAME)
+
+
+def get_lost_dismissed_at(*, state_path: Optional[str] = None) -> Optional[str]:
+    """Return the ISO-8601 timestamp of the last banner dismissal.
+
+    Returns ``None`` when the tombstone file is missing, malformed,
+    unreadable, or contains no timestamp. Callers MUST tolerate
+    ``None`` (it just means "no floor — apply the 24 h window only").
+    """
+    import json
+
+    path = state_path or _lost_dismissed_path()
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning("get_lost_dismissed_at: failed to read %s: %s", path, e)
+        return None
+
+    ts = data.get('dismissed_at') if isinstance(data, dict) else None
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    return ts
+
+
+def set_lost_dismissed_at(timestamp: Optional[str] = None,
+                          *, state_path: Optional[str] = None) -> Optional[str]:
+    """Persist a banner-dismissal timestamp; return what was written.
+
+    Atomic-write pattern: temp file + ``os.replace`` so a crash
+    mid-write can never leave a half-truncated JSON file (which
+    :func:`get_lost_dismissed_at` would silently treat as "no tombstone"
+    — wrong, but at least not a crash).
+
+    Pass ``timestamp=None`` to use ``_iso_now()`` (the typical caller
+    path from :func:`delete_source_gone`); pass an explicit string to
+    rewrite the floor (e.g. tests, or an admin "un-dismiss" action).
+
+    Returns the timestamp actually written, or ``None`` on a write
+    failure (the caller should treat the dismissal as still effective
+    in-memory but warn that the suppression won't survive a restart).
+    """
+    import json
+
+    path = state_path or _lost_dismissed_path()
+    ts = timestamp if timestamp is not None else _iso_now()
+    tmp = path + '.tmp'
+    try:
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'dismissed_at': ts}, f)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+        return ts
+    except OSError as e:
+        logger.warning("set_lost_dismissed_at: failed to write %s: %s", path, e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None
+
+
+def _epoch_from_iso(iso: Optional[str]) -> Optional[int]:
+    """Convert ISO-8601 timestamp to integer epoch seconds; return None on parse failure.
+
+    Accepts both formats produced by :func:`_iso_now` (offset-aware
+    ``+00:00``) and SQLite's own ``datetime('now')`` (naive UTC).
+    Wrapped in try/except so a corrupt tombstone file can't blow up
+    the caller — :func:`count_source_gone_recent` then degrades to
+    "no tombstone, 24 h window only."
+    """
+    if not iso:
+        return None
+    try:
+        # ``fromisoformat`` accepts both ``2026-01-02T03:04:05+00:00`` and
+        # ``2026-01-02 03:04:05``; the only real-world failure mode is a
+        # truncated/garbage write, in which case we want to fall back to
+        # "no floor" rather than crash.
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
 def _safe_stat(path: str):
     """Return ``os.stat`` result or None on failure.
 
@@ -386,7 +512,9 @@ def enqueue_many_for_archive(source_paths: Iterable[str], *,
 
 
 def count_source_gone_recent(hours: int = 24,
-                             *, db_path: Optional[str] = None) -> int:
+                             *, db_path: Optional[str] = None,
+                             dismissed_at: Optional[str] = None,
+                             ignore_dismissed: bool = False) -> int:
     """Return the number of ``source_gone`` rows in the last N hours.
 
     Phase 4.3 (issue #101) — surface "files Tesla rotated out before we
@@ -404,6 +532,18 @@ def count_source_gone_recent(hours: int = 24,
     precondition (``WHERE status='claimed'``) guarantees ``claimed_at``
     is never NULL on a ``source_gone`` row, so the counter cannot
     silently undercount because of an out-of-flow caller.
+
+    **Dismissal floor (PR #169 follow-up)**: if a banner-dismissal
+    tombstone is set (see :func:`set_lost_dismissed_at`), the lower
+    bound is clamped to ``MAX(now-hours, dismissed_at)`` so previously-
+    acknowledged losses don't repopulate the count when the worker
+    immediately marks more files ``source_gone`` (catch-up backlog
+    burst). When ``dismissed_at`` is ``None`` and ``ignore_dismissed``
+    is False, the helper looks up the tombstone via
+    :func:`get_lost_dismissed_at` (default behavior — what the banner
+    poll wants). Pass ``ignore_dismissed=True`` to bypass the floor
+    entirely (e.g. the Failed Jobs page, where we want the raw count
+    regardless of dismissal state).
 
     Cheap COUNT(*) — uses the v11 partial index
     ``archive_queue_source_gone_claimed`` (``ON archive_queue(claimed_at)
@@ -423,6 +563,22 @@ def count_source_gone_recent(hours: int = 24,
     if hours <= 0:
         return 0
     db_path = _resolve_db_path(db_path)
+
+    # Resolve the dismissal floor. ``ignore_dismissed=True`` is the
+    # explicit "no floor at all" override (used by Failed Jobs page);
+    # otherwise an explicit ``dismissed_at`` kwarg wins over the
+    # on-disk tombstone (used by tests + by future per-user dismiss).
+    if ignore_dismissed:
+        floor_iso = None
+    elif dismissed_at is not None:
+        floor_iso = dismissed_at
+    else:
+        try:
+            floor_iso = get_lost_dismissed_at()
+        except Exception:  # noqa: BLE001
+            floor_iso = None
+    floor_epoch = _epoch_from_iso(floor_iso)
+
     conn = None
     try:
         conn = _open_archive_conn(db_path)
@@ -432,17 +588,35 @@ def count_source_gone_recent(hours: int = 24,
         # Using integer-second arithmetic instead of julianday floats
         # avoids the precision foot-gun documented in the project-wide
         # gotchas (see ``copilot-instructions.md``).
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS n
-              FROM archive_queue
-             WHERE status = 'source_gone'
-               AND claimed_at IS NOT NULL
-               AND CAST(strftime('%s', claimed_at) AS INTEGER) >=
-                   CAST(strftime('%s', 'now') AS INTEGER) - ?
-            """,
-            (int(hours) * 3600,),
-        ).fetchone()
+        if floor_epoch is None:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                  FROM archive_queue
+                 WHERE status = 'source_gone'
+                   AND claimed_at IS NOT NULL
+                   AND CAST(strftime('%s', claimed_at) AS INTEGER) >=
+                       CAST(strftime('%s', 'now') AS INTEGER) - ?
+                """,
+                (int(hours) * 3600,),
+            ).fetchone()
+        else:
+            # Apply the dismissal floor on top of the 24 h window.
+            # SQLite's ``MAX()`` is a scalar across two arguments here.
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                  FROM archive_queue
+                 WHERE status = 'source_gone'
+                   AND claimed_at IS NOT NULL
+                   AND CAST(strftime('%s', claimed_at) AS INTEGER) >=
+                       MAX(
+                           CAST(strftime('%s', 'now') AS INTEGER) - ?,
+                           ?
+                       )
+                """,
+                (int(hours) * 3600, floor_epoch),
+            ).fetchone()
         return int(row['n'] or 0) if row else 0
     except sqlite3.Error as e:
         logger.warning("count_source_gone_recent failed: %s", e)
@@ -456,7 +630,9 @@ def count_source_gone_recent(hours: int = 24,
 
 
 def delete_source_gone(*, older_than_hours: Optional[int] = None,
-                       db_path: Optional[str] = None) -> int:
+                       db_path: Optional[str] = None,
+                       set_dismissal_tombstone: bool = True,
+                       state_path: Optional[str] = None) -> int:
     """Permanently delete ``source_gone`` rows from ``archive_queue``.
 
     Issue #163 — companion to :func:`count_source_gone_recent`. The
@@ -481,11 +657,36 @@ def delete_source_gone(*, older_than_hours: Optional[int] = None,
     many hours (mirrors the ``hours`` parameter of
     :func:`count_source_gone_recent`).
 
+    **Dismissal tombstone (PR #169 follow-up)**: when called from the
+    Dismiss button (``older_than_hours=None``), this also writes the
+    current timestamp via :func:`set_lost_dismissed_at` BEFORE the
+    DELETE so a worker burst racing the dismiss cannot repopulate the
+    banner — :func:`count_source_gone_recent` will floor the window at
+    that timestamp on subsequent polls. Pass
+    ``set_dismissal_tombstone=False`` to skip the tombstone write
+    (e.g. for forensic / older-than-hours purges that aren't user
+    acknowledgments). Tombstone-write failure is non-fatal: the DELETE
+    still happens; the operator just won't get the suppression
+    benefit if the worker repopulates between now and the next
+    successful tombstone write.
+
     Returns the number of rows actually deleted (``0`` if nothing
     matched). Returns ``0`` on any DB error so a UI Dismiss click
     never blows up the request handler.
     """
     db_path = _resolve_db_path(db_path)
+
+    # Write the tombstone BEFORE the DELETE so we never race the
+    # worker. Only the unconditional dismiss path (``older_than_hours
+    # is None``) is treated as a user acknowledgment; an
+    # ``older_than_hours``-scoped purge is a forensic operation, not a
+    # banner dismiss, so we skip the tombstone there.
+    if set_dismissal_tombstone and older_than_hours is None:
+        try:
+            set_lost_dismissed_at(state_path=state_path)
+        except Exception:  # noqa: BLE001
+            logger.warning("delete_source_gone: tombstone write raised; continuing")
+
     conn = None
     try:
         conn = _open_archive_conn(db_path)

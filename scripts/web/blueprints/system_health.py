@@ -711,4 +711,23 @@ def api_clear_lost_clips():
         logger.exception("/api/system/clear_lost_clips crashed")
         return jsonify({'error': 'clear failed'}), 500
 
-    return jsonify({'rows_deleted': n})
+    # Read back the tombstone so the UI can show "dismissed at" if it
+    # wants to. Wrapped in its own try/except: a tombstone-read failure
+    # MUST NOT 500 a successful dismiss — the DELETE has already
+    # committed, the operator's primary intent is satisfied.
+    # Skip the lookup for forensic ``older_than_hours`` purges (those
+    # don't write a tombstone — see ``delete_source_gone``).
+    dismissed_at = None
+    if older_than_hours is None:
+        try:
+            dismissed_at = archive_queue.get_lost_dismissed_at()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "/api/system/clear_lost_clips: tombstone read failed",
+                exc_info=True,
+            )
+
+    return jsonify({
+        'rows_deleted': n,
+        'dismissed_at': dismissed_at,
+    })

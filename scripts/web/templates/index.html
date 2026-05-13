@@ -2177,11 +2177,24 @@ if (document.getElementById('fsck-status-container')) {
     if (lostDismiss) {
         lostDismiss.addEventListener('click', function() {
             // Issue #163 — let the operator acknowledge the banner.
-            // Posts to /api/system/clear_lost_clips which deletes
-            // every source_gone row; the banner re-polls and hides
-            // when the count returns to 0. ``source_gone`` is
-            // terminal and has no downstream consumer, so this
-            // affects only the banner number.
+            // Posts to /api/system/clear_lost_clips which:
+            //   1. Writes a server-side dismissal tombstone (PR #169
+            //      follow-up). Subsequent count_source_gone_recent
+            //      calls floor the 24-h window at this timestamp so a
+            //      worker burst on a heavily-backlogged device cannot
+            //      repopulate the banner with already-acknowledged
+            //      losses.
+            //   2. Deletes every existing source_gone row so the
+            //      Failed Jobs page's `source_gone_count` also clears.
+            // ``source_gone`` is terminal and has no downstream
+            // consumer, so this is safe.
+            //
+            // We optimistically hide the banner the instant the POST
+            // succeeds (instead of waiting for the next health poll
+            // to pick up the count change), so the user gets an
+            // immediate visual confirmation that "Dismiss worked".
+            // If a brand-new loss arrives later, the next poll will
+            // re-show the banner.
             if (!window.confirm(
                     'Dismiss the lost-footage banner?\n\n' +
                     'This permanently deletes the records of clips ' +
@@ -2203,8 +2216,12 @@ if (document.getElementById('fsck-status-container')) {
                 return resp.json();
             })
             .then(function() {
-                // Force an immediate health re-poll; the banner
-                // will hide itself when lost_24h drops to 0.
+                // Optimistically hide the banner now. Do this BEFORE
+                // loadHealth() so we never flash "still showing" for
+                // the ~50–200 ms the GET takes to round-trip the Pi.
+                if (lostBanner) lostBanner.hidden = true;
+                // Force an immediate health re-poll so the System
+                // Health card reflects the cleared state.
                 loadHealth();
             })
             .catch(function(e) {

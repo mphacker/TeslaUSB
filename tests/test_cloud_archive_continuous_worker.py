@@ -635,11 +635,47 @@ class TestPR126Regressions:
         see success — the second must not get a false negative
         ``"Failed to start cloud archive worker"`` just because the
         first won the race.
+
+        Re-review noted the original version of this test was
+        unreliable because Python's GIL serializes the snapshot →
+        start window so tightly that the buggy code path is rarely
+        taken. We deliberately widen the race here:
+
+        * Monkey-patch ``svc.start()`` with a wrapper that sleeps
+          ~50 ms while holding the worker lock. That guarantees the
+          first caller is mid-``start()`` long enough for all the
+          other callers to pile up behind the lock — and means the
+          subsequent callers will see ``start()`` return ``False``
+          (because the first caller already set ``_worker_thread``)
+          and therefore exercise the ``worker_alive`` recheck branch
+          that Finding #4 lived in.
+        * The pre-fix code did its own ``_worker_thread is None``
+          snapshot OUTSIDE the lock and treated ``False`` from
+          ``start()`` as a hard failure — under this test it would
+          return False for 4 of 5 callers.
         """
-        results = []
+        original_start = svc.start
+
+        def _slow_start(*args, **kwargs):
+            # Acquire the same lock start() uses, sleep briefly to
+            # widen the race, then call through. This guarantees
+            # the lock is held long enough for all 5 threads to
+            # contend at the start() entry point.
+            with svc._worker_lock:
+                time.sleep(0.05)
+            return original_start(*args, **kwargs)
+
+        monkeypatch.setattr(svc, 'start', _slow_start)
+
+        results: List = []
         results_lock = threading.Lock()
+        barrier = threading.Barrier(5)
 
         def _call_start_sync():
+            # Pile all callers up at the barrier so they all enter
+            # start_sync simultaneously — maximizing the chance of
+            # one winning the race and the others losing.
+            barrier.wait(timeout=2.0)
             ok, msg = svc.start_sync("/teslacam", "/db", trigger="manual")
             with results_lock:
                 results.append((ok, msg))
@@ -650,13 +686,20 @@ class TestPR126Regressions:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=3.0)
+            t.join(timeout=5.0)
 
         # All 5 callers must report success.
-        assert len(results) == 5
+        assert len(results) == 5, (
+            f"Only {len(results)}/5 threads completed — start_sync "
+            f"hung under contention."
+        )
         failures = [(ok, msg) for ok, msg in results if not ok]
         assert not failures, (
             f"start_sync returned False for {len(failures)} of 5 "
-            f"concurrent callers — race in lazy-start. "
-            f"Failures: {failures}"
+            f"concurrent callers — race in lazy-start. The "
+            f"start_sync code must call start() unconditionally "
+            f"(it's idempotent) and only fail if the worker isn't "
+            f"actually alive afterward, NOT if start() returned "
+            f"False (which only means 'someone else already "
+            f"started it'). Failures: {failures}"
         )

@@ -1338,9 +1338,14 @@ def _drain_once(
     """
     global _sync_status
 
-    # Compose a "either" event so per-file checks below short-circuit
-    # on either signal. Wrap as a tiny shim with the threading.Event
-    # API surface used inside the body (.is_set() / .wait()).
+    # Compose an "either" event so per-file checks below short-circuit
+    # on either ``_drain_cancel`` (set by ``stop_sync``) or
+    # ``_worker_stop`` (set by ``stop``). Only ``.is_set()`` is exercised
+    # by the drain loop today; we deliberately do NOT expose ``set``,
+    # ``clear``, or ``wait`` because those would have asymmetric
+    # semantics (which underlying event do we mutate?) and become a
+    # footgun for future code. If a future caller needs to mutate the
+    # composite, it should operate on the underlying events directly.
     class _EitherEvent:
         __slots__ = ("_a", "_b")
 
@@ -1350,31 +1355,6 @@ def _drain_once(
 
         def is_set(self):
             return self._a.is_set() or self._b.is_set()
-
-        def set(self):
-            # Setting the composite signals stop_sync semantics
-            # (interrupt current drain, don't kill worker).
-            self._a.set()
-
-        def clear(self):
-            self._a.clear()
-
-        def wait(self, timeout=None):
-            # Poll both events. Used only by sub-second waits in
-            # the upload loop, so a 0.1 s poll is fine.
-            deadline = (
-                None if timeout is None else time.monotonic() + timeout
-            )
-            while True:
-                if self.is_set():
-                    return True
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return False
-                    self._a.wait(timeout=min(0.1, remaining))
-                else:
-                    self._a.wait(timeout=0.1)
 
     cancel_event = _EitherEvent(_drain_cancel, _worker_stop)
 

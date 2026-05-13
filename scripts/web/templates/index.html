@@ -569,6 +569,18 @@
                           style="font-size:0.95rem">—</span>
                 </div>
             </div>
+            {# Phase 4.7 (#101) — prominent one-line summary so users
+               see what retention did without having to scan three chips.
+               Hidden until the first /api/archive/status response arrives;
+               JS sets textContent and toggles `hidden`. #}
+            <p id="storage-prune-summary"
+               class="storage-prune-summary"
+               style="margin:0 0 12px; padding:10px 12px;
+                      background:var(--bg-secondary);
+                      border-left:3px solid var(--accent-info, #0891B2);
+                      border-radius:4px; font-size:0.9rem;
+                      color:var(--text-primary);"
+               hidden></p>
             <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 8px">
                 Clips older than the retention window above are automatically deleted.
                 Trips, waypoints, and detected events are <strong>preserved</strong> —
@@ -1372,6 +1384,64 @@ if (document.getElementById('fsck-status-container')) {
             ? data.last_prune_deleted + ' files (' +
               fmtBytes(data.last_prune_freed_bytes) + ')'
             : 'no files');
+
+        // Phase 4.7 (#101) — prominent retention summary line.
+        // Reassures users that retention is keeping the SD card healthy
+        // and tells them concretely what was deleted last time.
+        const summaryEl = document.getElementById('storage-prune-summary');
+        if (summaryEl) {
+            const summary = composePruneSummary(data);
+            if (summary) {
+                summaryEl.textContent = summary;
+                summaryEl.hidden = false;
+            } else {
+                summaryEl.hidden = true;
+            }
+        }
+    }
+
+    // Build a single-line human summary of the most recent retention
+    // prune. Returns '' (caller hides the element) when no prune has
+    // ever run yet — the chips already show '—' in that case.
+    function composePruneSummary(data) {
+        if (data.last_prune_error) {
+            return 'Last retention prune failed: ' +
+                   String(data.last_prune_error);
+        }
+        if (!data.last_prune_at) {
+            return '';
+        }
+        const deleted = parseInt(data.last_prune_deleted, 10) || 0;
+        const freed = parseInt(data.last_prune_freed_bytes, 10) || 0;
+        const kept = parseInt(data.last_prune_kept_unsynced, 10) || 0;
+        const when = fmtPruneWhen(data.last_prune_at);
+
+        let main;
+        if (deleted > 0) {
+            const noun = deleted === 1 ? 'clip' : 'clips';
+            main = 'Retention pruned ' + deleted + ' ' + noun + ' ' +
+                   when + ', ' + fmtBytes(freed) + ' freed.';
+        } else {
+            main = 'Retention ran ' + when +
+                   '; no clips removed (all within retention window).';
+        }
+        if (kept > 0) {
+            const keptNoun = kept === 1 ? 'clip' : 'clips';
+            main += ' Kept ' + kept + ' ' + keptNoun +
+                    ' past retention awaiting cloud sync.';
+        }
+        return main;
+    }
+
+    // "today" / "yesterday" / "N days ago" — matches the friendly
+    // tone of the rest of the Storage panel.
+    function fmtPruneWhen(iso) {
+        const t = Date.parse(iso);
+        if (isNaN(t)) return 'recently';
+        const ageS = Math.max(0, (Date.now() - t) / 1000);
+        if (ageS < 86400) return 'today';
+        if (ageS < 2 * 86400) return 'yesterday';
+        return Math.floor(ageS / 86400) + ' days ago';
     }
 
     async function poll() {

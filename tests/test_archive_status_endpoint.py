@@ -129,6 +129,7 @@ class TestArchiveStatusShape:
         'last_successful_copy_at', 'last_successful_copy_age_seconds',
         'retention_days', 'last_prune_at', 'last_prune_deleted',
         'last_prune_freed_bytes', 'last_prune_error', 'next_prune_due_at',
+        'last_prune_kept_unsynced',
         'watchdog_running',
     }
 

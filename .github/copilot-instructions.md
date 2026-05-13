@@ -73,7 +73,7 @@ These devices run in a vehicle; power can drop at any time. Prioritize atomic wr
 - **Tesla cache invalidation**: Tesla caches USB file contents and won't detect changes unless the USB device is re-enumerated. After replacing `LockChime.wav`, MUST unbind/rebind the USB gadget (see `partition_mount_service.rebind_usb_gadget()`). This simulates unplug/replug and forces Tesla to clear cache and re-scan the drive. The `set_active_chime()` function handles this automatically in present mode.
 
 ## Key Workflows
-- Switch modes: `sudo /home/pi/TeslaUSB/present_usb.sh` or `edit_usb.sh`; check `state.txt`.
+- Switch modes: `sudo /home/pi/TeslaUSB/scripts/present_usb.sh` or `scripts/edit_usb.sh`; check `state.txt`.
 - Logs: `sudo journalctl -u gadget_web.service -f`; scheduler `chime_scheduler.service`; monitor quick-edit lock at `~/.quick_edit_part2.lock`.
 - Manual web run: `cd /home/pi/TeslaUSB && python3 web_control.py` (use configured paths after setup).
 

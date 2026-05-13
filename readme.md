@@ -243,8 +243,8 @@ The web interface abstracts the underlying modes behind user-friendly labels:
 
 **Switch modes** via the device status card on the Settings page ("Enable Network Sharing" / "Reconnect to Tesla" buttons) or command line:
 ```bash
-sudo ~/TeslaUSB/present_usb.sh  # Reconnect to Tesla
-sudo ~/TeslaUSB/edit_usb.sh     # Enable Network Sharing
+sudo ~/TeslaUSB/scripts/present_usb.sh  # Reconnect to Tesla
+sudo ~/TeslaUSB/scripts/edit_usb.sh     # Enable Network Sharing
 ```
 
 ### Network Access

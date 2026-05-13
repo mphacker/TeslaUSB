@@ -28,7 +28,11 @@ OOMScoreAdjust=-500
 # Security settings - relaxed for sudo operations
 # Note: Disabled mount namespace isolation so mounts are visible system-wide
 MountFlags=shared
-ReadWritePaths=__GADGET_DIR__ __MNT_DIR__ /run/samba /tmp
+# /run/samba is prefixed with `-` so systemd silently ignores it when
+# missing on a fresh boot. smbd auto-start is disabled (issue #74); the
+# directory only exists after edit_usb.sh starts smbd. Without `-` the
+# unit fails with `Failed to set up mount namespacing` / status=226/NAMESPACE.
+ReadWritePaths=__GADGET_DIR__ __MNT_DIR__ -/run/samba /tmp
 
 [Install]
 WantedBy=multi-user.target

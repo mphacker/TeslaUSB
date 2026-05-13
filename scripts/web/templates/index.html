@@ -385,6 +385,20 @@
                     <button type="button" id="sr-run-now-btn" class="btn btn-secondary"
                             style="flex:1; min-width:160px">Run cleanup now</button>
                 </div>
+
+                <div style="margin-top:14px; padding:12px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary)">
+                    <div style="font-size:0.9rem; font-weight:600; margin-bottom:4px">
+                        Reclaim space from stationary RecentClips
+                    </div>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 10px">
+                        Deletes archived RecentClips with no GPS movement (parked Sentry-mode footage,
+                        no driving, no events). Saved/Sentry event clips are preserved even if a
+                        RecentClips copy of the same recording exists. This can free a lot of space —
+                        on a typical install, RecentClips dominates the SD card.
+                    </p>
+                    <button type="button" id="sr-reclaim-stationary-btn" class="btn btn-secondary"
+                            style="width:100%; min-width:160px">Reclaim stationary RecentClips</button>
+                </div>
             </form>
 
             <div id="sr-last-run" style="margin-top:14px; padding:10px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary); font-size:0.85rem">
@@ -1587,6 +1601,7 @@ if (document.getElementById('fsck-status-container')) {
     var STORAGE_API = '/api/cleanup/status';
     var SAVE_API = '/api/cleanup/policy';
     var RUN_NOW_API = '/api/cleanup/run_now';
+    var RECLAIM_STATIONARY_API = '/api/cleanup/reclaim_stationary_recent';
     var POLL_MS = 30000;
     var FOLDER_NAMES = ['SentryClips', 'SavedClips', 'RecentClips', 'EncryptedClips', 'ArchivedClips'];
 
@@ -1804,12 +1819,61 @@ if (document.getElementById('fsck-status-container')) {
             .finally(function () { btn.disabled = false; });
     }
 
+    function onReclaimStationary() {
+        var btn = $('sr-reclaim-stationary-btn');
+        if (!btn) return;
+        var ok = window.confirm(
+            'Delete all archived RecentClips with no GPS movement?\n\n' +
+            'This deletes parked-Sentry / stationary footage from the SD card. ' +
+            'Saved/Sentry event clips are preserved. Indexed driving footage is preserved. ' +
+            'This may free several GB.'
+        );
+        if (!ok) return;
+        var origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Reclaiming…';
+        setError(null);
+        fetch(RECLAIM_STATIONARY_API, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        })
+            .then(function (r) {
+                return r.json().then(function (data) { return { status: r.status, data: data }; });
+            })
+            .then(function (res) {
+                var d = res.data || {};
+                var result = d.result || {};
+                if (result.status === 'already_running') {
+                    btn.textContent = 'Already running';
+                } else if (res.status >= 200 && res.status < 300 && d.success !== false) {
+                    var deleted = result.deleted_count || 0;
+                    var freed = result.freed_bytes ? fmtBytes(result.freed_bytes) : '0 B';
+                    btn.textContent = '✓ ' + deleted + ' clips, ' + freed;
+                } else {
+                    setError(d.message || 'Reclaim failed');
+                    btn.textContent = origText;
+                    return;
+                }
+                loadStatus();
+                setTimeout(function () { btn.textContent = origText; }, 6000);
+            })
+            .catch(function (e) {
+                setError('Network error: ' + e.message);
+                btn.textContent = origText;
+            })
+            .finally(function () { btn.disabled = false; });
+    }
+
     if (!$('storage-retention-section')) return;
 
     var saveBtn = $('sr-save-btn');
     var runBtn = $('sr-run-now-btn');
+    var reclaimBtn = $('sr-reclaim-stationary-btn');
     if (saveBtn) saveBtn.addEventListener('click', onSave);
     if (runBtn) runBtn.addEventListener('click', onRunNow);
+    if (reclaimBtn) reclaimBtn.addEventListener('click', onReclaimStationary);
     var defEl = $('sr-default-retention');
     var warnEl = $('sr-short-warning');
     function refreshWarning() {

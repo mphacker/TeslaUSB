@@ -901,6 +901,281 @@ def force_prune_now() -> Dict[str, Any]:
     return summary
 
 
+def reclaim_stationary_recent_clips(*,
+                                    db_path: Optional[str] = None,
+                                    archive_root: Optional[str] = None,
+                                    min_age_hours: int = 1,
+                                    ) -> Dict[str, Any]:
+    """Issue #167 — delete already-archived stationary RecentClips.
+
+    Walks ``<archive_root>/RecentClips/*.mp4`` and deletes every clip
+    that the indexer classified as stationary (``waypoint_count = 0``
+    AND ``event_count = 0`` in ``indexed_files``) AND has no
+    SentryClips / SavedClips counterpart with the same basename. The
+    counterpart check protects user-meaningful events: Tesla writes
+    the same clip into both ``RecentClips/`` (rolling buffer) and the
+    event subfolder when an event triggers, and we should never delete
+    the only copy of a saved-event clip.
+
+    Why this is safe to ship behind a single button (no per-file
+    confirm):
+
+    * Routes every delete through
+      :func:`services.file_safety.safe_delete_archive_video` — the
+      single doorway that enforces the ``*.img`` / protected-file
+      guard.
+    * Reconciles geodata via
+      :func:`mapping_service.purge_deleted_videos` for each deleted
+      clip, which only deletes the orphan ``indexed_files`` row and
+      NULLs ``waypoints.video_path`` / ``detected_events.video_path``.
+      The "trips are sacred" invariant is preserved.
+    * Refuses to delete files newer than ``min_age_hours`` (default
+      1 h) so a clip Tesla just wrote and the indexer hasn't seen yet
+      can't be preemptively wiped.
+    * Holds the ``task_coordinator`` 'retention' slot for the
+      duration so the archive worker yields cleanly. Releases the
+      slot before returning.
+    * Single-flight: re-uses the same ``_retention_running`` guard as
+      the daily prune, so a stacked Settings click can't pile up two
+      reclaim passes.
+
+    Caller args (both optional — startup state is the default):
+
+    * ``db_path``: path to ``geodata.db``. Defaults to the value
+      ``start_watchdog`` was called with.
+    * ``archive_root``: SD-card archive root. Defaults to the value
+      ``start_watchdog`` was called with.
+    * ``min_age_hours``: don't touch files younger than this. Default
+      1 h. Set to 0 ONLY for testing.
+
+    Returns a summary dict::
+
+        {'deleted_count': N, 'freed_bytes': M, 'scanned': K,
+         'kept_too_new': T, 'kept_has_event_counterpart': E,
+         'kept_unindexed': U, 'kept_has_gps': G,
+         'duration_seconds': S}
+
+    On any error (missing args, watchdog never started, ``acquire_task``
+    timeout) returns the same dict with the relevant ``error`` /
+    ``status`` field populated; never raises.
+    """
+    global _retention_running
+    started = time.time()
+    summary: Dict[str, Any] = {
+        'deleted_count': 0,
+        'freed_bytes': 0,
+        'scanned': 0,
+        'kept_too_new': 0,
+        'kept_has_event_counterpart': 0,
+        'kept_unindexed': 0,
+        'kept_has_gps': 0,
+        'min_age_hours': int(min_age_hours),
+        'duration_seconds': 0.0,
+    }
+
+    if db_path is None or archive_root is None:
+        with _state_lock:
+            if db_path is None:
+                db_path = _db_path
+            if archive_root is None:
+                archive_root = _archive_root
+    if not archive_root or not db_path:
+        summary['error'] = 'watchdog not started'
+        summary['duration_seconds'] = round(time.time() - started, 3)
+        return summary
+
+    # Issue #91 — single-flight guard. Same flag as the periodic prune
+    # so a stacked "Run cleanup now" + "Reclaim stationary" + watchdog
+    # tick can't pile up. Set BEFORE acquire_task so the second caller
+    # short-circuits even if the first is still queued on the slot.
+    # Checked before the missing-RecentClips early-return so a stacked
+    # call still sees the in-flight status (the test contract — a
+    # second call should never silently no-op).
+    with _state_lock:
+        if _retention_running:
+            summary['status'] = 'already_running'
+            summary['duration_seconds'] = round(time.time() - started, 3)
+            logger.info(
+                "reclaim_stationary: skipped — another prune is already "
+                "in flight (returning status='already_running')"
+            )
+            return summary
+        _retention_running = True
+
+    recent_root = os.path.join(archive_root, 'RecentClips')
+    if not os.path.isdir(recent_root):
+        with _state_lock:
+            _retention_running = False
+        summary['duration_seconds'] = round(time.time() - started, 3)
+        return summary
+
+    cutoff_mtime = started - (max(int(min_age_hours), 0) * 3600)
+
+    try:
+        acquired = task_coordinator.acquire_task(
+            _RETENTION_COORDINATOR_TASK,
+            wait_seconds=_RETENTION_COORDINATOR_WAIT_SECONDS,
+        )
+        if not acquired:
+            logger.info(
+                "reclaim_stationary: skipped — could not acquire 'retention' "
+                "task slot within %.1fs",
+                _RETENTION_COORDINATOR_WAIT_SECONDS,
+            )
+            summary['duration_seconds'] = round(time.time() - started, 3)
+            return summary
+
+        try:
+            stationary_paths = _collect_stationary_recent_clips(
+                db_path, archive_root,
+            )
+            stationary_set = {p for p, _meta in stationary_paths}
+            event_basenames = _collect_event_basenames(archive_root)
+
+            for path, mtime, _size in _iter_archive_mp4_files(recent_root):
+                summary['scanned'] += 1
+                if mtime > cutoff_mtime:
+                    summary['kept_too_new'] += 1
+                    continue
+                if path not in stationary_set:
+                    # Either the indexer hasn't seen it yet, or it has
+                    # GPS waypoints / events. Either way: don't touch.
+                    # We can tell the two apart cheaply by checking the
+                    # ``indexed_files`` row presence.
+                    if _is_indexed(db_path, path):
+                        summary['kept_has_gps'] += 1
+                    else:
+                        summary['kept_unindexed'] += 1
+                    continue
+                basename = os.path.basename(path)
+                if basename in event_basenames:
+                    summary['kept_has_event_counterpart'] += 1
+                    continue
+                freed = _delete_one_mp4(path, db_path)
+                if freed > 0 or not os.path.exists(path):
+                    summary['deleted_count'] += 1
+                    summary['freed_bytes'] += freed
+                    logger.info(
+                        "reclaim_stationary: removed %s (freed=%d bytes)",
+                        path, freed,
+                    )
+        finally:
+            task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
+            summary['duration_seconds'] = round(time.time() - started, 3)
+    finally:
+        with _state_lock:
+            _retention_running = False
+
+    logger.info(
+        "reclaim_stationary: done — deleted=%d, freed_bytes=%d, "
+        "scanned=%d, kept_too_new=%d, kept_event_counterpart=%d, "
+        "kept_unindexed=%d, kept_has_gps=%d, duration=%.2fs",
+        summary['deleted_count'], summary['freed_bytes'],
+        summary['scanned'], summary['kept_too_new'],
+        summary['kept_has_event_counterpart'],
+        summary['kept_unindexed'], summary['kept_has_gps'],
+        summary['duration_seconds'],
+    )
+    return summary
+
+
+def _collect_stationary_recent_clips(db_path: str,
+                                     archive_root: str,
+                                     ) -> list:
+    """Return a list of ``(abs_path, indexed_meta)`` for every indexed
+    RecentClips clip the indexer classified as stationary
+    (``waypoint_count = 0`` AND ``event_count = 0``).
+
+    Reads ``indexed_files`` once, filters paths in Python rather than
+    via a SQL ``LIKE`` so it works across path-separator quirks
+    (Windows tests, edge cases). Returns an empty list on any DB
+    error.
+    """
+    out = []
+    if not db_path or not os.path.isfile(db_path):
+        return out
+    recent_root_norm = os.path.realpath(
+        os.path.join(archive_root, 'RecentClips')
+    ) + os.sep
+    conn = None
+    try:
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True,
+                               timeout=5.0)
+        for row in conn.execute(
+            "SELECT file_path, file_size FROM indexed_files "
+            "WHERE waypoint_count = 0 AND event_count = 0"
+        ):
+            file_path = row[0] or ''
+            try:
+                resolved = os.path.realpath(file_path)
+            except OSError:
+                continue
+            if not resolved.startswith(recent_root_norm):
+                continue
+            out.append((resolved, {'file_size': row[1]}))
+    except sqlite3.Error as e:
+        logger.warning("reclaim_stationary: stationary lookup failed: %s", e)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+    return out
+
+
+def _collect_event_basenames(archive_root: str) -> set:
+    """Return the set of ``.mp4`` basenames present under
+    ``SentryClips/`` or ``SavedClips/`` (recursive). Used to refuse
+    deleting a RecentClips clip that ALSO appears as a saved-event
+    clip — Tesla writes the same recording into both folders when an
+    event triggers, and the saved-event copy is the user-meaningful
+    one we must preserve even if the RecentClips copy is the only one
+    on disk.
+
+    Cheap O(n) directory walk; on a typical install n is a few thousand
+    files, finishes in well under a second.
+    """
+    out: set = set()
+    for sub in ('SentryClips', 'SavedClips'):
+        root = os.path.join(archive_root, sub)
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(
+            root, followlinks=False,
+        ):
+            dirnames[:] = [
+                d for d in dirnames if d != _DEAD_LETTER_DIRNAME
+            ]
+            for fn in filenames:
+                if fn.lower().endswith('.mp4'):
+                    out.add(fn)
+    return out
+
+
+def _is_indexed(db_path: str, file_path: str) -> bool:
+    """Return True iff ``indexed_files`` has a row for ``file_path``."""
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True,
+                               timeout=2.0)
+        row = conn.execute(
+            "SELECT 1 FROM indexed_files WHERE file_path = ? LIMIT 1",
+            (file_path,),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Watchdog thread loop
 # ---------------------------------------------------------------------------

@@ -195,6 +195,113 @@
         </div>
     </details>
 
+    <!-- Storage & Retention (Phase 3a.2 — closes part of #98) -->
+    <details class="settings-section" id="storage-retention-section" open>
+        <summary>Storage &amp; Retention</summary>
+        <div class="section-content">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                Controls how long archived dashcam clips are kept on the Pi's SD card and how
+                aggressively the cleanup pass runs. Changes take effect on the next cleanup pass —
+                no service restart needed.
+            </p>
+
+            <div id="sr-warning-banner" hidden
+                 style="margin:0 0 14px; padding:10px 14px; border-radius:8px;
+                        background:var(--msg-warning-bg); color:var(--msg-warning-text);
+                        border:1px solid var(--msg-warning-text); font-size:0.85rem;">
+                <strong>Heads up:</strong> short retention may delete footage of incidents that take time
+                to discover (e.g., scratches noticed days later).
+            </div>
+
+            <div id="sr-error-banner" hidden
+                 style="margin:0 0 14px; padding:10px 14px; border-radius:8px;
+                        background:var(--msg-error-bg); color:var(--msg-error-text);
+                        border:1px solid var(--msg-error-text); font-size:0.85rem;"></div>
+
+            <form id="storage-retention-form" onsubmit="return false;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Default retention (days)</strong></label>
+                        <input type="number" name="default_retention_days" id="sr-default-retention"
+                               min="1" max="3650" value="30"
+                               style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Applied to ArchivedClips and any folder without an override below.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Free-space target (% of SD card)</strong>
+                            <span style="font-weight:normal; color:var(--text-secondary)">
+                                — Phase 5 (preview)
+                            </span>
+                        </label>
+                        <input type="number" name="free_space_target_pct" id="sr-free-space-target"
+                               min="5" max="50" value="10"
+                               style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Saved now; not yet enforced by the prune. Phase 5 will use this to keep at
+                            least the requested free percentage.
+                        </p>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Maximum archive size (GB)</strong>
+                            <span style="font-weight:normal; color:var(--text-secondary)">
+                                — Phase 5 (preview)
+                            </span>
+                        </label>
+                        <input type="number" name="max_archive_size_gb" id="sr-max-archive"
+                               min="0" max="10000" value="0"
+                               style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Saved now; not yet enforced by the prune. Phase 5 will treat this as a hard
+                            cap. Leave at <strong>0</strong> to use only time-based retention.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Short-retention warning (days)</strong></label>
+                        <input type="number" name="short_retention_warning_days" id="sr-short-warning"
+                               min="1" max="365" value="7"
+                               style="width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Show the yellow warning banner when default retention drops below this.
+                        </p>
+                    </div>
+                </div>
+
+                <details style="margin-bottom:14px; border:1px solid var(--border); border-radius:8px; padding:10px 14px">
+                    <summary style="cursor:pointer; font-weight:600">Per-folder overrides (advanced)</summary>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:8px 0 12px">
+                        Override retention for individual Tesla folders. Leave a row disabled to inherit the default.
+                        ArchivedClips lives on the Pi's SD card; the others (SentryClips, SavedClips, RecentClips,
+                        EncryptedClips) are inside the USB image that Tesla writes to.
+                    </p>
+                    <div id="sr-policy-rows" style="display:flex; flex-direction:column; gap:10px">
+                        <!-- rows rendered by JS from /api/cleanup/status -->
+                    </div>
+                </details>
+
+                <div style="display:flex; gap:10px; flex-wrap:wrap">
+                    <button type="button" id="sr-save-btn" class="btn btn-primary"
+                            style="flex:1; min-width:160px">Save retention settings</button>
+                    <button type="button" id="sr-run-now-btn" class="btn btn-secondary"
+                            style="flex:1; min-width:160px">Run cleanup now</button>
+                </div>
+            </form>
+
+            <div id="sr-last-run" style="margin-top:14px; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg-secondary); font-size:0.85rem">
+                <strong>Last cleanup:</strong>
+                <span id="sr-last-run-text">—</span>
+            </div>
+
+            <div id="sr-disk-usage" hidden style="margin-top:10px; font-size:0.8rem; color:var(--text-secondary)">
+                <strong>SD card:</strong> <span id="sr-disk-text">—</span>
+            </div>
+        </div>
+    </details>
+
     <!-- Archive Settings -->
     <details class="settings-section">
         <summary>Archive Settings</summary>
@@ -1248,6 +1355,273 @@ if (document.getElementById('fsck-status-container')) {
 
     poll();
     setInterval(poll, POLL_MS);
+})();
+
+// ===========================================================================
+// Storage & Retention card (Phase 3a.2 — closes part of #98)
+// ===========================================================================
+(function () {
+    var STORAGE_API = '/api/cleanup/status';
+    var SAVE_API = '/api/cleanup/policy';
+    var RUN_NOW_API = '/api/cleanup/run_now';
+    var POLL_MS = 30000;
+    var FOLDER_NAMES = ['SentryClips', 'SavedClips', 'RecentClips', 'EncryptedClips', 'ArchivedClips'];
+
+    function $(id) { return document.getElementById(id); }
+
+    function fmtBytes(n) {
+        if (n == null || isNaN(n)) return '—';
+        if (n < 1024) return n + ' B';
+        var units = ['KB', 'MB', 'GB', 'TB'];
+        var i = -1;
+        do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+        return n.toFixed(n >= 10 ? 0 : 1) + ' ' + units[i];
+    }
+
+    function fmtRelative(iso) {
+        if (!iso) return 'never';
+        try {
+            var t = new Date(iso).getTime();
+            if (!t) return iso;
+            var diff = (Date.now() - t) / 1000;
+            if (diff < 60) return 'just now';
+            if (diff < 3600) return Math.floor(diff / 60) + ' min ago';
+            if (diff < 86400) return Math.floor(diff / 3600) + ' hr ago';
+            return Math.floor(diff / 86400) + ' days ago';
+        } catch (e) { return iso; }
+    }
+
+    function setError(msg) {
+        var el = $('sr-error-banner');
+        if (!el) return;
+        if (msg) {
+            el.textContent = msg;
+            el.hidden = false;
+        } else {
+            el.hidden = true;
+        }
+    }
+
+    function renderPolicyRows(policies, defaultDays) {
+        var container = $('sr-policy-rows');
+        if (!container) return;
+        container.innerHTML = '';
+        FOLDER_NAMES.forEach(function (name) {
+            var p = (policies && policies[name]) || {};
+            var enabled = !!p.enabled;
+            var days = (p.retention_days != null) ? p.retention_days : defaultDays;
+            var row = document.createElement('div');
+            row.style.cssText = 'display:grid; grid-template-columns:auto 1fr 1fr; gap:10px; align-items:center';
+            row.innerHTML =
+                '<label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.85rem">' +
+                  '<input type="checkbox" name="policy_' + name + '_enabled" ' + (enabled ? 'checked' : '') + '>' +
+                  '<strong>' + name + '</strong>' +
+                '</label>' +
+                '<span style="font-size:0.8rem; color:var(--text-secondary)">Retention (days)</span>' +
+                '<input type="number" name="policy_' + name + '_days" value="' + days +
+                  '" min="1" max="3650" style="width:100%; padding:4px 8px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary)">';
+            container.appendChild(row);
+        });
+    }
+
+    function renderLastRun(snapshot) {
+        var el = $('sr-last-run-text');
+        if (!el) return;
+        var lr = snapshot.last_run || {};
+        if (!lr.at) {
+            el.textContent = 'never run yet';
+            return;
+        }
+        var parts = [];
+        parts.push(fmtRelative(lr.at));
+        if (lr.deleted_count != null) parts.push('pruned ' + lr.deleted_count + ' clips');
+        if (lr.freed_bytes != null) parts.push('freed ' + fmtBytes(lr.freed_bytes));
+        if (lr.kept_unsynced_count) parts.push('kept ' + lr.kept_unsynced_count + ' un-synced');
+        if (lr.error) parts.push('error: ' + lr.error);
+        el.textContent = parts.join(' — ');
+    }
+
+    function renderDisk(snapshot) {
+        var disk = snapshot.disk || {};
+        var box = $('sr-disk-usage');
+        var txt = $('sr-disk-text');
+        if (!box || !txt) return;
+        if (!disk.total_bytes) {
+            box.hidden = true;
+            return;
+        }
+        txt.textContent =
+            fmtBytes(disk.free_bytes) + ' free of ' + fmtBytes(disk.total_bytes) +
+            ' (' + disk.free_pct + '% free)';
+        box.hidden = false;
+    }
+
+    function renderWarning(defaultDays, warnDays) {
+        var el = $('sr-warning-banner');
+        if (!el) return;
+        el.hidden = !(defaultDays && warnDays && defaultDays < warnDays);
+    }
+
+    function loadStatus() {
+        return fetch(STORAGE_API, { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+                if (!data || !data.success) return null;
+                var cfg = data.config || {};
+                // ``default_retention_days === 0`` in config.yaml means
+                // "inherit from legacy fallback chain". Show the resolved
+                // value the watchdog will actually use ONLY in that case;
+                // when the user has saved a concrete value, show THEIR value
+                // so subsequent saves don't accidentally write the cached
+                // resolved value back over the customization.
+                var resolvedDefault = (cfg.default_retention_days > 0)
+                    ? cfg.default_retention_days
+                    : ((data.resolved_retention_days != null)
+                        ? data.resolved_retention_days
+                        : 30);
+                $('sr-default-retention').value = resolvedDefault;
+                $('sr-free-space-target').value = cfg.free_space_target_pct || 10;
+                $('sr-max-archive').value = cfg.max_archive_size_gb || 0;
+                $('sr-short-warning').value = cfg.short_retention_warning_days || 7;
+                renderPolicyRows(cfg.policies || {}, resolvedDefault);
+                renderWarning(resolvedDefault, cfg.short_retention_warning_days);
+                renderLastRun(data);
+                renderDisk(data);
+                return data;
+            })
+            .catch(function (e) { console.warn('storage-retention load failed', e); return null; });
+    }
+
+    function collectPayload() {
+        var policies = {};
+        FOLDER_NAMES.forEach(function (name) {
+            var enabledEl = document.querySelector('input[name="policy_' + name + '_enabled"]');
+            var daysEl = document.querySelector('input[name="policy_' + name + '_days"]');
+            if (!enabledEl && !daysEl) return;
+            policies[name] = {
+                enabled: enabledEl ? enabledEl.checked : false,
+                retention_days: daysEl ? parseInt(daysEl.value, 10) : null,
+            };
+        });
+        return {
+            default_retention_days: parseInt($('sr-default-retention').value, 10),
+            free_space_target_pct: parseInt($('sr-free-space-target').value, 10),
+            max_archive_size_gb: parseInt($('sr-max-archive').value, 10),
+            short_retention_warning_days: parseInt($('sr-short-warning').value, 10),
+            policies: policies,
+        };
+    }
+
+    function onSave() {
+        var btn = $('sr-save-btn');
+        if (!btn) return;
+        var origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+        setError(null);
+        fetch(SAVE_API, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(collectPayload()),
+        })
+            .then(function (r) {
+                return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+            })
+            .then(function (res) {
+                if (!res.ok || !res.data || res.data.success === false) {
+                    setError((res.data && res.data.message) || 'Failed to save retention settings');
+                    return;
+                }
+                btn.textContent = 'Saved ✓';
+                loadStatus();
+                setTimeout(function () { btn.textContent = origText; }, 1500);
+            })
+            .catch(function (e) {
+                setError('Network error: ' + e.message);
+            })
+            .finally(function () {
+                btn.disabled = false;
+                if (btn.textContent === 'Saving…') btn.textContent = origText;
+            });
+    }
+
+    function onRunNow() {
+        var btn = $('sr-run-now-btn');
+        if (!btn) return;
+        var origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Running…';
+        setError(null);
+        fetch(RUN_NOW_API, { method: 'POST', credentials: 'same-origin' })
+            .then(function (r) {
+                return r.json().then(function (data) { return { status: r.status, data: data }; });
+            })
+            .then(function (res) {
+                var d = res.data || {};
+                var result = d.result || {};
+                if (result.status === 'already_running') {
+                    btn.textContent = 'Already running';
+                } else if (res.status >= 200 && res.status < 300 && d.success !== false) {
+                    var deleted = result.deleted_count || 0;
+                    var freed = result.freed_bytes ? fmtBytes(result.freed_bytes) : '0 B';
+                    btn.textContent = '✓ ' + deleted + ' clips, ' + freed;
+                } else {
+                    setError(d.message || 'Cleanup failed');
+                    btn.textContent = origText;
+                    return;
+                }
+                loadStatus();
+                setTimeout(function () { btn.textContent = origText; }, 4000);
+            })
+            .catch(function (e) {
+                setError('Network error: ' + e.message);
+                btn.textContent = origText;
+            })
+            .finally(function () { btn.disabled = false; });
+    }
+
+    if (!$('storage-retention-section')) return;
+
+    var saveBtn = $('sr-save-btn');
+    var runBtn = $('sr-run-now-btn');
+    if (saveBtn) saveBtn.addEventListener('click', onSave);
+    if (runBtn) runBtn.addEventListener('click', onRunNow);
+    var defEl = $('sr-default-retention');
+    var warnEl = $('sr-short-warning');
+    function refreshWarning() {
+        renderWarning(parseInt(defEl.value, 10), parseInt(warnEl.value, 10));
+    }
+    if (defEl) defEl.addEventListener('input', refreshWarning);
+    if (warnEl) warnEl.addEventListener('input', refreshWarning);
+
+    loadStatus();
+    // Visibility-aware polling — pause when the tab is hidden so a
+    // backgrounded phone doesn't keep hitting the Pi every 30 s for
+    // hours on end.
+    var pollTimer = null;
+    function startPolling() {
+        if (pollTimer != null) return;
+        pollTimer = setInterval(loadStatus, POLL_MS);
+    }
+    function stopPolling() {
+        if (pollTimer == null) return;
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+    if (typeof document.visibilityState === 'string') {
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                stopPolling();
+            } else {
+                loadStatus();
+                startPolling();
+            }
+        });
+        if (!document.hidden) startPolling();
+    } else {
+        startPolling();
+    }
 })();
 </script>
 {% endblock %}

@@ -161,6 +161,43 @@ cloud_archive:
   disk_space_pause_seconds: 300          # How long the worker stays paused after a disk-critical refusal
 
 # ============================================================================
+# Storage & Retention Configuration (Phase 3a.2 — closes part of #98)
+# ============================================================================
+# Single source of truth for archive/clip retention policies. Replaces the
+# legacy ``cleanup_config.json`` (auto-migrated on first boot) and
+# the scattered ``archive.retention_days`` / ``cloud_archive.archived_clips_retention_days``
+# values (which remain as backward-compat fallbacks).
+#
+# Surfaced in the web UI under Settings → Storage & Retention so users can
+# manage retention without SSHing in. All changes take effect on the next
+# retention pass (no service restart needed).
+cleanup:
+  # 0 = inherit from the legacy fallback chain
+  # (cloud_archive.archived_clips_retention_days → archive.retention_days → 30).
+  # The startup migration seeds this from the legacy keys on first boot so
+  # existing customizations carry over without a behavior change. Saving from
+  # the Settings UI also writes a concrete value here, making this the unified
+  # source of truth from that point on.
+  default_retention_days: 0
+  free_space_target_pct: 10              # Try to keep at least this % of SD-card capacity free; aggressive prune below this
+  max_archive_size_gb: 0                 # Hard cap on total ArchivedClips size; 0 = no cap (time-based retention only) — Phase 5 wires the cap into the prune
+  short_retention_warning_days: 7        # Warn in the UI when default retention drops below this
+  policies:                              # Per-folder overrides (empty dict = use defaults everywhere)
+    # Examples (uncomment to override the default for a specific folder):
+    # SentryClips:
+    #   enabled: false
+    #   retention_days: 90
+    # SavedClips:
+    #   enabled: false
+    #   retention_days: 365
+    # RecentClips:
+    #   enabled: false
+    #   retention_days: 30
+    # ArchivedClips:
+    #   enabled: true
+    #   retention_days: 30
+
+# ============================================================================
 # Live Event Sync Configuration
 # ============================================================================
 # Real-time upload of Sentry/Saved events as soon as Tesla writes the

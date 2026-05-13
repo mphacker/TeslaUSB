@@ -543,3 +543,245 @@ def get_cleanup_service(gadget_dir: str) -> CleanupService:
         CleanupService instance
     """
     return CleanupService(gadget_dir)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3a.2 (#98) — One-shot migration of legacy cleanup_config.json
+# ---------------------------------------------------------------------------
+
+# Folders the storage_retention blueprint accepts as per-folder overrides.
+# Anything outside this set is silently dropped so the migration can't seed
+# typo'd legacy keys into config.yaml's new ``cleanup.policies`` map.
+_MIGRATION_ALLOWED_FOLDERS = (
+    'SentryClips',
+    'SavedClips',
+    'RecentClips',
+    'EncryptedClips',
+    'ArchivedClips',
+)
+
+
+def _seed_default_retention_from_legacy_yaml(cfg: Dict[str, Any]) -> Optional[int]:
+    """Phase 3a.2 (#98) — preserve existing customizations across upgrades.
+
+    On a ``git pull`` the shipped ``cleanup.default_retention_days: 0``
+    means "inherit from legacy". This helper migrates the legacy value
+    into the unified key so the user's customization survives even if
+    they never visit the new Settings card.
+
+    Mutates ``cfg`` in place. Returns the value seeded (or ``None`` if
+    nothing was seeded — either the unified key is already set or no
+    legacy value exists).
+    """
+    cleanup = cfg.get('cleanup') if isinstance(cfg.get('cleanup'), dict) else {}
+    try:
+        existing = int(cleanup.get('default_retention_days') or 0)
+    except (TypeError, ValueError):
+        existing = 0
+    if existing > 0:
+        return None  # user (or a prior boot's seed pass) already set it
+
+    candidate: Optional[int] = None
+    cloud_archive = cfg.get('cloud_archive') if isinstance(cfg.get('cloud_archive'), dict) else {}
+    try:
+        c = int(cloud_archive.get('archived_clips_retention_days') or 0)
+        if c > 0:
+            candidate = c
+    except (TypeError, ValueError):
+        pass
+    if candidate is None:
+        archive = cfg.get('archive') if isinstance(cfg.get('archive'), dict) else {}
+        try:
+            a = int(archive.get('retention_days') or 0)
+            if a > 0:
+                candidate = a
+        except (TypeError, ValueError):
+            pass
+    if candidate is None:
+        return None
+
+    cleanup['default_retention_days'] = candidate
+    cfg['cleanup'] = cleanup
+    return candidate
+
+
+def migrate_legacy_cleanup_config(
+    gadget_dir: str,
+    config_yaml_path: Optional[str] = None,
+    config_filename: str = 'cleanup_config.json',
+) -> Dict[str, Any]:
+    """One-shot migration of the legacy ``cleanup_config.json`` AND legacy
+    YAML retention keys into the unified ``cleanup`` section.
+
+    Two passes, both idempotent:
+
+    1. **Default-retention seed pass** — if
+       ``cleanup.default_retention_days`` is unset/0, copy from
+       ``cloud_archive.archived_clips_retention_days`` (or the older
+       ``archive.retention_days``). Preserves user customizations
+       across a ``git pull``.
+    2. **Per-folder policy import pass** — if ``cleanup.policies`` is
+       empty AND a legacy ``cleanup_config.json`` exists, import its
+       allow-listed policies. The legacy file is renamed with a
+       ``.migrated`` suffix on success so the next boot doesn't redo
+       the work.
+
+    Returns a small summary dict suitable for INFO-level logging:
+    ``{'migrated': bool, 'imported_folders': [...],
+       'seeded_default_retention_days': Optional[int], 'reason': str}``.
+
+    Safe to call from service startup — never raises. A logged WARNING
+    on failure is preferred over crashing the web service over a
+    legacy-config corner case.
+    """
+    summary: Dict[str, Any] = {
+        'migrated': False,
+        'imported_folders': [],
+        'seeded_default_retention_days': None,
+        'reason': '',
+    }
+    try:
+        # Resolve config.yaml path — fall back to the canonical helper
+        # so this works under tests that monkeypatch the location.
+        if config_yaml_path is None:
+            try:
+                from config import CONFIG_YAML  # type: ignore
+                config_yaml_path = CONFIG_YAML
+            except Exception:  # noqa: BLE001
+                config_yaml_path = str(Path(gadget_dir) / 'config.yaml')
+
+        try:
+            import yaml  # local import keeps import-time cost off the hot path
+            with open(config_yaml_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"migrate_legacy_cleanup_config: cannot read {config_yaml_path}: {e}")
+            summary['reason'] = f'config.yaml unreadable: {e}'
+            return summary
+
+        # Pass 1: seed default_retention_days from legacy YAML keys.
+        seeded = _seed_default_retention_from_legacy_yaml(cfg)
+        if seeded is not None:
+            summary['seeded_default_retention_days'] = seeded
+
+        legacy_path = Path(gadget_dir) / config_filename
+        legacy_exists = legacy_path.exists()
+
+        # Pass 2: import per-folder policies from legacy JSON (if any).
+        existing_policies = (
+            cfg.get('cleanup', {}).get('policies') if isinstance(cfg.get('cleanup'), dict) else None
+        )
+        if isinstance(existing_policies, dict) and existing_policies:
+            # User has already used the new UI to set policies. The
+            # legacy file (e.g. left behind from a downgrade) MUST NOT
+            # overwrite the user's choices.
+            summary['reason'] = 'cleanup.policies already populated; skipping'
+            if legacy_exists:
+                try:
+                    legacy_path.rename(legacy_path.with_suffix(legacy_path.suffix + '.migrated'))
+                except Exception:  # noqa: BLE001
+                    pass
+            # Still write back if the seed pass changed something.
+            if seeded is not None:
+                _atomic_write_yaml(config_yaml_path, cfg, summary)
+            return summary
+
+        if not legacy_exists:
+            summary['reason'] = 'no legacy file'
+            # Persist any seed-pass change.
+            if seeded is not None:
+                _atomic_write_yaml(config_yaml_path, cfg, summary)
+                if not summary['reason'].startswith('config.yaml write failed'):
+                    summary['reason'] = (
+                        f'no legacy file; seeded default_retention_days={seeded}'
+                    )
+            return summary
+
+        try:
+            with open(legacy_path, 'r') as f:
+                legacy = json.load(f) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"migrate_legacy_cleanup_config: cannot parse {legacy_path}: {e}")
+            summary['reason'] = f'legacy file unparseable: {e}'
+            # Even if we can't parse the legacy file, persist the
+            # default-retention seed so the upgrade isn't lost.
+            if seeded is not None:
+                _atomic_write_yaml(config_yaml_path, cfg, summary)
+            return summary
+
+        imported: Dict[str, Dict[str, Any]] = {}
+        for folder, policy in legacy.items():
+            if folder not in _MIGRATION_ALLOWED_FOLDERS or not isinstance(policy, dict):
+                continue
+            age = policy.get('age_based') if isinstance(policy.get('age_based'), dict) else {}
+            try:
+                days = int(age.get('days', 0)) or None
+            except (TypeError, ValueError):
+                days = None
+            if days is None or days < 1:
+                continue
+            imported[folder] = {
+                'enabled': bool(policy.get('enabled', False)),
+                'retention_days': days,
+            }
+
+        if not imported:
+            summary['reason'] = 'no migratable policies in legacy file'
+            try:
+                legacy_path.rename(legacy_path.with_suffix(legacy_path.suffix + '.migrated'))
+            except Exception:  # noqa: BLE001
+                pass
+            if seeded is not None:
+                _atomic_write_yaml(config_yaml_path, cfg, summary)
+            return summary
+
+        cleanup_block = cfg.get('cleanup') if isinstance(cfg.get('cleanup'), dict) else {}
+        cleanup_block.setdefault('default_retention_days', 0)
+        cleanup_block.setdefault('free_space_target_pct', 10)
+        cleanup_block.setdefault('max_archive_size_gb', 0)
+        cleanup_block.setdefault('short_retention_warning_days', 7)
+        cleanup_block['policies'] = imported
+        cfg['cleanup'] = cleanup_block
+
+        if not _atomic_write_yaml(config_yaml_path, cfg, summary):
+            return summary
+
+        try:
+            legacy_path.rename(legacy_path.with_suffix(legacy_path.suffix + '.migrated'))
+        except Exception:  # noqa: BLE001
+            # Migration succeeded; rename failure is cosmetic.
+            pass
+
+        summary['migrated'] = True
+        summary['imported_folders'] = sorted(imported.keys())
+        summary['reason'] = f"migrated {len(imported)} folder policies"
+        logger.info(
+            f"migrate_legacy_cleanup_config: imported {len(imported)} legacy policies "
+            f"into cleanup.policies ({sorted(imported.keys())})"
+        )
+        return summary
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"migrate_legacy_cleanup_config: unexpected failure: {e}")
+        summary['reason'] = f'unexpected: {e}'
+        return summary
+
+
+def _atomic_write_yaml(path: str, cfg: Dict[str, Any], summary: Dict[str, Any]) -> bool:
+    """Power-loss-safe YAML write. Returns True on success; on failure
+    sets ``summary['reason']`` and returns False (caller should bail).
+    """
+    try:
+        import yaml
+        tmp_path = path + '.tmp'
+        with open(tmp_path, 'w') as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"_atomic_write_yaml: failed to write {path}: {e}")
+        summary['reason'] = f'config.yaml write failed: {e}'
+        return False

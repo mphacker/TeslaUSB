@@ -1109,6 +1109,167 @@ class TestResolveDeleteUnsynced:
         assert archive_watchdog._resolve_delete_unsynced() is False
 
 
+class TestResolveRetentionDays:
+    """Phase 3a.2 (#98) — verify the unified ``cleanup`` config section
+    takes precedence over the legacy ``cloud_archive.archived_clips_retention_days``
+    and ``archive.retention_days`` keys, while preserving full backward
+    compat for existing installs that haven't migrated yet.
+
+    Resolution order (first non-zero wins):
+
+    1. ``cleanup.policies.ArchivedClips.retention_days``
+    2. ``cleanup.default_retention_days``
+    3. ``cloud_archive.archived_clips_retention_days``
+    4. ``archive.retention_days`` (via ``CLOUD_ARCHIVE_RETENTION_DAYS`` fallback)
+    5. Hard-coded ``30``
+    """
+
+    def _patch_config(self, monkeypatch, **values):
+        """Apply each kwarg to the loaded ``config`` module via monkeypatch.
+
+        Use ``raising=False`` so we can null-out attributes that may not
+        exist on every test installation. Also points ``CONFIG_YAML`` at
+        a nonexistent path so the Phase 3a.2 YAML-direct read in
+        ``_resolve_retention_days`` falls through to the cached config
+        attributes that this helper actually controls.
+        """
+        import config as cfg_module
+        monkeypatch.setattr(
+            cfg_module, 'CONFIG_YAML',
+            '/nonexistent/test/config.yaml', raising=False,
+        )
+        for k, v in values.items():
+            monkeypatch.setattr(cfg_module, k, v, raising=False)
+
+    def test_per_folder_override_wins(self, monkeypatch):
+        self._patch_config(
+            monkeypatch,
+            CLEANUP_POLICIES={'ArchivedClips': {'retention_days': 14, 'enabled': True}},
+            CLEANUP_DEFAULT_RETENTION_DAYS=60,
+            CLOUD_ARCHIVE_RETENTION_DAYS=90,
+        )
+        assert archive_watchdog._resolve_retention_days() == 14
+
+    def test_default_used_when_no_override(self, monkeypatch):
+        self._patch_config(
+            monkeypatch,
+            CLEANUP_POLICIES={},
+            CLEANUP_DEFAULT_RETENTION_DAYS=60,
+            CLOUD_ARCHIVE_RETENTION_DAYS=90,
+        )
+        assert archive_watchdog._resolve_retention_days() == 60
+
+    def test_default_used_when_archived_override_missing_days(self, monkeypatch):
+        # Per-folder block exists but lacks retention_days — fall through.
+        self._patch_config(
+            monkeypatch,
+            CLEANUP_POLICIES={'ArchivedClips': {'enabled': True}},
+            CLEANUP_DEFAULT_RETENTION_DAYS=45,
+            CLOUD_ARCHIVE_RETENTION_DAYS=90,
+        )
+        assert archive_watchdog._resolve_retention_days() == 45
+
+    def test_legacy_cloud_archive_used_when_cleanup_empty(self, monkeypatch):
+        # Backward-compat path: install with no cleanup.* section but
+        # an existing cloud_archive.archived_clips_retention_days.
+        self._patch_config(
+            monkeypatch,
+            CLEANUP_POLICIES={},
+            CLEANUP_DEFAULT_RETENTION_DAYS=0,
+            CLOUD_ARCHIVE_RETENTION_DAYS=90,
+        )
+        assert archive_watchdog._resolve_retention_days() == 90
+
+    def test_hardcoded_default_when_everything_missing(self, monkeypatch):
+        # All three sources zero/missing → fall to the hard 30-day floor
+        # so a misconfigured install never accidentally pretends "no
+        # retention" (which would let the SD card fill until OOM).
+        self._patch_config(
+            monkeypatch,
+            CLEANUP_POLICIES={},
+            CLEANUP_DEFAULT_RETENTION_DAYS=0,
+            CLOUD_ARCHIVE_RETENTION_DAYS=0,
+        )
+        assert archive_watchdog._resolve_retention_days() == 30
+
+    def test_zero_override_does_not_disable_retention(self, monkeypatch):
+        # A user setting retention to 0 in the per-folder UI must NOT
+        # be interpreted as "infinite retention" — it falls through to
+        # the next source so the system keeps pruning. (Disabling is a
+        # separate concept handled by the per-folder ``enabled`` flag.)
+        self._patch_config(
+            monkeypatch,
+            CLEANUP_POLICIES={'ArchivedClips': {'retention_days': 0}},
+            CLEANUP_DEFAULT_RETENTION_DAYS=21,
+            CLOUD_ARCHIVE_RETENTION_DAYS=90,
+        )
+        assert archive_watchdog._resolve_retention_days() == 21
+
+    def test_yaml_direct_read_wins_over_cached_attrs(self, monkeypatch, tmp_path):
+        # Phase 3a.2 PR #124 review fix: ``_resolve_retention_days`` now
+        # reads ``config.yaml`` directly on every call so a save from
+        # the Settings UI takes effect without restart. Verify the
+        # direct read is preferred over the cached config attributes
+        # (which would otherwise lag behind by a service restart).
+        cfg_path = tmp_path / 'config.yaml'
+        cfg_path.write_text(
+            "cleanup:\n"
+            "  default_retention_days: 99\n"
+            "  policies: {}\n"
+            "cloud_archive:\n"
+            "  archived_clips_retention_days: 7\n"
+        )
+        import config as cfg_module
+        monkeypatch.setattr(cfg_module, 'CONFIG_YAML', str(cfg_path), raising=False)
+        # Cached attrs say 7; direct YAML read says 99. The fresh value wins.
+        monkeypatch.setattr(cfg_module, 'CLEANUP_DEFAULT_RETENTION_DAYS', 7, raising=False)
+        monkeypatch.setattr(cfg_module, 'CLOUD_ARCHIVE_RETENTION_DAYS', 7, raising=False)
+        monkeypatch.setattr(cfg_module, 'CLEANUP_POLICIES', {}, raising=False)
+        assert archive_watchdog._resolve_retention_days() == 99
+
+    def test_yaml_direct_read_per_folder_override_wins(self, monkeypatch, tmp_path):
+        cfg_path = tmp_path / 'config.yaml'
+        cfg_path.write_text(
+            "cleanup:\n"
+            "  default_retention_days: 60\n"
+            "  policies:\n"
+            "    ArchivedClips:\n"
+            "      enabled: true\n"
+            "      retention_days: 14\n"
+            "cloud_archive:\n"
+            "  archived_clips_retention_days: 90\n"
+        )
+        import config as cfg_module
+        monkeypatch.setattr(cfg_module, 'CONFIG_YAML', str(cfg_path), raising=False)
+        assert archive_watchdog._resolve_retention_days() == 14
+
+    def test_yaml_falls_through_to_cloud_archive_when_cleanup_zero(self, monkeypatch, tmp_path):
+        cfg_path = tmp_path / 'config.yaml'
+        cfg_path.write_text(
+            "cleanup:\n"
+            "  default_retention_days: 0\n"
+            "  policies: {}\n"
+            "cloud_archive:\n"
+            "  archived_clips_retention_days: 21\n"
+        )
+        import config as cfg_module
+        monkeypatch.setattr(cfg_module, 'CONFIG_YAML', str(cfg_path), raising=False)
+        assert archive_watchdog._resolve_retention_days() == 21
+
+    def test_yaml_falls_through_to_archive_legacy_key(self, monkeypatch, tmp_path):
+        cfg_path = tmp_path / 'config.yaml'
+        cfg_path.write_text(
+            "cleanup:\n"
+            "  default_retention_days: 0\n"
+            "  policies: {}\n"
+            "archive:\n"
+            "  retention_days: 45\n"
+        )
+        import config as cfg_module
+        monkeypatch.setattr(cfg_module, 'CONFIG_YAML', str(cfg_path), raising=False)
+        assert archive_watchdog._resolve_retention_days() == 45
+
+
 # ---------------------------------------------------------------------------
 # Issue #91 — duplicate-trigger guard for retention prune
 # ---------------------------------------------------------------------------

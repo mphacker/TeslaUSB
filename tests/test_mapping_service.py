@@ -16,11 +16,6 @@ from services.mapping_service import (
     _detect_events,
     _debounce_events,
     _haversine_km,
-    _haversine_m,
-    _is_gap_between,
-    _parse_iso_seconds,
-    GAP_MAX_SECONDS_DEFAULT,
-    GAP_MAX_METERS_DEFAULT,
     _timestamp_from_filename,
     _find_front_camera_videos,
     _index_video,
@@ -30,14 +25,6 @@ from services.mapping_service import (
     index_single_file,
     IndexOutcome,
     IndexResult,
-    query_days,
-    query_day_routes,
-    query_trips,
-    query_trip_route,
-    query_events,
-    get_stats,
-    get_driving_stats,
-    get_event_chart_data,
     start_daily_stale_scan,
     stop_daily_stale_scan,
     trigger_stale_scan_now,
@@ -46,6 +33,21 @@ from services.mapping_service import (
     _reset_stale_scan_state_for_tests,
     DEFAULT_THRESHOLDS,
     _SCHEMA_VERSION,
+)
+from services.mapping_queries import (
+    _haversine_m,
+    _is_gap_between,
+    _parse_iso_seconds,
+    GAP_MAX_SECONDS_DEFAULT,
+    GAP_MAX_METERS_DEFAULT,
+    query_days,
+    query_day_routes,
+    query_trips,
+    query_trip_route,
+    query_events,
+    get_stats,
+    get_driving_stats,
+    get_event_chart_data,
 )
 from services.indexing_queue_service import (
     claim_next_queue_item,
@@ -1142,7 +1144,7 @@ class TestQueryAllRoutesSimplified:
             )
 
     def test_all_trips_returned_ordered_newest_first(self, tmp_path):
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-03T08:00:00', distance_km=3.0)
         self._add_waypoints(conn, 1, count=4)
@@ -1159,7 +1161,7 @@ class TestQueryAllRoutesSimplified:
         # The client uses ``date`` to drill into the right day on
         # polyline click — must match substr(start_time, 1, 10), the
         # same bucketing rule query_days/query_day_routes use.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T23:59:00',
                        end='2026-05-05T00:30:00', distance_km=3.0)
@@ -1172,7 +1174,7 @@ class TestQueryAllRoutesSimplified:
         # First + last waypoints anchor the polyline at the trip's
         # actual endpoints — no matter how aggressively RDP collapses
         # straight middle stretches, both endpoints must survive.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         # 200 waypoints at lat = 37.700, 37.701, ..., 37.899 (a
@@ -1195,7 +1197,7 @@ class TestQueryAllRoutesSimplified:
         # The previous stride-based sampler returned ~N/step points
         # even on perfectly straight roads, wasting bytes for no
         # visual benefit.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=10.0)
         self._add_waypoints(conn, 1, count=500)
@@ -1208,7 +1210,7 @@ class TestQueryAllRoutesSimplified:
         # sharp turns when the corner falls inside a stride gap. RDP
         # detects the corner via its perpendicular distance from the
         # chord and forces a kept point there.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         import sqlite3
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
@@ -1252,7 +1254,7 @@ class TestQueryAllRoutesSimplified:
         # endpoints survive — that's the correct simplification, and
         # any mid-trip drilldown should drill into the per-day
         # endpoint which preserves every raw waypoint.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         self._add_waypoints(conn, 1, count=8)
@@ -1267,7 +1269,7 @@ class TestQueryAllRoutesSimplified:
         # points, the safety cap kicks in via stride sampling. This
         # test builds a pathological zigzag where every other point
         # is a real corner so RDP has to keep them all.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         # 40 zigzag points that alternate north/south so every
@@ -1292,7 +1294,7 @@ class TestQueryAllRoutesSimplified:
         # Same default as /api/trips and /api/day/<date>/routes —
         # the All time overlay must not advertise trips other views
         # hide as parking-lot blips.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         self._add_waypoints(conn, 1, count=4)
@@ -1310,7 +1312,7 @@ class TestQueryAllRoutesSimplified:
         # otherwise Leaflet would draw nothing and the JSON payload
         # would just waste bandwidth. The schema enforces NOT NULL on
         # lat/lon so this guard kicks in via the <2-row count path.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         self._add_waypoints(conn, 1, count=1)
@@ -1319,7 +1321,7 @@ class TestQueryAllRoutesSimplified:
         assert trips == []
 
     def test_trips_with_no_waypoints_excluded_by_inner_join(self, tmp_path):
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         # Trip 1 has zero waypoints — must be excluded.
@@ -1330,7 +1332,7 @@ class TestQueryAllRoutesSimplified:
         assert [t['trip_id'] for t in trips] == [2]
 
     def test_empty_db_returns_empty_list(self, tmp_path):
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         conn.commit(); conn.close()
         assert query_all_routes_simplified(db_path) == []
@@ -1339,7 +1341,7 @@ class TestQueryAllRoutesSimplified:
         # Polyline rendering depends on the waypoints arriving in
         # the order the trip actually drove them — out-of-order
         # rows would draw a tangled mess.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         self._add_waypoints(conn, 1, count=10)
@@ -3702,7 +3704,7 @@ class TestGapAfterStamping:
         # per-segment RDP path preserves the gap_after flag on the
         # last simplified waypoint of the pre-gap segment so the
         # frontend renders TWO polylines per trip, not one.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-04-26T09:00:00', distance_km=3.0)
         # Build a longer drive on each side of the gap so RDP keeps
@@ -3746,7 +3748,7 @@ class TestGapAfterStamping:
         # Clean drive: no gap_after key should appear anywhere. Pin
         # the no-flag invariant so the payload doesn't grow for the
         # 99% case of well-indexed trips.
-        from services.mapping_service import query_all_routes_simplified
+        from services.mapping_queries import query_all_routes_simplified
         db_path, conn = self._make_db(tmp_path)
         self._add_trip(conn, 1, '2026-05-04T08:00:00', distance_km=3.0)
         for i in range(20):

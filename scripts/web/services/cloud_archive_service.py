@@ -669,7 +669,7 @@ def _score_event_priority(event_dir: str) -> int:
         try:
             from config import MAPPING_ENABLED, MAPPING_DB_PATH
             if MAPPING_ENABLED:
-                from services.mapping_service import get_db_connection
+                from services.mapping_queries import get_db_connection
                 conn = get_db_connection(MAPPING_DB_PATH)
                 # Escape LIKE wildcards in dir_name to prevent unintended matches
                 safe_name = dir_name.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')

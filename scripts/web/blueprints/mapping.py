@@ -48,7 +48,7 @@ def map_view():
 @mapping_bp.route("/api/trips")
 def api_trips():
     """List trips with optional filters."""
-    from services.mapping_service import query_trips
+    from services.mapping_queries import query_trips
 
     limit = request.args.get('limit', 50, type=int)
     offset = request.args.get('offset', 0, type=int)
@@ -83,7 +83,7 @@ def api_trips():
 @mapping_bp.route("/api/trip/<int:trip_id>/route")
 def api_trip_route(trip_id):
     """Get GeoJSON route for a specific trip."""
-    from services.mapping_service import query_trip_route
+    from services.mapping_queries import query_trip_route
 
     try:
         waypoints = query_trip_route(MAPPING_DB_PATH, trip_id)
@@ -122,7 +122,7 @@ def api_trip_route(trip_id):
 @mapping_bp.route("/api/waypoints-for-clip")
 def api_waypoints_for_clip():
     """Look up waypoints matching a video clip path (or nearby clips in same trip)."""
-    from services.mapping_service import get_db_connection
+    from services.mapping_queries import get_db_connection
 
     video_path = request.args.get('path', '')
     if not video_path:
@@ -142,7 +142,7 @@ def api_waypoints_for_clip():
             # Sort by timestamp (id as tiebreaker): id-only ordering breaks
             # when late-indexed videos or merged trips give waypoints non-
             # monotonic ids relative to their timestamps. See
-            # mapping_service.query_day_routes docstring for the full story.
+            # mapping_queries.query_day_routes docstring for the full story.
             trip_id = rows[0]['trip_id']
             all_wps = conn.execute(
                 """SELECT * FROM waypoints WHERE trip_id = ?
@@ -184,7 +184,7 @@ def api_waypoints_for_clip():
 @mapping_bp.route("/api/events")
 def api_events():
     """List detected events with optional filters."""
-    from services.mapping_service import query_events
+    from services.mapping_queries import query_events
 
     # When ``date`` is supplied the request is asking for a complete
     # day's worth of markers (the map renders all of them). Allow up
@@ -275,7 +275,7 @@ def api_days():
       * ``min_distance`` — trip distance threshold in km
         (default 0.05 = 50 m). Pass 0 to include parking blips.
     """
-    from services.mapping_service import query_days
+    from services.mapping_queries import query_days
 
     limit = request.args.get('limit', _DAYS_LIMIT_DEFAULT, type=int)
     if limit is None or limit <= 0:
@@ -325,7 +325,7 @@ def api_day_routes(date):
           ]
         }
     """
-    from services.mapping_service import query_day_routes
+    from services.mapping_queries import query_day_routes
 
     if not _DATE_RE.match(date):
         return jsonify({'error': 'date must be YYYY-MM-DD'}), 400
@@ -385,7 +385,7 @@ def api_trips_playable():
     Trip ids are JSON-stringified because JSON object keys must be
     strings; the client coerces them back to numbers.
     """
-    from services.mapping_service import playable_trips_for_date
+    from services.mapping_queries import playable_trips_for_date
 
     date = request.args.get('date', '')
     if not _DATE_RE.match(date):
@@ -462,7 +462,7 @@ def api_all_routes():
           ]
         }
     """
-    from services.mapping_service import query_all_routes_simplified
+    from services.mapping_queries import query_all_routes_simplified
 
     min_distance_km = request.args.get(
         'min_distance', _DEFAULT_DAY_MIN_DISTANCE_KM, type=float
@@ -515,7 +515,7 @@ def api_all_routes():
 @mapping_bp.route("/api/stats")
 def api_stats():
     """Get summary statistics."""
-    from services.mapping_service import get_stats
+    from services.mapping_queries import get_stats
 
     try:
         return jsonify(get_stats(MAPPING_DB_PATH))
@@ -719,7 +719,7 @@ def api_index_diagnose():
 @mapping_bp.route("/api/driving-stats")
 def api_driving_stats():
     """Get driving behavior statistics."""
-    from services.mapping_service import get_driving_stats
+    from services.mapping_queries import get_driving_stats
     try:
         return jsonify(get_driving_stats(MAPPING_DB_PATH))
     except Exception as e:
@@ -730,7 +730,7 @@ def api_driving_stats():
 @mapping_bp.route("/api/event-charts")
 def api_event_charts():
     """Get event data formatted for Chart.js."""
-    from services.mapping_service import get_event_chart_data
+    from services.mapping_queries import get_event_chart_data
     try:
         return jsonify(get_event_chart_data(MAPPING_DB_PATH))
     except Exception as e:
@@ -750,7 +750,7 @@ def api_sentry_events():
     data; the client lazily fetches per-event details via
     :func:`api_event_details` for cards as they scroll into view.
     """
-    from services.mapping_service import query_events
+    from services.mapping_queries import query_events
 
     try:
         # Fetch ALL detected events — sentry, saved, and driving events

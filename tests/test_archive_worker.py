@@ -909,7 +909,7 @@ class TestClipHasGpsSignal:
         clip.write_bytes(b"x" * 100)
         seen = []
 
-        def fake_extract(path, sample_rate):
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
             assert path == str(clip)
             for i in range(100):
                 seen.append(i)
@@ -937,7 +937,7 @@ class TestClipHasGpsSignal:
         clip = tmp_path / "stationary.mp4"
         clip.write_bytes(b"x" * 100)
 
-        def fake_extract(path, sample_rate):
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
             # Yield one less than the cap to confirm we walk normally
             # to exhaustion when no GPS appears.
             for _ in range(archive_worker._SKIP_GPS_PEEK_MAX_MESSAGES - 1):
@@ -955,7 +955,7 @@ class TestClipHasGpsSignal:
         clip = tmp_path / "no-sei.mp4"
         clip.write_bytes(b"x" * 100)
 
-        def fake_extract(path, sample_rate):
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
             return
             yield  # unreachable; makes this a generator
 
@@ -976,7 +976,7 @@ class TestClipHasGpsSignal:
         clip.write_bytes(b"x" * 100)
         pulled = []
 
-        def fake_extract(path, sample_rate):
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
             for i in range(10000):
                 pulled.append(i)
                 yield fake_msg(False)
@@ -995,7 +995,7 @@ class TestClipHasGpsSignal:
         clip = tmp_path / "broken.mp4"
         clip.write_bytes(b"x" * 100)
 
-        def fake_extract(path, sample_rate):
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
             raise ValueError("not a valid MP4")
             yield  # unreachable
 
@@ -1014,7 +1014,7 @@ class TestClipHasGpsSignal:
         clip = tmp_path / "vanished.mp4"
         clip.write_bytes(b"x" * 100)
 
-        def fake_extract(path, sample_rate):
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
             raise FileNotFoundError(path)
             yield  # unreachable
 
@@ -1025,6 +1025,45 @@ class TestClipHasGpsSignal:
         # File vanished mid-peek → ambiguous → caller will re-stat
         # and mark source_gone via the existing copy path.
         assert archive_worker._clip_has_gps_signal(str(clip)) is None
+
+    def test_passes_max_walk_bytes_cap_to_parser(
+        self, monkeypatch, tmp_path, fake_msg,
+    ):
+        # Issue #176 — the peek MUST forward ``max_walk_bytes`` to the
+        # parser so the parser exits after a bounded mmap walk on
+        # parked clips (where Tesla emits zero SEI). Without this, the
+        # message-count cap never fires for stationary footage and the
+        # parser walks the entire 25-50 MB ``mdat`` box.
+        clip = tmp_path / "parked.mp4"
+        clip.write_bytes(b"x" * 100)
+        captured_kwargs: list = []
+
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
+            captured_kwargs.append({
+                'sample_rate': sample_rate,
+                'max_walk_bytes': max_walk_bytes,
+            })
+            return
+            yield  # unreachable; makes this a generator
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
+        archive_worker._clip_has_gps_signal(str(clip))
+        assert len(captured_kwargs) == 1
+        assert captured_kwargs[0]['sample_rate'] == (
+            archive_worker._SKIP_GPS_PEEK_SAMPLE_RATE
+        )
+        # The cap must be a positive integer of bytes (the parser
+        # interprets ``None`` as "walk to end" — that would defeat the
+        # whole point of issue #176, so this assertion is the
+        # regression guard).
+        assert captured_kwargs[0]['max_walk_bytes'] == (
+            archive_worker._SKIP_GPS_PEEK_MAX_WALK_BYTES
+        )
+        assert captured_kwargs[0]['max_walk_bytes'] is not None
+        assert captured_kwargs[0]['max_walk_bytes'] > 0
 
 
 # ---------------------------------------------------------------------------

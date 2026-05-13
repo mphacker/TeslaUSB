@@ -322,7 +322,6 @@ class TestNoPerParentLsfRegression:
             "ArchivedClips/2026-05-12_10-00-00-front.mp4\n"
         )
         calls: List[List[str]] = []
-        original_run = subprocess.run
 
         def tracing_run(cmd, *args, **kwargs):
             calls.append(list(cmd))

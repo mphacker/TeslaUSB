@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from services import mapping_service
+from services import indexing_queue_service as queue_svc
 from services import task_coordinator
 
 logger = logging.getLogger(__name__)
@@ -254,8 +255,8 @@ def get_worker_status() -> Dict[str, Any]:
     """Snapshot for the /api/index/status endpoint and the UI banner.
 
     Combines in-memory worker state with a fresh
-    :func:`mapping_service.get_queue_status` snapshot so callers get
-    everything in one round-trip.
+    :func:`indexing_queue_service.get_queue_status` snapshot so callers
+    get everything in one round-trip.
     """
     with _state_lock:
         snap = {
@@ -275,7 +276,7 @@ def get_worker_status() -> Dict[str, Any]:
         db_path = _db_path
     if db_path:
         try:
-            snap.update(mapping_service.get_queue_status(db_path))
+            snap.update(queue_svc.get_queue_status(db_path))
         except Exception as e:  # noqa: BLE001 — status must never raise
             logger.warning("get_queue_status failed inside status: %s", e)
             snap['queue_depth'] = None
@@ -338,7 +339,7 @@ def process_claimed_item(
         logger.exception(
             "Indexer raised unexpectedly for %s; deferring", file_path,
         )
-        backoff = mapping_service.compute_backoff(attempts)
+        backoff = queue_svc.compute_backoff(attempts)
         return WorkerAction(
             action='defer',
             next_attempt_at=now_fn() + backoff,
@@ -382,7 +383,7 @@ def process_claimed_item(
         )
 
     if outcome == IO.PARSE_ERROR:
-        backoff = mapping_service.compute_backoff(attempts)
+        backoff = queue_svc.compute_backoff(attempts)
         return WorkerAction(
             action='defer', next_attempt_at=now_fn() + backoff,
             bump_attempts=True, last_error=result.error,
@@ -414,7 +415,7 @@ def _apply_action(action: WorkerAction, row: Dict[str, Any],
     claimed_at = row.get('claimed_at')
 
     if action.action == 'complete':
-        mapping_service.complete_queue_item(
+        queue_svc.complete_queue_item(
             db_path, canonical_key_value,
             claimed_by=claimed_by, claimed_at=claimed_at,
         )
@@ -429,7 +430,7 @@ def _apply_action(action: WorkerAction, row: Dict[str, Any],
                     action.purge_path, e,
                 )
     elif action.action == 'defer':
-        mapping_service.defer_queue_item(
+        queue_svc.defer_queue_item(
             db_path, canonical_key_value,
             next_attempt_at=action.next_attempt_at or 0.0,
             bump_attempts=action.bump_attempts,
@@ -437,7 +438,7 @@ def _apply_action(action: WorkerAction, row: Dict[str, Any],
             claimed_by=claimed_by, claimed_at=claimed_at,
         )
     elif action.action == 'release':
-        mapping_service.release_claim(
+        queue_svc.release_claim(
             db_path, canonical_key_value,
             claimed_by=claimed_by, claimed_at=claimed_at,
         )
@@ -543,7 +544,7 @@ def _run_worker_loop(db_path: str, teslacam_root: str, worker_id: str) -> None:
     """The thread target. One file at a time, until stop is signaled."""
     _apply_low_priority()
     try:
-        released = mapping_service.recover_stale_claims(db_path)
+        released = queue_svc.recover_stale_claims(db_path)
         if released:
             logger.info(
                 "Worker %s released %d stale claims at startup",
@@ -586,7 +587,7 @@ def _run_worker_loop(db_path: str, teslacam_root: str, worker_id: str) -> None:
         claim_failed = False
         try:
             try:
-                row = mapping_service.claim_next_queue_item(
+                row = queue_svc.claim_next_queue_item(
                     db_path, worker_id,
                 )
             except Exception as e:  # noqa: BLE001
@@ -652,7 +653,7 @@ def _process_one(row: Dict[str, Any], db_path: str,
             "Worker dispatch failed for %s; releasing claim", file_path,
         )
         try:
-            mapping_service.release_claim(
+            queue_svc.release_claim(
                 db_path, canonical_key_value,
                 claimed_by=row.get('claimed_by'),
                 claimed_at=claimed_at,

@@ -168,7 +168,7 @@ if __name__ == "__main__":
                 from config import MAPPING_ENABLED, MAPPING_DB_PATH
                 if MAPPING_ENABLED:
                     def _on_new_videos(file_paths):
-                        from services.mapping_service import (
+                        from services.indexing_queue_service import (
                             enqueue_many_for_indexing,
                         )
                         items = [(p, None) for p in file_paths if p]

@@ -117,8 +117,8 @@ def _infer_priority(path: str) -> int:
     """Map a TeslaCam clip path to its archive priority.
 
     Uses the same lowercase folder-name heuristic as
-    ``mapping_service.priority_for_path`` so behavior is consistent
-    across the indexing and archive subsystems.
+    ``indexing_queue_service.priority_for_path`` so behavior is
+    consistent across the indexing and archive subsystems.
     """
     norm = (path or '').replace('\\', '/').lower()
     if '/recentclips/' in norm:
@@ -161,8 +161,9 @@ def _open_archive_conn(db_path: str) -> sqlite3.Connection:
     connection. See the module docstring for the full contract.
 
     Mirrors the per-connection pragmas used by
-    ``mapping_service._open_queue_conn`` so producers don't trip over
-    contended locks and the WAL stays small under concurrent writers.
+    ``indexing_queue_service._open_queue_conn`` so producers don't
+    trip over contended locks and the WAL stays small under concurrent
+    writers.
     """
     conn = sqlite3.connect(db_path, timeout=15.0, isolation_level=None)
     conn.row_factory = sqlite3.Row

@@ -176,9 +176,10 @@ TeslaUSB has **two separate cloud upload subsystems** that share one rclone prov
 
 ## Video Indexing
 - **Single SQLite-backed queue + one worker.** All video indexing flows through `indexing_queue` (in `geodata.db`, schema v6). One low-priority background thread (`indexing_worker.py`, started inside `gadget_web.service`) drains the queue one file at a time. **Never re-introduce parallel triggers** — the old design had 6 redundant paths (every page load, every mode switch, every WiFi connect, etc.) that caused the constantly-flashing "Indexing…" banner.
+- **Module split (Phase 3c.1):** the queue API (`enqueue_for_indexing`, `enqueue_many_for_indexing`, `claim_next_queue_item`, `complete_queue_item`, `defer_queue_item`, `release_claim`, `recover_stale_claims`, `compute_backoff`, `get_queue_status`, `clear_pending_queue`, `clear_all_queue`, `priority_for_path`, `_open_queue_conn`, plus `_PRIORITY_*` / `_PARSE_ERROR_*` / `_STALE_CLAIM_SECONDS` constants) lives in `services.indexing_queue_service`. The cohesive indexing core (`canonical_key`, `_index_video`, `index_single_file`, `purge_deleted_videos`, trip merge, event detection, daily stale scan, boot catch-up, the schema/migrations and the Flask query helpers — for now) stays in `services.mapping_service`. New code touching the queue MUST import from `services.indexing_queue_service`, never from `services.mapping_service`.
 - **Producers** (the only legal ways to add work to the queue):
   - **Boot catch-up scan** — `mapping_service.boot_catchup_scan()` runs once at `gadget_web` start; cheap directory walk + batch INSERT, no parsing.
-  - **inotify file watcher** — `file_watcher_service.py` callback calls `enqueue_many_for_indexing()` on `IN_CREATE` / `IN_MOVED_TO`.
+  - **inotify file watcher** — `file_watcher_service.py` callback calls `indexing_queue_service.enqueue_many_for_indexing()` on `IN_CREATE` / `IN_MOVED_TO`.
   - **Archive run** — `video_archive_service` enqueues each newly archived clip with a short defer.
   - **Manual reindex** — `POST /api/index/trigger` (single file) and `POST /api/index/rebuild` (full rebuild).
 - **Dedup is the queue's job**, not the producers'. `mapping_service.canonical_key(path)` resolves both the SD-card and USB-RO views of the same file to the same key. `enqueue_*` is idempotent — duplicate enqueues are no-ops.
@@ -191,7 +192,7 @@ TeslaUSB has **two separate cloud upload subsystems** that share one rclone prov
 
 ## File Watcher (inotify)
 - `file_watcher_service.py` monitors USB RO mount + ArchivedClips using `watchdog` library.
-- On new file: enqueues into `indexing_queue` (via `enqueue_many_for_indexing`) and notifies the cloud sync producer. Both consumers dedup by canonical key.
+- On new file: enqueues into `indexing_queue` (via `indexing_queue_service.enqueue_many_for_indexing`) and notifies the cloud sync producer. Both consumers dedup by canonical key.
 - **Two callback types** (subscribed independently): `register_callback(cb)` for `.mp4` arrivals (consumed by the indexing producer) and `register_event_json_callback(cb)` for Tesla `event.json` arrivals (consumed by Live Event Sync). The mp4 callback uses a 60-second age gate; the event_json callback fires immediately because Tesla writes event.json atomically as the last file in the event dir.
 - Falls back to 5-minute polling if inotify unavailable (mount changes, etc.). Both callback types fire from the polling path too.
 - Must be memory-efficient: watch directory-level events only (IN_CREATE, IN_MOVED_TO, IN_CLOSE_WRITE for event.json).

@@ -35,6 +35,23 @@
             </a>
         </div>
         <div class="top-bar-right">
+            {# Phase 4.8 (#101) — system-health status dot. Polls
+               /api/system/health every 30 s. Color = overall severity:
+               ok=green, warn=amber, error=red, unknown=gray.
+               Click navigates to Settings (where the Phase 4.2
+               system-health card shows the per-subsystem breakdown).
+               Hidden until first poll arrives so we never flash a
+               stale color. #}
+            <a href="{{ url_for('mode_control.index') }}#system-health-card"
+               class="health-dot-link"
+               id="health-dot-link"
+               title="System status"
+               aria-label="System status"
+               hidden>
+                <span class="status-dot health-dot"
+                      id="health-dot"
+                      data-status-dot="health"></span>
+            </a>
             <span class="status-dot {% if mode_token == 'present' %}status-present{% elif mode_token == 'edit' %}status-edit{% else %}status-unknown{% endif %}" title="{{ mode_label }}"></span>
             <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
                 <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
@@ -297,6 +314,61 @@
         })();
     </script>
     {% endif %}
+
+    {# Phase 4.8 (#101) — system-health status dot in the top-bar.
+       Polls /api/system/health every 30 s; colours the dot per the
+       overall.severity (ok/warn/error/unknown). Hidden until the
+       first response arrives so we never flash a stale colour.
+       Lives outside the videos_available guard above because system
+       health is a global concern (cloud, WiFi, disk all matter even
+       on a Pi without a TeslaCam image). #}
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity → CSS class + tooltip prefix.
+            // Matches the tokens defined in style.css for the existing
+            // mode status-dot vocabulary (status-present uses --mode-present
+            // = green, status-edit uses --mode-edit = blue) and uses the
+            // design-system accent tokens for warn/error so dark/light
+            // mode work automatically.
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

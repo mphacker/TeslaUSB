@@ -367,6 +367,48 @@
 }
 
 /* ============================================================
+   Phase 4.8 (#101) — System Health status dot
+   Coloured by /api/system/health overall.severity. Lives in the
+   top-bar next to the existing mode status-dot. The link wrapper
+   is also styled here so the dot can be tapped (44 × 44 hit area).
+   ============================================================ */
+
+.health-dot-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    text-decoration: none;
+    color: inherit;
+}
+
+.status-dot.health-dot {
+    /* Inherits 10px / radius-full from .status-dot. */
+    transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.status-dot.health-dot.health-dot-ok {
+    background-color: var(--ds-accent-success, #16A34A);
+    box-shadow: 0 0 6px var(--ds-accent-success, #16A34A);
+}
+
+.status-dot.health-dot.health-dot-warn {
+    background-color: var(--ds-accent-warning, #D97706);
+    box-shadow: 0 0 6px var(--ds-accent-warning, #D97706);
+}
+
+.status-dot.health-dot.health-dot-error {
+    background-color: var(--ds-accent-danger, #DC2626);
+    box-shadow: 0 0 6px var(--ds-accent-danger, #DC2626);
+}
+
+.status-dot.health-dot.health-dot-unknown {
+    background-color: var(--ds-text-secondary, #6b7280);
+    box-shadow: 0 0 6px var(--ds-text-secondary, #6b7280);
+}
+
+/* ============================================================
    Theme Toggle Button (new)
    ============================================================ */
 

@@ -1834,13 +1834,11 @@
             try { data = await resp.json(); } catch(e) { /* non-JSON response */ }
             if (!resp.ok || (data && data.success === false)) {
                 var msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);
-                if (typeof showToast === 'function') showToast('Could not remove from queue: ' + msg, 'error');
-                else alert('Could not remove from queue: ' + msg);
+                showToast('Could not remove from queue: ' + msg, 'error');
             }
             refreshQueue();
         } catch(e) {
-            if (typeof showToast === 'function') showToast('Could not remove from queue: ' + e.message, 'error');
-            else alert('Could not remove from queue: ' + e.message);
+            showToast('Could not remove from queue: ' + e.message, 'error');
             refreshQueue();
         }
     };
@@ -1856,15 +1854,13 @@
             try { data = await resp.json(); } catch(e) { /* non-JSON response */ }
             if (!resp.ok || (data && data.success === false)) {
                 var msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);
-                if (typeof showToast === 'function') showToast('Could not clear queue: ' + msg, 'error');
-                else alert('Could not clear queue: ' + msg);
+                showToast('Could not clear queue: ' + msg, 'error');
             } else if (data && data.message) {
-                if (typeof showToast === 'function') showToast(data.message, 'success');
+                showToast(data.message, 'success');
             }
             refreshQueue();
         } catch(e) {
-            if (typeof showToast === 'function') showToast('Could not clear queue: ' + e.message, 'error');
-            else alert('Could not clear queue: ' + e.message);
+            showToast('Could not clear queue: ' + e.message, 'error');
             refreshQueue();
         }
     };

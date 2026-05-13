@@ -2721,10 +2721,24 @@ def get_sync_status_for_events(event_names: list) -> dict:
     """
     if not event_names:
         return {}
-    # Pre-build the result skeleton so callers always get every key.
-    statuses: dict = {name: None for name in event_names}
-    if not any(event_names):
-        return statuses
+    # Defensive cap. ``event_names`` is unbounded at the caller (the
+    # blueprint accepts whatever the client posts). One OR-clause is a
+    # few bytes of SQL text plus one row per match in fetchall(), so
+    # 500 names is the practical safety ceiling on a Pi Zero 2 W's
+    # 512 MB RAM. Names beyond the cap simply land as None — the UI
+    # already treats unknown statuses as "not synced".
+    _MAX_BATCH = 500
+    if len(event_names) > _MAX_BATCH:
+        logger.warning(
+            "get_sync_status_for_events: %d names requested, capping at %d",
+            len(event_names),
+            _MAX_BATCH,
+        )
+        # Pre-build the FULL skeleton so capped-out names still appear.
+        statuses: dict = {name: None for name in event_names}
+        event_names = event_names[:_MAX_BATCH]
+    else:
+        statuses = {name: None for name in event_names}
 
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:

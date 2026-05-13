@@ -39,14 +39,6 @@ from services import cloud_archive_service as svc
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _make_cloud_db(tmp_path) -> sqlite3.Connection:
-    db_path = str(tmp_path / "cloud_sync.db")
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(svc._CLOUD_TABLES_SQL)
-    return conn
-
-
 def _seed(conn, rows):
     """rows: (file_path, status, synced_at)"""
     for fp, st, sa in rows:
@@ -338,3 +330,59 @@ class TestCrossRowMatching:
             "2026-05-12_10-00-00": "synced",
             "2026-05-12_10-00-15": "synced",
         }
+
+
+# ---------------------------------------------------------------------------
+# Defensive cap — unbounded callers must not blow Pi Zero 2 W RAM
+# ---------------------------------------------------------------------------
+
+class TestMaxBatchCap:
+
+    def test_oversize_input_is_capped_but_returns_full_skeleton(self, cloud_db):
+        # Caller posts 1000 names. The cap is 500 (Phase 5.5 review fix);
+        # the function MUST still return a dict with all 1000 keys so the
+        # UI doesn't see KeyErrors. Capped-out names land as None.
+        c = _conn_for(cloud_db)
+        try:
+            _seed(c, [
+                # Match a name within first 500 (index 5).
+                ("SentryClips/2026-05-12_10-00-005-event.mp4",
+                 "synced", "2026-05-12T11:00:00"),
+                # Match a name within first 500 (index 499).
+                ("SavedClips/2026-05-12_10-00-499-event.mp4",
+                 "synced", "2026-05-12T11:00:00"),
+                # Match a name BEYOND the cap (index 700).
+                ("ArchivedClips/2026-05-12_10-00-700-event.mp4",
+                 "synced", "2026-05-12T11:00:00"),
+            ])
+        finally:
+            c.close()
+
+        names = [f"2026-05-12_10-00-{i:03d}" for i in range(1000)]
+        out = svc.get_sync_status_for_events(names)
+        # All 1000 keys present — UI never sees KeyError.
+        assert len(out) == 1000
+        assert set(out.keys()) == set(names)
+        # First 500 names resolve when matched.
+        assert out["2026-05-12_10-00-005"] == "synced"
+        assert out["2026-05-12_10-00-499"] == "synced"
+        # Name beyond the cap is excluded from the query → None.
+        assert out["2026-05-12_10-00-700"] is None
+
+    def test_under_cap_input_unaffected(self, cloud_db):
+        # Sanity: 100 names < 500 cap → behaves identically to legacy.
+        c = _conn_for(cloud_db)
+        try:
+            _seed(c, [
+                ("SentryClips/2026-05-12_10-00-00-event.mp4",
+                 "synced", "2026-05-12T11:00:00"),
+            ])
+        finally:
+            c.close()
+
+        names = [f"2026-05-12_10-00-{i:02d}" for i in range(100)]
+        out = svc.get_sync_status_for_events(names)
+        assert len(out) == 100
+        assert out["2026-05-12_10-00-00"] == "synced"
+        assert out["2026-05-12_10-00-99"] is None
+

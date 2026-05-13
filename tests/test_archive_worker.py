@@ -1957,6 +1957,14 @@ class TestProcessOneClaimSdioSafeguards:
         self, db, archive_root, teslacam_root, make_clip, monkeypatch,
     ):
         # Capture the kwargs that process_one_claim passes through.
+        # Issue #109: pin disk_usage to a low-fullness fixture so the
+        # adaptive helpers added in #109 don't silently rescale the
+        # base values on a host whose real filesystem is ≥ 80% full.
+        # (Mirrors the pattern in TestProcessOneClaimAdaptiveWiring.)
+        monkeypatch.setattr(
+            archive_worker.shutil, 'disk_usage',
+            lambda p: _FakeDiskUsage(used_pct=50.0),
+        )
         clip = make_clip("RecentClips/forward-front.mp4")
         enqueue_for_archive(clip, db_path=db)
         captured: List[dict] = []
@@ -1985,6 +1993,9 @@ class TestProcessOneClaimSdioSafeguards:
         assert captured[0]['load_pause_threshold'] == 3.5
         assert captured[0]['chunk_pause_seconds'] == 0.25
         assert captured[0]['time_budget_seconds'] == 60.0
+        # Issue #109 — at <80% fullness, always-apply must be False
+        # so the load-gated path is preserved.
+        assert captured[0]['chunk_pause_always'] is False
 
 
 # ---------------------------------------------------------------------------

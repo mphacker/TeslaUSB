@@ -1030,7 +1030,7 @@ class TestClipHasGpsSignal:
         self, monkeypatch, tmp_path, fake_msg,
     ):
         # Issue #176 — the peek MUST forward ``max_walk_bytes`` to the
-        # parser so the parker exits after a bounded mmap walk on
+        # parser so the parser exits after a bounded mmap walk on
         # parked clips (where Tesla emits zero SEI). Without this, the
         # message-count cap never fires for stationary footage and the
         # parser walks the entire 25-50 MB ``mdat`` box.

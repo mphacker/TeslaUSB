@@ -477,6 +477,14 @@
                     <span class="chip-label">Last copy</span>
                     <span class="chip-value" id="chip-lastcopy" style="font-size:0.95rem">—</span>
                 </div>
+                <!-- Phase 4.4 (#101): drain-rate ETA chip. Hidden by
+                     default; shown by JS when the worker has enough
+                     fresh samples to estimate a rate AND the queue
+                     has work pending. -->
+                <div class="archive-status-chip" id="chip-eta-wrap" hidden>
+                    <span class="chip-label">Backlog ETA</span>
+                    <span class="chip-value" id="chip-eta" style="font-size:0.95rem">—</span>
+                </div>
             </div>
             <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 8px"
                id="archive-active-file-row" hidden>
@@ -1261,6 +1269,20 @@ if (document.getElementById('fsck-status-container')) {
         return mb + ' MB';
     }
 
+    // Phase 4.4 (#101): mirror server-side ``_format_eta_human`` so the
+    // chip stays consistent with the System Health card message even
+    // when the user has both panels open. Cap at 24 h matches the
+    // backend cap; anything larger is suppressed at the source.
+    function fmtEta(seconds) {
+        if (!seconds || seconds < 0) return '—';
+        if (seconds < 60) return '<1 min';
+        if (seconds < 3600) return Math.floor(seconds / 60) + ' min';
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (minutes === 0) return hours + ' h';
+        return hours + ' h ' + minutes + ' min';
+    }
+
     function setText(id, txt) {
         const el = document.getElementById(id);
         if (el) el.textContent = txt;
@@ -1285,6 +1307,25 @@ if (document.getElementById('fsck-status-container')) {
         if (dlWrap) dlWrap.classList.toggle(
             'has-issue', (data.dead_letter_count || 0) > 0);
         setText('chip-lastcopy', fmtAgo(data.last_successful_copy_at));
+
+        // Phase 4.4 (#101): drain-rate ETA chip. Shown only when the
+        // backend reports a usable estimate AND the queue is non-empty.
+        // Backend already gates on freshness, sample count, and the
+        // 24-hour cap, so the UI just renders what it gets.
+        const etaWrap = document.getElementById('chip-eta-wrap');
+        const etaEl = document.getElementById('chip-eta');
+        if (etaWrap && etaEl) {
+            const eta = data.eta_seconds;
+            const queue = (data.queue_depth_p1 || 0)
+                        + (data.queue_depth_p2 || 0)
+                        + (data.queue_depth_p3 || 0);
+            if (eta && eta > 0 && queue > 0) {
+                etaEl.textContent = fmtEta(eta);
+                etaWrap.hidden = false;
+            } else {
+                etaWrap.hidden = true;
+            }
+        }
 
         const activeRow = document.getElementById('archive-active-file-row');
         if (activeRow) {

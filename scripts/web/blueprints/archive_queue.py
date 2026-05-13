@@ -159,6 +159,20 @@ def archive_status():
         'last_successful_copy_age_seconds': health.get(
             'last_successful_copy_age_seconds',
         ),
+
+        # Phase 4.4 (#101) — drain-rate ETA.
+        # ``eta_seconds`` is None when the worker hasn't established a
+        # rate yet (< 3 fresh samples), the queue is empty, or the
+        # rolling window is stale (worker idled >10 min). The UI should
+        # suppress the ETA chip in those cases.
+        'eta_seconds': worker_status.get('eta_seconds'),
+        'drain_rate_per_sec': worker_status.get('drain_rate_per_sec'),
+        'drain_rate_samples': int(
+            worker_status.get('drain_rate_samples', 0) or 0,
+        ),
+        'drain_rate_stale': bool(
+            worker_status.get('drain_rate_stale', False),
+        ),
     }
 
     retention = (health.get('retention') or {})

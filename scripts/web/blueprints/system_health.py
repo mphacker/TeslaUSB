@@ -172,6 +172,32 @@ def _indexer_block() -> Dict[str, Any]:
     }
 
 
+def _format_eta_human(eta_seconds: int) -> str:
+    """Format an ETA in seconds as a short human-readable label.
+
+    Phase 4.4 (#101) — used in the archive health message and as the
+    Settings card detail. The user wants to know "5 min vs 5 hours";
+    sub-minute precision isn't useful at the polling cadence we run.
+    Examples:
+      * ``45``     → ``"<1 min"``
+      * ``120``    → ``"2 min"``
+      * ``3600``   → ``"1 h"`` (whole hours drop the "0 min" suffix)
+      * ``5400``   → ``"1 h 30 min"``
+      * ``86400``  → ``"24 h"`` (cap; ``compute_eta_seconds`` returns
+                                 None above this, so 24 h is the
+                                 maximum we'll ever format)
+    """
+    if eta_seconds < 60:
+        return '<1 min'
+    if eta_seconds < 3600:
+        return f'{eta_seconds // 60} min'
+    hours = eta_seconds // 3600
+    minutes = (eta_seconds % 3600) // 60
+    if minutes == 0:
+        return f'{hours} h'
+    return f'{hours} h {minutes} min'
+
+
 def _archive_block() -> Dict[str, Any]:
     """Archive watchdog + worker status."""
     if not ARCHIVE_QUEUE_ENABLED:
@@ -182,6 +208,9 @@ def _archive_block() -> Dict[str, Any]:
             'paused': False,
             'queue_depth': 0,
             'lost_24h': 0,
+            'eta_seconds': None,
+            'eta_human': None,
+            'drain_rate_per_sec': None,
         }
     try:
         from services import archive_queue, archive_watchdog, archive_worker
@@ -202,6 +231,9 @@ def _archive_block() -> Dict[str, Any]:
             'paused': False,
             'queue_depth': 0,
             'lost_24h': 0,
+            'eta_seconds': None,
+            'eta_human': None,
+            'drain_rate_per_sec': None,
             '_error': str(e)[:120],
         }
 
@@ -209,6 +241,15 @@ def _archive_block() -> Dict[str, Any]:
     running = bool(worker.get('worker_running'))
     pending = int(counts.get('pending', 0))
     dead = int(counts.get('dead_letter', 0))
+    # Phase 4.4 — drain-rate ETA. ``get_status`` returns ``None`` when
+    # there aren't enough fresh samples, so we just pass through.
+    eta_seconds = worker.get('eta_seconds')
+    drain_rate = worker.get('drain_rate_per_sec')
+    eta_human: Any = (
+        _format_eta_human(int(eta_seconds))
+        if isinstance(eta_seconds, int) and eta_seconds > 0
+        else None
+    )
 
     # Watchdog severity is the single source of truth for "should the
     # operator be alarmed". We translate its 4-level ladder into the
@@ -241,11 +282,18 @@ def _archive_block() -> Dict[str, Any]:
         msg = (watchdog.get('message') or 'Watchdog warn')[:80]
     elif pending > 200:
         sev = SEV_WARN
-        msg = f'{pending} pending (catch-up)'
+        if eta_human:
+            msg = f'{pending} pending — est. {eta_human}'
+        else:
+            msg = f'{pending} pending (catch-up)'
     else:
         sev = SEV_OK
-        msg = (f'{pending} pending'
-               if pending else 'Idle, queue empty')
+        if pending and eta_human:
+            msg = f'{pending} pending — est. {eta_human}'
+        elif pending:
+            msg = f'{pending} pending'
+        else:
+            msg = 'Idle, queue empty'
 
     return {
         'severity': sev,
@@ -256,6 +304,9 @@ def _archive_block() -> Dict[str, Any]:
         'queue_depth': pending,
         'dead_letter_count': dead,
         'lost_24h': lost_24h,
+        'eta_seconds': eta_seconds,
+        'eta_human': eta_human,
+        'drain_rate_per_sec': drain_rate,
     }
 
 

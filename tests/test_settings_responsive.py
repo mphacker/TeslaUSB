@@ -94,27 +94,59 @@ class TestCssUtilityClasses:
 
     def test_settings_form_input_uses_existing_tokens(self):
         """The new class must use CSS tokens that ACTUALLY exist in
-        both light and dark themes — otherwise borders silently
-        disappear (the original bug). Allowed border tokens:
-        ``--border-color``, ``--border-input``."""
+        both light and dark themes — otherwise borders / focus rings
+        silently disappear (the original bug). Allowed border tokens:
+        ``--border-color``, ``--border-input``. Allowed accent token:
+        ``--ds-accent-primary`` (defined in both :root and
+        ``[data-theme="dark"]``)."""
         css = _read(STYLE_CSS)
         match = re.search(
             r'\.settings-form-input\s*\{([^}]+)\}',
             css, re.DOTALL,
         )
         block = match.group(1)
-        # Must NOT use the broken --border (alone) token.
         assert 'var(--border)' not in block, (
             ".settings-form-input uses the broken --border token "
             "(no such token in style.css). Use --border-input or "
             "--border-color instead."
         )
-        # Must use a known-existing token.
         assert ('var(--border-input)' in block or
                 'var(--border-color)' in block), (
             ".settings-form-input border must use --border-input "
             "or --border-color (both exist in :root and "
             "[data-theme='dark'])."
+        )
+
+    def test_settings_form_input_focus_uses_design_system_token(self):
+        """Focus ring color must use ``--ds-accent-primary`` — the
+        only theme-aware accent token defined in this codebase. Bare
+        ``var(--accent-primary)`` falls through to its hex fallback
+        on every render and breaks dark-mode color consistency.
+        Per design system L270/L409, outline-offset MUST be 2px."""
+        css = _read(STYLE_CSS)
+        match = re.search(
+            r'\.settings-form-input:focus\s*\{([^}]+)\}',
+            css, re.DOTALL,
+        )
+        assert match, "Could not locate .settings-form-input:focus block"
+        block = match.group(1)
+        # Must use the theme-aware accent token, NOT the broken one.
+        assert 'var(--ds-accent-primary)' in block, (
+            ".settings-form-input:focus must use var(--ds-accent-primary) "
+            "(defined in both :root and [data-theme='dark']). The bare "
+            "var(--accent-primary) token is not defined and would force "
+            "the hex fallback, breaking dark-mode focus ring color."
+        )
+        assert 'var(--accent-primary,' not in block, (
+            ".settings-form-input:focus must not reference the "
+            "non-existent --accent-primary token (with or without a "
+            "hex fallback). Use --ds-accent-primary instead."
+        )
+        # Pin the offset value per design system spec.
+        offset = re.search(r'outline-offset:\s*(\d+)px', block)
+        assert offset and int(offset.group(1)) == 2, (
+            "outline-offset must be 2px per docs/UI_UX_DESIGN_SYSTEM.md "
+            "L270/L409"
         )
 
     def test_settings_form_input_has_16px_font(self):
@@ -277,6 +309,53 @@ class TestIndexHtmlAdoption:
                 'icon-trash-2' in block or
                 'lucide-sprite.svg' in block), (
             "Auto-Cleanup card must use a Lucide SVG icon"
+        )
+
+    def test_inverse_adoption_no_legacy_inline_input_styles(self):
+        """Inverse-adoption tripwire (per #153 review F3): catch a
+        future regression that re-introduces a legacy under-44px
+        input in a slightly *different* inline shape (e.g.,
+        ``padding:5px 8px``, ``padding:7px 10px``, etc.).
+
+        Rule: any ``<input type="number|text|password">`` whose
+        opening tag carries an inline ``padding:`` declaration is
+        suspicious — Settings inputs MUST go through
+        ``.settings-form-input`` so the 44 px touch target and
+        theme-aware tokens are guaranteed.
+
+        Allowed: inputs without an inline ``padding`` style at all
+        (they pick up the global rule or the new utility class)."""
+        html = _read(INDEX_HTML)
+        # Find every <input ...> opening tag.
+        input_tags = re.findall(r'<input\s[^>]*>', html)
+        bad = []
+        for tag in input_tags:
+            # Only audit text-like inputs (skip checkbox/radio/file/
+            # hidden/submit/button — they have different sizing rules).
+            type_match = re.search(r'\btype="([^"]+)"', tag)
+            kind = type_match.group(1) if type_match else 'text'
+            if kind not in ('text', 'number', 'password', 'email',
+                            'tel', 'url', 'search'):
+                continue
+            # Inline padding without going through the utility class
+            # is the regression we're guarding against.
+            inline_padding = re.search(
+                r'style="[^"]*padding\s*:', tag,
+            )
+            if not inline_padding:
+                continue
+            # Allow if also wearing the utility class (defensive
+            # double-styling is OK; we just want to ensure the
+            # 44 px floor applies).
+            if 'class="settings-form-input"' in tag:
+                continue
+            bad.append(tag[:160])
+        assert len(bad) == 0, (
+            f"Found {len(bad)} text-like <input> tag(s) with inline "
+            f"padding outside .settings-form-input. Settings inputs "
+            f"must use class='settings-form-input' so 44 px touch "
+            f"targets and theme-aware borders are guaranteed.\n"
+            + "\n".join(f"  {t}" for t in bad[:5])
         )
 
 

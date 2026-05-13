@@ -196,13 +196,13 @@
                 <div style="margin-bottom:8px">
                     <label for="newWifiSSID" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">SSID</label>
                     <input type="text" id="newWifiSSID" maxlength="32" placeholder="Network name" list="wifiScanResults"
-                           style="width:100%;max-width:300px;padding:4px;background-color:var(--form-input-bg);color:var(--text-primary);border:1px solid var(--border-input);border-radius:3px">
+                           class="settings-form-input" style="max-width:300px">
                     <datalist id="wifiScanResults"></datalist>
                 </div>
                 <div style="margin-bottom:8px">
                     <label for="newWifiPassword" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">Password</label>
                     <input type="password" id="newWifiPassword" minlength="8" maxlength="63" placeholder="Password (empty for open)"
-                           style="width:100%;max-width:300px;padding:4px;background-color:var(--form-input-bg);color:var(--text-primary);border:1px solid var(--border-input);border-radius:3px">
+                           class="settings-form-input" style="max-width:300px">
                 </div>
                 <button class="edit-btn" onclick="addWifiNetwork()" id="addWifiBtn" style="padding:4px 10px;font-size:0.85em">Connect</button>
             </div>
@@ -234,14 +234,14 @@
                         <div style="margin-bottom: 8px;">
                             <label for="ap_ssid" style="display: inline-block; width: 100px; color: var(--text-primary);">SSID:</label>
                             <input type="text" id="ap_ssid" name="ssid" value="{{ ap_config.ssid }}" maxlength="32" required
-                                   style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
+                                   class="settings-form-input" style="max-width:300px">
                             <span style="font-size: 0.85em; color: var(--text-secondary);">(1-32 chars)</span>
                         </div>
                         <div style="margin-bottom: 8px;">
                             <label for="ap_passphrase" style="display: inline-block; width: 100px; color: var(--text-primary);">Password:</label>
                             <input type="password" id="ap_passphrase" name="passphrase" value="{{ ap_config.passphrase }}" minlength="8" maxlength="63"
-                                   style="width: 200px; padding: 4px; background-color: var(--form-input-bg); color: var(--text-primary); border: 1px solid var(--border-input); border-radius: 3px;">
-                            <button type="button" onclick="togglePassword(this)" style="padding: 4px 8px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                                   class="settings-form-input" style="max-width:300px">
+                            <button type="button" onclick="togglePassword(this)" style="min-height:44px; padding: 8px 12px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
                             <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
                         </div>
                         <button type="submit" class="edit-btn" id="updateApBtn" onclick="return confirm('Changing AP credentials will disconnect all connected clients. Continue?')">Update AP Credentials</button>

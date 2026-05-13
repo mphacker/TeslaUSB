@@ -2943,7 +2943,7 @@ details summary span:first-of-type {
     box-sizing: border-box;
 }
 .settings-form-input:focus {
-    outline: 2px solid var(--accent-primary, #007bff);
-    outline-offset: 1px;
-    border-color: var(--accent-primary, #007bff);
+    outline: 2px solid var(--ds-accent-primary);
+    outline-offset: 2px;
+    border-color: var(--ds-accent-primary);
 }

@@ -2064,11 +2064,13 @@ class TestMoovVerifyAfterCopy:
         assert archive_worker._verify_destination_complete(str(f)) is True
 
     def test_size_zero_box_at_end_handled(self, tmp_path):
-        # box size==0 means: extends to EOF. If it IS moov, valid.
+        # box size==0 means: extends to EOF. If it IS moov AND we have
+        # already seen mdat (pre-#110: moov alone was sufficient), valid.
         ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        mdat = b'\x00\x00\x00\x10mdat' + b'\x00' * 8
         moov_eof = (0).to_bytes(4, 'big') + b'moov' + b'\x00' * 100
         f = tmp_path / "moov_eof.mp4"
-        f.write_bytes(ftyp + moov_eof)
+        f.write_bytes(ftyp + mdat + moov_eof)
         assert archive_worker._verify_destination_complete(str(f)) is True
 
     def test_size_zero_non_moov_fails(self, tmp_path):
@@ -2116,7 +2118,7 @@ class TestMoovVerifyAfterCopy:
             + b'\x00\x00\x00\x10mdat' + b'\x00' * 8
         )
         dst = tmp_path / "dest.mp4"
-        with pytest.raises(OSError, match="missing moov"):
+        with pytest.raises(OSError, match="missing moov or mdat"):
             archive_worker._atomic_copy(
                 str(src), str(dst), chunk_size=4096,
             )
@@ -2124,6 +2126,7 @@ class TestMoovVerifyAfterCopy:
             "partial must be cleaned up on moov-verify failure"
         assert not dst.exists(), \
             "dest must NOT exist after a moov-verify failure"
+
 
     def test_atomic_copy_succeeds_for_well_formed_mp4(self, tmp_path):
         src = tmp_path / "source.mp4"
@@ -2182,6 +2185,74 @@ class TestMoovVerifyAfterCopy:
         assert not os.path.exists(dest), (
             "Incomplete MP4 must not leak into ArchivedClips"
         )
+
+
+class TestMdatRequiredAfterCopy:
+    """Issue #110 — verifier must reject MP4s that have ``moov`` but
+    are missing ``mdat``. Tesla's RecentClips writer can produce this
+    layout transiently; pre-#110 the verifier accepted it and the
+    indexer dead-lettered the file with "No mdat box found"."""
+
+    def test_no_mdat_with_moov_first_fails(self, tmp_path):
+        # ftyp + moov ONLY — the issue #110 case. Pre-fix this passed.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        moov = b'\x00\x00\x00\x08moov'
+        f = tmp_path / "no_mdat.mp4"
+        f.write_bytes(ftyp + moov)
+        assert archive_worker._verify_destination_complete(str(f)) is False
+
+    def test_mdat_then_moov_passes(self, tmp_path):
+        # Standard layout: ftyp + mdat + moov (moov at end).
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        mdat = b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        moov = b'\x00\x00\x00\x08moov'
+        f = tmp_path / "std_layout.mp4"
+        f.write_bytes(ftyp + mdat + moov)
+        assert archive_worker._verify_destination_complete(str(f)) is True
+
+    def test_moov_then_mdat_passes(self, tmp_path):
+        # Tesla RecentClips layout: ftyp + moov + mdat (moov at start).
+        # When BOTH boxes are present this is also valid.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        moov = b'\x00\x00\x00\x08moov'
+        mdat = b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        f = tmp_path / "moov_first.mp4"
+        f.write_bytes(ftyp + moov + mdat)
+        assert archive_worker._verify_destination_complete(str(f)) is True
+
+    def test_size_zero_mdat_at_end_with_prior_moov_passes(self, tmp_path):
+        # mdat extends to EOF, moov already seen → valid.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        moov = b'\x00\x00\x00\x08moov'
+        mdat_eof = (0).to_bytes(4, 'big') + b'mdat' + b'\x00' * 100
+        f = tmp_path / "mdat_eof_after_moov.mp4"
+        f.write_bytes(ftyp + moov + mdat_eof)
+        assert archive_worker._verify_destination_complete(str(f)) is True
+
+    def test_size_zero_moov_at_end_with_prior_mdat_passes(self, tmp_path):
+        # moov extends to EOF, mdat already seen → valid.
+        ftyp = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+        mdat = b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        moov_eof = (0).to_bytes(4, 'big') + b'moov' + b'\x00' * 100
+        f = tmp_path / "moov_eof_after_mdat.mp4"
+        f.write_bytes(ftyp + mdat + moov_eof)
+        assert archive_worker._verify_destination_complete(str(f)) is True
+
+    def test_atomic_copy_raises_when_source_lacks_mdat(self, tmp_path):
+        # End-to-end variant for the issue #110 layout: source has
+        # ftyp + moov but no mdat. ``_atomic_copy`` must raise.
+        src = tmp_path / "source.mp4"
+        src.write_bytes(
+            b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+            + b'\x00\x00\x00\x08moov'
+        )
+        dst = tmp_path / "dest.mp4"
+        with pytest.raises(OSError, match="missing moov or mdat"):
+            archive_worker._atomic_copy(
+                str(src), str(dst), chunk_size=4096,
+            )
+        assert not (tmp_path / "dest.mp4.partial").exists()
+        assert not dst.exists()
 
 
 # ---------------------------------------------------------------------------

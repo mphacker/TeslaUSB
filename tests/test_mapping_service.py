@@ -3533,6 +3533,45 @@ class TestStaleScanTrigger:
         )
         assert result is None
 
+    def test_blocking_helper_purges_orphaned_dead_letters(self, tmp_path):
+        """Issue #110 — _run_stale_scan_blocking also removes
+        ``indexing_queue`` dead-letter rows whose source file no
+        longer exists (typically because retention deleted a
+        truncated archive copy)."""
+        from services.indexing_queue_service import (
+            _PARSE_ERROR_MAX_ATTEMPTS,
+            enqueue_for_indexing,
+            get_queue_status,
+        )
+
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        tc = tmp_path / "TeslaCam"
+        tc.mkdir()
+
+        # Create a "front" clip, enqueue it for indexing, force it
+        # to dead-letter, then delete the file (simulating retention).
+        clip = tmp_path / "2026-05-11_08-41-58-front.mp4"
+        clip.write_bytes(b"fake")
+        assert enqueue_for_indexing(db, str(clip)) is True
+        with sqlite3.connect(db) as c:
+            c.execute(
+                "UPDATE indexing_queue SET attempts = ?, "
+                "last_error = 'No mdat box found' "
+                "WHERE file_path = ?",
+                (_PARSE_ERROR_MAX_ATTEMPTS, str(clip)),
+            )
+            c.commit()
+        assert get_queue_status(db)['dead_letter_count'] == 1
+        clip.unlink()
+
+        result = _run_stale_scan_blocking(db, str(tc), source='test')
+        assert result is not None
+        assert result.get('purged_dead_letters') == 1
+
+        # Row should be gone after the sweep.
+        assert get_queue_status(db)['dead_letter_count'] == 0
+
 
 
 class TestGapDetectionHelpers:

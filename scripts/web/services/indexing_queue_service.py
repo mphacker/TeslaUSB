@@ -41,6 +41,7 @@ discipline that prevents the constantly-flashing "Indexing…" banner.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -876,3 +877,96 @@ def clear_all_queue(db_path: str) -> int:
 # Backward-compat alias — same dangerous semantics as the original
 # (deletes claimed rows). New code should pick one of the two above.
 clear_queue = clear_all_queue
+
+
+def purge_orphaned_dead_letters(db_path: str) -> int:
+    """Delete dead-letter rows whose ``file_path`` no longer exists.
+
+    Issue #110 — When the archive watchdog's retention prune deletes a
+    truncated archive copy, it calls
+    :func:`mapping_service.purge_deleted_videos` to clean
+    ``indexed_files``, but it does NOT touch ``indexing_queue``.
+    Dead-letter rows (``attempts >= _PARSE_ERROR_MAX_ATTEMPTS``) for
+    those deleted files would otherwise linger forever, inflating
+    ``dead_letter_count`` and showing stale paths in
+    :func:`list_dead_letters`.
+
+    Wired into :func:`mapping_service._run_stale_scan_blocking` so it
+    runs alongside the existing ``indexed_files`` orphan sweep on the
+    same daily cadence (with the 5–10 min initial delay after boot).
+
+    Safety contract:
+
+    * Only ``attempts >= _PARSE_ERROR_MAX_ATTEMPTS`` rows are eligible.
+      Live or in-flight rows (``claimed_by IS NOT NULL`` or
+      ``attempts < _PARSE_ERROR_MAX_ATTEMPTS``) are NEVER touched —
+      the worker's normal ``FILE_MISSING`` outcome handles them on
+      next claim.
+    * Dead-letter rows whose source file STILL exists are preserved
+      (the file might be re-processable after a future fix).
+    * One ``os.path.isfile`` per dead-letter row — same shape as the
+      ``indexed_files`` stale scan. Orders of magnitude faster than
+      re-attempting the parse.
+
+    Returns the number of rows purged.
+    """
+    if not db_path:
+        return 0
+
+    conn = None
+    try:
+        conn = _open_queue_conn(db_path)
+        rows = conn.execute(
+            """SELECT canonical_key, file_path
+               FROM indexing_queue
+               WHERE attempts >= ?
+                 AND claimed_by IS NULL""",
+            (_PARSE_ERROR_MAX_ATTEMPTS,),
+        ).fetchall()
+    except sqlite3.Error as e:
+        logger.warning("purge_orphaned_dead_letters select failed: %s", e)
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        return 0
+
+    # Capture (canonical_key, file_path) so the DELETE can pin BOTH —
+    # closes the narrow SELECT→DELETE race where a row could in theory
+    # be DELETEd + re-INSERTed under the same canonical_key with a
+    # different file_path between our isfile check and the DELETE.
+    orphans = [(r['canonical_key'], r['file_path']) for r in rows
+               if r['file_path'] and not os.path.isfile(r['file_path'])]
+
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+    if not orphans:
+        return 0
+
+    purged = 0
+    try:
+        with _atomic_indexing_op(db_path) as conn:
+            cur = conn.executemany(
+                "DELETE FROM indexing_queue "
+                "WHERE canonical_key = ? "
+                "  AND file_path = ? "
+                "  AND attempts >= ? "
+                "  AND claimed_by IS NULL",
+                [(k, p, _PARSE_ERROR_MAX_ATTEMPTS) for (k, p) in orphans],
+            )
+            purged = cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("purge_orphaned_dead_letters delete failed: %s", e)
+        return 0
+
+    if purged:
+        logger.info(
+            "purge_orphaned_dead_letters: removed %d dead-letter row(s) "
+            "whose source file no longer exists",
+            purged,
+        )
+    return purged

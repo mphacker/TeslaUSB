@@ -2061,15 +2061,42 @@ def _run_stale_scan_blocking(db_path: str, teslacam_path_provider,
             tc = teslacam_path_provider
         if tc and os.path.isdir(tc):
             result = purge_deleted_videos(db_path, teslacam_path=tc)
+            # Issue #110 — also clean up orphaned indexer dead-letter
+            # rows whose source file is gone (e.g., retention pruned
+            # a truncated archive copy that the indexer dead-lettered
+            # for "No mdat box found"). Same problem class as the
+            # ``indexed_files`` orphan sweep, same place to handle it.
+            try:
+                # Local import: ``indexing_queue_service`` is at the
+                # bottom of the import graph (depended on by mapping_
+                # service callers in workers); importing it at module
+                # top would create an indirect cycle through worker
+                # boot. Lazy import here is intentional and matches
+                # the pattern used elsewhere in this module.
+                from services.indexing_queue_service import (
+                    purge_orphaned_dead_letters,
+                )
+                orphan_dl = purge_orphaned_dead_letters(db_path)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Stale scan (%s): purge_orphaned_dead_letters "
+                    "failed: %s",
+                    source, e,
+                )
+                orphan_dl = 0
             logger.info(
                 "Stale scan (%s): purged %d indexed_files rows, "
-                "orphaned %d waypoints and %d events "
+                "orphaned %d waypoints and %d events, "
+                "removed %d orphaned dead-letter row(s) "
                 "(trips/waypoints preserved)",
                 source,
                 result.get('purged_files', 0),
                 result.get('purged_waypoints', 0),
                 result.get('purged_events', 0),
+                orphan_dl,
             )
+            if isinstance(result, dict):
+                result['purged_dead_letters'] = orphan_dl
             return result
         logger.debug(
             "Stale scan (%s): TeslaCam not accessible — skipping",

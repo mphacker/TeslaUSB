@@ -651,11 +651,20 @@ def quick_edit_part2(operation_callback, timeout=10):
                 logger.error(f"Error during RO mount restoration: {e}", exc_info=True)
 
             # Priority 3: Drop caches (nice to have)
+            # Issue #152: standardize on the tee form used elsewhere
+            # (e.g. mapping_service._refresh_ro_mount). Avoids spawning
+            # an extra shell process per call and is consistent with the
+            # documented pattern in copilot-instructions.md. Writes "3"
+            # (page + slab caches) — the page cache also needs flushing
+            # in this quick-edit RW transition path.
             try:
                 subprocess.run(
-                    ['sudo', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
+                    ['sudo', 'tee', '/proc/sys/vm/drop_caches'],
+                    input='3\n',
+                    text=True,
                     capture_output=True,
-                    check=False
+                    timeout=5,
+                    check=True,
                 )
                 logger.info("✓ Dropped caches")
             except Exception:
@@ -958,11 +967,18 @@ def quick_edit_part3(operation_callback, timeout=10):
                 logger.error(f"Error during music RO mount restoration: {e}", exc_info=True)
 
             # Priority 3: Drop caches (nice to have)
+            # Issue #152: standardize on the tee form (see part2 path above
+            # and mapping_service._refresh_ro_mount). Writes "3" because
+            # this is the quick-edit RW transition path where the page
+            # cache also needs flushing.
             try:
                 subprocess.run(
-                    ['sudo', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
+                    ['sudo', 'tee', '/proc/sys/vm/drop_caches'],
+                    input='3\n',
+                    text=True,
                     capture_output=True,
-                    check=False
+                    timeout=5,
+                    check=True,
                 )
                 logger.info("✓ Dropped caches")
             except Exception:

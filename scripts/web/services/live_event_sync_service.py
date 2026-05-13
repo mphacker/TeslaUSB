@@ -1348,7 +1348,12 @@ def get_status() -> Dict:
     with _status_lock:
         snapshot.update(_status)
 
-    # Add queue counts (cheap aggregate query).
+    # Add queue counts (cheap aggregate query). Phase 4.6 (#101)
+    # reuses the same connection to compute the fresh data-cap
+    # state so the cloud_archive page banner is accurate even when
+    # the worker is idle (LES idles between events; the cached
+    # ``data_cap_reached`` would otherwise lag until the next
+    # upload cycle).
     try:
         conn = _open_db()
         try:
@@ -1362,10 +1367,34 @@ def get_status() -> Dict:
                 ).fetchone()
                 counts[st] = int(row['n']) if row else 0
             snapshot['queue_counts'] = counts
+
+            # Phase 4.6 — fresh today-uploaded count + cap state so
+            # the cloud_archive banner is correct on every poll.
+            today_bytes = _today_uploaded_bytes(conn)
+            snapshot['data_uploaded_today_bytes'] = today_bytes
+            cap_mb = int(LIVE_EVENT_DAILY_DATA_CAP_MB)
+            snapshot['daily_data_cap_mb'] = cap_mb
+            if cap_mb > 0:
+                cap_bytes = cap_mb * 1024 * 1024
+                snapshot['data_cap_reached'] = today_bytes >= cap_bytes
+                snapshot['data_cap_pct'] = min(
+                    100, int(round((today_bytes / cap_bytes) * 100))
+                )
+            else:
+                # Unlimited — banner stays hidden, percent is null.
+                snapshot['data_cap_reached'] = False
+                snapshot['data_cap_pct'] = None
         finally:
             conn.close()
     except Exception as e:
         snapshot['queue_counts'] = {'error': str(e)[:200]}
+        # Defensive: keep the cap fields present even on DB error so
+        # the JS consumer doesn't crash on missing keys (mirrors the
+        # Phase 4.4 ETA / Phase 4.5 pause_reason contract).
+        snapshot.setdefault('data_uploaded_today_bytes', 0)
+        snapshot.setdefault('daily_data_cap_mb', int(LIVE_EVENT_DAILY_DATA_CAP_MB))
+        snapshot.setdefault('data_cap_reached', False)
+        snapshot.setdefault('data_cap_pct', None)
 
     # Surface the cross-subsystem coordination signal so the
     # WiFi-connect dispatcher's drain wait can yield correctly when

@@ -2703,19 +2703,80 @@ def recover_interrupted_uploads(db_path: str) -> int:
 def get_sync_status_for_events(event_names: list) -> dict:
     """Check sync status for a list of event names.
 
-    Returns dict mapping event_name -> status ('synced', 'queued', 'uploading', None).
+    Returns dict mapping event_name -> status ('synced', 'queued',
+    'uploading', None).
+
+    Phase 5.5 — single-query batch lookup. The legacy implementation
+    issued one ``SELECT ... LIKE '%name%' ORDER BY synced_at DESC LIMIT 1``
+    per event, which is N round-trips for an N-event status request
+    (typical UI request: 30 events → 30 queries → ~3-9 ms baseline +
+    SQLite overhead × 30). Now we issue ONE query that returns every
+    matching row and bucket-match in Python.
+
+    The match semantics (case-sensitive substring of ``file_path``) are
+    preserved: an event_name like ``2026-05-12_10-00-00`` still matches
+    rows whose ``file_path`` contains that string. The "most recent
+    match wins" semantics are preserved by ordering ``synced_at DESC``
+    server-side and taking the FIRST hit per event_name in Python.
     """
     if not event_names:
         return {}
+    # Defensive cap. ``event_names`` is unbounded at the caller (the
+    # blueprint accepts whatever the client posts). One OR-clause is a
+    # few bytes of SQL text plus one row per match in fetchall(), so
+    # 500 names is the practical safety ceiling on a Pi Zero 2 W's
+    # 512 MB RAM. Names beyond the cap simply land as None — the UI
+    # already treats unknown statuses as "not synced".
+    _MAX_BATCH = 500
+    if len(event_names) > _MAX_BATCH:
+        logger.warning(
+            "get_sync_status_for_events: %d names requested, capping at %d",
+            len(event_names),
+            _MAX_BATCH,
+        )
+        # Pre-build the FULL skeleton so capped-out names still appear.
+        statuses: dict = {name: None for name in event_names}
+        event_names = event_names[:_MAX_BATCH]
+    else:
+        statuses = {name: None for name in event_names}
+
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:
-        statuses = {}
-        for name in event_names:
-            row = conn.execute(
-                "SELECT status FROM cloud_synced_files WHERE file_path LIKE ? ORDER BY synced_at DESC LIMIT 1",
-                ('%' + name + '%',)
-            ).fetchone()
-            statuses[name] = row['status'] if row else None
+        # ONE query: union the per-name LIKE patterns. SQLite does not
+        # support a parameterized "any of these patterns" operator, so we
+        # OR N parameterized LIKE clauses — the SQL text length grows
+        # linearly with N but the round-trip count stays at 1.
+        like_clauses = " OR ".join(["file_path LIKE ?"] * len(event_names))
+        params = ["%" + name + "%" for name in event_names]
+        sql = (
+            "SELECT file_path, status FROM cloud_synced_files "
+            f"WHERE {like_clauses} "
+            "ORDER BY synced_at DESC"
+        )
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.Error:
+            # Best-effort: a malformed query (shouldn't happen) or DB
+            # error returns the empty-skeleton dict so the UI degrades
+            # gracefully instead of 500ing.
+            return statuses
+
+        # Bucket-match in Python. ``rows`` is ordered most-recent-first
+        # so the FIRST match per event_name is the row we want — same
+        # semantics as the legacy ``LIMIT 1`` per name. Stop scanning
+        # once every name has been resolved.
+        unresolved = set(event_names)
+        for row in rows:
+            if not unresolved:
+                break
+            file_path = row["file_path"]
+            # A row may match more than one event_name (e.g. two events
+            # with overlapping timestamps); each name takes its own most-
+            # recent match independently.
+            matched = [n for n in unresolved if n in file_path]
+            for name in matched:
+                statuses[name] = row["status"]
+                unresolved.discard(name)
         return statuses
     finally:
         conn.close()

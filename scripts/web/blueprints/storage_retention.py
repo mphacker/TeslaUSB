@@ -8,6 +8,9 @@ JSON endpoints for:
 * ``POST /api/cleanup/run_now``  — trigger an immediate retention pass
   (one-line wrapper for ``services.video_archive_service.trigger_archive_cleanup``,
   which itself wraps ``archive_watchdog.force_prune_now``).
+* ``POST /api/cleanup/reclaim_stationary_recent`` — issue #167: delete
+  already-archived RecentClips with no GPS movement (one-shot reclaim
+  that complements the daily retention prune).
 * ``GET  /api/cleanup/status``   — return the latest retention summary
   (last-run timestamp, deleted count, freed bytes, kept-unsynced count,
   next-due timestamp, current resolved retention days, and the
@@ -415,6 +418,87 @@ def api_cleanup_run_now():
         return jsonify({
             'success': False,
             'message': f"Cleanup failed: {exc}",
+        }), 500
+
+    if isinstance(result, dict) and result.get('error'):
+        return jsonify({
+            'success': False,
+            'message': str(result.get('error')),
+            'result': result,
+        }), 500
+
+    return jsonify({
+        'success': True,
+        'result': result if isinstance(result, dict) else {},
+    }), 200
+
+
+@storage_retention_bp.route('/api/cleanup/reclaim_stationary_recent',
+                             methods=['POST'])
+def api_reclaim_stationary_recent():
+    """Issue #167 — delete already-archived stationary RecentClips.
+
+    The archive worker copies every RecentClips clip to the SD card
+    without filtering. The indexer downstream classifies clips as
+    stationary (``waypoint_count = 0``) but nothing acts on that
+    classification, so SD-card RecentClips storage grows unbounded
+    with worthless overnight Sentry-mode-while-parked footage.
+
+    This endpoint deletes those clips synchronously. Each delete
+    routes through ``safe_delete_archive_video`` (protected-file
+    guard) and ``purge_deleted_videos`` (geodata reconciliation —
+    trips/waypoints/events preserved). Files newer than ``min_age_hours``
+    are kept; clips with a SentryClips/SavedClips counterpart with the
+    same basename are kept (event copies are user-meaningful).
+
+    Request body (JSON, optional)::
+
+        {"min_age_hours": int}   # default 1
+
+    Returns the watchdog summary on success::
+
+        {"success": true,
+         "result": {"deleted_count": N, "freed_bytes": M, ...}}
+
+    Same HTTP contract as ``/api/cleanup/run_now``: 200 on success
+    (including ``status='already_running'``), 500 on adapter crash.
+    """
+    payload: Dict[str, Any] = {}
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+
+    raw_age = payload.get('min_age_hours')
+    if raw_age is None:
+        min_age_hours = 1
+    else:
+        # bool is a subclass of int in Python — reject explicitly so
+        # ``{"min_age_hours": true}`` doesn't silently coerce to 1
+        # (and ``false`` to 0, i.e. "delete every age"). Honors the
+        # documented "non-integer -> 400" contract.
+        if isinstance(raw_age, bool):
+            return jsonify({
+                'success': False,
+                'message': 'min_age_hours must be an integer',
+            }), 400
+        try:
+            min_age_hours = int(raw_age)
+        except (TypeError, ValueError):
+            return jsonify({
+                'success': False,
+                'message': 'min_age_hours must be an integer',
+            }), 400
+        if min_age_hours < 0:
+            min_age_hours = 0
+
+    try:
+        from services.archive_watchdog import reclaim_stationary_recent_clips
+        result = reclaim_stationary_recent_clips(min_age_hours=min_age_hours)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "storage_retention: reclaim_stationary_recent_clips raised")
+        return jsonify({
+            'success': False,
+            'message': f"Reclaim failed: {exc}",
         }), 500
 
     if isinstance(result, dict) and result.get('error'):

@@ -445,3 +445,190 @@ class TestApiCleanupRunNow:
         body = r.get_json()
         assert body['success'] is False
         assert 'boom' in body['message']
+
+
+# ---------------------------------------------------------------------------
+# /api/cleanup/reclaim_stationary_recent (issue #167)
+# Same HTTP contract as run_now: 200 on success / already_running, 500 on
+# error dict or unexpected exception, 400 on bad input.
+# ---------------------------------------------------------------------------
+
+
+class TestApiReclaimStationaryRecent:
+    def test_success_returns_200_with_summary(self, client):
+        with patch(
+            'services.archive_watchdog.reclaim_stationary_recent_clips',
+            return_value={
+                'deleted_count': 12, 'freed_bytes': 25_000_000,
+                'scanned': 100, 'kept_too_new': 4,
+                'kept_has_event_counterpart': 1, 'kept_unindexed': 0,
+                'kept_has_gps': 0, 'min_age_hours': 1,
+                'duration_seconds': 0.8,
+            },
+        ):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent',
+                json={},
+            )
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body['success'] is True
+        assert body['result']['deleted_count'] == 12
+        assert body['result']['freed_bytes'] == 25_000_000
+
+    def test_already_running_returns_200(self, client):
+        with patch(
+            'services.archive_watchdog.reclaim_stationary_recent_clips',
+            return_value={
+                'deleted_count': 0, 'freed_bytes': 0,
+                'status': 'already_running', 'duration_seconds': 0.0,
+            },
+        ):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent', json={},
+            )
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body['success'] is True
+        assert body['result']['status'] == 'already_running'
+
+    def test_watchdog_error_dict_returns_500(self, client):
+        with patch(
+            'services.archive_watchdog.reclaim_stationary_recent_clips',
+            return_value={
+                'deleted_count': 0, 'freed_bytes': 0,
+                'error': 'watchdog not started',
+            },
+        ):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent', json={},
+            )
+        assert r.status_code == 500
+        body = r.get_json()
+        assert body['success'] is False
+        assert 'watchdog not started' in body['message']
+
+    def test_unexpected_exception_returns_500(self, client):
+        with patch(
+            'services.archive_watchdog.reclaim_stationary_recent_clips',
+            side_effect=RuntimeError("boom"),
+        ):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent', json={},
+            )
+        assert r.status_code == 500
+        body = r.get_json()
+        assert body['success'] is False
+        assert 'boom' in body['message']
+
+    def test_default_min_age_hours_is_one(self, client):
+        captured: dict = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return {
+                'deleted_count': 0, 'freed_bytes': 0, 'scanned': 0,
+                'kept_too_new': 0, 'kept_has_event_counterpart': 0,
+                'kept_unindexed': 0, 'kept_has_gps': 0,
+                'min_age_hours': kwargs.get('min_age_hours', -1),
+                'duration_seconds': 0.0,
+            }
+        with patch(
+            'services.archive_watchdog.reclaim_stationary_recent_clips',
+            side_effect=_capture,
+        ):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent', json={},
+            )
+        assert r.status_code == 200
+        assert captured.get('min_age_hours') == 1
+
+    def test_explicit_min_age_hours_passes_through(self, client):
+        captured: dict = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return {
+                'deleted_count': 0, 'freed_bytes': 0, 'scanned': 0,
+                'kept_too_new': 0, 'kept_has_event_counterpart': 0,
+                'kept_unindexed': 0, 'kept_has_gps': 0,
+                'min_age_hours': kwargs.get('min_age_hours', -1),
+                'duration_seconds': 0.0,
+            }
+        with patch(
+            'services.archive_watchdog.reclaim_stationary_recent_clips',
+            side_effect=_capture,
+        ):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent',
+                json={'min_age_hours': 6},
+            )
+        assert r.status_code == 200
+        assert captured.get('min_age_hours') == 6
+
+    def test_negative_min_age_hours_clamped_to_zero(self, client):
+        captured: dict = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return {
+                'deleted_count': 0, 'freed_bytes': 0, 'scanned': 0,
+                'kept_too_new': 0, 'kept_has_event_counterpart': 0,
+                'kept_unindexed': 0, 'kept_has_gps': 0,
+                'min_age_hours': kwargs.get('min_age_hours', -1),
+                'duration_seconds': 0.0,
+            }
+        with patch(
+            'services.archive_watchdog.reclaim_stationary_recent_clips',
+            side_effect=_capture,
+        ):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent',
+                json={'min_age_hours': -5},
+            )
+        assert r.status_code == 200
+        assert captured.get('min_age_hours') == 0
+
+    def test_non_integer_min_age_hours_returns_400(self, client):
+        # No patch — should reject before the service call.
+        r = client.post(
+            '/api/cleanup/reclaim_stationary_recent',
+            json={'min_age_hours': 'not-a-number'},
+        )
+        assert r.status_code == 400
+        body = r.get_json()
+        assert body['success'] is False
+        assert 'min_age_hours' in body['message']
+
+    def test_bool_min_age_hours_returns_400(self, client):
+        """``bool`` is a subclass of ``int`` in Python — reject explicitly
+        so ``{"min_age_hours": true}`` doesn't silently coerce to 1
+        and ``false`` to 0 ("delete every age"). Honors the documented
+        non-integer -> 400 contract.
+        """
+        for raw in (True, False):
+            r = client.post(
+                '/api/cleanup/reclaim_stationary_recent',
+                json={'min_age_hours': raw},
+            )
+            assert r.status_code == 400, \
+                f"bool {raw} should be rejected, got {r.status_code}"
+            body = r.get_json()
+            assert body['success'] is False
+            assert 'min_age_hours' in body['message']
+
+    def test_empty_post_body_works(self, client):
+        # Some clients send no Content-Type or no body at all.
+        with patch(
+            'services.archive_watchdog.reclaim_stationary_recent_clips',
+            return_value={
+                'deleted_count': 0, 'freed_bytes': 0, 'scanned': 0,
+                'kept_too_new': 0, 'kept_has_event_counterpart': 0,
+                'kept_unindexed': 0, 'kept_has_gps': 0,
+                'min_age_hours': 1, 'duration_seconds': 0.0,
+            },
+        ):
+            r = client.post('/api/cleanup/reclaim_stationary_recent')
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body['success'] is True

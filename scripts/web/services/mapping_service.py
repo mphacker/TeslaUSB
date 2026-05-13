@@ -1431,22 +1431,35 @@ def _index_video(
             (trip_id, last_ts),
         ).fetchone()
         total_dist = 0.0
-        videos = conn.execute(
-            "SELECT DISTINCT video_path FROM waypoints "
-            "WHERE trip_id = ? AND video_path IS NOT NULL",
+        # Phase 5.1 (#102) — collapse the original N+1 (1 query for
+        # the distinct video list + 1 per video) into a single
+        # ORDER BY video_path, id pass.
+        #
+        # Distance is summed per video (we MUST NOT haversine across
+        # consecutive rows belonging to different videos): Tesla videos
+        # can overlap in time (saved clips alongside RecentClips), so
+        # a global ORDER BY timestamp would interleave them and produce
+        # phantom GPS jumps. Walking ORDER BY video_path, id gives the
+        # same per-video ordering the old per-video SELECT produced,
+        # and the explicit ``video_path`` column lets us reset between
+        # videos — equivalent semantics, one query instead of 1+N.
+        all_wps = conn.execute(
+            "SELECT video_path, lat, lon FROM waypoints "
+            "WHERE trip_id = ? AND video_path IS NOT NULL "
+            "ORDER BY video_path, id",
             (trip_id,),
         ).fetchall()
-        for v in videos:
-            vwps = conn.execute(
-                "SELECT lat, lon FROM waypoints "
-                "WHERE trip_id = ? AND video_path = ? ORDER BY id",
-                (trip_id, v['video_path']),
-            ).fetchall()
-            for j in range(1, len(vwps)):
+        prev = None
+        prev_video = None
+        for w in all_wps:
+            video_path = w['video_path']
+            if prev is not None and video_path == prev_video:
                 total_dist += _haversine_km(
-                    vwps[j-1]['lat'], vwps[j-1]['lon'],
-                    vwps[j]['lat'], vwps[j]['lon'],
+                    prev['lat'], prev['lon'],
+                    w['lat'], w['lon'],
                 )
+            prev = w
+            prev_video = video_path
         try:
             dur = max(0, int((
                 datetime.fromisoformat(last_ts)

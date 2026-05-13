@@ -18,7 +18,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -636,7 +636,151 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
 # Priority Scoring
 # ---------------------------------------------------------------------------
 
-def _score_event_priority(event_dir: str) -> int:
+def _load_geo_hits(db_path: Optional[str] = None) -> Optional[Set[str]]:
+    """Pre-fetch the set of "anchors" — strings that legacy
+    ``_score_event_priority`` would match via ``LIKE '%dir_name%'`` —
+    extracted from every non-NULL ``waypoints.video_path`` row.
+
+    Phase 5.2 — replaces the per-event ``get_db_connection() → SELECT … LIKE``
+    pattern in :func:`_score_event_priority`. For a queue with N candidate
+    events the legacy code opened N fresh SQLite connections and ran one
+    full-scan ``LIKE '%dir%'`` query each. This helper does ONE connection
+    and ONE ``SELECT DISTINCT video_path`` then derives every possible
+    ``dir_name`` anchor in Python (set-build) so the per-event check
+    collapses to an O(1) ``in`` lookup.
+
+    The legacy LIKE substring pattern actually accepts THREE anchor shapes
+    because :func:`_discover_events` calls the scorer with two different
+    ``event_dir`` shapes:
+
+      * **Nested event dirs** (``SentryClips/2026-05-12_10-00-00``) —
+        ``dir_name`` is a 19-char timestamp.
+      * **Flat ArchivedClips files** (``ArchivedClips/2026-05-12_10-00-00-front.mp4``) —
+        ``dir_name`` is the full filename (``os.path.basename`` of the
+        FILE, not a directory).
+
+    And ``waypoints.video_path`` in production is stored as
+    ``ArchivedClips/<basename>`` — never the original nested
+    ``SentryClips/<event-dir>/<file>`` form. So we MUST look at the
+    file's basename and the leading-19-char timestamp prefix, not
+    just the parent-dir basename. (PR #143 reviewer caught this: the
+    parent-dir-only build always produced ``"ArchivedClips"`` and
+    silently demoted geo-tier events to the no-geo tier, which under
+    ``sync_non_event_videos: false`` would drop them from the queue.)
+
+    For each ``video_path`` we add three anchors to the set:
+      1. ``os.path.basename(os.path.dirname(vp))`` — catches the
+         nested-event-dir naming pattern (``RecentClips`` /
+         ``ArchivedClips`` are always added but never collide with a
+         real event-dir name, so they're harmless noise).
+      2. ``os.path.basename(vp)`` — catches the flat-ArchivedClips
+         file-basename naming pattern.
+      3. The leading 19-char ``YYYY-MM-DD_HH-MM-SS`` timestamp prefix
+         of the file basename — catches the nested-event-dir case
+         even when the indexer has rewritten the path to flat form
+         (which is the production situation).
+
+    Uses raw ``sqlite3.connect`` rather than
+    ``mapping_queries.get_db_connection`` because the latter runs the
+    full v6 schema initialization on every call. This helper is
+    read-only and called once per discover pass — schema migration is
+    a different lifecycle and belongs in the indexing path, not the
+    cloud picker. Skipping it also means ``_load_geo_hits`` doesn't
+    crash when geodata.db is missing or partially initialized: it
+    returns ``None`` so the scorer falls back to the legacy per-event
+    query path.
+
+    Returns:
+      * a ``set`` of anchor strings (may be empty if waypoints table
+        has no rows) — caller should use ``in`` for the per-event check.
+      * ``None`` if mapping is disabled, the DB doesn't exist, or the
+        query raises (no waypoints table, locked, etc.) — caller MUST
+        treat ``None`` as "fall back to per-event lookup" so behaviour
+        matches the legacy code path.
+    """
+    try:
+        from config import MAPPING_ENABLED, MAPPING_DB_PATH
+    except ImportError:
+        return None
+    if not MAPPING_ENABLED:
+        return None
+    path = db_path or MAPPING_DB_PATH
+
+    # Refuse to create the DB if it doesn't exist — that would mask
+    # real configuration problems and create an empty file the indexer
+    # would then try to migrate. ``None`` is the right "I have no info"
+    # response.
+    if not path or not os.path.isfile(path):
+        return None
+
+    try:
+        conn = sqlite3.connect(path, timeout=5.0)
+    except Exception:
+        return None
+
+    hits: Set[str] = set()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT video_path FROM waypoints "
+            "WHERE video_path IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # YYYY-MM-DD_HH-MM-SS Tesla event timestamp pattern (19 chars).
+    # Pre-compiled in the function body — we only get here once per
+    # discover pass, so the compile cost is negligible and keeps the
+    # helper self-contained.
+    import re
+    _TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
+
+    for row in rows:
+        # Plain sqlite3 connection (no row_factory) → tuple access.
+        try:
+            vp = row[0]
+        except (IndexError, TypeError):
+            continue
+        if not vp:
+            continue
+
+        # Anchor 1: parent-dir basename. Catches the nested
+        # ``SentryClips/<event-dir>/<file>`` naming convention. In
+        # current production this is almost always ``ArchivedClips`` /
+        # ``RecentClips`` (because the indexer rewrites paths to the
+        # flat form), which is harmless noise: those names never
+        # collide with a real Tesla event-dir basename.
+        parent = os.path.basename(os.path.dirname(vp))
+        if parent:
+            hits.add(parent)
+
+        # Anchor 2: file basename. Catches flat ArchivedClips files
+        # where ``_discover_events`` calls the scorer with a full
+        # filename as the ``event_dir`` argument.
+        base = os.path.basename(vp)
+        if base:
+            hits.add(base)
+
+            # Anchor 3: leading 19-char Tesla-timestamp prefix of the
+            # file basename. Catches the nested-event-dir case (where
+            # ``dir_name`` is just the 19-char timestamp) even when
+            # the indexer has rewritten the path to the flat form
+            # (which is the production situation per PR #143 review).
+            m = _TS_RE.match(base)
+            if m:
+                hits.add(m.group(0))
+
+    return hits
+
+
+def _score_event_priority(
+    event_dir: str,
+    geo_hits: Optional[Set[str]] = None,
+) -> int:
     """Score an event directory for sync priority (lower = higher priority).
 
     Priority order:
@@ -666,22 +810,32 @@ def _score_event_priority(event_dir: str) -> int:
 
     # Check geodata.db for geolocation
     if score >= 200:
-        try:
-            from config import MAPPING_ENABLED, MAPPING_DB_PATH
-            if MAPPING_ENABLED:
-                from services.mapping_queries import get_db_connection
-                conn = get_db_connection(MAPPING_DB_PATH)
-                # Escape LIKE wildcards in dir_name to prevent unintended matches
-                safe_name = dir_name.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-                row = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM waypoints WHERE video_path LIKE ? ESCAPE '\\'",
-                    (f'%{safe_name}%',)
-                ).fetchone()
-                conn.close()
-                if row and row['cnt'] > 0:
-                    score = 100  # Has geolocation — medium priority
-        except Exception:
-            pass
+        # Phase 5.2 — fast path: caller pre-fetched the geo-hit set in a
+        # single ``SELECT DISTINCT video_path`` query. Skip the per-event
+        # SQLite connection entirely. ``geo_hits is None`` means "no
+        # batched lookup available" (mapping disabled, import failed,
+        # query raised) → fall through to the legacy per-event query so
+        # behaviour matches direct callers (tests).
+        if geo_hits is not None:
+            if dir_name in geo_hits:
+                score = 100
+        else:
+            try:
+                from config import MAPPING_ENABLED, MAPPING_DB_PATH
+                if MAPPING_ENABLED:
+                    from services.mapping_queries import get_db_connection
+                    conn = get_db_connection(MAPPING_DB_PATH)
+                    # Escape LIKE wildcards in dir_name to prevent unintended matches
+                    safe_name = dir_name.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                    row = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM waypoints WHERE video_path LIKE ? ESCAPE '\\'",
+                        (f'%{safe_name}%',)
+                    ).fetchone()
+                    conn.close()
+                    if row and row['cnt'] > 0:
+                        score = 100  # Has geolocation — medium priority
+            except Exception:
+                pass
 
     # Add age-based sub-score (older = lower number = higher priority)
     try:
@@ -922,12 +1076,21 @@ def _discover_events(
     except ImportError:
         pass
 
+    # Phase 5.2 — pre-fetch the geo-hit set ONCE so the scorer doesn't
+    # open a fresh SQLite connection per event. For a queue of N candidate
+    # events the legacy per-event ``LIKE '%dir%'`` pattern was N
+    # connection-open + N full-scan queries; now it's ONE
+    # ``SELECT DISTINCT video_path`` + N O(1) set lookups. ``None``
+    # signals fallback to per-event lookup (mapping disabled / import
+    # failed / query raised) so behaviour matches direct callers.
+    geo_hits = _load_geo_hits()
+
     # Score every candidate once so we can both filter and sort without
     # invoking the (relatively expensive) scorer twice. Score >= 200 means
     # neither an event.json trigger nor any waypoint geolocation hit was
     # found — i.e. routine driving footage.
     scored: List[Tuple[Tuple[str, str, int], int]] = [
-        (t, _score_event_priority(t[0])) for t in events
+        (t, _score_event_priority(t[0], geo_hits=geo_hits)) for t in events
     ]
 
     # Phase 2.3 — When ``sync_non_event_videos`` is False the picker MUST

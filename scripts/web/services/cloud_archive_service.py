@@ -637,28 +637,61 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 def _load_geo_hits(db_path: Optional[str] = None) -> Optional[Set[str]]:
-    """Pre-fetch the set of event-directory basenames that have any waypoint
-    geolocation hit in geodata.db.
+    """Pre-fetch the set of "anchors" — strings that legacy
+    ``_score_event_priority`` would match via ``LIKE '%dir_name%'`` —
+    extracted from every non-NULL ``waypoints.video_path`` row.
 
     Phase 5.2 — replaces the per-event ``get_db_connection() → SELECT … LIKE``
     pattern in :func:`_score_event_priority`. For a queue with N candidate
     events the legacy code opened N fresh SQLite connections and ran one
     full-scan ``LIKE '%dir%'`` query each. This helper does ONE connection
-    and ONE ``SELECT DISTINCT video_path`` then derives the parent-dir
-    basename in Python (set-build) so the per-event check collapses to an
-    O(1) ``in`` lookup.
+    and ONE ``SELECT DISTINCT video_path`` then derives every possible
+    ``dir_name`` anchor in Python (set-build) so the per-event check
+    collapses to an O(1) ``in`` lookup.
 
-    Uses a raw ``sqlite3.connect`` rather than ``mapping_queries.
-    get_db_connection`` because the latter runs the full v6 schema
-    initialization on every call. This helper is read-only and called
-    once per discover pass — schema migration is a different lifecycle
-    and belongs in the indexing path, not the cloud picker. Skipping it
-    also means ``_load_geo_hits`` doesn't crash when geodata.db is
-    missing or partially initialized: it simply returns ``None`` so the
-    scorer falls back to the legacy per-event query path.
+    The legacy LIKE substring pattern actually accepts THREE anchor shapes
+    because :func:`_discover_events` calls the scorer with two different
+    ``event_dir`` shapes:
+
+      * **Nested event dirs** (``SentryClips/2026-05-12_10-00-00``) —
+        ``dir_name`` is a 19-char timestamp.
+      * **Flat ArchivedClips files** (``ArchivedClips/2026-05-12_10-00-00-front.mp4``) —
+        ``dir_name`` is the full filename (``os.path.basename`` of the
+        FILE, not a directory).
+
+    And ``waypoints.video_path`` in production is stored as
+    ``ArchivedClips/<basename>`` — never the original nested
+    ``SentryClips/<event-dir>/<file>`` form. So we MUST look at the
+    file's basename and the leading-19-char timestamp prefix, not
+    just the parent-dir basename. (PR #143 reviewer caught this: the
+    parent-dir-only build always produced ``"ArchivedClips"`` and
+    silently demoted geo-tier events to the no-geo tier, which under
+    ``sync_non_event_videos: false`` would drop them from the queue.)
+
+    For each ``video_path`` we add three anchors to the set:
+      1. ``os.path.basename(os.path.dirname(vp))`` — catches the
+         nested-event-dir naming pattern (``RecentClips`` /
+         ``ArchivedClips`` are always added but never collide with a
+         real event-dir name, so they're harmless noise).
+      2. ``os.path.basename(vp)`` — catches the flat-ArchivedClips
+         file-basename naming pattern.
+      3. The leading 19-char ``YYYY-MM-DD_HH-MM-SS`` timestamp prefix
+         of the file basename — catches the nested-event-dir case
+         even when the indexer has rewritten the path to flat form
+         (which is the production situation).
+
+    Uses raw ``sqlite3.connect`` rather than
+    ``mapping_queries.get_db_connection`` because the latter runs the
+    full v6 schema initialization on every call. This helper is
+    read-only and called once per discover pass — schema migration is
+    a different lifecycle and belongs in the indexing path, not the
+    cloud picker. Skipping it also means ``_load_geo_hits`` doesn't
+    crash when geodata.db is missing or partially initialized: it
+    returns ``None`` so the scorer falls back to the legacy per-event
+    query path.
 
     Returns:
-      * a ``set`` of dir-name strings (may be empty if waypoints table
+      * a ``set`` of anchor strings (may be empty if waypoints table
         has no rows) — caller should use ``in`` for the per-event check.
       * ``None`` if mapping is disabled, the DB doesn't exist, or the
         query raises (no waypoints table, locked, etc.) — caller MUST
@@ -699,6 +732,13 @@ def _load_geo_hits(db_path: Optional[str] = None) -> Optional[Set[str]]:
         except Exception:
             pass
 
+    # YYYY-MM-DD_HH-MM-SS Tesla event timestamp pattern (19 chars).
+    # Pre-compiled in the function body — we only get here once per
+    # discover pass, so the compile cost is negligible and keeps the
+    # helper self-contained.
+    import re
+    _TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
+
     for row in rows:
         # Plain sqlite3 connection (no row_factory) → tuple access.
         try:
@@ -707,15 +747,33 @@ def _load_geo_hits(db_path: Optional[str] = None) -> Optional[Set[str]]:
             continue
         if not vp:
             continue
-        # Tesla layout: ARCHIVE_DIR/<event-dir>/<camera-file>.mp4
-        # waypoints.video_path may also be a flat ArchivedClips path:
-        #   ARCHIVE_DIR/<filename>.mp4
-        # In the flat-file case ``dirname`` is ARCHIVE_DIR (which is not
-        # an event dir), so its basename will not match any event entry —
-        # safe no-op.
+
+        # Anchor 1: parent-dir basename. Catches the nested
+        # ``SentryClips/<event-dir>/<file>`` naming convention. In
+        # current production this is almost always ``ArchivedClips`` /
+        # ``RecentClips`` (because the indexer rewrites paths to the
+        # flat form), which is harmless noise: those names never
+        # collide with a real Tesla event-dir basename.
         parent = os.path.basename(os.path.dirname(vp))
         if parent:
             hits.add(parent)
+
+        # Anchor 2: file basename. Catches flat ArchivedClips files
+        # where ``_discover_events`` calls the scorer with a full
+        # filename as the ``event_dir`` argument.
+        base = os.path.basename(vp)
+        if base:
+            hits.add(base)
+
+            # Anchor 3: leading 19-char Tesla-timestamp prefix of the
+            # file basename. Catches the nested-event-dir case (where
+            # ``dir_name`` is just the 19-char timestamp) even when
+            # the indexer has rewritten the path to the flat form
+            # (which is the production situation per PR #143 review).
+            m = _TS_RE.match(base)
+            if m:
+                hits.add(m.group(0))
+
     return hits
 
 

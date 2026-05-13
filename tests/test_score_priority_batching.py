@@ -266,6 +266,101 @@ class TestScorePriorityBatching:
         result = svc._load_geo_hits()
         assert result is None
 
+    def test_geo_hits_matches_flat_archived_clips_shape(
+            self, tmp_path, monkeypatch):
+        """REGRESSION GUARD (PR #143 review).
+
+        In production the indexer rewrites every waypoint's
+        ``video_path`` to the flat ``ArchivedClips/<basename>`` form —
+        NEVER the original nested ``SentryClips/<event-dir>/<file>``
+        form. The first iteration of this PR derived only the parent
+        dir basename, which always produced ``"ArchivedClips"`` /
+        ``"RecentClips"`` — never the event timestamp.
+
+        The result was that ``_score_event_priority`` for an event
+        like ``SentryClips/2026-05-12_10-00-00`` would NOT find its
+        waypoint anchor in ``geo_hits`` and would silently demote the
+        event from the geo tier (100) to the no-geo tier (200+).
+        Under ``sync_non_event_videos: false`` (the default) that
+        causes the clip to be DROPPED from the queue.
+
+        This test pins the production data shape end-to-end:
+        - waypoint stored as ``ArchivedClips/<timestamp>-front.mp4``
+        - event dir ``SentryClips/<timestamp>`` (timestamp dir_name)
+        - geo_hits MUST contain the timestamp string so the per-event
+          ``in`` check matches.
+        """
+        # Production-shaped geodata.db: waypoint stored as flat
+        # ``ArchivedClips/2026-05-12_10-00-00-front.mp4``.
+        db_path = _make_geodata_db(tmp_path, [
+            "ArchivedClips/2026-05-12_10-00-00-front.mp4",
+            "ArchivedClips/2026-05-12_11-00-00-back.mp4",
+        ])
+        monkeypatch.setattr(config, "MAPPING_ENABLED", True, raising=False)
+        monkeypatch.setattr(config, "MAPPING_DB_PATH", db_path, raising=False)
+
+        hits = svc._load_geo_hits()
+        assert hits is not None
+
+        # Anchor 3: the leading 19-char timestamp prefix MUST be in
+        # the set so a SentryClips event-dir basename can match.
+        assert "2026-05-12_10-00-00" in hits, (
+            "Missing timestamp anchor — SentryClips event dirs would "
+            "fail to match their flat-stored waypoints. Reproduces "
+            "PR #143 critical finding."
+        )
+        assert "2026-05-12_11-00-00" in hits
+
+        # Anchor 2: the full filename MUST also be in the set so a
+        # flat-ArchivedClips event call (where dir_name is the file
+        # basename) can match.
+        assert "2026-05-12_10-00-00-front.mp4" in hits
+        assert "2026-05-12_11-00-00-back.mp4" in hits
+
+        # Anchor 1: parent-dir basename — harmless noise but documents
+        # the contract.
+        assert "ArchivedClips" in hits
+
+    def test_score_via_geo_hits_matches_flat_path_production_shape(
+            self, tmp_path, monkeypatch):
+        """End-to-end: a SentryClips event-dir score with batched
+        geo_hits MUST equal the legacy per-event score when waypoints
+        are stored in the flat production form.
+
+        This is the test that would have caught the PR #143 critical
+        finding before deploy.
+        """
+        # Production-shaped geodata.db.
+        db_path = _make_geodata_db(tmp_path, [
+            "ArchivedClips/2026-05-12_10-00-00-front.mp4",
+        ])
+        monkeypatch.setattr(config, "MAPPING_ENABLED", True, raising=False)
+        monkeypatch.setattr(config, "MAPPING_DB_PATH", db_path, raising=False)
+
+        # SentryClips event dir with the matching timestamp.
+        teslacam = tmp_path / "TeslaCam"
+        sentry = teslacam / "SentryClips"
+        sentry.mkdir(parents=True)
+        event_dir = _make_event_dir(
+            str(sentry), "2026-05-12_10-00-00", with_event_json=False)
+
+        legacy_score = svc._score_event_priority(event_dir)
+        hits = svc._load_geo_hits()
+        batched_score = svc._score_event_priority(event_dir, geo_hits=hits)
+
+        assert legacy_score == batched_score, (
+            f"Score mismatch on production-shape data: "
+            f"legacy={legacy_score} batched={batched_score}. "
+            f"PR #143 critical finding regression."
+        )
+        # Both should be in the geo tier (100-199), not the no-geo
+        # tier (200+).
+        assert 100 <= batched_score < 200, (
+            f"Expected geo tier, got {batched_score}. The flat-path "
+            f"anchors (basename + 19-char prefix) were not added to "
+            f"geo_hits."
+        )
+
     def test_score_via_geo_hits_skips_db_connection_entirely(
             self, teslacam_with_geo, monkeypatch):
         """When ``geo_hits`` is provided, ``_score_event_priority`` MUST NOT

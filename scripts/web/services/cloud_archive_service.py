@@ -1248,6 +1248,77 @@ def _load_provider_creds() -> dict:
 # Cloud Reconciliation
 # ---------------------------------------------------------------------------
 
+def _list_remote_tree(
+    conf_path: str,
+    remote_path: str,
+    mem_flags: list,
+) -> Optional[Dict[str, Set[str]]]:
+    """Phase 5.4 — single-call batched remote listing.
+
+    Replaces 3 separate ``rclone lsf`` invocations (one per parent folder
+    in ``CLOUD_ARCHIVE_SYNC_FOLDERS`` plus one for ``ArchivedClips``) with
+    a single ``rclone lsf --recursive --max-depth=2`` call. Each rclone
+    invocation costs roughly 100–500 ms in subprocess + auth-handshake +
+    network round-trip overhead; collapsing them shaves ~1 s off every
+    reconcile pass and matches the spec in #102 (item 5.4).
+
+    Returns a dict keyed by parent folder name (e.g. ``"SentryClips"``,
+    ``"SavedClips"``, ``"ArchivedClips"``) mapping to a set of relative
+    entries directly under that parent. For event folders the entries
+    are sub-directory names (with the trailing slash that ``rclone lsf``
+    appends — used by the caller to distinguish dirs from files);
+    for ``ArchivedClips`` the entries are file basenames.
+
+    Returns ``None`` if the rclone call fails — the caller falls through
+    to the legacy per-folder path so reconciliation still happens (just
+    slower). Returns an empty dict if the remote is reachable but empty.
+    """
+    interest = list(CLOUD_ARCHIVE_SYNC_FOLDERS) + ["ArchivedClips"]
+    try:
+        result = subprocess.run(
+            ["rclone", "lsf", "--config", conf_path,
+             "--recursive", "--max-depth", "2",
+             *mem_flags,
+             f"teslausb:{remote_path}/"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Reconcile timeout listing remote tree (>120s)")
+        return None
+    except Exception as e:
+        logger.warning("Reconcile error listing remote tree: %s", e)
+        return None
+
+    if result.returncode != 0:
+        logger.warning(
+            "rclone lsf --recursive returned %d; falling back to per-folder",
+            result.returncode,
+        )
+        return None
+
+    out: Dict[str, Set[str]] = {p: set() for p in interest}
+    for raw in result.stdout.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        # rclone lsf --recursive emits paths relative to the listed dir,
+        # e.g. "SentryClips/2026-05-12_10-00-00/" or
+        # "ArchivedClips/2026-05-12_10-00-00-front.mp4". --max-depth=2
+        # ensures we get exactly one slash inside ArchivedClips and at
+        # most one slash inside event folders (the trailing one for dirs).
+        parts = line.split("/", 1)
+        if len(parts) != 2:
+            continue
+        parent, rest = parts
+        if parent not in out:
+            continue
+        if not rest:
+            # Bare parent dir entry — skip.
+            continue
+        out[parent].add(rest)
+    return out
+
+
 def _reconcile_with_remote(
     conn: sqlite3.Connection,
     conf_path: str,
@@ -1256,11 +1327,130 @@ def _reconcile_with_remote(
 ) -> int:
     """Mark locally-pending files as synced if they already exist on the remote.
 
-    Uses ``rclone lsf`` to list directories and files on the remote,
-    then updates matching DB entries from pending/failed → synced, and
+    Phase 5.4 — uses ``_list_remote_tree`` for a single batched
+    ``rclone lsf --recursive --max-depth=2`` call, replacing the legacy
+    one-call-per-parent loop. Falls back to the legacy per-folder path
+    if the batched call fails so reconciliation still happens.
+
+    Updates matching DB entries from pending/failed → synced, and
     inserts new 'synced' entries for remote files not yet tracked in the DB
     (e.g., files uploaded before tracking was implemented).
     Returns the number of entries reconciled.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    reconciled = 0
+
+    tree = _list_remote_tree(conf_path, remote_path, mem_flags)
+    if tree is None:
+        # Fallback: legacy per-folder listing keeps reconcile working
+        # even when the batched call fails (network blip, rclone version
+        # mismatch, etc.). Same behaviour as before this PR.
+        return _reconcile_with_remote_legacy(
+            conn, conf_path, remote_path, mem_flags,
+        )
+
+    # List event directories on remote (SentryClips/*, SavedClips/*) — now
+    # served from the single batched listing.
+    for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
+        try:
+            entries = tree.get(folder, set())
+            # event-dir entries have a trailing slash from rclone lsf;
+            # files (which shouldn't appear in event parents but might
+            # from earlier corruption) get filtered out here.
+            remote_dirs = {e.rstrip('/') for e in entries if e.endswith('/')}
+            if not remote_dirs:
+                continue
+
+            for dirname in remote_dirs:
+                rel_path = canonical_cloud_path(f"{folder}/{dirname}")
+                remote_dest = f"teslausb:{remote_path}/{rel_path}"
+
+                # Update existing pending/failed entries
+                cur = conn.execute(
+                    """UPDATE cloud_synced_files
+                       SET status = 'synced', synced_at = ?,
+                           remote_path = ?, last_error = NULL
+                       WHERE file_path = ? AND status IN ('pending', 'failed')""",
+                    (now_iso, remote_dest, rel_path)
+                )
+                if cur.rowcount > 0:
+                    reconciled += cur.rowcount
+                    continue
+
+                # If not in DB at all, insert as synced (pre-tracking upload)
+                existing = conn.execute(
+                    "SELECT status FROM cloud_synced_files WHERE file_path = ?",
+                    (rel_path,)
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """INSERT INTO cloud_synced_files
+                           (file_path, status, synced_at, remote_path)
+                           VALUES (?, 'synced', ?, ?)""",
+                        (rel_path, now_iso, remote_dest)
+                    )
+                    reconciled += 1
+        except Exception as e:
+            logger.warning("Reconcile error for %s: %s", folder, e)
+
+    # ArchivedClips files — also from the same batched listing.
+    try:
+        entries = tree.get("ArchivedClips", set())
+        # Strip trailing slashes too — rclone lsf may return directory
+        # entries when a folder gets mistakenly created on the remote
+        # (PRE-2.7 this produced corrupt rows like
+        # ``ArchivedClips/foo.mp4/`` that broke later dedup checks).
+        remote_files = {e.rstrip('/') for e in entries if e.strip()}
+        for filename in remote_files:
+            if not filename:
+                continue
+            rel_path = canonical_cloud_path(f"ArchivedClips/{filename}")
+            remote_dest = f"teslausb:{remote_path}/{rel_path}"
+
+            cur = conn.execute(
+                """UPDATE cloud_synced_files
+                   SET status = 'synced', synced_at = ?,
+                       remote_path = ?, last_error = NULL
+                   WHERE file_path = ? AND status IN ('pending', 'failed')""",
+                (now_iso, remote_dest, rel_path)
+            )
+            if cur.rowcount > 0:
+                reconciled += cur.rowcount
+                continue
+
+            existing = conn.execute(
+                "SELECT status FROM cloud_synced_files WHERE file_path = ?",
+                (rel_path,)
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    """INSERT INTO cloud_synced_files
+                       (file_path, status, synced_at, remote_path)
+                       VALUES (?, 'synced', ?, ?)""",
+                    (rel_path, now_iso, remote_dest)
+                )
+                reconciled += 1
+    except Exception as e:
+        logger.warning("Reconcile error for ArchivedClips: %s", e)
+
+    if reconciled:
+        conn.commit()
+        logger.info("Cloud reconciliation: marked %d already-uploaded entries as synced", reconciled)
+
+    return reconciled
+
+
+def _reconcile_with_remote_legacy(
+    conn: sqlite3.Connection,
+    conf_path: str,
+    remote_path: str,
+    mem_flags: list,
+) -> int:
+    """Pre-Phase-5.4 reconcile: one ``rclone lsf`` call per parent folder.
+
+    Kept as a fallback for ``_reconcile_with_remote`` when the single
+    batched ``--recursive --max-depth=2`` call fails — slower but
+    proven against every rclone version this device has shipped with.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     reconciled = 0
@@ -1365,7 +1555,10 @@ def _reconcile_with_remote(
 
     if reconciled:
         conn.commit()
-        logger.info("Cloud reconciliation: marked %d already-uploaded entries as synced", reconciled)
+        logger.info(
+            "Cloud reconciliation (legacy fallback): marked %d already-uploaded entries as synced",
+            reconciled,
+        )
 
     return reconciled
 

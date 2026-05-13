@@ -18,7 +18,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -2469,3 +2469,114 @@ def clear_queue() -> Tuple[bool, str]:
         return True, "Cleared {} items from queue".format(result.rowcount)
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.1 — dead-letter inspection + manual retry (Failed Jobs page)
+# ---------------------------------------------------------------------------
+
+def list_dead_letters(limit: int = 100) -> List[Dict[str, Any]]:
+    """Return up to ``limit`` ``dead_letter`` rows for the Failed Jobs page.
+
+    Each row carries ``file_path``, ``last_error``, ``retry_count``, and
+    ``file_size`` so the unified UI can render the why and how-big without
+    a follow-up call. Sorted oldest-first by id (the order rows were
+    promoted to dead-letter), which matches the order operators want to
+    triage them — earliest failure usually exposes a config or auth
+    problem the rest are downstream of.
+
+    Returns plain dicts so the blueprint can ``jsonify`` them directly.
+    """
+    if limit <= 0:
+        return []
+    limit = min(int(limit), 1000)
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT id, file_path, file_size, retry_count, last_error "
+            "FROM cloud_synced_files "
+            "WHERE status = 'dead_letter' "
+            "ORDER BY id ASC "
+            "LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def count_dead_letters() -> int:
+    """Return the count of ``dead_letter`` rows in ``cloud_synced_files``.
+
+    Cheap (single ``SELECT COUNT(*)`` over the ``idx_cloud_synced_status``
+    index defined on ``cloud_synced_files(status)``). Used by
+    ``/api/jobs/counts`` so the unified page doesn't fetch every row
+    just to compute ``len()``. Returns ``0`` on any DB error so a
+    failed count never breaks the aggregate page.
+    """
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM cloud_synced_files "
+            "WHERE status = 'dead_letter'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning("count_dead_letters failed: %s", e)
+        return 0
+    finally:
+        conn.close()
+
+
+def retry_dead_letter(file_path: Optional[str] = None) -> int:
+    """Reset ``dead_letter`` rows back to ``pending`` for re-pickup.
+
+    When ``file_path`` is given, only that one row is reset (looked up
+    via :func:`canonical_cloud_path` so legacy absolute forms still
+    match the stored canonical form). When ``None``, every dead-letter
+    row in the table is reset — useful for "Retry all" after fixing a
+    cloud auth or quota outage that affected the whole batch.
+
+    Resets ``retry_count`` to zero so the cap-promotion logic in
+    :func:`_mark_upload_failure` starts the next attempt fresh.
+    **Does NOT clear** ``last_error`` — the previous failure reason
+    is the most useful triage context the operator has, and the next
+    failure overwrites it via ``_mark_upload_failure`` anyway (a
+    successful retry leaves the row out of the dead-letter view).
+    Wakes the cloud worker so the row gets picked up immediately if
+    WiFi + cloud are healthy. Returns the number of rows actually
+    reset (``0`` if nothing matched).
+    """
+    if file_path is not None:
+        try:
+            target = canonical_cloud_path(file_path)
+        except ValueError:
+            return 0
+    else:
+        target = None
+    conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    try:
+        if target is None:
+            cur = conn.execute(
+                "UPDATE cloud_synced_files "
+                "SET status = 'pending', retry_count = 0 "
+                "WHERE status = 'dead_letter'"
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE cloud_synced_files "
+                "SET status = 'pending', retry_count = 0 "
+                "WHERE status = 'dead_letter' AND file_path = ?",
+                (target,),
+            )
+        conn.commit()
+        n = cur.rowcount or 0
+    finally:
+        conn.close()
+    if n > 0:
+        try:
+            wake()
+        except Exception:  # noqa: BLE001
+            logger.debug("retry_dead_letter: wake() raised; ignoring",
+                         exc_info=True)
+    return n

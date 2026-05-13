@@ -1,0 +1,346 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container" style="max-width: 1100px;">
+
+    <header style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+        <div>
+            <h1 style="margin: 0 0 4px; font-size: 1.5rem;">Failed Jobs</h1>
+            <p style="margin: 0; color: var(--text-secondary); font-size: 0.875rem;">
+                Tasks that hit their retry cap. Review the error, fix the cause, then retry.
+            </p>
+        </div>
+        <div style="display: flex; gap: 8px;">
+            <button type="button" id="refreshBtn" class="btn btn-secondary" aria-label="Refresh failed jobs list">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+                <span>Refresh</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Subsystem filter pills -->
+    <nav aria-label="Filter by subsystem" style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px;">
+        <button type="button" class="failed-pill" data-subsystem="all" aria-pressed="true">
+            <span class="pill-label">All</span>
+            <span class="pill-count" id="count-all">0</span>
+        </button>
+        <button type="button" class="failed-pill" data-subsystem="archive" aria-pressed="false">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-hard-drive"></use></svg>
+            <span class="pill-label">Archive</span>
+            <span class="pill-count" id="count-archive">0</span>
+        </button>
+        <button type="button" class="failed-pill" data-subsystem="indexer" aria-pressed="false">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-map-pin"></use></svg>
+            <span class="pill-label">Indexer</span>
+            <span class="pill-count" id="count-indexer">0</span>
+        </button>
+        <button type="button" class="failed-pill" data-subsystem="cloud_sync" aria-pressed="false">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud-upload"></use></svg>
+            <span class="pill-label">Cloud</span>
+            <span class="pill-count" id="count-cloud_sync">0</span>
+        </button>
+        <button type="button" class="failed-pill" data-subsystem="live_event_sync" aria-pressed="false">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bell"></use></svg>
+            <span class="pill-label">Live Events</span>
+            <span class="pill-count" id="count-live_event_sync">0</span>
+        </button>
+    </nav>
+
+    <!-- "Retry all" bar (shown only when a single subsystem is selected) -->
+    <div id="retryAllBar" style="display: none; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px;">
+        <span id="retryAllLabel" style="font-size: 0.875rem; color: var(--text-secondary);"></span>
+        <button type="button" id="retryAllBtn" class="btn btn-primary" aria-label="Retry all failed jobs in this subsystem">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+            <span>Retry all</span>
+        </button>
+    </div>
+
+    <!-- Empty state / loading state -->
+    <div id="emptyState" style="display: none; padding: 40px 20px; text-align: center; background: var(--bg-secondary); border: 1px dashed var(--border-color); border-radius: 8px;">
+        <svg aria-hidden="true" style="width: 48px; height: 48px; color: var(--accent-success, #22C55E); margin: 0 auto 12px;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
+        <h2 style="margin: 0 0 4px; font-size: 1.125rem;">No failed jobs</h2>
+        <p style="margin: 0; color: var(--text-secondary); font-size: 0.875rem;">Every background task is healthy.</p>
+    </div>
+
+    <div id="loadingState" style="display: none; padding: 40px 20px; text-align: center; color: var(--text-secondary); font-size: 0.875rem;">
+        Loading…
+    </div>
+
+    <div id="errorState" style="display: none; padding: 16px; background: var(--bg-secondary); border-left: 4px solid var(--accent-danger, #EF4444); border-radius: 4px; margin-bottom: 12px; font-size: 0.875rem; color: var(--text-primary);"></div>
+
+    <!-- Card list -->
+    <div id="jobList" role="list" style="display: flex; flex-direction: column; gap: 10px;"></div>
+</div>
+
+<style>
+.failed-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    min-height: 44px; padding: 8px 14px;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.failed-pill[aria-pressed="true"] {
+    background: var(--accent-primary, #3B82F6);
+    border-color: var(--accent-primary, #3B82F6);
+    color: #fff;
+}
+.failed-pill .nav-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.failed-pill .pill-count {
+    display: inline-flex; justify-content: center; align-items: center;
+    min-width: 22px; padding: 0 6px; height: 20px;
+    border-radius: 999px;
+    background: rgba(0,0,0,0.08);
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.failed-pill[aria-pressed="true"] .pill-count {
+    background: rgba(255,255,255,0.2);
+}
+.job-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 14px;
+    display: grid;
+    gap: 8px;
+}
+.job-card-header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.job-subsystem-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 0.75rem; font-weight: 600;
+    background: var(--bg-primary); color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+.job-subsystem-badge .nav-icon { width: 12px; height: 12px; }
+.job-attempts {
+    color: var(--accent-danger, #EF4444);
+    font-size: 0.75rem; font-weight: 600;
+}
+.job-identifier {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8125rem;
+    word-break: break-all;
+    color: var(--text-primary);
+}
+.job-error {
+    color: var(--text-secondary);
+    font-size: 0.8125rem;
+    background: var(--bg-primary);
+    padding: 8px 10px;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    overflow: auto;
+}
+.job-actions {
+    display: flex; justify-content: flex-end; gap: 8px;
+}
+@media (max-width: 480px) {
+    .job-card-header { gap: 6px; }
+    .job-actions .btn { flex: 1; justify-content: center; }
+}
+</style>
+
+<script>
+(function () {
+    'use strict';
+
+    const state = {
+        subsystem: 'all',
+        rows: [],
+        counts: { archive: 0, indexer: 0, cloud_sync: 0, live_event_sync: 0, total: 0 },
+    };
+
+    const SUBSYSTEM_META = {
+        archive:        { label: 'Archive',      icon: 'icon-hard-drive' },
+        indexer:        { label: 'Indexer',      icon: 'icon-map-pin' },
+        cloud_sync:     { label: 'Cloud',        icon: 'icon-cloud-upload' },
+        live_event_sync:{ label: 'Live Events',  icon: 'icon-bell' },
+    };
+
+    const SPRITE_URL = {{ url_for('static', filename='icons/lucide-sprite.svg')|tojson }};
+
+    function $(id) { return document.getElementById(id); }
+
+    function showLoading(on) {
+        $('loadingState').style.display = on ? '' : 'none';
+        if (on) {
+            $('emptyState').style.display = 'none';
+            $('errorState').style.display = 'none';
+        }
+    }
+
+    function showError(msg) {
+        $('errorState').textContent = msg;
+        $('errorState').style.display = '';
+    }
+
+    function clearError() {
+        $('errorState').style.display = 'none';
+        $('errorState').textContent = '';
+    }
+
+    function setPills() {
+        document.querySelectorAll('.failed-pill').forEach(function (b) {
+            b.setAttribute('aria-pressed', b.dataset.subsystem === state.subsystem ? 'true' : 'false');
+        });
+        const bar = $('retryAllBar');
+        if (state.subsystem === 'all') {
+            bar.style.display = 'none';
+        } else {
+            const meta = SUBSYSTEM_META[state.subsystem];
+            const n = state.counts[state.subsystem] || 0;
+            $('retryAllLabel').textContent = n + ' ' + (meta ? meta.label : state.subsystem) + ' job' + (n === 1 ? '' : 's') + ' failed';
+            $('retryAllBtn').disabled = n === 0;
+            bar.style.display = 'flex';
+        }
+    }
+
+    function setCounts(counts) {
+        state.counts = counts;
+        ['archive', 'indexer', 'cloud_sync', 'live_event_sync'].forEach(function (k) {
+            const el = $('count-' + k);
+            if (el) el.textContent = counts[k] || 0;
+        });
+        $('count-all').textContent = counts.total || 0;
+    }
+
+    function fmtAttempts(n) {
+        n = Number(n) || 0;
+        return n + ' attempt' + (n === 1 ? '' : 's');
+    }
+
+    function renderRows() {
+        const list = $('jobList');
+        list.innerHTML = '';
+        const empty = state.rows.length === 0;
+        $('emptyState').style.display = empty ? '' : 'none';
+        if (empty) return;
+
+        state.rows.forEach(function (r) {
+            const meta = SUBSYSTEM_META[r.subsystem] || { label: r.subsystem, icon: 'icon-alert-triangle' };
+
+            const card = document.createElement('article');
+            card.className = 'job-card';
+            card.setAttribute('role', 'listitem');
+
+            const header = document.createElement('div');
+            header.className = 'job-card-header';
+            header.innerHTML =
+                '<span class="job-subsystem-badge">' +
+                  '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#' + meta.icon + '"></use></svg>' +
+                  meta.label +
+                '</span>' +
+                '<span class="job-attempts">' + fmtAttempts(r.attempts) + '</span>';
+
+            const identifier = document.createElement('div');
+            identifier.className = 'job-identifier';
+            identifier.textContent = r.identifier || '(no identifier)';
+
+            const error = document.createElement('div');
+            error.className = 'job-error';
+            error.textContent = r.last_error || '(no error message)';
+
+            const actions = document.createElement('div');
+            actions.className = 'job-actions';
+
+            const retryBtn = document.createElement('button');
+            retryBtn.type = 'button';
+            retryBtn.className = 'btn btn-primary';
+            retryBtn.setAttribute('aria-label', 'Retry this job');
+            retryBtn.innerHTML = '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#icon-refresh-cw"></use></svg><span>Retry</span>';
+            retryBtn.addEventListener('click', function () { retryRow(r); });
+
+            actions.appendChild(retryBtn);
+            card.appendChild(header);
+            card.appendChild(identifier);
+            card.appendChild(error);
+            card.appendChild(actions);
+            list.appendChild(card);
+        });
+    }
+
+    function loadCounts() {
+        return fetch('/api/jobs/counts', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function (r) { if (!r.ok) throw new Error('counts ' + r.status); return r.json(); })
+            .then(function (counts) {
+                setCounts(counts);
+                setPills();
+            });
+    }
+
+    function loadRows() {
+        showLoading(true);
+        clearError();
+        return fetch('/api/jobs/failed?subsystem=' + encodeURIComponent(state.subsystem) + '&limit=200',
+                     { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function (r) { if (!r.ok) throw new Error('failed ' + r.status); return r.json(); })
+            .then(function (data) {
+                state.rows = data.rows || [];
+                renderRows();
+            })
+            .catch(function (err) {
+                showError('Could not load failed jobs: ' + err.message);
+                state.rows = [];
+                renderRows();
+            })
+            .then(function () { showLoading(false); });
+    }
+
+    function refresh() { return loadCounts().then(loadRows); }
+
+    function retry(payload) {
+        return fetch('/api/jobs/retry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify(payload),
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); });
+    }
+
+    function retryRow(row) {
+        retry({ subsystem: row.subsystem, id: row.id })
+            .then(function (res) {
+                if (!res.ok) {
+                    showError('Retry failed: ' + (res.body && res.body.error ? res.body.error : 'unknown'));
+                    return;
+                }
+                return refresh();
+            });
+    }
+
+    function retryAll() {
+        if (state.subsystem === 'all') return;
+        retry({ subsystem: state.subsystem, id: null })
+            .then(function (res) {
+                if (!res.ok) {
+                    showError('Retry-all failed: ' + (res.body && res.body.error ? res.body.error : 'unknown'));
+                    return;
+                }
+                return refresh();
+            });
+    }
+
+    document.querySelectorAll('.failed-pill').forEach(function (b) {
+        b.addEventListener('click', function () {
+            state.subsystem = b.dataset.subsystem;
+            setPills();
+            loadRows();
+        });
+    });
+    $('refreshBtn').addEventListener('click', refresh);
+    $('retryAllBtn').addEventListener('click', retryAll);
+
+    document.addEventListener('DOMContentLoaded', function () {
+        refresh();
+    });
+})();
+</script>
+{% endblock %}

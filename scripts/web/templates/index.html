@@ -408,11 +408,17 @@
                     <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
                     Run archive now
                 </button>
+                <a href="{{ url_for('jobs.failed_jobs_page') }}"
+                   class="btn btn-secondary"
+                   style="min-height:44px; text-decoration:none;">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+                    Failed jobs
+                </a>
                 <button type="button" class="btn btn-secondary"
                         id="archive-view-dl-btn"
                         style="min-height:44px">
                     <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
-                    View dead letters
+                    Archive dead letters
                 </button>
             </div>
             <div id="archive-dl-modal" hidden

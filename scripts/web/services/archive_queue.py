@@ -476,6 +476,128 @@ def list_queue(limit: int = 50,
 
 
 # ---------------------------------------------------------------------------
+# Phase 4.1 — dead-letter inspection + manual retry (Failed Jobs page)
+# ---------------------------------------------------------------------------
+
+def list_dead_letters(limit: int = 100,
+                      db_path: Optional[str] = None) -> List[Dict]:
+    """Return up to ``limit`` ``dead_letter`` rows ordered oldest-first.
+
+    Thin wrapper over :func:`list_queue` that fixes the status filter
+    so the unified Failed Jobs blueprint (Phase 4.1) doesn't have to
+    pass it explicitly. Sorted oldest-first by id (the order rows were
+    promoted) so operators see the original failure first when
+    triaging.
+    """
+    if limit <= 0:
+        return []
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        cursor = conn.execute(
+            """
+            SELECT * FROM archive_queue
+            WHERE status = 'dead_letter'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.warning("list_dead_letters failed: %s", e)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def count_dead_letters(db_path: Optional[str] = None) -> int:
+    """Return the count of ``dead_letter`` rows in ``archive_queue``.
+
+    Cheap (single ``SELECT COUNT(*)`` over the ``status`` column —
+    schema indexes ``status`` in v10). Used by the unified
+    ``/api/jobs/counts`` endpoint and the future status-dot poller so
+    they don't have to fetch every row just to compute ``len()``.
+    Returns ``0`` on any DB error so a failed count never breaks the
+    aggregate page.
+    """
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM archive_queue "
+            "WHERE status = 'dead_letter'"
+        ).fetchone()
+        return int(row['n']) if row else 0
+    except sqlite3.Error as e:
+        logger.warning("count_dead_letters failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def retry_dead_letter(row_id: Optional[int] = None,
+                      db_path: Optional[str] = None) -> int:
+    """Reset ``dead_letter`` rows back to ``pending`` for re-pickup.
+
+    When ``row_id`` is given, only that one row is reset. When
+    ``None``, every dead-letter row in the table is reset — useful
+    after fixing a transient SD-card / namespace issue that affected
+    a whole batch of failed copies.
+
+    Resets ``attempts`` to zero and clears any stale claim so the
+    worker re-picks the row on the next cycle. **Does NOT clear**
+    ``last_error`` — the previous failure reason is the most useful
+    triage context the operator has, and the worker will overwrite it
+    on the next failure (and a successful retry leaves the row out of
+    the dead-letter view anyway). Returns the number of rows actually
+    reset (``0`` if nothing matched).
+    """
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        if row_id is None:
+            cur = conn.execute(
+                """UPDATE archive_queue
+                   SET status = 'pending', attempts = 0,
+                       claimed_by = NULL,
+                       claimed_at = NULL
+                   WHERE status = 'dead_letter'"""
+            )
+        else:
+            cur = conn.execute(
+                """UPDATE archive_queue
+                   SET status = 'pending', attempts = 0,
+                       claimed_by = NULL,
+                       claimed_at = NULL
+                   WHERE status = 'dead_letter' AND id = ?""",
+                (int(row_id),),
+            )
+        conn.commit()
+        return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("retry_dead_letter failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Worker-side helpers (Phase 2b — consumed by ``archive_worker``)
 # ---------------------------------------------------------------------------
 #

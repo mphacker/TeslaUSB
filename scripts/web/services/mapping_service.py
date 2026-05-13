@@ -799,7 +799,19 @@ def _refresh_ro_mount(teslacam_path: str) -> None:
     The ``current_mode() != 'present'`` early return is preserved: in
     edit mode the local mount IS the write path, so the cache is fresh
     by definition and the call is a no-op.
+
+    .. note::
+
+        ``teslacam_path`` is retained as a parameter for API
+        compatibility with the legacy mount-specific implementation
+        and to document caller intent (which mount is being
+        refreshed). It is intentionally unreferenced — ``drop_caches``
+        is a process-global kernel knob that flushes caches for ALL
+        mounts on the system. This is harmless (only the RO gadget
+        mount actually has stale dentry entries; other mounts are
+        re-resolved from disk on next access at negligible cost).
     """
+    del teslacam_path  # unused — kept for API compat; see docstring
     from services.mode_service import current_mode
     if current_mode() != 'present':
         return  # Only meaningful in present mode

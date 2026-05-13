@@ -654,7 +654,8 @@ _MOOV_VERIFY_MAX_HEADER_READS = 512
 
 
 def _verify_destination_complete(dest_path: str) -> bool:
-    """Return True iff ``dest_path`` is an MP4 with both ``ftyp`` and ``moov``.
+    """Return True iff ``dest_path`` is an MP4 with ``ftyp``, ``moov``,
+    AND ``mdat`` boxes all present.
 
     Phase 2.4 — A "successful" copy of an unplayable MP4 is worse than
     a failed copy: the bad file looks complete (size matches), gets
@@ -662,6 +663,14 @@ def _verify_destination_complete(dest_path: str) -> bool:
     Tesla writes the ``moov`` atom at the END of the file, so a copy
     that started before Tesla finished writing will have everything up
     to and including ``mdat`` but be missing ``moov``.
+
+    Issue #110 — Tesla's RecentClips writer also produces clips with
+    ``moov`` near the START of the file (before ``mdat``). A copy
+    snapshotted between the moov and mdat writes has moov but no mdat,
+    and the pre-#110 verifier (which returned True on the first moov
+    box) accepted these. The indexer's SEI parser then bailed with
+    "No mdat box found" and the row eventually dead-lettered. Both
+    boxes are now required.
 
     Implementation notes (Pi Zero 2 W constraints):
 
@@ -693,10 +702,12 @@ def _verify_destination_complete(dest_path: str) -> bool:
             if len(head) < 12 or head[4:8] != b'ftyp':
                 return False
 
-            # Walk top-level boxes from offset 0 looking for moov.
+            # Walk top-level boxes from offset 0 looking for moov + mdat.
             f.seek(0)
             pos = 0
             reads = 0
+            seen_moov = False
+            seen_mdat = False
             while pos + 8 <= file_size:
                 if reads >= _MOOV_VERIFY_MAX_HEADER_READS:
                     # Bounded walk — pathological input.
@@ -722,26 +733,40 @@ def _verify_destination_complete(dest_path: str) -> bool:
                     if size < 16:
                         return False  # Malformed extended box.
                 elif size == 0:
-                    # Box extends to end of file. If this IS moov, found.
-                    # Otherwise nothing follows so we're done.
+                    # Box extends to end of file. If it IS one of the
+                    # required boxes, mark it seen — but nothing can
+                    # follow, so we must already have the OTHER required
+                    # box for the file to be complete.
                     if box_type == b'moov':
-                        return True
-                    return False
+                        seen_moov = True
+                    elif box_type == b'mdat':
+                        seen_mdat = True
+                    return seen_moov and seen_mdat
                 elif size < 8:
                     return False  # Malformed normal box.
 
                 if box_type == b'moov':
                     # Sanity-check the box doesn't claim to extend past EOF.
-                    return pos + size <= file_size
+                    if pos + size > file_size:
+                        return False
+                    seen_moov = True
+                elif box_type == b'mdat':
+                    if pos + size > file_size:
+                        return False
+                    seen_mdat = True
+                else:
+                    # Defensive — a non-required box claiming to extend
+                    # past EOF is truncated; nothing useful follows.
+                    if pos + size > file_size:
+                        return False
 
-                # Defensive — a box claiming to extend past EOF is
-                # truncated. Bail out (moov can't follow).
-                if pos + size > file_size:
-                    return False
+                if seen_moov and seen_mdat:
+                    return True
 
                 pos += size
 
-            return False  # Walked to EOF without finding moov.
+            # Walked to EOF without seeing both required boxes.
+            return seen_moov and seen_mdat
     except (OSError, IOError):
         return False
 
@@ -847,7 +872,7 @@ def _atomic_copy(source_path: str, dest_path: str,
         if dest_path.lower().endswith('.mp4'):
             if not _verify_destination_complete(partial):
                 raise OSError(
-                    f"destination MP4 missing moov atom — "
+                    f"destination MP4 missing moov or mdat box — "
                     f"source may still be writing: {source_path}"
                 )
         # Copy mtime so downstream consumers (indexer, ZIP exporter)

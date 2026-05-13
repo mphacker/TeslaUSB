@@ -232,6 +232,15 @@ _worker_lock = threading.Lock()
 _worker_stop = threading.Event()
 _wake = threading.Event()
 
+# In-flight drain cancellation, separate from worker shutdown.
+# ``stop_sync()`` sets this to interrupt the current upload pass;
+# ``_worker_loop`` clears it after the drain returns so the worker
+# stays alive and will respond to the next ``wake()``. ONLY ``stop()``
+# (terminal worker shutdown) sets ``_worker_stop`` — confusing the two
+# would kill the worker on every "Stop Sync" UI click and silently
+# drop subsequent file-watcher / NM dispatcher / mode-switch wakes.
+_drain_cancel = threading.Event()
+
 # Idle wait between drain attempts when the worker has nothing to do.
 # We wake on ``_wake.set()`` (file watcher, NM dispatcher, mode switch,
 # manual UI) so this just sets the maximum latency between an unobserved
@@ -1315,17 +1324,59 @@ def _drain_once(
     contract, same LES yield-between-files contract, same per-row
     DB updates — only the entry signature changed:
 
-    * Cancellation is read from the module-level ``_worker_stop``
-      event instead of a per-thread ``cancel_event`` parameter.
-    * Returns ``True`` if the drain ran (even if it uploaded zero
-      files), ``False`` if the drain bailed out before doing any
-      meaningful work (no events to sync, lock contention, WiFi
-      down). The worker uses this to decide whether to short-sleep
-      (busy / contended) or long-sleep (genuinely idle).
+    * In-flight cancellation is read from ``_drain_cancel`` (set by
+      ``stop_sync()``) **OR** ``_worker_stop`` (set by ``stop()``
+      for terminal worker shutdown). The worker only reuses the
+      latter for permanent shutdown so a "Stop Sync" UI click can
+      cancel the current upload pass without killing the worker
+      thread itself.
+    * Returns ``True`` only when at least one file was uploaded,
+      ``False`` for no-op drains (empty queue, cloud full, lock
+      contention, WiFi down). The worker uses this to decide
+      whether to immediately re-wake (more work might be ready)
+      or sleep (no work was found this pass — don't hot-loop).
     """
     global _sync_status
 
-    cancel_event = _worker_stop
+    # Compose a "either" event so per-file checks below short-circuit
+    # on either signal. Wrap as a tiny shim with the threading.Event
+    # API surface used inside the body (.is_set() / .wait()).
+    class _EitherEvent:
+        __slots__ = ("_a", "_b")
+
+        def __init__(self, a, b):
+            self._a = a
+            self._b = b
+
+        def is_set(self):
+            return self._a.is_set() or self._b.is_set()
+
+        def set(self):
+            # Setting the composite signals stop_sync semantics
+            # (interrupt current drain, don't kill worker).
+            self._a.set()
+
+        def clear(self):
+            self._a.clear()
+
+        def wait(self, timeout=None):
+            # Poll both events. Used only by sub-second waits in
+            # the upload loop, so a 0.1 s poll is fine.
+            deadline = (
+                None if timeout is None else time.monotonic() + timeout
+            )
+            while True:
+                if self.is_set():
+                    return True
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._a.wait(timeout=min(0.1, remaining))
+                else:
+                    self._a.wait(timeout=0.1)
+
+    cancel_event = _EitherEvent(_drain_cancel, _worker_stop)
 
     # Acquire the global heavy-task lock so the indexer and archiver
     # don't run concurrently (Pi Zero has limited CPU/IO).
@@ -1403,7 +1454,9 @@ def _drain_once(
                     (datetime.now(timezone.utc).isoformat(), session_id),
                 )
                 conn.commit()
-            return True
+            # No work performed — return False so the worker idles
+            # instead of immediately re-waking itself into a hot loop.
+            return False
 
         _sync_status["files_total"] = len(to_sync)
         _sync_status["total_bytes"] = sum(s for _, _, s in to_sync)
@@ -1475,7 +1528,10 @@ def _drain_once(
                     (datetime.now(timezone.utc).isoformat(), session_id),
                 )
                 conn.commit()
-            return True
+            # Cloud is full — no work performed. Return False so the
+            # worker idles. A user freeing space + clicking "Sync Now"
+            # will re-wake; the periodic idle timeout also retries.
+            return False
 
         # Memory-safe flags for Pi Zero 2W
         mem_flags = ["--buffer-size", "0", "--transfers", "1", "--checkers", "1"]
@@ -1861,13 +1917,16 @@ def _worker_loop(teslacam_path: str, db_path: str) -> None:
                 _sync_status["drain_count"] = (
                     _sync_status.get("drain_count", 0) + 1
                 )
-                did_work = _drain_once(teslacam_path, db_path, "auto")
-                if did_work:
-                    # We just uploaded something — there may be more
-                    # ready now (the file watcher fired during the
-                    # drain). Don't sleep; loop straight back to a
-                    # fresh wake check.
-                    _wake.set()
+                _drain_once(teslacam_path, db_path, "auto")
+                # NOTE: deliberately do NOT self-rewake here. Producers
+                # (file watcher, NM dispatcher, mode switch, manual UI)
+                # already call wake() when new work arrives — those
+                # wakes fire even while the worker is mid-drain and
+                # are picked up by the next loop-top _wake.wait().
+                # Self-rewaking would amplify any bug where
+                # _drain_once mistakenly returns the wrong state into
+                # a hot-loop that floods the SDIO bus on the Pi
+                # Zero 2 W (PR #126 review Finding #1).
             except Exception as e:  # noqa: BLE001
                 # Containment: never let a bad drain kill the worker.
                 logger.exception("Cloud archive drain iteration failed: %s", e)
@@ -1879,6 +1938,13 @@ def _worker_loop(teslacam_path: str, db_path: str) -> None:
                 _backoff_wait(_WAIT_WHEN_BUSY_SECONDS)
                 if _worker_stop.is_set():
                     break
+            finally:
+                # Clear the in-flight cancel so the next drain isn't
+                # pre-cancelled. ``stop_sync()`` may have set this to
+                # interrupt the just-completed pass; once the drain
+                # has returned the signal has done its job.
+                _drain_cancel.clear()
+                _sync_cancel.clear()
 
     finally:
         _sync_status["worker_running"] = False
@@ -2039,12 +2105,18 @@ def start_sync(
     # Production startup calls ``start()`` explicitly; this is a
     # belt-and-suspenders for tests / scripts that import the module
     # directly.
-    with _worker_lock:
-        worker_alive = (
-            _worker_thread is not None and _worker_thread.is_alive()
-        )
-    if not worker_alive:
-        if not start(teslacam_path=teslacam_path, db_path=db_path):
+    #
+    # ``start()`` returning False with the worker actually alive is
+    # success (a concurrent caller won the race). Treating it as a
+    # hard failure produced spurious "Failed to start cloud archive
+    # worker" messages on the UI under any concurrent trigger.
+    started = start(teslacam_path=teslacam_path, db_path=db_path)
+    if not started:
+        with _worker_lock:
+            worker_alive = (
+                _worker_thread is not None and _worker_thread.is_alive()
+            )
+        if not worker_alive:
             return False, "Failed to start cloud archive worker"
 
     wake()
@@ -2060,9 +2132,19 @@ def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
 
     Phase 3b (#99): the worker thread itself stays alive (use
     :func:`stop` for full shutdown). Only the in-flight rclone
-    subprocess is terminated, and ``_worker_stop`` is briefly set so
-    the drain bails out at the next inter-file checkpoint, then
-    cleared again. The worker resumes idling normally after the kill.
+    subprocess is terminated, and ``_drain_cancel`` is set so the
+    drain bails out at the next inter-file checkpoint. The worker
+    clears ``_drain_cancel`` itself when the drain returns and
+    resumes idling normally so subsequent ``wake()`` calls (from
+    file watcher / NM dispatcher / mode switch / manual UI) are
+    still honored.
+
+    Critically does NOT touch ``_worker_stop`` — that event is
+    reserved for terminal worker shutdown by :func:`stop`. Setting
+    it here would race the worker's loop-top
+    ``while not _worker_stop.is_set()`` check and silently kill the
+    worker thread, causing every subsequent ``wake()`` to be
+    dropped on the floor (bug fixed in PR #126 review).
 
     Always terminates immediately — a single event upload can take
     20+ minutes, so waiting is impractical. The partial file on the
@@ -2074,11 +2156,10 @@ def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
     if not _sync_status.get("running"):
         return False, "Sync is not running"
 
-    # Briefly raise the stop flag so the in-flight ``_drain_once`` sees
-    # cancellation at its next inter-file check, then lower it so the
-    # worker resumes idling. (We can't keep it raised — that would
-    # exit the worker loop entirely.)
-    _worker_stop.set()
+    # Set the in-flight cancel flag so ``_drain_once`` sees
+    # cancellation at its next inter-file check. The worker clears
+    # this on its own once the drain returns — see ``_worker_loop``.
+    _drain_cancel.set()
     _sync_cancel.set()  # legacy alias for any external callers
 
     proc = _sync_rclone_proc
@@ -2094,18 +2175,7 @@ def stop_sync(graceful: bool = True) -> Tuple[bool, str]:
         except (OSError, ProcessLookupError):
             pass
 
-    # Schedule a delayed clear so the drain has time to observe the
-    # stop, then lower the flag so the worker keeps running.
-    def _release_stop():
-        time.sleep(2)
-        _worker_stop.clear()
-        _sync_cancel.clear()
-
-    threading.Thread(
-        target=_release_stop, name="cloud-stop-release", daemon=True,
-    ).start()
-
-    logger.info("Sync stop requested")
+    logger.info("Sync stop requested (worker stays alive)")
     return True, "Sync stopping"
 
 
@@ -2225,13 +2295,11 @@ def trigger_auto_sync(teslacam_path: str, db_path: str) -> None:
     working without changes.
     """
     # Lazy-start safety: every other producer assumes the worker is
-    # alive. If it isn't (e.g. config flipped at runtime), spinning it
-    # up here is cheap and safe.
-    with _worker_lock:
-        worker_alive = (
-            _worker_thread is not None and _worker_thread.is_alive()
-        )
-    if not worker_alive and CLOUD_ARCHIVE_ENABLED and CLOUD_ARCHIVE_PROVIDER:
+    # alive. If it isn't (e.g. config flipped at runtime), spinning
+    # it up here is cheap and safe. ``start()`` is idempotent and
+    # internally locks, so a concurrent call here is a no-op rather
+    # than a race.
+    if CLOUD_ARCHIVE_ENABLED and CLOUD_ARCHIVE_PROVIDER:
         start(teslacam_path=teslacam_path, db_path=db_path)
     wake()
 

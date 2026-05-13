@@ -345,14 +345,12 @@ def api_wake():
     observe the resulting drain.
     """
     from services.cloud_archive_service import (
-        wake, get_sync_status, CLOUD_ARCHIVE_ENABLED,
+        wake, get_sync_status,
     )
-    if not CLOUD_ARCHIVE_ENABLED:
-        return jsonify({
-            "success": True,
-            "enabled": False,
-            "message": "Cloud archive disabled",
-        })
+    # NOTE: ``CLOUD_ARCHIVE_ENABLED`` guard is enforced by the
+    # blueprint's ``_require_cloud_archive`` ``before_request`` hook
+    # (returns 503 for AJAX, redirect+flash for browser). No inline
+    # check needed here.
     try:
         wake()
         st = get_sync_status()

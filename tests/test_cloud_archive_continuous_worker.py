@@ -48,6 +48,7 @@ def _reset_worker_state():
     svc._worker_stop.clear()
     svc._wake.clear()
     svc._sync_cancel.clear()
+    svc._drain_cancel.clear()
     svc._sync_status.update({
         "running": False,
         "worker_running": False,
@@ -495,3 +496,167 @@ class TestStatus:
             time.sleep(0.05)
         st = svc.get_sync_status()
         assert st.get("drain_count", 0) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 11. PR #126 review regressions: hot-loop, stop_sync, lazy-start race
+# ---------------------------------------------------------------------------
+
+
+class TestPR126Regressions:
+    """Pin the three behaviors found by PR #126 review.
+
+    Finding #1 (Critical): _drain_once returning True for empty-queue /
+    cloud-full paths caused _worker_loop's ``if did_work: _wake.set()``
+    branch to re-fire the loop indefinitely. Empirically: 1.3M iterations
+    in 2 sec with a stub that returned True. In production each iteration
+    runs _refresh_ro_mount (umount/mount) — exactly what convention forbids.
+
+    Finding #2 (Critical): stop_sync() set _worker_stop, then scheduled a
+    2-second-delayed clear. The worker observed the stop, exited the loop,
+    and was gone before the clear ran. After "Stop Sync" the worker was
+    dead and every subsequent wake() was silently dropped.
+
+    Finding #4 (Warning): start_sync / trigger_auto_sync's lazy-start
+    snapshot worker_alive inside the lock then started outside. Two
+    concurrent callers both saw worker_alive=False, both called start();
+    the second got False (worker now alive) and returned the false
+    negative ``"Failed to start cloud archive worker"``.
+    """
+
+    def test_drain_returning_true_does_not_hot_loop(
+        self, monkeypatch, _enable_cloud, _stub_recover, _stub_wifi_up,
+        _stub_no_les_pending, _stub_no_archive_running,
+    ):
+        """Finding #1: a no-op drain (empty queue, cloud full) must
+        return False so the worker idles. If it returned True, the
+        worker would re-wake itself every iteration and burn the
+        SDIO bus in production.
+
+        Reproducer: stub _drain_once to ALWAYS return True. Confirm
+        the worker iterates fewer than 50 times in 1 second (vs. the
+        million+ iterations the bug allowed).
+        """
+        call_count = [0]
+
+        def _greedy_drain(*_a, **_k):
+            call_count[0] += 1
+            return True  # Bug: would cause hot-loop
+
+        monkeypatch.setattr(svc, '_drain_once', _greedy_drain)
+        svc.start(teslacam_path="/x", db_path="/y")
+
+        # Let the worker run for a bounded window.
+        time.sleep(1.0)
+
+        # Bug had ~650K iterations/sec. Even a generous "no hot-loop"
+        # ceiling is 1000 iterations in 1 sec. Real production should
+        # see < 10 iterations in 1 sec from a single producer wake.
+        # We accept up to 100 to keep the test resilient on slow CI
+        # but still detect the bug (which would be 5+ orders of
+        # magnitude over).
+        assert call_count[0] < 100, (
+            f"Worker hot-looped: {call_count[0]} drain iterations in "
+            f"1 sec (expected < 100). _drain_once returning True for "
+            f"a no-op pass causes _worker_loop to re-wake itself "
+            f"infinitely. The empty-queue and cloud-full early-return "
+            f"paths in _drain_once must return False."
+        )
+
+    def test_stop_sync_does_not_kill_worker(
+        self, monkeypatch, _enable_cloud, _stub_recover, _stub_wifi_up,
+        _stub_no_les_pending, _stub_no_archive_running,
+    ):
+        """Finding #2: stop_sync must cancel the in-flight drain
+        without exiting the worker thread. Subsequent wake() calls
+        from file watcher / NM dispatcher / mode switch / manual UI
+        must still be honored.
+        """
+        # Stub a slow drain so we have time to call stop_sync mid-pass.
+        drain_started = threading.Event()
+        cancel_observed = threading.Event()
+
+        def _slow_drain(*_a, **_k):
+            svc._sync_status["running"] = True
+            drain_started.set()
+            # Loop for up to 5 sec, observing _drain_cancel each tick.
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                if svc._drain_cancel.is_set():
+                    cancel_observed.set()
+                    break
+                time.sleep(0.05)
+            svc._sync_status["running"] = False
+            return False
+
+        monkeypatch.setattr(svc, '_drain_once', _slow_drain)
+        svc.start(teslacam_path="/x", db_path="/y")
+
+        # Wait for the slow drain to start.
+        assert drain_started.wait(timeout=3.0)
+
+        # Call stop_sync — should cancel the drain but NOT kill the worker.
+        ok, msg = svc.stop_sync(graceful=True)
+        assert ok, f"stop_sync returned False: {msg}"
+
+        # Drain should observe the cancel within a couple of ticks.
+        assert cancel_observed.wait(timeout=2.0)
+
+        # Worker must still be alive 1 sec after stop_sync.
+        time.sleep(1.0)
+        assert svc._worker_thread is not None
+        assert svc._worker_thread.is_alive(), (
+            "stop_sync killed the worker thread. After 'Stop Sync' "
+            "in the UI, every subsequent wake() from the file watcher, "
+            "NM dispatcher, mode-switch hook, or /api/wake would be "
+            "silently dropped. stop_sync must use _drain_cancel "
+            "(in-flight cancel only), NOT _worker_stop (terminal "
+            "shutdown)."
+        )
+
+        # And a fresh wake should still trigger a new drain.
+        drain_count_before = svc._sync_status.get("drain_count", 0)
+        svc.wake()
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if svc._sync_status.get("drain_count", 0) > drain_count_before:
+                break
+            time.sleep(0.05)
+        assert svc._sync_status.get("drain_count", 0) > drain_count_before, (
+            "Worker did not drain after wake() following stop_sync. "
+            "The worker is dead — Finding #2 regressed."
+        )
+
+    def test_concurrent_start_sync_no_false_failure(
+        self, monkeypatch, _enable_cloud, _stub_recover, _stub_drain_noop,
+        _stub_wifi_up, _stub_no_les_pending, _stub_no_archive_running,
+    ):
+        """Finding #4: two concurrent start_sync callers must both
+        see success — the second must not get a false negative
+        ``"Failed to start cloud archive worker"`` just because the
+        first won the race.
+        """
+        results = []
+        results_lock = threading.Lock()
+
+        def _call_start_sync():
+            ok, msg = svc.start_sync("/teslacam", "/db", trigger="manual")
+            with results_lock:
+                results.append((ok, msg))
+
+        threads = [
+            threading.Thread(target=_call_start_sync) for _ in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=3.0)
+
+        # All 5 callers must report success.
+        assert len(results) == 5
+        failures = [(ok, msg) for ok, msg in results if not ok]
+        assert not failures, (
+            f"start_sync returned False for {len(failures)} of 5 "
+            f"concurrent callers — race in lazy-start. "
+            f"Failures: {failures}"
+        )

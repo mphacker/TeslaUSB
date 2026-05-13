@@ -198,6 +198,62 @@ def _format_eta_human(eta_seconds: int) -> str:
     return f'{hours} h {minutes} min'
 
 
+def _format_pause_reason(load_pause: Dict[str, Any],
+                         disk_pause: Dict[str, Any]) -> str:
+    """Phase 4.5 (#101) — render a self-explanatory pause-reason string.
+
+    The archive worker auto-pauses for two reasons:
+
+    * **load** — 1-min loadavg crossed
+      ``archive_queue.load_pause_threshold`` (default 3.5). The pause
+      relieves the SDIO bus and keeps the hardware watchdog daemon
+      from missing its kick. Reason string: ``"load 4.2 > 3.5"``.
+    * **disk** — free space at ``archive_root`` fell below the
+      configured critical threshold (default 100 MB). The pause stops
+      new copies until retention or manual cleanup frees space.
+      Reason string: ``"SD card 96% full"`` (when total is known) or
+      ``"SD card 50 MB free (threshold 100 MB)"`` (when only free is
+      known).
+
+    When both fire concurrently we join them with a semicolon.
+    When neither has armed (``pause_worker()`` was called manually,
+    or the worker is paused for an unknown reason at the iteration
+    boundary), return ``"background"`` so the caller renders a
+    generic "Paused (background task)" without claiming false specificity.
+    """
+    parts = []
+
+    load_now = bool(load_pause.get('is_paused_now'))
+    load_avg = load_pause.get('last_loadavg')
+    load_thresh = load_pause.get('threshold')
+    if load_now and isinstance(load_avg, (int, float)) and \
+            isinstance(load_thresh, (int, float)) and load_thresh > 0:
+        parts.append(f'load {load_avg:.1f} > {load_thresh:.1f}')
+
+    disk_now = bool(disk_pause.get('is_paused_now'))
+    free_mb = disk_pause.get('last_free_mb')
+    total_mb = disk_pause.get('last_total_mb')
+    crit_mb = disk_pause.get('critical_threshold_mb')
+    if disk_now and isinstance(free_mb, (int, float)) and free_mb >= 0:
+        if isinstance(total_mb, (int, float)) and total_mb > 0:
+            pct_full = int(round((1 - free_mb / total_mb) * 100))
+            # Cap at 99% so we never claim "100% full" — there's
+            # always at least the few MB the OS keeps reserved.
+            pct_full = min(pct_full, 99)
+            parts.append(f'SD card {pct_full}% full')
+        elif isinstance(crit_mb, (int, float)) and crit_mb > 0:
+            parts.append(
+                f'SD card {int(free_mb)} MB free '
+                f'(threshold {int(crit_mb)} MB)'
+            )
+        else:
+            parts.append(f'SD card {int(free_mb)} MB free')
+
+    if not parts:
+        return 'background'
+    return '; '.join(parts)
+
+
 def _archive_block() -> Dict[str, Any]:
     """Archive watchdog + worker status."""
     if not ARCHIVE_QUEUE_ENABLED:
@@ -211,6 +267,7 @@ def _archive_block() -> Dict[str, Any]:
             'eta_seconds': None,
             'eta_human': None,
             'drain_rate_per_sec': None,
+            'pause_reason': None,
         }
     try:
         from services import archive_queue, archive_watchdog, archive_worker
@@ -234,6 +291,7 @@ def _archive_block() -> Dict[str, Any]:
             'eta_seconds': None,
             'eta_human': None,
             'drain_rate_per_sec': None,
+            'pause_reason': None,
             '_error': str(e)[:120],
         }
 
@@ -250,6 +308,22 @@ def _archive_block() -> Dict[str, Any]:
         if isinstance(eta_seconds, int) and eta_seconds > 0
         else None
     )
+    # Phase 4.5 — pause-reason. Pull the disk/load pause sub-dicts
+    # surfaced by archive_worker and render a self-explanatory string.
+    # The top-level ``paused`` field returned by ``get_status()`` only
+    # reflects the manual ``pause_worker()`` flag (used by mode
+    # switches / RW remounts); it does NOT track the auto-arm guards
+    # ``_disk_space_pause_until`` and ``_load_pause_until``. So
+    # broaden the operator-facing paused notion to include any of the
+    # three pause types so the System Health card surfaces the load /
+    # disk auto-pauses too.
+    load_pause = worker.get('load_pause') or {}
+    disk_pause = worker.get('disk_pause') or {}
+    auto_paused = bool(
+        load_pause.get('is_paused_now') or disk_pause.get('is_paused_now')
+    )
+    paused_effective = paused or auto_paused
+    pause_reason = _format_pause_reason(load_pause, disk_pause)
 
     # Watchdog severity is the single source of truth for "should the
     # operator be alarmed". We translate its 4-level ladder into the
@@ -274,9 +348,17 @@ def _archive_block() -> Dict[str, Any]:
     elif dead > 0:
         sev = SEV_WARN
         msg = f'{dead} dead-letter row{"s" if dead != 1 else ""}'
-    elif paused:
+    elif paused_effective:
         sev = SEV_WARN
-        msg = 'Paused (load or disk)'
+        # Phase 4.5 — render the actual reason instead of an opaque
+        # "Paused (load or disk)". When neither guard has armed
+        # (manual ``pause_worker()`` from a mode switch, RW remount,
+        # quick-edit), ``_format_pause_reason`` returns "background"
+        # which we surface as the human-friendly fallback.
+        if pause_reason == 'background':
+            msg = 'Paused (background task)'
+        else:
+            msg = f'Paused: {pause_reason}'
     elif wd_sev == SEV_WARN:
         sev = SEV_WARN
         msg = (watchdog.get('message') or 'Watchdog warn')[:80]
@@ -300,13 +382,22 @@ def _archive_block() -> Dict[str, Any]:
         'message': msg,
         'enabled': True,
         'worker_running': running,
-        'paused': paused,
+        # Phase 4.5: ``paused`` reflects the operator-facing notion
+        # (any of: manual pause flag, load auto-pause armed, disk
+        # auto-pause armed). The lower-level ``/api/archive/status``
+        # still distinguishes the manual flag via its own ``paused``
+        # key for callers that need to differentiate.
+        'paused': paused_effective,
         'queue_depth': pending,
         'dead_letter_count': dead,
         'lost_24h': lost_24h,
         'eta_seconds': eta_seconds,
         'eta_human': eta_human,
         'drain_rate_per_sec': drain_rate,
+        # Phase 4.5 — surface raw pause-reason for callers that want
+        # to render their own UI (chip, tooltip, etc.) without
+        # re-parsing the message string.
+        'pause_reason': pause_reason if paused_effective else None,
     }
 
 

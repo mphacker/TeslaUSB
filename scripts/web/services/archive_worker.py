@@ -191,6 +191,7 @@ _state: Dict[str, Any] = {
     'last_drained_at': None,
     'last_disk_pause_at': None,
     'last_disk_pause_free_mb': None,
+    'last_disk_pause_total_mb': None,
     'last_load_pause_at': None,
     'last_load_pause_loadavg': None,
 }
@@ -342,6 +343,7 @@ def start_worker(db_path: str, archive_root: str, *,
         _state['active_file'] = None
         _state['last_disk_pause_at'] = None
         _state['last_disk_pause_free_mb'] = None
+        _state['last_disk_pause_total_mb'] = None
         _state['last_load_pause_at'] = None
         _state['last_load_pause_loadavg'] = None
         # Phase 4.4: drop any rate samples from the previous instance.
@@ -1006,11 +1008,30 @@ def _check_disk_space_guard(archive_root: str) -> str:
 
 
 def get_disk_pause_state() -> Dict[str, Any]:
-    """Return the current disk-space pause state for status endpoints."""
-    return {
-        'paused_until_epoch': float(_disk_space_pause_until),
-        'is_paused_now': _disk_space_pause_until > time.time(),
-    }
+    """Return the current disk-space pause state for status endpoints.
+
+    Phase 4.5 (#101) — surfaces the *reason* the disk-space guard
+    armed the pause so the UI can render "Paused: SD card X% full"
+    instead of an opaque "Paused" string. ``last_pause_at`` and
+    ``last_free_mb`` are set the first time the critical-threshold
+    guard fires (via :func:`process_one_claim`); they remain ``None``
+    on a freshly started worker that has never seen a critical hit.
+
+    ``critical_threshold_mb`` and ``warning_threshold_mb`` are the
+    currently-configured trip points (resolved at call time so config
+    edits show up without a service restart).
+    """
+    warn_mb, crit_mb = _resolve_disk_thresholds_mb()
+    with _state_lock:
+        return {
+            'paused_until_epoch': float(_disk_space_pause_until),
+            'is_paused_now': _disk_space_pause_until > time.time(),
+            'last_pause_at': _state.get('last_disk_pause_at'),
+            'last_free_mb': _state.get('last_disk_pause_free_mb'),
+            'last_total_mb': _state.get('last_disk_pause_total_mb'),
+            'critical_threshold_mb': int(crit_mb),
+            'warning_threshold_mb': int(warn_mb),
+        }
 
 
 def get_load_pause_state() -> Dict[str, Any]:
@@ -1020,13 +1041,25 @@ def get_load_pause_state() -> Dict[str, Any]:
     pause (None until the guard fires for the first time). Mirrors
     :func:`get_disk_pause_state` so the UI can show *why* the worker
     isn't draining.
+
+    Phase 4.5 (#101) — also surfaces the configured
+    ``threshold`` (resolved at call time) so the message can render
+    "Paused: load 4.2 > 3.5".
     """
+    # Threshold is the 5th element of the _read_config_or_defaults
+    # tuple; resolve outside the state lock to keep the critical
+    # section small.
+    try:
+        threshold = float(_read_config_or_defaults()[4])
+    except Exception:  # noqa: BLE001
+        threshold = float(_LOAD_PAUSE_THRESHOLD)
     with _state_lock:
         return {
             'paused_until_epoch': float(_load_pause_until),
             'is_paused_now': _load_pause_until > time.time(),
             'last_pause_at': _state.get('last_load_pause_at'),
             'last_loadavg': _state.get('last_load_pause_loadavg'),
+            'threshold': threshold,
         }
 
 
@@ -1286,14 +1319,16 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
             now_fn() + _resolve_disk_space_pause_seconds()
         )
         try:
-            free_mb = int(
-                shutil.disk_usage(archive_root).free // (1024 * 1024)
-            )
+            usage = shutil.disk_usage(archive_root)
+            free_mb = int(usage.free // (1024 * 1024))
+            total_mb = int(usage.total // (1024 * 1024))
         except OSError:
             free_mb = -1
+            total_mb = -1
         with _state_lock:
             _state['last_disk_pause_at'] = time.time()
             _state['last_disk_pause_free_mb'] = free_mb
+            _state['last_disk_pause_total_mb'] = total_mb
         # Phase 1 item 1.5: kick the retention prune NOW (debounced)
         # so we don't sit at "Archive paused" for up to 24 h waiting
         # for the daily retention timer.

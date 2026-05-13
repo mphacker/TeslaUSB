@@ -224,6 +224,20 @@ def _build_tunables() -> List[Dict[str, Any]]:
             'min': 10.0, 'max': 3600.0, 'step': 10.0,
             'cast': _bounded_float(10.0, 3600.0),
         },
+        {
+            'key': 'archive_queue.copy_chunk_bytes',
+            'form_name': 'archive_copy_chunk_bytes',
+            'label': 'Archive: copy chunk size',
+            'description': (
+                'Bytes per write in the temp+fsync+rename copy loop. '
+                'Smaller = lower per-chunk pause cost but more syscalls.'
+            ),
+            'current': int(config.ARCHIVE_QUEUE_COPY_CHUNK_BYTES),
+            'default': 1048576,
+            'unit': 'bytes',
+            'min': 65536, 'max': 16777216, 'step': 65536,
+            'cast': _bounded_int(65536, 16777216),
+        },
     ]
 
 

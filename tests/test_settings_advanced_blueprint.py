@@ -280,6 +280,24 @@ class TestTunableSchema:
         missing = required_keys - keys
         assert not missing, f"Phase 5.9 spec violation: missing {missing}"
 
+    def test_at_least_one_int_tunable_uses_bounded_int(self):
+        """`_bounded_int` is part of the public surface — keep at
+        least one tunable wired to it so the helper isn't dead code
+        and the integer-cast path is exercised in the live route."""
+        from blueprints.settings_advanced import _build_tunables, _bounded_int
+        sentinel = _bounded_int(1, 2)
+        # Compare on co_consts of the closure to identify _bounded_int casts
+        # (the closure captures min_val + max_val).
+        bounded_int_count = sum(
+            1 for t in _build_tunables()
+            if hasattr(t['cast'], '__qualname__')
+               and t['cast'].__qualname__ == sentinel.__qualname__
+        )
+        assert bounded_int_count >= 1, (
+            "At least one tunable must use _bounded_int — "
+            "otherwise the helper + its tests are dead code"
+        )
+
 
 # ---------------------------------------------------------------------------
 # POST /settings/advanced/save

@@ -15,25 +15,41 @@
 
     {# Persistent banner — visible at all times so users can't miss it. #}
     <div role="alert"
-         style="background:var(--accent-warning-bg, #fff7e6);
-                color:var(--accent-warning, #b76b00);
-                border:1px solid var(--accent-warning, #b76b00);
+         style="background:rgba(217, 119, 6, 0.08);
+                color:var(--ds-accent-warning, #D97706);
+                border:1px solid var(--ds-accent-warning, #D97706);
                 padding:12px 16px; border-radius:8px;
-                margin-bottom:20px; font-size:0.9rem;">
-        <strong>&#9888; Advanced settings affect background workers.</strong>
-        Most users should leave these at their defaults. Incorrect values can
-        starve the SDIO bus, trigger the hardware watchdog, or cause clips
-        to be skipped during indexing.
+                margin-bottom:20px; font-size:0.9rem;
+                display:flex; gap:10px; align-items:flex-start;">
+        <svg class="inline-icon" aria-hidden="true"
+             style="width:18px; height:18px; flex-shrink:0; margin-top:2px;">
+            <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use>
+        </svg>
+        <span>
+            <strong>Advanced settings affect background workers.</strong>
+            Most users should leave these at their defaults. Incorrect values can
+            starve the SDIO bus, trigger the hardware watchdog, or cause clips
+            to be skipped during indexing.
+        </span>
     </div>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
+                {% if category == 'danger' %}
+                    {% set _color = 'var(--ds-accent-danger, #DC2626)' %}
+                    {% set _bg = 'rgba(220, 38, 38, 0.08)' %}
+                {% elif category == 'success' %}
+                    {% set _color = 'var(--ds-accent-success, #16A34A)' %}
+                    {% set _bg = 'rgba(22, 163, 74, 0.08)' %}
+                {% else %}
+                    {% set _color = 'var(--text-primary)' %}
+                    {% set _bg = 'var(--bg-secondary, #f5f5f5)' %}
+                {% endif %}
                 <div role="status"
                      style="padding:10px 14px; border-radius:8px; margin-bottom:12px;
-                            background:{% if category == 'danger' %}var(--accent-danger-bg, #fff0f0){% elif category == 'success' %}var(--accent-success-bg, #f0fff5){% else %}var(--bg-secondary, #f5f5f5){% endif %};
-                            color:{% if category == 'danger' %}var(--accent-danger, #b00){% elif category == 'success' %}var(--accent-success, #060){% else %}var(--text-primary){% endif %};
-                            border:1px solid {% if category == 'danger' %}var(--accent-danger, #b00){% elif category == 'success' %}var(--accent-success, #060){% else %}var(--border){% endif %};">
+                            background:{{ _bg }}; color:{{ _color }};
+                            border:1px solid {{ _color }};">
                     {{ message }}
                 </div>
             {% endfor %}
@@ -45,7 +61,7 @@
 
         {% for t in tunables %}
         <div class="advanced-row"
-             style="padding:14px 0; border-bottom:1px solid var(--border);">
+             style="padding:14px 0; border-bottom:1px solid var(--border-color, #d6d8db);">
 
             <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-start;">
                 <div style="flex:1; min-width:200px;">
@@ -69,7 +85,10 @@
                            required
                            data-default="{{ t.default }}"
                            style="width:110px; padding:6px 10px;
-                                  border:1px solid var(--border); border-radius:6px;
+                                  border:1px solid var(--border-input, #ced4da);
+                                  border-radius:6px;
+                                  background:var(--bg-secondary, #ffffff);
+                                  color:var(--text-primary);
                                   font-family:inherit; font-size:0.9rem;">
                     <span style="color:var(--text-secondary); font-size:0.85rem;
                                  min-width:48px;">{{ t.unit }}</span>
@@ -83,7 +102,8 @@
                 <span>Range: {{ '%g'|format(t.min) }} – {{ '%g'|format(t.max) }} {{ t.unit }}</span>
                 <button type="button"
                         onclick="resetAdvancedField('{{ t.form_name }}', '{{ t.default }}')"
-                        style="background:none; border:none; color:var(--accent-primary, #0066cc);
+                        style="background:none; border:none;
+                               color:var(--ds-accent-primary, #2563EB);
                                cursor:pointer; padding:0; font-size:0.8rem;
                                text-decoration:underline;"
                         aria-label="Reset {{ t.label }} to default">
@@ -95,7 +115,8 @@
 
         <div style="display:flex; gap:10px; margin-top:24px;">
             <button type="submit"
-                    style="padding:10px 24px; background:var(--accent-primary, #0066cc);
+                    style="padding:10px 24px;
+                           background:var(--ds-accent-primary, #2563EB);
                            color:white; border:none; border-radius:8px;
                            font-size:0.95rem; font-weight:600; cursor:pointer;
                            min-height:44px;">
@@ -103,7 +124,8 @@
             </button>
             <a href="{{ url_for('mode_control.index') }}"
                style="padding:10px 24px; background:var(--bg-secondary, #f5f5f5);
-                      color:var(--text-primary); border:1px solid var(--border);
+                      color:var(--text-primary);
+                      border:1px solid var(--border-color, #d6d8db);
                       border-radius:8px; font-size:0.95rem; text-decoration:none;
                       display:inline-flex; align-items:center;
                       min-height:44px; box-sizing:border-box;">

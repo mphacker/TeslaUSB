@@ -97,6 +97,15 @@
                   padding:0 10px;">
             Details
         </a>
+        <button id="files-lost-dismiss" type="button"
+                aria-label="Dismiss footage-lost banner"
+                style="background:transparent; color:inherit;
+                       border:1px solid currentColor; border-radius:6px;
+                       cursor:pointer; font-size:0.9rem;
+                       min-height:44px; min-width:44px;
+                       padding:0 12px;">
+            Dismiss
+        </button>
     </div>
 
     <!-- System Health (Phase 4.2 — issue #101) -->
@@ -1958,7 +1967,51 @@ if (document.getElementById('fsck-status-container')) {
     var lostBanner   = document.getElementById('files-lost-banner');
     var lostDetail   = document.getElementById('files-lost-detail');
     var lostLink     = document.getElementById('files-lost-link');
+    var lostDismiss  = document.getElementById('files-lost-dismiss');
     if (lostLink && jobsUrl) lostLink.href = jobsUrl;
+
+    if (lostDismiss) {
+        lostDismiss.addEventListener('click', function() {
+            // Issue #163 — let the operator acknowledge the banner.
+            // Posts to /api/system/clear_lost_clips which deletes
+            // every source_gone row; the banner re-polls and hides
+            // when the count returns to 0. ``source_gone`` is
+            // terminal and has no downstream consumer, so this
+            // affects only the banner number.
+            if (!window.confirm(
+                    'Dismiss the lost-footage banner?\n\n' +
+                    'This permanently deletes the records of clips ' +
+                    'Tesla rotated out before they could be archived. ' +
+                    'The footage itself is already gone — this only ' +
+                    'clears the count from the banner.')) {
+                return;
+            }
+            lostDismiss.disabled = true;
+            fetch('/api/system/clear_lost_clips', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: '{}'
+            })
+            .then(function(resp) {
+                if (!resp.ok) {
+                    throw new Error('HTTP ' + resp.status);
+                }
+                return resp.json();
+            })
+            .then(function() {
+                // Force an immediate health re-poll; the banner
+                // will hide itself when lost_24h drops to 0.
+                loadHealth();
+            })
+            .catch(function(e) {
+                console.warn('clear_lost_clips failed:', e);
+                window.alert('Could not dismiss banner: ' + e.message);
+            })
+            .finally(function() {
+                lostDismiss.disabled = false;
+            });
+        });
+    }
 
     function renderFilesLostBanner(payload) {
         if (!lostBanner) return;

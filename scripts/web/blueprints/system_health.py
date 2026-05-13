@@ -34,7 +34,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Tuple
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from config import (
     ARCHIVE_QUEUE_ENABLED,
@@ -659,3 +659,56 @@ def api_system_health():
     endpoint MUST stay sub-100 ms in the cached path.
     """
     return jsonify(_build_health())
+
+
+@system_health_bp.route('/api/system/clear_lost_clips', methods=['POST'])
+def api_clear_lost_clips():
+    """Dismiss the home-page "Footage may have been lost" banner (#163).
+
+    The banner counts ``archive_queue`` rows with
+    ``status='source_gone'`` (clips Tesla rotated out of RecentClips
+    before the worker could copy them) within the trailing 24 h
+    window. The count self-clears once those rows age past 24 h, but
+    after a major catch-up backlog (post-crash, archive worker fell
+    badly behind) that takes a full 24 h of staring at the red banner.
+    This endpoint lets the operator acknowledge the loss and clear the
+    count immediately.
+
+    Request body (JSON, optional):
+      * ``older_than_hours`` (optional int) — if provided, only delete
+        rows whose ``claimed_at`` is older than that many hours;
+        otherwise delete every ``source_gone`` row. The Dismiss button
+        passes nothing (delete all).
+
+    Returns ``{rows_deleted}`` (HTTP 200) on success, ``{rows_deleted: 0}``
+    when the archive subsystem is disabled or no rows matched, or
+    ``{error}`` (HTTP 500) on adapter crash.
+
+    ``source_gone`` is terminal — no retry, no downstream consumer —
+    so this delete has zero functional impact on the worker, indexer,
+    cloud-sync, or any other subsystem; only the banner number
+    changes. Does NOT touch ``dead_letter`` / ``pending`` / ``claimed``
+    / ``copied`` rows.
+    """
+    if not ARCHIVE_QUEUE_ENABLED:
+        return jsonify({'rows_deleted': 0, 'enabled': False})
+
+    payload = request.get_json(silent=True) or {}
+    older_than_hours = payload.get('older_than_hours')
+    if older_than_hours is not None:
+        try:
+            older_than_hours = int(older_than_hours)
+        except (TypeError, ValueError):
+            return jsonify({
+                'error': 'older_than_hours must be an integer',
+            }), 400
+
+    try:
+        from services import archive_queue
+        n = int(archive_queue.delete_source_gone(
+            older_than_hours=older_than_hours) or 0)
+    except Exception:  # noqa: BLE001
+        logger.exception("/api/system/clear_lost_clips crashed")
+        return jsonify({'error': 'clear failed'}), 500
+
+    return jsonify({'rows_deleted': n})

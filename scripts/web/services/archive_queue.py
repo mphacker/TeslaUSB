@@ -454,6 +454,68 @@ def count_source_gone_recent(hours: int = 24,
                 pass
 
 
+def delete_source_gone(*, older_than_hours: Optional[int] = None,
+                       db_path: Optional[str] = None) -> int:
+    """Permanently delete ``source_gone`` rows from ``archive_queue``.
+
+    Issue #163 — companion to :func:`count_source_gone_recent`. The
+    "Footage may have been lost" home-page banner counts these rows
+    and is intentionally persistent for 24 h so the operator notices
+    the loss; this function powers the **Dismiss** affordance on that
+    banner so the operator can clear the count once they've
+    acknowledged it (instead of staring at the red banner for a full
+    24 h after the catch-up backlog drains).
+
+    ``source_gone`` is **terminal** — the source clip vanished before
+    the worker could copy it; there is no retry path, no downstream
+    table consumes the row, and the worker never re-claims it.
+    Deleting these rows therefore has zero functional impact on the
+    archive worker, indexer, cloud-sync, or any other subsystem; only
+    the banner number changes.
+
+    When ``older_than_hours`` is ``None`` (the default — what the
+    Dismiss button passes), every ``source_gone`` row is deleted
+    regardless of age. Callers that want to preserve very old rows for
+    forensics can pass an integer to delete only rows older than that
+    many hours (mirrors the ``hours`` parameter of
+    :func:`count_source_gone_recent`).
+
+    Returns the number of rows actually deleted (``0`` if nothing
+    matched). Returns ``0`` on any DB error so a UI Dismiss click
+    never blows up the request handler.
+    """
+    db_path = _resolve_db_path(db_path)
+    conn = None
+    try:
+        conn = _open_archive_conn(db_path)
+        if older_than_hours is None:
+            cur = conn.execute(
+                "DELETE FROM archive_queue WHERE status = 'source_gone'"
+            )
+        else:
+            cur = conn.execute(
+                """
+                DELETE FROM archive_queue
+                 WHERE status = 'source_gone'
+                   AND claimed_at IS NOT NULL
+                   AND CAST(strftime('%s', claimed_at) AS INTEGER) <
+                       CAST(strftime('%s', 'now') AS INTEGER) - ?
+                """,
+                (int(older_than_hours) * 3600,),
+            )
+        conn.commit()
+        return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("delete_source_gone failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def get_queue_status(db_path: Optional[str] = None) -> Dict[str, int]:
     """Return per-status counts for the queue.
 

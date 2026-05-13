@@ -1138,3 +1138,110 @@ def test_api_returns_json_payload(health_app, monkeypatch):
     assert 'generated_at' in body
     assert body['overall']['severity'] == 'ok'
     assert body['indexer']['severity'] == 'ok'
+
+
+# ---------------------------------------------------------------------------
+# /api/system/clear_lost_clips — issue #163 dismiss banner endpoint
+# ---------------------------------------------------------------------------
+
+def test_clear_lost_clips_disabled_returns_zero(health_app, monkeypatch):
+    """When ``ARCHIVE_QUEUE_ENABLED`` is False the endpoint must
+    short-circuit and never even import the queue module."""
+    import blueprints.system_health as sh
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False)
+    client = health_app.test_client()
+    rv = client.post('/api/system/clear_lost_clips', json={})
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body['rows_deleted'] == 0
+    assert body['enabled'] is False
+
+
+def test_clear_lost_clips_calls_service(health_app, monkeypatch):
+    import blueprints.system_health as sh
+    import services
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
+    captured = {}
+
+    class _FakeArchiveQueue:
+        @staticmethod
+        def delete_source_gone(*, older_than_hours=None, db_path=None):
+            captured['older_than_hours'] = older_than_hours
+            return 7
+
+    monkeypatch.setattr(services, 'archive_queue', _FakeArchiveQueue)
+    client = health_app.test_client()
+    rv = client.post('/api/system/clear_lost_clips', json={})
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body['rows_deleted'] == 7
+    assert captured['older_than_hours'] is None
+
+
+def test_clear_lost_clips_passes_older_than_hours(health_app, monkeypatch):
+    import blueprints.system_health as sh
+    import services
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
+    captured = {}
+
+    class _FakeArchiveQueue:
+        @staticmethod
+        def delete_source_gone(*, older_than_hours=None, db_path=None):
+            captured['older_than_hours'] = older_than_hours
+            return 3
+
+    monkeypatch.setattr(services, 'archive_queue', _FakeArchiveQueue)
+    client = health_app.test_client()
+    rv = client.post(
+        '/api/system/clear_lost_clips', json={'older_than_hours': 48})
+    assert rv.status_code == 200
+    assert rv.get_json()['rows_deleted'] == 3
+    assert captured['older_than_hours'] == 48
+
+
+def test_clear_lost_clips_rejects_non_integer_hours(health_app, monkeypatch):
+    import blueprints.system_health as sh
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
+    client = health_app.test_client()
+    rv = client.post(
+        '/api/system/clear_lost_clips',
+        json={'older_than_hours': 'forever'})
+    assert rv.status_code == 400
+    assert 'error' in rv.get_json()
+
+
+def test_clear_lost_clips_handles_service_crash(health_app, monkeypatch):
+    import blueprints.system_health as sh
+    import services
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
+
+    class _Boom:
+        @staticmethod
+        def delete_source_gone(*, older_than_hours=None, db_path=None):
+            raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(services, 'archive_queue', _Boom)
+    client = health_app.test_client()
+    rv = client.post('/api/system/clear_lost_clips', json={})
+    assert rv.status_code == 500
+    assert 'error' in rv.get_json()
+
+
+def test_clear_lost_clips_accepts_empty_body(health_app, monkeypatch):
+    """The Dismiss button POSTs ``{}`` — and a missing/empty body
+    must also work (some HTTP clients send neither Content-Type nor
+    body for a no-arg POST)."""
+    import blueprints.system_health as sh
+    import services
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
+
+    class _FakeArchiveQueue:
+        @staticmethod
+        def delete_source_gone(*, older_than_hours=None, db_path=None):
+            return 0
+
+    monkeypatch.setattr(services, 'archive_queue', _FakeArchiveQueue)
+    client = health_app.test_client()
+    rv = client.post('/api/system/clear_lost_clips')
+    assert rv.status_code == 200
+    assert rv.get_json()['rows_deleted'] == 0

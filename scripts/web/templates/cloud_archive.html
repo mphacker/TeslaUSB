@@ -578,6 +578,20 @@
             <div id="lesActiveLine" style="display: none; margin-bottom: var(--space-4); padding: 8px 12px; border-radius: var(--radius-md); background: var(--msg-info-bg); color: var(--msg-info-text); font-size: var(--text-sm);">
                 <strong>Uploading:</strong> <span id="lesActiveFile"></span>
             </div>
+            {# Phase 4.6 (#101) — Daily data-cap banner. Hidden until LES
+               reports data_cap_reached=true. The cap is configurable via
+               live_event_sync.daily_data_cap_mb (0 = unlimited). When the
+               cap is hit, the worker idles until the local clock crosses
+               midnight UTC, so the user knows uploads will resume on
+               their own — no action required. #}
+            <div id="lesDataCapBanner" style="display: none; margin-bottom: var(--space-4); padding: 10px 12px; border-radius: var(--radius-md); background: var(--msg-warning-bg); color: var(--msg-warning-text); font-size: var(--text-sm);">
+                <strong>Daily data cap reached.</strong>
+                <span id="lesDataCapDetail" style="margin-left: 4px;"></span>
+                <span style="display: block; margin-top: 4px; opacity: 0.85; font-size: var(--text-xs);">
+                    Uploads will resume automatically at midnight UTC.
+                    Adjust the cap below or set it to 0 (unlimited) to keep uploading today.
+                </span>
+            </div>
             <div id="lesLastError" style="display: none; margin-bottom: var(--space-4); padding: 8px 12px; border-radius: var(--radius-md); background: var(--msg-error-bg); color: var(--msg-error-text); font-size: var(--text-sm);">
                 <strong>Last error:</strong> <span id="lesLastErrorText"></span>
             </div>
@@ -1879,6 +1893,28 @@
                 errBox.style.display = 'block';
             } else if (errBox) {
                 errBox.style.display = 'none';
+            }
+
+            /* Phase 4.6 (#101) — daily data-cap banner. Show with the
+               percentage and MB-uploaded vs MB-cap so the user knows
+               (a) the cap was hit, (b) by how much, (c) that uploads
+               will resume at midnight UTC. */
+            var capBanner = document.getElementById('lesDataCapBanner');
+            var capDetail = document.getElementById('lesDataCapDetail');
+            if (capBanner && capDetail) {
+                if (data.data_cap_reached === true && data.daily_data_cap_mb > 0) {
+                    var todayMb = Math.round(
+                        (data.data_uploaded_today_bytes || 0) / (1024 * 1024)
+                    );
+                    var pct = (data.data_cap_pct === null || data.data_cap_pct === undefined)
+                        ? '' : ' (' + data.data_cap_pct + '%)';
+                    capDetail.textContent =
+                        todayMb + ' MB uploaded today, cap ' +
+                        data.daily_data_cap_mb + ' MB' + pct + '.';
+                    capBanner.style.display = 'block';
+                } else {
+                    capBanner.style.display = 'none';
+                }
             }
         } catch (e) { /* ignore network blips */ }
     }

@@ -473,6 +473,77 @@ class TestExtractSeiMessages:
         with pytest.raises(ValueError, match="mdat"):
             list(extract_sei_messages(str(f)))
 
+    def test_max_walk_bytes_caps_mdat_walk(self, tmp_path):
+        """Issue #176 — ``max_walk_bytes`` caps the mdat walk so the
+        parser exits early on long files instead of paging in the
+        whole ``mdat`` box.
+
+        We use 100 SEI payloads to grow the mdat box well past any
+        small cap, then assert that:
+
+          * ``max_walk_bytes=None`` (default) yields all 100 messages.
+          * A small cap yields strictly fewer messages.
+          * The capped result is a strict prefix of the unlimited
+            result (i.e., we stop early — we don't skip ahead).
+          * A cap of 0 yields zero messages without raising.
+        """
+        payloads = [
+            _make_sei_protobuf(lat=float(i + 1), lon=float(i + 1))
+            for i in range(100)
+        ]
+        mp4_data = self._make_synthetic_mp4(payloads)
+        video_file = tmp_path / "long.mp4"
+        video_file.write_bytes(mp4_data)
+
+        unlimited = list(extract_sei_messages(
+            str(video_file), sample_rate=1,
+        ))
+        assert len(unlimited) == 100
+
+        # 1 KB is far smaller than the mdat we just built (each NAL
+        # pair is dozens of bytes), so the cap MUST short-circuit.
+        capped = list(extract_sei_messages(
+            str(video_file), sample_rate=1, max_walk_bytes=1024,
+        ))
+        assert 0 < len(capped) < len(unlimited), (
+            f"capped peek did not actually cap: "
+            f"capped={len(capped)} unlimited={len(unlimited)}"
+        )
+        # Capped result must be a prefix of the unlimited result —
+        # we early-exit, we do not skip ahead.
+        for i, msg in enumerate(capped):
+            assert abs(msg.latitude_deg - unlimited[i].latitude_deg) < 1e-6
+
+        # Zero-byte cap is a degenerate but legal call. We must not
+        # raise; we just yield nothing because the walk never enters
+        # the body. This matches the documented "treat None as
+        # walk-to-end, anything else as a hard cap" contract.
+        zero = list(extract_sei_messages(
+            str(video_file), sample_rate=1, max_walk_bytes=0,
+        ))
+        assert zero == []
+
+    def test_max_walk_bytes_default_is_unlimited(self, tmp_path):
+        """The default value for ``max_walk_bytes`` MUST preserve
+        the historical walk-to-end behavior the indexer depends on.
+
+        Regression guard: a future refactor that flipped the default
+        to a small cap would silently truncate every indexer pass.
+        """
+        payloads = [_make_sei_protobuf() for _ in range(10)]
+        mp4_data = self._make_synthetic_mp4(payloads)
+        video_file = tmp_path / "default_unlimited.mp4"
+        video_file.write_bytes(mp4_data)
+
+        # Default call (no ``max_walk_bytes`` kwarg) must yield all.
+        msgs = list(extract_sei_messages(str(video_file), sample_rate=1))
+        assert len(msgs) == 10
+        # Explicit None must behave identically.
+        msgs2 = list(extract_sei_messages(
+            str(video_file), sample_rate=1, max_walk_bytes=None,
+        ))
+        assert len(msgs2) == 10
+
 
 class TestParseVideoSei:
     def test_returns_list(self, tmp_path):

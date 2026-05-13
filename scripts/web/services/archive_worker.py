@@ -1347,20 +1347,37 @@ def _stable_write_age_seconds() -> float:
 
 # ---------------------------------------------------------------------------
 # Issue #167 sub-deliverable 2 — skip-at-source for stationary RecentClips
+# Issue #176 — fast-peek tuning
 # ---------------------------------------------------------------------------
 
 # Cap on SEI messages scanned by ``_clip_has_gps_signal`` before declaring
 # "no GPS". Tesla writes one SEI NAL per frame at ~30 fps; with sample_rate=30
-# one SeiMessage is yielded per ~1 s of video. A typical RecentClips clip is
-# 60 s of video (one minute), so 60 messages covers the whole clip. We cap at
-# 90 to allow a small safety margin for slightly-longer clips and clips that
-# yield SEI at slightly higher cadence, but bail out fast on degenerate inputs
-# (e.g., a corrupted clip that yields tens of thousands of SEI NALs).
+# one SeiMessage is yielded per ~1 s of video. The cap is mainly a defensive
+# bound for degenerate inputs (e.g., a corrupted clip that yields tens of
+# thousands of SEI NALs); the dominant termination signal for a moving clip
+# is the early ``return True`` on the first GPS-bearing message, and for a
+# stationary clip is ``_SKIP_GPS_PEEK_MAX_WALK_BYTES`` (below).
 _SKIP_GPS_PEEK_MAX_MESSAGES = 90
 # Sample rate for the peek. ``30`` matches what the indexer uses — one SEI
 # per ~1 s of video — so the I/O footprint of the peek is on the same order
 # as one indexer pass.
 _SKIP_GPS_PEEK_SAMPLE_RATE = 30
+# Issue #176 — hard cap on bytes walked through the ``mdat`` box during the
+# stationary peek. Tesla writes ZERO SEI NAL units in parked Sentry clips
+# (no telemetry to record), so the message-count cap above never fires on
+# parked footage — the parser would otherwise walk the entire ``mdat`` box
+# (~25-50 MB on Tesla cameras) and page in the whole file via mmap to
+# confirm "no SEI exists". Bench results on cybertruckusb.local (Pi
+# Zero 2 W) showed 1.2-3.7 s of cold-cache wall time per parked clip in
+# the unlimited case versus ~20 ms with a 2 MB cap — a ~200x speedup that
+# eliminates the load-pause throttle the worker was hitting every 7 clips.
+# 2 MB is enough to comfortably catch the first GPS-bearing SEI in any
+# moving clip (Tesla writes 1 SEI per frame at 30 fps; at ~3 Mbit/s that's
+# ~30 SEI messages in 1 s of video ≈ ~370 KB into ``mdat``). A driving
+# clip that has zero GPS lock for the first 5 seconds would be
+# misclassified as stationary, but the user already opted in to skipping
+# stationary clips and that edge case is far rarer than the stall it cures.
+_SKIP_GPS_PEEK_MAX_WALK_BYTES = 2 * 1024 * 1024
 
 
 def _skip_stationary_recent_clips_enabled() -> bool:
@@ -1400,15 +1417,16 @@ def _clip_has_gps_signal(source_path: str) -> Optional[bool]:
         are never silently dropped — the existing copy-then-index
         path will handle them safely.
 
-    Memory model: re-uses the same ``mmap``-backed
+    Memory and I/O model: re-uses the same ``mmap``-backed
     :func:`sei_parser.extract_sei_messages` generator the indexer
-    uses, with an early ``break`` on the first GPS-bearing message.
-    For a moving clip the peek returns after ~1 s of video; for a
-    stationary 60-s clip the peek scans the whole clip, but the
-    walker only pages in SEI NAL bytes (skipping past video NAL
-    payloads), so the actual I/O footprint stays in the low MB
-    range. Net I/O is dramatically lower than the 30-50 MB write +
-    sync we avoid by skipping the copy.
+    uses, with an early ``break`` on the first GPS-bearing message
+    AND a ``max_walk_bytes`` cap so a parked clip with zero SEI does
+    NOT have to page in the entire ``mdat`` box to confirm absence.
+    Issue #176 — without the byte cap, the parser walks the whole
+    ``mdat`` box (~25-50 MB) for every parked clip because the
+    message-count cap never fires when Tesla emits zero SEI messages
+    in stationary footage. Bench: 1.2-3.7 s per peek without cap,
+    ~20 ms per peek with a 2 MB cap.
     """
     try:
         from services import sei_parser
@@ -1424,7 +1442,9 @@ def _clip_has_gps_signal(source_path: str) -> Optional[bool]:
     scanned = 0
     try:
         for msg in sei_parser.extract_sei_messages(
-                source_path, sample_rate=_SKIP_GPS_PEEK_SAMPLE_RATE):
+                source_path,
+                sample_rate=_SKIP_GPS_PEEK_SAMPLE_RATE,
+                max_walk_bytes=_SKIP_GPS_PEEK_MAX_WALK_BYTES):
             scanned += 1
             if msg.has_gps:
                 return True
@@ -1613,8 +1633,9 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
             archive_queue.mark_skipped_stationary(row_id, db_path=db_path)
             logger.info(
                 "archive_worker: skipped stationary RecentClips %s "
-                "(no GPS-bearing SEI in first ~%d s)",
+                "(no GPS-bearing SEI in first %d KB / %d msgs)",
                 source_path,
+                _SKIP_GPS_PEEK_MAX_WALK_BYTES // 1024,
                 _SKIP_GPS_PEEK_MAX_MESSAGES,
             )
             return 'skipped_stationary'

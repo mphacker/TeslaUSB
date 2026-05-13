@@ -439,7 +439,8 @@ def _get_timescale_and_durations(data: bytes) -> tuple:
 
 def extract_sei_messages(
     video_path: str,
-    sample_rate: int = 1
+    sample_rate: int = 1,
+    max_walk_bytes: Optional[int] = None,
 ) -> Generator[SeiMessage, None, None]:
     """Extract SEI telemetry messages from a Tesla dashcam MP4 file.
 
@@ -450,6 +451,15 @@ def extract_sei_messages(
         video_path: Path to the MP4 file.
         sample_rate: Only process every Nth frame (1=all, 30=~1/sec at 30fps).
             Use 1 for maximum resolution, 30 for route mapping.
+        max_walk_bytes: Optional hard cap on the number of bytes walked
+            inside the ``mdat`` box. When set, the generator stops after
+            the cumulative ``cursor`` advance through ``mdat`` exceeds
+            this many bytes. Use this for "is this clip stationary?"
+            peeks where the caller will break out on the first
+            GPS-bearing message anyway — capping the walk turns a
+            full-file mmap page-in (25-50 MB cold-cache I/O) into a
+            fixed-size read. Default ``None`` preserves the historical
+            walk-to-end behavior used by the indexer.
 
     Yields:
         SeiMessage objects with GPS, speed, acceleration, and control data.
@@ -529,6 +539,16 @@ def extract_sei_messages(
         # Walk through NAL units in mdat
         cursor = mdat['start']
         end = mdat['end']
+        # Apply ``max_walk_bytes`` as a hard cap on the cumulative
+        # cursor advance through ``mdat``. We compute a stop-cursor
+        # once and check it on each loop iteration; this keeps the
+        # hot path branch-free for the unbounded indexer case (where
+        # ``max_walk_bytes is None`` collapses to the original
+        # ``cursor + 4 <= end`` predicate).
+        if max_walk_bytes is not None:
+            walk_stop = mdat['start'] + max(0, int(max_walk_bytes))
+            if walk_stop < end:
+                end = walk_stop
         frame_index = 0
         cumulative_time_ms = 0.0
 

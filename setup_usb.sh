@@ -1514,13 +1514,21 @@ configure_service "$TEMPLATES_DIR/chime_scheduler.service" "$CHIME_SCHEDULER_SER
 CHIME_SCHEDULER_TIMER="/etc/systemd/system/chime_scheduler.timer"
 configure_service "$TEMPLATES_DIR/chime_scheduler.timer" "$CHIME_SCHEDULER_TIMER"
 
-# Cloud archive sync service (oneshot — triggered by timer or web UI)
-CLOUD_SYNC_SERVICE="/etc/systemd/system/cloud_archive_sync.service"
-configure_service "$TEMPLATES_DIR/cloud_archive_sync.service" "$CLOUD_SYNC_SERVICE"
-
-# Cloud archive sync timer (periodic — every 6 hours)
-CLOUD_SYNC_TIMER="/etc/systemd/system/cloud_archive_sync.timer"
-configure_service "$TEMPLATES_DIR/cloud_archive_sync.timer" "$CLOUD_SYNC_TIMER"
+# Phase 3b (#99): the cloud_archive_sync.timer / .service one-shot
+# entry point has been removed. The continuous worker started by
+# gadget_web.service replaces both: a long-lived daemon thread that
+# idles on threading.Event.wait() and drains the queue on
+# file-watcher events, NM dispatcher fires, mode-switch hooks, and
+# manual UI clicks. Disable + remove any pre-existing units from
+# previous installs so we don't keep firing the dead timer.
+if systemctl list-unit-files cloud_archive_sync.timer 2>/dev/null | grep -q cloud_archive_sync; then
+  echo "Removing legacy cloud_archive_sync.timer / .service (replaced by continuous worker)"
+  systemctl disable --now cloud_archive_sync.timer 2>/dev/null || true
+  systemctl disable --now cloud_archive_sync.service 2>/dev/null || true
+  rm -f /etc/systemd/system/cloud_archive_sync.timer
+  rm -f /etc/systemd/system/cloud_archive_sync.service
+  systemctl daemon-reload
+fi
 
 # WiFi monitor service
 WIFI_MONITOR_SERVICE="/etc/systemd/system/wifi-monitor.service"
@@ -1560,14 +1568,10 @@ chmod +x "$SCRIPT_DIR/scripts/boot_deferred_tasks.sh"
 # Enable and start chime scheduler timer
 systemctl enable --now chime_scheduler.timer || systemctl restart chime_scheduler.timer
 
-# Enable cloud archive sync timer (only if cloud archive is enabled in config)
-if [ "$CLOUD_ARCHIVE_ENABLED" = "true" ]; then
-  echo "Cloud archive enabled — starting sync timer"
-  systemctl enable --now cloud_archive_sync.timer || systemctl restart cloud_archive_sync.timer
-else
-  echo "Cloud archive not enabled — sync timer disabled (enable in config.yaml)"
-  systemctl disable cloud_archive_sync.timer 2>/dev/null || true
-fi
+# Phase 3b (#99): cloud_archive_sync.timer is gone — the continuous
+# worker inside gadget_web.service handles all cloud sync triggers
+# (file watcher, NM dispatcher, mode switch, manual UI). The block
+# above already removed any stale unit files from previous installs.
 
 # Enable and start WiFi monitoring service
 systemctl enable --now wifi-monitor.service || systemctl restart wifi-monitor.service

@@ -1,7 +1,7 @@
 [Unit]
 Description=TeslaUSB Safe Mode Boot Check
 DefaultDependencies=no
-Before=present_usb_on_boot.service gadget_web.service wifi-monitor.service chime_scheduler.timer cloud_archive_sync.timer network-optimizations.service
+Before=present_usb_on_boot.service gadget_web.service wifi-monitor.service chime_scheduler.timer network-optimizations.service
 After=local-fs.target
 StartLimitBurst=3
 StartLimitIntervalSec=600

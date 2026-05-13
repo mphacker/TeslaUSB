@@ -201,7 +201,14 @@ def _restart_watcher_after_mode_switch() -> None:
 
 
 def _trigger_cloud_sync_after_mode_switch():
-    """Trigger cloud archive sync after a mode switch if enabled."""
+    """Wake the continuous cloud archive worker after a mode switch.
+
+    Phase 3b (#99): the worker is always alive; this just nudges it
+    so it re-checks the queue immediately rather than waiting for the
+    next idle timeout. Tesla may have written new events while the
+    USB gadget was in edit mode (gadget unbound), so the next drain
+    needs to discover them.
+    """
     try:
         from config import CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_DB_PATH
         if not CLOUD_ARCHIVE_ENABLED:

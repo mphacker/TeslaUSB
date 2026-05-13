@@ -1527,10 +1527,17 @@ def index_single_file(
         logger.debug("index_single_file: cannot stat %s", video_path)
         return IndexResult(IndexOutcome.FILE_MISSING)
 
-    # Skip files still being written (< 2 min old). Tesla writes the moov
-    # atom at the end of each clip, and re-indexing while writes are in
-    # progress wastes CPU and may produce truncated waypoint lists.
-    if (time.time() - stat.st_mtime) < 120:
+    # Skip files still being written (< MAPPING_INDEX_TOO_NEW_SECONDS
+    # old, default 120 s). Tesla writes the moov atom at the end of
+    # each clip, and re-indexing while writes are in progress wastes
+    # CPU and may produce truncated waypoint lists. Phase 5.9 (#102):
+    # threshold is now configurable via mapping.index_too_new_seconds
+    # in config.yaml — exposed via the Settings → Advanced sub-page.
+    try:
+        from config import MAPPING_INDEX_TOO_NEW_SECONDS as _too_new
+    except Exception:  # noqa: BLE001
+        _too_new = 120.0
+    if (time.time() - stat.st_mtime) < _too_new:
         logger.debug("index_single_file: skipping %s (still being written)", video_path)
         return IndexResult(IndexOutcome.TOO_NEW)
 

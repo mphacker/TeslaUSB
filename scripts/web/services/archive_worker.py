@@ -101,6 +101,10 @@ _IDLE_SLEEP_SECONDS = 5.0
 _BACKOFF_SLEEP_SECONDS = 0.5
 # Stable-write age gate — files modified within this many seconds get
 # re-queued so we don't copy a clip Tesla is still writing.
+# Configurable via ``archive_queue.stable_write_age_seconds``. The
+# module-level default below is the fallback when config isn't
+# importable (unit-test envs without the full app); the runtime value
+# is read by ``_stable_write_age_seconds()`` at call time.
 _STABLE_WRITE_AGE_SECONDS = 5.0
 # task_coordinator wait when acquiring the archive slot. The archive
 # worker is a periodic priority task (per the task_coordinator
@@ -1189,6 +1193,20 @@ def _record_idle(*, last_outcome: Optional[str] = None,
     _idle_event.set()
 
 
+def _stable_write_age_seconds() -> float:
+    """Return ``ARCHIVE_QUEUE_STABLE_WRITE_AGE_SECONDS`` from config,
+    falling back to the module-level ``_STABLE_WRITE_AGE_SECONDS``.
+
+    Looked up at call time so tests can monkeypatch the config module
+    after import. Phase 5.9 — issue #102.
+    """
+    try:
+        from config import ARCHIVE_QUEUE_STABLE_WRITE_AGE_SECONDS
+        return float(ARCHIVE_QUEUE_STABLE_WRITE_AGE_SECONDS)
+    except Exception:  # noqa: BLE001
+        return _STABLE_WRITE_AGE_SECONDS
+
+
 def _read_config_or_defaults():
     """Return tunables from config.
 
@@ -1294,7 +1312,7 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         or (expected_mtime is not None and expected_mtime != st.st_mtime)
     )
     needs_settling_check = metadata_drifted or metadata_unknown
-    if age < _STABLE_WRITE_AGE_SECONDS and needs_settling_check:
+    if age < _stable_write_age_seconds() and needs_settling_check:
         # Update the snapshot so the next pick uses fresh values.
         archive_queue.release_claim(
             row_id,
@@ -1407,7 +1425,17 @@ def _run_worker_loop(db_path: str, archive_root: str,
 
     _apply_low_priority()
     try:
-        released = archive_queue.recover_stale_claims(db_path=db_path)
+        # Phase 5.9 (#102): pull the stale-claim age from config so
+        # users can tune via Settings → Advanced.
+        try:
+            from config import ARCHIVE_QUEUE_STALE_CLAIM_MAX_AGE_SECONDS
+            _stale_age = float(ARCHIVE_QUEUE_STALE_CLAIM_MAX_AGE_SECONDS)
+        except Exception:  # noqa: BLE001
+            _stale_age = 600.0
+        released = archive_queue.recover_stale_claims(
+            db_path=db_path,
+            max_age_seconds=_stale_age,
+        )
         if released:
             logger.info(
                 "Archive worker %s released %d stale claims at startup",

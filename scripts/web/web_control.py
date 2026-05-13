@@ -58,6 +58,7 @@ from blueprints import (
     storage_retention_bp,
     jobs_bp,
     system_health_bp,
+    settings_advanced_bp,
 )
 
 app.register_blueprint(mapping_bp)
@@ -80,6 +81,7 @@ app.register_blueprint(archive_queue_bp)
 app.register_blueprint(storage_retention_bp)
 app.register_blueprint(jobs_bp)
 app.register_blueprint(system_health_bp)
+app.register_blueprint(settings_advanced_bp)
 # Register captive portal blueprint LAST to avoid conflicting with other routes
 app.register_blueprint(captive_portal_bp)
 

@@ -177,7 +177,13 @@ class TestIsPathSkipped:
     def test_uses_indexed_lookup_not_full_scan(self, cloud_conn):
         """The unique index on ``file_path`` MUST be used — a full scan
         would defeat the entire memory win (we'd be slower AND still
-        loading rows). EXPLAIN QUERY PLAN catches this."""
+        loading rows). EXPLAIN QUERY PLAN catches this.
+
+        Note: this test runs EXPLAIN against an inline copy of the SQL
+        for clarity. The helper's runtime SQL is covered by the two
+        integration tests below — if a future refactor changes the
+        helper's query shape, those tests guard the actual behaviour.
+        """
         plan_rows = cloud_conn.execute(
             "EXPLAIN QUERY PLAN "
             "SELECT 1 FROM cloud_synced_files "
@@ -188,9 +194,12 @@ class TestIsPathSkipped:
         plan = " ".join(str(r["detail"]) for r in plan_rows).lower()
         # SQLite reports the auto-created unique index as
         # "sqlite_autoindex_cloud_synced_files_1". The exact name is not
-        # part of the contract, but the plan MUST mention USING INDEX.
-        assert "using index" in plan or "search" in plan, (
-            f"_is_path_skipped query is doing a full scan, not an index "
+        # part of the contract, but for a unique-key point lookup SQLite
+        # always emits "SEARCH ... USING INDEX ...". Require BOTH tokens
+        # so a future plan that drops to a SCAN or a different access
+        # path (e.g. covering-index range) is caught.
+        assert "search" in plan and "using index" in plan, (
+            f"_is_path_skipped query is not doing an indexed point "
             f"lookup. Plan was: {plan}"
         )
         # And explicitly NOT a SCAN of the full table.
@@ -243,6 +252,23 @@ class TestDiscoverEventsStreaming:
         ``SELECT file_path FROM cloud_synced_files WHERE status IN (…)``
         bulk-load shape. We trace every execute() and assert that
         signature is never produced.
+
+        This test is **complementary to** ``test_bounded_query_count_per
+        _candidate`` below, not redundant:
+
+        * THIS test catches any ``cloud_synced_files`` query that omits
+          ``file_path = ?`` — i.e. the legacy bulk-load OR a future
+          per-event regression that joins/scans on something other than
+          the unique key.
+        * The bounded-query-count test catches per-discover query count
+          growing with cloud history — i.e. a per-event JOIN fan-out
+          where each candidate triggers N row-reads in proportion to
+          ``cloud_synced_files`` size. That class would still satisfy
+          THIS test (the queries DO mention ``file_path = ?``) but
+          would defeat the memory/CPU win.
+
+        Together they pin the contract: bounded query count AND each
+        query is an indexed point lookup.
         """
         _seed_cloud(cloud_conn, [
             ("SentryClips/2026-05-12_10-00-00", "synced"),
@@ -289,6 +315,9 @@ class TestDiscoverEventsStreaming:
         queries must scale with NEW events on disk, not with the size
         of cloud_synced_files. Seeding 100 unrelated synced rows must
         not change the query count vs seeding 0.
+
+        Complement to ``test_no_bulk_load_query_is_issued`` above —
+        see that test's docstring for the full contract.
         """
         # Run 1: empty DB.
         executed_a: List[str] = []

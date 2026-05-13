@@ -1016,7 +1016,11 @@ def _is_path_skipped(
             (rel_path,),
         ).fetchone()
         return row is not None
-    except Exception:
+    except sqlite3.Error:
+        # Best-effort dedup: SQLite errors (closed conn, locked DB, etc.)
+        # mean we can't tell — let the picker through. Programmer errors
+        # (TypeError from a wrong-type rel_path, AttributeError from a
+        # broken proxy) are NOT swallowed so they surface during dev.
         return False
 
 

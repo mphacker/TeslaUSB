@@ -1841,22 +1841,14 @@ def _drain_once(
 
         # Write rclone conf and refresh token once up front
         conf_path = _write_rclone_conf(CLOUD_ARCHIVE_PROVIDER, creds)
-        try:
-            # Force token refresh before starting
-            subprocess.run(
-                ["rclone", "about", "--config", conf_path, "teslausb:", "--json"],
-                capture_output=True, text=True, timeout=30,
-            )
-            try:
-                from services.cloud_rclone_service import _capture_refreshed_token
-                _capture_refreshed_token(creds)
-            except Exception:
-                pass
-        except Exception:
-            pass
 
-        # Check available cloud storage and cap sync to what fits.
-        # Reserve configured amount so we never fill the provider to 100%.
+        # Phase 5.7: a single ``rclone about`` call serves BOTH
+        # purposes — token refresh AND capacity check. The legacy
+        # implementation issued two back-to-back ``rclone about``
+        # subprocess calls (one to force a token refresh, one to
+        # parse free/total bytes), each ~1-3 s on a slow uplink.
+        # The provider returns identical data both times; we now
+        # capture once and reuse.
         cloud_reserve_bytes = int(CLOUD_ARCHIVE_RESERVE_GB * 1024 * 1024 * 1024)
         cloud_free_bytes: Optional[int] = None
         try:
@@ -1864,9 +1856,27 @@ def _drain_once(
                 ["rclone", "about", "--config", conf_path, "teslausb:", "--json"],
                 capture_output=True, text=True, timeout=30,
             )
+            # Side-effect of ``rclone about``: rclone refreshes the
+            # OAuth token and writes it back into ``conf_path``.
+            # Capture the refreshed token into the live creds dict so
+            # subsequent calls use the new token, even if this single
+            # ``about`` invocation failed to parse a free byte count
+            # (some providers omit ``free`` from the JSON).
+            try:
+                from services.cloud_rclone_service import _capture_refreshed_token
+                _capture_refreshed_token(creds)
+            except Exception:
+                pass
+
             if about_result.returncode == 0:
                 import json as _json
-                about = _json.loads(about_result.stdout)
+                try:
+                    about = _json.loads(about_result.stdout)
+                except (_json.JSONDecodeError, ValueError) as e:
+                    logger.warning(
+                        "Could not parse rclone about JSON: %s", e,
+                    )
+                    about = {}
                 if "free" in about:
                     cloud_free_bytes = int(about["free"]) - cloud_reserve_bytes
                     cloud_total = int(about.get("total", 0))

@@ -16,11 +16,14 @@ import pytest
 
 from services import indexing_worker
 from services import mapping_service
+from services import indexing_queue_service as queue_svc
 from services.mapping_service import (
     IndexOutcome,
     IndexResult,
     _init_db,
     canonical_key,
+)
+from services.indexing_queue_service import (
     enqueue_for_indexing,
     claim_next_queue_item,
 )

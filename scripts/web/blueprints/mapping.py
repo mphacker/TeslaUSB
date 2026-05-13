@@ -627,7 +627,8 @@ def api_index_rebuild():
         }), 400
 
     import sqlite3
-    from services.mapping_service import boot_catchup_scan, clear_all_queue
+    from services.mapping_service import boot_catchup_scan
+    from services.indexing_queue_service import clear_all_queue
     from services import indexing_worker
 
     # Pause the worker for the destructive sweep so it can't be
@@ -679,7 +680,7 @@ def api_index_cancel():
     in-flight work isn't wasted. Useful if a user accidentally
     triggered a rebuild on a Pi with thousands of clips.
     """
-    from services.mapping_service import clear_pending_queue
+    from services.indexing_queue_service import clear_pending_queue
     try:
         n = clear_pending_queue(MAPPING_DB_PATH)
     except Exception as e:  # noqa: BLE001

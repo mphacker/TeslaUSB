@@ -29,8 +29,8 @@ All three responsibilities now live elsewhere (Phase 2b + Phase 3a):
   records are preserved.
 
 * **Path fixup** — Replaced by re-enqueueing the archived file into
-  ``indexing_queue`` (``mapping_service.enqueue_for_indexing``); the
-  indexer rewrites the canonical path on its next pass and
+  ``indexing_queue`` (``indexing_queue_service.enqueue_for_indexing``);
+  the indexer rewrites the canonical path on its next pass and
   ``purge_deleted_videos`` removes the stale USB-side row.
 
 This module is kept for backwards compatibility with the public API

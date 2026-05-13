@@ -22,8 +22,9 @@ Drains the ``archive_queue`` table one file at a time. For each row:
    ``fsync``, ``rename`` to the final name, verify size matches the
    source.
 6. On success, mark the row ``copied`` and enqueue the **destination**
-   path into ``indexing_queue`` via ``mapping_service.enqueue_for_indexing``
-   so the indexer picks it up next.
+   path into ``indexing_queue`` via
+   ``indexing_queue_service.enqueue_for_indexing`` so the indexer
+   picks it up next.
 7. Failure handling:
    * ``FileNotFoundError`` (source rotated by Tesla mid-flight) → mark
      ``source_gone``. No retry, no dead-letter.
@@ -837,25 +838,30 @@ def _enqueue_indexed(dest_path: str, db_path: str) -> None:
     """Enqueue the archived dest into indexing_queue.
 
     Looked up at call time (not import time) so tests can monkeypatch
-    ``mapping_service.enqueue_for_indexing`` cleanly. Failure here
-    doesn't roll back the archive — the indexer's boot catch-up scan
-    will pick the file up later anyway.
+    ``indexing_queue_service.enqueue_for_indexing`` cleanly. Failure
+    here doesn't roll back the archive — the indexer's boot catch-up
+    scan will pick the file up later anyway.
+
+    Phase 3c.1 (#100): the indexing queue API moved to
+    ``services.indexing_queue_service``. Tests that previously
+    monkey-patched ``mapping_service.enqueue_for_indexing`` should
+    target the new module instead.
     """
     try:
-        from services import mapping_service
-        if hasattr(mapping_service, 'enqueue_for_indexing'):
-            # mapping_service.enqueue_for_indexing is positional
+        from services import indexing_queue_service as queue_svc
+        if hasattr(queue_svc, 'enqueue_for_indexing'):
+            # queue_svc.enqueue_for_indexing is positional
             # (db_path, file_path) — keep the call site aligned.
-            mapping_service.enqueue_for_indexing(
+            queue_svc.enqueue_for_indexing(
                 db_path, dest_path, source='archive',
             )
-        elif hasattr(mapping_service, 'enqueue_many_for_indexing'):
-            mapping_service.enqueue_many_for_indexing(
+        elif hasattr(queue_svc, 'enqueue_many_for_indexing'):
+            queue_svc.enqueue_many_for_indexing(
                 db_path, [(dest_path, None)], source='archive',
             )
         else:
             logger.warning(
-                "mapping_service has no enqueue_for_indexing API; skipping",
+                "indexing_queue_service has no enqueue API; skipping",
             )
     except Exception as e:  # noqa: BLE001
         logger.warning(

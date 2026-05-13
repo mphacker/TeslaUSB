@@ -1757,44 +1757,91 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
         elif teslacam_path:
             # Full scan mode — check every indexed file against disk.
             # Also check ArchivedClips on SD card before marking as missing.
+            #
+            # Phase 5.6 (#102): the full scan walks every row of
+            # ``indexed_files`` (often >10k rows on a busy install). The
+            # legacy implementation issued a single ``fetchall()`` and
+            # held the connection open for the entire walk. On a busy
+            # Pi Zero 2 W this blocked the indexer worker (which needs
+            # the same SQLite file) for the duration of the scan and
+            # held a process-resident list of every file_path string.
+            #
+            # We now stream in batches of ``BATCH_SIZE`` rows: each
+            # batch reads under one cursor, processes, COMMITs the
+            # path-fixup UPDATEs/DELETEs, then explicitly **yields the
+            # SQLite lock** by closing + reopening the connection
+            # between batches. The reopen is cheap (μs); the yield gap
+            # lets the indexer / archive workers acquire the write lock
+            # if they're waiting.
             try:
                 from config import ARCHIVE_DIR, ARCHIVE_ENABLED
                 archive_dir = ARCHIVE_DIR if ARCHIVE_ENABLED else None
             except ImportError:
                 archive_dir = None
 
-            rows = conn.execute(
-                "SELECT file_path FROM indexed_files"
-            ).fetchall()
-            missing = []
-            for row in rows:
-                fp = row['file_path']
-                if os.path.isfile(fp):
-                    continue
-                # Check if file exists in ArchivedClips (by filename)
-                if archive_dir and os.path.isdir(archive_dir):
-                    basename = os.path.basename(fp)
-                    archive_path = os.path.join(archive_dir, basename)
-                    if os.path.isfile(archive_path):
-                        # Update indexed path to point to archive.
-                        # If the archive path already has its own entry (from
-                        # _update_geodata_paths), just delete the stale USB entry.
-                        existing = conn.execute(
-                            "SELECT 1 FROM indexed_files WHERE file_path = ?",
-                            (archive_path,)
-                        ).fetchone()
-                        if existing:
-                            conn.execute(
-                                "DELETE FROM indexed_files WHERE file_path = ?",
-                                (fp,)
-                            )
-                        else:
-                            conn.execute(
-                                "UPDATE indexed_files SET file_path = ? WHERE file_path = ?",
-                                (archive_path, fp)
-                            )
+            BATCH_SIZE = 500
+            INTER_BATCH_SLEEP = 0.05  # 50 ms — long enough to release
+                                      # the SQLite lock to a contender
+            last_rowid = 0
+            missing: List[str] = []
+            while True:
+                # Fetch one bounded batch using a rowid cursor so
+                # mid-walk DELETEs (our own path-fixup or another
+                # worker's writes) don't cause us to skip rows.
+                # ``rowid`` is the implicit SQLite primary key —
+                # always indexed, no extra cost.
+                batch = conn.execute(
+                    "SELECT rowid, file_path FROM indexed_files "
+                    "WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                    (last_rowid, BATCH_SIZE),
+                ).fetchall()
+                if not batch:
+                    break
+
+                for row in batch:
+                    fp = row['file_path']
+                    last_rowid = row['rowid']
+                    if os.path.isfile(fp):
                         continue
-                missing.append(fp)
+                    # Check if file exists in ArchivedClips (by filename)
+                    if archive_dir and os.path.isdir(archive_dir):
+                        basename = os.path.basename(fp)
+                        archive_path = os.path.join(archive_dir, basename)
+                        if os.path.isfile(archive_path):
+                            # Update indexed path to point to archive.
+                            # If the archive path already has its own entry (from
+                            # _update_geodata_paths), just delete the stale USB entry.
+                            existing = conn.execute(
+                                "SELECT 1 FROM indexed_files WHERE file_path = ?",
+                                (archive_path,)
+                            ).fetchone()
+                            if existing:
+                                conn.execute(
+                                    "DELETE FROM indexed_files WHERE file_path = ?",
+                                    (fp,)
+                                )
+                            else:
+                                conn.execute(
+                                    "UPDATE indexed_files SET file_path = ? WHERE file_path = ?",
+                                    (archive_path, fp)
+                                )
+                            continue
+                    missing.append(fp)
+
+                # Commit any path-fixup writes from this batch and
+                # release the SQLite lock by closing the connection.
+                # Sleep a tick to give any waiting writer a real
+                # chance to grab the lock before we reopen.
+                conn.commit()
+                conn.close()
+                if INTER_BATCH_SLEEP > 0:
+                    time.sleep(INTER_BATCH_SLEEP)
+                conn = _init_db(db_path)
+
+                # Safety: if the table is shorter than the batch we
+                # asked for, we're done.
+                if len(batch) < BATCH_SIZE:
+                    break
 
             if missing:
                 logger.info("Purging %d missing videos from geodata.db", len(missing))

@@ -870,6 +870,73 @@ def test_archive_block_paused_load_message(monkeypatch):
     assert block['pause_reason'] == 'load 4.2 > 3.5'
 
 
+def test_archive_block_load_auto_paused_without_manual_flag(monkeypatch):
+    """``archive_worker.get_status()`` only sets ``paused=True`` for
+    the manual ``pause_worker()`` flag — not for auto-armed
+    ``_load_pause_until``. Phase 4.5 (#101) broadens the
+    operator-facing paused notion in ``_archive_block`` so the
+    System Health card surfaces the load auto-pause too.
+
+    Pinned in production: smoke test on the Pi caught
+    ``load_pause.is_paused_now=True`` while ``paused=False`` —
+    without this broadening the card would silently drop the pause
+    state entirely."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 442, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    # paused=False (no manual flag) but load_pause is armed.
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': False,
+        'load_pause': {
+            'is_paused_now': True, 'last_loadavg': 3.9, 'threshold': 3.5,
+        },
+        'disk_pause': {'is_paused_now': False},
+    })
+    block = sh._archive_block()
+    # The operator-facing paused field must now reflect the
+    # auto-pause, not the narrower manual flag.
+    assert block['paused'] is True
+    assert block['severity'] == 'warn'
+    assert block['message'] == 'Paused: load 3.9 > 3.5'
+    assert block['pause_reason'] == 'load 3.9 > 3.5'
+
+
+def test_archive_block_disk_auto_paused_without_manual_flag(monkeypatch):
+    """Mirror of the load auto-pause test for the disk-space guard.
+    ``_disk_space_pause_until`` arms independently of the manual
+    pause flag; both Phase 4.5 ``paused`` field and
+    ``pause_reason`` must surface it."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 5, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': False,
+        'load_pause': {'is_paused_now': False},
+        'disk_pause': {
+            'is_paused_now': True,
+            'last_free_mb': 1024, 'last_total_mb': 25600,
+            'critical_threshold_mb': 100,
+        },
+    })
+    block = sh._archive_block()
+    assert block['paused'] is True
+    assert block['severity'] == 'warn'
+    assert block['message'] == 'Paused: SD card 96% full'
+    assert block['pause_reason'] == 'SD card 96% full'
+
+
 def test_archive_block_paused_disk_message(monkeypatch):
     """End-to-end: disk pause armed → message includes the % full."""
     import blueprints.system_health as sh

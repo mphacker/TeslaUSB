@@ -219,7 +219,7 @@ def _format_pause_reason(load_pause: Dict[str, Any],
     When neither has armed (``pause_worker()`` was called manually,
     or the worker is paused for an unknown reason at the iteration
     boundary), return ``"background"`` so the caller renders a
-    generic "Paused (background)" without claiming false specificity.
+    generic "Paused (background task)" without claiming false specificity.
     """
     parts = []
 
@@ -310,10 +310,19 @@ def _archive_block() -> Dict[str, Any]:
     )
     # Phase 4.5 — pause-reason. Pull the disk/load pause sub-dicts
     # surfaced by archive_worker and render a self-explanatory string.
-    # Always computed (even when not paused) so the API contract stays
-    # stable; the message branch below decides whether to use it.
+    # The top-level ``paused`` field returned by ``get_status()`` only
+    # reflects the manual ``pause_worker()`` flag (used by mode
+    # switches / RW remounts); it does NOT track the auto-arm guards
+    # ``_disk_space_pause_until`` and ``_load_pause_until``. So
+    # broaden the operator-facing paused notion to include any of the
+    # three pause types so the System Health card surfaces the load /
+    # disk auto-pauses too.
     load_pause = worker.get('load_pause') or {}
     disk_pause = worker.get('disk_pause') or {}
+    auto_paused = bool(
+        load_pause.get('is_paused_now') or disk_pause.get('is_paused_now')
+    )
+    paused_effective = paused or auto_paused
     pause_reason = _format_pause_reason(load_pause, disk_pause)
 
     # Watchdog severity is the single source of truth for "should the
@@ -339,7 +348,7 @@ def _archive_block() -> Dict[str, Any]:
     elif dead > 0:
         sev = SEV_WARN
         msg = f'{dead} dead-letter row{"s" if dead != 1 else ""}'
-    elif paused:
+    elif paused_effective:
         sev = SEV_WARN
         # Phase 4.5 — render the actual reason instead of an opaque
         # "Paused (load or disk)". When neither guard has armed
@@ -373,7 +382,12 @@ def _archive_block() -> Dict[str, Any]:
         'message': msg,
         'enabled': True,
         'worker_running': running,
-        'paused': paused,
+        # Phase 4.5: ``paused`` reflects the operator-facing notion
+        # (any of: manual pause flag, load auto-pause armed, disk
+        # auto-pause armed). The lower-level ``/api/archive/status``
+        # still distinguishes the manual flag via its own ``paused``
+        # key for callers that need to differentiate.
+        'paused': paused_effective,
         'queue_depth': pending,
         'dead_letter_count': dead,
         'lost_24h': lost_24h,
@@ -383,7 +397,7 @@ def _archive_block() -> Dict[str, Any]:
         # Phase 4.5 — surface raw pause-reason for callers that want
         # to render their own UI (chip, tooltip, etc.) without
         # re-parsing the message string.
-        'pause_reason': pause_reason if paused else None,
+        'pause_reason': pause_reason if paused_effective else None,
     }
 
 

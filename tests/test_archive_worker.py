@@ -2182,3 +2182,128 @@ class TestMoovVerifyAfterCopy:
         assert not os.path.exists(dest), (
             "Incomplete MP4 must not leak into ArchivedClips"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.4 (#101) — drain-rate ETA
+# ---------------------------------------------------------------------------
+
+class TestDrainRateETA:
+    """``_compute_drain_rate`` + ``compute_eta_seconds`` + ``get_status``."""
+
+    def setup_method(self):
+        archive_worker._recent_copy_completions.clear()
+
+    def teardown_method(self):
+        archive_worker._recent_copy_completions.clear()
+
+    def test_no_samples_returns_none(self):
+        rate = archive_worker._compute_drain_rate()
+        assert rate['rate_per_sec'] is None
+        assert rate['samples'] == 0
+        assert rate['stale'] is False
+
+    def test_below_min_samples_returns_none(self):
+        archive_worker._recent_copy_completions.append(100.0)
+        archive_worker._recent_copy_completions.append(110.0)
+        rate = archive_worker._compute_drain_rate(now=120.0)
+        assert rate['rate_per_sec'] is None
+        assert rate['samples'] == 2
+
+    def test_three_samples_yields_rate(self):
+        # 3 completions over 6 s = 2 gaps / 6 s = 0.333 files/sec.
+        for t in (100.0, 103.0, 106.0):
+            archive_worker._recent_copy_completions.append(t)
+        rate = archive_worker._compute_drain_rate(now=107.0)
+        assert rate['rate_per_sec'] == pytest.approx(2.0 / 6.0, rel=1e-3)
+        assert rate['samples'] == 3
+        assert rate['stale'] is False
+        assert rate['window_age_sec'] == pytest.approx(6.0)
+
+    def test_stale_window_returns_none_with_stale_flag(self):
+        # Most recent sample is 10 minutes + 1 second old → stale.
+        for t in (100.0, 103.0, 106.0):
+            archive_worker._recent_copy_completions.append(t)
+        now = 106.0 + 601.0
+        rate = archive_worker._compute_drain_rate(now=now)
+        assert rate['rate_per_sec'] is None
+        assert rate['stale'] is True
+        assert rate['samples'] == 3
+
+    def test_rolling_window_caps_at_50(self):
+        # Append 60 samples; deque keeps only the most recent 50.
+        for t in range(60):
+            archive_worker._recent_copy_completions.append(float(t))
+        rate = archive_worker._compute_drain_rate(now=60.0)
+        assert rate['samples'] == 50
+        # 50 samples spanning 49 s = 49/49 = 1.0 file/sec.
+        assert rate['rate_per_sec'] == pytest.approx(1.0)
+
+    def test_compute_eta_no_queue_returns_none(self):
+        assert archive_worker.compute_eta_seconds(0, 1.0) is None
+
+    def test_compute_eta_no_rate_returns_none(self):
+        assert archive_worker.compute_eta_seconds(100, None) is None
+        assert archive_worker.compute_eta_seconds(100, 0.0) is None
+        assert archive_worker.compute_eta_seconds(100, -0.5) is None
+
+    def test_compute_eta_basic_division(self):
+        # 1000 files at 2 files/sec = 500 s.
+        assert archive_worker.compute_eta_seconds(1000, 2.0) == 500
+
+    def test_compute_eta_caps_at_24h(self):
+        # 1 file every hour with 30k pending = 30k hours → suppress.
+        assert archive_worker.compute_eta_seconds(30000, 1.0 / 3600) is None
+
+    def test_compute_eta_just_under_cap_is_returned(self):
+        # 1 file/sec × (24h - 1s) → returned.
+        seconds_under_cap = 24 * 3600 - 1
+        assert archive_worker.compute_eta_seconds(
+            seconds_under_cap, 1.0,
+        ) == seconds_under_cap
+
+    def test_get_status_surfaces_eta_fields(self, tmp_path):
+        # End-to-end: build a status with a real DB, populate the deque
+        # by hand (no need to drive the full worker loop), and confirm
+        # the status snapshot exposes both the rate and the ETA.
+        db_path = str(tmp_path / "geodata.db")
+        _init_db(db_path).close()
+        archive_worker._db_path = db_path
+        try:
+            for t in (100.0, 103.0, 106.0):
+                archive_worker._recent_copy_completions.append(t)
+            # Patch time.time to keep the window fresh.
+            with patch.object(archive_worker.time, 'time', return_value=107.0):
+                snap = archive_worker.get_status()
+            # No queue → eta_seconds is None even with a valid rate.
+            assert snap['eta_seconds'] is None
+            assert snap['drain_rate_per_sec'] == pytest.approx(2.0 / 6.0, rel=1e-3)
+            assert snap['drain_rate_samples'] == 3
+            assert snap['drain_rate_stale'] is False
+        finally:
+            archive_worker._db_path = None
+
+    def test_get_status_with_queue_yields_eta(self, tmp_path):
+        db_path = str(tmp_path / "geodata.db")
+        _init_db(db_path).close()
+        # Prime the queue with 10 pending rows.
+        for i in range(10):
+            f = tmp_path / f"clip{i}.mp4"
+            f.write_bytes(b"x")
+            enqueue_for_archive(str(f), db_path=db_path)
+        archive_worker._db_path = db_path
+        try:
+            # Rate = 2 files/sec → ETA = 10/2 = 5 s.
+            now = 100.0
+            for t in (now - 4.0, now - 3.0, now - 2.0,
+                      now - 1.0, now):
+                archive_worker._recent_copy_completions.append(t)
+            with patch.object(archive_worker.time, 'time', return_value=now + 0.1):
+                snap = archive_worker.get_status()
+            assert snap['queue_depth'] == 10
+            assert snap['drain_rate_per_sec'] == pytest.approx(1.0, rel=0.05)
+            assert snap['eta_seconds'] is not None
+            assert 9 <= snap['eta_seconds'] <= 11
+
+        finally:
+            archive_worker._db_path = None

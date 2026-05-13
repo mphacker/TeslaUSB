@@ -62,6 +62,7 @@ Public API mirrors :mod:`indexing_worker`::
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import shutil
@@ -69,7 +70,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Deque, Dict, Optional
 
 from services import archive_queue
 from services import task_coordinator
@@ -129,6 +130,32 @@ _CHUNK_PAUSE_SECONDS = 0.25
 # ``archive_queue.per_file_time_budget_seconds`` (default 60.0).
 _PER_FILE_TIME_BUDGET_SECONDS = 60.0
 
+# Phase 4.4 (#101) — drain-rate ETA tunables.
+# Number of recent ``copied`` completion timestamps kept for rate
+# estimation. 50 keeps the rolling window honest without wasting RAM
+# (50 × 8 bytes = 400 bytes). With a typical ~3 s/clip cadence, 50 copies
+# spans ~2.5 min — long enough to smooth out short-term jitter, short
+# enough to react when the pace shifts (e.g. SDIO contention slows things
+# down).
+_DRAIN_RATE_WINDOW_SIZE = 50
+# If the most recent copy completion is older than this, the rate is
+# considered "stale" and the ETA is suppressed. The worker may have been
+# idle (queue empty), paused (load/disk), or simply between catch-up
+# bursts — none of those are useful predictors of how fast the *next*
+# burst will drain. Without this guard, a 2 h gap followed by a sudden
+# 1 000-row enqueue would render an absurdly low rate estimate.
+_DRAIN_RATE_FRESHNESS_SECONDS = 600.0  # 10 minutes
+# Minimum number of completion samples needed before computing a rate.
+# With < 2 samples there's no time span to divide by; with very few
+# samples the estimate has too much variance to surface. Three is a
+# pragmatic floor: the user sees ETA only after the worker has shown it
+# can sustain the pace.
+_DRAIN_RATE_MIN_SAMPLES = 3
+# Cap the displayed ETA so a transient slow start (first few files of a
+# huge backlog drained at sub-second rates after a long pause) doesn't
+# show "est. 47 hours". Anything above this just shows ">N hours".
+_DRAIN_RATE_ETA_CAP_SECONDS = 24 * 3600
+
 
 # ---------------------------------------------------------------------------
 # Module state — all access through _state_lock
@@ -147,6 +174,15 @@ _wake_event = threading.Event()
 _db_path: Optional[str] = None
 _archive_root: Optional[str] = None
 _teslacam_root: Optional[str] = None
+# Phase 4.4: rolling window of recent successful copy completion epochs
+# (``time.time()``). Trimmed to ``_DRAIN_RATE_WINDOW_SIZE`` via
+# ``deque(maxlen=...)``. Read under ``_state_lock``; any append happens
+# from the single worker thread under the same lock for cleanliness even
+# though deque append is itself thread-safe — uniform locking keeps the
+# rate computation self-consistent with the snapshot read.
+_recent_copy_completions: Deque[float] = collections.deque(
+    maxlen=_DRAIN_RATE_WINDOW_SIZE,
+)
 _state: Dict[str, Any] = {
     'active_file': None,
     'last_outcome': None,
@@ -308,6 +344,11 @@ def start_worker(db_path: str, archive_root: str, *,
         _state['last_disk_pause_free_mb'] = None
         _state['last_load_pause_at'] = None
         _state['last_load_pause_loadavg'] = None
+        # Phase 4.4: drop any rate samples from the previous instance.
+        # A worker restart usually means we paused for a transition
+        # (mode switch, manual stop) and the old samples are no longer
+        # representative.
+        _recent_copy_completions.clear()
         # Reset the disk-space self-pause; the next iteration will
         # re-arm it if disk space is still critical.
         global _disk_space_pause_until, _load_pause_until
@@ -468,6 +509,16 @@ def get_status() -> Dict[str, Any]:
     snap['error_count'] = counts.get('error', 0)
     snap['disk_pause'] = get_disk_pause_state()
     snap['load_pause'] = get_load_pause_state()
+    # Phase 4.4 — drain-rate ETA. Surfaced as a sub-dict so the JS UI
+    # can read both the rate and the consumer-friendly ETA without
+    # recomputing.
+    drain = _compute_drain_rate()
+    snap['drain_rate_per_sec'] = drain['rate_per_sec']
+    snap['drain_rate_samples'] = drain['samples']
+    snap['drain_rate_stale'] = drain['stale']
+    snap['eta_seconds'] = compute_eta_seconds(
+        snap['queue_depth'], drain['rate_per_sec'],
+    )
     return snap
 
 
@@ -978,6 +1029,104 @@ def get_load_pause_state() -> Dict[str, Any]:
         }
 
 
+def _compute_drain_rate(now: Optional[float] = None) -> Dict[str, Any]:
+    """Compute the recent drain rate + ETA from the rolling window.
+
+    Phase 4.4 (#101) — surface "how long until the backlog clears" so
+    the user knows whether to wait around or come back later. Returns a
+    dict with these keys (always present so the API contract is stable):
+
+      * ``rate_per_sec``    — float files/sec, or ``None`` when there
+                              aren't enough fresh samples to estimate.
+      * ``samples``         — int, number of completion timestamps in
+                              the rolling window currently used for the
+                              estimate (may be < window size after a
+                              restart or trim by freshness gate).
+      * ``window_age_sec``  — float seconds spanned by the samples
+                              (latest minus earliest), or ``None``.
+      * ``stale``           — bool, True when the most recent sample is
+                              older than :data:`_DRAIN_RATE_FRESHNESS_SECONDS`.
+                              Stale rates are NOT used for ETA because
+                              an idle window is not a useful predictor
+                              of the next burst's drain pace.
+
+    The caller computes ETA from this + the queue depth so the gating
+    logic (queue threshold, freshness, sample count) is colocated with
+    the consumer's UI rules, not buried in the worker.
+
+    Reads under :data:`_state_lock` so the snapshot is consistent with
+    the worker's own append. Touching ``time.time()`` outside the lock
+    keeps the lock window tiny.
+    """
+    now = now if now is not None else time.time()
+    with _state_lock:
+        samples = list(_recent_copy_completions)
+    n = len(samples)
+    if n < _DRAIN_RATE_MIN_SAMPLES:
+        return {
+            'rate_per_sec': None,
+            'samples': n,
+            'window_age_sec': None,
+            'stale': False,
+        }
+    most_recent_age = now - samples[-1]
+    if most_recent_age > _DRAIN_RATE_FRESHNESS_SECONDS:
+        # Stale window — worker has been idle/paused. The historical
+        # rate is no longer meaningful for the current backlog.
+        return {
+            'rate_per_sec': None,
+            'samples': n,
+            'window_age_sec': samples[-1] - samples[0],
+            'stale': True,
+        }
+    span = samples[-1] - samples[0]
+    if span <= 0:
+        # All N samples in the same wall-clock instant (impossible in
+        # practice, but defensive against tests with patched clocks).
+        return {
+            'rate_per_sec': None,
+            'samples': n,
+            'window_age_sec': 0.0,
+            'stale': False,
+        }
+    # n - 1 inter-completion gaps in `span` seconds → files/sec.
+    rate = (n - 1) / span
+    return {
+        'rate_per_sec': rate,
+        'samples': n,
+        'window_age_sec': span,
+        'stale': False,
+    }
+
+
+def compute_eta_seconds(queue_depth: int,
+                        drain_rate_per_sec: Optional[float]) -> Optional[int]:
+    """Return ETA seconds for ``queue_depth`` files at ``drain_rate_per_sec``.
+
+    Returns ``None`` when:
+      * queue is empty (no ETA needed),
+      * no rate is available (e.g. fresh worker, < 3 samples, stale window),
+      * rate is non-positive (defensive),
+      * computed ETA exceeds :data:`_DRAIN_RATE_ETA_CAP_SECONDS`.
+
+    The cap exists to suppress absurd values from short-window
+    estimates of huge backlogs (e.g. 5 fresh copies per second × a
+    10 000-file queue → reasonable; but 1 copy / hour after a long
+    pause × 10 000 = 10 000 hours, which is misleading because the
+    pace is virtually guaranteed to recover). Surfacing "more than
+    24 h" as ``None`` lets the UI fall back to "estimate not available
+    yet" rather than render a silly headline number.
+    """
+    if not queue_depth:
+        return None
+    if drain_rate_per_sec is None or drain_rate_per_sec <= 0:
+        return None
+    eta = queue_depth / drain_rate_per_sec
+    if eta > _DRAIN_RATE_ETA_CAP_SECONDS:
+        return None
+    return int(round(eta))
+
+
 def _set_state(**fields: Any) -> None:
     with _state_lock:
         _state.update(fields)
@@ -1381,6 +1530,10 @@ def _run_worker_loop(db_path: str, archive_root: str,
                         if new_status == 'copied':
                             with _state_lock:
                                 _state['files_done_session'] += 1
+                                # Phase 4.4: record the completion for
+                                # drain-rate ETA. Bounded deque means the
+                                # oldest sample falls off automatically.
+                                _recent_copy_completions.append(time.time())
                     except Exception as e:  # noqa: BLE001
                         logger.exception(
                             "Archive worker dispatch failed for %s; "

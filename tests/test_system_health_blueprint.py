@@ -591,6 +591,132 @@ def test_archive_block_disabled_includes_lost_24h_field(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Phase 4.4 (#101) — drain-rate ETA in archive block
+# ---------------------------------------------------------------------------
+
+def test_archive_block_eta_appears_in_message_when_pending_with_rate(
+        monkeypatch):
+    """When pending > 0 AND a usable ETA is available, it must appear
+    in the user-facing message (e.g., '15 pending — est. 5 min')."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 15, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': False,
+        'eta_seconds': 300,           # 5 minutes
+        'drain_rate_per_sec': 0.05,
+        'drain_rate_samples': 10,
+        'drain_rate_stale': False,
+    })
+    block = sh._archive_block()
+    assert block['severity'] == 'ok'
+    assert '15 pending' in block['message']
+    assert 'est.' in block['message']
+    assert '5 min' in block['message']
+    assert block['eta_seconds'] == 300
+    assert block['eta_human'] == '5 min'
+    assert block['drain_rate_per_sec'] == 0.05
+
+
+def test_archive_block_eta_appears_in_catchup_warn(monkeypatch):
+    """Even at the >200 pending warn level, ETA must still be shown."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 1233, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': False,
+        'eta_seconds': 2820,        # 47 minutes — matches the issue spec
+        'drain_rate_per_sec': 0.44,
+        'drain_rate_samples': 50,
+        'drain_rate_stale': False,
+    })
+    block = sh._archive_block()
+    assert block['severity'] == 'warn'
+    # Spec quote: "Archiving 1 233 pending — est. 47 minutes at current rate."
+    assert '1233 pending' in block['message']
+    assert 'est. 47 min' in block['message']
+
+
+def test_archive_block_no_eta_falls_back_to_legacy_message(monkeypatch):
+    """When eta_seconds is None (cold start, stale window, etc.), the
+    block must still render the legacy pending message."""
+    import blueprints.system_health as sh
+    from services import archive_queue, archive_watchdog, archive_worker
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    monkeypatch.setattr(archive_queue, 'get_queue_status',
+                        lambda: {'pending': 500, 'dead_letter': 0})
+    monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
+                        lambda hours=24: 0)
+    monkeypatch.setattr(archive_watchdog, 'get_status',
+                        lambda: {'severity': 'ok'})
+    monkeypatch.setattr(archive_worker, 'get_status', lambda: {
+        'worker_running': True, 'paused': False,
+        'eta_seconds': None,
+        'drain_rate_per_sec': None,
+        'drain_rate_samples': 0,
+        'drain_rate_stale': False,
+    })
+    block = sh._archive_block()
+    assert block['severity'] == 'warn'
+    assert '500 pending' in block['message']
+    assert 'est.' not in block['message']
+    assert block['eta_human'] is None
+
+
+def test_archive_block_disabled_includes_eta_fields(monkeypatch):
+    """The disabled block must include the new ETA fields so JS
+    consumers don't have to special-case missing keys (mirrors the
+    Phase 4.3 lost_24h contract)."""
+    import blueprints.system_health as sh
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False, raising=False)
+    block = sh._archive_block()
+    assert block['eta_seconds'] is None
+    assert block['eta_human'] is None
+    assert block['drain_rate_per_sec'] is None
+
+
+def test_archive_block_status_failure_includes_eta_fields(monkeypatch):
+    """When the inner subsystem fetch raises, the safety-net block
+    must still include the ETA fields so JS doesn't break."""
+    import blueprints.system_health as sh
+    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
+    # Force an import-time raise inside the try block.
+    def _explode(*a, **kw):
+        raise RuntimeError("simulated")
+    from services import archive_queue
+    monkeypatch.setattr(archive_queue, 'get_queue_status', _explode)
+    block = sh._archive_block()
+    assert block['severity'] == 'unknown'
+    assert block['eta_seconds'] is None
+    assert block['eta_human'] is None
+    assert block['drain_rate_per_sec'] is None
+
+
+def test_format_eta_human_boundaries():
+    """Server-side formatter must match the JS ``fmtEta`` exactly so
+    System Health card and Archive chip don't show different strings."""
+    import blueprints.system_health as sh
+    assert sh._format_eta_human(45) == '<1 min'
+    assert sh._format_eta_human(60) == '1 min'
+    assert sh._format_eta_human(120) == '2 min'
+    assert sh._format_eta_human(3600) == '1 h'
+    assert sh._format_eta_human(5400) == '1 h 30 min'
+    assert sh._format_eta_human(24 * 3600) == '24 h'
+
+
+# ---------------------------------------------------------------------------
 # Cloud block
 # ---------------------------------------------------------------------------
 

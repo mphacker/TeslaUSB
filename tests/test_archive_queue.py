@@ -99,8 +99,12 @@ class TestInferPriority:
         assert _infer_priority(path) == expected
 
     def test_recent_clips_beats_archive_when_both_present(self):
-        # If both substrings appear (synthetic edge case), RecentClips wins
-        # because it's checked first.
+        # If a path contains ``/recentclips/`` but no event substring,
+        # the function returns PRIORITY_RECENT_CLIPS regardless of
+        # what other folder names appear (e.g. ArchivedClips, which is
+        # not in the heuristic). Behavior is unaffected by the post-#178
+        # check-order reorder because events and RecentClips are
+        # mutually exclusive in production paths.
         path = '/var/ArchivedClips/RecentClips/clip.mp4'
         assert _infer_priority(path) == PRIORITY_RECENT_CLIPS
 

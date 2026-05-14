@@ -139,12 +139,19 @@ def _infer_priority(path: str) -> int:
     Uses the same lowercase folder-name heuristic as
     ``indexing_queue_service.priority_for_path`` so behavior is
     consistent across the indexing and archive subsystems.
+
+    Checks are ordered highest-priority-first to mirror the
+    "lower number = picked first" semantics post-#178: events are
+    checked before RecentClips. Production paths are mutually
+    exclusive between the three folders, so check order only
+    affects synthetic edge cases — but the explicit ordering makes
+    the function self-documenting for the priority swap.
     """
     norm = (path or '').replace('\\', '/').lower()
-    if '/recentclips/' in norm:
-        return PRIORITY_RECENT_CLIPS
     if '/sentryclips/' in norm or '/savedclips/' in norm:
         return PRIORITY_EVENTS
+    if '/recentclips/' in norm:
+        return PRIORITY_RECENT_CLIPS
     return PRIORITY_OTHER
 
 

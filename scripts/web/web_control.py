@@ -173,16 +173,15 @@ if __name__ == "__main__":
             try:
                 from config import MAPPING_ENABLED, MAPPING_DB_PATH
                 if MAPPING_ENABLED:
-                    def _on_new_videos(file_paths):
-                        from services.indexing_queue_service import (
-                            enqueue_many_for_indexing,
-                        )
-                        items = [(p, None) for p in file_paths if p]
-                        if items:
-                            enqueue_many_for_indexing(
-                                MAPPING_DB_PATH, items, source='watcher',
-                            )
-
+                    # Issue #184 Wave 2 — Phase C: the inotify→indexing
+                    # callback that used to live here was a duplicate
+                    # enqueue path. The archive worker (which is the
+                    # only writer to ``ArchivedClips``) calls
+                    # ``_enqueue_indexed`` directly after each
+                    # successful copy, and ``boot_catchup_scan``
+                    # handles anything an operator might rsync into
+                    # ArchivedClips outside the worker. Per-clip
+                    # ``indexing_queue`` INSERTs drop from 2→1.
                     def _on_deleted_videos(file_paths):
                         # Mirror deletes immediately so the map page
                         # doesn't keep showing trips/events for clips
@@ -198,9 +197,8 @@ if __name__ == "__main__":
                         except Exception as e:
                             print(f"Warning: purge_deleted_videos failed: {e}")
 
-                    register_callback(_on_new_videos)
                     register_delete_callback(_on_deleted_videos)
-                    print("File watcher → indexing queue producer registered")
+                    print("File watcher → delete callback registered")
             except Exception as e:
                 print(f"Warning: Failed to register watcher callbacks: {e}")
 
@@ -229,13 +227,17 @@ if __name__ == "__main__":
             # mp4 callback into the archive_queue table. Issue #184 Wave 1
             # made the queue subsystem unconditional — there is no longer
             # an enable flag.
+            #
+            # Issue #184 Wave 2 — Phase B: the inotify path now calls
+            # ``archive_producer.enqueue_with_peek`` instead of the raw
+            # ``archive_queue.enqueue_many_for_archive`` so RecentClips
+            # candidates with no GPS-bearing SEI are dropped at the
+            # producer (no queue row, no worker pick, no SD writes).
             try:
                 def _on_new_videos_for_archive(file_paths):
-                    from services.archive_queue import (
-                        enqueue_many_for_archive,
-                    )
+                    from services.archive_producer import enqueue_with_peek
                     try:
-                        enqueue_many_for_archive(list(file_paths))
+                        enqueue_with_peek(list(file_paths))
                     except Exception as e:
                         print(
                             "Warning: archive_queue enqueue failed: "

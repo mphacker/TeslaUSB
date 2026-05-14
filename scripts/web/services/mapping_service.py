@@ -1894,11 +1894,106 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
     }
 
 
+def _kv_get(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    """Read a value from the ``kv_meta`` table. Returns None if absent."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM kv_meta WHERE key = ?", (key,),
+        ).fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def _kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Upsert a value into the ``kv_meta`` table. Best-effort; logs on failure."""
+    try:
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        logger.warning("kv_meta upsert failed for %r: %s", key, e)
+
+
+# Persistent key for the boot catch-up watermark (Phase E).
+_BOOT_CATCHUP_WATERMARK_KEY = 'boot_catchup_archived_max_mtime'
+
+
+def _iter_archived_with_mtime() -> Generator[Tuple[str, float], None, None]:
+    """Yield ``(path, mtime)`` for every front-camera mp4 under ARCHIVE_DIR.
+
+    Sister generator to ``_find_archived_videos`` that also returns the
+    file's mtime so the boot catch-up scan (Phase E) can apply its
+    watermark gate without an extra ``os.stat`` round-trip per file.
+    Yields nothing if archiving is disabled or the directory is absent.
+    """
+    try:
+        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+    except ImportError:
+        return
+    if not ARCHIVE_ENABLED or not ARCHIVE_DIR or not os.path.isdir(ARCHIVE_DIR):
+        return
+
+    def _stat_mtime(p: str) -> Optional[float]:
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return None
+
+    # Top-level mp4s (legacy archive layout — flat directory).
+    try:
+        for f in sorted(os.listdir(ARCHIVE_DIR)):
+            full = os.path.join(ARCHIVE_DIR, f)
+            if (
+                os.path.isfile(full)
+                and f.lower().endswith('.mp4')
+                and '-front' in f.lower()
+            ):
+                m = _stat_mtime(full)
+                if m is not None:
+                    yield full, m
+    except OSError:
+        return
+
+    for sub in ('RecentClips', 'SavedClips', 'SentryClips'):
+        sub_path = os.path.join(ARCHIVE_DIR, sub)
+        if not os.path.isdir(sub_path):
+            continue
+        try:
+            for entry in sorted(os.listdir(sub_path)):
+                entry_path = os.path.join(sub_path, entry)
+                if os.path.isfile(entry_path):
+                    if (
+                        entry.lower().endswith('.mp4')
+                        and '-front' in entry.lower()
+                    ):
+                        m = _stat_mtime(entry_path)
+                        if m is not None:
+                            yield entry_path, m
+                    continue
+                if not os.path.isdir(entry_path):
+                    continue
+                try:
+                    for f in sorted(os.listdir(entry_path)):
+                        if f.lower().endswith('.mp4') and '-front' in f.lower():
+                            ev_path = os.path.join(entry_path, f)
+                            m = _stat_mtime(ev_path)
+                            if m is not None:
+                                yield ev_path, m
+                except OSError:
+                    continue
+        except OSError:
+            continue
+
+
 def boot_catchup_scan(db_path: str, teslacam_path: str = '',
                       *, source: str = 'catchup') -> Dict[str, int]:
     """Diff filesystem vs ``indexed_files`` and enqueue any orphans.
 
-    **Phase 2b (issue #76)**: This now walks ONLY ``ARCHIVE_DIR``
+    **Phase 2b (issue #76)**: This walks ONLY ``ARCHIVE_DIR``
     (``~/ArchivedClips``). The ``archive_producer`` thread handles
     USB-side catch-up by enqueueing into ``archive_queue``; the
     ``archive_worker`` then copies clips into ArchivedClips, where
@@ -1906,22 +2001,87 @@ def boot_catchup_scan(db_path: str, teslacam_path: str = '',
     moment of the worker's enqueue (e.g. a manual scp landed a clip
     while ``gadget_web`` was restarting).
 
+    **Phase E (issue #184 Wave 2)**: A persistent watermark
+    (``kv_meta.boot_catchup_archived_max_mtime``) records the highest
+    file mtime seen by any prior run. The walker stat()s every file
+    (a cheap inode read) but only does the canonical_key + DB-lookup
+    + enqueue work for files newer than the watermark. The first run
+    after upgrade still pays the full cost, but every subsequent boot
+    drops to O(new files) — typically zero work because the file
+    watcher already handled real-time arrivals.
+
     The ``teslacam_path`` parameter is accepted for backward
     compatibility but is **ignored** — there is intentionally no path
     from this function to the RO USB mount any more.
 
-    Returns ``{scanned, already_indexed, enqueued}``. The
-    ``active_file`` banner stays off during this call (no parsing); the
-    banner only lights up when the worker actually picks up an orphan.
+    Returns ``{scanned, already_indexed, enqueued, skipped_by_watermark}``.
+    The ``active_file`` banner stays off during this call (no
+    parsing); the banner only lights up when the worker actually
+    picks up an orphan.
     """
     # ``teslacam_path`` is intentionally ignored — see docstring.
     del teslacam_path
-    result = {'scanned': 0, 'already_indexed': 0, 'enqueued': 0}
+    result = {
+        'scanned': 0, 'already_indexed': 0, 'enqueued': 0,
+        'skipped_by_watermark': 0,
+    }
 
-    # Build the set of canonical_keys already represented in
-    # indexed_files. We diff against canonical keys (not raw paths) so a
-    # clip that exists in both Recent and Archived doesn't get
-    # re-enqueued.
+    # First pass: collect new (path, mtime) tuples; everything below the
+    # watermark is dropped without any string slicing or DB work.
+    try:
+        conn = _init_db(db_path)
+        try:
+            wm_raw = _kv_get(conn, _BOOT_CATCHUP_WATERMARK_KEY)
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.warning(
+            "boot_catchup_scan: watermark read failed (%s) — full scan",
+            e,
+        )
+        wm_raw = None
+
+    try:
+        watermark = float(wm_raw) if wm_raw is not None else 0.0
+    except (TypeError, ValueError):
+        watermark = 0.0
+
+    new_files: List[Tuple[str, float]] = []
+    new_max_mtime = watermark
+    for fpath, mtime in _iter_archived_with_mtime():
+        result['scanned'] += 1
+        if mtime > new_max_mtime:
+            new_max_mtime = mtime
+        if mtime <= watermark:
+            result['skipped_by_watermark'] += 1
+            continue
+        new_files.append((fpath, mtime))
+
+    # Fast path: nothing new since last boot — skip the DB read entirely.
+    if not new_files:
+        if new_max_mtime > watermark:
+            try:
+                conn = _init_db(db_path)
+                try:
+                    _kv_set(
+                        conn, _BOOT_CATCHUP_WATERMARK_KEY,
+                        repr(new_max_mtime),
+                    )
+                finally:
+                    conn.close()
+            except sqlite3.Error as e:
+                logger.warning(
+                    "boot_catchup_scan: watermark write failed: %s", e,
+                )
+        logger.info(
+            "boot_catchup_scan: scanned=%d, already_indexed=0, "
+            "enqueued=0, skipped_by_watermark=%d (watermark=%.3f, "
+            "no new files)",
+            result['scanned'], result['skipped_by_watermark'], watermark,
+        )
+        return result
+
+    # Slow path: load the existing canonical-key sets and dedup.
     try:
         conn = _init_db(db_path)
         try:
@@ -1947,8 +2107,7 @@ def boot_catchup_scan(db_path: str, teslacam_path: str = '',
     indexed_keys.discard('')
 
     to_enqueue: List[Tuple[str, Optional[int]]] = []
-    for fpath in _find_archived_videos():
-        result['scanned'] += 1
+    for fpath, _mtime in new_files:
         key = canonical_key(fpath)
         if not key:
             continue
@@ -1970,15 +2129,35 @@ def boot_catchup_scan(db_path: str, teslacam_path: str = '',
         from services.indexing_queue_service import enqueue_many_for_indexing
         n = enqueue_many_for_indexing(db_path, to_enqueue, source=source)
         result['enqueued'] = n
+
+    # Persist new watermark — even if nothing was enqueued (the files
+    # might already have been indexed via the realtime watcher path).
+    if new_max_mtime > watermark:
+        try:
+            conn = _init_db(db_path)
+            try:
+                _kv_set(
+                    conn, _BOOT_CATCHUP_WATERMARK_KEY,
+                    repr(new_max_mtime),
+                )
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            logger.warning(
+                "boot_catchup_scan: watermark write failed: %s", e,
+            )
+
     logger.info(
-        "boot_catchup_scan: scanned=%d, already_indexed=%d, enqueued=%d",
+        "boot_catchup_scan: scanned=%d, already_indexed=%d, enqueued=%d, "
+        "skipped_by_watermark=%d (watermark=%.3f → %.3f)",
         result['scanned'], result['already_indexed'], result['enqueued'],
+        result['skipped_by_watermark'], watermark, new_max_mtime,
     )
     return result
 
 
 # ---------------------------------------------------------------------------
-# Daily stale-data sweep
+# Periodic stale-data sweep (issue #184 Wave 2 — Phase F)
 # ---------------------------------------------------------------------------
 
 # Independent safety net for the case where ``purge_deleted_videos`` calls
@@ -1991,18 +2170,27 @@ def boot_catchup_scan(db_path: str, teslacam_path: str = '',
 # (e.g. files Tesla rotated out of RecentClips while the Pi was off)
 # get cleaned up before the user opens the map page, but long enough
 # that boot-time IO doesn't compete with USB gadget presentation.
-# Subsequent fires happen ~daily with jitter so multiple Pis don't
-# hammer the same minute.
 #
-# Out-of-cycle scans can be triggered with :func:`trigger_stale_scan_now`
-# from high-signal events (after each archive cycle, on the first map
-# page load after a restart). The trigger is debounced so concurrent
-# triggers from different services collapse into a single scan.
-_DAILY_STALE_SCAN_INTERVAL = 24 * 60 * 60  # 24 hours
-_DAILY_STALE_SCAN_JITTER = 60 * 60         # +/- 1 hour
-_INITIAL_STALE_SCAN_BASE = 5 * 60          # 5 minutes after boot
-_INITIAL_STALE_SCAN_JITTER = 5 * 60        # +0..5 min spread
-_TRIGGER_DEBOUNCE_SECONDS = 10 * 60        # 10 minutes between fires
+# **Cadence (issue #184 Wave 2 — Phase F):** Subsequent fires happen
+# ~monthly (was: daily) with jitter so multiple Pis don't hammer the
+# same minute. The watcher's per-delete callback is the real-time
+# cleanup path — it stat()s nothing, just deletes the row whose
+# canonical_key was just removed. The periodic sweep is the safety
+# net for the rare case where a delete happened while gadget_web
+# was down (e.g., the user copied an SD-card image off the Pi or a
+# manual ``rm`` happened over SSH); for a 10k-clip install this
+# cuts ``os.path.isfile`` syscalls from 10,000/day → 10,000/month
+# (~30× reduction). Out-of-cycle scans can be triggered with
+# :func:`trigger_stale_scan_now` from high-signal events (after each
+# archive cycle, on the first map page load after a restart, when
+# disk-space drops to ``critical``, or when the user clicks a
+# Reconcile button). The trigger is debounced so concurrent triggers
+# from different services collapse into a single scan.
+_DAILY_STALE_SCAN_INTERVAL = 30 * 24 * 60 * 60  # 30 days (was: 24 h)
+_DAILY_STALE_SCAN_JITTER = 24 * 60 * 60         # +/- 1 day (was: +/- 1 h)
+_INITIAL_STALE_SCAN_BASE = 5 * 60               # 5 minutes after boot
+_INITIAL_STALE_SCAN_JITTER = 5 * 60             # +0..5 min spread
+_TRIGGER_DEBOUNCE_SECONDS = 10 * 60             # 10 minutes between fires
 _daily_stale_scan_thread: Optional[threading.Thread] = None
 _daily_stale_scan_stop: Optional[threading.Event] = None
 _stale_scan_state_lock = threading.Lock()

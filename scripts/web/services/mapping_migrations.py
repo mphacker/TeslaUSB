@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 13
+_SCHEMA_VERSION = 14
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -228,6 +228,20 @@ CREATE INDEX IF NOT EXISTS archive_queue_ready
 CREATE INDEX IF NOT EXISTS archive_queue_source_gone_claimed
     ON archive_queue(claimed_at)
     WHERE status = 'source_gone';
+
+-- v14 (issue #184 Wave 2 — Phase E): generic key/value table for
+-- service-level scalars that don't merit their own table. First
+-- consumer is the boot catch-up scan watermark
+-- (``boot_catchup_archived_max_mtime``): the highest mtime seen by
+-- ``boot_catchup_scan`` in any prior run, so the next run can short-
+-- circuit the dir-walk + canonical_key + DB-lookup work for the
+-- unchanged majority of files. Stored as TEXT so future scalars
+-- (versions, last-run timestamps, feature flags) don't need new
+-- migrations. Lookup key is unique; values are opaque to the schema.
+CREATE TABLE IF NOT EXISTS kv_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -481,6 +495,13 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                 )
                 conn.commit()
                 return conn
+        # v14 (issue #184 Wave 2 — Phase E): ``kv_meta`` table for
+        # service-level scalars (boot catch-up watermark, etc.).
+        # Created by the executescript above (CREATE TABLE IF NOT
+        # EXISTS is idempotent); no data migration required — the
+        # first ``boot_catchup_scan`` after the upgrade will take the
+        # full O(N) hit, then write the watermark, and every
+        # subsequent boot will short-circuit on the watermark.
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",

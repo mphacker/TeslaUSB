@@ -3226,7 +3226,10 @@ class TestBootCatchupScan:
         db = str(tmp_path / "g.db")
         _init_db(db)
         result = boot_catchup_scan(db, '')
-        assert result == {'scanned': 0, 'already_indexed': 0, 'enqueued': 0}
+        assert result == {
+            'scanned': 0, 'already_indexed': 0, 'enqueued': 0,
+            'skipped_by_watermark': 0,
+        }
 
     def test_enqueues_orphan_clips(self, tmp_path):
         db = str(tmp_path / "g.db")
@@ -3328,12 +3331,99 @@ class TestBootCatchupScan:
         result = boot_catchup_scan(db, legacy_tc)
         assert result == {
             'scanned': 0, 'already_indexed': 0, 'enqueued': 0,
+            'skipped_by_watermark': 0,
         }
         with sqlite3.connect(db) as c:
             count = c.execute(
                 "SELECT COUNT(*) FROM indexing_queue"
             ).fetchone()[0]
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #184 Wave 2 — Phase E: boot catch-up watermark
+# ---------------------------------------------------------------------------
+
+
+class TestBootCatchupWatermark:
+    """The boot catch-up scan persists a high-water mark of the highest
+    file mtime it has ever seen and uses it on subsequent boots to
+    skip files older than the watermark — turning the steady-state
+    boot scan from O(N) into O(new files)."""
+
+    def _make_archive(self, root, files):
+        for rel in files:
+            full = root / rel
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_bytes(b'')
+        return str(root)
+
+    @pytest.fixture(autouse=True)
+    def _patch_archive_dir(self, tmp_path, monkeypatch):
+        archive_root = tmp_path / "ArchivedClips"
+        archive_root.mkdir()
+        import config as _cfg
+        monkeypatch.setattr(_cfg, 'ARCHIVE_DIR', str(archive_root))
+        monkeypatch.setattr(_cfg, 'ARCHIVE_ENABLED', True)
+        self._archive_root = archive_root
+
+    def test_first_run_writes_watermark(self, tmp_path):
+        from services.mapping_service import (
+            _kv_get, _BOOT_CATCHUP_WATERMARK_KEY,
+        )
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        self._make_archive(self._archive_root, [
+            "RecentClips/2026-05-11_09-00-00-front.mp4",
+        ])
+        result = boot_catchup_scan(db, '')
+        assert result['scanned'] == 1
+        assert result['enqueued'] == 1
+        assert result['skipped_by_watermark'] == 0
+        # Watermark must be set to the file's mtime.
+        with sqlite3.connect(db) as conn:
+            stored = _kv_get(conn, _BOOT_CATCHUP_WATERMARK_KEY)
+        assert stored is not None
+        assert float(stored) > 0.0
+
+    def test_second_run_skips_unchanged_files(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        self._make_archive(self._archive_root, [
+            "RecentClips/2026-05-11_09-00-00-front.mp4",
+            "RecentClips/2026-05-11_09-01-00-front.mp4",
+        ])
+        # First run — full scan.
+        first = boot_catchup_scan(db, '')
+        assert first['scanned'] == 2
+        # Second run — watermark covers both files.
+        second = boot_catchup_scan(db, '')
+        assert second['scanned'] == 2
+        assert second['skipped_by_watermark'] == 2
+        assert second['enqueued'] == 0
+        assert second['already_indexed'] == 0
+
+    def test_new_file_after_watermark_is_processed(self, tmp_path):
+        db = str(tmp_path / "g.db")
+        _init_db(db)
+        self._make_archive(self._archive_root, [
+            "RecentClips/2026-05-11_09-00-00-front.mp4",
+        ])
+        boot_catchup_scan(db, '')
+        # Add a new file with a strictly newer mtime.
+        new_path = (
+            self._archive_root / "RecentClips" /
+            "2026-05-11_09-05-00-front.mp4"
+        )
+        new_path.write_bytes(b'')
+        # Bump its mtime explicitly so the test isn't sensitive to
+        # filesystem timestamp granularity (FAT32 has 2-s resolution).
+        future = time.time() + 60
+        os.utime(str(new_path), (future, future))
+        result = boot_catchup_scan(db, '')
+        assert result['scanned'] == 2
+        assert result['skipped_by_watermark'] == 1
+        assert result['enqueued'] == 1
 
 
 # ---------------------------------------------------------------------------

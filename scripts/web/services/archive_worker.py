@@ -281,6 +281,26 @@ def _maybe_trigger_critical_cleanup(archive_root: str) -> bool:
                 "archive_worker: disk-critical cleanup raised: %s", e,
             )
 
+        # Issue #184 Wave 2 — Phase F: also trigger an out-of-cycle
+        # stale scan so any indexed_files rows whose underlying clip
+        # was just rotated/pruned are reaped immediately, not in
+        # ~30 days when the periodic sweep would otherwise run.
+        # ``trigger_stale_scan_now`` is itself debounced (10 min) so
+        # repeated disk-critical signals collapse into a single scan.
+        try:
+            from services.mapping_service import trigger_stale_scan_now
+            from services.video_service import get_teslacam_path
+            from config import MAPPING_DB_PATH
+            trigger_stale_scan_now(
+                MAPPING_DB_PATH, get_teslacam_path,
+                source='disk_critical',
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "archive_worker: disk-critical stale-scan trigger "
+                "skipped: %s", e,
+            )
+
     logger.info(
         "archive_worker: disk-critical at %s — triggering immediate "
         "retention cleanup (debounced, daemon thread)", archive_root,

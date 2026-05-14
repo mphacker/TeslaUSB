@@ -440,6 +440,42 @@ def api_cleanup_run_now():
     }), 200
 
 
+@storage_retention_bp.route('/api/cleanup/reconcile_index', methods=['POST'])
+def api_reconcile_index():
+    """Trigger an immediate stale-scan reconciliation pass.
+
+    Issue #184 Wave 2 — Phase F: the periodic stale scan that used to
+    run daily now runs monthly (real-time deletes still fire via the
+    watcher's ``register_delete_callback`` so this is a safety-net
+    cadence change). This endpoint exposes a manual "Reconcile" button
+    so an operator who suspects orphans (e.g., after a manual ``rm``
+    over SSH, or after an SD-card image swap) can request a one-shot
+    scan without waiting up to ~30 days.
+
+    Wraps :func:`mapping_service.trigger_stale_scan_now` with the
+    standard 10-minute debounce so a click-spam doesn't queue multiple
+    scans. Returns immediately; the scan runs on a daemon thread.
+    """
+    try:
+        from services.mapping_service import trigger_stale_scan_now
+        from services.video_service import get_teslacam_path
+        from config import MAPPING_DB_PATH
+        result = trigger_stale_scan_now(
+            MAPPING_DB_PATH, get_teslacam_path, source='manual_reconcile',
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("storage_retention: trigger_stale_scan_now raised")
+        return jsonify({
+            'success': False,
+            'message': f"Reconcile failed: {exc}",
+        }), 500
+
+    return jsonify({
+        'success': True,
+        'result': result if isinstance(result, dict) else {},
+    }), 200
+
+
 @storage_retention_bp.route('/api/cleanup/reclaim_stationary_recent',
                              methods=['POST'])
 def api_reclaim_stationary_recent():
@@ -535,18 +571,37 @@ def api_get_skipped_stationary_tally():
     endpoint exists purely to power the badge so operators can see how
     many overnight Sentry-mode RecentClips were skipped at source in
     the last 24 hours.
+
+    Issue #184 Wave 2 — Phase B: skips now happen at the producer
+    (no DB row written) so the count is the SUM of:
+
+      * the in-memory deque managed by ``archive_producer`` for
+        post-Wave-2 skips, and
+      * the legacy ``count_skipped_stationary_recent`` for any
+        rows already in ``archive_queue`` from before the upgrade
+        (worker-side fallback path also writes here as
+        defense-in-depth).
     """
     skipped_24h = 0
     try:
         from services import archive_queue
-        skipped_24h = int(
+        skipped_24h += int(
             archive_queue.count_skipped_stationary_recent(24)
         )
     except Exception:  # noqa: BLE001
         logger.exception(
-            "skipped_stationary status: count helper failed"
+            "skipped_stationary status: legacy DB count helper failed"
         )
-        skipped_24h = 0
+
+    try:
+        from services import archive_producer
+        skipped_24h += int(
+            archive_producer.get_skipped_stationary_count(24)
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "skipped_stationary status: producer tally helper failed"
+        )
 
     return jsonify({
         'success': True,
@@ -563,6 +618,10 @@ def api_clear_skipped_stationary_tally():
     files-lost banner (issue #163) — the operator has acknowledged
     the running tally and wants the badge zeroed without waiting
     24 h for it to age out. Returns the number of rows deleted.
+
+    Issue #184 Wave 2 — Phase B: also clears the in-memory deque the
+    producer maintains for post-Wave-2 skips so the badge truly
+    zeroes out across both legacy and current code paths.
     """
     try:
         from services import archive_queue
@@ -573,6 +632,13 @@ def api_clear_skipped_stationary_tally():
             'success': False,
             'message': f"Clear failed: {exc}",
         }), 500
+    try:
+        from services import archive_producer
+        archive_producer.reset_skipped_stationary_tally()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "skipped_stationary: producer tally reset failed (non-fatal)"
+        )
     return jsonify({
         'success': True,
         'deleted': n,

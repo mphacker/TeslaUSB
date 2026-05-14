@@ -653,7 +653,13 @@ def _record_attempt_start(conn: sqlite3.Connection, row_id: int) -> int:
         (row_id,),
     ).fetchone()
     new_attempts = int(row['attempts']) if row else 0
-    if new_attempts:
+    # Wave 4 PR-B: gate on row existence, not on the new value.
+    # ``attempts`` is unsigned and starts at 0; a future refactor that
+    # legitimately resets attempts to 0 (e.g. retry_failed) would skip
+    # the mirror under the old ``if new_attempts:`` gate. ``row is not
+    # None`` matches the real precondition: there is a legacy row to
+    # mirror.
+    if row is not None:
         _dual_write_pipeline_live_event_state(
             int(row_id),
             attempts=new_attempts,
@@ -802,23 +808,24 @@ def retry_failed(row_id: Optional[int] = None) -> int:
         conn = _open_db()
         try:
             _ensure_schema(conn)
+            # Wave 4 PR-B: ``BEGIN IMMEDIATE`` so no concurrent writer
+            # can flip a row into ``'failed'`` between the SELECT
+            # (which captures ids for the mirror) and the UPDATE
+            # (which would also flip the new row but skip its mirror).
+            conn.execute("BEGIN IMMEDIATE")
             if row_id is not None:
-                # Capture id BEFORE the UPDATE so we can dual-write
-                # afterwards. Using a guarded SELECT mirrors the
-                # ``WHERE status = 'failed'`` filter on the UPDATE.
-                row = conn.execute(
-                    "SELECT id FROM live_event_queue "
-                    "WHERE id = ? AND status = 'failed'",
-                    (row_id,),
-                ).fetchone()
+                # Single-row branch: the caller already supplied the
+                # id, and the WHERE filter restricts the UPDATE to
+                # ``status = 'failed'``. ``cur.rowcount > 0`` tells us
+                # the row matched, so no separate SELECT is needed.
                 cur = conn.execute(
                     "UPDATE live_event_queue SET status = 'pending', "
                     "attempts = 0, next_retry_at = NULL "
                     "WHERE id = ? AND status = 'failed'",
                     (row_id,),
                 )
-                if row is not None and cur.rowcount:
-                    affected_ids.append(int(row['id']))
+                if cur.rowcount:
+                    affected_ids.append(int(row_id))
             else:
                 rows = conn.execute(
                     "SELECT id FROM live_event_queue "
@@ -832,8 +839,7 @@ def retry_failed(row_id: Optional[int] = None) -> int:
                 if cur.rowcount:
                     affected_ids.extend(int(r['id']) for r in rows)
             n = cur.rowcount
-            if n:
-                conn.commit()
+            conn.commit()
         finally:
             conn.close()
     except Exception as e:

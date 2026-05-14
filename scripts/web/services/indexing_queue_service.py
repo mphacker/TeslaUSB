@@ -571,6 +571,10 @@ def complete_queue_item(db_path: str, canonical_key_value: str,
     """
     if not canonical_key_value:
         return False
+    # Wave 4 PR-B (review #191 Info #7): capture pipeline_queue's
+    # completed_at BEFORE the legacy DELETE so the mirror reflects the
+    # moment the legacy commit happened.
+    completed_at = time.time()
     conn = None
     deleted = False
     try:
@@ -613,7 +617,7 @@ def complete_queue_item(db_path: str, canonical_key_value: str,
                 canonical_key_value,
                 new_stage='index_done',
                 status='done',
-                completed_at=time.time(),
+                completed_at=completed_at,
                 last_error='',
                 db_path=db_path,
             )

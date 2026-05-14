@@ -551,8 +551,29 @@ def enqueue_many_for_archive(source_paths: Iterable[str], *,
             )
             after = conn.total_changes
             inserted_count = max(0, after - before)
+            # Wave 4 PR-B fix (review #191 Info #6): look up the
+            # legacy_id of every row we just inserted so the batched
+            # dual-write can populate ``pipeline_queue.legacy_id``.
+            # Without this, every state mutation on a batched row
+            # (mark_copied, mark_source_gone, mark_skipped_stationary,
+            # mark_failed) would fail to find the mirror — they look
+            # up by ``(legacy_table, legacy_id)``. The IN-clause is
+            # bounded by the executemany batch size (Tesla's 120-file
+            # flush), so it stays well under SQLite's 999-host-parameter
+            # limit and runs as a single indexed scan over the unique
+            # ``idx_archive_source_path`` index.
+            legacy_id_map: Dict[str, int] = {}
+            if inserted_count:
+                placeholders = ','.join('?' for _ in paths)
+                cur = conn.execute(
+                    f"SELECT id, source_path FROM archive_queue "
+                    f"WHERE source_path IN ({placeholders})",
+                    paths,
+                )
+                for row in cur.fetchall():
+                    legacy_id_map[row['source_path']] = int(row['id'])
         if inserted_count:
-            _dual_write_pipeline_archive_many(db_path, rows)
+            _dual_write_pipeline_archive_many(db_path, rows, legacy_id_map)
         return inserted_count
     except sqlite3.Error as e:
         logger.warning("enqueue_many_for_archive failed: %s", e)
@@ -593,14 +614,24 @@ def _dual_write_pipeline_archive(db_path: str, source_path: str,
         )
 
 
-def _dual_write_pipeline_archive_many(db_path: str, rows) -> None:
+def _dual_write_pipeline_archive_many(
+    db_path: str, rows,
+    legacy_id_map: Optional[Dict[str, int]] = None,
+) -> None:
     """``rows`` is a list of (source_path, priority, enqueued_at,
     expected_size, expected_mtime) tuples — same shape as the legacy
-    executemany rows. We don't have legacy_ids for batch inserts (the
-    INSERT OR IGNORE doesn't return per-row rowids); the
-    ``UNIQUE(source_path, stage, legacy_table)`` constraint still
-    enforces per-source idempotency.
+    executemany rows. ``legacy_id_map`` is an optional
+    ``{source_path: id}`` lookup populated by
+    :func:`enqueue_many_for_archive` after the executemany so each
+    pipeline_queue mirror row carries a back-pointer to its legacy
+    row. Without it, every state mutation on a batched row would
+    fail to find the mirror — the mark_* helpers look up by
+    ``(legacy_table, legacy_id)``. The ``UNIQUE(source_path, stage,
+    legacy_table)`` constraint still enforces per-source idempotency
+    for the rare case where ``legacy_id_map`` is missing.
     """
+    if legacy_id_map is None:
+        legacy_id_map = {}
     try:
         from services import pipeline_queue_service as pqs
         pqs.dual_write_enqueue_many(
@@ -609,6 +640,7 @@ def _dual_write_pipeline_archive_many(db_path: str, rows) -> None:
                     'source_path': src,
                     'stage': pqs.STAGE_ARCHIVE_PENDING,
                     'legacy_table': pqs.LEGACY_TABLE_ARCHIVE,
+                    'legacy_id': legacy_id_map.get(src),
                     'priority': int(prio),
                     'payload': {
                         'expected_size': es,
@@ -1323,6 +1355,12 @@ def mark_copied(row_id: int, dest_path: str, *,
         return False
     db_path = _resolve_db_path(db_path)
     copied_at = _iso_now()
+    # Wave 4 PR-B (review #191 Info #7): capture pipeline_queue's
+    # completed_at BEFORE the legacy UPDATE so the mirror reflects
+    # the moment the legacy commit happened, not the moment the
+    # mirror call finally runs (which can drift by tens of ms behind
+    # the legacy fsync).
+    completed_at = time.time()
     conn = None
     try:
         conn = _open_archive_conn(db_path)
@@ -1343,7 +1381,7 @@ def mark_copied(row_id: int, dest_path: str, *,
                 int(row_id),
                 new_stage='archive_done',
                 status='done',
-                completed_at=time.time(),
+                completed_at=completed_at,
                 last_error='',
                 db_path=db_path,
             )
@@ -1383,6 +1421,8 @@ def mark_source_gone(row_id: int, *,
     if not row_id:
         return False
     db_path = _resolve_db_path(db_path)
+    # Wave 4 PR-B (review #191 Info #7): capture before the UPDATE.
+    completed_at = time.time()
     conn = None
     try:
         conn = _open_archive_conn(db_path)
@@ -1402,7 +1442,7 @@ def mark_source_gone(row_id: int, *,
                 int(row_id),
                 new_stage='archive_done',
                 status='source_gone',
-                completed_at=time.time(),
+                completed_at=completed_at,
                 last_error='',
                 db_path=db_path,
             )
@@ -1446,6 +1486,8 @@ def mark_skipped_stationary(row_id: int, *,
     if not row_id:
         return False
     db_path = _resolve_db_path(db_path)
+    # Wave 4 PR-B (review #191 Info #7): capture before the UPDATE.
+    completed_at = time.time()
     conn = None
     try:
         conn = _open_archive_conn(db_path)
@@ -1465,7 +1507,7 @@ def mark_skipped_stationary(row_id: int, *,
                 int(row_id),
                 new_stage='archive_done',
                 status='skipped_stationary',
-                completed_at=time.time(),
+                completed_at=completed_at,
                 last_error='',
                 db_path=db_path,
             )
@@ -1679,6 +1721,9 @@ def mark_failed(row_id: int, error: str, *,
         return 'error'
     db_path = _resolve_db_path(db_path)
     truncated = (error or '')[:4096]
+    # Wave 4 PR-B (review #191 Info #7): capture before the UPDATE so
+    # the mirror reflects the moment the legacy commit happened.
+    completed_at = time.time()
     # mark_failed is genuinely multi-statement: it SELECTs the current
     # attempts count, branches, then UPDATEs. Under autocommit alone
     # another writer could update ``attempts`` between our SELECT and
@@ -1739,7 +1784,7 @@ def mark_failed(row_id: int, error: str, *,
             status='dead_letter',
             attempts=new_attempts,
             last_error=truncated,
-            completed_at=time.time(),
+            completed_at=completed_at,
             db_path=db_path,
         )
     elif new_status == 'pending':

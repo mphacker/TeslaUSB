@@ -1122,7 +1122,7 @@ def _read_retry_max_attempts_setting() -> int:
 
 def _mark_upload_failure(
     conn: sqlite3.Connection, rel_path: str, err_msg: str,
-) -> None:
+) -> Optional[Tuple[str, int]]:
     """Mark ``rel_path`` failed; promote to ``dead_letter`` when capped.
 
     Phase 2.6 — atomically increments ``retry_count`` and decides whether
@@ -1140,6 +1140,12 @@ def _mark_upload_failure(
     see in journalctl which files have been permanently abandoned by
     auto-sync. The previous (uncapped) behaviour silently retried
     every cycle forever.
+
+    Returns ``(post_status, post_retry_count)`` so the caller can mirror
+    the new state into ``pipeline_queue`` AFTER ``_fsync_db(conn)`` has
+    committed the legacy row. Wave 4 PR-B invariant: legacy commit FIRST,
+    then mirror — never the other way around. Returns ``None`` when the
+    UPDATE matched zero rows.
     """
     cap = _read_retry_max_attempts_setting()
     cur = conn.execute(
@@ -1154,32 +1160,24 @@ def _mark_upload_failure(
            WHERE file_path = ?""",
         (cap, err_msg, rel_path),
     )
-    if cur.rowcount:
-        # Re-read the row to know which terminal state we landed in so
-        # the log message is accurate. Cheap (single indexed lookup).
-        post = conn.execute(
-            "SELECT status, retry_count FROM cloud_synced_files "
-            "WHERE file_path = ?",
-            (rel_path,),
-        ).fetchone()
-        if post and post["status"] == 'dead_letter':
-            logger.warning(
-                "Cloud sync: %s reached retry cap (%d attempts) — "
-                "moved to dead_letter. Recover via Failed Jobs page.",
-                rel_path, post["retry_count"],
-            )
-        # Wave 4 PR-B: mirror the failure into pipeline_queue. We do
-        # NOT promote the stage on dead_letter — the row stays under
-        # ``cloud_pending`` so an operator-driven Failed Jobs reset
-        # picks it back up; the ``status='dead_letter'`` is what
-        # excludes it from the auto-picker.
-        if post:
-            _dual_write_pipeline_cloud_synced_state(
-                rel_path,
-                status=post["status"],
-                attempts=int(post["retry_count"] or 0),
-                last_error=err_msg,
-            )
+    if not cur.rowcount:
+        return None
+    # Re-read the row to know which terminal state we landed in so
+    # the log message is accurate. Cheap (single indexed lookup).
+    post = conn.execute(
+        "SELECT status, retry_count FROM cloud_synced_files "
+        "WHERE file_path = ?",
+        (rel_path,),
+    ).fetchone()
+    if not post:
+        return None
+    if post["status"] == 'dead_letter':
+        logger.warning(
+            "Cloud sync: %s reached retry cap (%d attempts) — "
+            "moved to dead_letter. Recover via Failed Jobs page.",
+            rel_path, post["retry_count"],
+        )
+    return str(post["status"]), int(post["retry_count"] or 0)
 
 
 def _is_path_skipped(
@@ -2243,6 +2241,11 @@ def _drain_once(
 
                     # Mark as synced with timestamp — the critical tracking step
                     now_synced = datetime.now(timezone.utc).isoformat()
+                    # Wave 4 PR-B (review #191 Info #7): capture
+                    # pipeline_queue's completed_at BEFORE the legacy
+                    # UPDATE so the mirror reflects the moment the
+                    # legacy commit/fsync actually happened.
+                    completed_at = time.time()
                     conn.execute(
                         """UPDATE cloud_synced_files
                            SET status = 'synced', synced_at = ?, remote_path = ?,
@@ -2261,24 +2264,47 @@ def _drain_once(
                         status='done',
                         attempts=0,
                         last_error='',
-                        completed_at=time.time(),
+                        completed_at=completed_at,
                     )
                 else:
                     err_msg = (stderr or "").strip()[:500]
                     logger.error("Sync: [%d/%d] %s FAILED (exit %d): %s",
                                 idx + 1, len(to_sync), rel_path,
                                 returncode, err_msg[:200])
-                    _mark_upload_failure(
-                        conn, rel_path, err_msg[:255],
+                    truncated_err = err_msg[:255]
+                    post = _mark_upload_failure(
+                        conn, rel_path, truncated_err,
                     )
                     _fsync_db(conn)
+                    # Wave 4 PR-B: mirror the failure into pipeline_queue
+                    # ONLY after _fsync_db has committed the legacy row.
+                    # The stage stays under ``cloud_pending`` even on
+                    # dead_letter — the ``status='dead_letter'`` value
+                    # is what excludes the row from the auto-picker.
+                    if post is not None:
+                        post_status, post_attempts = post
+                        _dual_write_pipeline_cloud_synced_state(
+                            rel_path,
+                            status=post_status,
+                            attempts=post_attempts,
+                            last_error=truncated_err,
+                        )
 
             except Exception as e:
                 logger.error("Sync: %s error: %s", rel_path, e)
-                _mark_upload_failure(
-                    conn, rel_path, str(e)[:255],
+                truncated_err = str(e)[:255]
+                post = _mark_upload_failure(
+                    conn, rel_path, truncated_err,
                 )
                 _fsync_db(conn)
+                if post is not None:
+                    post_status, post_attempts = post
+                    _dual_write_pipeline_cloud_synced_state(
+                        rel_path,
+                        status=post_status,
+                        attempts=post_attempts,
+                        last_error=truncated_err,
+                    )
 
             # Yield to Live Event Sync if it has READY pending event work.
             # LES gets priority over normal cloud_archive uploads when both
@@ -2938,7 +2964,12 @@ def recover_interrupted_uploads(db_path: str) -> int:
     try:
         # Wave 4 PR-B: capture paths BEFORE the UPDATE so the
         # corresponding pipeline_queue rows can be reset to 'pending'
-        # too.
+        # too. ``BEGIN IMMEDIATE`` acquires the reserved write lock
+        # before the SELECT so no concurrent writer can flip a row
+        # into ``'uploading'`` between the SELECT and the UPDATE
+        # (which would otherwise leave the new row's pipeline_queue
+        # mirror stale).
+        conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT file_path FROM cloud_synced_files "
             "WHERE status = 'uploading'"
@@ -3280,6 +3311,12 @@ def retry_dead_letter(file_path: Optional[str] = None) -> int:
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     affected_paths: List[str] = []
     try:
+        # Wave 4 PR-B: ``BEGIN IMMEDIATE`` acquires the reserved write
+        # lock before the SELECT so no concurrent writer can flip a
+        # row into ``'dead_letter'`` between the SELECT and UPDATE
+        # (which would otherwise leave the new dead-letter row's
+        # pipeline_queue mirror stale).
+        conn.execute("BEGIN IMMEDIATE")
         if target is None:
             # Capture matching paths BEFORE the UPDATE so we can mirror
             # the reset into pipeline_queue afterwards.

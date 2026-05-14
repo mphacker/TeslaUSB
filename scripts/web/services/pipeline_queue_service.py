@@ -308,6 +308,65 @@ def dual_write_enqueue_many(rows: Iterable[Dict[str, Any]],
                 pass
 
 
+_UPDATE_COLUMNS: Tuple[str, ...] = (
+    "new_stage", "status", "attempts", "last_error",
+    "completed_at", "next_retry_at", "payload_json",
+)
+"""Names of the optional kwargs accepted by both
+:func:`update_pipeline_row` and
+:func:`update_pipeline_row_by_legacy_id`.
+
+Used by the "no kwargs passed" gate AND the SET-clause builder so a
+future column addition needs to be made in exactly one place. The
+DB column name happens to differ from the kwarg name only for
+``new_stage`` (column is ``stage``); :data:`_KWARG_TO_COLUMN`
+translates.
+"""
+
+_KWARG_TO_COLUMN: Dict[str, str] = {
+    "new_stage": "stage",
+    "status": "status",
+    "attempts": "attempts",
+    "last_error": "last_error",
+    "completed_at": "completed_at",
+    "next_retry_at": "next_retry_at",
+    "payload_json": "payload_json",
+}
+
+
+def _build_update_sql_and_params(
+    where_clause: str,
+    where_params: List[Any],
+    **kwargs,
+) -> Optional[Tuple[str, List[Any]]]:
+    """Build the UPDATE SQL + bind params for the ``update_pipeline_row*``
+    helpers.
+
+    Returns ``None`` when no settable kwargs were passed (so the
+    caller can short-circuit with the documented "silent no-op"
+    semantics). Otherwise returns ``(sql, params)`` where ``params``
+    is in positional order: SET values first, then the ``where_params``
+    appended.
+    """
+    set_clauses: List[str] = []
+    set_params: List[Any] = []
+    for kwarg_name in _UPDATE_COLUMNS:
+        value = kwargs.get(kwarg_name)
+        if value is None:
+            continue
+        column = _KWARG_TO_COLUMN[kwarg_name]
+        set_clauses.append(f"{column} = ?")
+        set_params.append(value)
+    if not set_clauses:
+        return None
+    sql = (
+        "UPDATE pipeline_queue SET "
+        + ", ".join(set_clauses)
+        + " WHERE " + where_clause
+    )
+    return sql, set_params + list(where_params)
+
+
 def update_pipeline_row(
     *,
     stage: str,
@@ -355,43 +414,18 @@ def update_pipeline_row(
         db_path = _resolve_pipeline_db()
     if not db_path or not os.path.isfile(db_path):
         return False
-    if status is None and new_stage is None and attempts is None \
-       and last_error is None and completed_at is None \
-       and next_retry_at is None and payload_json is None:
+    built = _build_update_sql_and_params(
+        "stage = ? AND source_path = ?",
+        [stage, source_path],
+        new_stage=new_stage, status=status, attempts=attempts,
+        last_error=last_error, completed_at=completed_at,
+        next_retry_at=next_retry_at, payload_json=payload_json,
+    )
+    if built is None:
         # Nothing to update — silently no-op so callers don't have to
         # track which optional kwargs they passed.
         return False
-
-    set_clauses: List[str] = []
-    params: List[Any] = []
-    if new_stage is not None:
-        set_clauses.append("stage = ?")
-        params.append(new_stage)
-    if status is not None:
-        set_clauses.append("status = ?")
-        params.append(status)
-    if attempts is not None:
-        set_clauses.append("attempts = ?")
-        params.append(attempts)
-    if last_error is not None:
-        set_clauses.append("last_error = ?")
-        params.append(last_error)
-    if completed_at is not None:
-        set_clauses.append("completed_at = ?")
-        params.append(completed_at)
-    if next_retry_at is not None:
-        set_clauses.append("next_retry_at = ?")
-        params.append(next_retry_at)
-    if payload_json is not None:
-        set_clauses.append("payload_json = ?")
-        params.append(payload_json)
-    params.extend([stage, source_path])
-
-    sql = (
-        "UPDATE pipeline_queue SET "
-        + ", ".join(set_clauses)
-        + " WHERE stage = ? AND source_path = ?"
-    )
+    sql, params = built
     conn = None
     try:
         conn = _open_pipeline_conn(db_path)
@@ -441,41 +475,16 @@ def update_pipeline_row_by_legacy_id(
         return False
     if not legacy_table or legacy_id is None:
         return False
-    if status is None and new_stage is None and attempts is None \
-       and last_error is None and completed_at is None \
-       and next_retry_at is None and payload_json is None:
-        return False
-
-    set_clauses: List[str] = []
-    params: List[Any] = []
-    if new_stage is not None:
-        set_clauses.append("stage = ?")
-        params.append(new_stage)
-    if status is not None:
-        set_clauses.append("status = ?")
-        params.append(status)
-    if attempts is not None:
-        set_clauses.append("attempts = ?")
-        params.append(attempts)
-    if last_error is not None:
-        set_clauses.append("last_error = ?")
-        params.append(last_error)
-    if completed_at is not None:
-        set_clauses.append("completed_at = ?")
-        params.append(completed_at)
-    if next_retry_at is not None:
-        set_clauses.append("next_retry_at = ?")
-        params.append(next_retry_at)
-    if payload_json is not None:
-        set_clauses.append("payload_json = ?")
-        params.append(payload_json)
-    params.extend([legacy_table, int(legacy_id)])
-
-    sql = (
-        "UPDATE pipeline_queue SET "
-        + ", ".join(set_clauses)
-        + " WHERE legacy_table = ? AND legacy_id = ?"
+    built = _build_update_sql_and_params(
+        "legacy_table = ? AND legacy_id = ?",
+        [legacy_table, int(legacy_id)],
+        new_stage=new_stage, status=status, attempts=attempts,
+        last_error=last_error, completed_at=completed_at,
+        next_retry_at=next_retry_at, payload_json=payload_json,
     )
+    if built is None:
+        return False
+    sql, params = built
     conn = None
     try:
         conn = _open_pipeline_conn(db_path)

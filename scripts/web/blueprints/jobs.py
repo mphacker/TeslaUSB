@@ -181,9 +181,10 @@ _VALUE_TIERS: Dict[str, Tuple[str, str]] = {
         '(impact, alarm, or manual save). Usually irreplaceable.',
     ),
     'recent': (
-        'Driving footage',
-        'Last hour of dashcam (RecentClips). Tesla rotates these out '
-        'automatically — losing one row is usually fine.',
+        'Rolling buffer',
+        'RecentClips — Tesla writes these continuously while the car '
+        'is powered (driving OR parked in Sentry standby) and rotates '
+        'them out automatically. Losing one row is usually fine.',
     ),
     'archived': (
         'Already on SD card',

@@ -647,6 +647,164 @@ def release_pipeline_claim(
                 pass
 
 
+def dead_letter_pipeline_row_by_id(
+    *,
+    row_id: int,
+    last_error: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Move a single ``pipeline_queue`` row to ``status='dead_letter'``
+    keyed by its primary-key ``id``.
+
+    Wave 4 PR-F3 review fix (issue #184): used by
+    ``cloud_archive_service._claim_via_pipeline_reader_cloud`` when a
+    claimed row has an unrecoverable data-shape gap (e.g. empty
+    ``source_path``) — the legacy_id-keyed and source_path-keyed
+    helpers can't address such a row by content. Without an id-keyed
+    dead-letter the only options are (a) leave it in ``in_progress``
+    so :func:`recover_stale_claims_pipeline` keeps recycling it back
+    to ``pending`` only for the same gap to re-fire (a recycle loop),
+    or (b) write an inline UPDATE in every caller. This helper closes
+    the gap cleanly.
+
+    Behaviour:
+      * Atomically sets ``status='dead_letter'``, NULLs ``claimed_by``
+        / ``claimed_at`` (so the row presents as a clean dead-letter
+        entry to operators and to :func:`recover_stale_claims_pipeline`,
+        which only picks up ``in_progress``).
+      * Optional ``last_error`` stamped for forensics; ``None`` leaves
+        the existing error untouched.
+      * Returns ``True`` on rowcount > 0, ``False`` otherwise.
+        Never raises — silent no-op on missing DB / sqlite errors,
+        same defensive contract as the rest of this module.
+    """
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    if row_id is None:
+        return False
+    try:
+        row_id_int = int(row_id)
+    except (TypeError, ValueError):
+        return False
+    if last_error is not None:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'dead_letter', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL, "
+            "       last_error = ? "
+            " WHERE id = ?"
+        )
+        params: Tuple[Any, ...] = (last_error, row_id_int)
+    else:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'dead_letter', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL "
+            " WHERE id = ?"
+        )
+        params = (row_id_int,)
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.debug(
+            "dead_letter_pipeline_row_by_id(id=%s) failed: %s",
+            row_id_int, e,
+        )
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def release_pipeline_claim_by_source_path(
+    *,
+    stage: str,
+    source_path: str,
+    last_error: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Release a claimed row keyed by ``(stage, source_path)``.
+
+    Wave 4 PR-F3 (issue #184): the cloud_archive variant of
+    :func:`release_pipeline_claim`. Cloud rows are mirrored from
+    ``cloud_synced_files`` lazily — the producer in
+    ``cloud_archive_service._discover_events`` enqueues with
+    ``source_path = <relative event.json path>`` but does NOT set
+    ``legacy_id`` because the corresponding ``cloud_synced_files``
+    row is not created until upload starts. The legacy_id-keyed
+    :func:`release_pipeline_claim` therefore cannot find these rows.
+
+    The lookup uses the ``(stage, source_path)`` UNIQUE index — the
+    same index PR-A added for dual-write enqueue idempotency — so
+    this is O(1) and never matches more than one row.
+
+    Behaviour parity with :func:`release_pipeline_claim`:
+      * Resets ``status='pending'``, NULLs ``claimed_by`` /
+        ``claimed_at`` (so :func:`recover_stale_claims_pipeline`
+        won't pick the row up — it filters on ``in_progress``).
+      * Optional ``last_error`` stamped for forensics; ``None``
+        leaves the existing error untouched.
+      * Returns ``True`` on rowcount > 0, ``False`` otherwise.
+        Never raises — silent no-op on missing DB / sqlite errors,
+        same defensive contract as the rest of this module.
+    """
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    if not stage or not source_path:
+        return False
+    if last_error is not None:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'pending', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL, "
+            "       last_error = ? "
+            " WHERE stage = ? AND source_path = ?"
+        )
+        params = (last_error, stage, source_path)
+    else:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'pending', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL "
+            " WHERE stage = ? AND source_path = ?"
+        )
+        params = (stage, source_path)
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.debug(
+            "release_pipeline_claim_by_source_path(stage=%s, "
+            "source_path=%r) failed: %s",
+            stage, source_path, e,
+        )
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Reader API — Wave 4 PR-C (issue #184)
 # ---------------------------------------------------------------------------

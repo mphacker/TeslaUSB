@@ -18,7 +18,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1089,6 +1089,246 @@ def _peek_pipeline_cloud_pending(limit: int = _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT
             "failed: %s", e,
         )
         return ()
+
+
+# ---------------------------------------------------------------------------
+# Wave 4 PR-F3 (issue #184): cloud reader-switch helpers
+# ---------------------------------------------------------------------------
+# PR-F3 mirrors PR-F1's archive-worker reader switch for cloud_archive.
+# When ``CLOUD_ARCHIVE_USE_PIPELINE_READER`` is True (default OFF), the
+# drain pass replaces the disk-walk + ``cloud_synced_files`` filter with
+# a batch ``claim_next_for_stage`` against ``pipeline_queue``. The
+# upload loop body is structurally unchanged — it still iterates a list
+# of ``(event_dir, rel_path, event_size)`` tuples — so the existing
+# state-transition dual-write hooks (PR-B) drive the pipeline_queue row
+# from ``in_progress`` (set by claim) to ``done`` (set by the
+# ``cloud_synced_files`` UPDATE on success) without any new wiring.
+#
+# Cloud rows are mirrored from ``cloud_synced_files`` LAZILY: the
+# producer in ``_discover_events`` enqueues with ``source_path = <rel
+# event.json path>`` but does NOT set ``legacy_id`` because the
+# corresponding ``cloud_synced_files`` row is not created until upload
+# starts. That's why the release-claim helper uses the cloud-specific
+# :func:`pqs.release_pipeline_claim_by_source_path` (added by PR-F3)
+# instead of the legacy_id-keyed PR-F1 helper.
+# ---------------------------------------------------------------------------
+
+# Default upper bound on the number of rows claimed in a single drain
+# pass. The legacy disk-walk has no equivalent — it sees everything in
+# ``_discover_events`` then trims by cloud capacity. The reader path
+# claims a bounded batch so a cancel/error doesn't strand an unbounded
+# number of in_progress rows. ``recover_stale_claims_pipeline`` will
+# eventually release stragglers if the worker crashes mid-batch, but
+# bounding the batch keeps the recovery surface small.
+_CLOUD_PIPELINE_READER_BATCH_SIZE = 32
+
+
+def _claim_via_pipeline_reader_cloud(
+    worker_id: str,
+    db_path: Optional[str] = None,
+    limit: int = _CLOUD_PIPELINE_READER_BATCH_SIZE,
+) -> List[Tuple[str, str, int]]:
+    """Claim up to ``limit`` cloud_pending rows from pipeline_queue.
+
+    Wave 4 PR-F3 (issue #184): the cloud-side mirror of
+    :func:`archive_worker._claim_via_pipeline_reader`.
+
+    Returns a list of ``(event_dir, rel_path, event_size)`` tuples
+    shaped exactly like ``_discover_events`` so the existing
+    ``_drain_once`` upload loop can iterate the result without any
+    branch-by-branch changes.
+
+    Each successful claim atomically sets ``status='in_progress'``,
+    bumps ``attempts``, and persists ``claimed_by`` / ``claimed_at``.
+    Caller responsibilities:
+      * On upload success → existing PR-B dual-write hook fires from
+        ``cloud_synced_files`` UPDATE → pipeline row goes to
+        ``status='done'``. No PR-F3-specific code required.
+      * On upload failure → existing PR-B failure-mirror dual-write
+        hook updates ``last_error`` / ``attempts``. No PR-F3-specific
+        code required.
+      * On early cancel (cancel event fires mid-batch, leaving N
+        unprocessed claims) → caller MUST call
+        :func:`_release_cloud_pipeline_claims` with the unprocessed
+        ``rel_path`` list so those rows return to ``status='pending'``
+        and don't accrue ``attempts`` for work that never started.
+
+    Defensive cases (data-shape gaps that should never happen in
+    production but are handled instead of silently corrupting the
+    queue):
+      * Pipeline row missing ``source_path`` → moved to
+        ``status='dead_letter'`` (unrecoverable; an empty path is not
+        something a recovery cycle can fix). One WARNING per
+        occurrence — operators inspect via
+        ``/api/pipeline_queue/dead_letter``.
+      * Pipeline row's ``payload`` missing ``event_dir`` → released
+        back to ``pending`` so the next ``_discover_events`` pass
+        can re-enqueue with the correct payload. One WARNING per
+        occurrence.
+
+    The cloud reader claims a BATCH up front (vs. the per-row claim
+    archive_worker uses) because cloud_archive's drain loop is built
+    around iterating a discovered list, not "claim → process → claim
+    again". Re-shaping the loop to per-row claim would be an
+    invasive refactor with no measurable upside (cloud's per-event
+    dwell time is dominated by the rclone subprocess, not the claim
+    overhead).
+    """
+    try:
+        from services import pipeline_queue_service as pqs
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "PR-F3 cloud reader: pipeline_queue_service import "
+            "failed (%s) — falling back to no-op", e,
+        )
+        return []
+
+    claimed: List[Tuple[str, str, int]] = []
+    for _ in range(max(int(limit), 0)):
+        try:
+            row = pqs.claim_next_for_stage(
+                stage=pqs.STAGE_CLOUD_PENDING,
+                claimed_by=worker_id,
+                db_path=db_path,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "PR-F3 cloud reader: claim_next_for_stage raised: %s",
+                e,
+            )
+            break
+        if row is None:
+            break
+        rel_path = (row.get('source_path') or '').strip()
+        if not rel_path:
+            # Unrecoverable data-shape gap — empty source_path can
+            # never be matched by ``release_pipeline_claim_by_source_path``
+            # (which keys on the ``(stage, source_path)`` UNIQUE index)
+            # nor by ``recover_stale_claims_pipeline`` (which would
+            # release the row back to pending only for the same gap
+            # to fire again next claim — a recycle loop). Move the
+            # row to ``dead_letter`` immediately by primary-key id
+            # via the dedicated helper. Operators can inspect the
+            # dead-letter rows via the upcoming
+            # ``/api/pipeline_queue/dead_letter`` endpoint and either
+            # manually backfill ``source_path`` or drop the row.
+            #
+            # This mirrors PR-F1's archive-side fix for the
+            # legacy_id-missing case (see ``archive_worker._claim_via
+            # _pipeline_reader`` ~L2168) so both reader paths behave
+            # the same way under unrecoverable data-shape gaps.
+            row_id = row.get('id')
+            try:
+                pqs.dead_letter_pipeline_row_by_id(
+                    row_id=row_id,
+                    last_error=(
+                        'PR-F3: pipeline_queue cloud_pending row has '
+                        'empty source_path (unrecoverable data-shape '
+                        'gap); manual intervention required'
+                    ),
+                    db_path=db_path,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            logger.warning(
+                "PR-F3 cloud reader: claimed row id=%s has empty "
+                "source_path — moved to dead_letter (unrecoverable)",
+                row_id,
+            )
+            continue
+        payload = row.get('payload') or {}
+        event_dir = (payload.get('event_dir') or '').strip()
+        try:
+            event_size = int(payload.get('event_size') or 0)
+        except (TypeError, ValueError):
+            event_size = 0
+        if not event_dir:
+            # Recoverable: the next _discover_events pass will
+            # re-enqueue with the correct payload (idempotent via the
+            # UNIQUE index on (stage, source_path)). Release the
+            # claim back to pending so attempts isn't bumped for work
+            # that didn't start.
+            try:
+                pqs.release_pipeline_claim_by_source_path(
+                    stage=pqs.STAGE_CLOUD_PENDING,
+                    source_path=rel_path,
+                    last_error=(
+                        'PR-F3: pipeline_queue payload missing '
+                        'event_dir; released for re-enqueue'
+                    ),
+                    db_path=db_path,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            logger.warning(
+                "PR-F3 cloud reader: claimed row for %r has no "
+                "event_dir in payload — released for re-enqueue",
+                rel_path,
+            )
+            continue
+        claimed.append((event_dir, rel_path, event_size))
+    return claimed
+
+
+def _release_cloud_pipeline_claims(
+    rel_paths: Sequence[str],
+    last_error: str,
+    db_path: Optional[str] = None,
+) -> int:
+    """Release in-progress cloud_pending claims back to ``pending``.
+
+    Wave 4 PR-F3 (issue #184): used by ``_drain_once`` when the
+    upload loop exits early (cancel, cloud-full, exception) leaving
+    N unprocessed claims in ``status='in_progress'``. Without this
+    release the rows would sit until ``recover_stale_claims_pipeline``
+    times them out, which is wasteful (and bumps ``attempts`` for
+    work that never started).
+
+    ``rel_paths`` is intentionally typed as :class:`Sequence` (not
+    :class:`Iterable`) so callers cannot pass a single-shot
+    generator — the empty-check below would consume it before the
+    iteration loop, silently skipping every release. Callers always
+    pass a list (the ``unprocessed_pipeline_claims`` straggler list
+    from ``_drain_once``); a tuple would also be safe.
+
+    Returns the count of rows actually released (rowcount > 0).
+    Never raises — silent at DEBUG on per-row failures so a transient
+    sqlite glitch can't abort the drain wind-down.
+    """
+    # ``len(rel_paths) == 0`` and ``not rel_paths`` are equivalent
+    # for ``Sequence`` and both safely short-circuit; we use the
+    # explicit length check to make the Sequence contract obvious
+    # at the call site.
+    if not rel_paths:
+        return 0
+    released = 0
+    try:
+        from services import pipeline_queue_service as pqs
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "PR-F3 cloud reader: pipeline_queue_service import "
+            "failed during release (%s) — claims will rely on "
+            "stale-claim recovery", e,
+        )
+        return 0
+    for rel_path in rel_paths:
+        if not rel_path:
+            continue
+        try:
+            ok = pqs.release_pipeline_claim_by_source_path(
+                stage=pqs.STAGE_CLOUD_PENDING,
+                source_path=rel_path,
+                last_error=last_error,
+                db_path=db_path,
+            )
+            if ok:
+                released += 1
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "PR-F3 cloud reader: release for %r failed: %s",
+                rel_path, e,
+            )
+    return released
 
 
 def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
@@ -2440,6 +2680,12 @@ def _drain_once(
     session_id: Optional[int] = None
     files_synced = 0
     bytes_transferred = 0
+    # Wave 4 PR-F3 (issue #184): the reader-switch tracking
+    # variables. Initialised here (outside the try block) so the
+    # finally block can always reference them, even if the try body
+    # raised before the reader-switch branch ran.
+    used_pipeline_reader = False
+    unprocessed_pipeline_claims: List[str] = []
 
     try:
         conn = _init_cloud_tables(db_path)
@@ -2466,7 +2712,51 @@ def _drain_once(
         except Exception:
             pass
 
-        to_sync = _discover_events(teslacam_path, conn=conn)
+        # Wave 4 PR-F3 (issue #184): reader-switch branch.
+        #
+        # When ``CLOUD_ARCHIVE_USE_PIPELINE_READER`` is ON, the work
+        # list comes from claiming rows out of ``pipeline_queue``
+        # instead of walking the disk. The producer hook in
+        # ``_discover_events`` (PR-F2) feeds the queue, so the two
+        # flags are effectively coupled in production: turning the
+        # reader on without the producer would yield an empty queue
+        # and starve uploads. The shadow path (PR-F2) is auto-skipped
+        # when reader is ON because comparing the legacy reader's
+        # pick against ourselves is moot.
+        #
+        # Each claimed row goes to ``status='in_progress'`` and bumps
+        # ``attempts``. The existing per-event upload loop's
+        # state-transition dual-writes (PR-B) drive the row to
+        # ``status='done'`` on success and ``status='pending'/
+        # 'failed'/'dead_letter'`` on failure — no PR-F3-specific
+        # success/failure wiring required. Only the EARLY-CANCEL case
+        # needs a release pass (handled in the ``finally`` block at
+        # the end of this function so cancel/exception/cloud-full all
+        # release stragglers).
+        used_pipeline_reader = _use_pipeline_reader_enabled()
+        if used_pipeline_reader:
+            try:
+                to_sync = _claim_via_pipeline_reader_cloud(
+                    worker_id='cloud_archive',
+                    db_path=None,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "_claim_via_pipeline_reader_cloud raised: %s — "
+                    "falling back to legacy disk-walk for this drain",
+                    e,
+                )
+                to_sync = _discover_events(teslacam_path, conn=conn)
+                used_pipeline_reader = False
+            else:
+                # Track the claimed paths so the finally block can
+                # release any stragglers if the upload loop exits
+                # early (cancel, cloud-full, exception).
+                unprocessed_pipeline_claims = [
+                    rel_path for _, rel_path, _ in to_sync
+                ]
+        else:
+            to_sync = _discover_events(teslacam_path, conn=conn)
 
         # Wave 4 PR-F2 (issue #184): SHADOW comparison against the
         # unified ``pipeline_queue`` cloud_pending stage. Cheap (one
@@ -2477,15 +2767,13 @@ def _drain_once(
         #     compare; the helper does NOT log when both are empty so
         #     the noise floor is zero).
         #   * Reader flag OFF (when ON we ARE the pipeline reader, so
-        #     comparing ourselves to ourselves is moot — PR-F3 will
-        #     add an inverse shadow that compares the legacy
-        #     disk-walk against the unified worker's actual pick).
+        #     comparing ourselves to ourselves is moot).
         # Failures are swallowed at DEBUG by ``_peek_pipeline_cloud_pending``
         # so a transient pipeline_queue read error never blocks the
         # legacy upload path.
         if (_enqueue_to_pipeline_enabled() and
                 _shadow_pipeline_queue_enabled() and
-                not _use_pipeline_reader_enabled()):
+                not used_pipeline_reader):
             try:
                 shadow_candidates = _peek_pipeline_cloud_pending()
                 legacy_first = to_sync[0][1] if to_sync else None
@@ -2646,6 +2934,13 @@ def _drain_once(
                     f"{skipped} skipped (upgrade storage or free space)"
                 )
                 _sync_status["error"] = "Cloud storage full"
+                # Wave 4 PR-F3 (issue #184): the cloud-full skip
+                # leaves the current row + all remaining rows
+                # unprocessed. The break drops to the loop exit so
+                # the finally block can release the entire residual
+                # ``unprocessed_pipeline_claims`` list back to
+                # pending — including this row, which we have NOT
+                # yet removed from the tracking list.
                 break
 
             # Mark event as uploading in the tracking database
@@ -2692,6 +2987,17 @@ def _drain_once(
                     _dual_write_pipeline_cloud_synced_state(
                         rel_path, status='pending',
                     )
+                    # Wave 4 PR-F3 (issue #184): the dual-write above
+                    # already returned this row to status='pending';
+                    # don't let the finally block double-release it
+                    # (which would overwrite the dual-write's
+                    # last_error with a misleading "drain ended
+                    # early" stamp).
+                    if used_pipeline_reader:
+                        try:
+                            unprocessed_pipeline_claims.remove(rel_path)
+                        except ValueError:
+                            pass
                     break
 
                 if returncode == 0:
@@ -2771,6 +3077,24 @@ def _drain_once(
                         attempts=post_attempts,
                         last_error=truncated_err,
                     )
+
+            # Wave 4 PR-F3 (issue #184): mark this row as "no longer
+            # claimed by this drain" so the finally block won't
+            # release it back to pending. The PR-B dual-write hooks
+            # above have already moved the row to its terminal state
+            # (status='done' on success, status='failed' / 'pending'
+            # / 'dead_letter' on failure via _mark_upload_failure).
+            # The release pass in the finally block only acts on
+            # rows STILL in_progress — which is exactly the ones we
+            # claimed but didn't actually process (cancel / cloud-
+            # full / unhandled exception).
+            if used_pipeline_reader:
+                try:
+                    unprocessed_pipeline_claims.remove(rel_path)
+                except ValueError:
+                    # Path wasn't in the list (legacy reader path,
+                    # or duplicate processing). Safe to ignore.
+                    pass
 
             # Yield to Live Event Sync if it has READY pending event work.
             # LES gets priority over normal cloud_archive uploads when both
@@ -2856,6 +3180,37 @@ def _drain_once(
         drain_did_work = False
 
     finally:
+        # Wave 4 PR-F3 (issue #184): if the reader switch was on for
+        # this drain and the upload loop exited early (cancel mid-
+        # batch, cloud-full mid-batch, exception), some claimed rows
+        # may still be ``status='in_progress'``. Release them back
+        # to pending so the next drain pass can re-claim them
+        # without waiting for the stale-claim recovery cycle. Each
+        # successful event removed itself from
+        # ``unprocessed_pipeline_claims`` after its terminal
+        # state-transition dual-write fired, so anything left in
+        # the list is by definition unprocessed.
+        if used_pipeline_reader and unprocessed_pipeline_claims:
+            try:
+                released = _release_cloud_pipeline_claims(
+                    list(unprocessed_pipeline_claims),
+                    last_error=(
+                        'PR-F3: drain ended before upload '
+                        f'(reason={_sync_status.get("progress") or "unknown"})'
+                    ),
+                )
+                logger.info(
+                    "PR-F3 cloud reader: released %d/%d "
+                    "unprocessed pipeline claims at drain end",
+                    released, len(unprocessed_pipeline_claims),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "PR-F3 cloud reader: straggler-release at "
+                    "drain end raised: %s — claims will rely on "
+                    "stale-claim recovery", e,
+                )
+
         # Update session record
         if conn is not None and session_id is not None:
             try:

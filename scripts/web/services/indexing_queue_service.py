@@ -239,6 +239,7 @@ def enqueue_for_indexing(db_path: str, file_path: str, *,
             """,
             (key, file_path, priority, now, next_at, source),
         )
+        _dual_write_pipeline_indexing(db_path, file_path, key, priority, source)
         return True
     except sqlite3.Error as e:
         logger.warning("enqueue_for_indexing failed for %s: %s", file_path, e)
@@ -317,10 +318,69 @@ def enqueue_many_for_indexing(db_path: str,
                 """,
                 rows,
             )
+        _dual_write_pipeline_indexing_many(db_path, rows)
         return len(rows)
     except sqlite3.Error as e:
         logger.warning("enqueue_many_for_indexing failed: %s", e)
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Pipeline queue dual-write helpers (issue #184 Wave 4 — Phase I.1)
+# ---------------------------------------------------------------------------
+# These wrap ``services.pipeline_queue_service`` and are imported lazily
+# so that (a) tests don't pull in the unified-queue module unless they
+# need it, and (b) a missing pipeline_queue table on a partly-migrated
+# DB doesn't break the legacy enqueue path.
+
+def _dual_write_pipeline_indexing(db_path: str, file_path: str,
+                                   canonical_key_value: str,
+                                   priority: int, source: str) -> None:
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.dual_write_enqueue(
+            source_path=file_path,
+            stage=pqs.STAGE_INDEX_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_INDEXING,
+            priority=priority,
+            payload={
+                'canonical_key': canonical_key_value,
+                'source': source,
+            },
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue dual-write skipped for %s: %s", file_path, e,
+        )
+
+
+def _dual_write_pipeline_indexing_many(
+    db_path: str,
+    rows: List[Tuple[str, str, int, float, str]],
+) -> None:
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.dual_write_enqueue_many(
+            (
+                {
+                    'source_path': file_path,
+                    'stage': pqs.STAGE_INDEX_PENDING,
+                    'legacy_table': pqs.LEGACY_TABLE_INDEXING,
+                    'priority': prio,
+                    'payload': {
+                        'canonical_key': key,
+                        'source': src,
+                    },
+                }
+                for (key, file_path, prio, _now, src) in rows
+            ),
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue batched dual-write skipped: %s", e,
+        )
 
 
 # ---------------------------------------------------------------------------

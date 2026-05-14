@@ -466,6 +466,29 @@ if __name__ == "__main__":
     except Exception as e:  # noqa: BLE001
         print(f"Warning: WAL checkpoint service failed to start: {e}")
 
+    # One-time pipeline_queue backfill (issue #184 Wave 4 — Phase I.1).
+    # Idempotent — re-running on every boot is safe (the unique
+    # constraint catches duplicates). Runs on a background daemon
+    # thread so it never blocks the request loop. Read more in
+    # ``services.pipeline_queue_service.backfill_legacy_queues``.
+    try:
+        import threading
+
+        def _run_pipeline_backfill():
+            try:
+                from services import pipeline_queue_service
+                counts = pipeline_queue_service.backfill_legacy_queues()
+                print(f"pipeline_queue backfill: {counts}")
+            except Exception as e:  # noqa: BLE001
+                print(f"Warning: pipeline_queue backfill failed: {e}")
+        threading.Thread(
+            target=_run_pipeline_backfill,
+            name='pipeline-backfill',
+            daemon=True,
+        ).start()
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: failed to schedule pipeline_queue backfill: {e}")
+
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:
         from waitress import serve

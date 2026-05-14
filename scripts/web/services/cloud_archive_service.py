@@ -522,6 +522,50 @@ def _migrate_canonicalize_paths_v2(
     return (rewrites, merges)
 
 
+def _dual_write_pipeline_cloud_synced(file_path: str,
+                                      remote_path: Optional[str],
+                                      status: str,
+                                      file_size: Optional[int] = None,
+                                      file_mtime: Optional[float] = None) -> None:
+    """Best-effort dual-write of a ``cloud_synced_files`` row to the
+    unified ``pipeline_queue`` table (issue #184 Wave 4 — Phase I.1).
+
+    Cross-DB write — opens a fresh ``geodata.db`` connection inside
+    :func:`pipeline_queue_service.dual_write_enqueue` and closes it.
+    Failures are logged at WARNING and swallowed; the legacy
+    ``cloud_synced_files`` row remains the source of truth in
+    Phase I.1.
+
+    The ``status`` parameter is the legacy status string ('pending',
+    'queued', 'uploading', 'synced', 'failed'); we translate to the
+    unified stage/status pair: ``synced`` rows become
+    ``stage='cloud_done'``, anything else is ``stage='cloud_pending'``.
+    """
+    try:
+        from services import pipeline_queue_service as pqs
+        stage = (
+            pqs.STAGE_CLOUD_DONE if status == 'synced'
+            else pqs.STAGE_CLOUD_PENDING
+        )
+        pqs.dual_write_enqueue(
+            source_path=file_path,
+            stage=stage,
+            legacy_table=pqs.LEGACY_TABLE_CLOUD_SYNCED,
+            priority=pqs.PRIORITY_CLOUD_BULK,
+            dest_path=remote_path,
+            payload={
+                'file_size': file_size,
+                'file_mtime': file_mtime,
+                'legacy_status': status,
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue cloud-synced dual-write skipped for %s: %s",
+            file_path, e,
+        )
+
+
 def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
     """Open the cloud sync database and ensure all tables exist.
 
@@ -1394,9 +1438,12 @@ def _reconcile_with_remote(
                 )
                 if cur.rowcount > 0:
                     reconciled += cur.rowcount
+                    _dual_write_pipeline_cloud_synced(
+                        rel_path, remote_dest, 'synced',
+                    )
                     continue
 
-                # If not in DB at all, insert as synced (pre-tracking upload)
+                # If not in DB at all, insert as synced (event dirs)
                 existing = conn.execute(
                     "SELECT status FROM cloud_synced_files WHERE file_path = ?",
                     (rel_path,)
@@ -1409,6 +1456,9 @@ def _reconcile_with_remote(
                         (rel_path, now_iso, remote_dest)
                     )
                     reconciled += 1
+                    _dual_write_pipeline_cloud_synced(
+                        rel_path, remote_dest, 'synced',
+                    )
         except Exception as e:
             logger.warning("Reconcile error for %s: %s", folder, e)
 
@@ -1435,6 +1485,9 @@ def _reconcile_with_remote(
             )
             if cur.rowcount > 0:
                 reconciled += cur.rowcount
+                _dual_write_pipeline_cloud_synced(
+                    rel_path, remote_dest, 'synced',
+                )
                 continue
 
             existing = conn.execute(
@@ -1449,6 +1502,9 @@ def _reconcile_with_remote(
                     (rel_path, now_iso, remote_dest)
                 )
                 reconciled += 1
+                _dual_write_pipeline_cloud_synced(
+                    rel_path, remote_dest, 'synced',
+                )
     except Exception as e:
         logger.warning("Reconcile error for ArchivedClips: %s", e)
 
@@ -1503,6 +1559,9 @@ def _reconcile_with_remote_legacy(
                 )
                 if cur.rowcount > 0:
                     reconciled += cur.rowcount
+                    _dual_write_pipeline_cloud_synced(
+                        rel_path, remote_dest, 'synced',
+                    )
                     continue
 
                 # If not in DB at all, insert as synced (pre-tracking upload)
@@ -1518,6 +1577,9 @@ def _reconcile_with_remote_legacy(
                         (rel_path, now_iso, remote_dest)
                     )
                     reconciled += 1
+                    _dual_write_pipeline_cloud_synced(
+                        rel_path, remote_dest, 'synced',
+                    )
         except subprocess.TimeoutExpired:
             logger.warning("Reconcile timeout listing %s", folder)
         except Exception as e:
@@ -1555,6 +1617,9 @@ def _reconcile_with_remote_legacy(
                 )
                 if cur.rowcount > 0:
                     reconciled += cur.rowcount
+                    _dual_write_pipeline_cloud_synced(
+                        rel_path, remote_dest, 'synced',
+                    )
                     continue
 
                 existing = conn.execute(
@@ -1569,6 +1634,9 @@ def _reconcile_with_remote_legacy(
                         (rel_path, now_iso, remote_dest)
                     )
                     reconciled += 1
+                    _dual_write_pipeline_cloud_synced(
+                        rel_path, remote_dest, 'synced',
+                    )
     except Exception as e:
         logger.warning("Reconcile error for ArchivedClips: %s", e)
 
@@ -1989,6 +2057,10 @@ def _drain_once(
                 (rel_path, event_size, time.time(), rel_path)
             )
             _fsync_db(conn)
+            _dual_write_pipeline_cloud_synced(
+                rel_path, None, 'uploading',
+                file_size=event_size, file_mtime=time.time(),
+            )
 
             # Use the shared rclone helper. It handles copy-vs-copyto,
             # nice/ionice, bwlimit, timeout, and stderr capture.
@@ -2855,6 +2927,10 @@ def queue_event_for_sync(folder: str, event_name: str, priority: bool = False) -
                     (canonical, stat.st_size, stat.st_mtime)
                 )
                 queued += 1
+                _dual_write_pipeline_cloud_synced(
+                    canonical, None, 'queued',
+                    file_size=stat.st_size, file_mtime=stat.st_mtime,
+                )
 
         conn.commit()
         if queued:

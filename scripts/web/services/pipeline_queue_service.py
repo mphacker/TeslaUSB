@@ -647,6 +647,84 @@ def release_pipeline_claim(
                 pass
 
 
+def release_pipeline_claim_by_source_path(
+    *,
+    stage: str,
+    source_path: str,
+    last_error: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Release a claimed row keyed by ``(stage, source_path)``.
+
+    Wave 4 PR-F3 (issue #184): the cloud_archive variant of
+    :func:`release_pipeline_claim`. Cloud rows are mirrored from
+    ``cloud_synced_files`` lazily — the producer in
+    ``cloud_archive_service._discover_events`` enqueues with
+    ``source_path = <relative event.json path>`` but does NOT set
+    ``legacy_id`` because the corresponding ``cloud_synced_files``
+    row is not created until upload starts. The legacy_id-keyed
+    :func:`release_pipeline_claim` therefore cannot find these rows.
+
+    The lookup uses the ``(stage, source_path)`` UNIQUE index — the
+    same index PR-A added for dual-write enqueue idempotency — so
+    this is O(1) and never matches more than one row.
+
+    Behaviour parity with :func:`release_pipeline_claim`:
+      * Resets ``status='pending'``, NULLs ``claimed_by`` /
+        ``claimed_at`` (so :func:`recover_stale_claims_pipeline`
+        won't pick the row up — it filters on ``in_progress``).
+      * Optional ``last_error`` stamped for forensics; ``None``
+        leaves the existing error untouched.
+      * Returns ``True`` on rowcount > 0, ``False`` otherwise.
+        Never raises — silent no-op on missing DB / sqlite errors,
+        same defensive contract as the rest of this module.
+    """
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    if not stage or not source_path:
+        return False
+    if last_error is not None:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'pending', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL, "
+            "       last_error = ? "
+            " WHERE stage = ? AND source_path = ?"
+        )
+        params = (last_error, stage, source_path)
+    else:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'pending', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL "
+            " WHERE stage = ? AND source_path = ?"
+        )
+        params = (stage, source_path)
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.debug(
+            "release_pipeline_claim_by_source_path(stage=%s, "
+            "source_path=%r) failed: %s",
+            stage, source_path, e,
+        )
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Reader API — Wave 4 PR-C (issue #184)
 # ---------------------------------------------------------------------------

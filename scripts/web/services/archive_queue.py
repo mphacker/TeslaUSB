@@ -1362,10 +1362,15 @@ def claim_specific_pending(row_id: int, claimed_by: str, *,
       If the row was already claimed, deleted, or never existed, the
       rowcount is 0 and we return ``None``.
     * On success, returns the row dict (post-update) AND fires the
-      pipeline_queue dual-write hook — which is a NO-OP in PR-F1
-      because the pipeline_queue row is already ``in_progress``
-      (we just claimed it). Keeping the hook call is intentional so
-      future state-mirror invariants stay enforced.
+      pipeline_queue dual-write hook. In the PR-F1 caller flow the
+      hook is **functionally idempotent** — the pipeline_queue row
+      is already ``in_progress`` because the caller claimed it via
+      ``pipeline_queue_service.claim_next_for_stage`` before invoking
+      us, so re-writing ``status='in_progress'`` is a write of the
+      same value and does not reset ``attempts``, ``claimed_at``, or
+      any other column. Keeping the hook call is intentional so a
+      future caller invoking this helper directly (without a prior
+      pipeline_queue claim) still keeps the two tables in sync.
 
     Args:
         row_id: ``archive_queue.id`` to claim.
@@ -1431,11 +1436,15 @@ def claim_specific_pending(row_id: int, claimed_by: str, *,
         )
         return None
     if claimed is not None:
-        # Mirror the claim into pipeline_queue. This is a NO-OP in
-        # PR-F1 (the pipeline row is already 'in_progress' because
-        # the caller claimed it via pipeline_queue.claim_next_for_stage
-        # before invoking us) but kept for invariant consistency in
-        # case a future caller invokes this helper directly.
+        # Mirror the claim into pipeline_queue. In PR-F1's caller flow
+        # this is **functionally idempotent** — the pipeline row is
+        # already 'in_progress' because the caller claimed it via
+        # pipeline_queue.claim_next_for_stage before invoking us, so
+        # re-writing status='in_progress' is a write of the same
+        # value (does not reset attempts/claimed_at/claimed_by). Kept
+        # intentionally so a future caller invoking this helper
+        # directly (without a prior pipeline_queue claim) still keeps
+        # the two tables in sync.
         _dual_write_pipeline_archive_state(
             claimed.get('source_path', ''),
             status='in_progress',

@@ -3693,12 +3693,19 @@ class TestClaimViaPipelineReader:
         finally:
             conn.close()
 
-    def test_pipeline_row_missing_legacy_id_releases_and_skips(
+    def test_pipeline_row_missing_legacy_id_moves_to_dead_letter(
         self, db_path, sample_file, caplog,
     ):
         # Manually insert a pipeline_queue row WITHOUT legacy_id to
         # simulate a corrupted dual-write. The wrapper must:
-        # (a) return None, (b) log WARNING, (c) update last_error.
+        # (a) return None,
+        # (b) log WARNING,
+        # (c) move the row to ``status='dead_letter'`` (NOT leave
+        #     it ``in_progress``) so ``recover_stale_claims_pipeline``
+        #     does not recycle it back to pending in a tight loop.
+        # (d) update ``last_error`` for forensic context.
+        # This is the PR-F1 review fix #1 contract — the missing
+        # legacy_id is unrecoverable corruption, not a transient.
         import logging as _log
         caplog.set_level(_log.WARNING)
         from services import pipeline_queue_service as pqs
@@ -3721,18 +3728,28 @@ class TestClaimViaPipelineReader:
                     and 'PR-F1' in r.getMessage()]
         assert len(warnings) >= 1
         assert any('legacy_id' in r.getMessage() for r in warnings)
+        # Operators should see the "moved to dead_letter" hint in the
+        # log so they know the row needs manual intervention.
+        assert any('dead_letter' in r.getMessage() for r in warnings)
 
-        # last_error has been recorded so operators can investigate.
+        # Row is dead_letter (NOT in_progress) so the recovery sweep
+        # leaves it alone and the worker never re-claims it.
         conn = sqlite3.connect(db_path)
         try:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT last_error FROM pipeline_queue "
+                "SELECT status, last_error FROM pipeline_queue "
                 " WHERE source_path = ? AND stage = 'archive_pending'",
                 (sample_file,),
             ).fetchone()
             assert row is not None
+            assert row['status'] == 'dead_letter', (
+                f"Expected dead_letter, got {row['status']!r} — "
+                "missing-legacy_id rows must NOT remain in_progress "
+                "or pending (would loop forever)"
+            )
             assert 'legacy_id' in (row['last_error'] or '')
+            assert 'unrecoverable' in (row['last_error'] or '')
         finally:
             conn.close()
 
@@ -3744,6 +3761,10 @@ class TestClaimViaPipelineReader:
         # simulating "the legacy row got deleted out from under us".
         # The wrapper must release the pipeline_queue claim back to
         # 'pending' so the next iteration can retry, AND log WARNING.
+        # Per PR-F1 review fix #2: ``claimed_by`` / ``claimed_at``
+        # MUST be cleared (not left stale) so the row presents as a
+        # clean ``pending`` row to operators and to
+        # ``recover_stale_claims_pipeline``.
         import logging as _log
         caplog.set_level(_log.WARNING)
         from services import archive_queue as aq
@@ -3759,24 +3780,37 @@ class TestClaimViaPipelineReader:
         )
         assert result is None
 
-        # WARNING logged with the legacy id.
         warnings = [r for r in caplog.records
                     if r.levelno == _log.WARNING
                     and 'PR-F1' in r.getMessage()
                     and 'archive_queue row' in r.getMessage()]
         assert len(warnings) >= 1
 
-        # Pipeline_queue row was released back to 'pending'.
+        # Pipeline_queue row was released back to 'pending' AND
+        # claim metadata was cleared.
         conn = sqlite3.connect(db_path)
         try:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT status FROM pipeline_queue "
+                "SELECT status, claimed_by, claimed_at, last_error "
+                "  FROM pipeline_queue "
                 " WHERE source_path = ? AND stage = 'archive_pending'",
                 (sample_file,),
             ).fetchone()
             assert row is not None
             assert row['status'] == 'pending'
+            assert row['claimed_by'] is None, (
+                "claimed_by must be cleared on release — leaving it "
+                "set would look like a stuck active claim AND would "
+                "NOT be picked up by recover_stale_claims_pipeline "
+                "(which filters on status='in_progress')"
+            )
+            assert row['claimed_at'] is None, (
+                "claimed_at must be cleared on release — see fix #2 "
+                "in PR #198 review"
+            )
+            # last_error gives operators a hint about what happened.
+            assert 'PR-F1' in (row['last_error'] or '')
         finally:
             conn.close()
 
@@ -3810,16 +3844,19 @@ class TestClaimViaPipelineReader:
         assert result['expected_size'] == 999999
         assert result['expected_mtime'] == 1.5
 
-    def test_pipeline_queue_service_import_failure_returns_none(
+    def test_claim_next_for_stage_exception_bubbles_to_caller(
         self, db_path, monkeypatch, caplog,
     ):
-        # Defensive: if pipeline_queue_service raises during the
-        # `claim_next_for_stage` call (e.g., transient sqlite error
-        # at import-time leaks through), the wrapper must NOT crash
-        # — return None and log. We simulate this by monkeypatching
-        # claim_next_for_stage to raise; the wrapper's try/except
-        # in ``_claim_via_pipeline_reader`` runs the same path the
-        # real ``except Exception`` arm would have caught.
+        # Contract assertion: ``_claim_via_pipeline_reader`` does NOT
+        # swallow exceptions from ``claim_next_for_stage``. The pipeline
+        # service is documented to swallow sqlite errors internally and
+        # return None on failure, so an exception escaping it indicates
+        # a real bug (e.g. a programmer error or unexpected runtime
+        # condition). Bubbling it lets the worker loop's outer
+        # try/except catch it, log a WARNING, and continue — consistent
+        # with how the legacy ``claim_next_for_worker`` exception is
+        # handled. We simulate the unexpected exception here and assert
+        # it propagates.
         import logging as _log
         caplog.set_level(_log.WARNING)
         from services import pipeline_queue_service as pqs
@@ -3829,14 +3866,226 @@ class TestClaimViaPipelineReader:
 
         monkeypatch.setattr(pqs, 'claim_next_for_stage', _boom)
 
-        # The outer try/except in archive_worker._run_worker_loop
-        # catches the exception when called from the loop, but our
-        # wrapper itself doesn't catch claim_next_for_stage errors
-        # — that's intentional: ``claim_next_for_stage`` is documented
-        # to swallow sqlite errors and return None on failure, so an
-        # exception bubbling out is a real bug. We assert it bubbles.
         import pytest
         with pytest.raises(RuntimeError):
             archive_worker._claim_via_pipeline_reader(
                 'w-pr-f1', db_path,
             )
+
+
+# ---------------------------------------------------------------------------
+# TestRunWorkerLoopReaderSwitch (PR-F1 review fix #6)
+# ---------------------------------------------------------------------------
+
+
+class TestRunWorkerLoopReaderSwitch:
+    """End-to-end coverage of the cutover-flag branch in ``_run_worker_loop``.
+
+    PR-F1 (issue #184) added a flag ``ARCHIVE_QUEUE_USE_PIPELINE_READER``
+    that selects between two claim paths:
+
+    * Flag ON  → ``_claim_via_pipeline_reader`` (pipeline_queue source-of-truth)
+    * Flag OFF → ``archive_queue.claim_next_for_worker`` + PR-E shadow peek
+
+    These tests run the **real** worker loop (via ``start_worker``) with a
+    single enqueued clip and assert that:
+
+    1. The chosen claim path was actually invoked (spy via monkeypatch).
+    2. The other claim path was NOT invoked (no double-claiming).
+    3. The clip drains end-to-end (status='copied' on archive_queue, and
+       'done' on the pipeline_queue mirror) — proving the dual-write
+       contract holds across the switch.
+    """
+
+    def test_flag_on_routes_through_pipeline_reader_and_completes(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # Force flag ON.
+        monkeypatch.setattr(
+            archive_worker, '_use_pipeline_reader_enabled',
+            lambda: True,
+        )
+        # Spy on both claim paths so we can assert which one ran.
+        pipeline_calls: List[str] = []
+        legacy_calls: List[str] = []
+
+        real_pipeline_claim = archive_worker._claim_via_pipeline_reader
+        real_legacy_claim = archive_queue.claim_next_for_worker
+
+        def _pipeline_spy(worker_id, db_path):
+            pipeline_calls.append(worker_id)
+            return real_pipeline_claim(worker_id, db_path)
+
+        def _legacy_spy(*args, **kwargs):
+            legacy_calls.append('called')
+            return real_legacy_claim(*args, **kwargs)
+
+        monkeypatch.setattr(
+            archive_worker, '_claim_via_pipeline_reader', _pipeline_spy,
+        )
+        monkeypatch.setattr(
+            archive_queue, 'claim_next_for_worker', _legacy_spy,
+        )
+
+        clip = make_clip("RecentClips/pf-front.mp4", mtime=1000.0)
+        enqueue_for_archive(clip, db_path=db)
+
+        archive_worker.start_worker(
+            db, archive_root, teslacam_root=teslacam_root,
+        )
+        try:
+            # Wait for the row to land in 'copied'.
+            deadline = time.monotonic() + 15
+            copied = False
+            while time.monotonic() < deadline:
+                rows = list_queue(db_path=db)
+                if rows and rows[0]['status'] == 'copied':
+                    copied = True
+                    break
+                time.sleep(0.05)
+            assert copied, (
+                f"Flag-ON path failed to drain row; final state: "
+                f"{[dict(r) for r in list_queue(db_path=db)]}"
+            )
+        finally:
+            archive_worker.stop_worker(timeout=5)
+
+        # Pipeline path was hit at least once for the actual claim.
+        assert len(pipeline_calls) >= 1, (
+            "Flag ON but _claim_via_pipeline_reader was never called"
+        )
+        # Legacy path must NOT have been called as a fallback — the
+        # flag-on branch is exclusive.
+        assert legacy_calls == [], (
+            "Flag ON but legacy claim_next_for_worker was also called "
+            "— double-claim risk"
+        )
+
+        # Pipeline_queue mirror reflects the completion. After
+        # mark_copied, the row is moved to stage='archive_done' and
+        # status='done', so we search by source_path only.
+        conn = sqlite3.connect(db)
+        try:
+            conn.row_factory = sqlite3.Row
+            pr = conn.execute(
+                "SELECT stage, status FROM pipeline_queue "
+                " WHERE source_path = ?",
+                (clip,),
+            ).fetchone()
+            assert pr is not None, (
+                "Pipeline_queue mirror row missing — dual-write "
+                "broke between claim and completion"
+            )
+            assert pr['stage'] == 'archive_done', (
+                f"Pipeline_queue mirror stage is {pr['stage']!r} "
+                f"— expected 'archive_done' after copy"
+            )
+            assert pr['status'] == 'done', (
+                f"Pipeline_queue mirror status is {pr['status']!r} "
+                f"— expected 'done' after copy"
+            )
+        finally:
+            conn.close()
+
+    def test_flag_off_uses_legacy_path_and_runs_shadow_peek(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # Force flag OFF (the production default).
+        monkeypatch.setattr(
+            archive_worker, '_use_pipeline_reader_enabled',
+            lambda: False,
+        )
+        # Force shadow peek ON so we can verify it ran.
+        monkeypatch.setattr(
+            archive_worker, '_shadow_pipeline_queue_enabled',
+            lambda: True,
+        )
+
+        pipeline_calls: List[str] = []
+        legacy_calls: List[str] = []
+        shadow_calls: List[str] = []
+
+        real_pipeline_claim = archive_worker._claim_via_pipeline_reader
+        real_legacy_claim = archive_queue.claim_next_for_worker
+        real_shadow_compare = archive_worker._shadow_compare_picks
+
+        def _pipeline_spy(worker_id, db_path):
+            pipeline_calls.append(worker_id)
+            return real_pipeline_claim(worker_id, db_path)
+
+        def _legacy_spy(*args, **kwargs):
+            legacy_calls.append('called')
+            return real_legacy_claim(*args, **kwargs)
+
+        def _shadow_spy(*args, **kwargs):
+            shadow_calls.append('called')
+            return real_shadow_compare(*args, **kwargs)
+
+        monkeypatch.setattr(
+            archive_worker, '_claim_via_pipeline_reader', _pipeline_spy,
+        )
+        monkeypatch.setattr(
+            archive_queue, 'claim_next_for_worker', _legacy_spy,
+        )
+        monkeypatch.setattr(
+            archive_worker, '_shadow_compare_picks', _shadow_spy,
+        )
+
+        clip = make_clip("RecentClips/pf-front-off.mp4", mtime=1000.0)
+        enqueue_for_archive(clip, db_path=db)
+
+        archive_worker.start_worker(
+            db, archive_root, teslacam_root=teslacam_root,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            copied = False
+            while time.monotonic() < deadline:
+                rows = list_queue(db_path=db)
+                if rows and rows[0]['status'] == 'copied':
+                    copied = True
+                    break
+                time.sleep(0.05)
+            assert copied, (
+                f"Flag-OFF path failed to drain row; final state: "
+                f"{[dict(r) for r in list_queue(db_path=db)]}"
+            )
+        finally:
+            archive_worker.stop_worker(timeout=5)
+
+        # Legacy path was hit; pipeline path was NOT.
+        assert len(legacy_calls) >= 1, (
+            "Flag OFF but legacy claim_next_for_worker was never called"
+        )
+        assert pipeline_calls == [], (
+            "Flag OFF but _claim_via_pipeline_reader was called "
+            "— branch should be exclusive"
+        )
+        # Shadow comparison runs on the legacy path.
+        assert len(shadow_calls) >= 1, (
+            "Flag OFF and shadow ON, but _shadow_compare_picks was "
+            "never invoked"
+        )
+
+        # Dual-write still mirrors the completion to pipeline_queue
+        # (the dual-write hooks fire from the legacy mark_copied path).
+        # After mark_copied, stage moves to 'archive_done'.
+        conn = sqlite3.connect(db)
+        try:
+            conn.row_factory = sqlite3.Row
+            pr = conn.execute(
+                "SELECT stage, status FROM pipeline_queue "
+                " WHERE source_path = ?",
+                (clip,),
+            ).fetchone()
+            assert pr is not None
+            assert pr['stage'] == 'archive_done', (
+                f"Pipeline_queue mirror stage is {pr['stage']!r} "
+                f"after legacy-path completion — expected 'archive_done'"
+            )
+            assert pr['status'] == 'done', (
+                f"Pipeline_queue mirror status is {pr['status']!r} "
+                f"after legacy-path completion — expected 'done'"
+            )
+        finally:
+            conn.close()

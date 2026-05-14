@@ -2165,22 +2165,35 @@ def _claim_via_pipeline_reader(
         return None
     legacy_id = pipeline_row.get('legacy_id')
     if legacy_id is None:
-        # The dual-write enqueue did not set legacy_id — treat as
-        # data-shape failure. Update the pipeline row to surface
-        # the gap; a subsequent recover_stale_claims_pipeline will
-        # reclaim it and re-attempt.
+        # Wave 4 PR-F1 review fix #1 (PR #198): the dual-write
+        # enqueue did not set legacy_id. This is a permanent
+        # data-shape corruption that retrying cannot fix — the
+        # back-pointer was never set, so no number of recovery
+        # cycles will produce one. Move the row to ``dead_letter``
+        # immediately (instead of leaving it in_progress and letting
+        # ``recover_stale_claims_pipeline`` keep recycling it back to
+        # pending in a tight loop). Operators can inspect the
+        # dead-letter rows via the upcoming /api/pipeline_queue/
+        # dead_letter endpoint and either manually backfill the
+        # legacy_id or drop the row.
         try:
             pqs.update_pipeline_row(
                 stage='archive_pending',
                 source_path=pipeline_row.get('source_path') or '',
-                last_error='PR-F1: pipeline row missing legacy_id',
+                status='dead_letter',
+                last_error=(
+                    'PR-F1: pipeline_queue row missing legacy_id '
+                    '(unrecoverable data-shape corruption); manual '
+                    'intervention required'
+                ),
                 db_path=db_path,
             )
         except Exception:  # noqa: BLE001
             pass
         logger.warning(
             "PR-F1 reader switch: pipeline_queue row id=%s has no "
-            "legacy_id — skipping. Source: %r",
+            "legacy_id — moved to dead_letter (unrecoverable). "
+            "Source: %r",
             pipeline_row.get('id'), pipeline_row.get('source_path'),
         )
         return None
@@ -2188,17 +2201,27 @@ def _claim_via_pipeline_reader(
         int(legacy_id), worker_id, db_path=db_path,
     )
     if legacy_row is None:
-        # Legacy row missing or already-claimed — release the
-        # pipeline claim back to pending so the next iteration can
-        # reconcile (or recover_stale_claims_pipeline will sweep
-        # it). This handles the rare race where the legacy reader
-        # was still active during a flag-flip and grabbed the row
-        # first; the worker simply tries again next tick.
+        # Wave 4 PR-F1 review fix #2 (PR #198): legacy row missing
+        # or already-claimed. Release the pipeline_queue claim back
+        # to ``pending`` AND clear ``claimed_by`` / ``claimed_at`` so
+        # the row presents as a clean ``pending`` row to operators
+        # and to ``recover_stale_claims_pipeline``. (Leaving the
+        # claim metadata stale on a ``pending`` row would look like
+        # a stuck active claim AND would NOT be picked up by
+        # recovery — which filters on ``status='in_progress'``.)
+        # The next worker iteration will re-attempt; since the
+        # legacy row is missing, the same code path will fire
+        # again — but the legacy reader (or stale-recovery in the
+        # legacy queue) will eventually reconcile the gap.
         try:
-            pqs.update_pipeline_row_by_legacy_id(
+            pqs.release_pipeline_claim(
                 legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
                 legacy_id=int(legacy_id),
-                status='pending',
+                last_error=(
+                    'PR-F1: archive_queue row not claimable '
+                    '(deleted, already claimed, or status changed) '
+                    '— pipeline claim released'
+                ),
                 db_path=db_path,
             )
         except Exception:  # noqa: BLE001
@@ -2210,6 +2233,16 @@ def _claim_via_pipeline_reader(
             legacy_id,
         )
         return None
+    # Wave 4 PR-F1 review fix #4 (PR #198): note that
+    # ``pipeline_queue.attempts`` was already bumped by
+    # ``claim_next_for_stage`` above, but ``archive_queue.attempts``
+    # was NOT bumped by ``claim_specific_pending`` (the legacy claim
+    # path historically does not increment attempts on claim). The
+    # two counters intentionally drift on the success path — the
+    # legacy ``attempts`` is bumped only on ``mark_failed``, while
+    # the pipeline ``attempts`` reflects every claim. Operators
+    # cross-comparing the two during the cutover window will see
+    # this divergence; it is not a dual-write bug.
     adapted = _adapt_pipeline_row_to_legacy_shape(pipeline_row)
     # The adapter takes its expected_size/expected_mtime from the
     # pipeline payload, but the legacy row may carry fresher values
@@ -2418,6 +2451,20 @@ def _run_worker_loop(db_path: str, archive_root: str,
             # now, so comparing against the legacy reader is moot.
             # Default OFF preserves the legacy claim path (and its
             # PR-E shadow comparison) so a fresh deploy is a no-op.
+            #
+            # TODO(PR-F2 / future): consider an *inverse* shadow when
+            # the flag is ON — peek the legacy reader's pick (via a
+            # non-mutating SELECT against archive_queue, mirroring
+            # ``peek_next_for_stage``) and compare against the
+            # pipeline pick we just claimed. Same purpose as PR-E's
+            # shadow but in the opposite direction, giving operators
+            # confidence during the cutover window. Out of scope for
+            # PR-F1 because (a) the single-worker invariant means a
+            # divergence couldn't actually starve the legacy queue,
+            # and (b) the legacy reader has no equivalent of
+            # ``peek_top_n_paths_for_stage`` yet — would need a new
+            # ``archive_queue.peek_next_for_worker`` helper. Track
+            # via the relevant sub-PR (see issue body's Wave 4 plan).
             if _use_pipeline_reader_enabled():
                 try:
                     row = _claim_via_pipeline_reader(worker_id, db_path)

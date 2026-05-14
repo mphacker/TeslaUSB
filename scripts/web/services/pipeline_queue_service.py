@@ -559,6 +559,94 @@ def update_pipeline_row_by_legacy_id(
                 pass
 
 
+def release_pipeline_claim(
+    *,
+    legacy_table: str,
+    legacy_id: int,
+    last_error: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Release a claimed pipeline_queue row back to ``status='pending'``,
+    nulling ``claimed_by`` and ``claimed_at``.
+
+    Wave 4 PR-F1 (issue #184): used by ``archive_worker`` when a
+    pipeline_queue row was claimed but the work didn't actually
+    start (e.g. the legacy mirror failed or the dispatch path bailed
+    before doing real work). Differs from
+    :func:`update_pipeline_row_by_legacy_id` with ``status='pending'``
+    in that it ALSO clears the claim metadata — leaving stale
+    ``claimed_by`` / ``claimed_at`` on a ``pending`` row would
+    confuse forensics (looks like a stuck active claim) and would
+    NOT be picked up by :func:`recover_stale_claims_pipeline`
+    (which filters on ``status='in_progress'`` only).
+
+    The ``_UPDATE_COLUMNS`` whitelist used by
+    :func:`update_pipeline_row*` deliberately excludes ``claimed_by``
+    / ``claimed_at`` so callers can't accidentally clear claim state
+    via the generic update API; this helper is the public, named
+    entry point for "release a claim cleanly."
+
+    Args:
+        legacy_table: One of the ``LEGACY_TABLE_*`` constants — same
+            semantics as :func:`update_pipeline_row_by_legacy_id`.
+        legacy_id: ``archive_queue.id`` (or equivalent legacy PK).
+        last_error: Optional human-readable string stamped into
+            ``last_error`` for forensic context. ``None`` (default)
+            leaves the existing ``last_error`` untouched.
+        db_path: Override the geodata.db path (test injection).
+
+    Returns:
+        ``True`` on a successful UPDATE (rowcount > 0). ``False`` on
+        missing DB, missing args, sqlite error, or no matching row
+        — same silent no-op semantics as the rest of this module.
+        Returns ``False`` (not raising) so a pipeline_queue glitch
+        cannot abort the caller's mutation flow.
+    """
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    if not legacy_table or legacy_id is None:
+        return False
+    if last_error is not None:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'pending', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL, "
+            "       last_error = ? "
+            " WHERE legacy_table = ? AND legacy_id = ?"
+        )
+        params = (last_error, legacy_table, int(legacy_id))
+    else:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'pending', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL "
+            " WHERE legacy_table = ? AND legacy_id = ?"
+        )
+        params = (legacy_table, int(legacy_id))
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.debug(
+            "release_pipeline_claim(table=%s, id=%s) failed: %s",
+            legacy_table, legacy_id, e,
+        )
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Reader API — Wave 4 PR-C (issue #184)
 # ---------------------------------------------------------------------------

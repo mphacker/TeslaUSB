@@ -827,6 +827,170 @@ class TestUpdatePipelineRowByLegacyId:
 
 
 # ---------------------------------------------------------------------------
+# Wave 4 PR-F1 — release_pipeline_claim helper (review fix #2 of PR #198)
+# ---------------------------------------------------------------------------
+
+
+class TestReleasePipelineClaim:
+    """Unit tests for ``release_pipeline_claim``.
+
+    PR-F1 review fix #2 (PR #198): the helper exists so the archive
+    worker can release a pipeline_queue claim back to ``pending`` AND
+    null ``claimed_by`` / ``claimed_at`` in one atomic UPDATE — closing
+    the gap left by ``update_pipeline_row_by_legacy_id``, which
+    deliberately whitelists only the "user data" columns and cannot
+    clear claim metadata.
+    """
+
+    def _claim_and_get_row(self, db, legacy_id):
+        # Helper: insert a row, claim it, return the row dict.
+        pqs.dual_write_enqueue(
+            source_path=f'/tmp/r{legacy_id}.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=legacy_id,
+            db_path=db,
+        )
+        return pqs.claim_next_for_stage(
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            claimed_by=f'w-{legacy_id}',
+            db_path=db,
+        )
+
+    def test_release_clears_claim_metadata_and_status(self, geodata_db):
+        # Set up a claimed row.
+        claimed = self._claim_and_get_row(geodata_db, 1001)
+        assert claimed is not None
+        assert claimed['status'] == 'in_progress'
+        assert claimed['claimed_by'] == 'w-1001'
+        assert claimed['claimed_at'] is not None
+
+        ok = pqs.release_pipeline_claim(
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=1001,
+            db_path=geodata_db,
+        )
+        assert ok is True
+
+        conn = sqlite3.connect(geodata_db)
+        try:
+            r = conn.execute(
+                "SELECT status, claimed_by, claimed_at FROM pipeline_queue "
+                " WHERE legacy_id = ?",
+                (1001,),
+            ).fetchone()
+            assert r is not None
+            assert r[0] == 'pending'
+            assert r[1] is None, "claimed_by must be cleared"
+            assert r[2] is None, "claimed_at must be cleared"
+        finally:
+            conn.close()
+
+    def test_release_sets_last_error_when_provided(self, geodata_db):
+        self._claim_and_get_row(geodata_db, 1002)
+        ok = pqs.release_pipeline_claim(
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=1002,
+            last_error='PR-F1 test: simulated mirror failure',
+            db_path=geodata_db,
+        )
+        assert ok is True
+        conn = sqlite3.connect(geodata_db)
+        try:
+            r = conn.execute(
+                "SELECT last_error FROM pipeline_queue WHERE legacy_id = ?",
+                (1002,),
+            ).fetchone()
+            assert r is not None
+            assert 'PR-F1 test' in r[0]
+        finally:
+            conn.close()
+
+    def test_release_without_last_error_preserves_existing_value(
+        self, geodata_db,
+    ):
+        # Pre-populate last_error, then release without overwriting.
+        self._claim_and_get_row(geodata_db, 1003)
+        # Stamp an existing last_error.
+        conn = sqlite3.connect(geodata_db)
+        try:
+            conn.execute(
+                "UPDATE pipeline_queue SET last_error = ? "
+                " WHERE legacy_id = ?",
+                ('pre-existing forensic note', 1003),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        ok = pqs.release_pipeline_claim(
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=1003,
+            db_path=geodata_db,
+        )
+        assert ok is True
+        conn = sqlite3.connect(geodata_db)
+        try:
+            r = conn.execute(
+                "SELECT last_error FROM pipeline_queue WHERE legacy_id = ?",
+                (1003,),
+            ).fetchone()
+            assert r[0] == 'pre-existing forensic note', (
+                "release_pipeline_claim with last_error=None must NOT "
+                "overwrite an existing last_error value"
+            )
+        finally:
+            conn.close()
+
+    def test_release_missing_legacy_id_returns_false(self, geodata_db):
+        ok = pqs.release_pipeline_claim(
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=99999,
+            db_path=geodata_db,
+        )
+        assert ok is False
+
+    def test_release_missing_args_returns_false(self, geodata_db):
+        # Missing legacy_table.
+        assert pqs.release_pipeline_claim(
+            legacy_table='',
+            legacy_id=1,
+            db_path=geodata_db,
+        ) is False
+        # Missing legacy_id.
+        assert pqs.release_pipeline_claim(
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=None,  # type: ignore[arg-type]
+            db_path=geodata_db,
+        ) is False
+
+    def test_release_missing_db_returns_false(self, tmp_path):
+        ok = pqs.release_pipeline_claim(
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=1,
+            db_path=str(tmp_path / 'does-not-exist.db'),
+        )
+        assert ok is False
+
+    def test_release_makes_row_visible_to_next_claim(self, geodata_db):
+        # End-to-end: release → next claim should succeed.
+        self._claim_and_get_row(geodata_db, 1004)
+        pqs.release_pipeline_claim(
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=1004,
+            db_path=geodata_db,
+        )
+        next_claim = pqs.claim_next_for_stage(
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            claimed_by='w-after-release',
+            db_path=geodata_db,
+        )
+        assert next_claim is not None
+        assert next_claim['legacy_id'] == 1004
+        assert next_claim['claimed_by'] == 'w-after-release'
+
+
+# ---------------------------------------------------------------------------
 # Wave 4 PR-B — integration: legacy mutation mirrors to pipeline_queue
 # ---------------------------------------------------------------------------
 

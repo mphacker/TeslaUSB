@@ -25,7 +25,7 @@ from typing import Any, Dict
 
 from flask import Blueprint, jsonify, request
 
-from config import ARCHIVE_QUEUE_ENABLED, IMG_CAM_PATH
+from config import IMG_CAM_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def status():
         producer = {}
 
     return jsonify({
-        "enabled": bool(ARCHIVE_QUEUE_ENABLED),
+        "enabled": True,
         "counts": counts,
         "producer": producer,
     })
@@ -112,7 +112,7 @@ def archive_status():
         # do something. Defaults to True for backward compat if the
         # watchdog payload is missing the field (older deployments).
         'actionable': bool(health.get('actionable', True)),
-        'enabled': bool(ARCHIVE_QUEUE_ENABLED),
+        'enabled': True,
         'checked_at': health.get('checked_at'),
         'watchdog_running': health.get('watchdog_running', False),
 

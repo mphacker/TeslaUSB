@@ -671,12 +671,11 @@ def api_wifi_scan():
 def _get_archive_config() -> dict:
     """Read current archive settings for the settings page."""
     from config import (
-        ARCHIVE_ENABLED, ARCHIVE_ONLY_DRIVING,
+        ARCHIVE_ENABLED,
         ARCHIVE_RETENTION_DAYS, ARCHIVE_MIN_FREE_SPACE_GB,
     )
     return {
         'enabled': ARCHIVE_ENABLED,
-        'only_driving': ARCHIVE_ONLY_DRIVING,
         'retention_days': ARCHIVE_RETENTION_DAYS,
         'min_free_space_gb': ARCHIVE_MIN_FREE_SPACE_GB,
     }
@@ -685,12 +684,11 @@ def _get_archive_config() -> dict:
 def _get_mapping_config() -> dict:
     """Read current mapping settings for the settings page."""
     from config import (
-        MAPPING_ENABLED, MAPPING_ARCHIVE_INDEXING,
+        MAPPING_ENABLED,
         MAPPING_TRIP_GAP_MINUTES, MAPPING_EVENT_THRESHOLDS,
     )
     return {
         'enabled': MAPPING_ENABLED,
-        'archive_indexing': MAPPING_ARCHIVE_INDEXING,
         'trip_gap_minutes': MAPPING_TRIP_GAP_MINUTES,
         'speed_limit_mph': round(MAPPING_EVENT_THRESHOLDS.get('speed_limit_mps', 35.76) * 2.237, 0),
     }
@@ -716,7 +714,6 @@ def save_archive_settings():
     try:
         updates = {
             'archive.enabled': 'enabled' in request.form,
-            'archive.only_driving': 'only_driving' in request.form,
             'archive.retention_days': max(1, int(request.form.get('retention_days', 30))),
             'archive.min_free_space_gb': max(1, int(request.form.get('min_free_space_gb', 10))),
         }
@@ -741,7 +738,6 @@ def save_mapping_settings():
 
         updates = {
             'mapping.enabled': 'enabled' in request.form,
-            'mapping.archive_indexing': 'archive_indexing' in request.form,
             'mapping.trip_gap_minutes': max(1, int(request.form.get('trip_gap_minutes', 5))),
             'mapping.event_detection.speed_limit_mps': speed_mps,
         }

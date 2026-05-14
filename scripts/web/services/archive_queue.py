@@ -98,17 +98,18 @@ logger = logging.getLogger(__name__)
 # **Issue #178 — priority swap.** Pre-#178 the order was inverted:
 # ``RECENT_CLIPS=1, EVENTS=2``. The original reasoning ("Tesla rotates
 # RecentClips out after ~60 min, so they're the most urgent") was
-# correct when the worker copied every RecentClip. After issue #167
-# (``skip_stationary_recent_clips``) shipped, most RecentClips on a
-# parked car became low-value skip-decisions and the priority order
-# starved real Sentry events: live evidence on cybertruckusb showed
-# 71 SentryClips events untouched for 130+ minutes while the worker
-# burned its SDIO budget on parked-Sentry RecentClips skip decisions.
-# Events are the highest-value footage (something physically happened
-# to the car); RecentClips driving footage is dashcam-grade and gets
-# the second tier; the SEI-peek skip-stationary path handles the
-# parked-no-event case at copy time so it never competes with events
-# for the queue head.
+# correct when the worker copied every RecentClip. After the SEI-peek
+# skip-stationary path shipped (issue #167; made unconditional in
+# issue #184 Wave 1), most RecentClips on a parked car became
+# low-value skip-decisions and the priority order starved real Sentry
+# events: live evidence on cybertruckusb showed 71 SentryClips events
+# untouched for 130+ minutes while the worker burned its SDIO budget
+# on parked-Sentry RecentClips skip decisions. Events are the
+# highest-value footage (something physically happened to the car);
+# RecentClips driving footage is dashcam-grade and gets the second
+# tier; the SEI-peek skip-stationary path handles the parked-no-event
+# case at copy time so it never competes with events for the queue
+# head.
 #
 # A v13 schema migration (``mapping_migrations.py``) flips existing
 # non-terminal rows on the first run after upgrade so the in-flight
@@ -1231,9 +1232,9 @@ def mark_skipped_stationary(row_id: int, *,
     where the archive worker peeked at the source clip's SEI metadata
     and found no GPS-bearing message (no movement / no GPS lock),
     indicating the clip is overnight Sentry-while-parked footage that
-    the operator opted not to copy via the
-    ``archive.skip_stationary_recent_clips`` config flag. No retry, no
-    dead-letter — the operator's decision is final.
+    the worker unconditionally skips at source (issue #184 Wave 1
+    made this behavior intrinsic — there is no longer an opt-in
+    config flag). No retry, no dead-letter — the decision is final.
 
     Mirrors :func:`mark_source_gone` exactly: same precondition (the
     row MUST be ``claimed`` so we never produce an unattributable

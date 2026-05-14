@@ -461,10 +461,8 @@ def ensure_worker_started() -> bool:
         return True
     try:
         from config import (
-            ARCHIVE_QUEUE_ENABLED, ARCHIVE_DIR, MAPPING_DB_PATH,
+            ARCHIVE_DIR, MAPPING_DB_PATH,
         )
-        if not ARCHIVE_QUEUE_ENABLED:
-            return False
         from services.video_service import get_teslacam_path
         tc = get_teslacam_path()
         return start_worker(MAPPING_DB_PATH, ARCHIVE_DIR, teslacam_root=tc)
@@ -1380,28 +1378,15 @@ _SKIP_GPS_PEEK_SAMPLE_RATE = 30
 _SKIP_GPS_PEEK_MAX_WALK_BYTES = 2 * 1024 * 1024
 
 
-def _skip_stationary_recent_clips_enabled() -> bool:
-    """Return the runtime value of
-    ``archive.skip_stationary_recent_clips``.
-
-    Looked up at call time so tests can monkeypatch the config module
-    after import. Falls back to ``False`` if config isn't importable
-    (unit-test environments without the full app), which matches the
-    documented default — operators must opt in.
-    """
-    try:
-        from config import ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS
-        return bool(ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS)
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _clip_has_gps_signal(source_path: str) -> Optional[bool]:
     """Return whether a RecentClips candidate has any GPS-bearing SEI.
 
     Issue #167 sub-deliverable 2 — fast SEI peek used by
     :func:`process_one_claim` to decide whether to skip a stationary
-    overnight RecentClips clip before copying it.
+    overnight RecentClips clip before copying it. Issue #184 Wave 1
+    made the skip-stationary behavior unconditional — there is no
+    longer an opt-in toggle; the peek runs for every RecentClips
+    candidate.
 
     Returns:
       * ``True``  — at least one SEI message with non-zero lat/lon was
@@ -1549,11 +1534,11 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
     Possible return values:
       * ``'copied'``       — file copied + indexer enqueued
       * ``'source_gone'``  — source vanished (no retry, terminal)
-      * ``'skipped_stationary'`` — issue #167 sub-deliverable 2:
+      * ``'skipped_stationary'`` — issue #167 sub-deliverable 2 (made
+                             unconditional in issue #184 Wave 1):
                              RecentClips clip with no GPS-bearing SEI
-                             message; opted out via the
-                             ``archive.skip_stationary_recent_clips``
-                             config flag (no retry, terminal)
+                             message; the worker always skips parked-no-event
+                             RecentClips at source (no retry, terminal)
       * ``'pending'``      — released back to pending (stable-write
                              gate, disk pause, time-budget abort,
                              transient error with attempts left)
@@ -1615,19 +1600,19 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         return 'pending'
 
     # Issue #167 sub-deliverable 2 — skip-at-source for stationary
-    # RecentClips. Runs AFTER the stable-write gate (so we never peek
-    # at a half-written file) and BEFORE the disk-space guard (so a
-    # successful skip can't be falsely paused by a 'critical' disk
-    # verdict — the skip frees no bytes itself but neither does it
-    # consume any). Sentry/Saved event clips have priority 2 and
-    # never enter this branch — they bypass the SEI peek entirely
-    # and follow the normal copy path. ``_clip_has_gps_signal``
-    # returns ``None`` for any ambiguous case (parse error, mmap
-    # failure, file vanished mid-peek), and we fall through to the
-    # normal copy path so a parser bug can never silently drop a
-    # clip we should have copied.
-    if (_skip_stationary_recent_clips_enabled()
-            and _is_recent_clips_priority(row)):
+    # RecentClips. Issue #184 Wave 1 made this unconditional: every
+    # RecentClips candidate is SEI-peeked. Runs AFTER the stable-write
+    # gate (so we never peek at a half-written file) and BEFORE the
+    # disk-space guard (so a successful skip can't be falsely paused
+    # by a 'critical' disk verdict — the skip frees no bytes itself
+    # but neither does it consume any). Sentry/Saved event clips have
+    # priority 1 and never enter this branch — they bypass the SEI
+    # peek entirely and follow the normal copy path.
+    # ``_clip_has_gps_signal`` returns ``None`` for any ambiguous case
+    # (parse error, mmap failure, file vanished mid-peek), and we fall
+    # through to the normal copy path so a parser bug can never
+    # silently drop a clip we should have copied.
+    if _is_recent_clips_priority(row):
         gps_signal = _clip_has_gps_signal(source_path)
         if gps_signal is False:
             archive_queue.mark_skipped_stationary(row_id, db_path=db_path)

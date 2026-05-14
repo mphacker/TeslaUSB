@@ -440,17 +440,9 @@ def test_indexer_block_catchup(monkeypatch):
 # Archive block
 # ---------------------------------------------------------------------------
 
-def test_archive_block_disabled(monkeypatch):
-    import blueprints.system_health as sh
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False, raising=False)
-    block = sh._archive_block()
-    assert block['severity'] == 'unknown'
-
-
 def test_archive_block_paused(monkeypatch):
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
 
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 10, 'dead_letter': 0})
@@ -467,7 +459,6 @@ def test_archive_block_paused(monkeypatch):
 def test_archive_block_watchdog_error(monkeypatch):
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
 
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 0, 'dead_letter': 0})
@@ -487,7 +478,6 @@ def test_archive_block_files_lost_24h_warns(monkeypatch):
     user-facing message that includes the count."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
 
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 0, 'dead_letter': 0})
@@ -509,7 +499,6 @@ def test_archive_block_files_lost_pluralization(monkeypatch):
     """Singular vs plural messages for 1 vs N clips lost."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 0, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -530,7 +519,6 @@ def test_archive_block_files_lost_takes_precedence_over_dead_letters(
     unrecoverable, while DL rows still have the source on disk."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 0, 'dead_letter': 5})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -552,7 +540,6 @@ def test_archive_block_lost_24h_zero_means_ok(monkeypatch):
     """Zero lost files must not bump severity."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 0, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -572,7 +559,6 @@ def test_archive_block_count_source_gone_failure_safe(monkeypatch):
     degrade to lost_24h=0, not 500 the dashboard."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 0, 'dead_letter': 0})
     def boom(hours=24):
@@ -588,15 +574,6 @@ def test_archive_block_count_source_gone_failure_safe(monkeypatch):
     assert block['severity'] == 'ok'
 
 
-def test_archive_block_disabled_includes_lost_24h_field(monkeypatch):
-    """The disabled block must still include lost_24h: 0 so JS
-    consumers don't have to special-case missing keys."""
-    import blueprints.system_health as sh
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False, raising=False)
-    block = sh._archive_block()
-    assert block['lost_24h'] == 0
-
-
 # ---------------------------------------------------------------------------
 # Phase 4.4 (#101) — drain-rate ETA in archive block
 # ---------------------------------------------------------------------------
@@ -607,7 +584,6 @@ def test_archive_block_eta_appears_in_message_when_pending_with_rate(
     in the user-facing message (e.g., '15 pending — est. 5 min')."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 15, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -635,7 +611,6 @@ def test_archive_block_eta_appears_in_catchup_warn(monkeypatch):
     """Even at the >200 pending warn level, ETA must still be shown."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 1233, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -661,7 +636,6 @@ def test_archive_block_no_eta_falls_back_to_legacy_message(monkeypatch):
     block must still render the legacy pending message."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 500, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -682,23 +656,10 @@ def test_archive_block_no_eta_falls_back_to_legacy_message(monkeypatch):
     assert block['eta_human'] is None
 
 
-def test_archive_block_disabled_includes_eta_fields(monkeypatch):
-    """The disabled block must include the new ETA fields so JS
-    consumers don't have to special-case missing keys (mirrors the
-    Phase 4.3 lost_24h contract)."""
-    import blueprints.system_health as sh
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False, raising=False)
-    block = sh._archive_block()
-    assert block['eta_seconds'] is None
-    assert block['eta_human'] is None
-    assert block['drain_rate_per_sec'] is None
-
-
 def test_archive_block_status_failure_includes_eta_fields(monkeypatch):
     """When the inner subsystem fetch raises, the safety-net block
     must still include the ETA fields so JS doesn't break."""
     import blueprints.system_health as sh
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     # Force an import-time raise inside the try block.
     def _explode(*a, **kw):
         raise RuntimeError("simulated")
@@ -857,7 +818,6 @@ def test_archive_block_paused_load_message(monkeypatch):
     and the threshold."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 10, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -895,7 +855,6 @@ def test_archive_block_load_auto_paused_without_manual_flag(monkeypatch):
     state entirely."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 442, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -927,7 +886,6 @@ def test_archive_block_disk_auto_paused_without_manual_flag(monkeypatch):
     ``pause_reason`` must surface it."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 5, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -955,7 +913,6 @@ def test_archive_block_paused_disk_message(monkeypatch):
     """End-to-end: disk pause armed → message includes the % full."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 0, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -984,7 +941,6 @@ def test_archive_block_paused_background_message(monkeypatch):
     generic 'Paused (background task)' fallback."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 5, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -1005,15 +961,10 @@ def test_archive_block_paused_background_message(monkeypatch):
 
 def test_archive_block_pause_reason_field_present_in_all_paths(monkeypatch):
     """The ``pause_reason`` key must appear in every return path
-    (disabled, error, normal) so JS consumers don't crash on missing
-    keys (mirrors the Phase 4.3 lost_24h / Phase 4.4 ETA contracts)."""
+    (error, normal) so JS consumers don't crash on missing keys
+    (mirrors the Phase 4.3 lost_24h / Phase 4.4 ETA contracts)."""
     import blueprints.system_health as sh
-    # Disabled path
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False, raising=False)
-    assert 'pause_reason' in sh._archive_block()
-    assert sh._archive_block()['pause_reason'] is None
     # Error path
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     from services import archive_queue
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -1028,7 +979,6 @@ def test_archive_block_pause_reason_null_when_not_paused(monkeypatch):
     a green status."""
     import blueprints.system_health as sh
     from services import archive_queue, archive_watchdog, archive_worker
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True, raising=False)
     monkeypatch.setattr(archive_queue, 'get_queue_status',
                         lambda: {'pending': 0, 'dead_letter': 0})
     monkeypatch.setattr(archive_queue, 'count_source_gone_recent',
@@ -1164,23 +1114,9 @@ def test_api_returns_json_payload(health_app, monkeypatch):
 # /api/system/clear_lost_clips — issue #163 dismiss banner endpoint
 # ---------------------------------------------------------------------------
 
-def test_clear_lost_clips_disabled_returns_zero(health_app, monkeypatch):
-    """When ``ARCHIVE_QUEUE_ENABLED`` is False the endpoint must
-    short-circuit and never even import the queue module."""
-    import blueprints.system_health as sh
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', False)
-    client = health_app.test_client()
-    rv = client.post('/api/system/clear_lost_clips', json={})
-    assert rv.status_code == 200
-    body = rv.get_json()
-    assert body['rows_deleted'] == 0
-    assert body['enabled'] is False
-
-
 def test_clear_lost_clips_calls_service(health_app, monkeypatch):
     import blueprints.system_health as sh
     import services
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
     captured = {}
 
     class _FakeArchiveQueue:
@@ -1201,7 +1137,6 @@ def test_clear_lost_clips_calls_service(health_app, monkeypatch):
 def test_clear_lost_clips_passes_older_than_hours(health_app, monkeypatch):
     import blueprints.system_health as sh
     import services
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
     captured = {}
 
     class _FakeArchiveQueue:
@@ -1221,7 +1156,6 @@ def test_clear_lost_clips_passes_older_than_hours(health_app, monkeypatch):
 
 def test_clear_lost_clips_rejects_non_integer_hours(health_app, monkeypatch):
     import blueprints.system_health as sh
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
     client = health_app.test_client()
     rv = client.post(
         '/api/system/clear_lost_clips',
@@ -1233,7 +1167,6 @@ def test_clear_lost_clips_rejects_non_integer_hours(health_app, monkeypatch):
 def test_clear_lost_clips_handles_service_crash(health_app, monkeypatch):
     import blueprints.system_health as sh
     import services
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
 
     class _Boom:
         @staticmethod
@@ -1253,7 +1186,6 @@ def test_clear_lost_clips_accepts_empty_body(health_app, monkeypatch):
     body for a no-arg POST)."""
     import blueprints.system_health as sh
     import services
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
 
     class _FakeArchiveQueue:
         @staticmethod
@@ -1282,7 +1214,6 @@ def test_clear_lost_clips_returns_tombstone(health_app, monkeypatch):
     can confirm the tombstone was written)."""
     import blueprints.system_health as sh
     import services
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
 
     class _FakeArchiveQueue:
         @staticmethod
@@ -1311,7 +1242,6 @@ def test_clear_lost_clips_tombstone_read_failure_still_returns_200(
     for a dismiss that actually succeeded."""
     import blueprints.system_health as sh
     import services
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
 
     class _FakeArchiveQueue:
         @staticmethod
@@ -1339,7 +1269,6 @@ def test_clear_lost_clips_older_than_hours_skips_tombstone_lookup(
     omits the lookup too (returns ``dismissed_at: null``)."""
     import blueprints.system_health as sh
     import services
-    monkeypatch.setattr(sh, 'ARCHIVE_QUEUE_ENABLED', True)
     lookup_called = {'flag': False}
 
     class _FakeArchiveQueue:

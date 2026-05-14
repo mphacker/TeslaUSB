@@ -81,11 +81,8 @@ MAX_UPLOAD_CHUNK_MB = int(config['web'].get('max_upload_chunk_mb', 16))
 # Mapping & Geo-Indexing Configuration
 _mapping = config.get('mapping', {})
 MAPPING_ENABLED = bool(_mapping.get('enabled', False))
-MAPPING_INDEX_ON_STARTUP = bool(_mapping.get('index_on_startup', True))
-MAPPING_INDEX_ON_MODE_SWITCH = bool(_mapping.get('index_on_mode_switch', True))
 MAPPING_SAMPLE_RATE = int(_mapping.get('sample_rate', 30))
 MAPPING_TRIP_GAP_MINUTES = int(_mapping.get('trip_gap_minutes', 5))
-MAPPING_ARCHIVE_INDEXING = bool(_mapping.get('archive_indexing', True))
 # Phase 5.9 (issue #102) — too-new gate exposed via Settings → Advanced.
 MAPPING_INDEX_TOO_NEW_SECONDS = float(_mapping.get('index_too_new_seconds', 120))
 MAPPING_DB_PATH = os.path.join(GADGET_DIR, 'geodata.db')
@@ -96,7 +93,6 @@ MAPPING_EVENT_THRESHOLDS = {
     'hard_accel_threshold': float(_event_cfg.get('hard_accel_threshold', 3.5)),
     'sharp_turn_lateral_g': float(_event_cfg.get('sharp_turn_lateral_g', 4.0)),
     'speed_limit_mps': float(_event_cfg.get('speed_limit_mps', 35.76)),
-    'fsd_disengage_detect': bool(_event_cfg.get('fsd_disengage_detect', True)),
 }
 
 # Cloud Archive Configuration
@@ -197,16 +193,6 @@ ARCHIVE_INTERVAL_MINUTES = int(_archive.get('interval_minutes', 2))
 ARCHIVE_RETENTION_DAYS = int(_archive.get('retention_days', 30))
 ARCHIVE_MIN_FREE_SPACE_GB = int(_archive.get('min_free_space_gb', 10))
 ARCHIVE_MAX_SIZE_GB = int(_archive.get('max_size_gb', 50))
-ARCHIVE_ONLY_DRIVING = bool(_archive.get('only_driving', True))
-# Issue #167 sub-deliverable 2 — skip-at-source for stationary RecentClips.
-# Default ``False`` so existing installs see no behavior change. When
-# ``True``, the archive worker peeks at the SEI metadata of each
-# RecentClips candidate before copying; clips with no GPS-bearing SEI
-# message are marked ``skipped_stationary`` instead of consuming SD-card
-# space. Sentry/Saved event clips (priority 2) are NEVER skipped.
-ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS = bool(
-    _archive.get('skip_stationary_recent_clips', False)
-)
 _archive_path = _archive.get('path', '')
 ARCHIVE_DIR = _archive_path if _archive_path else os.path.join(
     os.path.expanduser(f"~{TARGET_USER}"), 'ArchivedClips'
@@ -217,17 +203,13 @@ ARCHIVE_DIR = _archive_path if _archive_path else os.path.join(
 # archive pipeline. The inotify watcher, the 60-s rescan thread, and the
 # boot catch-up scan all enqueue rows into ``archive_queue``; the Phase
 # 2b worker thread drains them by copying source → ArchivedClips and
-# enqueueing the archived path into ``indexing_queue``. When
-# ``ARCHIVE_QUEUE_ENABLED`` is False the wiring in web_control.py skips
-# the watcher callback registration, the producer thread, and the worker
-# thread, so behavior matches pre-#76 installs exactly.
+# enqueueing the archived path into ``indexing_queue``. The whole
+# subsystem is unconditional now (issue #184 Wave 1) — the legacy
+# ``archive_queue.enabled`` and ``archive_queue.boot_catchup_enabled``
+# kill-switches were removed.
 _archive_queue = config.get('archive_queue', {})
-ARCHIVE_QUEUE_ENABLED = bool(_archive_queue.get('enabled', True))
 ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS = float(
     _archive_queue.get('rescan_interval_seconds', 60)
-)
-ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED = bool(
-    _archive_queue.get('boot_catchup_enabled', True)
 )
 ARCHIVE_QUEUE_WORKER_CHECK_INTERVAL_SECONDS = float(
     _archive_queue.get('worker_check_interval_seconds', 5)

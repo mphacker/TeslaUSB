@@ -96,11 +96,8 @@ web:
 # ============================================================================
 mapping:
   enabled: true                          # Enable GPS/telemetry indexing of dashcam videos
-  index_on_startup: true                 # DEPRECATED — no effect; persistent queue + worker handles this automatically
-  index_on_mode_switch: true             # DEPRECATED — no effect; mode switch already triggers a catch-up scan
   sample_rate: 30                        # Extract every Nth frame (30 = ~1/sec at 30fps)
   trip_gap_minutes: 5                    # Gap between waypoints to start a new trip
-  archive_indexing: true                 # Index ArchivedClips on SD card during WiFi connect
   # Phase 5.9 (issue #102) — exposed via Settings → Advanced.
   index_too_new_seconds: 120             # Skip indexing for clips whose mtime is fresher than this many seconds (Tesla still writing)
   event_detection:
@@ -109,7 +106,6 @@ mapping:
     hard_accel_threshold: 3.5            # m/s² longitudinal (positive = accelerating)
     sharp_turn_lateral_g: 4.0            # m/s² lateral
     speed_limit_mps: 35.76              # ~80 mph speed alert threshold (0 = disabled)
-    fsd_disengage_detect: true           # Detect FSD engagement/disengagement events
 
 # ============================================================================
 # Cloud Archive Configuration
@@ -232,36 +228,27 @@ archive:
   retention_days: 30                     # Delete archived clips older than this
   min_free_space_gb: 20                  # Hard floor — stop archiving if SD card < this free. Issue #109: raised from 10 → 20 GiB. On a typical 470 GiB SD card, 10 GiB ≈ 2.1% free, which is well below the point at which ext4 free-block-group search starts thrashing and inflates per-write cost 10–100×, starving the watchdog daemon. 20 GiB ≈ 4.2% gives ext4 enough headroom to keep writes cheap.
   max_size_gb: 0                         # 0 = auto (use all available space minus reserved)
-  only_driving: true                     # Only archive clips from active driving trips (skip idle/parked)
   path: ""                               # Archive path (default: ~/ArchivedClips, set by web app)
-  # Issue #167 sub-deliverable 2 — skip-at-source for stationary RecentClips.
-  # When ``true``, the archive worker peeks at the SEI metadata of each
-  # ``RecentClips`` candidate before copying. If the clip contains no
-  # GPS-bearing SEI message (no movement / no GPS lock), the row is
-  # marked ``skipped_stationary`` instead of being copied. This is the
-  # long-term complement to the one-shot reclaim button (sub-deliverable 1) —
-  # the reclaim button cleans up clips that already landed on the SD card,
-  # this flag prevents new stationary clips from arriving in the first place.
-  # Default: ``false`` so existing installs see zero behavior change. Operators
-  # who don't care about overnight Sentry-while-parked footage can flip this on
-  # to keep the SD card from filling. Sentry/Saved event clips are NEVER skipped
-  # (they are PRIORITY_EVENTS and never enter this code path).
-  skip_stationary_recent_clips: false
+  # Stationary RecentClips skip-at-source is now unconditional (issue #184
+  # Wave 1). The archive worker peeks at each RecentClips candidate's SEI
+  # metadata; clips with no GPS-bearing SEI message are marked
+  # ``skipped_stationary`` instead of being copied. Sentry/Saved event
+  # clips are PRIORITY_EVENTS and never enter the skip path. The reclaim
+  # button on the Storage & Retention card still cleans up already-archived
+  # stationary RecentClips from before this default was in effect.
 
 # ============================================================================
-# Archive Queue Configuration (issue #76 — Phase 2a producer-only)
+# Archive Queue Configuration (issue #76)
 # ============================================================================
-# Persistent SQLite-backed queue (in geodata.db) for the upcoming two-queue
-# archive pipeline. Phase 2a populates this queue from three independent
-# producers: the inotify file watcher, a periodic full-directory rescan,
-# and a one-shot boot catch-up scan. **No worker yet** — rows accumulate
-# harmlessly until Phase 2b adds the consumer thread. Disabling this
-# section prevents the producers from running, leaving behavior identical
-# to pre-#76 installs.
+# Persistent SQLite-backed queue (in geodata.db) for the two-queue archive
+# pipeline. Three producers populate the queue: the inotify file watcher,
+# a periodic full-directory rescan, and a one-shot boot catch-up scan.
+# The Phase 2b worker drains the queue one file at a time. The whole
+# subsystem is unconditional now (issue #184 Wave 1) — disabling it left
+# the gadget in a degraded state with no recourse for catch-up after an
+# unclean shutdown, so the kill-switch was removed.
 archive_queue:
-  enabled: true                          # Run Phase 2a producers + Phase 2b worker
   rescan_interval_seconds: 60            # Cadence of the periodic full-dir rescan
-  boot_catchup_enabled: true             # Run the one-shot scan on producer start
   worker_check_interval_seconds: 5       # Idle/empty-queue sleep between worker iterations
   retry_max_attempts: 3                  # OSError retries before a row goes to dead_letter
   copy_chunk_bytes: 1048576              # Chunk size (1 MiB) for the temp+fsync+rename copy

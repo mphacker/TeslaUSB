@@ -80,6 +80,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Dict, Iterable, Iterator, List, Optional
@@ -624,6 +625,87 @@ def _dual_write_pipeline_archive_many(db_path: str, rows) -> None:
         )
 
 
+def _dual_write_pipeline_archive_state(
+    source_path: str,
+    *,
+    new_stage: Optional[str] = None,
+    status: Optional[str] = None,
+    attempts: Optional[int] = None,
+    last_error: Optional[str] = None,
+    completed_at: Optional[float] = None,
+    next_retry_at: Optional[float] = None,
+    db_path: Optional[str] = None,
+) -> None:
+    """State-transition dual-write for the archive queue (Wave 4 PR-B).
+
+    Mirrors a legacy ``archive_queue`` row's state transition into
+    ``pipeline_queue``. Lazy import on every call to keep the
+    legacy-mutation path's import budget unchanged. Failures are
+    logged at DEBUG and swallowed — pipeline_queue mirroring is a
+    secondary concern; the legacy mutation always wins.
+    """
+    if not source_path:
+        return
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.update_pipeline_row(
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            source_path=source_path,
+            new_stage=new_stage,
+            status=status,
+            attempts=attempts,
+            last_error=last_error,
+            completed_at=completed_at,
+            next_retry_at=next_retry_at,
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "pipeline_queue state dual-write skipped for %s: %s",
+            source_path, e,
+        )
+
+
+def _dual_write_pipeline_archive_state_by_id(
+    row_id: int,
+    *,
+    new_stage: Optional[str] = None,
+    status: Optional[str] = None,
+    attempts: Optional[int] = None,
+    last_error: Optional[str] = None,
+    completed_at: Optional[float] = None,
+    next_retry_at: Optional[float] = None,
+    db_path: Optional[str] = None,
+) -> None:
+    """Same as :func:`_dual_write_pipeline_archive_state` but lookup
+    by ``legacy_id`` — used by ``mark_copied`` / ``mark_source_gone``
+    / ``mark_failed`` etc. which take an integer ``row_id`` (avoids a
+    second SELECT to fetch ``source_path``).
+
+    Same swallow-and-warn semantics.
+    """
+    if not row_id:
+        return
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.update_pipeline_row_by_legacy_id(
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=int(row_id),
+            new_stage=new_stage,
+            status=status,
+            attempts=attempts,
+            last_error=last_error,
+            completed_at=completed_at,
+            next_retry_at=next_retry_at,
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "pipeline_queue state dual-write skipped for legacy_id=%s: %s",
+            row_id, e,
+        )
+
+
 def count_source_gone_recent(hours: int = 24,
                              *, db_path: Optional[str] = None,
                              dismissed_at: Optional[str] = None,
@@ -1154,6 +1236,7 @@ def claim_next_for_worker(claimed_by: str, *,
     # wrap the whole thing in an atomic transaction so the fallback
     # is genuinely atomic — not just relying on the conditional WHERE
     # to paper over a race.
+    claimed: Optional[Dict] = None
     try:
         with _atomic_archive_op(db_path) as conn:
             try:
@@ -1179,48 +1262,53 @@ def claim_next_for_worker(claimed_by: str, *,
                 )
                 row = cur.fetchone()
                 if row is not None:
-                    return dict(row)
-                return None
+                    claimed = dict(row)
             except sqlite3.OperationalError:
                 # Older SQLite — no RETURNING clause. Fall back to
                 # SELECT-then-UPDATE; the surrounding transaction
                 # plus the conditional WHERE keeps the claim atomic
                 # even if another worker raced us.
-                pass
-
-            row = conn.execute(
-                """
-                SELECT * FROM archive_queue
-                 WHERE status = 'pending'
-                 ORDER BY priority ASC,
-                          expected_mtime IS NULL,
-                          expected_mtime ASC,
-                          id ASC
-                 LIMIT 1
-                """
-            ).fetchone()
-            if row is None:
-                return None
-            cur = conn.execute(
-                """
-                UPDATE archive_queue
-                   SET status = 'claimed',
-                       claimed_at = ?,
-                       claimed_by = ?
-                 WHERE id = ? AND status = 'pending'
-                """,
-                (claimed_at, claimed_by, row['id']),
-            )
-            if cur.rowcount != 1:
-                return None
-            claimed = dict(row)
-            claimed['status'] = 'claimed'
-            claimed['claimed_at'] = claimed_at
-            claimed['claimed_by'] = claimed_by
-            return claimed
+                row = conn.execute(
+                    """
+                    SELECT * FROM archive_queue
+                     WHERE status = 'pending'
+                     ORDER BY priority ASC,
+                              expected_mtime IS NULL,
+                              expected_mtime ASC,
+                              id ASC
+                     LIMIT 1
+                    """
+                ).fetchone()
+                if row is None:
+                    return None
+                cur = conn.execute(
+                    """
+                    UPDATE archive_queue
+                       SET status = 'claimed',
+                           claimed_at = ?,
+                           claimed_by = ?
+                     WHERE id = ? AND status = 'pending'
+                    """,
+                    (claimed_at, claimed_by, row['id']),
+                )
+                if cur.rowcount != 1:
+                    return None
+                claimed = dict(row)
+                claimed['status'] = 'claimed'
+                claimed['claimed_at'] = claimed_at
+                claimed['claimed_by'] = claimed_by
     except sqlite3.Error as e:
         logger.warning("claim_next_for_worker failed: %s", e)
         return None
+    if claimed is not None:
+        # Wave 4 PR-B: mirror the claim into pipeline_queue so the
+        # row reflects 'in_progress' instead of stale 'pending'.
+        _dual_write_pipeline_archive_state(
+            claimed.get('source_path', ''),
+            status='in_progress',
+            db_path=db_path,
+        )
+    return claimed
 
 
 def mark_copied(row_id: int, dest_path: str, *,
@@ -1249,7 +1337,17 @@ def mark_copied(row_id: int, dest_path: str, *,
             """,
             (copied_at, dest_path, int(row_id)),
         )
-        return cur.rowcount == 1
+        ok = cur.rowcount == 1
+        if ok:
+            _dual_write_pipeline_archive_state_by_id(
+                int(row_id),
+                new_stage='archive_done',
+                status='done',
+                completed_at=time.time(),
+                last_error='',
+                db_path=db_path,
+            )
+        return ok
     except sqlite3.Error as e:
         logger.warning("mark_copied failed for id=%s: %s", row_id, e)
         return False
@@ -1298,7 +1396,17 @@ def mark_source_gone(row_id: int, *,
             """,
             (int(row_id),),
         )
-        return cur.rowcount == 1
+        ok = cur.rowcount == 1
+        if ok:
+            _dual_write_pipeline_archive_state_by_id(
+                int(row_id),
+                new_stage='archive_done',
+                status='source_gone',
+                completed_at=time.time(),
+                last_error='',
+                db_path=db_path,
+            )
+        return ok
     except sqlite3.Error as e:
         logger.warning("mark_source_gone failed for id=%s: %s", row_id, e)
         return False
@@ -1351,7 +1459,17 @@ def mark_skipped_stationary(row_id: int, *,
             """,
             (int(row_id),),
         )
-        return cur.rowcount == 1
+        ok = cur.rowcount == 1
+        if ok:
+            _dual_write_pipeline_archive_state_by_id(
+                int(row_id),
+                new_stage='archive_done',
+                status='skipped_stationary',
+                completed_at=time.time(),
+                last_error='',
+                db_path=db_path,
+            )
+        return ok
     except sqlite3.Error as e:
         logger.warning(
             "mark_skipped_stationary failed for id=%s: %s", row_id, e,
@@ -1522,7 +1640,17 @@ def release_claim(row_id: int, *,
                 """,
                 (int(row_id),),
             )
-        return cur.rowcount == 1
+        ok = cur.rowcount == 1
+        if ok:
+            # Wave 4 PR-B: release back to 'pending' on the
+            # pipeline_queue side too, so a re-claim later picks the
+            # row up correctly.
+            _dual_write_pipeline_archive_state_by_id(
+                int(row_id),
+                status='pending',
+                db_path=db_path,
+            )
+        return ok
     except sqlite3.Error as e:
         logger.warning("release_claim failed for id=%s: %s", row_id, e)
         return False
@@ -1557,6 +1685,8 @@ def mark_failed(row_id: int, error: str, *,
     # UPDATE, causing the UPDATE to use a stale base count. Wrap in
     # _atomic_archive_op so the SELECT + UPDATE land in one transaction
     # under a single write lock (BEGIN IMMEDIATE).
+    new_status: str = 'error'
+    new_attempts: int = 0
     try:
         with _atomic_archive_op(db_path) as conn:
             row = conn.execute(
@@ -1580,24 +1710,47 @@ def mark_failed(row_id: int, error: str, *,
                     """,
                     (new_attempts, truncated, int(row_id)),
                 )
-                return 'dead_letter'
-            conn.execute(
-                """
-                UPDATE archive_queue
-                   SET status = 'pending',
-                       attempts = ?,
-                       previous_last_error = last_error,
-                       last_error = ?,
-                       claimed_at = NULL,
-                       claimed_by = NULL
-                 WHERE id = ?
-                """,
-                (new_attempts, truncated, int(row_id)),
-            )
-            return 'pending'
+                new_status = 'dead_letter'
+            else:
+                conn.execute(
+                    """
+                    UPDATE archive_queue
+                       SET status = 'pending',
+                           attempts = ?,
+                           previous_last_error = last_error,
+                           last_error = ?,
+                           claimed_at = NULL,
+                           claimed_by = NULL
+                     WHERE id = ?
+                    """,
+                    (new_attempts, truncated, int(row_id)),
+                )
+                new_status = 'pending'
     except sqlite3.Error as e:
         logger.warning("mark_failed failed for id=%s: %s", row_id, e)
         return 'error'
+    # Wave 4 PR-B: mirror the failure into pipeline_queue. Done
+    # outside the legacy transaction so a pipeline_queue lock cannot
+    # delay the legacy unlock.
+    if new_status == 'dead_letter':
+        _dual_write_pipeline_archive_state_by_id(
+            int(row_id),
+            new_stage='archive_done',
+            status='dead_letter',
+            attempts=new_attempts,
+            last_error=truncated,
+            completed_at=time.time(),
+            db_path=db_path,
+        )
+    elif new_status == 'pending':
+        _dual_write_pipeline_archive_state_by_id(
+            int(row_id),
+            status='pending',
+            attempts=new_attempts,
+            last_error=truncated,
+            db_path=db_path,
+        )
+    return new_status
 
 
 def get_pending_counts_by_priority(db_path: Optional[str] = None) -> Dict[int, int]:

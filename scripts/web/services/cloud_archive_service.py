@@ -630,6 +630,50 @@ def _dual_write_pipeline_cloud_synced_batch(
         )
 
 
+def _dual_write_pipeline_cloud_synced_state(
+    file_path: str,
+    *,
+    new_stage: Optional[str] = None,
+    status: Optional[str] = None,
+    attempts: Optional[int] = None,
+    last_error: Optional[str] = None,
+    completed_at: Optional[float] = None,
+    next_retry_at: Optional[float] = None,
+) -> None:
+    """State-transition dual-write for cloud_synced_files (Wave 4 PR-B).
+
+    Unlike :func:`_dual_write_pipeline_cloud_synced` (which calls
+    ``dual_write_enqueue`` and is INSERT-OR-IGNORE), this updates an
+    existing pipeline_queue row to reflect a state transition (claim
+    success → 'in_progress' → 'done' / 'failed' / 'pending').
+
+    Looked up by ``(stage='cloud_pending', source_path=file_path)``.
+    Failures are swallowed at DEBUG.
+    """
+    if not file_path:
+        return
+    try:
+        from services import pipeline_queue_service as pqs
+        # The current row's stage is always cloud_pending (cloud_done
+        # is reached only on success and is itself terminal). For the
+        # source_path lookup we use the original cloud_pending stage.
+        pqs.update_pipeline_row(
+            stage=pqs.STAGE_CLOUD_PENDING,
+            source_path=file_path,
+            new_stage=new_stage,
+            status=status,
+            attempts=attempts,
+            last_error=last_error,
+            completed_at=completed_at,
+            next_retry_at=next_retry_at,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "pipeline_queue cloud-synced state dual-write skipped "
+            "for %s: %s", file_path, e,
+        )
+
+
 def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
     """Open the cloud sync database and ensure all tables exist.
 
@@ -742,6 +786,16 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
                 "WHERE status = 'running'",
                 (datetime.now(timezone.utc).isoformat(),)
             ).rowcount
+            # Wave 4 PR-B: capture interrupted-upload paths BEFORE
+            # the UPDATE so pipeline_queue can be reset to 'pending'
+            # too (it holds 'in_progress' from the original claim
+            # dual-write).
+            interrupted_paths = [
+                r["file_path"] for r in conn.execute(
+                    "SELECT file_path FROM cloud_synced_files "
+                    "WHERE status = 'uploading'"
+                ).fetchall()
+            ]
             n_uploads = conn.execute(
                 "UPDATE cloud_synced_files SET status = 'pending', "
                 "retry_count = retry_count WHERE status = 'uploading'"
@@ -752,6 +806,11 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
                     "Startup recovery: %d stale sessions, %d interrupted uploads reset",
                     n_sessions, n_uploads,
                 )
+                for fp in interrupted_paths:
+                    _dual_write_pipeline_cloud_synced_state(
+                        fp,
+                        status='pending',
+                    )
         except Exception as e:
             logger.warning("Startup recovery failed: %s", e)
 
@@ -1108,6 +1167,18 @@ def _mark_upload_failure(
                 "Cloud sync: %s reached retry cap (%d attempts) — "
                 "moved to dead_letter. Recover via Failed Jobs page.",
                 rel_path, post["retry_count"],
+            )
+        # Wave 4 PR-B: mirror the failure into pipeline_queue. We do
+        # NOT promote the stage on dead_letter — the row stays under
+        # ``cloud_pending`` so an operator-driven Failed Jobs reset
+        # picks it back up; the ``status='dead_letter'`` is what
+        # excludes it from the auto-picker.
+        if post:
+            _dual_write_pipeline_cloud_synced_state(
+                rel_path,
+                status=post["status"],
+                attempts=int(post["retry_count"] or 0),
+                last_error=err_msg,
             )
 
 
@@ -2154,6 +2225,9 @@ def _drain_once(
                         (rel_path,)
                     )
                     _fsync_db(conn)
+                    _dual_write_pipeline_cloud_synced_state(
+                        rel_path, status='pending',
+                    )
                     break
 
                 if returncode == 0:
@@ -2177,6 +2251,18 @@ def _drain_once(
                         (now_synced, remote_dest, rel_path)
                     )
                     _fsync_db(conn)
+                    # Wave 4 PR-B: terminal — promote pipeline_queue row
+                    # to cloud_done / done. Done after fsync so a crash
+                    # mid-flight can't leave the mirror ahead of the
+                    # legacy row.
+                    _dual_write_pipeline_cloud_synced_state(
+                        rel_path,
+                        new_stage='cloud_done',
+                        status='done',
+                        attempts=0,
+                        last_error='',
+                        completed_at=time.time(),
+                    )
                 else:
                     err_msg = (stderr or "").strip()[:500]
                     logger.error("Sync: [%d/%d] %s FAILED (exit %d): %s",
@@ -2848,7 +2934,15 @@ def recover_interrupted_uploads(db_path: str) -> int:
     Returns the number of rows reset.
     """
     conn = _init_cloud_tables(db_path)
+    affected_paths: List[str] = []
     try:
+        # Wave 4 PR-B: capture paths BEFORE the UPDATE so the
+        # corresponding pipeline_queue rows can be reset to 'pending'
+        # too.
+        rows = conn.execute(
+            "SELECT file_path FROM cloud_synced_files "
+            "WHERE status = 'uploading'"
+        ).fetchall()
         cur = conn.execute(
             "UPDATE cloud_synced_files SET status = 'pending', "
             "retry_count = retry_count WHERE status = 'uploading'"
@@ -2857,9 +2951,14 @@ def recover_interrupted_uploads(db_path: str) -> int:
         conn.commit()
         if affected:
             logger.info("Recovered %d interrupted cloud uploads", affected)
+            affected_paths.extend(r["file_path"] for r in rows)
         return affected
     finally:
         conn.close()
+        for fp in affected_paths:
+            _dual_write_pipeline_cloud_synced_state(
+                fp, status='pending',
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -3179,24 +3278,50 @@ def retry_dead_letter(file_path: Optional[str] = None) -> int:
     else:
         target = None
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
+    affected_paths: List[str] = []
     try:
         if target is None:
+            # Capture matching paths BEFORE the UPDATE so we can mirror
+            # the reset into pipeline_queue afterwards.
+            rows = conn.execute(
+                "SELECT file_path FROM cloud_synced_files "
+                "WHERE status = 'dead_letter'"
+            ).fetchall()
             cur = conn.execute(
                 "UPDATE cloud_synced_files "
                 "SET status = 'pending', retry_count = 0 "
                 "WHERE status = 'dead_letter'"
             )
+            if cur.rowcount:
+                affected_paths.extend(r["file_path"] for r in rows)
         else:
+            row = conn.execute(
+                "SELECT file_path FROM cloud_synced_files "
+                "WHERE status = 'dead_letter' AND file_path = ?",
+                (target,),
+            ).fetchone()
             cur = conn.execute(
                 "UPDATE cloud_synced_files "
                 "SET status = 'pending', retry_count = 0 "
                 "WHERE status = 'dead_letter' AND file_path = ?",
                 (target,),
             )
+            if row and cur.rowcount:
+                affected_paths.append(row["file_path"])
         conn.commit()
         n = cur.rowcount or 0
     finally:
         conn.close()
+    # Wave 4 PR-B: mirror the reset-to-pending into pipeline_queue.
+    # Done outside the legacy connection lock so a pipeline lock
+    # cannot delay the legacy unlock.
+    for fp in affected_paths:
+        _dual_write_pipeline_cloud_synced_state(
+            fp,
+            status='pending',
+            attempts=0,
+            next_retry_at=0.0,
+        )
     if n > 0:
         try:
             wake()

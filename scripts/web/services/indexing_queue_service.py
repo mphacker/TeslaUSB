@@ -338,13 +338,18 @@ def _dual_write_pipeline_indexing(db_path: str, file_path: str,
                                    priority: int, source: str) -> None:
     try:
         from services import pipeline_queue_service as pqs
+        # Use ``canonical_key`` as ``source_path`` in pipeline_queue
+        # so state-mutation lookups (claim / complete / defer /
+        # release) can look up by canonical_key — the only key the
+        # legacy mutation functions know. Keep the actual ``file_path``
+        # in payload for diagnostics.
         pqs.dual_write_enqueue(
-            source_path=file_path,
+            source_path=canonical_key_value,
             stage=pqs.STAGE_INDEX_PENDING,
             legacy_table=pqs.LEGACY_TABLE_INDEXING,
             priority=priority,
             payload={
-                'canonical_key': canonical_key_value,
+                'file_path': file_path,
                 'source': source,
             },
             db_path=db_path,
@@ -364,12 +369,12 @@ def _dual_write_pipeline_indexing_many(
         pqs.dual_write_enqueue_many(
             (
                 {
-                    'source_path': file_path,
+                    'source_path': key,
                     'stage': pqs.STAGE_INDEX_PENDING,
                     'legacy_table': pqs.LEGACY_TABLE_INDEXING,
                     'priority': prio,
                     'payload': {
-                        'canonical_key': key,
+                        'file_path': file_path,
                         'source': src,
                     },
                 }
@@ -380,6 +385,47 @@ def _dual_write_pipeline_indexing_many(
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "pipeline_queue batched dual-write skipped: %s", e,
+        )
+
+
+def _dual_write_pipeline_indexing_state(
+    canonical_key_value: str,
+    *,
+    new_stage: Optional[str] = None,
+    status: Optional[str] = None,
+    attempts: Optional[int] = None,
+    last_error: Optional[str] = None,
+    completed_at: Optional[float] = None,
+    next_retry_at: Optional[float] = None,
+    db_path: Optional[str] = None,
+) -> None:
+    """State-transition dual-write for the indexing queue (Wave 4 PR-B).
+
+    Mirrors a legacy ``indexing_queue`` row's state transition into
+    ``pipeline_queue``. Looked up by ``canonical_key`` since that's
+    the only key the legacy mutation functions know (and what the
+    new-style enqueue stores in pipeline_queue's ``source_path``).
+    Failures are swallowed at DEBUG.
+    """
+    if not canonical_key_value:
+        return
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.update_pipeline_row(
+            stage=pqs.STAGE_INDEX_PENDING,
+            source_path=canonical_key_value,
+            new_stage=new_stage,
+            status=status,
+            attempts=attempts,
+            last_error=last_error,
+            completed_at=completed_at,
+            next_retry_at=next_retry_at,
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "pipeline_queue indexing state dual-write skipped for %s: %s",
+            canonical_key_value, e,
         )
 
 
@@ -445,6 +491,7 @@ def claim_next_queue_item(db_path: str,
     skipped automatically).
     """
     now = time.time()
+    claimed_canonical_key: Optional[str] = None
     try:
         conn = _open_queue_conn(db_path)
         try:
@@ -479,6 +526,7 @@ def claim_next_queue_item(db_path: str,
             # an owner-guard for complete/release/defer.
             result['claimed_by'] = worker_id
             result['claimed_at'] = now
+            claimed_canonical_key = row['canonical_key']
             return result
         except Exception:
             try:
@@ -491,6 +539,18 @@ def claim_next_queue_item(db_path: str,
     except sqlite3.Error as e:
         logger.warning("claim_next_queue_item failed: %s", e)
         return None
+    finally:
+        # Wave 4 PR-B: dual-write the claim transition AFTER the
+        # legacy transaction has committed, so a pipeline_queue lock
+        # cannot delay the legacy unlock. ``finally`` ensures we still
+        # mirror even if the caller swallows an exception, and only
+        # fires when we actually claimed (claimed_canonical_key set).
+        if claimed_canonical_key is not None:
+            _dual_write_pipeline_indexing_state(
+                claimed_canonical_key,
+                status='in_progress',
+                db_path=db_path,
+            )
 
 
 def complete_queue_item(db_path: str, canonical_key_value: str,
@@ -512,6 +572,7 @@ def complete_queue_item(db_path: str, canonical_key_value: str,
     if not canonical_key_value:
         return False
     conn = None
+    deleted = False
     try:
         conn = _open_queue_conn(db_path)
         if claimed_by is None:
@@ -529,7 +590,8 @@ def complete_queue_item(db_path: str, canonical_key_value: str,
                 """,
                 (canonical_key_value, claimed_by, claimed_at),
             )
-        return (cur.rowcount or 0) > 0
+        deleted = (cur.rowcount or 0) > 0
+        return deleted
     except sqlite3.Error as e:
         logger.warning(
             "complete_queue_item failed for %s: %s",
@@ -542,6 +604,19 @@ def complete_queue_item(db_path: str, canonical_key_value: str,
                 conn.close()
             except sqlite3.Error:
                 pass
+        # Wave 4 PR-B: terminal transition — promote pipeline_queue
+        # row to ``index_done`` / ``done`` so observers see this clip
+        # has finished the indexing stage. Done after the legacy
+        # connection is closed so the lock is released first.
+        if deleted:
+            _dual_write_pipeline_indexing_state(
+                canonical_key_value,
+                new_stage='index_done',
+                status='done',
+                completed_at=time.time(),
+                last_error='',
+                db_path=db_path,
+            )
 
 
 def release_claim(db_path: str, canonical_key_value: str,
@@ -560,6 +635,7 @@ def release_claim(db_path: str, canonical_key_value: str,
     if not canonical_key_value:
         return False
     conn = None
+    released = False
     try:
         conn = _open_queue_conn(db_path)
         if claimed_by is None:
@@ -582,7 +658,8 @@ def release_claim(db_path: str, canonical_key_value: str,
                 """,
                 (canonical_key_value, claimed_by, claimed_at),
             )
-        return (cur.rowcount or 0) > 0
+        released = (cur.rowcount or 0) > 0
+        return released
     except sqlite3.Error as e:
         logger.warning(
             "release_claim failed for %s: %s",
@@ -595,6 +672,14 @@ def release_claim(db_path: str, canonical_key_value: str,
                 conn.close()
             except sqlite3.Error:
                 pass
+        # Wave 4 PR-B: drop pipeline_queue row back to ``pending``
+        # so the next worker tick can re-claim it.
+        if released:
+            _dual_write_pipeline_indexing_state(
+                canonical_key_value,
+                status='pending',
+                db_path=db_path,
+            )
 
 
 def defer_queue_item(db_path: str, canonical_key_value: str,
@@ -618,6 +703,8 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
     if not canonical_key_value:
         return False
     conn = None
+    succeeded = False
+    new_attempts: Optional[int] = None
     try:
         conn = _open_queue_conn(db_path)
         if claimed_by is None:
@@ -678,6 +765,24 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
             )
         if (cur.rowcount or 0) == 0:
             return False
+        succeeded = True
+        # Wave 4 PR-B: capture the new attempt count (the SQL above
+        # uses ``attempts = attempts + 1``; do a cheap re-read so the
+        # mirror reflects the post-bump value rather than the pre-bump
+        # one). Only meaningful when bump_attempts=True; otherwise
+        # leave ``new_attempts`` as None so the dual-write doesn't
+        # touch the attempts column.
+        if bump_attempts:
+            try:
+                row = conn.execute(
+                    "SELECT attempts FROM indexing_queue "
+                    "WHERE canonical_key = ?",
+                    (canonical_key_value,),
+                ).fetchone()
+                if row is not None:
+                    new_attempts = int(row['attempts'] or 0)
+            except sqlite3.Error:
+                pass
         return True
     except sqlite3.Error as e:
         logger.warning(
@@ -691,6 +796,18 @@ def defer_queue_item(db_path: str, canonical_key_value: str,
                 conn.close()
             except sqlite3.Error:
                 pass
+        # Wave 4 PR-B: mirror the deferral (release claim + reschedule)
+        # into pipeline_queue. Only fires when the legacy update
+        # actually matched a row.
+        if succeeded:
+            _dual_write_pipeline_indexing_state(
+                canonical_key_value,
+                status='pending',
+                attempts=new_attempts,
+                last_error=last_error,
+                next_retry_at=next_attempt_at,
+                db_path=db_path,
+            )
 
 
 def compute_backoff(attempts: int) -> float:

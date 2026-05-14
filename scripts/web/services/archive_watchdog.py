@@ -93,6 +93,11 @@ _RETENTION_COORDINATOR_TASK = 'retention'
 # Diagnostic subdirectory inside ``archive_root`` that the prune must
 # never touch. Mirrors the worker's dead-letter sidecar location.
 _DEAD_LETTER_DIRNAME = '.dead_letter'
+# Issue #184 Wave 3 — Phase H. Archive worker stages all in-flight
+# ``.partial`` files in this single directory. Retention/sweep
+# walkers must skip it so partials aren't mistaken for archived
+# clips and so the dir stays exclusively owned by archive_worker.
+_STAGING_DIRNAME = '.staging'
 
 # Default stop/join timeouts.
 _DEFAULT_STOP_TIMEOUT = 30.0
@@ -723,9 +728,11 @@ def _iter_archive_mp4_files(archive_root: str):
     if not archive_root or not os.path.isdir(archive_root):
         return
     for dirpath, dirnames, filenames in os.walk(archive_root, followlinks=False):
-        # Prune .dead_letter so os.walk doesn't descend into it.
+        # Prune .dead_letter and .staging so os.walk doesn't descend
+        # into them (issue #184 Wave 3 — Phase H).
         dirnames[:] = [
-            d for d in dirnames if d != _DEAD_LETTER_DIRNAME
+            d for d in dirnames
+            if d not in (_DEAD_LETTER_DIRNAME, _STAGING_DIRNAME)
         ]
         for fn in filenames:
             if not fn.lower().endswith('.mp4'):
@@ -1243,7 +1250,8 @@ def _collect_event_basenames(archive_root: str) -> set:
             root, followlinks=False,
         ):
             dirnames[:] = [
-                d for d in dirnames if d != _DEAD_LETTER_DIRNAME
+                d for d in dirnames
+                if d not in (_DEAD_LETTER_DIRNAME, _STAGING_DIRNAME)
             ]
             for fn in filenames:
                 if fn.lower().endswith('.mp4'):

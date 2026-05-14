@@ -18,9 +18,12 @@ Drains the ``archive_queue`` table one file at a time. For each row:
    proceeds. NOT the indexer's ``yield_to_waiters=True`` cyclic form.
 4. Compute the destination under ``ARCHIVE_DIR`` mirroring the
    ``TeslaCam/<sub>/<file>`` layout.
-5. Atomic copy: write to ``dest_path + '.partial'`` in 1-MiB chunks,
-   ``fsync``, ``rename`` to the final name, verify size matches the
-   source.
+5. Atomic copy: stage to ``<archive_root>/.staging/<hash>-<name>.partial``
+   in 1-MiB chunks, ``fsync``, ``os.replace`` to the final name,
+   verify size matches the source. The single staging dir keeps the
+   archive tree free of in-flight bytes (so directory traversals
+   never trip on partials) and reduces orphan-sweep cost from
+   ``os.walk`` to one ``os.scandir`` (issue #184 Wave 3 — Phase H).
 6. On success, mark the row ``copied`` and enqueue the **destination**
    path into ``indexing_queue`` via
    ``indexing_queue_service.enqueue_for_indexing`` so the indexer
@@ -63,6 +66,7 @@ Public API mirrors :mod:`indexing_worker`::
 from __future__ import annotations
 
 import collections
+import hashlib
 import logging
 import os
 import shutil
@@ -595,36 +599,113 @@ def _safe_stat(path: str):
         return None
 
 
+# Issue #184 Wave 3 — Phase H. Staging directory for atomic copies.
+# All ``.partial`` files now live here, never inside the destination
+# tree, so:
+#   * directory traversals (indexer, retention prune, file watcher)
+#     never see in-flight bytes;
+#   * orphan cleanup at startup is a single ``os.scandir`` of one
+#     directory, not a recursive walk of the whole archive.
+# The staging dir lives on the SAME filesystem as the archive root
+# so ``os.replace`` is atomic.
+_STAGING_DIRNAME = '.staging'
+
+
+def _staging_root(archive_root: str) -> str:
+    """Return the path to the staging dir under ``archive_root``.
+
+    Caller is responsible for ``os.makedirs(exist_ok=True)`` before
+    writing.
+    """
+    return os.path.join(archive_root, _STAGING_DIRNAME)
+
+
+def _staging_partial_path(archive_root: str, dest_path: str) -> str:
+    """Compute a unique ``.partial`` path inside the staging dir.
+
+    The basename includes a stable hash of the absolute destination
+    path so that two simultaneously-attempted copies of the same
+    source to different destinations (legacy migration scenarios)
+    can't clobber each other. The hash is short (10 hex chars) to
+    keep the staging filename readable.
+    """
+    abs_dest = os.path.abspath(dest_path)
+    digest = hashlib.sha1(
+        abs_dest.encode('utf-8', errors='replace'),
+    ).hexdigest()[:10]
+    base = os.path.basename(dest_path)
+    return os.path.join(
+        _staging_root(archive_root), f"{digest}-{base}.partial",
+    )
+
+
 def _sweep_partial_orphans(archive_root: str) -> int:
-    """Remove ``*.partial`` files orphaned by a prior crash.
+    """Remove orphan ``*.partial`` files from the staging directory.
 
-    ``_atomic_copy`` writes to ``dest_path + '.partial'`` and only
-    renames once the size-verified write succeeds. A power loss or
-    hardware reset (e.g., the May 11 SDIO-watchdog reboots) leaves the
-    partial behind forever — it's missed by retention (different
-    extension), counted toward disk usage, and confuses the indexer if
-    it ever sees the path.
+    Phase H rewrite (issue #184 Wave 3): partials live in
+    ``<archive_root>/.staging/`` rather than scattered across the
+    archive tree, so this is a single ``os.scandir`` instead of a
+    full ``os.walk``. The legacy archive-tree walk is preserved as
+    a fallback for one-time migration of any leftovers from before
+    this PR landed (e.g., the May 11 SDIO-watchdog reboots).
 
-    Walks ``archive_root`` once at worker startup, skipping the
-    ``.dead_letter`` diagnostic dir. Returns the number of orphans
-    removed (0 on a clean tree). Best-effort: per-file failures log a
-    warning and continue.
+    Returns the number of orphans removed (0 on a clean tree).
+    Best-effort: per-file failures log a warning and continue.
 
     Safety: only one archive worker exists at a time (enforced by
     ``start_worker``), and the worker doesn't begin claiming rows
     until this sweep completes — so we cannot delete a ``.partial``
-    that another writer is currently producing. Stat failures (file
-    vanished, permissions) are skipped without raising.
+    that another writer is currently producing.
     """
     if not archive_root or not os.path.isdir(archive_root):
         return 0
     removed = 0
+    staging = _staging_root(archive_root)
+    if os.path.isdir(staging):
+        try:
+            with os.scandir(staging) as it:
+                for entry in it:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if not entry.name.endswith('.partial'):
+                        continue
+                    try:
+                        size = entry.stat().st_size
+                    except OSError:
+                        size = 0
+                    try:
+                        os.remove(entry.path)
+                        removed += 1
+                        logger.info(
+                            "archive_worker: removed staged orphan "
+                            "partial %s (%d bytes)",
+                            entry.path, size,
+                        )
+                    except OSError as e:
+                        logger.warning(
+                            "archive_worker: failed to remove staged "
+                            "orphan partial %s: %s", entry.path, e,
+                        )
+        except OSError as e:
+            logger.warning(
+                "archive_worker: failed to scan staging dir %s: %s",
+                staging, e,
+            )
+
+    # One-time migration fallback: clean up any pre-Wave-3 partials
+    # still scattered across the archive tree. Once everyone has
+    # rebooted on Wave 3 there will be none, and this becomes a
+    # zero-cost scandir of an empty match set.
+    legacy_removed = 0
     for dirpath, dirnames, filenames in os.walk(
         archive_root, followlinks=False,
     ):
-        # Don't descend into .dead_letter — sidecar .txt files only,
-        # but keep the policy symmetric with the watchdog's prune.
-        dirnames[:] = [d for d in dirnames if d != '.dead_letter']
+        # Don't descend into .dead_letter or .staging — sidecar .txt
+        # files only, but keep the policy symmetric with the
+        # watchdog's prune. .staging was already swept above.
+        dirnames[:] = [
+            d for d in dirnames if d not in ('.dead_letter', _STAGING_DIRNAME)
+        ]
         for fn in filenames:
             if not fn.endswith('.partial'):
                 continue
@@ -635,17 +716,17 @@ def _sweep_partial_orphans(archive_root: str) -> int:
                 size = 0
             try:
                 os.remove(full)
-                removed += 1
+                legacy_removed += 1
                 logger.info(
-                    "archive_worker: removed orphan partial %s (%d bytes)",
-                    full, size,
+                    "archive_worker: removed legacy in-tree partial "
+                    "%s (%d bytes)", full, size,
                 )
             except OSError as e:
                 logger.warning(
-                    "archive_worker: failed to remove orphan partial "
-                    "%s: %s", full, e,
+                    "archive_worker: failed to remove legacy in-tree "
+                    "partial %s: %s", full, e,
                 )
-    return removed
+    return removed + legacy_removed
 
 
 class _CopyTimeBudgetExceeded(OSError):
@@ -800,13 +881,21 @@ def _atomic_copy(source_path: str, dest_path: str,
                  chunk_pause_seconds: float = 0.25,
                  chunk_pause_always: bool = False,
                  time_budget_seconds: float = 0.0,
+                 staging_root: Optional[str] = None,
                  now_fn: Callable[[], float] = time.monotonic,
                  sleep_fn: Callable[[float], None] = time.sleep) -> int:
     """Copy ``source_path`` → ``dest_path`` atomically. Returns size.
 
-    Pattern: ``dest_path + '.partial'`` → write in chunks → fsync →
-    rename. The temp file is unlinked on any failure so a crash mid-
-    copy doesn't leave an orphan in ArchivedClips.
+    Pattern (Phase H, issue #184 Wave 3): write to a uniquely-named
+    ``.partial`` file inside ``staging_root`` (a single ``.staging``
+    directory under the archive root), fsync, then ``os.replace``
+    into the final destination. The staging dir lives on the same
+    filesystem as the destination so the rename is atomic.
+
+    When ``staging_root`` is ``None`` (back-compat for direct test
+    callers), partials still go to ``dest_path + '.partial'`` — the
+    old in-tree pattern. Production callers always pass
+    ``staging_root`` so partials never appear in the archive tree.
 
     Verifies the rendered size matches the source's stat() size; any
     mismatch raises ``OSError`` so the caller bumps attempts.
@@ -847,7 +936,24 @@ def _atomic_copy(source_path: str, dest_path: str,
     parent = os.path.dirname(dest_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    partial = dest_path + '.partial'
+    if staging_root:
+        # Phase H: stage the .partial under <archive_root>/.staging/
+        # using a hash-prefixed basename so two simultaneous copies
+        # of the same destination (legacy migration scenarios) cannot
+        # collide. Must be on the same filesystem as ``dest_path`` for
+        # ``os.replace`` to be atomic; ``staging_root`` is always a
+        # subdir of the archive root so this holds.
+        os.makedirs(staging_root, exist_ok=True)
+        abs_dest = os.path.abspath(dest_path)
+        digest = hashlib.sha1(
+            abs_dest.encode('utf-8', errors='replace'),
+        ).hexdigest()[:10]
+        partial = os.path.join(
+            staging_root,
+            f"{digest}-{os.path.basename(dest_path)}.partial",
+        )
+    else:
+        partial = dest_path + '.partial'
     expected = os.path.getsize(source_path)
     written = 0
     started = now_fn()
@@ -1711,6 +1817,7 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
             chunk_pause_seconds=_adaptive_pause,
             chunk_pause_always=_pause_always,
             time_budget_seconds=time_budget_seconds,
+            staging_root=_staging_root(archive_root),
         )
     except FileNotFoundError:
         # Tesla rotated the source between stat() and open() — normal,

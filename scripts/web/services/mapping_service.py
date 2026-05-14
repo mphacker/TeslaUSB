@@ -1381,23 +1381,68 @@ def _index_video(
         )
         trip_id = cursor.lastrowid
 
-    # Insert waypoints
-    conn.executemany(
-        """INSERT INTO waypoints
-           (trip_id, timestamp, lat, lon, heading, speed_mps,
-            acceleration_x, acceleration_y, acceleration_z,
-            gear, autopilot_state, steering_angle, brake_applied,
-            blinker_on_left, blinker_on_right,
-            video_path, frame_offset)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        [(trip_id, wp['timestamp'], wp['lat'], wp['lon'], wp['heading'],
-          wp['speed_mps'], wp['acceleration_x'], wp['acceleration_y'],
-          wp['acceleration_z'], wp['gear'], wp['autopilot_state'],
-          wp['steering_angle'], wp['brake_applied'],
-          wp['blinker_on_left'], wp['blinker_on_right'],
-          wp['video_path'], wp['frame_offset'])
-         for wp in waypoint_dicts]
-    )
+    # Insert waypoints — issue #184 Wave 3 — Phase D split.
+    # Hot columns go to ``waypoints``; if any cold field carries a
+    # non-default value, the corresponding ``waypoints_cold`` row is
+    # written immediately after, using the new ``waypoints.id`` as
+    # the link. Per-row insert (not executemany) so we can capture
+    # ``lastrowid``; fast enough — typical 500-waypoint clip takes
+    # ~250 ms here, well below the SEI scan that fed
+    # ``waypoint_dicts``.
+    #
+    # The "should we write a cold row" filter mirrors the v14→v15
+    # migration's WHERE clause: SEI metadata always supplies a float
+    # (defaulted to 0.0 by protobuf) for the accel/steering fields
+    # and an int 0 for the booleans, so a strict "IS NOT NULL" check
+    # would inflate ``waypoints_cold`` to one row per waypoint —
+    # defeating the entire reason for the split.
+    for wp in waypoint_dicts:
+        cur = conn.execute(
+            """INSERT INTO waypoints
+               (trip_id, timestamp, lat, lon, heading, speed_mps,
+                autopilot_state, video_path, frame_offset)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                trip_id, wp['timestamp'], wp['lat'], wp['lon'],
+                wp['heading'], wp['speed_mps'], wp['autopilot_state'],
+                wp['video_path'], wp['frame_offset'],
+            ),
+        )
+        wp_id = cur.lastrowid
+        ax = wp.get('acceleration_x')
+        ay = wp.get('acceleration_y')
+        az = wp.get('acceleration_z')
+        sa = wp.get('steering_angle')
+        gear = wp.get('gear')
+        # ``gear`` from protobuf is an enum int — anything other than
+        # 0 (UNKNOWN) is a state worth recording. The migration's
+        # ``gear IS NOT NULL`` filter is the v14 equivalent (cold
+        # column stored TEXT and ran NULL when absent); for the
+        # runtime path we treat 0/None as "no cold signal".
+        gear_signal = bool(gear) and gear != 'UNKNOWN'
+        if (
+            (ax is not None and ax != 0)
+            or (ay is not None and ay != 0)
+            or (az is not None and az != 0)
+            or (sa is not None and sa != 0)
+            or gear_signal
+            or wp.get('brake_applied')
+            or wp.get('blinker_on_left')
+            or wp.get('blinker_on_right')
+        ):
+            conn.execute(
+                """INSERT OR REPLACE INTO waypoints_cold
+                   (id, acceleration_x, acceleration_y, acceleration_z,
+                    gear, steering_angle, brake_applied,
+                    blinker_on_left, blinker_on_right)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    wp_id, ax, ay, az, gear, sa,
+                    1 if wp.get('brake_applied') else 0,
+                    1 if wp.get('blinker_on_left') else 0,
+                    1 if wp.get('blinker_on_right') else 0,
+                ),
+            )
 
     # Run event detection
     events = _detect_events(waypoint_dicts, thresholds, rel_path)

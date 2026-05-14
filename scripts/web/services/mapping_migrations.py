@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 14
+_SCHEMA_VERSION = 15
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -76,17 +76,38 @@ CREATE TABLE IF NOT EXISTS waypoints (
     lon REAL NOT NULL,
     heading REAL,
     speed_mps REAL,
+    autopilot_state TEXT,
+    video_path TEXT,
+    frame_offset INTEGER
+);
+
+-- Issue #184 Wave 3 — Phase D. Cold telemetry payload split off the
+-- main ``waypoints`` table. ``waypoints`` (hot) carries lat/lon/
+-- speed/heading/autopilot_state — the columns the polyline render
+-- and click-to-seek lookups need on every map tile. ``waypoints_cold``
+-- carries steering/brake/accel/gear/blinker — used by the in-clip
+-- HUD scrubber, lazy-fetched per-trip via
+-- ``GET /api/trip/<id>/telemetry`` only when the user opens the
+-- video overlay. Splitting the data physically (not just at SELECT
+-- time) is what gives the SD-page-cache benefit: cold pages stay
+-- evicted during normal map browsing.
+--
+-- ``id`` mirrors ``waypoints.id`` (1:1, FK + PK), so insert order
+-- and merge migrations preserve the link without an extra index.
+-- Rows are only inserted when ANY cold field is non-default —
+-- parked-car waypoints (all-null telemetry) consume zero cold
+-- pages.
+CREATE TABLE IF NOT EXISTS waypoints_cold (
+    id INTEGER PRIMARY KEY,
     acceleration_x REAL,
     acceleration_y REAL,
     acceleration_z REAL,
     gear TEXT,
-    autopilot_state TEXT,
     steering_angle REAL,
     brake_applied INTEGER DEFAULT 0,
     blinker_on_left INTEGER DEFAULT 0,
     blinker_on_right INTEGER DEFAULT 0,
-    video_path TEXT,
-    frame_offset INTEGER
+    FOREIGN KEY (id) REFERENCES waypoints(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS detected_events (
@@ -316,8 +337,17 @@ def _init_db(db_path: str) -> sqlite3.Connection:
 
         conn.executescript(_SCHEMA_SQL)
         # Migrations for existing databases
-        if current < 2:
-            # v2: add blinker columns to waypoints
+        if current > 0 and current < 2:
+            # v2: add blinker columns to waypoints. Gated on
+            # ``current > 0`` because issue #184 Wave 3 — Phase D
+            # moved blinker_on_left / blinker_on_right to the new
+            # ``waypoints_cold`` table; on a fresh install
+            # (``current == 0``) the v15 schema already lacks these
+            # columns on ``waypoints``, so this migration must NOT
+            # re-add them. Existing pre-v2 databases (none in
+            # production at this point, but defensive) still get the
+            # v2 → v3 → ... → v15 walk where v15 then sweeps the
+            # cold cols off into the new table.
             for col in ('blinker_on_left', 'blinker_on_right'):
                 try:
                     conn.execute(f"ALTER TABLE waypoints ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -502,6 +532,33 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         # first ``boot_catchup_scan`` after the upgrade will take the
         # full O(N) hit, then write the watermark, and every
         # subsequent boot will short-circuit on the watermark.
+        if current > 0 and current < 15:
+            # v15 (issue #184 Wave 3 — Phase D): split the
+            # ``waypoints`` table into hot (lat/lon/heading/
+            # speed_mps/autopilot_state) and cold (accel/gear/
+            # steering/brake/blinker) tables. Cold telemetry moves
+            # to ``waypoints_cold`` (1:1 by id), then the cold
+            # columns are dropped from ``waypoints``.
+            #
+            # Wrapped in a single SAVEPOINT so a failure mid-
+            # migration leaves the schema at v14 (cold cols still
+            # on ``waypoints``) — readers that LEFT JOIN to
+            # ``waypoints_cold`` (created above) will see no rows
+            # there but will continue to find cold values inline,
+            # so the UI is preserved during a partial migration.
+            try:
+                conn.execute("SAVEPOINT migrate_v15")
+                _migrate_v14_to_v15(conn)
+                conn.execute("RELEASE SAVEPOINT migrate_v15")
+            except Exception as e:
+                conn.execute("ROLLBACK TO SAVEPOINT migrate_v15")
+                conn.execute("RELEASE SAVEPOINT migrate_v15")
+                logger.error(
+                    "Migration v14->v15 failed, leaving schema at v14: %s",
+                    e,
+                )
+                conn.commit()
+                return conn
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",
@@ -735,3 +792,153 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
     cleared_files = cur.rowcount
     logger.info("v3->v4: cleared %d Sentry/Saved indexed_files entries for re-processing",
                 cleared_files)
+
+
+# ---------------------------------------------------------------------------
+# v15: hot/cold waypoint split (issue #184 Wave 3 — Phase D)
+# ---------------------------------------------------------------------------
+
+# Cold telemetry columns split off from ``waypoints`` into
+# ``waypoints_cold``. Order matches the v15 ``waypoints_cold``
+# CREATE TABLE so the migration's INSERT and the runtime INSERT
+# share one column tuple.
+_COLD_COLUMNS = (
+    'acceleration_x',
+    'acceleration_y',
+    'acceleration_z',
+    'gear',
+    'steering_angle',
+    'brake_applied',
+    'blinker_on_left',
+    'blinker_on_right',
+)
+
+# Migration batch size. 500 trips × ~500 waypoints/trip = 250 000
+# rows per transaction, well within SQLite's per-tx working set on
+# a Pi Zero 2 W. Bigger batches are a SAVEPOINT WAL-bloat risk.
+_V15_BATCH_TRIPS = 500
+
+
+def _waypoints_has_cold_columns(conn: sqlite3.Connection) -> bool:
+    """True if the existing ``waypoints`` table still carries cold
+    telemetry columns (i.e. we haven't yet completed the v15 drop).
+
+    Idempotent on re-runs: if the cols are gone, the migration is a
+    no-op.
+    """
+    try:
+        cols = {
+            row['name']
+            for row in conn.execute("PRAGMA table_info(waypoints)").fetchall()
+        }
+    except sqlite3.Error:
+        return False
+    return any(c in cols for c in _COLD_COLUMNS)
+
+
+def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
+    """Split cold telemetry off the main ``waypoints`` table.
+
+    Steps (run inside the v15 SAVEPOINT in :func:`_init_db`):
+
+    1. If ``waypoints`` still has the cold columns, copy each row
+       with at least one non-default cold field into
+       ``waypoints_cold`` (the table itself is created idempotently
+       by the executescript). Insert is one batched ``INSERT ... SELECT``
+       — fastest and exhibits a single WAL frame.
+    2. Drop the cold columns from ``waypoints`` via repeated
+       ``ALTER TABLE waypoints DROP COLUMN`` (SQLite ≥ 3.35, present
+       on Bookworm). Each drop is idempotent — duplicate-column
+       ``OperationalError`` is caught and ignored, so re-runs after
+       a partial migration are safe.
+
+    After completion, the runtime INSERT path (in
+    ``mapping_service._insert_waypoints``) writes hot columns to
+    ``waypoints`` and cold columns to ``waypoints_cold`` directly.
+    Existing readers that JOIN to ``waypoints_cold`` see the same
+    payload they did before. Hot-only readers (``query_trip_route``,
+    ``query_day_routes``) skip the join and pay only for the hot
+    pages.
+    """
+    # 1. Backfill waypoints_cold from any remaining inline cold data
+    if _waypoints_has_cold_columns(conn):
+        col_list = ", ".join(_COLD_COLUMNS)
+        # ``INSERT OR IGNORE`` so a partially-completed prior run
+        # (where ``waypoints_cold`` already has some rows) doesn't
+        # collide on PRIMARY KEY ``id``.
+        #
+        # The WHERE clause filters out rows whose cold telemetry is
+        # entirely at the v14 SQL DEFAULT (0 for numerics, NULL for
+        # ``gear``). Without this filter the cold table would get
+        # one row per waypoint — bloating the very table the split
+        # exists to keep small. The DEFAULT comparison is verbose
+        # but it's the only correct semantic: a row where all cold
+        # fields are exactly the SQL default carries no telemetry
+        # signal, so it doesn't need a cold row.
+        conn.execute(
+            f"INSERT OR IGNORE INTO waypoints_cold (id, {col_list}) "
+            f"SELECT id, {col_list} FROM waypoints "
+            "WHERE (acceleration_x IS NOT NULL AND acceleration_x != 0) "
+            "   OR (acceleration_y IS NOT NULL AND acceleration_y != 0) "
+            "   OR (acceleration_z IS NOT NULL AND acceleration_z != 0) "
+            "   OR gear IS NOT NULL "
+            "   OR (steering_angle IS NOT NULL AND steering_angle != 0) "
+            "   OR brake_applied != 0 "
+            "   OR blinker_on_left != 0 "
+            "   OR blinker_on_right != 0"
+        )
+        backfilled = conn.execute(
+            "SELECT COUNT(*) AS n FROM waypoints_cold"
+        ).fetchone()['n']
+        logger.info(
+            "v14->v15: backfilled %d row(s) into waypoints_cold",
+            backfilled,
+        )
+
+        # 2. Drop the cold columns from waypoints. Each ALTER is its
+        #    own statement so a duplicate-column failure on retry is
+        #    isolated to one column. SQLite rebuilds the table once
+        #    per drop, but an empty rewrite on a table with hot
+        #    columns only is fast. Total cost: ~50 ms on a 100k-row
+        #    waypoints table.
+        for col in _COLD_COLUMNS:
+            try:
+                conn.execute(f"ALTER TABLE waypoints DROP COLUMN {col}")
+            except sqlite3.OperationalError as e:
+                # Already dropped (idempotent retry) or older SQLite —
+                # log once at WARNING; the runtime INSERT path handles
+                # the cold half via waypoints_cold either way.
+                logger.warning(
+                    "v14->v15: could not drop %s from waypoints: %s "
+                    "(continuing)", col, e,
+                )
+
+        # Re-create the small waypoints indexes; SQLite preserves
+        # them across DROP COLUMN, but a defensive idempotent CREATE
+        # IF NOT EXISTS covers the corner case where ALTER's table
+        # rebuild lost them.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_waypoints_trip "
+            "ON waypoints(trip_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_waypoints_coords "
+            "ON waypoints(lat, lon)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_waypoints_timestamp "
+            "ON waypoints(timestamp)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_waypoints_video_path "
+            "ON waypoints(video_path)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_waypoints_trip_video "
+            "ON waypoints(trip_id, video_path)"
+        )
+    else:
+        logger.info(
+            "v14->v15: waypoints already lacks cold columns — "
+            "no migration work needed",
+        )

@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 15
+_SCHEMA_VERSION = 16
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -263,6 +263,74 @@ CREATE TABLE IF NOT EXISTS kv_meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- v16 (issue #184 Wave 4 — Phase I.1): unified ``pipeline_queue``.
+-- Replaces (over the course of Wave 4) the four legacy queue tables
+-- ``archive_queue``, ``indexing_queue``, ``live_event_queue``,
+-- ``cloud_synced_files`` — each of which today has its own worker
+-- thread, retry policy, and status enum. Wave 4 ships in sub-PRs:
+--
+--   I.1 — add this table; legacy producers dual-write to BOTH old +
+--         pipeline_queue. Reads still come from old tables (no
+--         behaviour change).
+--   I.2 — switch a single unified worker to read from pipeline_queue;
+--         legacy worker reads come via SQL views over pipeline_queue.
+--   I.3 — inline SEI parse during archive copy.
+--   I.4 — delete ``live_event_sync_service`` (rows with priority 0–1
+--         in ``stage='cloud_pending'`` ARE the new LES).
+--   J/K — batched rclone, drop ``has_ready_live_event_work`` poll.
+--   I.5 — optional: consolidate ``cloud_synced_files`` /
+--         ``cloud_sync_sessions`` into geodata.db too.
+--
+-- ``stage`` encodes the lifecycle phase (e.g. ``archive_pending``,
+-- ``index_done``, ``cloud_pending``); ``status`` encodes the within-
+-- stage state (``pending`` / ``in_progress`` / ``done`` / ``failed``).
+-- A clip's lifecycle in the unified worker is one row that advances
+-- by UPDATEing ``stage``; during the dual-write transition each
+-- legacy queue creates its own ``pipeline_queue`` row tagged with
+-- ``legacy_table``+``legacy_id``. The composite UNIQUE constraint
+-- ``(source_path, stage, legacy_table)`` makes re-enqueues from the
+-- same legacy producer idempotent.
+--
+-- ``payload_json`` carries queue-specific extras (expected_size /
+-- expected_mtime for archive; canonical_key / source for indexing;
+-- event_dir / event_reason / upload_scope for LES; remote_path /
+-- file_size for cloud-synced). Storing these as JSON keeps the
+-- schema flat — no per-queue column proliferation.
+--
+-- ``priority``: lower = more urgent. Mapping during dual-write:
+--   0 — LES (real-time event upload)
+--   1 — archive (RecentClips, age-bound)
+--   2 — archive (SentryClips / SavedClips)
+--   3 — archive (other / catch-up)
+--   4 — cloud-synced bulk catch-up
+--   5 — indexing (default)
+CREATE TABLE IF NOT EXISTS pipeline_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_path TEXT NOT NULL,
+    dest_path TEXT,
+    stage TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    priority INTEGER DEFAULT 5,
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    next_retry_at REAL,
+    enqueued_at REAL NOT NULL,
+    completed_at REAL,
+    payload_json TEXT,
+    legacy_id INTEGER,
+    legacy_table TEXT,
+    UNIQUE(source_path, stage, legacy_table)
+);
+-- Worker pick-next index (used in Wave 4 PR-B): partial over only
+-- pending rows, ordered by priority then enqueued_at.
+CREATE INDEX IF NOT EXISTS idx_pipeline_ready
+    ON pipeline_queue(stage, status, priority, enqueued_at)
+    WHERE status = 'pending';
+-- Reverse lookup: legacy → pipeline (used by dual-write update path
+-- to find the pipeline row matching a legacy queue row).
+CREATE INDEX IF NOT EXISTS idx_pipeline_legacy
+    ON pipeline_queue(legacy_table, legacy_id);
 """
 
 
@@ -559,6 +627,26 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                 )
                 conn.commit()
                 return conn
+        if current > 0 and current < 16:
+            # v16 (issue #184 Wave 4 — Phase I.1): unified
+            # ``pipeline_queue`` table. Created idempotently above by
+            # the executescript; nothing to migrate at this step
+            # because dual-write fills it from the four legacy queues
+            # going forward, and the optional ``backfill_legacy_queues()``
+            # helper (in ``services.pipeline_queue_service``) populates
+            # any backlog rows that were enqueued pre-upgrade.
+            #
+            # The backfill is intentionally NOT run here:
+            #   * It can take seconds to minutes on a Pi with thousands
+            #     of pending rows; running it inside ``_init_db`` would
+            #     delay every gadget_web start.
+            #   * It's safe to run multiple times — the unique constraint
+            #     ``(source_path, stage, legacy_table)`` makes it
+            #     idempotent.
+            # Instead, ``web_control.py`` schedules the backfill on a
+            # background thread after gadget_web is serving requests,
+            # so the user never waits on it.
+            logger.info("Migration v15->v16: pipeline_queue table ready")
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",

@@ -466,6 +466,53 @@ if __name__ == "__main__":
     except Exception as e:  # noqa: BLE001
         print(f"Warning: WAL checkpoint service failed to start: {e}")
 
+    # One-time pipeline_queue backfill (issue #184 Wave 4 — Phase I.1).
+    # Idempotent — re-running on every boot is safe (the unique
+    # constraint catches duplicates), AND a one-shot completion flag
+    # in ``kv_meta`` makes subsequent boots a no-op (so we don't
+    # re-scan four legacy tables every restart). Runs on a background
+    # daemon thread so it never blocks the request loop.
+    #
+    # Daemon-thread kill semantics: ``daemon=True`` means the thread
+    # dies abruptly when the process exits. That's fine here because
+    # ``backfill_legacy_queues`` is fully idempotent — a kill in the
+    # middle of one of the per-table loops just means the next boot
+    # re-runs the scan and resumes (the ``ON CONFLICT DO NOTHING``
+    # clause + UNIQUE constraint dedup any partial work). The
+    # one-shot flag is only set on a successful end-to-end run.
+    #
+    # Read more in
+    # ``services.pipeline_queue_service.backfill_legacy_queues``.
+    try:
+        import threading
+        _backfill_logger = logging.getLogger('teslausb.pipeline_backfill')
+
+        def _run_pipeline_backfill():
+            try:
+                from services import pipeline_queue_service
+                counts = pipeline_queue_service.backfill_legacy_queues()
+                if any(counts.values()):
+                    _backfill_logger.info(
+                        "pipeline_queue backfill: %s", counts,
+                    )
+                else:
+                    _backfill_logger.debug(
+                        "pipeline_queue backfill: nothing to do",
+                    )
+            except Exception as e:  # noqa: BLE001
+                _backfill_logger.warning(
+                    "pipeline_queue backfill failed: %s", e,
+                )
+        threading.Thread(
+            target=_run_pipeline_backfill,
+            name='pipeline-backfill',
+            daemon=True,
+        ).start()
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger('teslausb.pipeline_backfill').warning(
+            "failed to schedule pipeline_queue backfill: %s", e,
+        )
+
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:
         from waitress import serve

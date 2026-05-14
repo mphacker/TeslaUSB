@@ -470,7 +470,14 @@ def enqueue_for_archive(source_path: str, *,
             (source_path, int(priority), enqueued_at,
              expected_size, expected_mtime),
         )
-        return cur.rowcount == 1
+        inserted = cur.rowcount == 1
+        if inserted:
+            new_id = cur.lastrowid
+            _dual_write_pipeline_archive(
+                db_path, source_path, int(priority),
+                expected_size, expected_mtime, new_id,
+            )
+        return inserted
     except sqlite3.Error as e:
         logger.warning("enqueue_for_archive failed for %s: %s",
                        source_path, e)
@@ -542,10 +549,79 @@ def enqueue_many_for_archive(source_paths: Iterable[str], *,
                 rows,
             )
             after = conn.total_changes
-            return max(0, after - before)
+            inserted_count = max(0, after - before)
+        if inserted_count:
+            _dual_write_pipeline_archive_many(db_path, rows)
+        return inserted_count
     except sqlite3.Error as e:
         logger.warning("enqueue_many_for_archive failed: %s", e)
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Pipeline queue dual-write helpers (issue #184 Wave 4 — Phase I.1)
+# ---------------------------------------------------------------------------
+# Best-effort dual-write to the unified ``pipeline_queue`` table. Lazy
+# import keeps the legacy archive path independent of the new module:
+# any failure here is logged and swallowed so a producer never fails
+# on pipeline_queue trouble.
+
+def _dual_write_pipeline_archive(db_path: str, source_path: str,
+                                 priority: int,
+                                 expected_size: Optional[int],
+                                 expected_mtime: Optional[float],
+                                 legacy_id: Optional[int]) -> None:
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.dual_write_enqueue(
+            source_path=source_path,
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=legacy_id,
+            priority=int(priority),
+            payload={
+                'expected_size': expected_size,
+                'expected_mtime': expected_mtime,
+            },
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue dual-write skipped for %s: %s",
+            source_path, e,
+        )
+
+
+def _dual_write_pipeline_archive_many(db_path: str, rows) -> None:
+    """``rows`` is a list of (source_path, priority, enqueued_at,
+    expected_size, expected_mtime) tuples — same shape as the legacy
+    executemany rows. We don't have legacy_ids for batch inserts (the
+    INSERT OR IGNORE doesn't return per-row rowids); the
+    ``UNIQUE(source_path, stage, legacy_table)`` constraint still
+    enforces per-source idempotency.
+    """
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.dual_write_enqueue_many(
+            (
+                {
+                    'source_path': src,
+                    'stage': pqs.STAGE_ARCHIVE_PENDING,
+                    'legacy_table': pqs.LEGACY_TABLE_ARCHIVE,
+                    'priority': int(prio),
+                    'payload': {
+                        'expected_size': es,
+                        'expected_mtime': em,
+                    },
+                }
+                for (src, prio, _enqueued_at, es, em) in rows
+            ),
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue batched archive dual-write skipped: %s", e,
+        )
 
 
 def count_source_gone_recent(hours: int = 24,

@@ -522,6 +522,114 @@ def _migrate_canonicalize_paths_v2(
     return (rewrites, merges)
 
 
+def _dual_write_pipeline_cloud_synced(file_path: str,
+                                      remote_path: Optional[str],
+                                      status: str,
+                                      file_size: Optional[int] = None,
+                                      file_mtime: Optional[float] = None) -> None:
+    """Best-effort dual-write of a single ``cloud_synced_files`` row to
+    the unified ``pipeline_queue`` table (issue #184 Wave 4 — Phase I.1).
+
+    For one-off transitions (the ``uploading`` and ``queued`` insert
+    sites). Reconcile loops should use
+    :func:`_dual_write_pipeline_cloud_synced_batch` instead — it
+    collapses N per-row connections into one fsync.
+
+    Cross-DB write — opens a fresh ``geodata.db`` connection inside
+    :func:`pipeline_queue_service.dual_write_enqueue` and closes it.
+    Failures are logged at WARNING and swallowed; the legacy
+    ``cloud_synced_files`` row remains the source of truth in
+    Phase I.1.
+
+    The ``status`` parameter is the legacy status string ('pending',
+    'queued', 'uploading', 'synced', 'failed'); we translate to the
+    unified stage/status pair: ``synced`` rows become
+    ``stage='cloud_done', status='done'``; ``uploading``/``syncing``
+    become ``status='in_progress'``; everything else is ``'pending'``.
+    """
+    try:
+        from services import pipeline_queue_service as pqs
+        stage = (
+            pqs.STAGE_CLOUD_DONE if status == 'synced'
+            else pqs.STAGE_CLOUD_PENDING
+        )
+        unified_status = {
+            'pending': 'pending',
+            'queued': 'pending',
+            'uploading': 'in_progress',
+            'syncing': 'in_progress',
+            'synced': 'done',
+            'failed': 'failed',
+        }.get(status, 'pending')
+        pqs.dual_write_enqueue(
+            source_path=file_path,
+            stage=stage,
+            legacy_table=pqs.LEGACY_TABLE_CLOUD_SYNCED,
+            priority=pqs.PRIORITY_CLOUD_BULK,
+            dest_path=remote_path,
+            payload={
+                'file_size': file_size,
+                'file_mtime': file_mtime,
+                'legacy_status': status,
+            },
+            status=unified_status,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue cloud-synced dual-write skipped for %s: %s",
+            file_path, e,
+        )
+
+
+def _dual_write_pipeline_cloud_synced_batch(
+    items: List[Tuple[str, Optional[str], str]],
+) -> None:
+    """Batched dual-write for the reconcile loops.
+
+    ``items`` is a list of ``(file_path, remote_path, legacy_status)``
+    tuples. Single connection, single fsync — replaces N per-row
+    connections that would each cost a full fsync (~25–35 s of extra
+    SDIO work for a 1000-file reconcile on a Pi Zero 2 W). Must be
+    called AFTER the legacy ``cloud_sync.db`` ``conn.commit()`` so a
+    crash mid-batch doesn't leave ``pipeline_queue`` orphans.
+
+    Translates each legacy status to the unified status. Failures
+    are logged at WARNING and swallowed.
+    """
+    if not items:
+        return
+    try:
+        from services import pipeline_queue_service as pqs
+        rows = []
+        for file_path, remote_path, legacy_status in items:
+            stage = (
+                pqs.STAGE_CLOUD_DONE if legacy_status == 'synced'
+                else pqs.STAGE_CLOUD_PENDING
+            )
+            unified_status = {
+                'pending': 'pending',
+                'queued': 'pending',
+                'uploading': 'in_progress',
+                'syncing': 'in_progress',
+                'synced': 'done',
+                'failed': 'failed',
+            }.get(legacy_status, 'pending')
+            rows.append({
+                'source_path': file_path,
+                'dest_path': remote_path,
+                'stage': stage,
+                'legacy_table': pqs.LEGACY_TABLE_CLOUD_SYNCED,
+                'priority': pqs.PRIORITY_CLOUD_BULK,
+                'payload': {'legacy_status': legacy_status},
+                'status': unified_status,
+            })
+        pqs.dual_write_enqueue_many(rows)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue cloud-synced batched dual-write skipped: %s", e,
+        )
+
+
 def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
     """Open the cloud sync database and ensure all tables exist.
 
@@ -1358,6 +1466,13 @@ def _reconcile_with_remote(
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     reconciled = 0
+    # Defer dual-writes until AFTER ``conn.commit()`` so a crash
+    # mid-loop can't leave orphan ``pipeline_queue`` rows referencing
+    # legacy IDs that were never persisted. Single batched call also
+    # collapses N per-row geodata.db connections (~25 ms each on Pi
+    # Zero 2 W's SD) into one fsync — critical because reconcile
+    # fires on WiFi-up, when the SDIO bus is already busy.
+    pending_pipeline: List[Tuple[str, Optional[str], str]] = []
 
     tree = _list_remote_tree(conf_path, remote_path, mem_flags)
     if tree is None:
@@ -1394,9 +1509,10 @@ def _reconcile_with_remote(
                 )
                 if cur.rowcount > 0:
                     reconciled += cur.rowcount
+                    pending_pipeline.append((rel_path, remote_dest, 'synced'))
                     continue
 
-                # If not in DB at all, insert as synced (pre-tracking upload)
+                # If not in DB at all, insert as synced (event dirs)
                 existing = conn.execute(
                     "SELECT status FROM cloud_synced_files WHERE file_path = ?",
                     (rel_path,)
@@ -1409,6 +1525,7 @@ def _reconcile_with_remote(
                         (rel_path, now_iso, remote_dest)
                     )
                     reconciled += 1
+                    pending_pipeline.append((rel_path, remote_dest, 'synced'))
         except Exception as e:
             logger.warning("Reconcile error for %s: %s", folder, e)
 
@@ -1435,6 +1552,7 @@ def _reconcile_with_remote(
             )
             if cur.rowcount > 0:
                 reconciled += cur.rowcount
+                pending_pipeline.append((rel_path, remote_dest, 'synced'))
                 continue
 
             existing = conn.execute(
@@ -1449,12 +1567,18 @@ def _reconcile_with_remote(
                     (rel_path, now_iso, remote_dest)
                 )
                 reconciled += 1
+                pending_pipeline.append((rel_path, remote_dest, 'synced'))
     except Exception as e:
         logger.warning("Reconcile error for ArchivedClips: %s", e)
 
     if reconciled:
         conn.commit()
         logger.info("Cloud reconciliation: marked %d already-uploaded entries as synced", reconciled)
+
+    # Flush deferred pipeline_queue dual-writes AFTER the legacy
+    # commit succeeds. One connection / one fsync for the whole batch.
+    if pending_pipeline:
+        _dual_write_pipeline_cloud_synced_batch(pending_pipeline)
 
     return reconciled
 
@@ -1473,6 +1597,7 @@ def _reconcile_with_remote_legacy(
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     reconciled = 0
+    pending_pipeline: List[Tuple[str, Optional[str], str]] = []
 
     # List event directories on remote (SentryClips/*, SavedClips/*)
     for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
@@ -1503,6 +1628,7 @@ def _reconcile_with_remote_legacy(
                 )
                 if cur.rowcount > 0:
                     reconciled += cur.rowcount
+                    pending_pipeline.append((rel_path, remote_dest, 'synced'))
                     continue
 
                 # If not in DB at all, insert as synced (pre-tracking upload)
@@ -1518,6 +1644,7 @@ def _reconcile_with_remote_legacy(
                         (rel_path, now_iso, remote_dest)
                     )
                     reconciled += 1
+                    pending_pipeline.append((rel_path, remote_dest, 'synced'))
         except subprocess.TimeoutExpired:
             logger.warning("Reconcile timeout listing %s", folder)
         except Exception as e:
@@ -1555,6 +1682,7 @@ def _reconcile_with_remote_legacy(
                 )
                 if cur.rowcount > 0:
                     reconciled += cur.rowcount
+                    pending_pipeline.append((rel_path, remote_dest, 'synced'))
                     continue
 
                 existing = conn.execute(
@@ -1569,6 +1697,7 @@ def _reconcile_with_remote_legacy(
                         (rel_path, now_iso, remote_dest)
                     )
                     reconciled += 1
+                    pending_pipeline.append((rel_path, remote_dest, 'synced'))
     except Exception as e:
         logger.warning("Reconcile error for ArchivedClips: %s", e)
 
@@ -1578,6 +1707,11 @@ def _reconcile_with_remote_legacy(
             "Cloud reconciliation (legacy fallback): marked %d already-uploaded entries as synced",
             reconciled,
         )
+
+    # Flush deferred pipeline_queue dual-writes AFTER the legacy
+    # commit succeeds. One connection / one fsync for the whole batch.
+    if pending_pipeline:
+        _dual_write_pipeline_cloud_synced_batch(pending_pipeline)
 
     return reconciled
 
@@ -1989,6 +2123,10 @@ def _drain_once(
                 (rel_path, event_size, time.time(), rel_path)
             )
             _fsync_db(conn)
+            _dual_write_pipeline_cloud_synced(
+                rel_path, None, 'uploading',
+                file_size=event_size, file_mtime=time.time(),
+            )
 
             # Use the shared rclone helper. It handles copy-vs-copyto,
             # nice/ionice, bwlimit, timeout, and stderr capture.
@@ -2829,6 +2967,10 @@ def queue_event_for_sync(folder: str, event_name: str, priority: bool = False) -
     conn = _init_cloud_tables(CLOUD_ARCHIVE_DB_PATH)
     try:
         queued = 0
+        # Defer dual-writes until AFTER ``conn.commit()`` so a crash
+        # mid-loop can't leave orphan ``pipeline_queue`` rows pointing
+        # at legacy IDs that were never persisted.
+        pending_pipeline: List[Tuple[str, Optional[str], str]] = []
         for entry in os.scandir(event_dir):
             if entry.name.lower().endswith('.mp4') and event_name in entry.name:
                 # Phase 2.7 — store and look up by canonical relative
@@ -2855,8 +2997,11 @@ def queue_event_for_sync(folder: str, event_name: str, priority: bool = False) -
                     (canonical, stat.st_size, stat.st_mtime)
                 )
                 queued += 1
+                pending_pipeline.append((canonical, None, 'queued'))
 
         conn.commit()
+        if pending_pipeline:
+            _dual_write_pipeline_cloud_synced_batch(pending_pipeline)
         if queued:
             return True, "Added {} files to sync queue".format(queued)
         return True, "All files already synced or queued"

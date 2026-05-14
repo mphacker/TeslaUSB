@@ -412,6 +412,43 @@ def _read_event_json(path: str) -> Tuple[Optional[str], Optional[str]]:
         return (None, None)
 
 
+def _dual_write_pipeline_live_event(event_json_path: str,
+                                    event_dir: str,
+                                    event_timestamp: Optional[str],
+                                    event_reason: Optional[str],
+                                    upload_scope: str,
+                                    legacy_id: Optional[int]) -> None:
+    """Best-effort dual-write to ``pipeline_queue`` (geodata.db).
+
+    Cross-DB write — opens a fresh geodata.db connection, writes one
+    row, closes. Failure here is logged at WARNING and swallowed —
+    the legacy ``live_event_queue`` row is the source of truth in
+    Phase I.1, so a missing pipeline_queue row only means the
+    Phase I.2 unified worker doesn't see it (legacy worker still
+    handles it).
+    """
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.dual_write_enqueue(
+            source_path=event_json_path,
+            stage=pqs.STAGE_LIVE_EVENT_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_LIVE_EVENT,
+            legacy_id=legacy_id,
+            priority=pqs.PRIORITY_LIVE_EVENT,
+            payload={
+                'event_dir': event_dir,
+                'event_timestamp': event_timestamp,
+                'event_reason': event_reason,
+                'upload_scope': upload_scope,
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue LES dual-write skipped for %s: %s",
+            event_dir, e,
+        )
+
+
 def enqueue_event_json(event_json_paths: List[str]) -> int:
     """Producer: enqueue events from a list of ``event.json`` paths.
 
@@ -428,6 +465,7 @@ def enqueue_event_json(event_json_paths: List[str]) -> int:
         return 0
 
     inserted = 0
+    pending_dual_writes = []  # (path, dir, ts, reason, scope, id)
     try:
         conn = _open_db()
         try:
@@ -450,9 +488,21 @@ def enqueue_event_json(event_json_paths: List[str]) -> int:
                 )
                 if cur.rowcount:
                     inserted += 1
+                    new_id = cur.lastrowid
                     logger.info(
                         "LES enqueued: %s reason=%s", event_dir, reason,
                     )
+                    # Defer the dual-write: if we crash between this
+                    # point and ``conn.commit()`` below, the legacy
+                    # row vanishes (it was never committed) and we
+                    # MUST NOT leave an orphan pipeline_queue row
+                    # with a now-stale ``legacy_id``. Phase I.2's
+                    # worker uses ``legacy_id`` to cross-reference;
+                    # an orphan would point at a non-existent row.
+                    pending_dual_writes.append((
+                        ej_path, event_dir, ts, reason,
+                        LIVE_EVENT_UPLOAD_SCOPE, new_id,
+                    ))
             if inserted:
                 conn.commit()
         finally:
@@ -462,6 +512,13 @@ def enqueue_event_json(event_json_paths: List[str]) -> int:
         # would silence MP4 callbacks for the indexer.
         logger.error("LES enqueue_event_json failed: %s", e)
         return 0
+
+    # Dual-write to pipeline_queue ONLY after the legacy commit
+    # succeeded — guarantees no orphans on crash mid-loop.
+    for ej_path, event_dir, ts, reason, scope, new_id in pending_dual_writes:
+        _dual_write_pipeline_live_event(
+            ej_path, event_dir, ts, reason, scope, new_id,
+        )
 
     if inserted:
         _wake.set()

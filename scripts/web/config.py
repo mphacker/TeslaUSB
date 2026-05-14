@@ -257,6 +257,13 @@ ARCHIVE_QUEUE_STABLE_WRITE_AGE_SECONDS = float(
 ARCHIVE_QUEUE_STALE_CLAIM_MAX_AGE_SECONDS = float(
     _archive_queue.get('stale_claim_max_age_seconds', 600.0)
 )
+# Wave 4 PR-E (issue #184): shadow-mode validation of pipeline_queue.
+# When True, the archive worker peeks at pipeline_queue before each
+# archive_queue claim and logs WARNING on disagreement. Pure
+# observability — no behavioural change.
+ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE = bool(
+    _archive_queue.get('shadow_pipeline_queue', True)
+)
 
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)

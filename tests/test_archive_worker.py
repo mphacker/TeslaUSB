@@ -3271,3 +3271,209 @@ class TestProcessOneClaimAdaptiveWiring:
         assert captured['chunk_pause_always'] is False
         assert captured['chunk_pause_seconds'] == 0.25
         assert captured['load_pause_threshold'] == 3.5
+
+
+# ============================================================================
+# Wave 4 PR-E ??? pipeline_queue shadow comparison helpers (#184)
+# ============================================================================
+# Pure observability helpers: `_shadow_compare_picks` logs WARNING
+# on disagreement (rate-limited) and INFO every Nth agreement;
+# `get_shadow_telemetry` returns the in-memory counter snapshot.
+# Wave 4 PR-E review fixes: comparison takes a top-N candidate set
+# (not a single path) to absorb the documented secondary-sort
+# divergence between archive_queue (expected_mtime) and
+# pipeline_queue (enqueued_at). Disagreement WARNINGs are
+# rate-limited (verbatim for first N, then heartbeat every Mth).
+
+class TestShadowComparisonHelpers:
+    def _reset(self):
+        with archive_worker._shadow_lock:
+            archive_worker._shadow_agreement_count = 0
+            archive_worker._shadow_disagreement_count = 0
+
+    def test_initial_telemetry_zero(self):
+        self._reset()
+        t = archive_worker.get_shadow_telemetry()
+        assert t['shadow_agreement_count'] == 0
+        assert t['shadow_disagreement_count'] == 0
+
+    def test_both_none_treats_as_agreement(self, caplog):
+        self._reset()
+        import logging as _log
+        caplog.set_level(_log.DEBUG)
+        archive_worker._shadow_compare_picks(
+            legacy_path=None, pipeline_candidates=(),
+        )
+        t = archive_worker.get_shadow_telemetry()
+        # Empty queue both sides -> counted as agreement, no log
+        # below the periodic threshold.
+        assert t['shadow_agreement_count'] == 1
+        assert t['shadow_disagreement_count'] == 0
+        # No INFO/WARNING emitted on a single agreement.
+        noisy = [r for r in caplog.records
+                 if r.levelno >= _log.INFO
+                 and 'shadow' in r.getMessage().lower()]
+        assert noisy == []
+
+    def test_matching_top1_increments_agreement(self):
+        self._reset()
+        for _ in range(5):
+            archive_worker._shadow_compare_picks(
+                legacy_path='/x/foo.mp4',
+                pipeline_candidates=('/x/foo.mp4',),
+            )
+        t = archive_worker.get_shadow_telemetry()
+        assert t['shadow_agreement_count'] == 5
+        assert t['shadow_disagreement_count'] == 0
+
+    def test_legacy_in_topN_window_is_agreement(self):
+        # Legacy reader picked /x/c.mp4 (e.g. it sorted by mtime).
+        # pipeline_queue's top-N (sorted by enqueued_at) lists it
+        # at position 3. Treat as agreement, NOT disagreement.
+        self._reset()
+        archive_worker._shadow_compare_picks(
+            legacy_path='/x/c.mp4',
+            pipeline_candidates=(
+                '/x/a.mp4', '/x/b.mp4', '/x/c.mp4', '/x/d.mp4',
+            ),
+        )
+        t = archive_worker.get_shadow_telemetry()
+        assert t['shadow_agreement_count'] == 1
+        assert t['shadow_disagreement_count'] == 0
+
+    def test_legacy_absent_from_topN_logs_warning_with_window(
+        self, caplog,
+    ):
+        self._reset()
+        import logging as _log
+        caplog.set_level(_log.WARNING)
+        archive_worker._shadow_compare_picks(
+            legacy_path='/x/foo.mp4',
+            pipeline_candidates=('/x/a.mp4', '/x/b.mp4'),
+        )
+        t = archive_worker.get_shadow_telemetry()
+        assert t['shadow_agreement_count'] == 0
+        assert t['shadow_disagreement_count'] == 1
+        warnings = [r for r in caplog.records
+                    if r.levelno == _log.WARNING
+                    and 'shadow' in r.getMessage().lower()]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        # Verbatim WARNING includes the legacy pick AND the window.
+        assert '/x/foo.mp4' in msg
+        assert '/x/a.mp4' in msg
+        assert '/x/b.mp4' in msg
+
+    def test_legacy_present_pipeline_empty_is_disagreement(self):
+        # Legacy picked something, pipeline_queue has nothing ready
+        # at this stage. That IS a real dual-write gap (not just a
+        # secondary-sort divergence) and should bump disagreement.
+        self._reset()
+        archive_worker._shadow_compare_picks(
+            legacy_path='/x/foo.mp4',
+            pipeline_candidates=(),
+        )
+        t = archive_worker.get_shadow_telemetry()
+        assert t['shadow_disagreement_count'] == 1
+
+    def test_legacy_none_pipeline_some_is_agreement(self):
+        # Legacy says no work, pipeline_queue has rows. There's no
+        # legacy pick to mismatch against — count as agreement (the
+        # row will surface on the next iteration when the legacy
+        # reader catches up). NOT a dual-write gap.
+        self._reset()
+        archive_worker._shadow_compare_picks(
+            legacy_path=None,
+            pipeline_candidates=('/x/foo.mp4',),
+        )
+        t = archive_worker.get_shadow_telemetry()
+        assert t['shadow_agreement_count'] == 1
+        assert t['shadow_disagreement_count'] == 0
+
+    def test_periodic_agreement_log_at_threshold(self, caplog):
+        self._reset()
+        import logging as _log
+        caplog.set_level(_log.INFO)
+        # _SHADOW_AGREEMENT_LOG_EVERY agreements in a row produce
+        # exactly 1 INFO log line.
+        for _ in range(archive_worker._SHADOW_AGREEMENT_LOG_EVERY):
+            archive_worker._shadow_compare_picks(
+                legacy_path='/x/foo.mp4',
+                pipeline_candidates=('/x/foo.mp4',),
+            )
+        infos = [r for r in caplog.records
+                 if r.levelno == _log.INFO
+                 and 'shadow' in r.getMessage().lower()]
+        assert len(infos) == 1
+        assert str(archive_worker._SHADOW_AGREEMENT_LOG_EVERY) in \
+            infos[0].getMessage()
+
+    def test_disagreement_warnings_verbatim_then_throttled(
+        self, caplog,
+    ):
+        self._reset()
+        import logging as _log
+        caplog.set_level(_log.WARNING)
+        verbatim = archive_worker._SHADOW_DISAGREEMENT_LOG_VERBATIM
+        every = archive_worker._SHADOW_DISAGREEMENT_LOG_EVERY
+        # Fire (verbatim + every) disagreements: expect verbatim
+        # WARNINGs for the first N, then exactly one heartbeat
+        # WARNING when the count reaches the next multiple of
+        # `every`.
+        total = verbatim + every
+        for _ in range(total):
+            archive_worker._shadow_compare_picks(
+                legacy_path='/x/foo.mp4',
+                pipeline_candidates=('/x/a.mp4',),
+            )
+        warnings = [r for r in caplog.records
+                    if r.levelno == _log.WARNING
+                    and 'shadow' in r.getMessage().lower()]
+        # The first `verbatim` are verbatim WARNINGs.
+        # After that, no per-event WARNINGs until we hit the next
+        # multiple of `every` — which is at count == verbatim+something.
+        # The heartbeat fires when d_count % every == 0 and
+        # d_count > verbatim. With verbatim=10, every=100: hits at
+        # 100, 200, ... So with total=110 we get verbatim=10 +
+        # heartbeat(s) at 100 = 11 total.
+        # Compute expected: count multiples of `every` strictly
+        # greater than verbatim, up to and including total.
+        heartbeats = sum(
+            1 for c in range(verbatim + 1, total + 1)
+            if c % every == 0
+        )
+        expected = verbatim + heartbeats
+        assert len(warnings) == expected, (
+            f"expected {expected} WARNINGs (verbatim={verbatim} + "
+            f"heartbeats={heartbeats}) got {len(warnings)}"
+        )
+        t = archive_worker.get_shadow_telemetry()
+        assert t['shadow_disagreement_count'] == total
+
+    def test_shadow_pipeline_queue_enabled_reads_config(
+        self, monkeypatch,
+    ):
+        import config as _conf
+        monkeypatch.setattr(
+            _conf, 'ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE', True,
+            raising=False,
+        )
+        assert archive_worker._shadow_pipeline_queue_enabled() is True
+        monkeypatch.setattr(
+            _conf, 'ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE', False,
+            raising=False,
+        )
+        assert archive_worker._shadow_pipeline_queue_enabled() is False
+
+    def test_shadow_pipeline_queue_enabled_swallows_import_errors(
+        self, monkeypatch,
+    ):
+        # If the config attr is missing for any reason, the helper
+        # MUST return False — the shadow path is purely optional and
+        # must never affect worker behavior.
+        import config as _conf
+        if hasattr(_conf, 'ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE'):
+            monkeypatch.delattr(
+                _conf, 'ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE',
+            )
+        assert archive_worker._shadow_pipeline_queue_enabled() is False

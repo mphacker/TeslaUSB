@@ -1917,14 +1917,32 @@ class TestSchemaV17:
             c.close()
 
     def test_idx_pipeline_stale_claims_exists(self, geodata_db):
+        # Findings #8: assert not just the index name but also that
+        # the partial WHERE clause is intact. A future change that
+        # drops "WHERE status='in_progress' AND claimed_at IS NOT NULL"
+        # (turning it into a full index) would silently pass a
+        # name-only check — and a full index defeats the
+        # "stay small even on a queue with thousands of done rows"
+        # optimisation that justifies the column.
         import sqlite3 as _sql
         c = _sql.connect(geodata_db)
         try:
-            indices = {r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' "
-                "AND tbl_name='pipeline_queue'"
-            ).fetchall()}
-            assert 'idx_pipeline_stale_claims' in indices
+            row = c.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='index' AND name='idx_pipeline_stale_claims'"
+            ).fetchone()
+            assert row is not None, \
+                "idx_pipeline_stale_claims missing"
+            sql = row[1] or ''
+            # SQLite normalises CREATE INDEX SQL but preserves the
+            # column references and the WHERE clause body.
+            assert 'claimed_at' in sql, \
+                f"index missing claimed_at column: {sql!r}"
+            assert "status='in_progress'" in sql.replace(' ', '') \
+                or "status = 'in_progress'" in sql, \
+                f"index missing partial WHERE on status: {sql!r}"
+            assert 'claimed_at IS NOT NULL' in sql.replace('  ', ' '), \
+                f"index missing claimed_at IS NOT NULL: {sql!r}"
         finally:
             c.close()
 
@@ -1994,6 +2012,31 @@ class TestSchemaV17:
         # (re-running on an already-v17 DB must not raise).
         conn2 = _init_db(db)
         conn2.close()
+        # Findings #9: post-assertion that the second migration didn't
+        # reset anything — schema_version should still be _SCHEMA_VERSION,
+        # the v16 row's claim metadata should still be NULL, and the
+        # columns should still be present.
+        c = _sql.connect(db)
+        c.row_factory = _sql.Row
+        try:
+            v = c.execute("SELECT version FROM schema_version").fetchone()[0]
+            assert v == _SCHEMA_VERSION, \
+                f"second _init_db reset schema_version to {v}"
+            cols = {r[1] for r in c.execute(
+                "PRAGMA table_info(pipeline_queue)"
+            ).fetchall()}
+            assert 'claimed_by' in cols
+            assert 'claimed_at' in cols
+            row = c.execute(
+                "SELECT claimed_by, claimed_at FROM pipeline_queue "
+                "WHERE source_path = '/legacy/v16-row.mp4'"
+            ).fetchone()
+            assert row is not None, \
+                "second _init_db lost the v16 row"
+            assert row['claimed_by'] is None
+            assert row['claimed_at'] is None
+        finally:
+            c.close()
 
 
 class TestClaimPersistsClaimMetadata:

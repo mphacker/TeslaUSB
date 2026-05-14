@@ -601,7 +601,11 @@ def claim_next_for_stage(
         db_path: Override the geodata.db path (test injection).
         now: Override the "current time" used for ``next_retry_at``
             comparisons AND for the ``claimed_at`` timestamp
-            written into the row. Test injection only.
+            written into the row. **Production code MUST pass
+            ``None`` (or omit the argument) so the persisted
+            ``claimed_at`` reflects the wall-clock time used by
+            :func:`recover_stale_claims_pipeline` to detect stale
+            claims.** Hard-coded values are for test injection only.
 
     Returns:
         A dict snapshot of the claimed row, augmented with two
@@ -812,13 +816,28 @@ def recover_stale_claims_pipeline(
     would be orphaned forever (no ``claimed_at`` timeout, no
     recovery mechanism — exactly the gap PR-D closes per issue #193).
 
-    The reset clears ``claimed_by`` and ``claimed_at`` (returning the
-    row to its pre-claim state) but DELIBERATELY preserves
-    ``attempts`` so a row that has already been attempted N times
-    isn't given a free retry — the next ``claim_next_for_stage``
-    will increment to N+1. ``next_retry_at`` is left untouched so a
-    failure-driven backoff (set by the failed-claim path) still
-    fires correctly.
+    **API note:** unlike ``indexing_queue_service.recover_stale_claims``
+    (positional ``db_path, max_age_seconds``), this function is
+    **keyword-only** to match the ``claim_next_for_stage`` /
+    ``peek_next_for_stage`` / ``ready_count_for_stage`` style of the
+    rest of this module. The reader-API consistency is the priority;
+    callers wiring both helpers into a unified worker should pass
+    arguments by name.
+
+    The reset:
+      * Flips ``status`` from ``'in_progress'`` to ``'pending'``.
+      * Clears ``claimed_by`` and ``claimed_at`` (returning the row
+        to its pre-claim state).
+      * **Preserves** every other field — ``attempts``,
+        ``next_retry_at``, ``last_error``, ``payload_json``,
+        ``priority``, ``enqueued_at``, ``source_path``, ``stage``,
+        ``legacy_id``, ``legacy_table``. ``attempts`` is preserved
+        so a row that has already been attempted N times isn't given
+        a free retry — the next ``claim_next_for_stage`` will
+        increment to N+1. ``next_retry_at`` is preserved so a
+        failure-driven backoff (set by the failed-claim path) still
+        fires correctly. ``last_error`` is preserved as a forensic
+        breadcrumb so operators can see why the claim was retried.
 
     Args:
         db_path: Override the geodata.db path.
@@ -840,6 +859,14 @@ def recover_stale_claims_pipeline(
     conn = None
     try:
         conn = _open_pipeline_conn(db_path)
+        # NOTE: Single-statement UPDATE — relies on sqlite3's implicit
+        # ``BEGIN`` for atomicity, which is functionally equivalent to
+        # ``BEGIN IMMEDIATE`` for a one-shot UPDATE because the write
+        # lock is acquired before any rows are scanned. If this is
+        # ever extended to a SELECT-then-UPDATE pattern (e.g. logging
+        # which row IDs were released), the transaction MUST be
+        # promoted to ``BEGIN IMMEDIATE`` to defend against the same
+        # race that ``claim_next_for_stage`` already handles.
         cur = conn.execute(
             """UPDATE pipeline_queue
                   SET status = 'pending',

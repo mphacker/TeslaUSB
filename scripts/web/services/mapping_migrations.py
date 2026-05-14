@@ -49,6 +49,14 @@ logger = logging.getLogger(__name__)
 _SCHEMA_VERSION = 17
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
+# Schema version that introduced ``pipeline_queue.claimed_by`` and
+# ``pipeline_queue.claimed_at`` (issue #184 Wave 4 PR-D / #193).
+# Used by both the v16->v17 pre-script ALTER TABLE block and the
+# post-script log block so the threshold lives in one place — when
+# the next migration (v18+) is added, both blocks must keep referring
+# to this constant rather than a magic number.
+_PIPELINE_CLAIM_COLS_VERSION = 17
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -431,7 +439,7 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         # subsequent indices then reference real columns. On a
         # fresh install the table doesn't exist yet so this block
         # is a no-op (caught OperationalError).
-        if current > 0 and current < 17:
+        if current > 0 and current < _PIPELINE_CLAIM_COLS_VERSION:
             try:
                 cols = {r[1] for r in conn.execute(
                     "PRAGMA table_info(pipeline_queue)"
@@ -447,9 +455,16 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                             "ALTER TABLE pipeline_queue "
                             "ADD COLUMN claimed_at REAL"
                         )
-            except sqlite3.OperationalError as e:
-                # Table absent (pre-v16 install path) — schema script
-                # will create it WITH the v17 columns. Safe to ignore.
+            except sqlite3.Error as e:
+                # Table absent (pre-v16 install path) OR transient
+                # corruption/lock during PRAGMA — schema script will
+                # create the table WITH the v17 columns on a fresh
+                # install, and a truly broken DB will surface again on
+                # the next ``executescript(_SCHEMA_SQL)`` call so we
+                # don't lose the failure signal. Caught broadly
+                # (``sqlite3.Error`` rather than ``OperationalError``)
+                # to mirror the defensive style used elsewhere in
+                # this module.
                 logger.debug(
                     "Pre-script v16->v17 ALTER TABLE skipped: %s", e,
                 )
@@ -698,7 +713,7 @@ def _init_db(db_path: str) -> sqlite3.Connection:
             # background thread after gadget_web is serving requests,
             # so the user never waits on it.
             logger.info("Migration v15->v16: pipeline_queue table ready")
-        if current > 0 and current < 17:
+        if current > 0 and current < _PIPELINE_CLAIM_COLS_VERSION:
             # v17 (issue #184 Wave 4 PR-D / issue #193): the
             # ``claimed_by`` and ``claimed_at`` columns and the
             # ``idx_pipeline_stale_claims`` partial index were

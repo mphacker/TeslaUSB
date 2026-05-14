@@ -95,9 +95,9 @@ def _checkpoint_one(db_path: str) -> None:
     DB-file lifecycle events: a future feature that swaps
     ``geodata.db`` after a corruption-recovery import (or the v15
     migration's table-rebuild path) cannot leave us holding a stale
-    file descriptor. If profiling ever shows this loop as hot, cache
-    a per-DB connection and add a "rebind on file mtime change"
-    invalidation hook — but until then the simpler design wins.
+    file descriptor. If profiling ever shows this loop as hot, see
+    follow-up issue #189 for the cached-connection design with
+    proper inode-invalidation hook.
     """
     if not db_path or not os.path.isfile(db_path):
         return

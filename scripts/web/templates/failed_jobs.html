@@ -17,6 +17,22 @@
         </div>
     </header>
 
+    <!-- Issue #180 — collapsible help section so the page is
+         self-explanatory the first time an operator lands here. -->
+    <details id="jobsHelp" style="margin-bottom: 16px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px;">
+        <summary style="cursor: pointer; padding: 12px 14px; font-weight: 600; font-size: 0.9375rem; display: flex; align-items: center; gap: 8px;">
+            <svg class="nav-icon" aria-hidden="true" style="width: 16px; height: 16px;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+            <span>What does this mean?</span>
+        </summary>
+        <div style="padding: 0 14px 14px; font-size: 0.875rem; color: var(--text-primary); line-height: 1.5;">
+            <p style="margin: 8px 0;">A <strong>failed job</strong> is a background task — archive copy, video index, cloud upload, or live event upload — that retried multiple times and gave up. Each card shows what failed and a recommendation for what to do.</p>
+            <p style="margin: 8px 0;"><strong>Failed</strong> vs <strong>queued</strong>: a failed job has stopped retrying and needs your decision. A "queued" or "pending" item on the Health card is just waiting in line for the worker — it isn't failed, it'll process when the worker reaches it. Big queue numbers (hundreds queued) mean the worker is catching up after a backlog, not that anything is broken.</p>
+            <p style="margin: 8px 0;"><strong>Retry</strong> resets the row so the worker picks it up again. Use this when the underlying cause is fixed (network is back, free space is restored, permissions corrected).</p>
+            <p style="margin: 8px 0;"><strong>Delete</strong> removes the queue row only — it never deletes the underlying video file from disk. Producers (file watcher, boot scan, archive worker) may legitimately re-enqueue the same file later if it still exists.</p>
+            <p style="margin: 8px 0;"><strong>Clip value</strong> badge: <span class="job-value job-value-event" style="display:inline-flex; vertical-align:middle;">Event clip</span> = Tesla recorded it because something happened (high value). <span class="job-value job-value-recent" style="display:inline-flex; vertical-align:middle;">Driving footage</span> = rolling dashcam, rotated out hourly. <span class="job-value job-value-index" style="display:inline-flex; vertical-align:middle;">Map / trip data</span> = re-derivable from the video.</p>
+        </div>
+    </details>
+
     <!-- Subsystem filter pills -->
     <nav aria-label="Filter by subsystem" style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px;">
         <button type="button" class="failed-pill" data-subsystem="all" aria-pressed="true">
@@ -45,15 +61,18 @@
         </button>
     </nav>
 
-    <!-- "Retry all" / "Delete all" bar (shown only when a single subsystem is selected) -->
-    <div id="retryAllBar" style="display: none; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px;">
+    <!-- "Retry all" / "Delete all" bar. Issue #180 — always visible.
+         When the "All" pill is selected the buttons fan out across
+         every subsystem; otherwise they act on the filtered subsystem
+         only. Buttons disable when there's nothing to act on. -->
+    <div id="retryAllBar" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; flex-wrap: wrap;">
         <span id="retryAllLabel" style="font-size: 0.875rem; color: var(--text-secondary);"></span>
-        <div style="display: flex; gap: 8px;">
-            <button type="button" id="retryAllBtn" class="btn btn-primary" aria-label="Retry all failed jobs in this subsystem">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="button" id="retryAllBtn" class="btn btn-primary" aria-label="Retry all failed jobs">
                 <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
                 <span>Retry all</span>
             </button>
-            <button type="button" id="deleteAllBtn" class="btn btn-danger" aria-label="Permanently delete all failed jobs in this subsystem">
+            <button type="button" id="deleteAllBtn" class="btn btn-danger" aria-label="Permanently delete all failed jobs">
                 <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
                 <span>Delete all</span>
             </button>
@@ -129,6 +148,42 @@
     color: var(--accent-danger, #EF4444);
     font-size: 0.75rem; font-weight: 600;
 }
+/* Issue #180 — clip-value badge. Color hints at the underlying
+   irreplaceability of the data (event = unique, recent = rotates,
+   archived = preserved, index = re-derivable). */
+.job-value {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 0.75rem; font-weight: 600;
+    border: 1px solid transparent;
+}
+.job-value-event,
+.job-value-live_event {
+    background: rgba(239, 68, 68, 0.10);
+    color: var(--accent-danger, #EF4444);
+    border-color: rgba(239, 68, 68, 0.30);
+}
+.job-value-recent {
+    background: rgba(245, 158, 11, 0.10);
+    color: var(--accent-warning, #F59E0B);
+    border-color: rgba(245, 158, 11, 0.30);
+}
+.job-value-archived {
+    background: rgba(34, 197, 94, 0.10);
+    color: var(--accent-success, #22C55E);
+    border-color: rgba(34, 197, 94, 0.30);
+}
+.job-value-cloud,
+.job-value-index {
+    background: rgba(59, 130, 246, 0.10);
+    color: var(--accent-primary, #3B82F6);
+    border-color: rgba(59, 130, 246, 0.30);
+}
+.job-value-unknown {
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+}
 .job-identifier {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8125rem;
@@ -145,6 +200,39 @@
     word-break: break-word;
     max-height: 200px;
     overflow: auto;
+}
+/* Issue #180 — recommendation chip steers the operator toward the
+   right action for each failure mode. Color matches the suggested
+   action (retry = primary, delete = danger, either = neutral). */
+.job-recommendation {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 8px 10px; border-radius: 6px;
+    font-size: 0.8125rem; line-height: 1.4;
+    border-left: 3px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+.job-recommendation-retry {
+    border-left-color: var(--accent-primary, #3B82F6);
+}
+.job-recommendation-delete {
+    border-left-color: var(--accent-danger, #EF4444);
+}
+.job-recommendation .nav-icon {
+    width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px;
+}
+.job-recommendation-action {
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.6875rem;
+    letter-spacing: 0.04em;
+    margin-right: 6px;
+}
+.job-recommendation-retry .job-recommendation-action {
+    color: var(--accent-primary, #3B82F6);
+}
+.job-recommendation-delete .job-recommendation-action {
+    color: var(--accent-danger, #EF4444);
 }
 /* Issue #132 — multi-failure history (prior error revealed on demand) */
 .job-prev-toggle {
@@ -242,16 +330,21 @@
         document.querySelectorAll('.failed-pill').forEach(function (b) {
             b.setAttribute('aria-pressed', b.dataset.subsystem === state.subsystem ? 'true' : 'false');
         });
-        const bar = $('retryAllBar');
+        // Issue #180 — bar is always visible. When "All" is selected
+        // the buttons fan out across every subsystem; otherwise they
+        // act on just the filtered subsystem. Buttons disable when
+        // there is nothing to act on.
         if (state.subsystem === 'all') {
-            bar.style.display = 'none';
+            const total = state.counts.total || 0;
+            $('retryAllLabel').textContent = total + ' job' + (total === 1 ? '' : 's') + ' failed across all subsystems';
+            $('retryAllBtn').disabled = total === 0;
+            $('deleteAllBtn').disabled = total === 0;
         } else {
             const meta = SUBSYSTEM_META[state.subsystem];
             const n = state.counts[state.subsystem] || 0;
             $('retryAllLabel').textContent = n + ' ' + (meta ? meta.label : state.subsystem) + ' job' + (n === 1 ? '' : 's') + ' failed';
             $('retryAllBtn').disabled = n === 0;
             $('deleteAllBtn').disabled = n === 0;
-            bar.style.display = 'flex';
         }
     }
 
@@ -269,6 +362,27 @@
         return n + ' attempt' + (n === 1 ? '' : 's');
     }
 
+    // Issue #180 — Lucide icon name per recommendation action so the
+    // chip's leading glyph reinforces the suggested choice.
+    const RECOMMENDATION_ICON = {
+        retry:  'icon-refresh-cw',
+        delete: 'icon-trash-2',
+        either: 'icon-alert-circle',
+    };
+    const RECOMMENDATION_LABEL = {
+        retry:  'Try retry',
+        delete: 'Delete is OK',
+        either: 'Your call',
+    };
+
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function renderRows() {
         const list = $('jobList');
         list.innerHTML = '';
@@ -283,12 +397,23 @@
             card.className = 'job-card';
             card.setAttribute('role', 'listitem');
 
+            // Issue #180 — clip-value badge (with title= tooltip
+            // describing the underlying data tier). Falls back to
+            // 'unknown' if the backend somehow omitted the value
+            // field, keeping the page renderable on a partial
+            // payload.
+            const value = r.value || { tier: 'unknown', label: 'Background task', description: '' };
+            const valueClass = 'job-value job-value-' + (value.tier || 'unknown');
+
             const header = document.createElement('div');
             header.className = 'job-card-header';
             header.innerHTML =
                 '<span class="job-subsystem-badge">' +
                   '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#' + meta.icon + '"></use></svg>' +
-                  meta.label +
+                  escapeHtml(meta.label) +
+                '</span>' +
+                '<span class="' + valueClass + '" title="' + escapeHtml(value.description || '') + '">' +
+                  escapeHtml(value.label || '') +
                 '</span>' +
                 '<span class="job-attempts">' + fmtAttempts(r.attempts) + '</span>';
 
@@ -299,6 +424,27 @@
             const error = document.createElement('div');
             error.className = 'job-error';
             error.textContent = r.last_error || '(no error message)';
+
+            // Issue #180 — recommendation chip. Tells the operator
+            // which action is most likely correct for this failure
+            // pattern. Both buttons are still rendered below; this
+            // is advisory only.
+            let recommendation = null;
+            if (r.recommendation && r.recommendation.action) {
+                const rec = r.recommendation;
+                const recClass = 'job-recommendation job-recommendation-' + rec.action;
+                const recIcon = RECOMMENDATION_ICON[rec.action] || 'icon-alert-circle';
+                const recLabel = RECOMMENDATION_LABEL[rec.action] || 'Suggested';
+                recommendation = document.createElement('div');
+                recommendation.className = recClass;
+                recommendation.setAttribute('role', 'note');
+                recommendation.innerHTML =
+                    '<svg class="nav-icon" aria-hidden="true"><use href="' + SPRITE_URL + '#' + recIcon + '"></use></svg>' +
+                    '<div>' +
+                      '<span class="job-recommendation-action">' + escapeHtml(recLabel) + '</span>' +
+                      '<span>' + escapeHtml(rec.reason || '') + '</span>' +
+                    '</div>';
+            }
 
             // Issue #132 — surface multi-cycle failure history on demand.
             // Hidden by default to keep the card scannable; the toggle is
@@ -357,6 +503,9 @@
             card.appendChild(header);
             card.appendChild(identifier);
             card.appendChild(error);
+            if (recommendation) {
+                card.appendChild(recommendation);
+            }
             if (prevToggle) {
                 card.appendChild(prevToggle);
                 card.appendChild(prevError);
@@ -415,8 +564,19 @@
     }
 
     function retryAll() {
-        if (state.subsystem === 'all') return;
-        retry({ subsystem: state.subsystem, id: null })
+        // Issue #180 — when "All" is selected, the backend fans out
+        // across every subsystem. Otherwise we send the filtered
+        // subsystem and let the matching adapter retry every row.
+        const sub = state.subsystem;
+        const total = sub === 'all'
+            ? (state.counts.total || 0)
+            : (state.counts[sub] || 0);
+        if (total === 0) return;
+        const label = sub === 'all'
+            ? 'every failed job across every subsystem'
+            : ((SUBSYSTEM_META[sub] ? SUBSYSTEM_META[sub].label : sub) + ' jobs');
+        if (!window.confirm('Retry all ' + total + ' ' + label + '?')) return;
+        retry({ subsystem: sub, id: null })
             .then(function (res) {
                 if (!res.ok) {
                     showError('Retry-all failed: ' + (res.body && res.body.error ? res.body.error : 'unknown'));
@@ -447,12 +607,22 @@
     }
 
     function deleteAll() {
-        if (state.subsystem === 'all') return;
-        const meta = SUBSYSTEM_META[state.subsystem];
-        const label = meta ? meta.label : state.subsystem;
-        const n = state.counts[state.subsystem] || 0;
-        if (!window.confirm('Permanently delete all ' + n + ' failed ' + label + ' job' + (n === 1 ? '' : 's') + '?\n\nThe rows will be removed from the queue. Underlying source files are NOT deleted from disk.')) return;
-        del({ subsystem: state.subsystem, id: null })
+        // Issue #180 — when "All" is selected, the backend fans out
+        // across every subsystem in one round-trip. Otherwise we
+        // send only the filtered subsystem and let the matching
+        // adapter delete every row.
+        const sub = state.subsystem;
+        const total = sub === 'all'
+            ? (state.counts.total || 0)
+            : (state.counts[sub] || 0);
+        if (total === 0) return;
+        const label = sub === 'all'
+            ? 'failed job' + (total === 1 ? '' : 's') + ' across every subsystem'
+            : 'failed ' + (SUBSYSTEM_META[sub] ? SUBSYSTEM_META[sub].label : sub) + ' job' + (total === 1 ? '' : 's');
+        const msg = 'Permanently delete all ' + total + ' ' + label + '?\n\n' +
+                    'The rows will be removed from the queue. Underlying source files are NOT deleted from disk.';
+        if (!window.confirm(msg)) return;
+        del({ subsystem: sub, id: null })
             .then(function (res) {
                 if (!res.ok) {
                     showError('Delete-all failed: ' + (res.body && res.body.error ? res.body.error : 'unknown'));

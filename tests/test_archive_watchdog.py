@@ -224,6 +224,12 @@ class TestArchiveWatchdogSeverity:
 
     def test_error_at_10_min_stale_with_pending(self):
         # Acceptance criterion 6: 10 min trigger — banner-worthy.
+        # Issue #180 — wording was toned down from the alarmist
+        # "may be stalled — videos may be lost!" to a neutral
+        # "not making progress" since 10 min without a copy is the
+        # normal signature of a load-pause under heavy backlog,
+        # not yet an emergency. CRITICAL (20 min+) keeps the loud
+        # "STALLED ... videos are being lost!" wording.
         sev, msg = archive_watchdog._classify_severity(
             worker_running=True,
             pending_count=5,
@@ -233,7 +239,9 @@ class TestArchiveWatchdogSeverity:
             disk_critical_mb=100,
         )
         assert sev == 'error'
-        assert 'stalled' in msg.lower() or 'lost' in msg.lower()
+        assert 'no copy in' in msg.lower()
+        assert 'min' in msg.lower()
+        assert '5 queued' in msg.lower()
 
     def test_critical_at_20_min_stale_with_pending(self):
         sev, msg = archive_watchdog._classify_severity(
@@ -519,6 +527,203 @@ class TestArchiveWatchdogReporting:
         assert snap['last_successful_copy_at'] == "2025-01-01T00:00:00+00:00"
         assert snap['last_successful_copy_age_seconds'] is not None
         assert snap['last_successful_copy_age_seconds'] > 0
+
+
+# ---------------------------------------------------------------------------
+# TestArchiveWatchdogActionable (#180 follow-up)
+#
+# The "footage may be lost" banner in base.html is gated on BOTH severity
+# (error/critical) AND actionable=True. The principle: don't pop a banner
+# the operator has no remedy for. Most ERROR/CRITICAL severities come from
+# transient SDIO contention where the worker is doing its best — popping
+# a banner asking "what can I do?" is pure annoyance. Only two conditions
+# are user-actionable:
+#   1. Worker not running while clips are pending → restart service.
+#   2. SD-card free space below the CRITICAL threshold → free space.
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveWatchdogActionable:
+    def test_idle_worker_with_empty_queue_is_not_actionable(
+        self, db, archive_root, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            archive_watchdog.shutil, 'disk_usage',
+            lambda _p: _fake_usage(free_mb=10_000),
+        )
+        snap = archive_watchdog._compute_health(db, archive_root)
+        assert snap['actionable'] is False
+
+    def test_running_worker_slow_or_stalled_is_not_actionable(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Insert a "last copied" row 25 minutes ago (well into the
+        # CRITICAL stall band) plus a pending row so the watchdog
+        # severity escalates to 'critical' / "videos are being lost!".
+        # actionable MUST still be False because the worker is
+        # running and the operator can't fix it from the web UI.
+        with sqlite3.connect(db) as conn:
+            old_iso = time.strftime(
+                '%Y-%m-%dT%H:%M:%S+00:00',
+                time.gmtime(time.time() - 25 * 60),
+            )
+            conn.execute(
+                "INSERT INTO archive_queue("
+                " source_path, dest_path, expected_size, expected_mtime,"
+                " status, copied_at, priority, enqueued_at, attempts) "
+                "VALUES (?, ?, ?, ?, 'copied', ?, 1, ?, 0)",
+                (
+                    "/teslacam/RecentClips/old.mp4",
+                    os.path.join(archive_root, "RecentClips/old.mp4"),
+                    100, time.time() - 25 * 60,
+                    old_iso, old_iso,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO archive_queue("
+                " source_path, dest_path, expected_size, expected_mtime,"
+                " status, priority, enqueued_at, attempts) "
+                "VALUES (?, ?, ?, ?, 'pending', 1, ?, 0)",
+                (
+                    "/teslacam/RecentClips/new.mp4",
+                    os.path.join(archive_root, "RecentClips/new.mp4"),
+                    100, time.time(),
+                    time.strftime(
+                        '%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(),
+                    ),
+                ),
+            )
+        monkeypatch.setattr(
+            archive_watchdog.shutil, 'disk_usage',
+            lambda _p: _fake_usage(free_mb=10_000),
+        )
+        # archive_worker.is_running() defaults to True via the lazy
+        # import path; we don't need to start a real worker for this
+        # test — the watchdog reads the "is the worker thread alive"
+        # bool, which is False here. To exercise the running-but-
+        # stalled branch we patch is_running to True.
+        monkeypatch.setattr(
+            archive_worker, 'is_running', lambda: True,
+        )
+        snap = archive_watchdog._compute_health(db, archive_root)
+        assert snap['severity'] == 'critical'
+        # The banner gate MUST NOT fire just because the worker
+        # is slow under load — there's nothing the operator can do.
+        assert snap['actionable'] is False, (
+            "actionable must be False for stale-only conditions: a "
+            "running worker that's just slow gives the operator no "
+            "remedy and a banner would be pure noise."
+        )
+
+    def test_worker_not_running_with_pending_is_actionable(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Worker thread dead + work queued = restart the service.
+        # This IS user-actionable.
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "INSERT INTO archive_queue("
+                " source_path, dest_path, expected_size, expected_mtime,"
+                " status, priority, enqueued_at, attempts) "
+                "VALUES (?, ?, ?, ?, 'pending', 1, ?, 0)",
+                (
+                    "/teslacam/RecentClips/new.mp4",
+                    os.path.join(archive_root, "RecentClips/new.mp4"),
+                    100, time.time(),
+                    time.strftime(
+                        '%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(),
+                    ),
+                ),
+            )
+        monkeypatch.setattr(
+            archive_watchdog.shutil, 'disk_usage',
+            lambda _p: _fake_usage(free_mb=10_000),
+        )
+        monkeypatch.setattr(
+            archive_worker, 'is_running', lambda: False,
+        )
+        snap = archive_watchdog._compute_health(db, archive_root)
+        assert snap['severity'] == 'critical'
+        assert snap['actionable'] is True
+
+    def test_worker_not_running_with_empty_queue_is_not_actionable(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Worker dead but no work to do — there's no urgency.
+        monkeypatch.setattr(
+            archive_watchdog.shutil, 'disk_usage',
+            lambda _p: _fake_usage(free_mb=10_000),
+        )
+        monkeypatch.setattr(
+            archive_worker, 'is_running', lambda: False,
+        )
+        snap = archive_watchdog._compute_health(db, archive_root)
+        assert snap['actionable'] is False
+
+    def test_disk_critical_is_actionable(
+        self, db, archive_root, monkeypatch,
+    ):
+        # SD card below CRITICAL threshold → user can free space.
+        monkeypatch.setattr(
+            archive_watchdog.shutil, 'disk_usage',
+            lambda _p: _fake_usage(free_mb=50),  # < 100 MB threshold
+        )
+        snap = archive_watchdog._compute_health(db, archive_root)
+        assert snap['severity'] == 'critical'
+        assert snap['actionable'] is True
+
+    def test_disk_warning_alone_is_not_actionable(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Below the WARNING threshold but above CRITICAL — heads-up
+        # only. The user doesn't need a banner; the System Health
+        # card will surface the % full as a yellow row.
+        monkeypatch.setattr(
+            archive_watchdog.shutil, 'disk_usage',
+            lambda _p: _fake_usage(free_mb=300),  # < 500, > 100
+        )
+        snap = archive_watchdog._compute_health(db, archive_root)
+        assert snap['actionable'] is False
+
+    def test_disk_unknown_is_not_actionable(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Transient OSError on shutil.disk_usage → disk_known=False
+        # → don't claim disk-critical and definitely don't fire the
+        # banner.
+        def _boom(_p):
+            raise OSError("ENOENT (transient)")
+        monkeypatch.setattr(
+            archive_watchdog.shutil, 'disk_usage', _boom,
+        )
+        snap = archive_watchdog._compute_health(db, archive_root)
+        assert snap['actionable'] is False
+
+    def test_actionable_field_present_in_every_snapshot(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Contract test: the field must always exist so the JSON
+        # endpoint (and the banner JS reading it) never trips on
+        # KeyError. Test across several severity bands.
+        for free_mb, run in [
+            (10_000, True),    # ok
+            (300, True),       # disk warn
+            (50, True),        # disk crit
+            (10_000, False),   # worker dead, queue empty
+        ]:
+            monkeypatch.setattr(
+                archive_watchdog.shutil, 'disk_usage',
+                lambda _p, _f=free_mb: _fake_usage(free_mb=_f),
+            )
+            monkeypatch.setattr(
+                archive_worker, 'is_running', lambda _r=run: _r,
+            )
+            snap = archive_watchdog._compute_health(db, archive_root)
+            assert 'actionable' in snap, (
+                f"actionable missing from snapshot "
+                f"(free_mb={free_mb}, running={run})"
+            )
+            assert isinstance(snap['actionable'], bool)
 
 
 # ---------------------------------------------------------------------------

@@ -561,3 +561,477 @@ def test_html_route_registered(app):
     assert 'jobs.api_counts' in rules
     assert 'jobs.api_failed' in rules
     assert 'jobs.api_retry' in rules
+
+
+# ---------------------------------------------------------------------------
+# Issue #180 — clip-value classifier, recommendation classifier, and
+# subsystem='all' retry/delete fan-out.
+# ---------------------------------------------------------------------------
+
+class TestClipValueClassifier:
+    """``_classify_clip_value`` translates the row identifier into a
+    deterministic value-tier so the UI can show an at-a-glance "how
+    irreplaceable is this clip" badge.
+    """
+
+    def test_sentryclips_path_is_event_tier(self):
+        from blueprints.jobs import _classify_clip_value
+        v = _classify_clip_value(
+            'archive',
+            '/mnt/gadget/part1-ro/TeslaCam/SentryClips/2025-10-29_10-39-36/'
+            'front.mp4',
+        )
+        assert v['tier'] == 'event'
+        assert v['label'] == 'Event clip'
+
+    def test_savedclips_path_is_event_tier(self):
+        from blueprints.jobs import _classify_clip_value
+        v = _classify_clip_value(
+            'cloud_sync',
+            '/home/pi/ArchivedClips/SavedClips/2025-11-01_08-00-00/back.mp4',
+        )
+        # Even though it's in ArchivedClips, the SavedClips
+        # sub-folder beats the archived check (it's a saved event).
+        assert v['tier'] == 'event'
+
+    def test_recentclips_path_is_recent_tier(self):
+        from blueprints.jobs import _classify_clip_value
+        v = _classify_clip_value(
+            'archive',
+            '/mnt/gadget/part1-ro/TeslaCam/RecentClips/2025-10-29_10-39-36-'
+            'front.mp4',
+        )
+        assert v['tier'] == 'recent'
+
+    def test_archivedclips_path_is_archived_tier(self):
+        from blueprints.jobs import _classify_clip_value
+        v = _classify_clip_value(
+            'cloud_sync',
+            '/home/pi/ArchivedClips/2025-10-29/clip.mp4',
+        )
+        assert v['tier'] == 'archived'
+
+    def test_indexer_subsystem_with_unknown_path_falls_back_to_index(self):
+        from blueprints.jobs import _classify_clip_value
+        v = _classify_clip_value('indexer', '/some/other/path.mp4')
+        assert v['tier'] == 'index'
+
+    def test_cloud_sync_subsystem_with_unknown_path_falls_back_to_cloud(self):
+        from blueprints.jobs import _classify_clip_value
+        v = _classify_clip_value('cloud_sync', '/some/other/path.mp4')
+        assert v['tier'] == 'cloud'
+
+    def test_live_event_sync_is_always_event_tier(self):
+        from blueprints.jobs import _classify_clip_value
+        # LES rows are always events by construction — the subsystem
+        # only triggers on Tesla event.json arrivals. The classifier
+        # MUST short-circuit on the subsystem name even when the
+        # event_dir path doesn't contain SentryClips/SavedClips.
+        v = _classify_clip_value(
+            'live_event_sync',
+            '/some/event/dir',
+        )
+        assert v['tier'] == 'live_event'
+
+    def test_unknown_subsystem_and_path_returns_unknown_tier(self):
+        from blueprints.jobs import _classify_clip_value
+        v = _classify_clip_value('archive', 'just-some-string')
+        assert v['tier'] == 'unknown'
+
+    def test_empty_identifier_does_not_crash(self):
+        from blueprints.jobs import _classify_clip_value
+        v = _classify_clip_value('archive', '')
+        assert 'tier' in v
+        assert 'label' in v
+        assert 'description' in v
+
+    def test_case_insensitive_path_match(self):
+        from blueprints.jobs import _classify_clip_value
+        # Tesla writes mixed-case folders; the classifier lowercases
+        # before matching so /TeslaCam/SentryClips/ and
+        # /teslacam/sentryclips/ both classify the same.
+        upper = _classify_clip_value(
+            'archive', '/TeslaCam/SentryClips/x.mp4')
+        lower = _classify_clip_value(
+            'archive', '/teslacam/sentryclips/x.mp4')
+        assert upper['tier'] == lower['tier'] == 'event'
+
+
+class TestRecommendationClassifier:
+    """``_classify_recommendation`` maps a redacted ``last_error``
+    string to a Retry / Delete / Either action recommendation. The
+    operator can always override; this just steers them to the right
+    button by default.
+    """
+
+    def test_file_missing_recommends_delete(self):
+        from blueprints.jobs import _classify_recommendation
+        for err in (
+            'No such file or directory',
+            '[Errno 2] ENOENT: file not found',
+            'source_gone',
+            'File does not exist',
+            'File missing',
+        ):
+            r = _classify_recommendation('archive', err)
+            assert r['action'] == 'delete', f"failed on {err!r}"
+
+    def test_parse_error_recommends_delete(self):
+        from blueprints.jobs import _classify_recommendation
+        for err in (
+            'Invalid data found when processing input',
+            'moov atom not found',
+            'truncated',
+            'parse error',
+            'unsupported codec',
+            'corrupt header',
+        ):
+            r = _classify_recommendation('indexer', err)
+            assert r['action'] == 'delete', f"failed on {err!r}"
+
+    def test_network_error_recommends_retry(self):
+        from blueprints.jobs import _classify_recommendation
+        for err in (
+            'Connection refused',
+            'connection reset by peer',
+            'Connection timed out',
+            'Network is unreachable',
+            'temporary failure in name resolution',
+            'no route to host',
+            'TLS handshake timed out',
+            'getaddrinfo: name or service not known',
+            'dial tcp 1.2.3.4:443: i/o timeout',
+        ):
+            r = _classify_recommendation('cloud_sync', err)
+            assert r['action'] == 'retry', f"failed on {err!r}"
+
+    def test_auth_quota_recommends_retry(self):
+        from blueprints.jobs import _classify_recommendation
+        for err in (
+            'HTTP 401 Unauthorized',
+            'HTTP 403 Forbidden',
+            'access denied',
+            'Invalid credential',
+            'Quota exceeded',
+            'Out of space on device',
+            'HTTP 429 too many requests',
+        ):
+            r = _classify_recommendation('cloud_sync', err)
+            assert r['action'] == 'retry', f"failed on {err!r}"
+
+    def test_io_error_recommends_retry(self):
+        from blueprints.jobs import _classify_recommendation
+        for err in (
+            'I/O error',
+            'Input/output error',
+            'Stale file handle',
+            'Device or resource busy',
+        ):
+            r = _classify_recommendation('archive', err)
+            assert r['action'] == 'retry', f"failed on {err!r}"
+
+    def test_permission_recommends_retry(self):
+        from blueprints.jobs import _classify_recommendation
+        r = _classify_recommendation(
+            'archive', '[Errno 13] Permission denied')
+        assert r['action'] == 'retry'
+        r2 = _classify_recommendation(
+            'archive', 'Read-only file system')
+        assert r2['action'] == 'retry'
+
+    def test_lock_contention_recommends_retry(self):
+        from blueprints.jobs import _classify_recommendation
+        r = _classify_recommendation(
+            'archive', 'lock timeout while waiting for coordinator')
+        assert r['action'] == 'retry'
+
+    def test_empty_error_returns_either(self):
+        from blueprints.jobs import _classify_recommendation
+        for err in ('', None, '   '):
+            r = _classify_recommendation('archive', err)
+            assert r['action'] == 'either', f"failed on {err!r}"
+            assert r['reason']
+
+    def test_unknown_error_with_few_attempts_returns_either(self):
+        from blueprints.jobs import _classify_recommendation
+        r = _classify_recommendation(
+            'archive', 'WeirdNeverSeenBeforeError: kaboom', attempts=2)
+        assert r['action'] == 'either'
+
+    def test_unknown_error_with_many_attempts_recommends_delete(self):
+        from blueprints.jobs import _classify_recommendation
+        # Heuristic: if a row has been retried 5+ times and still
+        # doesn't match any known recoverable pattern, the failure
+        # is probably stuck — push the operator toward delete so the
+        # worker isn't hammering the same broken row forever.
+        r = _classify_recommendation(
+            'archive', 'WeirdNeverSeenBeforeError: kaboom', attempts=5)
+        assert r['action'] == 'delete'
+        assert '5' in r['reason']
+
+    def test_response_shape_is_stable(self):
+        from blueprints.jobs import _classify_recommendation
+        r = _classify_recommendation(
+            'archive', 'No such file or directory', attempts=3)
+        assert set(r.keys()) == {'action', 'reason'}
+        assert isinstance(r['action'], str)
+        assert isinstance(r['reason'], str)
+
+
+class TestRowEnrichment:
+    """Each ``_*_rows`` adapter must populate ``value`` and
+    ``recommendation`` on every row so the UI never has to handle a
+    payload missing those fields.
+    """
+
+    def test_archive_rows_include_value_and_recommendation(self,
+                                                            geo_db, tmp_path,
+                                                            monkeypatch):
+        clip = tmp_path / 'SentryClips' / 'evt' / 'front.mp4'
+        clip.parent.mkdir(parents=True)
+        clip.write_bytes(b'x' * 10)
+        _force_archive_dead_letter(geo_db, str(clip))
+
+        # ``archive_queue.list_dead_letters`` resolves the DB by lazy-
+        # importing ``config.MAPPING_DB_PATH``, so patching the config
+        # module is what redirects the read to our fixture DB.
+        import config as config_module
+        from blueprints import jobs as jobs_module
+        monkeypatch.setattr(config_module, 'MAPPING_DB_PATH', geo_db,
+                            raising=False)
+        monkeypatch.setattr(jobs_module, 'MAPPING_DB_PATH', geo_db,
+                            raising=False)
+
+        from blueprints.jobs import _archive_rows
+        rows = _archive_rows(limit=10)
+        assert rows, 'archive adapter returned no rows'
+        for r in rows:
+            assert 'value' in r
+            assert 'recommendation' in r
+            assert r['value']['tier'] in (
+                'event', 'recent', 'archived', 'index', 'cloud',
+                'live_event', 'unknown',
+            )
+            assert r['recommendation']['action'] in (
+                'retry', 'delete', 'either',
+            )
+
+    def test_classifier_used_for_indexer_with_event_path(self):
+        # Pure unit test that does not need a DB — confirms the
+        # subsystem-name + path combination flows through the
+        # classifier correctly when the indexer holds a SentryClips
+        # path (a common case for failed event-clip indexing).
+        from blueprints.jobs import (
+            _classify_clip_value, _classify_recommendation,
+        )
+        v = _classify_clip_value(
+            'indexer',
+            '/home/pi/ArchivedClips/SentryClips/2025/front.mp4',
+        )
+        assert v['tier'] == 'event'  # path beats subsystem fallback
+
+        # Indexer parse errors recommend delete (the file is corrupt;
+        # retrying won't help).
+        r = _classify_recommendation('indexer', 'moov atom not found')
+        assert r['action'] == 'delete'
+
+
+class TestFanOutAcrossAllSubsystems:
+    """Issue #180 — ``subsystem='all'`` on retry/delete must invoke
+    every per-subsystem adapter once and return a per-subsystem
+    breakdown alongside the total.
+    """
+
+    def test_retry_all_fans_out(self, client, monkeypatch):
+        calls = {}
+
+        def make(name, n):
+            def fake(row_id):
+                calls[name] = row_id
+                return n
+            return fake
+
+        _patch_retrier(monkeypatch, 'archive',         make('archive', 2))
+        _patch_retrier(monkeypatch, 'indexer',         make('indexer', 3))
+        _patch_retrier(monkeypatch, 'cloud_sync',      make('cloud_sync', 1))
+        _patch_retrier(monkeypatch, 'live_event_sync', make('live_event_sync', 4))
+
+        rv = client.post('/api/jobs/retry',
+                         data=json.dumps({'subsystem': 'all'}),
+                         content_type='application/json')
+        assert rv.status_code == 200
+        body = rv.get_json()
+        assert body['subsystem'] == 'all'
+        assert body['rows_reset'] == 2 + 3 + 1 + 4
+        assert body['per_subsystem'] == {
+            'archive': 2, 'indexer': 3, 'cloud_sync': 1, 'live_event_sync': 4,
+        }
+        # Every adapter was invoked with id=None (retry-all).
+        assert set(calls.keys()) == {
+            'archive', 'indexer', 'cloud_sync', 'live_event_sync',
+        }
+        for name, row_id in calls.items():
+            assert row_id is None, f"{name} was invoked with id={row_id!r}"
+
+    def test_retry_all_ignores_id_in_payload(self, client, monkeypatch):
+        # Even if the client sends id=42, fan-out always uses id=None.
+        captured = {}
+
+        def fake(row_id):
+            captured.setdefault('args', []).append(row_id)
+            return 1
+
+        for name in ('archive', 'indexer', 'cloud_sync', 'live_event_sync'):
+            _patch_retrier(monkeypatch, name, fake)
+
+        rv = client.post('/api/jobs/retry',
+                         data=json.dumps({'subsystem': 'all', 'id': 42}),
+                         content_type='application/json')
+        assert rv.status_code == 200
+        # All four adapter invocations got None, not 42.
+        assert captured['args'] == [None, None, None, None]
+
+    def test_retry_all_one_subsystem_crashes(self, client, monkeypatch):
+        """A crashing adapter must not block fan-out for the others."""
+        import blueprints.jobs as jobs_module
+
+        def boom(row_id):
+            raise RuntimeError('boom')
+
+        monkeypatch.setitem(jobs_module._RETRIERS, 'archive', boom)
+        _patch_retrier(monkeypatch, 'indexer',         lambda _r: 5)
+        _patch_retrier(monkeypatch, 'cloud_sync',      lambda _r: 0)
+        _patch_retrier(monkeypatch, 'live_event_sync', lambda _r: 2)
+
+        rv = client.post('/api/jobs/retry',
+                         data=json.dumps({'subsystem': 'all'}),
+                         content_type='application/json')
+        assert rv.status_code == 200
+        body = rv.get_json()
+        # Crashed adapter contributes 0 (swallowed by _safe);
+        # other adapters still produce their counts.
+        assert body['per_subsystem']['archive'] == 0
+        assert body['per_subsystem']['indexer'] == 5
+        assert body['rows_reset'] == 5 + 0 + 2
+
+    def test_delete_all_fans_out(self, client, monkeypatch):
+        calls = {}
+
+        def make(name, n):
+            def fake(row_id):
+                calls[name] = row_id
+                return n
+            return fake
+
+        import blueprints.jobs as jobs_module
+        for name, n in (('archive', 7), ('indexer', 1),
+                        ('cloud_sync', 0), ('live_event_sync', 3)):
+            monkeypatch.setitem(jobs_module._DELETERS, name, make(name, n))
+
+        rv = client.post('/api/jobs/delete',
+                         data=json.dumps({'subsystem': 'all'}),
+                         content_type='application/json')
+        assert rv.status_code == 200
+        body = rv.get_json()
+        assert body['subsystem'] == 'all'
+        assert body['rows_deleted'] == 7 + 1 + 0 + 3
+        assert body['per_subsystem'] == {
+            'archive': 7, 'indexer': 1, 'cloud_sync': 0, 'live_event_sync': 3,
+        }
+        assert all(v is None for v in calls.values())
+
+    def test_delete_all_one_subsystem_crashes(self, client, monkeypatch):
+        import blueprints.jobs as jobs_module
+
+        def boom(row_id):
+            raise RuntimeError('boom')
+
+        monkeypatch.setitem(jobs_module._DELETERS, 'cloud_sync', boom)
+        monkeypatch.setitem(jobs_module._DELETERS, 'archive',
+                            lambda _r: 4)
+        monkeypatch.setitem(jobs_module._DELETERS, 'indexer',
+                            lambda _r: 0)
+        monkeypatch.setitem(jobs_module._DELETERS, 'live_event_sync',
+                            lambda _r: 2)
+
+        rv = client.post('/api/jobs/delete',
+                         data=json.dumps({'subsystem': 'all'}),
+                         content_type='application/json')
+        assert rv.status_code == 200
+        body = rv.get_json()
+        assert body['per_subsystem']['cloud_sync'] == 0  # crash swallowed
+        assert body['rows_deleted'] == 4 + 0 + 0 + 2
+
+    def test_unknown_subsystem_lists_all_in_allowed(self, client):
+        rv = client.post('/api/jobs/retry',
+                         data=json.dumps({'subsystem': 'bogus', 'id': None}),
+                         content_type='application/json')
+        assert rv.status_code == 400
+        body = rv.get_json()
+        # The "allowed" array must include 'all' so the client knows
+        # the bulk fan-out option exists.
+        assert 'all' in body['allowed']
+
+
+class TestFailedJobsPageContext:
+    """Issue #180 — the /jobs HTML route must merge
+    ``get_base_context()`` so the left sidebar / mobile bottom-tab
+    nav renders with all top-level pages instead of collapsing to
+    just Settings.
+    """
+
+    def test_render_template_receives_base_context(self, app, monkeypatch):
+        # Capture the kwargs render_template is called with so we can
+        # assert that get_base_context's flags flow into the template.
+        # Patching get_base_context to a known dict is simpler than
+        # patching render_template (the latter would require taking
+        # over the template loading machinery).
+        captured = {}
+
+        import blueprints.jobs as jobs_module
+
+        fake_ctx = {
+            'mode_token': 'present',
+            'mode_label': 'Present',
+            'mode_class': 'ok',
+            'share_paths': [],
+            'hostname': 'cybertruckusb',
+            'map_available': True,
+            'analytics_available': True,
+            'cloud_archive_available': True,
+            'chimes_available': True,
+            'shows_available': False,
+            'wraps_available': False,
+            'music_available': False,
+            'boombox_available': False,
+            'license_plates_available': False,
+            'videos_available': True,
+        }
+        monkeypatch.setattr(jobs_module, 'get_base_context',
+                            lambda: dict(fake_ctx))
+
+        # Stub render_template so the test doesn't need the entire
+        # base.html chain (with its url_for calls into every other
+        # blueprint). We just verify the template name and the kwargs
+        # it would have been called with.
+        def fake_render(template, **kwargs):
+            captured['template'] = template
+            captured['kwargs'] = kwargs
+            return 'ok'
+
+        monkeypatch.setattr(jobs_module, 'render_template', fake_render)
+
+        with app.test_client() as client:
+            rv = client.get('/jobs')
+            assert rv.status_code == 200
+
+        assert captured['template'] == 'failed_jobs.html'
+        # Every flag that was in the base context must reach the template.
+        for key, value in fake_ctx.items():
+            assert captured['kwargs'].get(key) == value, \
+                f"base-context flag {key!r} missing from /jobs render"
+        # And the page identifier must NOT collapse the nav by
+        # falsely highlighting Settings (issue #180 root cause).
+        assert captured['kwargs'].get('page') == 'jobs'
+        # The subsystem list still flows through.
+        assert 'subsystems' in captured['kwargs']

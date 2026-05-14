@@ -260,8 +260,21 @@
                     });
                     if (!r.ok) { banner.hidden = true; return; }
                     const data = await r.json();
-                    if (data.severity === 'error'
-                        || data.severity === 'critical') {
+                    // Issue #180 follow-up — banner is gated on
+                    // BOTH severity (error/critical) AND actionable
+                    // (the user can actually fix the underlying
+                    // issue). Stale-only conditions where the
+                    // worker is doing its best under heavy backlog
+                    // are reported in the System Health card but
+                    // never popped as a banner — banners that the
+                    // operator has no remedy for are pure noise.
+                    const sevBad = data.severity === 'error'
+                        || data.severity === 'critical';
+                    // Default to true when the field is missing so
+                    // an older deployment without the actionable
+                    // flag still surfaces the banner as before.
+                    const actionable = (data.actionable !== false);
+                    if (sevBad && actionable) {
                         applySeverity(data.severity, data.message);
                         banner.hidden = false;
                     } else {

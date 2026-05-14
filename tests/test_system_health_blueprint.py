@@ -404,7 +404,11 @@ def test_indexer_block_dead_letter(monkeypatch):
     })
     block = sh._indexer_block()
     assert block['severity'] == 'warn'
-    assert '3 dead-letter' in block['message']
+    # Issue #180 — actionable wording: "N jobs need attention — open
+    # Failed Jobs" instead of the old "N dead-letter rows" jargon.
+    assert '3 jobs need attention' in block['message']
+    assert 'Failed Jobs' in block['message']
+    assert block['dead_letter_count'] == 3
 
 
 def test_indexer_block_not_running(monkeypatch):
@@ -538,7 +542,10 @@ def test_archive_block_files_lost_takes_precedence_over_dead_letters(
 
     block = sh._archive_block()
     assert 'lost' in block['message'].lower()
-    assert 'dead-letter' not in block['message'].lower()
+    # Issue #180 — message now says "N jobs need attention" instead of
+    # "N dead-letter rows", so check for absence of the "need attention"
+    # phrase to confirm lost-files dominates.
+    assert 'need attention' not in block['message'].lower()
 
 
 def test_archive_block_lost_24h_zero_means_ok(monkeypatch):
@@ -866,7 +873,12 @@ def test_archive_block_paused_load_message(monkeypatch):
     })
     block = sh._archive_block()
     assert block['severity'] == 'warn'
-    assert block['message'] == 'Paused: load 4.2 > 3.5'
+    # Issue #180 — message now appends a queue-depth tail "· N queued"
+    # whenever there's pending work, so the operator sees consistent
+    # info even as the headline severity branch swaps. Pause-reason
+    # is the canonical prefix.
+    assert block['message'].startswith('Paused: load 4.2 > 3.5')
+    assert '10 queued' in block['message']
     assert block['pause_reason'] == 'load 4.2 > 3.5'
 
 
@@ -903,7 +915,8 @@ def test_archive_block_load_auto_paused_without_manual_flag(monkeypatch):
     # auto-pause, not the narrower manual flag.
     assert block['paused'] is True
     assert block['severity'] == 'warn'
-    assert block['message'] == 'Paused: load 3.9 > 3.5'
+    assert block['message'].startswith('Paused: load 3.9 > 3.5')
+    assert '442 queued' in block['message']
     assert block['pause_reason'] == 'load 3.9 > 3.5'
 
 
@@ -933,7 +946,8 @@ def test_archive_block_disk_auto_paused_without_manual_flag(monkeypatch):
     block = sh._archive_block()
     assert block['paused'] is True
     assert block['severity'] == 'warn'
-    assert block['message'] == 'Paused: SD card 96% full'
+    assert block['message'].startswith('Paused: SD card 96% full')
+    assert '5 queued' in block['message']
     assert block['pause_reason'] == 'SD card 96% full'
 
 
@@ -959,6 +973,7 @@ def test_archive_block_paused_disk_message(monkeypatch):
     })
     block = sh._archive_block()
     assert block['severity'] == 'warn'
+    # pending=0 → no queue tail; message stays clean.
     assert block['message'] == 'Paused: SD card 96% full'
     assert block['pause_reason'] == 'SD card 96% full'
 
@@ -983,7 +998,8 @@ def test_archive_block_paused_background_message(monkeypatch):
     })
     block = sh._archive_block()
     assert block['severity'] == 'warn'
-    assert block['message'] == 'Paused (background task)'
+    assert block['message'].startswith('Paused (background task)')
+    assert '5 queued' in block['message']
     assert block['pause_reason'] == 'background'
 
 
@@ -1051,7 +1067,11 @@ def test_cloud_block_dead_letters(monkeypatch):
     })
     block = sh._cloud_block()
     assert block['severity'] == 'warn'
-    assert 'dead-letter' in block['message']
+    # Issue #180 — actionable wording: "N jobs need attention — open
+    # Failed Jobs" instead of "N dead-letter rows".
+    assert '4 jobs need attention' in block['message']
+    assert 'Failed Jobs' in block['message']
+    assert block['dead_letter_count'] == 4
 
 
 def test_cloud_block_uploading(monkeypatch):

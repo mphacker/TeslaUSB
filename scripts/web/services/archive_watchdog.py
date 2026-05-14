@@ -524,25 +524,38 @@ def _classify_severity(*,
             f"{int(last_copy_age_seconds)}s ago)."
         )
     elif last_copy_age_seconds < _STALE_ERROR_SECONDS:
+        # Issue #180 — informative rather than alarming. 5–10 min
+        # without a copy is the normal signature of a load-pause
+        # under heavy backlog (Pi Zero 2 W's SDIO bus contention),
+        # not a "videos may be lost" emergency. Keep the metric so
+        # the operator can correlate with system load.
         stale_sev = 'warning'
         stale_msg = (
-            f"Archive worker is slow: no copy in "
+            f"Archive worker slow: no copy in "
             f"{int(last_copy_age_seconds // 60)} min "
-            f"({pending_count} pending)."
+            f"({pending_count} queued). Often caused by SD-card load."
         )
     elif last_copy_age_seconds < _STALE_CRITICAL_SECONDS:
+        # Issue #180 — escalate the wording rather than the alarm.
+        # 10–20 min is concerning but not yet "videos are being
+        # lost" — Tesla's RecentClips circular buffer is ~60 min,
+        # so we still have time to drain.
         stale_sev = 'error'
         stale_msg = (
-            f"Archive worker may be stalled: no copy in "
+            f"Archive worker not making progress: no copy in "
             f"{int(last_copy_age_seconds // 60)} min "
-            f"({pending_count} pending) — videos may be lost!"
+            f"({pending_count} queued). Check system load and "
+            f"SD-card health."
         )
     else:
+        # 20 min+ stall with pending work IS the genuine emergency —
+        # Tesla's RecentClips ring buffer is rolling clips out faster
+        # than we can copy them. Keep the loud alarm for this case.
         stale_sev = 'critical'
         stale_msg = (
             f"Archive worker is STALLED: no copy in "
             f"{int(last_copy_age_seconds // 60)} min "
-            f"({pending_count} pending) — videos are being lost!"
+            f"({pending_count} queued) — videos are being lost!"
         )
 
     # Worker-down with pending work is critical regardless of staleness.
@@ -621,9 +634,33 @@ def _compute_health(db_path: str, archive_root: str) -> Dict[str, Any]:
         disk_known=disk_known,
     )
 
+    # Issue #180 follow-up — only flag the snapshot as ``actionable``
+    # when the operator can actually do something to fix the problem.
+    # Most ERROR/CRITICAL severities are caused by transient backlog +
+    # SDIO contention, where the worker is doing its best and the
+    # right "action" is just to wait. Popping a banner the operator
+    # has no remedy for is pure annoyance — the system-health card
+    # surfaces the underlying numbers either way for diagnostics.
+    #
+    # Only two conditions are genuinely user-fixable:
+    #   1. Worker is not running while clips are pending  → restart
+    #      the gadget_web service / check journalctl.
+    #   2. SD-card free space is below the CRITICAL threshold → free
+    #      space or expand storage.
+    #
+    # A 20-minute+ stall on a *running* worker COULD be a real bug,
+    # but the operator still can't diagnose it from the web UI; if
+    # they can't act on it, we shouldn't yell at them about it. The
+    # underlying staleness is still visible in the System Health card
+    # message so it's not hidden — just demoted from a banner.
+    worker_down_with_work = (not worker_running) and pending_count > 0
+    disk_critical = disk_known and disk_free_mb < disk_critical_mb
+    actionable = bool(worker_down_with_work or disk_critical)
+
     snap: Dict[str, Any] = {
         'severity': severity,
         'message': message,
+        'actionable': actionable,
         'last_successful_copy_at': last_copy_iso,
         'last_successful_copy_age_seconds': int(age) if age is not None else None,
         'worker_running': bool(worker_running),

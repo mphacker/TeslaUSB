@@ -1195,10 +1195,12 @@ class TestDeleteSourceGone:
 
 class TestMarkSkippedStationary:
     """Issue #167 sub-deliverable 2 — terminal transition for the
-    ``archive.skip_stationary_recent_clips`` peek-and-skip path. Mirror
-    of ``TestMarkSourceGone``: the same precondition/return-value
-    contract so the two terminal "we did not copy" buckets stay
-    parallel.
+    SEI-peek-and-skip path. Mirror of ``TestMarkSourceGone``: the
+    same precondition/return-value contract so the two terminal
+    "we did not copy" buckets stay parallel.
+
+    Issue #184 Wave 1 made the SEI peek unconditional; the function
+    contract is unchanged.
     """
 
     def test_marks_claimed_row(self, db, sample_file):

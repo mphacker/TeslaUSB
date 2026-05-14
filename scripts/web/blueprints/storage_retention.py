@@ -10,17 +10,19 @@ JSON endpoints for:
   which itself wraps ``archive_watchdog.force_prune_now``).
 * ``POST /api/cleanup/reclaim_stationary_recent`` — issue #167: delete
   already-archived RecentClips with no GPS movement (one-shot reclaim
-  that complements the daily retention prune).
+  that complements the daily retention prune). With issue #184 Wave 1
+  the archive worker now skips stationary RecentClips at source for
+  every install, so this button only matters for clips archived
+  before the upgrade.
 * ``GET  /api/cleanup/status``   — return the latest retention summary
   (last-run timestamp, deleted count, freed bytes, kept-unsynced count,
   next-due timestamp, current resolved retention days, and the
   ``cleanup`` config block as it lives on disk so the UI can refresh
   without restart).
-* ``GET  /api/archive/skip_stationary``  — issue #167 sub-deliverable 2:
-  return the current value of ``archive.skip_stationary_recent_clips``
-  plus the 24-hour skipped-count tally for the Settings card badge.
-* ``POST /api/archive/skip_stationary`` — flip the skip flag and
-  schedule a service restart so the change takes effect.
+* ``GET  /api/archive/skipped_stationary`` — return the rolling
+  24-hour tally of skipped-stationary RecentClips for the badge.
+* ``POST /api/archive/skipped_stationary/clear`` — zero the badge
+  without waiting for rows to age out.
 
 The endpoints are intentionally JSON-only — the rendered card lives in
 ``index.html`` (the existing Settings page) so users see retention in
@@ -41,7 +43,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 from typing import Any, Dict, Optional
 
 import yaml
@@ -520,58 +521,21 @@ def api_reclaim_stationary_recent():
     }), 200
 
 # ---------------------------------------------------------------------------
-# Issue #167 sub-deliverable 2 — skip-stationary toggle endpoints
+# Issue #167 sub-deliverable 2 — skipped-stationary tally endpoints
 # ---------------------------------------------------------------------------
 
-def _schedule_gadget_web_restart() -> bool:
-    """Schedule a delayed restart of ``gadget_web.service`` via systemd-run.
 
-    Mirrors the pattern in ``blueprints/live_events.py`` —
-    ``systemd-run --on-active=2`` runs the restart job as a transient
-    timer **outside** this service's cgroup so the restart still
-    fires when our own process is killed mid-restart. Returns True
-    when scheduling succeeded.
+@storage_retention_bp.route('/api/archive/skipped_stationary', methods=['GET'])
+def api_get_skipped_stationary_tally():
+    """Return the rolling 24-hour ``skipped_stationary`` count for the
+    Storage & Retention badge.
 
-    No sudo is needed: ``gadget_web.service`` runs as root (port 80
-    requirement, see copilot-instructions "Web App Patterns"). Any
-    future privilege drop must add a sudoers rule for
-    ``systemd-run --on-active=... systemctl restart gadget_web.service``
-    or replace this with a PolicyKit/dbus call. The skip-stationary
-    settings UI surfaces ``restart_scheduled`` in its toast so a
-    scheduling failure is visible.
+    Issue #184 Wave 1 made the skip-stationary behavior unconditional
+    — there is no longer an enable toggle to read or persist. This
+    endpoint exists purely to power the badge so operators can see how
+    many overnight Sentry-mode RecentClips were skipped at source in
+    the last 24 hours.
     """
-    try:
-        subprocess.Popen(
-            [
-                'systemd-run',
-                '--on-active=2',
-                '/bin/systemctl',
-                'restart',
-                'gadget_web.service',
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
-        logger.info("Scheduled gadget_web.service restart via systemd-run")
-        return True
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to schedule gadget_web.service restart")
-        return False
-
-
-@storage_retention_bp.route('/api/archive/skip_stationary', methods=['GET'])
-def api_get_skip_stationary():
-    """Return the current ``archive.skip_stationary_recent_clips`` value
-    plus the 24-hour ``skipped_stationary`` count for the badge.
-
-    Always reachable; no image gating. The flag controls the archive
-    worker behavior, which is a system-level concern.
-    """
-    cfg = _load_config_dict() or {}
-    archive_block = cfg.get('archive') or {}
-    enabled = bool(archive_block.get('skip_stationary_recent_clips', False))
-
     skipped_24h = 0
     try:
         from services import archive_queue
@@ -580,74 +544,19 @@ def api_get_skip_stationary():
         )
     except Exception:  # noqa: BLE001
         logger.exception(
-            "skip_stationary status: count_skipped_stationary_recent failed"
+            "skipped_stationary status: count helper failed"
         )
         skipped_24h = 0
 
-    runtime_enabled = enabled
-    try:
-        from config import ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS
-        runtime_enabled = bool(ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS)
-    except Exception:  # noqa: BLE001
-        pass
-
     return jsonify({
         'success': True,
-        'enabled': enabled,
-        'runtime_enabled': runtime_enabled,
-        'restart_pending': enabled != runtime_enabled,
         'skipped_24h': skipped_24h,
     }), 200
 
 
-@storage_retention_bp.route('/api/archive/skip_stationary', methods=['POST'])
-def api_set_skip_stationary():
-    """Persist a new value for ``archive.skip_stationary_recent_clips``.
-
-    Body: ``{"enabled": true | false}``. Anything else returns 400.
-    On success, schedules a delayed ``gadget_web.service`` restart so
-    the new value takes effect (the flag is captured at module-import
-    time as a constant in ``config.py``). The response includes
-    ``restart_scheduled`` so the UI can show "saved; restarting…".
-    """
-    payload = request.get_json(silent=True) or {}
-    raw = payload.get('enabled')
-    if not isinstance(raw, bool):
-        return jsonify({
-            'success': False,
-            'message': 'enabled must be true or false',
-        }), 400
-
-    try:
-        from helpers.config_updater import update_config_yaml
-        update_config_yaml({
-            'archive.skip_stationary_recent_clips': bool(raw),
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "skip_stationary: failed to persist flag to config.yaml"
-        )
-        return jsonify({
-            'success': False,
-            'message': f"Failed to save: {exc}",
-        }), 500
-
-    restart_scheduled = _schedule_gadget_web_restart()
-
-    logger.info(
-        "skip_stationary_recent_clips set to %s (restart_scheduled=%s)",
-        bool(raw), restart_scheduled,
-    )
-    return jsonify({
-        'success': True,
-        'enabled': bool(raw),
-        'restart_scheduled': restart_scheduled,
-    }), 200
-
-
-@storage_retention_bp.route('/api/archive/skip_stationary/clear',
+@storage_retention_bp.route('/api/archive/skipped_stationary/clear',
                              methods=['POST'])
-def api_clear_skip_stationary_tally():
+def api_clear_skipped_stationary_tally():
     """Delete every ``skipped_stationary`` row from the archive_queue.
 
     Mirrors the existing ``Dismiss``-style affordance for the
@@ -659,7 +568,7 @@ def api_clear_skip_stationary_tally():
         from services import archive_queue
         n = int(archive_queue.delete_skipped_stationary())
     except Exception as exc:  # noqa: BLE001
-        logger.exception("skip_stationary: clear tally failed")
+        logger.exception("skipped_stationary: clear tally failed")
         return jsonify({
             'success': False,
             'message': f"Clear failed: {exc}",

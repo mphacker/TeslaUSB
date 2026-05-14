@@ -226,27 +226,24 @@ if __name__ == "__main__":
                 print(f"Warning: Failed to register LES watcher callback: {e}")
 
             # Archive queue producer (issue #76 Phase 2a): mirror the
-            # mp4 callback into the new archive_queue table. Phase 2a
-            # is producer-only — entries accumulate, no worker drains
-            # them until Phase 2b. Independent enable flag so existing
-            # installs that don't want the queue can disable it cleanly.
+            # mp4 callback into the archive_queue table. Issue #184 Wave 1
+            # made the queue subsystem unconditional — there is no longer
+            # an enable flag.
             try:
-                from config import ARCHIVE_QUEUE_ENABLED
-                if ARCHIVE_QUEUE_ENABLED:
-                    def _on_new_videos_for_archive(file_paths):
-                        from services.archive_queue import (
-                            enqueue_many_for_archive,
+                def _on_new_videos_for_archive(file_paths):
+                    from services.archive_queue import (
+                        enqueue_many_for_archive,
+                    )
+                    try:
+                        enqueue_many_for_archive(list(file_paths))
+                    except Exception as e:
+                        print(
+                            "Warning: archive_queue enqueue failed: "
+                            f"{e}"
                         )
-                        try:
-                            enqueue_many_for_archive(list(file_paths))
-                        except Exception as e:
-                            print(
-                                "Warning: archive_queue enqueue failed: "
-                                f"{e}"
-                            )
 
-                    register_archive_callback(_on_new_videos_for_archive)
-                    print("File watcher → archive_queue producer registered")
+                register_archive_callback(_on_new_videos_for_archive)
+                print("File watcher → archive_queue producer registered")
             except Exception as e:
                 print(
                     "Warning: Failed to register archive_queue watcher "
@@ -339,34 +336,29 @@ if __name__ == "__main__":
     # indexing worker's lifecycle: starts after the watcher is
     # registered so the boot catch-up scan and the every-60-s rescan
     # observe the same TeslaCam root. Failure here must never take
-    # down gadget_web.
+    # down gadget_web. Issue #184 Wave 1 made the producer
+    # unconditional — no enable flag, boot catch-up always runs.
     try:
         from config import (
-            ARCHIVE_QUEUE_ENABLED,
             ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS,
-            ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED,
             ARCHIVE_QUEUE_BOOT_SCAN_DEFER_SECONDS,
             MAPPING_DB_PATH as _ARCHIVE_QUEUE_DB,
         )
-        if ARCHIVE_QUEUE_ENABLED:
-            from services.video_service import get_teslacam_path
-            from services import archive_producer
-            tc = get_teslacam_path()
-            if tc:
-                archive_producer.start_producer(
-                    tc,
-                    db_path=_ARCHIVE_QUEUE_DB,
-                    rescan_interval_seconds=(
-                        ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS
-                    ),
-                    boot_catchup_enabled=(
-                        ARCHIVE_QUEUE_BOOT_CATCHUP_ENABLED
-                    ),
-                    boot_scan_defer_seconds=(
-                        ARCHIVE_QUEUE_BOOT_SCAN_DEFER_SECONDS
-                    ),
-                )
-                print("Archive queue producer started (Phase 2a)")
+        from services.video_service import get_teslacam_path
+        from services import archive_producer
+        tc = get_teslacam_path()
+        if tc:
+            archive_producer.start_producer(
+                tc,
+                db_path=_ARCHIVE_QUEUE_DB,
+                rescan_interval_seconds=(
+                    ARCHIVE_QUEUE_RESCAN_INTERVAL_SECONDS
+                ),
+                boot_scan_defer_seconds=(
+                    ARCHIVE_QUEUE_BOOT_SCAN_DEFER_SECONDS
+                ),
+            )
+            print("Archive queue producer started (Phase 2a)")
     except Exception as e:
         print(f"Warning: Failed to start archive queue producer: {e}")
 
@@ -379,36 +371,34 @@ if __name__ == "__main__":
     # in favor of this pair.
     try:
         from config import (
-            ARCHIVE_QUEUE_ENABLED,
             ARCHIVE_DIR,
             MAPPING_DB_PATH as _ARCHIVE_WORKER_DB,
         )
-        if ARCHIVE_QUEUE_ENABLED:
-            from services.video_service import get_teslacam_path
-            from services import archive_worker
-            tc = get_teslacam_path()
-            archive_worker.start_worker(
-                _ARCHIVE_WORKER_DB,
-                ARCHIVE_DIR,
-                teslacam_root=tc,
-            )
-            print("Archive queue worker started (Phase 2b)")
+        from services.video_service import get_teslacam_path
+        from services import archive_worker
+        tc = get_teslacam_path()
+        archive_worker.start_worker(
+            _ARCHIVE_WORKER_DB,
+            ARCHIVE_DIR,
+            teslacam_root=tc,
+        )
+        print("Archive queue worker started (Phase 2b)")
 
-            # Phase 2c: archive watchdog + retention prune. Single
-            # daemon thread that observes the queue/worker, exposes
-            # ``/api/archive/status``, and runs the daily retention
-            # prune on ``ArchivedClips``. Pure local-FS observer — it
-            # never touches the USB gadget.
-            try:
-                from services import archive_watchdog
-                archive_watchdog.start_watchdog(
-                    _ARCHIVE_WORKER_DB, ARCHIVE_DIR,
-                )
-                print("Archive watchdog started (Phase 2c)")
-            except Exception as e:  # noqa: BLE001
-                print(
-                    f"Warning: Failed to start archive watchdog: {e}"
-                )
+        # Phase 2c: archive watchdog + retention prune. Single
+        # daemon thread that observes the queue/worker, exposes
+        # ``/api/archive/status``, and runs the daily retention
+        # prune on ``ArchivedClips``. Pure local-FS observer — it
+        # never touches the USB gadget.
+        try:
+            from services import archive_watchdog
+            archive_watchdog.start_watchdog(
+                _ARCHIVE_WORKER_DB, ARCHIVE_DIR,
+            )
+            print("Archive watchdog started (Phase 2c)")
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"Warning: Failed to start archive watchdog: {e}"
+            )
     except Exception as e:
         print(f"Warning: Failed to start archive queue worker: {e}")
 
@@ -454,25 +444,6 @@ if __name__ == "__main__":
                 print("Cloud archive worker started (continuous)")
     except Exception as e:
         print(f"Warning: Cloud archive worker start failed: {e}")
-
-    # NOTE: ``MAPPING_INDEX_ON_STARTUP`` is intentionally no longer
-    # honored. The boot catch-up scan above has the same effect with
-    # none of the cost (no full re-parse of clips already indexed).
-    # The config flag is kept in config.yaml for now to avoid breaking
-    # existing installs; it just becomes a no-op.
-    try:
-        from config import (
-            MAPPING_INDEX_ON_STARTUP, MAPPING_INDEX_ON_MODE_SWITCH,
-        )
-        if MAPPING_INDEX_ON_STARTUP or MAPPING_INDEX_ON_MODE_SWITCH:
-            print(
-                "INFO: mapping.index_on_startup / mapping.index_on_mode_switch "
-                "are deprecated and now have no effect. The persistent indexing "
-                "queue + worker handle this automatically — to force a re-scan, "
-                "use the 'Scan for new clips' button on the map page."
-            )
-    except Exception:
-        pass
 
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:

@@ -383,7 +383,6 @@ DEFAULT_THRESHOLDS = {
     'hard_accel_threshold': 3.5,
     'sharp_turn_lateral_g': 4.0,          # m/s² (lateral)
     'speed_limit_mps': 35.76,             # ~80 mph
-    'fsd_disengage_detect': True,
 }
 
 
@@ -469,8 +468,8 @@ def _detect_events(
                 'metadata': json.dumps({'speed_mps': speed, 'limit_mps': limit}),
             })
 
-        # --- FSD Disengagement ---
-        if thresholds.get('fsd_disengage_detect', True) and prev_autopilot is not None:
+        # --- FSD Disengagement (issue #184 Wave 1: always on) ---
+        if prev_autopilot is not None:
             engaged = {'SELF_DRIVING', 'AUTOSTEER'}
             if prev_autopilot in engaged and autopilot not in engaged:
                 events.append({

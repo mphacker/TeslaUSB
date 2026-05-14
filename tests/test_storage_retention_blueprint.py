@@ -634,85 +634,45 @@ class TestApiReclaimStationaryRecent:
         assert body['success'] is True
 
 # ---------------------------------------------------------------------------
-# Issue #167 sub-deliverable 2 — skip-stationary toggle endpoints
+# Issue #167 sub-deliverable 2 — skipped-stationary tally endpoints.
+# Issue #184 Wave 1 removed the GET-toggle/POST-set endpoints; the
+# behavior is now unconditional and the badge endpoint only reports
+# the rolling 24-hour count.
 # ---------------------------------------------------------------------------
 
 
-class TestApiGetSkipStationary:
-    """``GET /api/archive/skip_stationary``.
+class TestApiGetSkippedStationaryTally:
+    """``GET /api/archive/skipped_stationary``.
 
-    Returns the on-disk flag value, the runtime constant value, a
-    ``restart_pending`` boolean, and the 24-hour skipped-tally count.
+    Returns only the 24-hour skipped-tally count.
     """
 
-    def test_default_disabled(self, client, monkeypatch):
-        # _load_config_dict reads from disk; stub it to return an
-        # empty config so the default (False) wins.
-        monkeypatch.setattr(
-            'blueprints.storage_retention._load_config_dict',
-            lambda: {},
-        )
-        # Stub count helper so the test doesn't touch a real DB.
-        from services import archive_queue
-        monkeypatch.setattr(
-            archive_queue, 'count_skipped_stationary_recent',
-            lambda hours: 0,
-        )
-        rv = client.get('/api/archive/skip_stationary')
-        assert rv.status_code == 200
-        data = rv.get_json()
-        assert data['success'] is True
-        assert data['enabled'] is False
-        assert data['skipped_24h'] == 0
-
-    def test_reflects_disk_value(self, client, monkeypatch):
-        monkeypatch.setattr(
-            'blueprints.storage_retention._load_config_dict',
-            lambda: {'archive': {'skip_stationary_recent_clips': True}},
-        )
+    def test_returns_count(self, client, monkeypatch):
         from services import archive_queue
         monkeypatch.setattr(
             archive_queue, 'count_skipped_stationary_recent',
             lambda hours: 42,
         )
-        rv = client.get('/api/archive/skip_stationary')
+        rv = client.get('/api/archive/skipped_stationary')
+        assert rv.status_code == 200
         data = rv.get_json()
-        assert data['enabled'] is True
+        assert data['success'] is True
         assert data['skipped_24h'] == 42
 
-    def test_restart_pending_when_disk_and_runtime_diverge(
-        self, client, monkeypatch,
-    ):
-        # Disk says True, runtime constant says False → operator
-        # flipped the flag but the service hasn't restarted yet.
-        monkeypatch.setattr(
-            'blueprints.storage_retention._load_config_dict',
-            lambda: {'archive': {'skip_stationary_recent_clips': True}},
-        )
+    def test_default_zero(self, client, monkeypatch):
         from services import archive_queue
         monkeypatch.setattr(
             archive_queue, 'count_skipped_stationary_recent',
             lambda hours: 0,
         )
-        # The runtime constant is captured at config import time; we
-        # can monkeypatch it on the config module itself.
-        import config as cfg_mod
-        monkeypatch.setattr(
-            cfg_mod, 'ARCHIVE_SKIP_STATIONARY_RECENT_CLIPS', False,
-            raising=False,
-        )
-        rv = client.get('/api/archive/skip_stationary')
+        rv = client.get('/api/archive/skipped_stationary')
+        assert rv.status_code == 200
         data = rv.get_json()
-        assert data['enabled'] is True
-        assert data['runtime_enabled'] is False
-        assert data['restart_pending'] is True
+        assert data['success'] is True
+        assert data['skipped_24h'] == 0
 
     def test_count_helper_failure_returns_zero(self, client, monkeypatch):
         # A broken count helper must not 500 the badge endpoint.
-        monkeypatch.setattr(
-            'blueprints.storage_retention._load_config_dict',
-            lambda: {},
-        )
         from services import archive_queue
 
         def boom(hours):
@@ -721,117 +681,13 @@ class TestApiGetSkipStationary:
         monkeypatch.setattr(
             archive_queue, 'count_skipped_stationary_recent', boom,
         )
-        rv = client.get('/api/archive/skip_stationary')
+        rv = client.get('/api/archive/skipped_stationary')
         assert rv.status_code == 200
         assert rv.get_json()['skipped_24h'] == 0
 
 
-class TestApiSetSkipStationary:
-    """``POST /api/archive/skip_stationary``."""
-
-    def test_persists_true_and_schedules_restart(
-        self, client, captured_updates, monkeypatch,
-    ):
-        monkeypatch.setattr(
-            'blueprints.storage_retention._schedule_gadget_web_restart',
-            lambda: True,
-        )
-        rv = client.post(
-            '/api/archive/skip_stationary',
-            data=json.dumps({'enabled': True}),
-            content_type='application/json',
-        )
-        assert rv.status_code == 200
-        data = rv.get_json()
-        assert data['success'] is True
-        assert data['enabled'] is True
-        assert data['restart_scheduled'] is True
-        assert (
-            captured_updates['last']
-            == {'archive.skip_stationary_recent_clips': True}
-        )
-
-    def test_persists_false(self, client, captured_updates, monkeypatch):
-        monkeypatch.setattr(
-            'blueprints.storage_retention._schedule_gadget_web_restart',
-            lambda: True,
-        )
-        rv = client.post(
-            '/api/archive/skip_stationary',
-            data=json.dumps({'enabled': False}),
-            content_type='application/json',
-        )
-        assert rv.status_code == 200
-        assert rv.get_json()['enabled'] is False
-        assert (
-            captured_updates['last']
-            == {'archive.skip_stationary_recent_clips': False}
-        )
-
-    @pytest.mark.parametrize('payload', [
-        {},                                # missing key
-        {'enabled': 1},                    # int 1
-        {'enabled': 0},                    # int 0
-        {'enabled': 'true'},               # string
-        {'enabled': 'yes'},                # string
-        {'enabled': None},                 # None
-    ])
-    def test_rejects_non_bool(self, client, captured_updates, payload):
-        rv = client.post(
-            '/api/archive/skip_stationary',
-            data=json.dumps(payload),
-            content_type='application/json',
-        )
-        assert rv.status_code == 400
-        assert rv.get_json()['success'] is False
-        assert captured_updates['calls'] == 0
-
-    def test_persist_failure_returns_500(
-        self, client, captured_updates, monkeypatch,
-    ):
-        def explode(updates):
-            raise RuntimeError('disk full')
-
-        monkeypatch.setattr(
-            'helpers.config_updater.update_config_yaml', explode,
-            raising=False,
-        )
-        rv = client.post(
-            '/api/archive/skip_stationary',
-            data=json.dumps({'enabled': True}),
-            content_type='application/json',
-        )
-        assert rv.status_code == 500
-        assert rv.get_json()['success'] is False
-
-    def test_restart_failure_does_not_block_save(
-        self, client, captured_updates, monkeypatch,
-    ):
-        # Save succeeds; restart-scheduling fails. Operator still
-        # gets 200 + clear ``restart_scheduled: false`` so the UI can
-        # show "saved but please restart manually".
-        monkeypatch.setattr(
-            'blueprints.storage_retention._schedule_gadget_web_restart',
-            lambda: False,
-        )
-        rv = client.post(
-            '/api/archive/skip_stationary',
-            data=json.dumps({'enabled': True}),
-            content_type='application/json',
-        )
-        assert rv.status_code == 200
-        data = rv.get_json()
-        assert data['success'] is True
-        assert data['restart_scheduled'] is False
-        # Save still happened.
-        assert (
-            captured_updates['last']
-            == {'archive.skip_stationary_recent_clips': True}
-        )
-
-
-class TestApiClearSkipStationaryTally:
-    """``POST /api/archive/skip_stationary/clear``."""
+class TestApiClearSkippedStationaryTally:
+    """``POST /api/archive/skipped_stationary/clear``."""
 
     def test_returns_deleted_count(self, client, monkeypatch):
         from services import archive_queue
@@ -839,7 +695,7 @@ class TestApiClearSkipStationaryTally:
             archive_queue, 'delete_skipped_stationary',
             lambda: 17,
         )
-        rv = client.post('/api/archive/skip_stationary/clear')
+        rv = client.post('/api/archive/skipped_stationary/clear')
         assert rv.status_code == 200
         data = rv.get_json()
         assert data['success'] is True
@@ -851,7 +707,7 @@ class TestApiClearSkipStationaryTally:
             archive_queue, 'delete_skipped_stationary',
             lambda: 0,
         )
-        rv = client.post('/api/archive/skip_stationary/clear')
+        rv = client.post('/api/archive/skipped_stationary/clear')
         assert rv.status_code == 200
         assert rv.get_json()['deleted'] == 0
 
@@ -864,6 +720,6 @@ class TestApiClearSkipStationaryTally:
         monkeypatch.setattr(
             archive_queue, 'delete_skipped_stationary', boom,
         )
-        rv = client.post('/api/archive/skip_stationary/clear')
+        rv = client.post('/api/archive/skipped_stationary/clear')
         assert rv.status_code == 500
         assert rv.get_json()['success'] is False

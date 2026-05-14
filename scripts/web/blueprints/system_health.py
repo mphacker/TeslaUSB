@@ -37,7 +37,6 @@ from typing import Any, Callable, Dict, Tuple
 from flask import Blueprint, jsonify, request
 
 from config import (
-    ARCHIVE_QUEUE_ENABLED,
     CLOUD_ARCHIVE_ENABLED,
     GADGET_DIR,
     LIVE_EVENT_SYNC_ENABLED,
@@ -260,19 +259,6 @@ def _format_pause_reason(load_pause: Dict[str, Any],
 
 def _archive_block() -> Dict[str, Any]:
     """Archive watchdog + worker status."""
-    if not ARCHIVE_QUEUE_ENABLED:
-        return {
-            'severity': SEV_UNKNOWN,
-            'message': 'Archive queue disabled',
-            'enabled': False,
-            'paused': False,
-            'queue_depth': 0,
-            'lost_24h': 0,
-            'eta_seconds': None,
-            'eta_human': None,
-            'drain_rate_per_sec': None,
-            'pause_reason': None,
-        }
     try:
         from services import archive_queue, archive_watchdog, archive_worker
         watchdog = archive_watchdog.get_status() or {}
@@ -724,9 +710,6 @@ def api_clear_lost_clips():
     changes. Does NOT touch ``dead_letter`` / ``pending`` / ``claimed``
     / ``copied`` rows.
     """
-    if not ARCHIVE_QUEUE_ENABLED:
-        return jsonify({'rows_deleted': 0, 'enabled': False})
-
     payload = request.get_json(silent=True) or {}
     older_than_hours = payload.get('older_than_hours')
     if older_than_hours is not None:

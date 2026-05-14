@@ -168,6 +168,32 @@ def _block_real_indexer_enqueue(monkeypatch):
     monkeypatch.setattr(archive_worker, '_enqueue_indexed', lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _default_clip_has_gps_signal_true(request, monkeypatch):
+    """Default the SEI peek to ``True`` ("has GPS, copy normally").
+
+    Issue #184 Wave 1 made the SEI peek unconditional for every
+    RecentClips claim. Most tests in this file build minimal MP4
+    fixtures with no SEI messages — the real peek would return
+    ``False`` and mark them ``skipped_stationary``, breaking tests
+    that expect the worker to actually copy the file.
+
+    Tests that exercise the skip path (``TestArchiveWorkerSkipStationary``)
+    monkeypatch this function with their own value AFTER this fixture
+    runs, so they keep full control of the peek result.
+
+    Tests that exercise the SEI peek itself (``TestClipHasGpsSignal``)
+    need the real function — they're explicitly opted out via the
+    class-name check below.
+    """
+    if request.cls is not None and request.cls.__name__ == 'TestClipHasGpsSignal':
+        return
+    monkeypatch.setattr(
+        archive_worker, '_clip_has_gps_signal',
+        lambda path: True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # TestArchiveWorkerLifecycle
 # ---------------------------------------------------------------------------
@@ -611,30 +637,28 @@ class TestArchiveWorkerSourceGone:
 
 
 # ---------------------------------------------------------------------------
-# TestArchiveWorkerSkipStationary  (issue #167 sub-deliverable 2)
+# TestArchiveWorkerSkipStationary  (issue #167 sub-deliverable 2;
+# made unconditional in issue #184 Wave 1)
 # ---------------------------------------------------------------------------
 
 
 class TestArchiveWorkerSkipStationary:
     """Issue #167 sub-deliverable 2 — peek-and-skip for stationary
-    RecentClips, gated by ``archive.skip_stationary_recent_clips``.
+    RecentClips. Issue #184 Wave 1 made the SEI peek unconditional;
+    there is no longer an enable toggle to monkeypatch.
 
     Tests stub ``_clip_has_gps_signal`` directly so we don't need a
     real Tesla SEI fixture. The helper itself is exercised by
     ``test_clip_has_gps_signal_*`` below.
     """
 
-    def test_skipped_when_flag_on_recent_clips_no_gps(
+    def test_skipped_when_recent_clips_no_gps(
         self, db, archive_root, teslacam_root, make_clip, monkeypatch,
     ):
         clip = make_clip("RecentClips/parked-front.mp4")
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
 
-        monkeypatch.setattr(
-            archive_worker, '_skip_stationary_recent_clips_enabled',
-            lambda: True,
-        )
         monkeypatch.setattr(
             archive_worker, '_clip_has_gps_signal',
             lambda path: False,
@@ -661,7 +685,7 @@ class TestArchiveWorkerSkipStationary:
         sidecar_dir = os.path.join(archive_root, '.dead_letter')
         assert not os.path.isdir(sidecar_dir) or not os.listdir(sidecar_dir)
 
-    def test_copied_when_flag_on_recent_clips_have_gps(
+    def test_copied_when_recent_clips_have_gps(
         self, db, archive_root, teslacam_root, make_clip, monkeypatch,
     ):
         # GPS-bearing RecentClips clip (e.g., active driving) —
@@ -670,10 +694,6 @@ class TestArchiveWorkerSkipStationary:
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
 
-        monkeypatch.setattr(
-            archive_worker, '_skip_stationary_recent_clips_enabled',
-            lambda: True,
-        )
         monkeypatch.setattr(
             archive_worker, '_clip_has_gps_signal',
             lambda path: True,
@@ -686,38 +706,6 @@ class TestArchiveWorkerSkipStationary:
         rows = list_queue(db_path=db)
         assert rows[0]['status'] == 'copied'
 
-    def test_copied_when_flag_off_no_peek(
-        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
-    ):
-        # Default install — flag off — must NEVER call the SEI peek
-        # and must always copy.
-        clip = make_clip("RecentClips/parked-front.mp4")
-        enqueue_for_archive(clip, db_path=db)
-        row = claim_next_for_worker('w', db_path=db)
-
-        monkeypatch.setattr(
-            archive_worker, '_skip_stationary_recent_clips_enabled',
-            lambda: False,
-        )
-        peek_called = []
-
-        def fake_peek(path):
-            peek_called.append(path)
-            return False  # would skip if reached
-
-        monkeypatch.setattr(
-            archive_worker, '_clip_has_gps_signal', fake_peek,
-        )
-        outcome = archive_worker.process_one_claim(
-            row, db, archive_root, teslacam_root,
-            chunk_size=4096, max_attempts=3,
-        )
-        assert outcome == 'copied'
-        assert peek_called == [], (
-            "Flag off must short-circuit BEFORE the SEI peek "
-            "(no I/O wasted on disabled feature)"
-        )
-
     def test_event_clips_never_skipped_even_with_no_gps(
         self, db, archive_root, teslacam_root, make_clip, monkeypatch,
     ):
@@ -729,10 +717,6 @@ class TestArchiveWorkerSkipStationary:
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
 
-        monkeypatch.setattr(
-            archive_worker, '_skip_stationary_recent_clips_enabled',
-            lambda: True,
-        )
         peek_called = []
 
         def fake_peek(path):
@@ -765,10 +749,6 @@ class TestArchiveWorkerSkipStationary:
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
 
-        monkeypatch.setattr(
-            archive_worker, '_skip_stationary_recent_clips_enabled',
-            lambda: True,
-        )
         peek_called = []
         monkeypatch.setattr(
             archive_worker, '_clip_has_gps_signal',
@@ -792,10 +772,6 @@ class TestArchiveWorkerSkipStationary:
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
 
-        monkeypatch.setattr(
-            archive_worker, '_skip_stationary_recent_clips_enabled',
-            lambda: True,
-        )
         monkeypatch.setattr(
             archive_worker, '_clip_has_gps_signal',
             lambda path: None,  # ambiguous
@@ -826,10 +802,6 @@ class TestArchiveWorkerSkipStationary:
         os.utime(clip, (time.time(), time.time()))
         row = claim_next_for_worker('w', db_path=db)
 
-        monkeypatch.setattr(
-            archive_worker, '_skip_stationary_recent_clips_enabled',
-            lambda: True,
-        )
         peek_called = []
         monkeypatch.setattr(
             archive_worker, '_clip_has_gps_signal',
@@ -858,10 +830,6 @@ class TestArchiveWorkerSkipStationary:
         row = claim_next_for_worker('w', db_path=db)
         os.unlink(clip)
 
-        monkeypatch.setattr(
-            archive_worker, '_skip_stationary_recent_clips_enabled',
-            lambda: True,
-        )
         peek_called = []
         monkeypatch.setattr(
             archive_worker, '_clip_has_gps_signal',

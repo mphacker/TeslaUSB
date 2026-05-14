@@ -127,10 +127,9 @@ def register_archive_callback(callback: Callable):
     Fired with the same path list as the existing mp4 callbacks
     (:func:`register_callback`) so the archive producer enqueues every
     clip the indexer enqueues, in the same call. Separate registration
-    keeps the two subsystems independently togglable: the archive
-    producer is opt-in via ``archive_queue.enabled`` in ``config.yaml``,
-    and a disabled producer just never registers a callback (zero cost
-    on the watcher's hot path beyond an empty-list iteration).
+    keeps the two subsystems independently observable; the archive
+    producer is unconditional (issue #184 Wave 1) so a callback is
+    always registered when the producer module imports.
 
     Phase 2a producer-only — see :mod:`services.archive_queue` and
     :mod:`services.archive_producer`. The Phase 2b worker will drain

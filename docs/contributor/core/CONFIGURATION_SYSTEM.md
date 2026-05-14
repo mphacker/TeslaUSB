@@ -52,16 +52,28 @@ archive:             # rescan interval, worker tuning, _atomic_copy guards,
 live_event_sync:     # enabled, upload_scope, retry backoff, daily cap, webhook
 ```
 
-A handful of keys are **deprecated** — they're still accepted but
-have no effect. The yaml comments label them explicitly:
+A handful of keys were **deprecated** in earlier waves and have now
+been removed (issue #184 Wave 1). If your `config.yaml` still mentions
+them, the new code simply ignores them — no upgrade hazard, but
+operators may want to clean them up:
 
-- `mapping.index_on_startup` — superseded by the persistent indexing
-  queue
-- `mapping.index_on_mode_switch` — same
-
-Do not remove deprecated keys silently; surface them as a one-line
-deprecation note in the YAML so existing installs don't break on
-upgrade.
+- `mapping.index_on_startup` and `mapping.index_on_mode_switch` —
+  replaced by the persistent indexing queue + worker, which always
+  runs.
+- `mapping.archive_indexing` — never consumed; ArchivedClips
+  indexing is intrinsic to the indexer.
+- `mapping.event_detection.fsd_disengage_detect` — FSD-disengage
+  detection is now always on.
+- `archive.only_driving` — never consumed; replaced by the
+  unconditional SEI-peek skip.
+- `archive.skip_stationary_recent_clips` — now unconditional; the
+  archive worker always SEI-peeks RecentClips and marks
+  parked-no-event clips `skipped_stationary` instead of copying.
+  Sentry/Saved event clips are never skipped.
+- `archive_queue.enabled` and `archive_queue.boot_catchup_enabled` —
+  the archive queue subsystem is unconditional; disabling it left
+  the gadget in a degraded state with no recourse for catch-up
+  after an unclean shutdown.
 
 ---
 

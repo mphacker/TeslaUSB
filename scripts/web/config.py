@@ -265,6 +265,14 @@ ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE = bool(
     _archive_queue.get('shadow_pipeline_queue', True)
 )
 
+# Wave 4 PR-F1 (issue #184): unified-queue reader cutover. When True,
+# the archive worker claims via pipeline_queue.claim_next_for_stage
+# instead of archive_queue.claim_next_for_worker. Defaults False so a
+# fresh deploy is a no-op; flip on after shadow telemetry agrees.
+ARCHIVE_QUEUE_USE_PIPELINE_READER = bool(
+    _archive_queue.get('use_pipeline_reader', False)
+)
+
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)
 # ============================================================================

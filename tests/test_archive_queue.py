@@ -2566,3 +2566,136 @@ class TestPriorityMigrationV12ToV13:
             assert row['v'] == _SCHEMA_VERSION
         finally:
             conn.close()
+
+
+
+# ---------------------------------------------------------------------------
+# Wave 4 PR-F1 (issue #184): claim_specific_pending — claim a SPECIFIC row
+# ---------------------------------------------------------------------------
+
+
+class TestClaimSpecificPending:
+    """Helper used by archive_worker._claim_via_pipeline_reader to mirror
+    a pipeline_queue claim onto the legacy archive_queue row.
+
+    Behaviour mirrors ``claim_next_for_worker`` for one specific row;
+    must atomically conditional-UPDATE on (id, status='pending').
+    """
+
+    def test_returns_none_for_zero_id(self, db):
+        assert archive_queue.claim_specific_pending(0, 'w1', db_path=db) is None
+
+    def test_returns_none_for_missing_row(self, db):
+        assert archive_queue.claim_specific_pending(
+            99999, 'w1', db_path=db,
+        ) is None
+
+    def test_claims_pending_row(self, db, sample_file):
+        archive_queue.enqueue_for_archive(sample_file, db_path=db)
+        rows = archive_queue.list_queue(db_path=db, status='pending')
+        assert len(rows) == 1
+        row_id = rows[0]['id']
+
+        claimed = archive_queue.claim_specific_pending(
+            row_id, 'w-pr-f1', db_path=db,
+        )
+        assert claimed is not None
+        assert claimed['id'] == row_id
+        assert claimed['status'] == 'claimed'
+        assert claimed['claimed_by'] == 'w-pr-f1'
+        assert claimed['claimed_at'] is not None
+        assert claimed['source_path'] == sample_file
+
+    def test_refuses_already_claimed_row(self, db, sample_file):
+        archive_queue.enqueue_for_archive(sample_file, db_path=db)
+        rows = archive_queue.list_queue(db_path=db, status='pending')
+        row_id = rows[0]['id']
+
+        first = archive_queue.claim_specific_pending(
+            row_id, 'w1', db_path=db,
+        )
+        assert first is not None
+        second = archive_queue.claim_specific_pending(
+            row_id, 'w2', db_path=db,
+        )
+        assert second is None
+
+    def test_refuses_non_pending_status(self, db, sample_file):
+        archive_queue.enqueue_for_archive(sample_file, db_path=db)
+        rows = archive_queue.list_queue(db_path=db, status='pending')
+        row_id = rows[0]['id']
+
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "UPDATE archive_queue SET status='copied' WHERE id=?",
+                (row_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = archive_queue.claim_specific_pending(
+            row_id, 'w1', db_path=db,
+        )
+        assert result is None
+
+    def test_two_concurrent_claims_only_one_wins(self, db, sample_file):
+        archive_queue.enqueue_for_archive(sample_file, db_path=db)
+        rows = archive_queue.list_queue(db_path=db, status='pending')
+        row_id = rows[0]['id']
+
+        results = []
+        barrier = threading.Barrier(2)
+
+        def claimer(name):
+            barrier.wait()
+            r = archive_queue.claim_specific_pending(
+                row_id, name, db_path=db,
+            )
+            results.append(r)
+
+        t1 = threading.Thread(target=claimer, args=('w1',))
+        t2 = threading.Thread(target=claimer, args=('w2',))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        winners = [r for r in results if r is not None]
+        losers = [r for r in results if r is None]
+        assert len(winners) == 1
+        assert len(losers) == 1
+
+    def test_dual_writes_pipeline_queue_in_progress(self, db, sample_file):
+        """The mirror MUST keep the pipeline_queue dual-write hook firing.
+
+        Even though the pipeline_queue row was already moved to
+        'in_progress' by ``pipeline_queue_service.claim_next_for_stage``
+        before this helper is called in production, the hook stays in
+        place as a defensive invariant — calling claim_specific_pending
+        in isolation (e.g. from a future caller) must not leave the
+        pipeline_queue stale.
+        """
+        archive_queue.enqueue_for_archive(sample_file, db_path=db)
+        rows = archive_queue.list_queue(db_path=db, status='pending')
+        row_id = rows[0]['id']
+
+        claimed = archive_queue.claim_specific_pending(
+            row_id, 'w1', db_path=db,
+        )
+        assert claimed is not None
+
+        # Inspect pipeline_queue row directly.
+        conn = sqlite3.connect(db)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT status FROM pipeline_queue "
+                " WHERE source_path = ? AND stage = 'archive_pending'",
+                (sample_file,),
+            ).fetchone()
+            assert row is not None
+            assert row['status'] == 'in_progress'
+        finally:
+            conn.close()

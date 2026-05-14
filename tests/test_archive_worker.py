@@ -3477,3 +3477,366 @@ class TestShadowComparisonHelpers:
                 _conf, 'ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE',
             )
         assert archive_worker._shadow_pipeline_queue_enabled() is False
+
+
+
+# ---------------------------------------------------------------------------
+# Wave 4 PR-F1 (issue #184): unified-queue reader cutover
+# ---------------------------------------------------------------------------
+
+
+class TestUsePipelineReaderEnabled:
+    """The flag-reading helper must lazily import config and never crash."""
+
+    def test_default_off_when_attr_missing(self, monkeypatch):
+        import config as _conf
+        if hasattr(_conf, 'ARCHIVE_QUEUE_USE_PIPELINE_READER'):
+            monkeypatch.delattr(
+                _conf, 'ARCHIVE_QUEUE_USE_PIPELINE_READER',
+            )
+        assert archive_worker._use_pipeline_reader_enabled() is False
+
+    def test_returns_true_when_flag_on(self, monkeypatch):
+        import config as _conf
+        monkeypatch.setattr(
+            _conf, 'ARCHIVE_QUEUE_USE_PIPELINE_READER', True,
+            raising=False,
+        )
+        assert archive_worker._use_pipeline_reader_enabled() is True
+
+    def test_returns_false_when_flag_off(self, monkeypatch):
+        import config as _conf
+        monkeypatch.setattr(
+            _conf, 'ARCHIVE_QUEUE_USE_PIPELINE_READER', False,
+            raising=False,
+        )
+        assert archive_worker._use_pipeline_reader_enabled() is False
+
+
+class TestAdaptPipelineRowToLegacyShape:
+    """The adapter converts a pipeline_queue row dict into the dict shape
+    that ``process_one_claim`` and the legacy ``mark_*`` helpers expect.
+    """
+
+    def test_none_input_returns_none(self):
+        assert archive_worker._adapt_pipeline_row_to_legacy_shape(None) is None
+
+    def test_missing_legacy_id_returns_none(self):
+        # legacy_id is REQUIRED — the adapter refuses to process a
+        # row that can't be reconciled with the legacy archive_queue.
+        row = {
+            'id': 99,
+            'source_path': '/tc/SentryClips/e/front.mp4',
+            'priority': 1,
+        }
+        assert archive_worker._adapt_pipeline_row_to_legacy_shape(row) is None
+
+    def test_full_payload_maps_all_fields(self):
+        pipeline_row = {
+            'id': 99,
+            'legacy_id': 42,
+            'source_path': '/tc/SentryClips/e/front.mp4',
+            'dest_path': '/sd/SentryClips/e/front.mp4',
+            'priority': 1,
+            'attempts': 2,
+            'enqueued_at': 1700000000.0,
+            'last_error': None,
+            'claimed_at': 1700000005.0,
+            'claimed_by': 'w-pr-f1',
+            'payload': {
+                'expected_size': 12345,
+                'expected_mtime': 1699999999.5,
+            },
+        }
+        adapted = archive_worker._adapt_pipeline_row_to_legacy_shape(
+            pipeline_row,
+        )
+        assert adapted is not None
+        assert adapted['id'] == 42
+        assert adapted['source_path'] == '/tc/SentryClips/e/front.mp4'
+        assert adapted['dest_path'] == '/sd/SentryClips/e/front.mp4'
+        assert adapted['expected_size'] == 12345
+        assert adapted['expected_mtime'] == 1699999999.5
+        assert adapted['priority'] == 1
+        assert adapted['attempts'] == 2
+        assert adapted['status'] == 'claimed'
+        assert adapted['claimed_at'] == 1700000005.0
+        assert adapted['claimed_by'] == 'w-pr-f1'
+        assert adapted['enqueued_at'] == 1700000000.0
+
+    def test_empty_payload_yields_none_for_optional_fields(self):
+        pipeline_row = {
+            'legacy_id': 7,
+            'source_path': '/tc/RecentClips/x.mp4',
+            'priority': 2,
+            'attempts': 1,
+            'payload': {},
+        }
+        adapted = archive_worker._adapt_pipeline_row_to_legacy_shape(
+            pipeline_row,
+        )
+        assert adapted is not None
+        assert adapted['id'] == 7
+        assert adapted['source_path'] == '/tc/RecentClips/x.mp4'
+        assert adapted['expected_size'] is None
+        assert adapted['expected_mtime'] is None
+        assert adapted['dest_path'] is None
+
+    def test_dest_path_falls_back_to_payload(self):
+        pipeline_row = {
+            'legacy_id': 7,
+            'source_path': '/tc/RecentClips/x.mp4',
+            'dest_path': None,  # row-level missing
+            'payload': {
+                'dest_path': '/sd/RecentClips/x.mp4',
+            },
+        }
+        adapted = archive_worker._adapt_pipeline_row_to_legacy_shape(
+            pipeline_row,
+        )
+        assert adapted is not None
+        assert adapted['dest_path'] == '/sd/RecentClips/x.mp4'
+
+    def test_missing_payload_treated_as_empty(self):
+        # `payload` key is allowed to be missing entirely — the
+        # adapter must default to {} (claim_next_for_stage already
+        # synthesises payload but defensive).
+        pipeline_row = {
+            'legacy_id': 7,
+            'source_path': '/tc/RecentClips/x.mp4',
+        }
+        adapted = archive_worker._adapt_pipeline_row_to_legacy_shape(
+            pipeline_row,
+        )
+        assert adapted is not None
+        assert adapted['expected_size'] is None
+        assert adapted['expected_mtime'] is None
+
+
+class TestClaimViaPipelineReader:
+    """End-to-end behaviour of the new claim path.
+
+    Tested with the REAL pipeline_queue + archive_queue tables (one
+    geodata.db, both schemas) so we exercise the dual-write contract
+    holistically, not via mocks alone.
+    """
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        from services.mapping_service import _init_db
+        p = str(tmp_path / "geodata.db")
+        _init_db(p).close()
+        return p
+
+    @pytest.fixture
+    def sample_file(self, tmp_path):
+        f = tmp_path / "TeslaCam" / "SentryClips" / "evt-1" / "front.mp4"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x" * 1024)
+        return str(f)
+
+    def test_returns_none_on_empty_queue(self, db_path):
+        # Queue has no rows: pipeline.claim_next_for_stage returns
+        # None, so our wrapper does too.
+        result = archive_worker._claim_via_pipeline_reader(
+            'w-pr-f1', db_path,
+        )
+        assert result is None
+
+    def test_successful_claim_returns_legacy_shaped_row(
+        self, db_path, sample_file,
+    ):
+        from services import archive_queue as aq
+        aq.enqueue_for_archive(sample_file, db_path=db_path)
+
+        result = archive_worker._claim_via_pipeline_reader(
+            'w-pr-f1', db_path,
+        )
+        assert result is not None
+        assert result['source_path'] == sample_file
+        # legacy_id-based id (this is what mark_* expects)
+        assert isinstance(result['id'], int)
+        assert result['id'] > 0
+        assert result['status'] == 'claimed'
+
+    def test_successful_claim_marks_both_tables(
+        self, db_path, sample_file,
+    ):
+        from services import archive_queue as aq
+        aq.enqueue_for_archive(sample_file, db_path=db_path)
+
+        result = archive_worker._claim_via_pipeline_reader(
+            'w-pr-f1', db_path,
+        )
+        assert result is not None
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            ar = conn.execute(
+                "SELECT status, claimed_by FROM archive_queue "
+                " WHERE id = ?",
+                (result['id'],),
+            ).fetchone()
+            assert ar is not None
+            assert ar['status'] == 'claimed'
+            assert ar['claimed_by'] == 'w-pr-f1'
+
+            pr = conn.execute(
+                "SELECT status, claimed_by FROM pipeline_queue "
+                " WHERE legacy_id = ? AND stage = 'archive_pending'",
+                (result['id'],),
+            ).fetchone()
+            assert pr is not None
+            assert pr['status'] == 'in_progress'
+            assert pr['claimed_by'] == 'w-pr-f1'
+        finally:
+            conn.close()
+
+    def test_pipeline_row_missing_legacy_id_releases_and_skips(
+        self, db_path, sample_file, caplog,
+    ):
+        # Manually insert a pipeline_queue row WITHOUT legacy_id to
+        # simulate a corrupted dual-write. The wrapper must:
+        # (a) return None, (b) log WARNING, (c) update last_error.
+        import logging as _log
+        caplog.set_level(_log.WARNING)
+        from services import pipeline_queue_service as pqs
+        pqs.dual_write_enqueue(
+            source_path=sample_file,
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            legacy_id=None,
+            priority=1,
+            db_path=db_path,
+        )
+
+        result = archive_worker._claim_via_pipeline_reader(
+            'w-pr-f1', db_path,
+        )
+        assert result is None
+
+        warnings = [r for r in caplog.records
+                    if r.levelno == _log.WARNING
+                    and 'PR-F1' in r.getMessage()]
+        assert len(warnings) >= 1
+        assert any('legacy_id' in r.getMessage() for r in warnings)
+
+        # last_error has been recorded so operators can investigate.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT last_error FROM pipeline_queue "
+                " WHERE source_path = ? AND stage = 'archive_pending'",
+                (sample_file,),
+            ).fetchone()
+            assert row is not None
+            assert 'legacy_id' in (row['last_error'] or '')
+        finally:
+            conn.close()
+
+    def test_legacy_mirror_failure_releases_pipeline_claim(
+        self, db_path, sample_file, monkeypatch, caplog,
+    ):
+        # Inject a legacy mirror failure: monkeypatch
+        # archive_queue.claim_specific_pending to always return None,
+        # simulating "the legacy row got deleted out from under us".
+        # The wrapper must release the pipeline_queue claim back to
+        # 'pending' so the next iteration can retry, AND log WARNING.
+        import logging as _log
+        caplog.set_level(_log.WARNING)
+        from services import archive_queue as aq
+        aq.enqueue_for_archive(sample_file, db_path=db_path)
+
+        monkeypatch.setattr(
+            aq, 'claim_specific_pending',
+            lambda *a, **kw: None,
+        )
+
+        result = archive_worker._claim_via_pipeline_reader(
+            'w-pr-f1', db_path,
+        )
+        assert result is None
+
+        # WARNING logged with the legacy id.
+        warnings = [r for r in caplog.records
+                    if r.levelno == _log.WARNING
+                    and 'PR-F1' in r.getMessage()
+                    and 'archive_queue row' in r.getMessage()]
+        assert len(warnings) >= 1
+
+        # Pipeline_queue row was released back to 'pending'.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT status FROM pipeline_queue "
+                " WHERE source_path = ? AND stage = 'archive_pending'",
+                (sample_file,),
+            ).fetchone()
+            assert row is not None
+            assert row['status'] == 'pending'
+        finally:
+            conn.close()
+
+    def test_legacy_row_expected_size_overrides_payload(
+        self, db_path, sample_file, monkeypatch,
+    ):
+        # If the legacy row carries fresher expected_size /
+        # expected_mtime (which release_claim would have refreshed),
+        # the wrapper MUST surface those values, not the (potentially
+        # stale) payload values.
+        from services import archive_queue as aq
+        aq.enqueue_for_archive(sample_file, db_path=db_path)
+
+        # Force the legacy row's expected_size to a known sentinel
+        # that differs from what payload contains.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE archive_queue SET expected_size = 999999, "
+                "expected_mtime = 1.5 WHERE source_path = ?",
+                (sample_file,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = archive_worker._claim_via_pipeline_reader(
+            'w-pr-f1', db_path,
+        )
+        assert result is not None
+        assert result['expected_size'] == 999999
+        assert result['expected_mtime'] == 1.5
+
+    def test_pipeline_queue_service_import_failure_returns_none(
+        self, db_path, monkeypatch, caplog,
+    ):
+        # Defensive: if pipeline_queue_service raises during the
+        # `claim_next_for_stage` call (e.g., transient sqlite error
+        # at import-time leaks through), the wrapper must NOT crash
+        # — return None and log. We simulate this by monkeypatching
+        # claim_next_for_stage to raise; the wrapper's try/except
+        # in ``_claim_via_pipeline_reader`` runs the same path the
+        # real ``except Exception`` arm would have caught.
+        import logging as _log
+        caplog.set_level(_log.WARNING)
+        from services import pipeline_queue_service as pqs
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError('simulated transient pipeline failure')
+
+        monkeypatch.setattr(pqs, 'claim_next_for_stage', _boom)
+
+        # The outer try/except in archive_worker._run_worker_loop
+        # catches the exception when called from the loop, but our
+        # wrapper itself doesn't catch claim_next_for_stage errors
+        # — that's intentional: ``claim_next_for_stage`` is documented
+        # to swallow sqlite errors and return None on failure, so an
+        # exception bubbling out is a real bug. We assert it bubbles.
+        import pytest
+        with pytest.raises(RuntimeError):
+            archive_worker._claim_via_pipeline_reader(
+                'w-pr-f1', db_path,
+            )

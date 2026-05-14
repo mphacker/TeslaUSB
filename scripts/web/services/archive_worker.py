@@ -1873,9 +1873,27 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
 
 # Throttle for "agreement" log lines so a healthy queue doesn't
 # flood the journal — log every Nth match at INFO so operators can
-# see the shadow path is still firing, while disagreements always
-# log at WARNING with both paths.
+# see the shadow path is still firing, while disagreements log at
+# WARNING with both paths but are also rate-limited so a degenerate
+# dual-write state (e.g. catch-up of a 1000+ clip backlog) cannot
+# emit one WARNING per worker iteration. The first
+# ``_SHADOW_DISAGREEMENT_LOG_VERBATIM`` mismatches log verbatim;
+# after that we drop to one heartbeat WARNING per
+# ``_SHADOW_DISAGREEMENT_LOG_EVERY`` mismatches with the running
+# count so journal hygiene is preserved.
 _SHADOW_AGREEMENT_LOG_EVERY = 500
+_SHADOW_DISAGREEMENT_LOG_VERBATIM = 10
+_SHADOW_DISAGREEMENT_LOG_EVERY = 100
+# Number of pipeline_queue candidates we peek at when comparing
+# against the legacy reader's pick. The legacy reader orders by
+# ``priority, expected_mtime, id`` while pipeline_queue orders by
+# ``priority, enqueued_at, id`` — a documented and accepted
+# divergence (see ``pipeline_queue_service.claim_next_for_stage``
+# docstring). Treating the legacy pick as "agreed" iff it appears
+# anywhere in the pipeline_queue's top-N candidates absorbs that
+# benign reordering and only flags a real dual-write gap (legacy
+# picked a path the pipeline doesn't even know about).
+_SHADOW_PEEK_CANDIDATE_COUNT = 8
 
 _shadow_lock = threading.Lock()
 _shadow_agreement_count = 0
@@ -1897,19 +1915,52 @@ def _shadow_pipeline_queue_enabled() -> bool:
         return False
 
 
-def _shadow_compare_picks(*, legacy_path: Optional[str],
-                          pipeline_path: Optional[str]) -> None:
-    """Compare the legacy and pipeline_queue picks; log on mismatch.
+def _shadow_compare_picks(
+    *,
+    legacy_path: Optional[str],
+    pipeline_candidates: Tuple[str, ...] = (),
+) -> None:
+    """Compare the legacy pick against the pipeline_queue top-N.
 
-    Both ``None`` ⇒ both readers say "queue empty" — no log.
-    Both equal ⇒ readers agree — bump the agreement counter and log
-    every ``_SHADOW_AGREEMENT_LOG_EVERY`` matches at INFO.
-    Disagreement ⇒ log WARNING with both paths and bump the
-    disagreement counter. The counters are read by tests and (in a
-    later PR) surfaced in the status endpoint.
+    The legacy ``archive_queue`` reader orders by
+    ``priority, expected_mtime, id``; ``pipeline_queue`` orders by
+    ``priority, enqueued_at, id`` (see
+    ``pipeline_queue_service.claim_next_for_stage`` docstring). The
+    secondary-key divergence is documented and accepted — comparing
+    only the top-1 of each reader would systematically WARN on
+    benign reorderings (e.g. boot catch-up enqueues a batch in
+    directory-walk order while Tesla wrote them in mtime order).
+
+    To avoid that noise we treat the legacy pick as **agreed** iff
+    it appears anywhere in ``pipeline_candidates`` (top-N pipeline
+    rows for the same stage). Only when the legacy pick is **absent**
+    from the top-N does the WARNING fire — that's a real dual-write
+    gap (a row exists in archive_queue but not, or far down, in
+    pipeline_queue) worth investigating before PR-F cuts over the
+    reader.
+
+    Empty queue case: both ``legacy_path`` is ``None`` AND
+    ``pipeline_candidates`` is empty ⇒ both readers say "queue
+    empty" ⇒ counted as agreement, no log.
+
+    Disagreement logging is rate-limited: the first
+    ``_SHADOW_DISAGREEMENT_LOG_VERBATIM`` mismatches log verbatim
+    with both paths; after that one heartbeat WARNING per
+    ``_SHADOW_DISAGREEMENT_LOG_EVERY`` mismatches surfaces the
+    running count so journal hygiene is preserved on Pi Zero 2 W
+    even during a degenerate catch-up.
     """
     global _shadow_agreement_count, _shadow_disagreement_count
-    if legacy_path == pipeline_path:
+    candidate_set = (
+        frozenset(p for p in pipeline_candidates if p)
+        if pipeline_candidates else frozenset()
+    )
+    if legacy_path is None:
+        # Legacy says "no work". Agreement iff pipeline_queue also
+        # has nothing ready. If pipeline_queue has rows but legacy
+        # doesn't, treat as a (benign) ordering case rather than a
+        # gap — there's no legacy pick to mismatch against, and the
+        # row will surface on the next iteration.
         with _shadow_lock:
             _shadow_agreement_count += 1
             count = _shadow_agreement_count
@@ -1920,15 +1971,45 @@ def _shadow_compare_picks(*, legacy_path: Optional[str],
                 count,
             )
         return
+    if legacy_path in candidate_set:
+        with _shadow_lock:
+            _shadow_agreement_count += 1
+            count = _shadow_agreement_count
+        if count % _SHADOW_AGREEMENT_LOG_EVERY == 0:
+            logger.info(
+                "Wave 4 PR-E shadow: pipeline_queue agreed with "
+                "archive_queue on %d consecutive picks "
+                "(top-%d window)",
+                count, _SHADOW_PEEK_CANDIDATE_COUNT,
+            )
+        return
     with _shadow_lock:
         _shadow_disagreement_count += 1
-    logger.warning(
-        "Wave 4 PR-E shadow: pipeline_queue and archive_queue "
-        "disagreed on next pick — legacy=%r pipeline=%r "
-        "(disagreement #%d). This indicates a dual-write gap; "
-        "investigate before PR-F cuts over the reader.",
-        legacy_path, pipeline_path, _shadow_disagreement_count,
-    )
+        d_count = _shadow_disagreement_count
+    if d_count <= _SHADOW_DISAGREEMENT_LOG_VERBATIM:
+        logger.warning(
+            "Wave 4 PR-E shadow: archive_queue picked %r but it is "
+            "absent from the top-%d pipeline_queue candidates "
+            "(disagreement #%d). pipeline top-%d=%r. The legacy "
+            "and pipeline readers use different secondary sort "
+            "keys (expected_mtime vs. enqueued_at) so small "
+            "reorderings within a priority band are expected — a "
+            "miss from the top-N window indicates a real "
+            "dual-write gap. Investigate before PR-F cuts over "
+            "the reader.",
+            legacy_path, _SHADOW_PEEK_CANDIDATE_COUNT, d_count,
+            _SHADOW_PEEK_CANDIDATE_COUNT,
+            tuple(pipeline_candidates),
+        )
+    elif d_count % _SHADOW_DISAGREEMENT_LOG_EVERY == 0:
+        logger.warning(
+            "Wave 4 PR-E shadow: archive_queue / pipeline_queue "
+            "disagreement count = %d (suppressing per-event "
+            "WARNINGs after the first %d; first %d are above). "
+            "Last legacy pick: %r.",
+            d_count, _SHADOW_DISAGREEMENT_LOG_VERBATIM,
+            _SHADOW_DISAGREEMENT_LOG_VERBATIM, legacy_path,
+        )
 
 
 def get_shadow_telemetry() -> Dict[str, int]:
@@ -2135,21 +2216,28 @@ def _run_worker_loop(db_path: str, archive_root: str,
             # legacy claim because the dual-write fires on UPDATE,
             # which would move the pipeline_queue row to in_progress
             # and invalidate the comparison.
-            shadow_peek_path: Optional[str] = None
+            #
+            # We peek the top-N (not just top-1) so the documented
+            # secondary-key divergence between archive_queue
+            # (expected_mtime) and pipeline_queue (enqueued_at)
+            # doesn't generate noisy WARNINGs on benign reorderings
+            # within a priority band — see ``_shadow_compare_picks``
+            # docstring for the rationale.
+            shadow_candidates: Tuple[str, ...] = ()
             if _shadow_pipeline_queue_enabled():
                 try:
                     from services import pipeline_queue_service as pqs
-                    peeked = pqs.peek_next_for_stage(
+                    shadow_candidates = pqs.peek_top_n_paths_for_stage(
                         stage='archive_pending',
+                        limit=_SHADOW_PEEK_CANDIDATE_COUNT,
                     )
-                    if peeked is not None:
-                        shadow_peek_path = peeked.get('source_path')
                 except Exception as e:  # noqa: BLE001
                     # Shadow path must NEVER affect the worker. Log
                     # at DEBUG so a misconfigured DB path doesn't
                     # spam WARNING on every iteration.
                     logger.debug(
-                        "shadow peek_next_for_stage failed: %s", e,
+                        "shadow peek_top_n_paths_for_stage failed: "
+                        "%s", e,
                     )
 
             try:
@@ -2165,14 +2253,16 @@ def _run_worker_loop(db_path: str, archive_root: str,
             if row is None and not claim_failed:
                 _set_state(last_drained_at=time.time())
 
-            # Wave 4 PR-E: compare the two readers' picks. If they
-            # disagree, log WARNING with both paths so dual-write
-            # gaps surface in journalctl. If both are None or both
-            # match, no log (steady-state silence).
-            if shadow_peek_path is not None or row is not None:
+            # Wave 4 PR-E: compare the legacy pick against the
+            # pipeline_queue top-N. Agreement = legacy_path appears
+            # in the candidate set (or both empty). Disagreement =
+            # legacy picked a path absent from the top-N — a real
+            # dual-write gap.
+            if shadow_candidates or row is not None or \
+                    _shadow_pipeline_queue_enabled():
                 _shadow_compare_picks(
                     legacy_path=row.get('source_path') if row else None,
-                    pipeline_path=shadow_peek_path,
+                    pipeline_candidates=shadow_candidates,
                 )
 
             if row is not None:

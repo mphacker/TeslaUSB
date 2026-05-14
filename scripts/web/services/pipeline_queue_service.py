@@ -46,6 +46,12 @@ Public API:
   workers wire to this in PR-D.
 * :func:`peek_next_for_stage` — Wave 4 PR-C; non-mutating "what's
   next" lookup (parity tests + Settings page).
+* :func:`peek_top_n_paths_for_stage` — Wave 4 PR-E; non-mutating
+  list of the next N candidate ``source_path`` values in pick order.
+  Used by the archive worker's shadow-mode comparison to tolerate
+  the documented secondary-sort divergence (``enqueued_at`` vs
+  legacy ``expected_mtime``) — a legacy pick is treated as "agreed"
+  if it appears anywhere in the pipeline_queue's top-N candidates.
 * :func:`ready_count_for_stage` — Wave 4 PR-C; cheap COUNT(*) of
   eligible rows for a stage.
 * :func:`recover_stale_claims_pipeline` — Wave 4 PR-D; release
@@ -821,6 +827,90 @@ def ready_count_for_stage(
                 pass
 
 
+def peek_top_n_paths_for_stage(
+    *,
+    stage: str,
+    limit: int,
+    db_path: Optional[str] = None,
+    now: Optional[float] = None,
+) -> Tuple[str, ...]:
+    """Return up to ``limit`` ``source_path`` candidates in pick order.
+
+    Same WHERE / ORDER BY as :func:`peek_next_for_stage` and
+    :func:`claim_next_for_stage`. Used by the archive worker's
+    shadow-mode comparison to tolerate the documented secondary-sort
+    divergence (``enqueued_at`` here vs ``expected_mtime`` in the
+    legacy ``archive_queue`` reader). A legacy pick is treated as
+    "agreed" by the shadow path if it appears anywhere in this
+    top-N — only when the legacy row is **absent** from the
+    pipeline_queue's top-N do we have a real dual-write gap worth
+    a WARNING.
+
+    Cheap by design: returns just the ``source_path`` strings (no
+    payload parsing, no row dicts) so the worker hot-path adds at
+    most one indexed-SELECT per iteration. ``Tuple`` (not ``list``)
+    so callers can use it in ``in`` checks without worrying about
+    accidental mutation.
+
+    Args:
+        stage: One of the ``STAGE_*_PENDING`` constants. Refused
+            (returns empty tuple) when empty / falsy.
+        limit: Maximum number of candidates to return. Clamped to
+            ``[1, 50]`` — the shadow path doesn't benefit from
+            larger windows and we don't want a buggy caller to
+            sweep the whole queue.
+        db_path: Override the geodata.db path (test injection).
+        now: Override "current time" for ``next_retry_at``
+            comparisons (test injection only).
+
+    Returns:
+        Tuple of ``source_path`` strings in ``(priority,
+        enqueued_at, id)`` order. Empty tuple if the queue is
+        empty for the stage, the DB doesn't exist, ``stage`` is
+        empty, ``limit`` is non-positive, or any sqlite error
+        fires.
+    """
+    if not stage:
+        return ()
+    try:
+        clamped_limit = max(1, min(50, int(limit)))
+    except (TypeError, ValueError):
+        return ()
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return ()
+    if now is None:
+        now = _now_epoch()
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        rows = conn.execute(
+            """SELECT source_path FROM pipeline_queue
+                WHERE stage = ?
+                  AND status = 'pending'
+                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                ORDER BY priority ASC, enqueued_at ASC, id ASC
+                LIMIT ?""",
+            (stage, now, clamped_limit),
+        ).fetchall()
+        return tuple(
+            r['source_path'] for r in rows if r['source_path']
+        )
+    except sqlite3.Error as e:
+        logger.debug(
+            "peek_top_n_paths_for_stage(stage=%s) failed: %s",
+            stage, e,
+        )
+        return ()
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def recover_stale_claims_pipeline(
     *,
     db_path: Optional[str] = None,
@@ -870,6 +960,17 @@ def recover_stale_claims_pipeline(
         The count of rows released. Returns 0 on missing DB / sqlite
         error (logged at WARNING). NEVER raises.
     """
+    # Wave 4 PR-E (issue #195): bump call_count at function entry
+    # so an operator querying telemetry sees "recovery is being
+    # called" even when the early-return paths fire (missing DB,
+    # sqlite error). Without this, a misconfigured DB path would
+    # leave call_count=0 and an operator would conclude "recovery
+    # never fired" when the truth is "recovery fired but couldn't
+    # open the DB". Total / last_at / last_count remain bounded to
+    # the actual successful release.
+    global _recover_stale_claims_call_count
+    with _recover_stale_claims_lock:
+        _recover_stale_claims_call_count += 1
     if db_path is None:
         db_path = _resolve_pipeline_db()
     if not db_path or not os.path.isfile(db_path):
@@ -908,16 +1009,14 @@ def recover_stale_claims_pipeline(
         # Wave 4 PR-E (issue #195): bump telemetry counters under
         # lock so concurrent recovery calls (only ever one, but
         # defensive for future workers) don't race on the read-modify-
-        # write of the running totals. Always bumped — the call_count
-        # / last_at pair tells operators "recovery is being called
-        # but finds nothing" vs. "recovery is repeatedly releasing
-        # rows", which is the actual diagnostic question.
+        # write of the running totals. ``_recover_stale_claims_call_count``
+        # is bumped at function entry so it covers the early-return
+        # paths too; here we only update the totals/last_at/last_count
+        # for the successful-release accounting.
         global _recover_stale_claims_total
         global _recover_stale_claims_last_at
         global _recover_stale_claims_last_count
-        global _recover_stale_claims_call_count
         with _recover_stale_claims_lock:
-            _recover_stale_claims_call_count += 1
             if released > 0:
                 _recover_stale_claims_total += released
                 _recover_stale_claims_last_at = now
@@ -950,10 +1049,14 @@ def get_recovery_telemetry() -> Dict[str, Any]:
         non-zero recovery call (``None`` if never).
       * ``stale_recoveries_last_count``: count from the last
         non-zero recovery call (0 if never).
-      * ``stale_recoveries_call_count``: total recovery calls made
-        (including zero-result calls). High call_count + zero total
+      * ``stale_recoveries_call_count``: total recovery calls made,
+        including zero-result calls AND early-return paths
+        (missing DB / sqlite error). High call_count + zero total
         = "called but found nothing", which is the healthy steady
-        state.
+        state. High call_count + zero total + persistent
+        ``stale_recoveries_last_at = None`` after a known
+        misconfigured DB = "called but couldn't open DB" — check
+        ``geodata.db`` path / permissions.
     """
     with _recover_stale_claims_lock:
         return {
@@ -969,12 +1072,20 @@ def pipeline_status(db_path: Optional[str] = None) -> Dict[str, Any]:
 
     Useful for debugging / the Settings page / dual-write parity
     checks. Counts grouped by ``(legacy_table, stage, status)``.
-    Returns an empty dict on any error.
+
+    On any sqlite error the queue-state portion is omitted but the
+    in-memory ``get_recovery_telemetry()`` snapshot is still
+    returned — telemetry is process-local and arguably MORE useful
+    when the DB read is failing (it tells operators "recovery has
+    fired N times" even when ``pipeline_queue`` itself can't be
+    read). Fully missing DB returns just the telemetry snapshot
+    too, for the same reason.
     """
+    telemetry = get_recovery_telemetry()
     if db_path is None:
         db_path = _resolve_pipeline_db()
     if not db_path or not os.path.isfile(db_path):
-        return {}
+        return dict(telemetry)
     conn = None
     try:
         conn = _open_pipeline_conn(db_path)
@@ -999,11 +1110,12 @@ def pipeline_status(db_path: Optional[str] = None) -> Dict[str, Any]:
         # Wave 4 PR-E (issue #195): merge in the in-memory
         # stale-recovery counters so a single endpoint payload
         # answers "is the queue OK and is the recovery healthy?"
-        result.update(get_recovery_telemetry())
+        result.update(telemetry)
         return result
     except sqlite3.Error as e:
         logger.warning("pipeline_status failed: %s", e)
-        return {}
+        # Surface telemetry even on DB read failure — see docstring.
+        return dict(telemetry)
     finally:
         if conn is not None:
             try:

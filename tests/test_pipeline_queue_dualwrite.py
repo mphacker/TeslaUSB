@@ -2389,3 +2389,246 @@ class TestPipelineStatusMergesRecoveryTelemetry:
                 pqs._recover_stale_claims_last_at = None
                 pqs._recover_stale_claims_last_count = 0
                 pqs._recover_stale_claims_call_count = 0
+
+    def test_status_missing_db_still_returns_telemetry(self, tmp_path):
+        # Wave 4 PR-E review fix (info #3): pipeline_status MUST
+        # surface telemetry even when the DB is missing — telemetry
+        # is process-local and arguably MORE useful in that
+        # diagnostic situation.
+        with pqs._recover_stale_claims_lock:
+            pqs._recover_stale_claims_total = 7
+            pqs._recover_stale_claims_call_count = 12
+        try:
+            missing = str(tmp_path / 'does-not-exist.db')
+            status = pqs.pipeline_status(db_path=missing)
+            assert status.get('stale_recoveries_total') == 7
+            assert status.get('stale_recoveries_call_count') == 12
+            # Queue-state keys absent (no DB).
+            assert 'total' not in status
+            assert 'by_legacy_stage_status' not in status
+        finally:
+            with pqs._recover_stale_claims_lock:
+                pqs._recover_stale_claims_total = 0
+                pqs._recover_stale_claims_last_at = None
+                pqs._recover_stale_claims_last_count = 0
+                pqs._recover_stale_claims_call_count = 0
+
+    def test_status_db_error_still_returns_telemetry(
+        self, geodata_db, monkeypatch,
+    ):
+        # Wave 4 PR-E review fix (info #3): on sqlite3.Error the
+        # function must still return the telemetry snapshot, not
+        # an empty dict. Force an error by monkeypatching
+        # _open_pipeline_conn to raise.
+        with pqs._recover_stale_claims_lock:
+            pqs._recover_stale_claims_total = 4
+            pqs._recover_stale_claims_call_count = 9
+        try:
+            import sqlite3 as _sql
+
+            def _raise(_p):
+                raise _sql.OperationalError('forced error')
+
+            monkeypatch.setattr(pqs, '_open_pipeline_conn', _raise)
+            status = pqs.pipeline_status(db_path=geodata_db)
+            assert status.get('stale_recoveries_total') == 4
+            assert status.get('stale_recoveries_call_count') == 9
+            assert 'total' not in status
+        finally:
+            with pqs._recover_stale_claims_lock:
+                pqs._recover_stale_claims_total = 0
+                pqs._recover_stale_claims_last_at = None
+                pqs._recover_stale_claims_last_count = 0
+                pqs._recover_stale_claims_call_count = 0
+
+
+class TestRecoveryCallCountOnEarlyReturn:
+    """Wave 4 PR-E review fix (info #4): call_count must bump on
+    every recovery call, including missing-DB and sqlite-error
+    early-return paths, so the docstring's
+    "high call_count + zero total = called but found nothing"
+    diagnostic is reliable when the DB itself is misconfigured."""
+
+    def _reset(self):
+        with pqs._recover_stale_claims_lock:
+            pqs._recover_stale_claims_total = 0
+            pqs._recover_stale_claims_last_at = None
+            pqs._recover_stale_claims_last_count = 0
+            pqs._recover_stale_claims_call_count = 0
+
+    def test_missing_db_still_bumps_call_count(self, tmp_path):
+        self._reset()
+        missing = str(tmp_path / 'does-not-exist.db')
+        n = pqs.recover_stale_claims_pipeline(db_path=missing)
+        assert n == 0
+        t = pqs.get_recovery_telemetry()
+        assert t['stale_recoveries_call_count'] == 1
+        assert t['stale_recoveries_total'] == 0
+        assert t['stale_recoveries_last_at'] is None
+
+    def test_sqlite_error_still_bumps_call_count(
+        self, geodata_db, monkeypatch,
+    ):
+        self._reset()
+        import sqlite3 as _sql
+
+        def _raise(_p):
+            raise _sql.OperationalError('forced error')
+
+        monkeypatch.setattr(pqs, '_open_pipeline_conn', _raise)
+        n = pqs.recover_stale_claims_pipeline(db_path=geodata_db)
+        assert n == 0
+        t = pqs.get_recovery_telemetry()
+        assert t['stale_recoveries_call_count'] == 1
+        assert t['stale_recoveries_total'] == 0
+
+
+class TestPeekTopNPathsForStage:
+    """Wave 4 PR-E: top-N candidate peek used by the archive worker's
+    shadow-mode comparison to absorb the documented secondary-sort
+    divergence between archive_queue (expected_mtime) and
+    pipeline_queue (enqueued_at)."""
+
+    def _seed(self, db, paths_with_enqueued):
+        import sqlite3 as _sql
+        c = _sql.connect(db)
+        try:
+            for path, enq in paths_with_enqueued:
+                c.execute(
+                    """INSERT INTO pipeline_queue
+                           (source_path, stage, status, priority,
+                            enqueued_at, attempts, legacy_table)
+                       VALUES (?, 'archive_pending', 'pending', 2,
+                               ?, 0, 'archive_queue')""",
+                    (path, enq),
+                )
+            c.commit()
+        finally:
+            c.close()
+
+    def test_returns_tuple_in_pick_order(self, geodata_db):
+        self._seed(
+            geodata_db,
+            [('/x/c.mp4', 30.0), ('/x/a.mp4', 10.0),
+             ('/x/b.mp4', 20.0)],
+        )
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='archive_pending', limit=10, db_path=geodata_db,
+        )
+        assert isinstance(result, tuple)
+        assert result == ('/x/a.mp4', '/x/b.mp4', '/x/c.mp4')
+
+    def test_respects_limit(self, geodata_db):
+        self._seed(
+            geodata_db,
+            [(f'/x/{i:02d}.mp4', float(i)) for i in range(20)],
+        )
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='archive_pending', limit=3, db_path=geodata_db,
+        )
+        assert len(result) == 3
+        assert result == ('/x/00.mp4', '/x/01.mp4', '/x/02.mp4')
+
+    def test_clamps_limit_to_50(self, geodata_db):
+        self._seed(
+            geodata_db,
+            [(f'/x/{i:03d}.mp4', float(i)) for i in range(60)],
+        )
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='archive_pending', limit=999, db_path=geodata_db,
+        )
+        assert len(result) == 50
+
+    def test_clamps_limit_floor_to_1(self, geodata_db):
+        self._seed(geodata_db, [('/x/a.mp4', 1.0)])
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='archive_pending', limit=0, db_path=geodata_db,
+        )
+        # 0 clamps to 1 ÔÇö returns the single row.
+        assert result == ('/x/a.mp4',)
+
+    def test_filters_by_stage(self, geodata_db):
+        self._seed(geodata_db, [('/x/a.mp4', 1.0)])
+        # Different stage ÔÇö no match.
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='cloud_upload_pending', limit=10,
+            db_path=geodata_db,
+        )
+        assert result == ()
+
+    def test_skips_in_progress_rows(self, geodata_db):
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute(
+                """INSERT INTO pipeline_queue
+                       (source_path, stage, status, priority,
+                        enqueued_at, attempts, legacy_table,
+                        claimed_by, claimed_at)
+                   VALUES ('/x/a.mp4', 'archive_pending',
+                           'in_progress', 2, 1.0, 1,
+                           'archive_queue', 'w-1', 100.0)""",
+            )
+            c.execute(
+                """INSERT INTO pipeline_queue
+                       (source_path, stage, status, priority,
+                        enqueued_at, attempts, legacy_table)
+                   VALUES ('/x/b.mp4', 'archive_pending',
+                           'pending', 2, 2.0, 0, 'archive_queue')""",
+            )
+            c.commit()
+        finally:
+            c.close()
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='archive_pending', limit=10, db_path=geodata_db,
+        )
+        assert result == ('/x/b.mp4',)
+
+    def test_respects_next_retry_at_gate(self, geodata_db):
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute(
+                """INSERT INTO pipeline_queue
+                       (source_path, stage, status, priority,
+                        enqueued_at, attempts, legacy_table,
+                        next_retry_at)
+                   VALUES ('/x/future.mp4', 'archive_pending',
+                           'pending', 2, 1.0, 0, 'archive_queue',
+                           99999.0)""",
+            )
+            c.execute(
+                """INSERT INTO pipeline_queue
+                       (source_path, stage, status, priority,
+                        enqueued_at, attempts, legacy_table)
+                   VALUES ('/x/now.mp4', 'archive_pending',
+                           'pending', 2, 2.0, 0, 'archive_queue')""",
+            )
+            c.commit()
+        finally:
+            c.close()
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='archive_pending', limit=10, now=1000.0,
+            db_path=geodata_db,
+        )
+        assert result == ('/x/now.mp4',)
+
+    def test_empty_stage_returns_empty(self, geodata_db):
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='', limit=10, db_path=geodata_db,
+        )
+        assert result == ()
+
+    def test_missing_db_returns_empty(self, tmp_path):
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='archive_pending', limit=10,
+            db_path=str(tmp_path / 'nope.db'),
+        )
+        assert result == ()
+
+    def test_invalid_limit_returns_empty(self, geodata_db):
+        result = pqs.peek_top_n_paths_for_stage(
+            stage='archive_pending', limit='not-a-number',
+            db_path=geodata_db,
+        )
+        assert result == ()

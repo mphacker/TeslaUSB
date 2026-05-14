@@ -17,8 +17,9 @@ Tests cover:
 * ``_claim_via_pipeline_reader_cloud`` batch claim semantics: claims
   up to ``limit`` rows, atomically marks each in_progress, returns
   shape matching ``_discover_events``.
-* Defensive data-shape gaps: empty source_path leaves row in_progress
-  + WARNING; missing event_dir releases back to pending + WARNING.
+* Defensive data-shape gaps: empty source_path moves row to
+  dead_letter + WARNING; missing event_dir releases back to pending
+  + WARNING.
 * ``_release_cloud_pipeline_claims`` releases multiple paths with a
   shared last_error message and tolerates per-row failures.
 * End-to-end: claim → release round-trip preserves the row's other
@@ -168,8 +169,13 @@ class TestReleaseBySourcePath:
             stage=pqs.STAGE_CLOUD_PENDING, source_path='',
         ) is False
 
-    def test_release_swallows_sqlite_error(self, monkeypatch, caplog):
-        # Point at a nonexistent DB so _open_pipeline_conn fails.
+    def test_release_returns_false_on_missing_db(self, monkeypatch, caplog):
+        # PR-F3 review fix: this test originally asserted "swallows
+        # sqlite_error" but actually exercised the missing-DB
+        # short-circuit (``os.path.isfile`` returns False before
+        # ``_open_pipeline_conn`` is ever called). Rename to match
+        # what's tested; the genuine sqlite-error swallow path is
+        # covered by ``test_release_swallows_sqlite_error`` below.
         monkeypatch.setattr(pqs, '_resolve_pipeline_db',
                             lambda: '/nonexistent/path.db')
         with caplog.at_level(logging.DEBUG):
@@ -178,6 +184,29 @@ class TestReleaseBySourcePath:
                 source_path='SentryClips/a.json',
             )
         assert ok is False  # silent no-op on missing DB
+
+    def test_release_swallows_sqlite_error(self, geodata_db, monkeypatch,
+                                           caplog):
+        # PR-F3 review fix: cover the genuine sqlite-error swallow
+        # path by monkeypatching ``_open_pipeline_conn`` to raise
+        # ``sqlite3.OperationalError`` (e.g. database locked, disk
+        # I/O error). The helper must swallow at DEBUG and return
+        # False without propagating.
+        def raise_op_error(*_args, **_kwargs):
+            raise sqlite3.OperationalError("simulated database is locked")
+
+        monkeypatch.setattr(pqs, '_open_pipeline_conn', raise_op_error)
+        with caplog.at_level(logging.DEBUG, logger=pqs.__name__):
+            ok = pqs.release_pipeline_claim_by_source_path(
+                stage=pqs.STAGE_CLOUD_PENDING,
+                source_path='SentryClips/a.json',
+            )
+        assert ok is False
+        # The swallow path logs at DEBUG; assert the trace landed so
+        # operators can find it when troubleshooting.
+        assert any('release_pipeline_claim_by_source_path' in r.message
+                   and 'simulated database is locked' in r.message
+                   for r in caplog.records)
 
     def test_release_only_matches_specified_stage(self, geodata_db):
         # Two rows with the same source_path but different stages.
@@ -200,10 +229,15 @@ class TestReleaseBySourcePath:
             stage=pqs.STAGE_INDEX_PENDING,
             source_path='SentryClips/c.json',
         )
-        # That row is still 'pending' (never claimed) — release is a
-        # no-op UPDATE on already-pending row, but returns True
-        # because rowcount > 0.
-        assert ok in (True, False)  # implementation-defined for already-pending
+        # PR-F3 review fix: previously asserted ``ok in (True, False)``
+        # which is a no-op (any boolean satisfies it). The release
+        # UPDATE matches the indexing row by ``(stage, source_path)``
+        # and runs the SET clause; sqlite reports rowcount=1 for any
+        # WHERE-matched row even when the SET values don't change.
+        # So the indexing release returns True. The semantics this
+        # test really cares about are pinned below: the cloud row
+        # MUST still be in_progress.
+        assert ok is True
 
         # The cloud row MUST still be in_progress.
         conn = sqlite3.connect(geodata_db)
@@ -216,6 +250,126 @@ class TestReleaseBySourcePath:
         finally:
             conn.close()
         assert row[0] == 'in_progress'  # cloud release did NOT fire
+
+
+# ---------------------------------------------------------------------------
+# dead_letter_pipeline_row_by_id (in pipeline_queue_service)
+# ---------------------------------------------------------------------------
+
+
+class TestDeadLetterPipelineRowById:
+    """The id-keyed dead-letter helper added by PR-F3 review fix.
+
+    Closes the recycle-loop gap for unrecoverable data-shape gaps
+    where neither (legacy_table, legacy_id) nor (stage, source_path)
+    can address the row.
+    """
+
+    def _seed_and_claim(self, geodata_db: str, rel_path: str) -> int:
+        """Seed an in_progress row and return its id."""
+        _seed_cloud_pending(geodata_db, rel_path)
+        pqs.claim_next_for_stage(
+            stage=pqs.STAGE_CLOUD_PENDING,
+            claimed_by='cloud_archive',
+        )
+        row = _row_for(geodata_db, rel_path)
+        return int(row['id'])
+
+    def test_dead_letter_an_in_progress_row_sets_status_and_clears_claim(
+            self, geodata_db):
+        row_id = self._seed_and_claim(geodata_db, 'SentryClips/dl1.json')
+        ok = pqs.dead_letter_pipeline_row_by_id(
+            row_id=row_id,
+            last_error='unrecoverable test',
+        )
+        assert ok is True
+        row = _row_for(geodata_db, 'SentryClips/dl1.json')
+        assert row['status'] == 'dead_letter'
+        assert row['claimed_by'] is None
+        assert row['claimed_at'] is None
+        assert row['last_error'] == 'unrecoverable test'
+
+    def test_dead_letter_without_last_error_leaves_existing_intact(
+            self, geodata_db):
+        row_id = self._seed_and_claim(geodata_db, 'SentryClips/dl2.json')
+        # First, set a last_error via release.
+        pqs.release_pipeline_claim_by_source_path(
+            stage=pqs.STAGE_CLOUD_PENDING,
+            source_path='SentryClips/dl2.json',
+            last_error='earlier error',
+        )
+        # Re-claim so the row is in_progress again.
+        pqs.claim_next_for_stage(
+            stage=pqs.STAGE_CLOUD_PENDING,
+            claimed_by='cloud_archive',
+        )
+        # Dead-letter without last_error.
+        ok = pqs.dead_letter_pipeline_row_by_id(row_id=row_id)
+        assert ok is True
+        row = _row_for(geodata_db, 'SentryClips/dl2.json')
+        assert row['status'] == 'dead_letter'
+        # Existing last_error preserved.
+        assert row['last_error'] == 'earlier error'
+
+    def test_dead_letter_missing_row_returns_false(self, geodata_db):
+        ok = pqs.dead_letter_pipeline_row_by_id(
+            row_id=999999,
+            last_error='nonexistent',
+        )
+        assert ok is False
+
+    def test_dead_letter_with_none_id_returns_false(self, geodata_db):
+        ok = pqs.dead_letter_pipeline_row_by_id(
+            row_id=None,  # type: ignore[arg-type]
+            last_error='no id',
+        )
+        assert ok is False
+
+    def test_dead_letter_with_garbage_id_returns_false(self, geodata_db):
+        ok = pqs.dead_letter_pipeline_row_by_id(
+            row_id='not a number',  # type: ignore[arg-type]
+            last_error='bad id',
+        )
+        assert ok is False
+
+    def test_dead_letter_returns_false_on_missing_db(self, monkeypatch):
+        monkeypatch.setattr(pqs, '_resolve_pipeline_db',
+                            lambda: '/nonexistent/path.db')
+        ok = pqs.dead_letter_pipeline_row_by_id(
+            row_id=42, last_error='no db',
+        )
+        assert ok is False
+
+    def test_dead_letter_swallows_sqlite_error(
+            self, geodata_db, monkeypatch, caplog):
+        def raise_op_error(*_args, **_kwargs):
+            raise sqlite3.OperationalError("simulated db locked")
+        monkeypatch.setattr(pqs, '_open_pipeline_conn', raise_op_error)
+        with caplog.at_level(logging.DEBUG, logger=pqs.__name__):
+            ok = pqs.dead_letter_pipeline_row_by_id(
+                row_id=42, last_error='locked',
+            )
+        assert ok is False
+        assert any(
+            'dead_letter_pipeline_row_by_id' in r.message
+            and 'simulated db locked' in r.message
+            for r in caplog.records
+        )
+
+    def test_dead_letter_does_not_match_other_rows(self, geodata_db):
+        # Seed two rows; dead-letter only the first.
+        _seed_cloud_pending(geodata_db, 'SentryClips/keep.json')
+        _seed_cloud_pending(geodata_db, 'SentryClips/dl3.json')
+        target_row = _row_for(geodata_db, 'SentryClips/dl3.json')
+        ok = pqs.dead_letter_pipeline_row_by_id(
+            row_id=int(target_row['id']),
+            last_error='only this one',
+        )
+        assert ok is True
+        # Other row untouched.
+        other = _row_for(geodata_db, 'SentryClips/keep.json')
+        assert other['status'] == 'pending'
+        assert other['last_error'] is None
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +457,64 @@ class TestClaimViaPipelineReaderCloud:
         # WARNING fired.
         assert any(
             'event_dir' in r.getMessage() and 're-enqueue' in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_claim_empty_source_path_moves_row_to_dead_letter(
+            self, geodata_db, caplog):
+        """PR-F3 review fix: previously the empty-source_path branch
+        left the row in ``in_progress`` and relied on stale-claim
+        recovery to recycle it — but the same gap fires every claim,
+        creating a recycle loop. The fix moves the row to
+        ``dead_letter`` immediately via the new id-keyed helper.
+        """
+        # Force the production producer's UNIQUE index path by writing
+        # the row directly with empty source_path (the producer would
+        # never enqueue empty source_path, but the recovery path or
+        # backfill could in principle).
+        conn = sqlite3.connect(geodata_db)
+        try:
+            conn.execute(
+                "INSERT INTO pipeline_queue "
+                "(stage, source_path, status, priority, enqueued_at, "
+                " attempts) "
+                "VALUES (?, ?, 'pending', ?, ?, 0)",
+                (pqs.STAGE_CLOUD_PENDING, '', pqs.PRIORITY_CLOUD_BULK,
+                 1700000000.0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with caplog.at_level(logging.WARNING):
+            result = svc._claim_via_pipeline_reader_cloud(
+                worker_id='cloud_archive',
+                db_path=geodata_db,
+                limit=8,
+            )
+        assert result == []  # not surfaced
+
+        # Row MUST now be in dead_letter (NOT recycling).
+        conn = sqlite3.connect(geodata_db)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT status, claimed_by, claimed_at, last_error "
+                "  FROM pipeline_queue WHERE source_path = ?",
+                ('',),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row['status'] == 'dead_letter'
+        assert row['claimed_by'] is None  # claim metadata cleared
+        assert row['claimed_at'] is None
+        assert 'PR-F3' in (row['last_error'] or '')
+        assert 'empty source_path' in (row['last_error'] or '')
+
+        # WARNING fired with the dead_letter forensic.
+        assert any(
+            'empty source_path' in r.getMessage()
+            and 'dead_letter' in r.getMessage()
             for r in caplog.records
         )
 

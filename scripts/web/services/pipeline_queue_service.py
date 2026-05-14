@@ -647,6 +647,86 @@ def release_pipeline_claim(
                 pass
 
 
+def dead_letter_pipeline_row_by_id(
+    *,
+    row_id: int,
+    last_error: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Move a single ``pipeline_queue`` row to ``status='dead_letter'``
+    keyed by its primary-key ``id``.
+
+    Wave 4 PR-F3 review fix (issue #184): used by
+    ``cloud_archive_service._claim_via_pipeline_reader_cloud`` when a
+    claimed row has an unrecoverable data-shape gap (e.g. empty
+    ``source_path``) — the legacy_id-keyed and source_path-keyed
+    helpers can't address such a row by content. Without an id-keyed
+    dead-letter the only options are (a) leave it in ``in_progress``
+    so :func:`recover_stale_claims_pipeline` keeps recycling it back
+    to ``pending`` only for the same gap to re-fire (a recycle loop),
+    or (b) write an inline UPDATE in every caller. This helper closes
+    the gap cleanly.
+
+    Behaviour:
+      * Atomically sets ``status='dead_letter'``, NULLs ``claimed_by``
+        / ``claimed_at`` (so the row presents as a clean dead-letter
+        entry to operators and to :func:`recover_stale_claims_pipeline`,
+        which only picks up ``in_progress``).
+      * Optional ``last_error`` stamped for forensics; ``None`` leaves
+        the existing error untouched.
+      * Returns ``True`` on rowcount > 0, ``False`` otherwise.
+        Never raises — silent no-op on missing DB / sqlite errors,
+        same defensive contract as the rest of this module.
+    """
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    if row_id is None:
+        return False
+    try:
+        row_id_int = int(row_id)
+    except (TypeError, ValueError):
+        return False
+    if last_error is not None:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'dead_letter', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL, "
+            "       last_error = ? "
+            " WHERE id = ?"
+        )
+        params: Tuple[Any, ...] = (last_error, row_id_int)
+    else:
+        sql = (
+            "UPDATE pipeline_queue "
+            "   SET status = 'dead_letter', "
+            "       claimed_by = NULL, "
+            "       claimed_at = NULL "
+            " WHERE id = ?"
+        )
+        params = (row_id_int,)
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.debug(
+            "dead_letter_pipeline_row_by_id(id=%s) failed: %s",
+            row_id_int, e,
+        )
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def release_pipeline_claim_by_source_path(
     *,
     stage: str,

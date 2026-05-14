@@ -18,7 +18,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1202,23 +1202,38 @@ def _claim_via_pipeline_reader_cloud(
         rel_path = (row.get('source_path') or '').strip()
         if not rel_path:
             # Unrecoverable data-shape gap — empty source_path can
-            # never be matched by a future recovery, so move to
-            # dead_letter immediately. Use the row's PK (id) via
-            # update_pipeline_row_by_legacy_id is not applicable
-            # (legacy_id absent); fall back to direct UPDATE through
-            # the legacy_table+legacy_id helper which we don't have
-            # — so write a one-off UPDATE via the source_path-keyed
-            # release helper with status='dead_letter' is also not
-            # supported. Simplest safe action: leave the row
-            # in_progress and log; ``recover_stale_claims_pipeline``
-            # will recycle it but the same gap will repeat — which
-            # is OK because (a) it should never happen, (b) the
-            # WARNING is loud enough that operators will notice.
+            # never be matched by ``release_pipeline_claim_by_source_path``
+            # (which keys on the ``(stage, source_path)`` UNIQUE index)
+            # nor by ``recover_stale_claims_pipeline`` (which would
+            # release the row back to pending only for the same gap
+            # to fire again next claim — a recycle loop). Move the
+            # row to ``dead_letter`` immediately by primary-key id
+            # via the dedicated helper. Operators can inspect the
+            # dead-letter rows via the upcoming
+            # ``/api/pipeline_queue/dead_letter`` endpoint and either
+            # manually backfill ``source_path`` or drop the row.
+            #
+            # This mirrors PR-F1's archive-side fix for the
+            # legacy_id-missing case (see ``archive_worker._claim_via
+            # _pipeline_reader`` ~L2168) so both reader paths behave
+            # the same way under unrecoverable data-shape gaps.
+            row_id = row.get('id')
+            try:
+                pqs.dead_letter_pipeline_row_by_id(
+                    row_id=row_id,
+                    last_error=(
+                        'PR-F3: pipeline_queue cloud_pending row has '
+                        'empty source_path (unrecoverable data-shape '
+                        'gap); manual intervention required'
+                    ),
+                    db_path=db_path,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             logger.warning(
                 "PR-F3 cloud reader: claimed row id=%s has empty "
-                "source_path (data-shape gap); leaving in_progress "
-                "for stale-claim recovery to recycle",
-                row.get('id'),
+                "source_path — moved to dead_letter (unrecoverable)",
+                row_id,
             )
             continue
         payload = row.get('payload') or {}
@@ -1256,7 +1271,7 @@ def _claim_via_pipeline_reader_cloud(
 
 
 def _release_cloud_pipeline_claims(
-    rel_paths: Iterable[str],
+    rel_paths: Sequence[str],
     last_error: str,
     db_path: Optional[str] = None,
 ) -> int:
@@ -1269,10 +1284,21 @@ def _release_cloud_pipeline_claims(
     times them out, which is wasteful (and bumps ``attempts`` for
     work that never started).
 
+    ``rel_paths`` is intentionally typed as :class:`Sequence` (not
+    :class:`Iterable`) so callers cannot pass a single-shot
+    generator — the empty-check below would consume it before the
+    iteration loop, silently skipping every release. Callers always
+    pass a list (the ``unprocessed_pipeline_claims`` straggler list
+    from ``_drain_once``); a tuple would also be safe.
+
     Returns the count of rows actually released (rowcount > 0).
     Never raises — silent at DEBUG on per-row failures so a transient
     sqlite glitch can't abort the drain wind-down.
     """
+    # ``len(rel_paths) == 0`` and ``not rel_paths`` are equivalent
+    # for ``Sequence`` and both safely short-circuit; we use the
+    # explicit length check to make the Sequence contract obvious
+    # at the call site.
     if not rel_paths:
         return 0
     released = 0

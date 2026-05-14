@@ -88,15 +88,34 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Priority inference (from the issue spec)
+# Priority inference (issue #178)
 # ---------------------------------------------------------------------------
 #
 # Lower number = more urgent. The Phase 2b worker picks rows in
 # (priority ASC, expected_mtime ASC) order — the partial index
 # ``archive_queue_ready`` covers exactly that ORDER BY.
+#
+# **Issue #178 — priority swap.** Pre-#178 the order was inverted:
+# ``RECENT_CLIPS=1, EVENTS=2``. The original reasoning ("Tesla rotates
+# RecentClips out after ~60 min, so they're the most urgent") was
+# correct when the worker copied every RecentClip. After issue #167
+# (``skip_stationary_recent_clips``) shipped, most RecentClips on a
+# parked car became low-value skip-decisions and the priority order
+# starved real Sentry events: live evidence on cybertruckusb showed
+# 71 SentryClips events untouched for 130+ minutes while the worker
+# burned its SDIO budget on parked-Sentry RecentClips skip decisions.
+# Events are the highest-value footage (something physically happened
+# to the car); RecentClips driving footage is dashcam-grade and gets
+# the second tier; the SEI-peek skip-stationary path handles the
+# parked-no-event case at copy time so it never competes with events
+# for the queue head.
+#
+# A v13 schema migration (``mapping_migrations.py``) flips existing
+# non-terminal rows on the first run after upgrade so the in-flight
+# backlog also benefits.
 
-PRIORITY_RECENT_CLIPS = 1     # Tesla rotates these out after ~60 min — highest urgency
-PRIORITY_EVENTS = 2           # SentryClips / SavedClips — user wants these soon
+PRIORITY_EVENTS = 1           # SentryClips / SavedClips — events are the highest-value footage
+PRIORITY_RECENT_CLIPS = 2     # Driving / dashcam footage; SEI-peek skips parked-no-event clips
 PRIORITY_OTHER = 3            # Default for anything else (e.g. ArchivedClips back-fill)
 
 # Status values stored in the ``status`` column. Phase 2a only ever
@@ -120,12 +139,19 @@ def _infer_priority(path: str) -> int:
     Uses the same lowercase folder-name heuristic as
     ``indexing_queue_service.priority_for_path`` so behavior is
     consistent across the indexing and archive subsystems.
+
+    Checks are ordered highest-priority-first to mirror the
+    "lower number = picked first" semantics post-#178: events are
+    checked before RecentClips. Production paths are mutually
+    exclusive between the three folders, so check order only
+    affects synthetic edge cases — but the explicit ordering makes
+    the function self-documenting for the priority swap.
     """
     norm = (path or '').replace('\\', '/').lower()
-    if '/recentclips/' in norm:
-        return PRIORITY_RECENT_CLIPS
     if '/sentryclips/' in norm or '/savedclips/' in norm:
         return PRIORITY_EVENTS
+    if '/recentclips/' in norm:
+        return PRIORITY_RECENT_CLIPS
     return PRIORITY_OTHER
 
 
@@ -1024,10 +1050,10 @@ def claim_next_for_worker(claimed_by: str, *,
     missing RETURNING.
 
     The pick order matches the partial index ``archive_queue_ready``:
-    ``priority ASC, expected_mtime ASC NULLS LAST, id ASC``. RecentClips
-    (P1) drains before Sentry/Saved (P2) which drains before everything
-    else (P3); within a priority band, files closer to Tesla's rotation
-    deadline go first (oldest mtime).
+    ``priority ASC, expected_mtime ASC NULLS LAST, id ASC``. Sentry/
+    Saved events (P1) drain before RecentClips (P2) which drain before
+    everything else (P3) — issue #178. Within a priority band, files
+    closer to Tesla's rotation deadline go first (oldest mtime).
 
     Args:
         claimed_by: Stamped into ``claimed_by`` for diagnostics
@@ -1493,7 +1519,8 @@ def get_pending_counts_by_priority(db_path: Optional[str] = None) -> Dict[int, i
     Always includes the canonical priorities (1, 2, 3) in the result so
     callers don't need to deal with missing keys. Phase 2c surfaces this
     in ``/api/archive/status`` as ``queue_depth_p1/p2/p3`` so the UI can
-    show RecentClips backlog separately from event/other backlogs.
+    show event backlog separately from RecentClips/other backlogs.
+    Per issue #178: P1=events, P2=RecentClips, P3=other.
     """
     counts: Dict[int, int] = {1: 0, 2: 0, 3: 0}
     db_path = _resolve_db_path(db_path)

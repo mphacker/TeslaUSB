@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 13
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -181,11 +181,14 @@ CREATE INDEX IF NOT EXISTS idx_queue_claimed_at
 -- then. Keyed by ``source_path`` (UNIQUE) so the inotify producer, the
 -- 60-s rescan producer, and the boot catch-up scan can all use
 -- ``INSERT OR IGNORE`` for cheap idempotent enqueue. ``priority``
--- follows the issue spec: 1=RecentClips (Tesla rotates these out
--- after ~60 min, highest urgency), 2=SentryClips/SavedClips
--- (event clips the user wants ASAP), 3=anything else. ``status``
--- transitions through pending → claimed → copied (terminal) or
--- → source_gone / error / dead_letter (terminal). ``expected_size``
+-- follows the issue spec (post-#178 mapping):
+-- 1=SentryClips/SavedClips event clips (highest-value footage —
+--   something physically happened to the car),
+-- 2=RecentClips (driving / dashcam footage; SEI-peek skip-stationary
+--   handles parked-no-event clips at copy time so they don't compete),
+-- 3=anything else (e.g. ArchivedClips back-fill).
+-- ``status`` transitions through pending → claimed → copied (terminal)
+-- or → source_gone / error / dead_letter (terminal). ``expected_size``
 -- and ``expected_mtime`` are captured at enqueue time so the Phase
 -- 2b worker can detect "Tesla still writing" by re-stat-ing before
 -- the copy.
@@ -428,6 +431,56 @@ def _init_db(db_path: str) -> sqlite3.Connection:
                     )
                 except sqlite3.OperationalError:
                     pass
+        if current > 0 and current < 13:
+            # v13 (#178): swap archive_queue priority constants so
+            # SentryClips/SavedClips events drain BEFORE RecentClips.
+            # Pre-#178: P1=RecentClips, P2=Events. Post-#178: P1=Events,
+            # P2=RecentClips. Producers re-tag new rows with the correct
+            # constant once the code update lands; this migration flips
+            # the existing in-flight backlog so users don't have to wait
+            # for the old rows to drain the slow way.
+            #
+            # Only non-terminal statuses are touched — pending/claimed/
+            # error rows will be re-inspected by the worker, so their
+            # priority must reflect the new mapping. Terminal-status
+            # rows (copied, source_gone, skipped_stationary, dead_letter)
+            # are left alone: their ``priority`` value is historical and
+            # mutating it would mislead future debugging of "what got
+            # picked when".
+            #
+            # CASE form is symmetric and idempotent — running the
+            # statement twice is a no-op modulo a second swap. The
+            # ``current < 13`` gate prevents that anyway.
+            try:
+                conn.execute("SAVEPOINT migrate_v13")
+                cur = conn.execute(
+                    """
+                    UPDATE archive_queue
+                       SET priority = CASE priority
+                                          WHEN 1 THEN 2
+                                          WHEN 2 THEN 1
+                                          ELSE priority
+                                      END
+                     WHERE status IN ('pending', 'claimed', 'error')
+                       AND priority IN (1, 2)
+                    """
+                )
+                flipped = cur.rowcount
+                conn.execute("RELEASE SAVEPOINT migrate_v13")
+                if flipped:
+                    logger.info(
+                        "Migration v12->v13: flipped priority on %d "
+                        "non-terminal archive_queue row(s) "
+                        "(events now P1, RecentClips now P2)", flipped,
+                    )
+            except Exception as e:
+                conn.execute("ROLLBACK TO SAVEPOINT migrate_v13")
+                conn.execute("RELEASE SAVEPOINT migrate_v13")
+                logger.error(
+                    "Migration v12->v13 failed, leaving schema at v12: %s", e,
+                )
+                conn.commit()
+                return conn
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",

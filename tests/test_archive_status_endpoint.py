@@ -183,17 +183,18 @@ class TestArchiveStatusShape:
         self, client, db, archive_root, monkeypatch,
     ):
         # Enqueue rows of different priorities and verify counts.
+        # Issue #178: P1=events, P2=RecentClips, P3=other.
         archive_queue.enqueue_for_archive(
-            "/tc/RecentClips/p1.mp4", db_path=db, priority=1,
+            "/tc/SentryClips/evt/p1.mp4", db_path=db, priority=1,
         )
         archive_queue.enqueue_for_archive(
-            "/tc/RecentClips/p1b.mp4", db_path=db, priority=1,
+            "/tc/SentryClips/evt/p1b.mp4", db_path=db, priority=1,
         )
         archive_queue.enqueue_for_archive(
-            "/tc/SentryClips/evt/p2.mp4", db_path=db, priority=2,
+            "/tc/RecentClips/p2.mp4", db_path=db, priority=2,
         )
         archive_queue.enqueue_for_archive(
-            "/tc/SavedClips/evt/p3.mp4", db_path=db, priority=3,
+            "/tc/ArchivedClips/p3.mp4", db_path=db, priority=3,
         )
         # Pin the DB resolver so the endpoint reads our test DB.
         monkeypatch.setattr(

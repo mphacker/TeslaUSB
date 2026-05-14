@@ -115,8 +115,60 @@ def api_trip_route(trip_id):
         }
         return jsonify(geojson)
     except Exception as e:
-        logger.error("Failed to query trip route: %s", e)
-        return jsonify({'error': str(e)}), 500
+        # Scrub the exception message from the response — raw SQL
+        # fragments / file paths could leak in error.message and
+        # surface to any browser that happens to be on the AP.
+        # Full traceback is preserved in the server log.
+        logger.exception("Failed to query trip route: %s", e)
+        return jsonify({'error': 'internal error'}), 500
+
+
+@mapping_bp.route("/api/trip/<int:trip_id>/telemetry")
+def api_trip_telemetry(trip_id):
+    """Return cold telemetry (steering/brake/accel/gear/blinker) for
+    every waypoint in ``trip_id`` keyed by waypoint id.
+
+    Issue #184 Wave 3 — Phase D companion to ``/api/trip/<id>/route``.
+    The map polyline endpoint returns hot columns only (lat/lon/
+    speed/heading/autopilot_state). When the user opens the in-clip
+    HUD overlay, the JS calls this endpoint once and merges the
+    cold payload into the existing waypoints array.
+
+    Response shape::
+
+        {
+            "trip_id": <int>,
+            "telemetry": {
+                "<waypoint_id>": {
+                    "id": <int>,
+                    "acceleration_x": <float|null>,
+                    "acceleration_y": <float|null>,
+                    "acceleration_z": <float|null>,
+                    "gear": <str|null>,
+                    "steering_angle": <float|null>,
+                    "brake_applied": <0|1>,
+                    "blinker_on_left": <0|1>,
+                    "blinker_on_right": <0|1>
+                },
+                ...
+            }
+        }
+
+    Empty ``telemetry`` is a valid response (parked-only trip).
+    """
+    from services.mapping_queries import query_trip_telemetry
+    try:
+        telem = query_trip_telemetry(MAPPING_DB_PATH, trip_id)
+        return jsonify({
+            'trip_id': trip_id,
+            'telemetry': {str(wp_id): row for wp_id, row in telem.items()},
+        })
+    except Exception as e:
+        # Scrub the exception message from the response — raw SQL
+        # fragments / file paths could leak in error.message. Full
+        # traceback is preserved in the server log.
+        logger.exception("Failed to query trip telemetry: %s", e)
+        return jsonify({'error': 'internal error'}), 500
 
 
 @mapping_bp.route("/api/waypoints-for-clip")

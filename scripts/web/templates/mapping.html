@@ -1542,7 +1542,7 @@ function showDisambigPopup(latlng, candidates) {
         }
         const screenPt = map.latLngToContainerPoint(latlng);
         closeDisambigPopup();
-        openVideoOverlay(seed, screenPt, trip.waypoints || []);
+        openVideoOverlay(seed, screenPt, trip.waypoints || [], trip.trip_id);
     };
 
     for (const c of candidates) {
@@ -2266,7 +2266,7 @@ function renderTripOnDay(trip, bounds) {
                 const trip = playableCandidates[0].trip;
                 const playable = pickPlayableWaypointForTrip(trip, e.latlng);
                 if (playable) {
-                    openVideoOverlay(playable, e.containerPoint, trip.waypoints || valid);
+                    openVideoOverlay(playable, e.containerPoint, trip.waypoints || valid, trip.trip_id);
                 }
                 return;
             }
@@ -2542,12 +2542,47 @@ function getBasePath(videoPath) {
     return angle ? videoPath.replace(`-${angle}.mp4`, '') : videoPath.replace('.mp4', '');
 }
 
-function openVideoOverlay(waypoint, clickPoint, routeWps) {
+function openVideoOverlay(waypoint, clickPoint, routeWps, tripId) {
     closeDisambigPopup();
     closeVideoOverlay();
 
     // Set waypoints AFTER close clears them
     overlayWaypoints = routeWps || [];
+
+    // Issue #184 Wave 3 — Phase D. The map polyline endpoints
+    // (/api/trip/<id>/route, /api/day/<date>/routes) only return
+    // hot columns (lat/lon/speed/heading/autopilot_state) so the
+    // server saves SD page-cache pressure on routine map browsing.
+    // When the overlay opens we lazy-fetch cold telemetry
+    // (steering/brake/accel/gear/blinker) and merge it into the
+    // existing waypoints array so updateOverlayTelemetry() can
+    // read wp.steering_angle / wp.brake_applied / etc. unchanged.
+    // Best-effort: a fetch failure leaves the HUD on neutral
+    // defaults, which already happens for SentryClips/ad-hoc
+    // overlay opens that don't have a trip context.
+    if (tripId && Array.isArray(overlayWaypoints) && overlayWaypoints.length > 0) {
+        const opSeq = ++overlayOpenSeq;
+        fetch(`/api/trip/${encodeURIComponent(tripId)}/telemetry`)
+            .then(r => (r && r.ok) ? r.json() : null)
+            .then(data => {
+                if (!data || !data.telemetry) return;
+                if (opSeq !== overlayOpenSeq) return;
+                const telem = data.telemetry;
+                for (const wp of overlayWaypoints) {
+                    const t = telem[String(wp.id)];
+                    if (!t) continue;
+                    if (wp.acceleration_x === undefined) wp.acceleration_x = t.acceleration_x;
+                    if (wp.acceleration_y === undefined) wp.acceleration_y = t.acceleration_y;
+                    if (wp.acceleration_z === undefined) wp.acceleration_z = t.acceleration_z;
+                    if (wp.gear === undefined) wp.gear = t.gear;
+                    if (wp.steering_angle === undefined) wp.steering_angle = t.steering_angle;
+                    if (wp.brake_applied === undefined) wp.brake_applied = t.brake_applied;
+                    if (wp.blinker_on_left === undefined) wp.blinker_on_left = t.blinker_on_left;
+                    if (wp.blinker_on_right === undefined) wp.blinker_on_right = t.blinker_on_right;
+                }
+            })
+            .catch(() => { /* HUD already falls back to neutral defaults */ });
+    }
 
     const filename = waypoint.video_path.split('/').pop();
     overlayCurrentAngle = CAMERA_ANGLES.find(a => filename.includes('-' + a + '.')) || 'front';
@@ -2699,6 +2734,12 @@ function openVideoOverlay(waypoint, clickPoint, routeWps) {
 // Module-level so closeVideoOverlay can abort drag listeners attached
 // during openVideoOverlay. Reset on each open/close cycle.
 let overlayDragController = null;
+
+// Issue #184 Wave 3 — Phase D. Monotonic sequence tagged on each
+// overlay open. Used by the lazy telemetry fetch to discard a
+// stale response when the user opens a different clip before the
+// fetch returns.
+let overlayOpenSeq = 0;
 
 const LUCIDE_SPRITE = "{{ url_for('static', filename='icons/lucide-sprite.svg') }}";
 const OVERLAY_ICON_MAX = LUCIDE_SPRITE + "#icon-maximize-2";
@@ -3007,7 +3048,7 @@ async function openEventVideo(tripId, videoPath, frameOffset, lat, lon) {
     }
 
     // Center the overlay on screen
-    openVideoOverlay(wp, { x: window.innerWidth / 3, y: window.innerHeight / 4 }, wps);
+    openVideoOverlay(wp, { x: window.innerWidth / 3, y: window.innerHeight / 4 }, wps, tripId);
 }
 
 // Event delegation for popup video links (avoids inline onclick XSS risk)
@@ -3045,6 +3086,14 @@ document.addEventListener('click', function(e) {
 });
 
 function closeVideoOverlay() {
+    // Bump the open-sequence counter so any in-flight lazy-load
+    // telemetry fetch (started by openVideoOverlay) discards its
+    // response when it returns. The fetch's own ``opSeq !== overlayOpenSeq``
+    // check below is the single source of truth for "is this response
+    // still relevant?" — keep it that way by always invalidating here,
+    // not by relying on overlayWaypoints being empty (a future change
+    // that re-populates the array after close would silently break).
+    ++overlayOpenSeq;
     const existing = document.getElementById('videoOverlay');
     if (existing) {
         const video = existing.querySelector('video');

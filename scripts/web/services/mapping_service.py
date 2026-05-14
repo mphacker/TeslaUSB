@@ -46,6 +46,39 @@ from services.mapping_migrations import (  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
+# Cold telemetry signal thresholds (issue #184 Wave 3 — Phase D)
+# ---------------------------------------------------------------------------
+# The accelerometer and steering sensors on a Tesla rarely report exactly
+# 0.0 even when stationary — IMU noise floors are typically ±0.001 to
+# ±0.05 m/s² and steering can show ±0.1° from sensor jitter. Without an
+# absolute-tolerance check, a parked-car Sentry event (10 000+ waypoints
+# in a single day) ends up with one ``waypoints_cold`` row per waypoint,
+# defeating the entire reason for the hot/cold split. The thresholds
+# below are calibrated to be well below any real driving maneuver while
+# above the documented sensor noise floor.
+#
+# These constants are also used by the v14→v15 migration WHERE clause in
+# ``mapping_migrations._migrate_v14_to_v15`` so backfill semantics match
+# the runtime path exactly. If you change a value here, change the
+# migration too — the matching ``_GEAR_NO_SIGNAL`` set is also exported.
+_COLD_ACCEL_THRESHOLD_MPS2 = 0.05
+_COLD_STEERING_THRESHOLD_DEG = 0.5
+
+# Gear states that carry no useful cold-telemetry signal:
+#  * 'UNKNOWN' — SEI parser emitted a value outside the documented
+#    enum (``_GEAR_NAMES`` in ``sei_parser``); usually a partial or
+#    corrupted SEI frame.
+#  * 'PARK'    — vehicle is stationary; every Sentry/Saved event clip
+#    on a parked car carries gear='PARK' for all 30 Hz × 60 s = 1 800
+#    waypoints. Recording 1 800 identical "still parked" cold rows per
+#    parked event would dwarf the few thousand driving rows that
+#    actually carry telemetry signal.
+# Other gear states (DRIVE / REVERSE / NEUTRAL) imply the vehicle is in
+# motion or about to move — record those.
+_COLD_GEAR_NO_SIGNAL = frozenset({'UNKNOWN', 'PARK'})
+
+
+# ---------------------------------------------------------------------------
 # Indexing Outcome Types
 # ---------------------------------------------------------------------------
 
@@ -1381,23 +1414,84 @@ def _index_video(
         )
         trip_id = cursor.lastrowid
 
-    # Insert waypoints
-    conn.executemany(
-        """INSERT INTO waypoints
-           (trip_id, timestamp, lat, lon, heading, speed_mps,
-            acceleration_x, acceleration_y, acceleration_z,
-            gear, autopilot_state, steering_angle, brake_applied,
-            blinker_on_left, blinker_on_right,
-            video_path, frame_offset)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        [(trip_id, wp['timestamp'], wp['lat'], wp['lon'], wp['heading'],
-          wp['speed_mps'], wp['acceleration_x'], wp['acceleration_y'],
-          wp['acceleration_z'], wp['gear'], wp['autopilot_state'],
-          wp['steering_angle'], wp['brake_applied'],
-          wp['blinker_on_left'], wp['blinker_on_right'],
-          wp['video_path'], wp['frame_offset'])
-         for wp in waypoint_dicts]
-    )
+    # Insert waypoints — issue #184 Wave 3 — Phase D split.
+    # Hot columns go to ``waypoints``; if any cold field carries a
+    # non-default value above the sensor noise floor, the corresponding
+    # ``waypoints_cold`` row is written. Both inserts are batched
+    # (``executemany`` for hot + multi-VALUES with ``RETURNING id`` for
+    # capturing the new ids in one round trip; ``executemany`` for cold).
+    # Per-clip cost: ~30 ms for a 500-waypoint clip vs. ~250 ms for the
+    # original per-row loop (Info #2 from the PR #187 review).
+    #
+    # The "should we write a cold row" filter mirrors the v14→v15
+    # migration's WHERE clause (``_migrate_v14_to_v15``). SEI metadata
+    # always supplies a float (defaulted to 0.0 by protobuf) for the
+    # accel/steering fields and an int 0 for the booleans, so a strict
+    # "IS NOT NULL" check would inflate ``waypoints_cold`` to one row
+    # per waypoint — defeating the entire reason for the split. The
+    # threshold constants (``_COLD_ACCEL_THRESHOLD_MPS2`` etc.) are
+    # defined at module top.
+    if not waypoint_dicts:
+        hot_ids: List[int] = []
+    else:
+        hot_sql = (
+            "INSERT INTO waypoints "
+            "(trip_id, timestamp, lat, lon, heading, speed_mps, "
+            " autopilot_state, video_path, frame_offset) VALUES "
+            + ",".join(["(?, ?, ?, ?, ?, ?, ?, ?, ?)"] * len(waypoint_dicts))
+            + " RETURNING id"
+        )
+        flat_values: List[Any] = []
+        for wp in waypoint_dicts:
+            flat_values.extend((
+                trip_id, wp['timestamp'], wp['lat'], wp['lon'],
+                wp['heading'], wp['speed_mps'], wp['autopilot_state'],
+                wp['video_path'], wp['frame_offset'],
+            ))
+        hot_ids = [r[0] for r in conn.execute(hot_sql, flat_values).fetchall()]
+
+    cold_rows: List[Tuple[Any, ...]] = []
+    for wp_id, wp in zip(hot_ids, waypoint_dicts):
+        ax = wp.get('acceleration_x')
+        ay = wp.get('acceleration_y')
+        az = wp.get('acceleration_z')
+        sa = wp.get('steering_angle')
+        gear = wp.get('gear')
+        # Tolerance check against IMU noise floor — see comment on
+        # ``_COLD_ACCEL_THRESHOLD_MPS2`` for the calibration rationale.
+        gear_signal = bool(gear) and gear not in _COLD_GEAR_NO_SIGNAL
+        accel_signal = (
+            (ax is not None and abs(ax) > _COLD_ACCEL_THRESHOLD_MPS2)
+            or (ay is not None and abs(ay) > _COLD_ACCEL_THRESHOLD_MPS2)
+            or (az is not None and abs(az) > _COLD_ACCEL_THRESHOLD_MPS2)
+        )
+        steering_signal = (
+            sa is not None and abs(sa) > _COLD_STEERING_THRESHOLD_DEG
+        )
+        if (
+            accel_signal
+            or steering_signal
+            or gear_signal
+            or wp.get('brake_applied')
+            or wp.get('blinker_on_left')
+            or wp.get('blinker_on_right')
+        ):
+            cold_rows.append((
+                wp_id, ax, ay, az, gear, sa,
+                1 if wp.get('brake_applied') else 0,
+                1 if wp.get('blinker_on_left') else 0,
+                1 if wp.get('blinker_on_right') else 0,
+            ))
+
+    if cold_rows:
+        conn.executemany(
+            """INSERT OR REPLACE INTO waypoints_cold
+               (id, acceleration_x, acceleration_y, acceleration_z,
+                gear, steering_angle, brake_applied,
+                blinker_on_left, blinker_on_right)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            cold_rows,
+        )
 
     # Run event detection
     events = _detect_events(waypoint_dicts, thresholds, rel_path)

@@ -291,6 +291,13 @@ def query_trips(db_path: str, limit: int = 50, offset: int = 0,
 def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
     """Get all waypoints for a trip as a GeoJSON-ready list.
 
+    Returns ONLY the hot columns needed for polyline rendering and
+    click-to-seek (issue #184 Wave 3 — Phase D). Cold telemetry
+    (steering, brake, accel, gear, blinkers) is fetched separately
+    via :func:`query_trip_telemetry` when the user opens the in-clip
+    HUD overlay. Splitting the read keeps the SD-page-cache hot for
+    map-only browsing.
+
     Sorted by ``timestamp ASC`` (with ``id ASC`` as tiebreaker) so
     polylines and HUD interpolation walk the trip in true chrono-
     logical order even when waypoints from a late-indexed video or
@@ -299,16 +306,44 @@ def query_trip_route(db_path: str, trip_id: int) -> List[dict]:
     conn = _init_db(db_path)
     try:
         rows = conn.execute(
-            """SELECT lat, lon, heading, speed_mps, autopilot_state,
-                      video_path, frame_offset, timestamp,
-                      steering_angle, brake_applied, gear,
-                      acceleration_x, acceleration_y,
-                      blinker_on_left, blinker_on_right
+            """SELECT id, lat, lon, heading, speed_mps, autopilot_state,
+                      video_path, frame_offset, timestamp
                FROM waypoints WHERE trip_id = ?
                ORDER BY timestamp ASC, id ASC""",
             (trip_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_with_db_retry
+def query_trip_telemetry(db_path: str, trip_id: int) -> Dict[int, dict]:
+    """Return cold telemetry for ``trip_id`` keyed by waypoint id.
+
+    Issue #184 Wave 3 — Phase D companion to :func:`query_trip_route`.
+    Lazy-fetched by the JS overlay player when the user opens a
+    clip; the returned dict is merged into the existing waypoints
+    list client-side so the HUD scrubber can read steering/brake/
+    accel/gear/blinker per frame.
+
+    Empty dict when the trip has no cold rows (e.g. parked-only
+    waypoints) — the JS HUD already falls back to neutral defaults
+    in that case.
+    """
+    conn = _init_db(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT c.id, c.acceleration_x, c.acceleration_y,
+                      c.acceleration_z, c.gear, c.steering_angle,
+                      c.brake_applied, c.blinker_on_left,
+                      c.blinker_on_right
+                 FROM waypoints_cold c
+                 JOIN waypoints w ON w.id = c.id
+                WHERE w.trip_id = ?""",
+            (trip_id,),
+        ).fetchall()
+        return {r['id']: dict(r) for r in rows}
     finally:
         conn.close()
 
@@ -503,6 +538,11 @@ def query_day_routes(db_path: str, date_str: str,
 
     conn = _init_db(db_path)
     try:
+        # Issue #184 Wave 3 — Phase D. Hot-only SELECT — cold
+        # telemetry (steering/brake/accel/gear/blinker) is fetched
+        # lazily via /api/trip/<id>/telemetry when the user opens
+        # the in-clip HUD. Cuts response bytes ~60% on a typical
+        # trip and keeps the SD-page-cache focused on hot pages.
         sql = """
             SELECT t.id                AS trip_id,
                    t.start_time        AS start_time,
@@ -520,14 +560,7 @@ def query_day_routes(db_path: str, date_str: str,
                    w.lon               AS w_lon,
                    w.heading           AS w_heading,
                    w.speed_mps         AS w_speed_mps,
-                   w.acceleration_x    AS w_acceleration_x,
-                   w.acceleration_y    AS w_acceleration_y,
-                   w.gear              AS w_gear,
                    w.autopilot_state   AS w_autopilot_state,
-                   w.steering_angle    AS w_steering_angle,
-                   w.brake_applied     AS w_brake_applied,
-                   w.blinker_on_left   AS w_blinker_on_left,
-                   w.blinker_on_right  AS w_blinker_on_right,
                    w.video_path        AS w_video_path,
                    w.frame_offset      AS w_frame_offset
               FROM trips t
@@ -567,14 +600,7 @@ def query_day_routes(db_path: str, date_str: str,
                 'lon': row['w_lon'],
                 'heading': row['w_heading'],
                 'speed_mps': row['w_speed_mps'],
-                'acceleration_x': row['w_acceleration_x'],
-                'acceleration_y': row['w_acceleration_y'],
-                'gear': row['w_gear'],
                 'autopilot_state': row['w_autopilot_state'],
-                'steering_angle': row['w_steering_angle'],
-                'brake_applied': row['w_brake_applied'],
-                'blinker_on_left': row['w_blinker_on_left'],
-                'blinker_on_right': row['w_blinker_on_right'],
                 'video_path': row['w_video_path'],
                 'frame_offset': row['w_frame_offset'],
             })

@@ -447,6 +447,25 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Warning: Cloud archive worker start failed: {e}")
 
+    # Idle-time WAL checkpoint service (issue #184 Wave 3 — Phase G).
+    # Runs ``PRAGMA wal_checkpoint(TRUNCATE)`` every ~30 seconds when
+    # no other heavy task holds the task_coordinator lock, pre-empting
+    # the inline auto-checkpoints that would otherwise fight the
+    # archive copies for SDIO bandwidth.
+    try:
+        from config import MAPPING_DB_PATH
+        from services import wal_checkpoint_service
+        _wal_dbs = [MAPPING_DB_PATH]
+        try:
+            from config import CLOUD_ARCHIVE_DB_PATH as _WAL_CLOUD_DB
+            _wal_dbs.append(_WAL_CLOUD_DB)
+        except Exception:  # noqa: BLE001
+            pass
+        if wal_checkpoint_service.start(_wal_dbs):
+            print("WAL checkpoint service started (idle-time)")
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: WAL checkpoint service failed to start: {e}")
+
     # Try to use Waitress if available, otherwise fall back to Flask dev server
     try:
         from waitress import serve

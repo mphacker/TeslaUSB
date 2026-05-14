@@ -721,10 +721,10 @@ class TestArchiveWorkerSkipStationary:
     def test_event_clips_never_skipped_even_with_no_gps(
         self, db, archive_root, teslacam_root, make_clip, monkeypatch,
     ):
-        # Sentry/Saved clips have priority 2 and MUST bypass the skip
-        # branch entirely — even if the SEI peek would say "no GPS"
-        # (which is the common case for stationary Sentry events).
-        # Losing event footage is unacceptable.
+        # Sentry/Saved clips have priority 1 (issue #178) and MUST
+        # bypass the skip branch entirely — even if the SEI peek would
+        # say "no GPS" (which is the common case for stationary Sentry
+        # events). Losing event footage is unacceptable.
         clip = make_clip("SentryClips/2024-01-01_12-00-00/front.mp4")
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
@@ -746,8 +746,8 @@ class TestArchiveWorkerSkipStationary:
             row, db, archive_root, teslacam_root,
             chunk_size=4096, max_attempts=3,
         )
-        # Event clips are PRIORITY_EVENTS (=2), not PRIORITY_RECENT_CLIPS.
-        # They must NEVER enter the skip branch.
+        # Event clips are PRIORITY_EVENTS (=1 post-#178), not
+        # PRIORITY_RECENT_CLIPS. They must NEVER enter the skip branch.
         assert outcome == 'copied'
         assert peek_called == [], (
             "Event clips must NEVER call the SEI peek — "
@@ -1175,19 +1175,19 @@ class TestArchiveWorkerPriority:
     def test_p1_drains_before_p2_before_p3(self, db, archive_root,
                                             teslacam_root, make_clip):
         """Phase 2b acceptance criterion: priority ordering across the
-        wire — RecentClips first, then Sentry/Saved, then everything
-        else. The partial index ``archive_queue_ready`` covers this
-        exact ORDER BY."""
+        wire — Sentry/Saved events first (P1 post-#178), then
+        RecentClips, then everything else. The partial index
+        ``archive_queue_ready`` covers this exact ORDER BY."""
         # Enqueue in REVERSE priority order to make sure we're testing
         # ORDER BY, not insertion order.
         p3 = make_clip(
             "Other/other-front.mp4", mtime=1000.0,
         )
         p2 = make_clip(
-            "SentryClips/evt/sentry-front.mp4", mtime=1000.0,
+            "RecentClips/recent-front.mp4", mtime=1000.0,
         )
         p1 = make_clip(
-            "RecentClips/recent-front.mp4", mtime=1000.0,
+            "SentryClips/evt/sentry-front.mp4", mtime=1000.0,
         )
         enqueue_for_archive(p3, db_path=db)
         enqueue_for_archive(p2, db_path=db)

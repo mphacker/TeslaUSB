@@ -138,7 +138,8 @@ class TestMappingMigrationV11toV12:
 
     def test_legacy_v11_db_gets_column_via_alter(self, tmp_path):
         """A pre-existing v11 DB (without the column) must be ALTERed
-        on first open and end up at v12 with the column present."""
+        on first open and end up at the current schema version with
+        the column present (#178 bumped this to v13)."""
         from services import mapping_migrations
         db = str(tmp_path / "geodata.db")
         # Hand-build a minimal v11 DB. Column list mirrors v11 schema
@@ -190,7 +191,7 @@ class TestMappingMigrationV11toV12:
             ver = new_conn.execute(
                 "SELECT MAX(version) FROM schema_version"
             ).fetchone()[0]
-            assert ver == 12
+            assert ver == mapping_migrations._SCHEMA_VERSION
             assert 'previous_last_error' in _column_names(new_conn, 'archive_queue')
             assert 'previous_last_error' in _column_names(new_conn, 'indexing_queue')
         finally:

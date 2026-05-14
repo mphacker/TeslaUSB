@@ -160,8 +160,10 @@ class TestRunBootCatchupOnce:
         archive_producer.run_boot_catchup_once(teslacam, db_path=db)
         rows = archive_queue.list_queue(limit=100, db_path=db)
         priorities = sorted(r['priority'] for r in rows)
-        # 2 RecentClips (priority 1), 3 events (priority 2)
-        assert priorities == [1, 1, 2, 2, 2]
+        # Issue #178: events (P1) and RecentClips (P2). The catch-up
+        # fixture seeds 3 SentryClips events and 2 RecentClips, so
+        # the sorted priority list is [1, 1, 1, 2, 2].
+        assert priorities == [1, 1, 1, 2, 2]
 
 
 # ---------------------------------------------------------------------------

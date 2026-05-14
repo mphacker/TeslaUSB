@@ -216,18 +216,19 @@ class TestEnqueueManyForArchive:
         assert all(r['priority'] == 1 for r in rows)
 
     def test_batch_priority_inferred_when_none(self, db, tmp_path):
-        # Mix of priorities: RecentClips and a generic path
-        recent_dir = tmp_path / "RecentClips"
-        recent_dir.mkdir()
-        recent_clip = recent_dir / "r.mp4"
-        recent_clip.write_bytes(b"r")
+        # Mix of priorities: SentryClips event (P1 post-#178) and a
+        # generic path (P3). Sorted output puts the event first.
+        sentry_dir = tmp_path / "SentryClips" / "evt"
+        sentry_dir.mkdir(parents=True)
+        sentry_clip = sentry_dir / "front.mp4"
+        sentry_clip.write_bytes(b"s")
         other = tmp_path / "other.mp4"
         other.write_bytes(b"o")
-        enqueue_many_for_archive([str(recent_clip), str(other)], db_path=db)
+        enqueue_many_for_archive([str(sentry_clip), str(other)], db_path=db)
         # Sorted by priority
         rows = list_queue(db_path=db)
-        assert rows[0]['priority'] == PRIORITY_RECENT_CLIPS
-        assert rows[0]['source_path'] == str(recent_clip)
+        assert rows[0]['priority'] == PRIORITY_EVENTS
+        assert rows[0]['source_path'] == str(sentry_clip)
         assert rows[1]['priority'] == PRIORITY_OTHER
 
 
@@ -676,19 +677,21 @@ class TestListQueue:
         assert copied[0]['source_path'].endswith('a.mp4')
 
     def test_sorted_by_priority_then_mtime(self, db, tmp_path):
-        # Three files with controlled priorities
-        recent_dir = tmp_path / "RecentClips"; recent_dir.mkdir()
-        r1 = recent_dir / "r1.mp4"; r1.write_bytes(b"x")
+        # Three files with controlled priorities (issue #178: events
+        # are P1 and drain first, RecentClips are P2).
+        sentry_dir = tmp_path / "SentryClips" / "evt"
+        sentry_dir.mkdir(parents=True)
+        s1 = sentry_dir / "s1.mp4"; s1.write_bytes(b"x")
         time.sleep(0.01)  # mtime ordering
-        r2 = recent_dir / "r2.mp4"; r2.write_bytes(b"x")
+        s2 = sentry_dir / "s2.mp4"; s2.write_bytes(b"x")
         other = tmp_path / "other.mp4"; other.write_bytes(b"x")
         enqueue_many_for_archive(
-            [str(other), str(r2), str(r1)], db_path=db,
+            [str(other), str(s2), str(s1)], db_path=db,
         )
         rows = list_queue(db_path=db)
-        # RecentClips (priority 1) come first, oldest mtime first within tier.
-        assert rows[0]['source_path'] == str(r1)
-        assert rows[1]['source_path'] == str(r2)
+        # Events (priority 1) come first, oldest mtime first within tier.
+        assert rows[0]['source_path'] == str(s1)
+        assert rows[1]['source_path'] == str(s2)
         assert rows[2]['source_path'] == str(other)
 
     def test_limit_caps_results(self, db, tmp_path):
@@ -837,12 +840,13 @@ class TestClaimNextForWorker:
         assert row['claimed_at'] is not None
 
     def test_picks_priority_one_first(self, db, tmp_path):
-        # Mix of priorities: P3 enqueued first, then P2, then P1.
-        # Worker MUST pick P1 first.
+        # Mix of priorities (issue #178: P1=events, P2=RecentClips,
+        # P3=other). P3 is enqueued first, then P2, then P1. Worker
+        # MUST pick P1 (event) first regardless of insertion order.
         p3 = tmp_path / "other.mp4"; p3.write_bytes(b'x')
-        p2 = tmp_path / "SentryClips" / "evt" / "front.mp4"
+        p2 = tmp_path / "RecentClips" / "front.mp4"
         p2.parent.mkdir(parents=True); p2.write_bytes(b'x')
-        p1 = tmp_path / "RecentClips" / "front.mp4"
+        p1 = tmp_path / "SentryClips" / "evt" / "front.mp4"
         p1.parent.mkdir(parents=True); p1.write_bytes(b'x')
         enqueue_for_archive(str(p3), db_path=db)
         enqueue_for_archive(str(p2), db_path=db)
@@ -856,9 +860,10 @@ class TestClaimNextForWorker:
         assert row['source_path'] == str(p3)
 
     def test_picks_oldest_mtime_within_priority(self, db, tmp_path):
-        a = tmp_path / "RecentClips" / "a-front.mp4"
-        b = tmp_path / "RecentClips" / "b-front.mp4"
-        a.parent.mkdir(parents=True); a.write_bytes(b'a'); b.write_bytes(b'b')
+        a = tmp_path / "SentryClips" / "evt-a" / "front.mp4"
+        b = tmp_path / "SentryClips" / "evt-b" / "front.mp4"
+        a.parent.mkdir(parents=True); a.write_bytes(b'a')
+        b.parent.mkdir(parents=True); b.write_bytes(b'b')
         # Make 'a' older than 'b' on disk.
         os.utime(str(a), (1000.0, 1000.0))
         os.utime(str(b), (2000.0, 2000.0))
@@ -2269,3 +2274,285 @@ class TestDeleteSourceGoneWritesTombstone:
         assert archive_queue.count_source_gone_recent(
             24, db_path=db, dismissed_at=ts,
         ) == 1
+
+
+# ===========================================================================
+# Issue #178 — priority swap: events drain before RecentClips
+# ===========================================================================
+#
+# Pre-#178 the archive queue had ``PRIORITY_RECENT_CLIPS=1`` and
+# ``PRIORITY_EVENTS=2``, so RecentClips drained ahead of Sentry/Saved
+# events. Live evidence on cybertruckusb.local showed 71 SentryClips
+# events untouched for 130+ minutes while the worker burned its SDIO
+# budget on parked-Sentry RecentClips skip-decisions. PR for #178
+# swaps the constants (events=1, RecentClips=2) and adds a v12->v13
+# schema migration that flips existing non-terminal queue rows so the
+# in-flight backlog also benefits.
+
+class TestPriorityConstantsPostIssue178:
+    """Issue #178: events MUST drain before RecentClips."""
+
+    def test_events_priority_is_lowest_number(self):
+        # Lower number = picked first. Events must be priority 1.
+        assert PRIORITY_EVENTS == 1, (
+            "Issue #178: SentryClips/SavedClips events are the "
+            "highest-value footage and MUST drain first. "
+            "PRIORITY_EVENTS must be 1."
+        )
+        assert PRIORITY_RECENT_CLIPS == 2, (
+            "Issue #178: RecentClips driving footage is second-tier "
+            "(SEI-peek skip-stationary handles parked-no-event case). "
+            "PRIORITY_RECENT_CLIPS must be 2."
+        )
+        assert PRIORITY_OTHER == 3, (
+            "Other (e.g. ArchivedClips back-fill) is the lowest "
+            "priority. PRIORITY_OTHER must be 3."
+        )
+        # Strict ordering — events strictly drain before RecentClips
+        # which strictly drain before other.
+        assert PRIORITY_EVENTS < PRIORITY_RECENT_CLIPS < PRIORITY_OTHER
+
+    def test_inference_maps_sentryclips_to_events(self):
+        for path in (
+            '/mnt/gadget/part1-ro/TeslaCam/SentryClips/2026-05-12_'
+            '08-00-00/front.mp4',
+            '/mnt/gadget/part1-ro/TeslaCam/SavedClips/2026-05-12_'
+            '08-00-00/back.mp4',
+            '/mnt/gadget/part1-ro/TeslaCam/sentryclips/lower/x.mp4',
+        ):
+            assert _infer_priority(path) == PRIORITY_EVENTS == 1, (
+                f"Path {path!r} must map to PRIORITY_EVENTS (=1) "
+                f"post-#178"
+            )
+
+    def test_inference_maps_recentclips_to_recent(self):
+        for path in (
+            '/mnt/gadget/part1-ro/TeslaCam/RecentClips/2026-05-12_'
+            '08-00-00-front.mp4',
+            r'C:\TeslaCam\RecentClips\clip.mp4',
+        ):
+            assert _infer_priority(path) == PRIORITY_RECENT_CLIPS == 2, (
+                f"Path {path!r} must map to PRIORITY_RECENT_CLIPS (=2) "
+                f"post-#178"
+            )
+
+    def test_pick_order_event_before_recent_clip(self, db, tmp_path):
+        """Acceptance test: with one event and one RecentClip both
+        pending, the worker MUST claim the event first regardless of
+        insertion order or mtime."""
+        recent = tmp_path / "RecentClips" / "front.mp4"
+        recent.parent.mkdir(parents=True)
+        recent.write_bytes(b"r")
+        event = tmp_path / "SentryClips" / "evt" / "front.mp4"
+        event.parent.mkdir(parents=True)
+        event.write_bytes(b"e")
+        # Make the RecentClip OLDER (closer to TTL deadline) so the
+        # only thing that picks the event first is the priority band —
+        # if the priority swap is wrong, the older RecentClip would win.
+        os.utime(str(recent), (1000.0, 1000.0))
+        os.utime(str(event), (2000.0, 2000.0))
+        enqueue_for_archive(str(recent), db_path=db)
+        enqueue_for_archive(str(event), db_path=db)
+
+        first = claim_next_for_worker('w', db_path=db)
+        assert first['source_path'] == str(event), (
+            "Issue #178 acceptance test: with both an event AND a "
+            "RecentClip pending (RecentClip even being OLDER), the "
+            "event MUST be claimed first."
+        )
+        assert int(first['priority']) == PRIORITY_EVENTS == 1
+        # And the RecentClip drains second.
+        second = claim_next_for_worker('w', db_path=db)
+        assert second['source_path'] == str(recent)
+        assert int(second['priority']) == PRIORITY_RECENT_CLIPS == 2
+
+
+class TestPriorityMigrationV12ToV13:
+    """Issue #178: the v12 -> v13 migration MUST flip existing
+    non-terminal queue rows so the in-flight backlog drains in the
+    new (correct) order — otherwise users would have to wait for the
+    old rows to drain the slow way before seeing the benefit.
+
+    Terminal-status rows (copied, source_gone, etc.) MUST be left
+    alone — their priority is historical and mutating it would
+    mislead future debugging.
+    """
+
+    def _build_v12_db_with_old_priorities(self, tmp_path, rows):
+        """Build a fresh DB and seed archive_queue rows BEFORE running
+        the migration. Returns (db_path, list of (source_path, status,
+        starting_priority)) tuples for assertion lookups.
+
+        We can't easily roll the schema back to v12 from v13, so we
+        build the DB at the current schema and then INSERT rows
+        carrying the pre-#178 priority values, then call the migration
+        helper directly to confirm it's idempotent and flips correctly.
+        """
+        db_path = str(tmp_path / "geodata.db")
+        conn = _init_db(db_path)
+        try:
+            # Force schema_version back to 12 so we can re-run the
+            # v12 -> v13 block as if upgrading from v12. Idempotent
+            # by design: the SQL has ``priority IN (1, 2)`` and only
+            # touches non-terminal statuses.
+            conn.execute("DELETE FROM schema_version")
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (12)"
+            )
+            for source_path, status, starting_priority in rows:
+                conn.execute(
+                    "INSERT INTO archive_queue "
+                    "(source_path, priority, status, enqueued_at) "
+                    "VALUES (?, ?, ?, datetime('now'))",
+                    (source_path, starting_priority, status),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return db_path
+
+    def _read_priority(self, db_path, source_path):
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT priority FROM archive_queue WHERE source_path = ?",
+                (source_path,),
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def test_migration_flips_pending_priorities(self, tmp_path):
+        # Seed rows at the OLD priority mapping (RecentClips=1,
+        # Events=2) and pretend we're at v12. Re-run _init_db to
+        # trigger the v12 -> v13 migration.
+        rows = [
+            # source_path, status, starting_priority
+            ('/tc/RecentClips/r.mp4', 'pending', 1),     # was P1, must flip to 2
+            ('/tc/SentryClips/e/f.mp4', 'pending', 2),    # was P2, must flip to 1
+            ('/tc/Other/o.mp4', 'pending', 3),             # P3 untouched
+        ]
+        db_path = self._build_v12_db_with_old_priorities(tmp_path, rows)
+        # Trigger the migration by re-initializing.
+        conn = _init_db(db_path)
+        conn.close()
+
+        assert self._read_priority(db_path, '/tc/RecentClips/r.mp4') == 2
+        assert self._read_priority(
+            db_path, '/tc/SentryClips/e/f.mp4',
+        ) == 1
+        assert self._read_priority(db_path, '/tc/Other/o.mp4') == 3
+
+    def test_migration_flips_claimed_and_error_rows_too(self, tmp_path):
+        # Non-terminal statuses ALL get flipped — when release_claim
+        # / mark_failed restore them to pending, they must already
+        # carry the new priority.
+        rows = [
+            ('/tc/RecentClips/r-claimed.mp4', 'claimed', 1),
+            ('/tc/SentryClips/e-claimed/f.mp4', 'claimed', 2),
+            ('/tc/RecentClips/r-error.mp4', 'error', 1),
+            ('/tc/SentryClips/e-error/f.mp4', 'error', 2),
+        ]
+        db_path = self._build_v12_db_with_old_priorities(tmp_path, rows)
+        conn = _init_db(db_path)
+        conn.close()
+
+        assert self._read_priority(
+            db_path, '/tc/RecentClips/r-claimed.mp4',
+        ) == 2
+        assert self._read_priority(
+            db_path, '/tc/SentryClips/e-claimed/f.mp4',
+        ) == 1
+        assert self._read_priority(
+            db_path, '/tc/RecentClips/r-error.mp4',
+        ) == 2
+        assert self._read_priority(
+            db_path, '/tc/SentryClips/e-error/f.mp4',
+        ) == 1
+
+    def test_migration_leaves_terminal_rows_untouched(self, tmp_path):
+        # Terminal statuses (copied, source_gone, skipped_stationary,
+        # dead_letter) keep their historical priority — mutating it
+        # would mislead future debugging of "what got picked when".
+        rows = [
+            ('/tc/RecentClips/r-copied.mp4', 'copied', 1),
+            ('/tc/SentryClips/e-copied/f.mp4', 'copied', 2),
+            ('/tc/RecentClips/r-gone.mp4', 'source_gone', 1),
+            ('/tc/SentryClips/e-gone/f.mp4', 'source_gone', 2),
+            (
+                '/tc/RecentClips/r-skipped.mp4',
+                'skipped_stationary',
+                1,
+            ),
+            ('/tc/RecentClips/r-dl.mp4', 'dead_letter', 1),
+            ('/tc/SentryClips/e-dl/f.mp4', 'dead_letter', 2),
+        ]
+        db_path = self._build_v12_db_with_old_priorities(tmp_path, rows)
+        conn = _init_db(db_path)
+        conn.close()
+
+        # Each row keeps its ORIGINAL priority value.
+        for source_path, _status, starting_priority in rows:
+            actual = self._read_priority(db_path, source_path)
+            assert actual == starting_priority, (
+                f"Terminal-status row {source_path!r} had its priority "
+                f"changed from {starting_priority} to {actual} — the "
+                f"v12->v13 migration MUST leave terminal rows alone."
+            )
+
+    def test_migration_is_idempotent(self, tmp_path):
+        # Running _init_db a second time on a v13 database is a no-op
+        # for the priority-swap migration (already at v13, so the
+        # ``current < 13`` gate is False). Verify by seeding rows at
+        # the NEW (post-migration) priority mapping and confirming
+        # they are NOT flipped back.
+        db_path = str(tmp_path / "geodata.db")
+        conn = _init_db(db_path)
+        try:
+            # Insert a row at the post-migration mapping.
+            conn.execute(
+                "INSERT INTO archive_queue "
+                "(source_path, priority, status, enqueued_at) "
+                "VALUES (?, 1, 'pending', datetime('now'))",
+                ('/tc/SentryClips/e/f.mp4',),
+            )
+            conn.execute(
+                "INSERT INTO archive_queue "
+                "(source_path, priority, status, enqueued_at) "
+                "VALUES (?, 2, 'pending', datetime('now'))",
+                ('/tc/RecentClips/r.mp4',),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Re-initialize — already at v13, should be a no-op for
+        # priorities.
+        conn = _init_db(db_path)
+        conn.close()
+
+        assert self._read_priority(
+            db_path, '/tc/SentryClips/e/f.mp4',
+        ) == 1
+        assert self._read_priority(db_path, '/tc/RecentClips/r.mp4') == 2
+
+    def test_migration_does_nothing_when_no_old_rows(self, tmp_path):
+        # Fresh install: no rows at all. Migration must complete
+        # cleanly without errors.
+        db_path = str(tmp_path / "geodata.db")
+        conn = _init_db(db_path)
+        # Force back to v12 to exercise the migration block.
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version (version) VALUES (12)")
+        conn.commit()
+        conn.close()
+
+        # Should not raise.
+        conn = _init_db(db_path)
+        try:
+            row = conn.execute(
+                "SELECT MAX(version) AS v FROM schema_version"
+            ).fetchone()
+            assert row['v'] == 13
+        finally:
+            conn.close()

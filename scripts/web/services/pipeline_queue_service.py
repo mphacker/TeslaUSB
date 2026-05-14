@@ -37,8 +37,20 @@ Public API:
 * :data:`LEGACY_TABLE_*` constants — canonical legacy table names.
 * :data:`PRIORITY_*` constants — canonical priorities.
 * :func:`dual_write_enqueue` — producer hook.
+* :func:`dual_write_enqueue_many` — batched producer hook.
+* :func:`update_pipeline_row` — state-mirror by ``(stage, source_path)``.
+* :func:`update_pipeline_row_by_legacy_id` — state-mirror by
+  ``(legacy_table, legacy_id)``.
+* :func:`claim_next_for_stage` — Wave 4 PR-C reader API; atomic
+  pick-and-claim of the next pending row in a stage. Production
+  workers wire to this in PR-D.
+* :func:`peek_next_for_stage` — Wave 4 PR-C; non-mutating "what's
+  next" lookup (parity tests + Settings page).
+* :func:`ready_count_for_stage` — Wave 4 PR-C; cheap COUNT(*) of
+  eligible rows for a stage.
+* :func:`pipeline_status` — debug / verification view (counts grouped
+  by legacy_table + stage + status).
 * :func:`backfill_legacy_queues` — one-time migration helper.
-* :func:`pipeline_status` — debug / verification view.
 """
 
 from __future__ import annotations
@@ -497,6 +509,258 @@ def update_pipeline_row_by_legacy_id(
             legacy_table, legacy_id, e,
         )
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Reader API — Wave 4 PR-C (issue #184)
+# ---------------------------------------------------------------------------
+# These functions let a worker treat ``pipeline_queue`` as the source of
+# truth for the *next item to process*, instead of querying the legacy
+# table directly. PR-C only ADDS the API; production wiring (switching
+# the archive worker over) ships in PR-D so the pipeline_queue view of
+# the world can be observed for one release before any worker depends
+# on it.
+
+def claim_next_for_stage(
+    *,
+    stage: str,
+    claimed_by: str,
+    db_path: Optional[str] = None,
+    now: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Atomically claim the next pending row in ``stage``.
+
+    The intended consumer is the unified worker (Wave 4 PR-D). This
+    function is purely a read+update on ``pipeline_queue`` — it does
+    NOT touch any legacy table. PR-D will compose this with the
+    existing legacy ``mark_*`` helpers (which already dual-write back
+    via PR-B) so a row's lifecycle stays consistent across both
+    tables during the transition.
+
+    Pick order:
+      ``WHERE stage = ? AND status = 'pending'
+            AND (next_retry_at IS NULL OR next_retry_at <= ?)
+       ORDER BY priority ASC, enqueued_at ASC, id ASC LIMIT 1``
+
+    The legacy archive_queue uses ``priority ASC, expected_mtime ASC
+    NULLS LAST, id ASC`` — we use ``enqueued_at`` instead because
+    ``expected_mtime`` lives in ``payload_json`` and ``json_extract``
+    cannot use the ``idx_pipeline_ready`` partial index. In production
+    ``enqueued_at`` is a usable proxy: inotify enqueues files in
+    arrival order (≈ mtime order from Tesla's POV), and boot catch-up
+    enqueues in directory-walk order which is also roughly mtime
+    order. Within a single batched enqueue the ordering may differ
+    from a strict mtime sort — this is acceptable for PR-C (parity
+    with the no-reads-yet baseline). PR-D will add an
+    ``expected_mtime REAL`` column or json-extract index if backlog
+    catch-up shows the proxy is insufficient.
+
+    Atomicity: the SELECT-then-UPDATE pair runs inside a single
+    ``BEGIN IMMEDIATE`` transaction so a concurrent claim from a
+    second worker cannot double-pick the same row. The UPDATE adds a
+    defensive ``WHERE status = 'pending'`` guard so even if BEGIN
+    IMMEDIATE were defeated (unrelated busy-timeout race), the second
+    worker's UPDATE returns rowcount=0 and we report "no work" rather
+    than handing out a duplicated claim.
+
+    Args:
+        stage: One of the ``STAGE_*_PENDING`` constants. Filtering
+            on stage is required — this function refuses to operate
+            without one (returns ``None``) so a caller bug can't
+            sweep the entire queue indiscriminately.
+        claimed_by: Operator-readable string for diagnostics. Stamped
+            into the returned dict's ``_claimed_by`` key only — NOT
+            written to the DB. The legacy queue's ``claimed_by``
+            column remains the operational record during the dual-
+            write transition; pipeline_queue gets a dedicated
+            ``claimed_by`` column when PR-D adds the column.
+        db_path: Override the geodata.db path (test injection).
+        now: Override the "current time" used for ``next_retry_at``
+            comparisons. Test injection only.
+
+    Returns:
+        A dict snapshot of the claimed row, augmented with two
+        synthesised keys:
+          * ``payload``: the deserialised ``payload_json`` (or
+            ``{}`` when JSON is absent/malformed) so callers don't
+            have to ``json.loads`` themselves.
+          * ``_claimed_by``: echoed back verbatim from the input
+            argument; useful for log/trace correlation.
+        ``status`` and ``attempts`` reflect the post-UPDATE values
+        (``'in_progress'`` and ``previous + 1`` respectively) so the
+        caller sees the same view the DB has after commit.
+
+        Returns ``None`` if the queue is empty for the stage, the
+        DB doesn't exist, ``stage`` is empty, or any sqlite error
+        fires.
+    """
+    if not stage:
+        return None
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return None
+    if now is None:
+        now = _now_epoch()
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        conn.execute("BEGIN IMMEDIATE")
+        sel = conn.execute(
+            """SELECT * FROM pipeline_queue
+                WHERE stage = ?
+                  AND status = 'pending'
+                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                ORDER BY priority ASC, enqueued_at ASC, id ASC
+                LIMIT 1""",
+            (stage, now),
+        ).fetchone()
+        if sel is None:
+            conn.rollback()
+            return None
+        cur = conn.execute(
+            """UPDATE pipeline_queue
+                  SET status = 'in_progress',
+                      attempts = attempts + 1
+                WHERE id = ? AND status = 'pending'""",
+            (sel['id'],),
+        )
+        if cur.rowcount != 1:
+            # Another worker raced us between the SELECT and the
+            # UPDATE despite BEGIN IMMEDIATE (shouldn't happen, but
+            # the defensive WHERE catches it). Roll back so we don't
+            # half-commit a stale view.
+            conn.rollback()
+            return None
+        conn.commit()
+        row = dict(sel)
+        row['status'] = 'in_progress'
+        row['attempts'] = (sel['attempts'] or 0) + 1
+        if row.get('payload_json'):
+            try:
+                parsed = json.loads(row['payload_json'])
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+            # Defensive: producers declare ``payload: Dict[str, Any]``
+            # but a hand-crafted (or future) row could store a JSON
+            # list / number / string. Callers expect ``.get(...)`` to
+            # work, so coerce non-dict to empty dict — matches the
+            # docstring's "(or `{}` when JSON is absent/malformed)"
+            # contract.
+            row['payload'] = parsed if isinstance(parsed, dict) else {}
+        else:
+            row['payload'] = {}
+        row['_claimed_by'] = claimed_by
+        return row
+    except sqlite3.Error as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+        logger.warning(
+            "claim_next_for_stage(stage=%s) failed: %s", stage, e,
+        )
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def peek_next_for_stage(
+    *,
+    stage: str,
+    db_path: Optional[str] = None,
+    now: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the next claimable row for ``stage`` WITHOUT claiming it.
+
+    Same ordering and filters as :func:`claim_next_for_stage`. Used
+    by parity tests and by ``/api/pipeline_queue/status`` to surface
+    "what would the worker pick next?" without actually picking it.
+
+    Returns the row as a plain dict (no payload-parsing convenience —
+    callers that need the payload can ``json.loads`` themselves), or
+    ``None`` if there's nothing ready.
+    """
+    if not stage:
+        return None
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return None
+    if now is None:
+        now = _now_epoch()
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        sel = conn.execute(
+            """SELECT * FROM pipeline_queue
+                WHERE stage = ?
+                  AND status = 'pending'
+                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                ORDER BY priority ASC, enqueued_at ASC, id ASC
+                LIMIT 1""",
+            (stage, now),
+        ).fetchone()
+        return dict(sel) if sel is not None else None
+    except sqlite3.Error as e:
+        logger.debug(
+            "peek_next_for_stage(stage=%s) failed: %s", stage, e,
+        )
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def ready_count_for_stage(
+    *,
+    stage: str,
+    db_path: Optional[str] = None,
+    now: Optional[float] = None,
+) -> int:
+    """Count rows in ``stage`` that are eligible for the next claim.
+
+    Cheap O(idx) scan against ``idx_pipeline_ready`` — safe to call
+    from the Settings page. Returns 0 on any error or missing DB.
+    """
+    if not stage:
+        return 0
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return 0
+    if now is None:
+        now = _now_epoch()
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM pipeline_queue
+                WHERE stage = ?
+                  AND status = 'pending'
+                  AND (next_retry_at IS NULL OR next_retry_at <= ?)""",
+            (stage, now),
+        ).fetchone()
+        return int(row['n']) if row is not None else 0
+    except sqlite3.Error as e:
+        logger.debug(
+            "ready_count_for_stage(stage=%s) failed: %s", stage, e,
+        )
+        return 0
     finally:
         if conn is not None:
             try:

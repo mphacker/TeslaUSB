@@ -1361,3 +1361,532 @@ class TestPipelineRowKwargGate:
         # stay in lockstep so a future kwarg addition can't be wired
         # into one but not the other.
         assert set(pqs._UPDATE_COLUMNS) == set(pqs._KWARG_TO_COLUMN.keys())
+
+# ============================================================================
+# Wave 4 PR-C reader API tests ? issue #184
+# ============================================================================
+# These exercise the new `claim_next_for_stage` / `peek_next_for_stage`
+# / `ready_count_for_stage` helpers that PR-C adds to make the unified
+# queue READABLE (PR-A added writes, PR-B added state-mirror updates;
+# PR-C completes the API surface so PR-D can switch readers over).
+
+
+class TestClaimNextForStage:
+    def _enqueue(self, db, source, *, stage='archive_pending',
+                 priority=2, payload=None, status='pending',
+                 next_retry_at=None):
+        # Use the dual_write_enqueue helper for the common path; for
+        # next_retry_at we need to hand-insert because the public
+        # producer hook doesn't accept it (only _try_upload's failure
+        # path sets next_retry_at via update_pipeline_row).
+        ok = __import__('services.pipeline_queue_service',
+                        fromlist=['dual_write_enqueue']).dual_write_enqueue(
+            source_path=source,
+            stage=stage,
+            legacy_table=__import__('services.pipeline_queue_service',
+                                     fromlist=['LEGACY_TABLE_ARCHIVE']).LEGACY_TABLE_ARCHIVE,
+            priority=priority,
+            payload=payload,
+            status=status,
+            db_path=db,
+        )
+        assert ok is True
+        if next_retry_at is not None:
+            import sqlite3 as _sql
+            c = _sql.connect(db)
+            try:
+                c.execute(
+                    "UPDATE pipeline_queue SET next_retry_at = ? "
+                    "WHERE source_path = ?",
+                    (next_retry_at, source),
+                )
+                c.commit()
+            finally:
+                c.close()
+
+    def test_returns_none_on_empty_queue(self, geodata_db):
+        row = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert row is None
+
+    def test_returns_none_when_db_missing(self, tmp_path):
+        missing = str(tmp_path / 'nope.db')
+        row = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=missing,
+        )
+        assert row is None
+
+    def test_returns_none_when_stage_blank(self, geodata_db):
+        row = pqs.claim_next_for_stage(
+            stage='', claimed_by='w1', db_path=geodata_db,
+        )
+        assert row is None
+
+    def test_claims_pending_row_and_marks_in_progress(self, geodata_db):
+        self._enqueue(geodata_db, '/x/a.mp4',
+                       payload={'expected_size': 100, 'expected_mtime': 1.0})
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='worker-A',
+            db_path=geodata_db,
+        )
+        assert claimed is not None
+        assert claimed['source_path'] == '/x/a.mp4'
+        assert claimed['status'] == 'in_progress'
+        assert claimed['attempts'] == 1
+        assert claimed['_claimed_by'] == 'worker-A'
+        assert claimed['payload'] == {'expected_size': 100, 'expected_mtime': 1.0}
+        # Verify DB state matches the returned snapshot.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            row = c.execute(
+                "SELECT status, attempts FROM pipeline_queue WHERE id = ?",
+                (claimed['id'],),
+            ).fetchone()
+            assert row['status'] == 'in_progress'
+            assert row['attempts'] == 1
+        finally:
+            c.close()
+
+    def test_claim_increments_attempts(self, geodata_db):
+        self._enqueue(geodata_db, '/x/a.mp4')
+        # Bump attempts to 5 first so we can verify the increment math.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute("UPDATE pipeline_queue SET attempts = 5 "
+                       "WHERE source_path = ?", ('/x/a.mp4',))
+            c.commit()
+        finally:
+            c.close()
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed['attempts'] == 6
+
+    def test_skips_in_progress_rows(self, geodata_db):
+        self._enqueue(geodata_db, '/x/a.mp4', status='in_progress')
+        self._enqueue(geodata_db, '/x/b.mp4', status='pending')
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed is not None
+        assert claimed['source_path'] == '/x/b.mp4'
+
+    def test_skips_done_rows(self, geodata_db):
+        self._enqueue(geodata_db, '/x/done.mp4', status='done')
+        self._enqueue(geodata_db, '/x/pending.mp4', status='pending')
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed['source_path'] == '/x/pending.mp4'
+
+    def test_orders_by_priority_first(self, geodata_db):
+        # Insert in reverse priority order; expect highest priority
+        # (lowest number) to come back first.
+        self._enqueue(geodata_db, '/x/low.mp4', priority=5)
+        self._enqueue(geodata_db, '/x/high.mp4', priority=1)
+        self._enqueue(geodata_db, '/x/mid.mp4', priority=3)
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed['source_path'] == '/x/high.mp4'
+
+    def test_orders_by_enqueued_at_within_priority(self, geodata_db):
+        # Same priority ? older row goes first.
+        self._enqueue(geodata_db, '/x/newer.mp4', priority=2)
+        # Force the second row to have an older enqueued_at than the
+        # first by hand-editing.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute("UPDATE pipeline_queue SET enqueued_at = 1000 "
+                       "WHERE source_path = ?", ('/x/newer.mp4',))
+            c.commit()
+        finally:
+            c.close()
+        self._enqueue(geodata_db, '/x/older.mp4', priority=2)
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute("UPDATE pipeline_queue SET enqueued_at = 100 "
+                       "WHERE source_path = ?", ('/x/older.mp4',))
+            c.commit()
+        finally:
+            c.close()
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed['source_path'] == '/x/older.mp4'
+
+    def test_filters_by_stage(self, geodata_db):
+        # Two rows in different stages ? claim from one, the other
+        # remains untouched.
+        self._enqueue(geodata_db, '/x/a.mp4', stage='archive_pending')
+        # Build an indexing-stage row directly so we don't have to
+        # juggle legacy_table.
+        ok = pqs.dual_write_enqueue(
+            source_path='/x/idx.mp4', stage='index_pending',
+            legacy_table=pqs.LEGACY_TABLE_INDEXING, db_path=geodata_db,
+        )
+        assert ok is True
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed['source_path'] == '/x/a.mp4'
+        # The indexing row must still be pending.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            row = c.execute(
+                "SELECT status FROM pipeline_queue WHERE source_path = ?",
+                ('/x/idx.mp4',),
+            ).fetchone()
+            assert row['status'] == 'pending'
+        finally:
+            c.close()
+
+    def test_skips_rows_with_future_next_retry_at(self, geodata_db):
+        self._enqueue(geodata_db, '/x/wait.mp4',
+                       next_retry_at=2_000_000_000.0)  # year 2033
+        self._enqueue(geodata_db, '/x/ready.mp4')
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+            now=1_000_000_000.0,
+        )
+        assert claimed['source_path'] == '/x/ready.mp4'
+
+    def test_picks_row_with_due_next_retry_at(self, geodata_db):
+        self._enqueue(geodata_db, '/x/due.mp4', next_retry_at=500.0)
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+            now=1000.0,
+        )
+        assert claimed is not None
+        assert claimed['source_path'] == '/x/due.mp4'
+
+    def test_picks_row_with_null_next_retry_at(self, geodata_db):
+        self._enqueue(geodata_db, '/x/never-failed.mp4')  # next_retry_at IS NULL
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed is not None
+
+    def test_sequential_claims_pick_different_rows(self, geodata_db):
+        # Sequential depletion: each call returns a distinct row,
+        # the third returns None when both rows are in_progress.
+        # The actual race-defense (BEGIN IMMEDIATE + WHERE rowcount
+        # check) is exercised by
+        # ``test_two_threaded_claims_get_different_rows`` below.
+        self._enqueue(geodata_db, '/x/a.mp4', priority=1)
+        self._enqueue(geodata_db, '/x/b.mp4', priority=1)
+        c1 = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        c2 = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w2', db_path=geodata_db,
+        )
+        assert c1 is not None and c2 is not None
+        assert c1['id'] != c2['id']
+        # Third claim should return None - both rows are in_progress.
+        c3 = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w3', db_path=geodata_db,
+        )
+        assert c3 is None
+
+    def test_two_threaded_claims_get_different_rows(self, geodata_db):
+        # Real concurrency: two threads race through ``claim_next_for_stage``
+        # against the same DB. The BEGIN IMMEDIATE write-lock + the
+        # defensive ``WHERE status='pending'`` rowcount check together
+        # guarantee that each row is claimed by at most one worker even
+        # when both threads enter the function simultaneously. Without
+        # the atomicity primitives in place, this test would
+        # occasionally see the same row returned twice (or one thread
+        # succeeding with a row and the other returning the same row's
+        # post-update view).
+        import threading
+        self._enqueue(geodata_db, '/x/race-a.mp4', priority=1)
+        self._enqueue(geodata_db, '/x/race-b.mp4', priority=1)
+        results = [None, None]
+        barrier = threading.Barrier(2)
+
+        def _worker(idx, name):
+            barrier.wait(timeout=5.0)
+            results[idx] = pqs.claim_next_for_stage(
+                stage='archive_pending', claimed_by=name,
+                db_path=geodata_db,
+            )
+
+        t1 = threading.Thread(target=_worker, args=(0, 'thread-1'))
+        t2 = threading.Thread(target=_worker, args=(1, 'thread-2'))
+        t1.start(); t2.start()
+        t1.join(timeout=10.0); t2.join(timeout=10.0)
+        assert not t1.is_alive() and not t2.is_alive()
+        assert results[0] is not None and results[1] is not None
+        # Distinct ids: the BEGIN IMMEDIATE serialised the two
+        # SELECT-then-UPDATE pairs so no double-pick happened.
+        assert results[0]['id'] != results[1]['id']
+        # Both rows are now in_progress.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            n = c.execute(
+                "SELECT COUNT(*) FROM pipeline_queue "
+                "WHERE status = 'in_progress'"
+            ).fetchone()[0]
+            assert n == 2
+        finally:
+            c.close()
+
+    def test_returns_none_when_db_corrupt(self, tmp_path):
+        # Write non-SQLite bytes into a path with the right extension;
+        # ``sqlite3.connect`` succeeds (it's lazy) but the first
+        # statement raises ``sqlite3.DatabaseError`` (a subclass of
+        # ``sqlite3.Error``). The function must swallow it and return
+        # None per the documented contract — no exception propagation.
+        bad = tmp_path / 'corrupt.db'
+        bad.write_bytes(b'this is not a sqlite database file at all\x00\x00')
+        result = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=str(bad),
+        )
+        assert result is None
+        # peek_next and ready_count must also degrade gracefully —
+        # they share the same swallow contract.
+        assert pqs.peek_next_for_stage(
+            stage='archive_pending', db_path=str(bad),
+        ) is None
+        assert pqs.ready_count_for_stage(
+            stage='archive_pending', db_path=str(bad),
+        ) == 0
+
+    def test_payload_non_dict_json_coerced_to_empty(self, geodata_db):
+        # Producers declare payload as Dict[str, Any] but a hand-crafted
+        # row (or a future producer bug) could store a JSON list /
+        # number / string / null. Callers expect ``.get(...)`` on
+        # ``row['payload']`` to work, so the helper must coerce
+        # non-dict to {} matching the docstring.
+        self._enqueue(geodata_db, '/x/list-payload.mp4')
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute(
+                "UPDATE pipeline_queue SET payload_json = '[1, 2, 3]' "
+                "WHERE source_path = ?", ('/x/list-payload.mp4',),
+            )
+            c.commit()
+        finally:
+            c.close()
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed is not None
+        assert claimed['payload'] == {}
+        # Same for a JSON null.
+        self._enqueue(geodata_db, '/x/null-payload.mp4')
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute(
+                "UPDATE pipeline_queue SET payload_json = 'null' "
+                "WHERE source_path = ?", ('/x/null-payload.mp4',),
+            )
+            c.commit()
+        finally:
+            c.close()
+        claimed2 = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed2 is not None
+        assert claimed2['payload'] == {}
+
+    def test_payload_dict_synthesized_even_when_json_missing(self, geodata_db):
+        self._enqueue(geodata_db, '/x/no-payload.mp4', payload=None)
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed['payload'] == {}
+
+    def test_payload_dict_safe_against_malformed_json(self, geodata_db):
+        self._enqueue(geodata_db, '/x/bad.mp4')
+        # Hand-corrupt the payload_json so json.loads will raise.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute("UPDATE pipeline_queue SET payload_json = '{not json' "
+                       "WHERE source_path = ?", ('/x/bad.mp4',))
+            c.commit()
+        finally:
+            c.close()
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        # Bad JSON yields {} ? we don't crash, we don't lose the claim.
+        assert claimed is not None
+        assert claimed['payload'] == {}
+
+    def test_claim_does_not_mutate_other_rows(self, geodata_db):
+        self._enqueue(geodata_db, '/x/a.mp4')
+        self._enqueue(geodata_db, '/x/b.mp4')
+        self._enqueue(geodata_db, '/x/c.mp4')
+        pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            n_pending = c.execute(
+                "SELECT COUNT(*) AS n FROM pipeline_queue "
+                "WHERE status = 'pending'"
+            ).fetchone()['n']
+            n_in_progress = c.execute(
+                "SELECT COUNT(*) AS n FROM pipeline_queue "
+                "WHERE status = 'in_progress'"
+            ).fetchone()['n']
+            assert n_pending == 2
+            assert n_in_progress == 1
+        finally:
+            c.close()
+
+
+class TestPeekNextForStage:
+    def test_returns_none_on_empty_queue(self, geodata_db):
+        assert pqs.peek_next_for_stage(
+            stage='archive_pending', db_path=geodata_db,
+        ) is None
+
+    def test_returns_next_without_mutating(self, geodata_db):
+        pqs.dual_write_enqueue(
+            source_path='/x/a.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            priority=2,
+            db_path=geodata_db,
+        )
+        peeked = pqs.peek_next_for_stage(
+            stage='archive_pending', db_path=geodata_db,
+        )
+        assert peeked is not None
+        assert peeked['source_path'] == '/x/a.mp4'
+        # Status must still be pending after peek.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            row = c.execute(
+                "SELECT status, attempts FROM pipeline_queue "
+                "WHERE source_path = ?", ('/x/a.mp4',),
+            ).fetchone()
+            assert row['status'] == 'pending'
+            assert row['attempts'] == 0
+        finally:
+            c.close()
+
+    def test_peek_then_claim_returns_same_row(self, geodata_db):
+        pqs.dual_write_enqueue(
+            source_path='/x/a.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            db_path=geodata_db,
+        )
+        peeked = pqs.peek_next_for_stage(
+            stage='archive_pending', db_path=geodata_db,
+        )
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert peeked['id'] == claimed['id']
+
+    def test_peek_honors_next_retry_at(self, geodata_db):
+        pqs.dual_write_enqueue(
+            source_path='/x/wait.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            db_path=geodata_db,
+        )
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute("UPDATE pipeline_queue SET next_retry_at = 9e9")
+            c.commit()
+        finally:
+            c.close()
+        peeked = pqs.peek_next_for_stage(
+            stage='archive_pending', db_path=geodata_db, now=1.0,
+        )
+        assert peeked is None
+
+    def test_blank_stage_returns_none(self, geodata_db):
+        assert pqs.peek_next_for_stage(stage='', db_path=geodata_db) is None
+
+
+class TestReadyCountForStage:
+    def test_zero_when_empty(self, geodata_db):
+        assert pqs.ready_count_for_stage(
+            stage='archive_pending', db_path=geodata_db,
+        ) == 0
+
+    def test_counts_pending_only(self, geodata_db):
+        for i, status in enumerate(['pending', 'pending', 'in_progress', 'done']):
+            pqs.dual_write_enqueue(
+                source_path=f'/x/r{i}.mp4',
+                stage=pqs.STAGE_ARCHIVE_PENDING,
+                legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+                status=status,
+                db_path=geodata_db,
+            )
+        assert pqs.ready_count_for_stage(
+            stage='archive_pending', db_path=geodata_db,
+        ) == 2
+
+    def test_excludes_future_retry_rows(self, geodata_db):
+        pqs.dual_write_enqueue(
+            source_path='/x/future.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            db_path=geodata_db,
+        )
+        pqs.dual_write_enqueue(
+            source_path='/x/now.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            db_path=geodata_db,
+        )
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute("UPDATE pipeline_queue SET next_retry_at = 9e9 "
+                       "WHERE source_path = '/x/future.mp4'")
+            c.commit()
+        finally:
+            c.close()
+        assert pqs.ready_count_for_stage(
+            stage='archive_pending', db_path=geodata_db, now=1.0,
+        ) == 1
+
+    def test_filters_by_stage(self, geodata_db):
+        pqs.dual_write_enqueue(
+            source_path='/x/arch.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            db_path=geodata_db,
+        )
+        pqs.dual_write_enqueue(
+            source_path='/x/idx.mp4',
+            stage=pqs.STAGE_INDEX_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_INDEXING,
+            db_path=geodata_db,
+        )
+        assert pqs.ready_count_for_stage(
+            stage='archive_pending', db_path=geodata_db,
+        ) == 1
+        assert pqs.ready_count_for_stage(
+            stage='index_pending', db_path=geodata_db,
+        ) == 1
+
+    def test_returns_zero_when_db_missing(self, tmp_path):
+        missing = str(tmp_path / 'absent.db')
+        assert pqs.ready_count_for_stage(
+            stage='archive_pending', db_path=missing,
+        ) == 0

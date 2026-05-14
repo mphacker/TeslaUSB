@@ -132,6 +132,44 @@ CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = float(_cloud.get(
     'disk_space_pause_seconds', 300,
 ))
 
+# Wave 4 PR-F2 (issue #184): unified ``pipeline_queue`` integration.
+# Three opt-in flags that lay the foundation for PR-F3's reader cutover.
+# See ``cloud_archive`` block in ``config.yaml`` for the full design notes.
+#
+# ``CLOUD_ARCHIVE_ENQUEUE_TO_PIPELINE`` — PRODUCER hook. When True,
+# every event discovered by ``_discover_events`` is also enqueued
+# into ``pipeline_queue`` with ``stage='cloud_pending'`` (idempotent
+# via the existing UNIQUE index). The legacy disk-walk + dual-write
+# path continues to drive uploads; this flag only POPULATES the
+# unified queue so PR-F3 can switch the reader without an empty
+# queue. Default False so a fresh deploy is a no-op.
+CLOUD_ARCHIVE_ENQUEUE_TO_PIPELINE = bool(
+    _cloud.get('enqueue_to_pipeline', False)
+)
+# ``CLOUD_ARCHIVE_SHADOW_PIPELINE_QUEUE`` — OBSERVABILITY. When True
+# (and the producer flag is also True), the cloud worker peeks at
+# the top-N ``cloud_pending`` rows in ``pipeline_queue`` immediately
+# before each ``_drain_once`` upload pass and logs a WARNING if the
+# legacy reader's first pick is absent from the pipeline's top-N.
+# Pure observability — no behavioural change. Default True so any
+# operator who flips ``enqueue_to_pipeline`` on automatically gets
+# validation telemetry. Skipped (cheap) when the producer flag is
+# off, since there are no rows to compare against.
+CLOUD_ARCHIVE_SHADOW_PIPELINE_QUEUE = bool(
+    _cloud.get('shadow_pipeline_queue', True)
+)
+# ``CLOUD_ARCHIVE_USE_PIPELINE_READER`` — RESERVED for PR-F3. When
+# True, the cloud worker will claim its next upload from
+# ``pipeline_queue.claim_next_for_stage(stage='cloud_pending')``
+# instead of disk-walking. Wired into config now so the constant
+# exists; PR-F2 only reads it for the shadow-skip predicate so
+# operators flipping ``use_pipeline_reader`` to True after PR-F3
+# ships don't get spurious shadow comparisons. Default False so
+# PR-F2 ships as a no-op.
+CLOUD_ARCHIVE_USE_PIPELINE_READER = bool(
+    _cloud.get('use_pipeline_reader', False)
+)
+
 # Phase 2.6 — bulk cloud sync retry cap. After this many consecutive
 # failures, the worker moves a row from 'failed' to 'dead_letter' and
 # excludes it from automatic re-picking. The Settings page allows

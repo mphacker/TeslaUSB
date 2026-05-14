@@ -118,7 +118,7 @@ class TestArchiveStatusImageGate:
 
 class TestArchiveStatusShape:
     REQUIRED_FIELDS = {
-        'severity', 'message', 'enabled', 'checked_at',
+        'severity', 'message', 'actionable', 'enabled', 'checked_at',
         'queue_depth_p1', 'queue_depth_p2', 'queue_depth_p3',
         'pending_count', 'claimed_count', 'copied_count',
         'source_gone_count', 'dead_letter_count',

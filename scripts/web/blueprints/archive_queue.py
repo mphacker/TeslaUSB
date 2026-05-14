@@ -107,6 +107,11 @@ def archive_status():
         # Top-level health (severity, message, banner trigger).
         'severity': health.get('severity', 'ok'),
         'message': health.get('message', ''),
+        # Issue #180 follow-up — banner gate. Only fire the big
+        # "footage may be lost" banner when the operator can actually
+        # do something. Defaults to True for backward compat if the
+        # watchdog payload is missing the field (older deployments).
+        'actionable': bool(health.get('actionable', True)),
         'enabled': bool(ARCHIVE_QUEUE_ENABLED),
         'checked_at': health.get('checked_at'),
         'watchdog_running': health.get('watchdog_running', False),

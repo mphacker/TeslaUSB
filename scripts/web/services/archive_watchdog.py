@@ -634,9 +634,33 @@ def _compute_health(db_path: str, archive_root: str) -> Dict[str, Any]:
         disk_known=disk_known,
     )
 
+    # Issue #180 follow-up — only flag the snapshot as ``actionable``
+    # when the operator can actually do something to fix the problem.
+    # Most ERROR/CRITICAL severities are caused by transient backlog +
+    # SDIO contention, where the worker is doing its best and the
+    # right "action" is just to wait. Popping a banner the operator
+    # has no remedy for is pure annoyance — the system-health card
+    # surfaces the underlying numbers either way for diagnostics.
+    #
+    # Only two conditions are genuinely user-fixable:
+    #   1. Worker is not running while clips are pending  → restart
+    #      the gadget_web service / check journalctl.
+    #   2. SD-card free space is below the CRITICAL threshold → free
+    #      space or expand storage.
+    #
+    # A 20-minute+ stall on a *running* worker COULD be a real bug,
+    # but the operator still can't diagnose it from the web UI; if
+    # they can't act on it, we shouldn't yell at them about it. The
+    # underlying staleness is still visible in the System Health card
+    # message so it's not hidden — just demoted from a banner.
+    worker_down_with_work = (not worker_running) and pending_count > 0
+    disk_critical = disk_known and disk_free_mb < disk_critical_mb
+    actionable = bool(worker_down_with_work or disk_critical)
+
     snap: Dict[str, Any] = {
         'severity': severity,
         'message': message,
+        'actionable': actionable,
         'last_successful_copy_at': last_copy_iso,
         'last_successful_copy_age_seconds': int(age) if age is not None else None,
         'worker_running': bool(worker_running),

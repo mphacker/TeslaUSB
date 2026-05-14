@@ -1890,3 +1890,378 @@ class TestReadyCountForStage:
         assert pqs.ready_count_for_stage(
             stage='archive_pending', db_path=missing,
         ) == 0
+
+
+# ============================================================================
+# Wave 4 PR-D ? schema v17 + recover_stale_claims_pipeline (issue #184 / #193)
+# ============================================================================
+# Covers the new `claimed_by` / `claimed_at` column persistence on
+# claim, the new `recover_stale_claims_pipeline()` helper, and the
+# v16 -> v17 migration path.
+
+
+class TestSchemaV17:
+    def test_schema_version_is_v17_or_later(self):
+        assert _SCHEMA_VERSION >= 17
+
+    def test_pipeline_queue_has_claim_columns(self, geodata_db):
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            cols = {r[1] for r in c.execute(
+                "PRAGMA table_info(pipeline_queue)"
+            ).fetchall()}
+            assert 'claimed_by' in cols
+            assert 'claimed_at' in cols
+        finally:
+            c.close()
+
+    def test_idx_pipeline_stale_claims_exists(self, geodata_db):
+        # Findings #8: assert not just the index name but also that
+        # the partial WHERE clause is intact. A future change that
+        # drops "WHERE status='in_progress' AND claimed_at IS NOT NULL"
+        # (turning it into a full index) would silently pass a
+        # name-only check — and a full index defeats the
+        # "stay small even on a queue with thousands of done rows"
+        # optimisation that justifies the column.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            row = c.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='index' AND name='idx_pipeline_stale_claims'"
+            ).fetchone()
+            assert row is not None, \
+                "idx_pipeline_stale_claims missing"
+            sql = row[1] or ''
+            # SQLite normalises CREATE INDEX SQL but preserves the
+            # column references and the WHERE clause body.
+            assert 'claimed_at' in sql, \
+                f"index missing claimed_at column: {sql!r}"
+            assert "status='in_progress'" in sql.replace(' ', '') \
+                or "status = 'in_progress'" in sql, \
+                f"index missing partial WHERE on status: {sql!r}"
+            assert 'claimed_at IS NOT NULL' in sql.replace('  ', ' '), \
+                f"index missing claimed_at IS NOT NULL: {sql!r}"
+        finally:
+            c.close()
+
+    def test_v16_to_v17_alter_table_idempotent(self, tmp_path):
+        # Build a v16 DB by hand (no claim columns) and simulate the
+        # _init_db migration path running against it. The schema's
+        # CREATE TABLE IF NOT EXISTS won't re-create the table, so
+        # the only path that adds the columns is the v16->v17
+        # ALTER TABLE block in _init_db.
+        import sqlite3 as _sql
+        db = str(tmp_path / 'v16-style.db')
+        c = _sql.connect(db)
+        try:
+            c.executescript(
+                """
+                CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+                INSERT INTO schema_version (version) VALUES (16);
+                CREATE TABLE pipeline_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_path TEXT NOT NULL,
+                    dest_path TEXT,
+                    stage TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    priority INTEGER DEFAULT 5,
+                    attempts INTEGER DEFAULT 0,
+                    last_error TEXT,
+                    next_retry_at REAL,
+                    enqueued_at REAL NOT NULL,
+                    completed_at REAL,
+                    payload_json TEXT,
+                    legacy_id INTEGER,
+                    legacy_table TEXT,
+                    UNIQUE(source_path, stage, legacy_table)
+                );
+                INSERT INTO pipeline_queue
+                    (source_path, stage, enqueued_at)
+                VALUES ('/legacy/v16-row.mp4', 'archive_pending', 100.0);
+                """
+            )
+            c.commit()
+        finally:
+            c.close()
+        # Run the migration.
+        conn = _init_db(db)
+        conn.close()
+        # Verify columns exist and the v16 row survived.
+        c = _sql.connect(db)
+        c.row_factory = _sql.Row
+        try:
+            cols = {r[1] for r in c.execute(
+                "PRAGMA table_info(pipeline_queue)"
+            ).fetchall()}
+            assert 'claimed_by' in cols
+            assert 'claimed_at' in cols
+            row = c.execute(
+                "SELECT claimed_by, claimed_at, source_path FROM pipeline_queue "
+                "WHERE source_path = '/legacy/v16-row.mp4'"
+            ).fetchone()
+            assert row is not None
+            assert row['claimed_by'] is None
+            assert row['claimed_at'] is None
+            v = c.execute("SELECT version FROM schema_version").fetchone()[0]
+            assert v == _SCHEMA_VERSION
+        finally:
+            c.close()
+        # Run _init_db again to verify the v16->v17 path is idempotent
+        # (re-running on an already-v17 DB must not raise).
+        conn2 = _init_db(db)
+        conn2.close()
+        # Findings #9: post-assertion that the second migration didn't
+        # reset anything — schema_version should still be _SCHEMA_VERSION,
+        # the v16 row's claim metadata should still be NULL, and the
+        # columns should still be present.
+        c = _sql.connect(db)
+        c.row_factory = _sql.Row
+        try:
+            v = c.execute("SELECT version FROM schema_version").fetchone()[0]
+            assert v == _SCHEMA_VERSION, \
+                f"second _init_db reset schema_version to {v}"
+            cols = {r[1] for r in c.execute(
+                "PRAGMA table_info(pipeline_queue)"
+            ).fetchall()}
+            assert 'claimed_by' in cols
+            assert 'claimed_at' in cols
+            row = c.execute(
+                "SELECT claimed_by, claimed_at FROM pipeline_queue "
+                "WHERE source_path = '/legacy/v16-row.mp4'"
+            ).fetchone()
+            assert row is not None, \
+                "second _init_db lost the v16 row"
+            assert row['claimed_by'] is None
+            assert row['claimed_at'] is None
+        finally:
+            c.close()
+
+
+class TestClaimPersistsClaimMetadata:
+    def test_claim_writes_claimed_by_and_claimed_at(self, geodata_db):
+        pqs.dual_write_enqueue(
+            source_path='/x/persist.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            db_path=geodata_db,
+        )
+        result = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='persistence-worker',
+            db_path=geodata_db, now=12345.0,
+        )
+        assert result is not None
+        assert result['claimed_by'] == 'persistence-worker'
+        assert result['claimed_at'] == 12345.0
+        # Synthesised back-compat key still set, equal to persisted.
+        assert result['_claimed_by'] == 'persistence-worker'
+        # Verify against DB.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            row = c.execute(
+                "SELECT claimed_by, claimed_at, status FROM pipeline_queue "
+                "WHERE source_path = ?", ('/x/persist.mp4',),
+            ).fetchone()
+            assert row['claimed_by'] == 'persistence-worker'
+            assert row['claimed_at'] == 12345.0
+            assert row['status'] == 'in_progress'
+        finally:
+            c.close()
+
+
+class TestRecoverStaleClaimsPipeline:
+    def _seed_in_progress(self, db, source, claimed_by, claimed_at):
+        # Insert a row directly in the in_progress state ? simulates a
+        # claim from a worker that subsequently crashed.
+        import sqlite3 as _sql
+        c = _sql.connect(db)
+        try:
+            c.execute(
+                """INSERT INTO pipeline_queue
+                       (source_path, stage, status, priority,
+                        enqueued_at, claimed_by, claimed_at, attempts,
+                        legacy_table)
+                   VALUES (?, 'archive_pending', 'in_progress', 2,
+                           100.0, ?, ?, 1, 'archive_queue')""",
+                (source, claimed_by, claimed_at),
+            )
+            c.commit()
+        finally:
+            c.close()
+
+    def test_returns_zero_on_empty(self, geodata_db):
+        assert pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db,
+        ) == 0
+
+    def test_returns_zero_when_db_missing(self, tmp_path):
+        missing = str(tmp_path / 'absent.db')
+        assert pqs.recover_stale_claims_pipeline(
+            db_path=missing,
+        ) == 0
+
+    def test_releases_old_claim(self, geodata_db):
+        self._seed_in_progress(
+            geodata_db, '/x/orphan.mp4', 'crashed-worker',
+            claimed_at=100.0,
+        )
+        # 'now' = 5000, max_age = 1800 -> cutoff = 3200; row's
+        # claimed_at=100 < 3200 -> stale.
+        released = pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=1800.0, now=5000.0,
+        )
+        assert released == 1
+        # Verify row is now pending and claim metadata cleared.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            row = c.execute(
+                "SELECT status, claimed_by, claimed_at, attempts "
+                "FROM pipeline_queue WHERE source_path = ?",
+                ('/x/orphan.mp4',),
+            ).fetchone()
+            assert row['status'] == 'pending'
+            assert row['claimed_by'] is None
+            assert row['claimed_at'] is None
+            # Attempts preserved ? stale recovery doesn't gift retries.
+            assert row['attempts'] == 1
+        finally:
+            c.close()
+
+    def test_does_not_release_recent_claim(self, geodata_db):
+        self._seed_in_progress(
+            geodata_db, '/x/fresh.mp4', 'live-worker',
+            claimed_at=4500.0,
+        )
+        # cutoff = 5000 - 1800 = 3200; claimed_at=4500 > 3200 -> not stale.
+        released = pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=1800.0, now=5000.0,
+        )
+        assert released == 0
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            row = c.execute(
+                "SELECT status, claimed_by FROM pipeline_queue "
+                "WHERE source_path = ?", ('/x/fresh.mp4',),
+            ).fetchone()
+            assert row['status'] == 'in_progress'
+            assert row['claimed_by'] == 'live-worker'
+        finally:
+            c.close()
+
+    def test_does_not_touch_pending_or_done_rows(self, geodata_db):
+        # Build one row in each status; only the in_progress one with
+        # an old claim should be touched.
+        pqs.dual_write_enqueue(
+            source_path='/x/pending.mp4',
+            stage=pqs.STAGE_ARCHIVE_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            db_path=geodata_db,
+        )
+        pqs.dual_write_enqueue(
+            source_path='/x/done.mp4',
+            stage=pqs.STAGE_ARCHIVE_DONE,
+            legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+            status='done',
+            db_path=geodata_db,
+        )
+        self._seed_in_progress(
+            geodata_db, '/x/stale.mp4', 'gone', claimed_at=1.0,
+        )
+        released = pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=10.0, now=10000.0,
+        )
+        assert released == 1
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            statuses = {
+                r['source_path']: r['status']
+                for r in c.execute(
+                    "SELECT source_path, status FROM pipeline_queue"
+                ).fetchall()
+            }
+            assert statuses['/x/pending.mp4'] == 'pending'
+            assert statuses['/x/done.mp4'] == 'done'
+            assert statuses['/x/stale.mp4'] == 'pending'  # was in_progress
+        finally:
+            c.close()
+
+    def test_recovered_row_picked_by_next_claim(self, geodata_db):
+        # End-to-end: seed an orphan, recover it, claim_next_for_stage
+        # should return it (and bump attempts to 2).
+        self._seed_in_progress(
+            geodata_db, '/x/recycle.mp4', 'crashed', claimed_at=1.0,
+        )
+        released = pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=10.0, now=10000.0,
+        )
+        assert released == 1
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='retry-worker',
+            db_path=geodata_db, now=10001.0,
+        )
+        assert claimed is not None
+        assert claimed['source_path'] == '/x/recycle.mp4'
+        assert claimed['attempts'] == 2  # was 1, recovered, then bumped
+        assert claimed['claimed_by'] == 'retry-worker'
+        assert claimed['claimed_at'] == 10001.0
+
+    def test_releases_multiple_stale_in_one_call(self, geodata_db):
+        for i in range(5):
+            self._seed_in_progress(
+                geodata_db, f'/x/orphan-{i}.mp4', f'crashed-{i}',
+                claimed_at=float(i),
+            )
+        released = pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=1.0, now=10.0,
+        )
+        assert released == 5
+
+    def test_preserves_next_retry_at(self, geodata_db):
+        # A row with a backoff timer set must keep its next_retry_at
+        # ? recovery resets the claim, not the failure-driven
+        # backoff state.
+        self._seed_in_progress(
+            geodata_db, '/x/backoff.mp4', 'gone', claimed_at=1.0,
+        )
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute(
+                "UPDATE pipeline_queue SET next_retry_at = 99999.0 "
+                "WHERE source_path = ?", ('/x/backoff.mp4',),
+            )
+            c.commit()
+        finally:
+            c.close()
+        pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=10.0, now=10000.0,
+        )
+        c = _sql.connect(geodata_db)
+        c.row_factory = _sql.Row
+        try:
+            row = c.execute(
+                "SELECT status, claimed_by, next_retry_at "
+                "FROM pipeline_queue WHERE source_path = ?",
+                ('/x/backoff.mp4',),
+            ).fetchone()
+            assert row['status'] == 'pending'
+            assert row['claimed_by'] is None
+            assert row['next_retry_at'] == 99999.0
+        finally:
+            c.close()
+
+    def test_returns_zero_when_db_corrupt(self, tmp_path):
+        bad = tmp_path / 'corrupt.db'
+        bad.write_bytes(b'not a sqlite db at all\x00')
+        assert pqs.recover_stale_claims_pipeline(
+            db_path=str(bad),
+        ) == 0

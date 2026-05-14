@@ -2027,6 +2027,243 @@ def get_shadow_telemetry() -> Dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Wave 4 PR-F1 (issue #184): unified-queue reader cutover
+# ---------------------------------------------------------------------------
+# Switches the worker's claim site from ``archive_queue.claim_next_for_worker``
+# to ``pipeline_queue_service.claim_next_for_stage`` when the
+# ``archive_queue.use_pipeline_reader`` config flag is on. The legacy
+# ``archive_queue`` row is mirrored to ``status='claimed'`` immediately
+# after the pipeline claim succeeds so:
+#
+#   * single-worker invariants hold (archive_queue.pending count
+#     reflects reality even before mark_copied/mark_failed fires);
+#   * the existing dual-write hooks on archive_queue.mark_copied /
+#     mark_failed / release_claim continue to mirror state changes
+#     back to pipeline_queue with no further wiring;
+#   * a flag-flip back to OFF immediately reverts to the legacy path
+#     with no DB rollback needed (both tables stay consistent
+#     because dual-write was active throughout).
+#
+# When the flag is on the shadow comparison is skipped — we ARE the
+# pipeline reader now, so comparing to the legacy reader is moot
+# (PR-F2 will add an inverse shadow that compares legacy-pick against
+# the unified worker's actual pick).
+
+
+def _use_pipeline_reader_enabled() -> bool:
+    """Return True iff the operator has the reader-cutover flag on.
+
+    Wrapped in a function so a config reload (or test override) is
+    picked up on the next worker iteration without restarting the
+    thread. Lazy import so the worker module can still be imported
+    in test contexts where ``config`` isn't bootstrapped.
+    """
+    try:
+        from config import ARCHIVE_QUEUE_USE_PIPELINE_READER
+        return bool(ARCHIVE_QUEUE_USE_PIPELINE_READER)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _adapt_pipeline_row_to_legacy_shape(
+    pipeline_row: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Convert a ``pipeline_queue`` row into the dict shape that
+    ``process_one_claim`` and the existing legacy ``mark_*`` helpers
+    expect.
+
+    The pipeline row carries:
+      * ``id`` — the pipeline_queue PK (NOT what process_one_claim
+        wants).
+      * ``legacy_id`` — back-pointer to ``archive_queue.id``. **This
+        is what the legacy ``mark_*`` helpers expect as ``id``.**
+      * ``source_path`` / ``dest_path`` — pass through as-is.
+      * ``priority`` / ``attempts`` / ``enqueued_at`` / ``last_error``
+        — pass through as-is.
+      * ``payload`` (deserialised) — carries ``expected_size`` and
+        ``expected_mtime`` (the legacy stable-write gate inputs).
+
+    Returns ``None`` when ``pipeline_row`` is ``None`` so the caller
+    can use the same "is None?" idiom the legacy claim path used.
+    Returns ``None`` when ``legacy_id`` is missing — that would mean
+    the row was enqueued without a back-pointer (data corruption);
+    we refuse to process it via the legacy ``mark_*`` helpers
+    because they key on ``archive_queue.id`` which we don't have.
+    """
+    if pipeline_row is None:
+        return None
+    legacy_id = pipeline_row.get('legacy_id')
+    if legacy_id is None:
+        return None
+    payload = pipeline_row.get('payload') or {}
+    return {
+        'id': int(legacy_id),
+        'source_path': pipeline_row.get('source_path'),
+        'dest_path': (
+            pipeline_row.get('dest_path')
+            or payload.get('dest_path')
+        ),
+        'expected_size': payload.get('expected_size'),
+        'expected_mtime': payload.get('expected_mtime'),
+        'priority': pipeline_row.get('priority'),
+        'attempts': pipeline_row.get('attempts'),
+        'status': 'claimed',
+        'claimed_at': pipeline_row.get('claimed_at'),
+        'claimed_by': pipeline_row.get('claimed_by'),
+        'enqueued_at': pipeline_row.get('enqueued_at'),
+        'last_error': pipeline_row.get('last_error'),
+    }
+
+
+def _claim_via_pipeline_reader(
+    worker_id: str,
+    db_path: str,
+) -> Optional[Dict[str, Any]]:
+    """Claim the next ``archive_pending`` row via ``pipeline_queue``,
+    mirror to ``archive_queue``, and return a legacy-shaped row dict.
+
+    Three failure paths, all return ``None`` (worker treats as "no
+    work this iteration", same as legacy ``claim_next_for_worker``):
+
+    1. ``pipeline_queue.claim_next_for_stage`` returns ``None`` —
+       queue empty, missing DB, or sqlite error. Already logged
+       inside the helper (DEBUG / WARNING as appropriate).
+    2. The pipeline row has no ``legacy_id`` (data-shape gap).
+       Logged at WARNING because it indicates a dual-write
+       enqueue that didn't supply the back-pointer — should never
+       happen in production but handled defensively. The pipeline
+       row stays ``in_progress`` with ``last_error`` updated to
+       describe the gap; the next ``recover_stale_claims_pipeline``
+       cycle will release it once ``claimed_at`` ages past the
+       stale window.
+    3. ``archive_queue.claim_specific_pending`` returns ``None`` —
+       the legacy row was deleted, already-claimed by a stale
+       process, or never existed. We release the pipeline claim back
+       to ``pending`` so the next iteration can reconcile, and log
+       at WARNING with the legacy_id for forensics.
+
+    Success path: pipeline_queue row is in_progress, archive_queue
+    row is claimed, returned dict is legacy-shaped. The downstream
+    ``mark_copied`` / ``mark_failed`` / ``release_claim`` calls all
+    take the legacy id and dual-write back to pipeline_queue via
+    the existing PR-B hooks — no further wiring required.
+    """
+    try:
+        from services import pipeline_queue_service as pqs
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "PR-F1 reader switch: pipeline_queue_service import "
+            "failed (%s) — falling back to no-op", e,
+        )
+        return None
+    pipeline_row = pqs.claim_next_for_stage(
+        stage='archive_pending',
+        claimed_by=worker_id,
+        db_path=db_path,
+    )
+    if pipeline_row is None:
+        return None
+    legacy_id = pipeline_row.get('legacy_id')
+    if legacy_id is None:
+        # Wave 4 PR-F1 review fix #1 (PR #198): the dual-write
+        # enqueue did not set legacy_id. This is a permanent
+        # data-shape corruption that retrying cannot fix — the
+        # back-pointer was never set, so no number of recovery
+        # cycles will produce one. Move the row to ``dead_letter``
+        # immediately (instead of leaving it in_progress and letting
+        # ``recover_stale_claims_pipeline`` keep recycling it back to
+        # pending in a tight loop). Operators can inspect the
+        # dead-letter rows via the upcoming /api/pipeline_queue/
+        # dead_letter endpoint and either manually backfill the
+        # legacy_id or drop the row.
+        try:
+            pqs.update_pipeline_row(
+                stage='archive_pending',
+                source_path=pipeline_row.get('source_path') or '',
+                status='dead_letter',
+                last_error=(
+                    'PR-F1: pipeline_queue row missing legacy_id '
+                    '(unrecoverable data-shape corruption); manual '
+                    'intervention required'
+                ),
+                db_path=db_path,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning(
+            "PR-F1 reader switch: pipeline_queue row id=%s has no "
+            "legacy_id — moved to dead_letter (unrecoverable). "
+            "Source: %r",
+            pipeline_row.get('id'), pipeline_row.get('source_path'),
+        )
+        return None
+    legacy_row = archive_queue.claim_specific_pending(
+        int(legacy_id), worker_id, db_path=db_path,
+    )
+    if legacy_row is None:
+        # Wave 4 PR-F1 review fix #2 (PR #198): legacy row missing
+        # or already-claimed. Release the pipeline_queue claim back
+        # to ``pending`` AND clear ``claimed_by`` / ``claimed_at`` so
+        # the row presents as a clean ``pending`` row to operators
+        # and to ``recover_stale_claims_pipeline``. (Leaving the
+        # claim metadata stale on a ``pending`` row would look like
+        # a stuck active claim AND would NOT be picked up by
+        # recovery — which filters on ``status='in_progress'``.)
+        # The next worker iteration will re-attempt; since the
+        # legacy row is missing, the same code path will fire
+        # again — but the legacy reader (or stale-recovery in the
+        # legacy queue) will eventually reconcile the gap.
+        try:
+            pqs.release_pipeline_claim(
+                legacy_table=pqs.LEGACY_TABLE_ARCHIVE,
+                legacy_id=int(legacy_id),
+                last_error=(
+                    'PR-F1: archive_queue row not claimable '
+                    '(deleted, already claimed, or status changed) '
+                    '— pipeline claim released'
+                ),
+                db_path=db_path,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning(
+            "PR-F1 reader switch: archive_queue row id=%s not "
+            "claimable (deleted, already claimed, or status changed) "
+            "— released pipeline_queue claim and skipping",
+            legacy_id,
+        )
+        return None
+    # Wave 4 PR-F1 review fix #4 (PR #198): note that
+    # ``pipeline_queue.attempts`` was already bumped by
+    # ``claim_next_for_stage`` above, but ``archive_queue.attempts``
+    # was NOT bumped by ``claim_specific_pending`` (the legacy claim
+    # path historically does not increment attempts on claim). The
+    # two counters intentionally drift on the success path — the
+    # legacy ``attempts`` is bumped only on ``mark_failed``, while
+    # the pipeline ``attempts`` reflects every claim. Operators
+    # cross-comparing the two during the cutover window will see
+    # this divergence; it is not a dual-write bug.
+    adapted = _adapt_pipeline_row_to_legacy_shape(pipeline_row)
+    # The adapter takes its expected_size/expected_mtime from the
+    # pipeline payload, but the legacy row may carry fresher values
+    # (release_claim refreshes them on stable-write gate failures).
+    # Prefer the legacy row's values when present so the
+    # process_one_claim stable-write gate sees the same data the
+    # legacy claim path would have.
+    if adapted is not None:
+        if legacy_row.get('expected_size') is not None:
+            adapted['expected_size'] = legacy_row.get('expected_size')
+        if legacy_row.get('expected_mtime') is not None:
+            adapted['expected_mtime'] = legacy_row.get('expected_mtime')
+        # Authoritative legacy_row fields override the adapted
+        # snapshot for diagnostic correctness (claimed_at/by are
+        # what the DB actually persisted).
+        adapted['claimed_at'] = legacy_row.get('claimed_at')
+        adapted['claimed_by'] = legacy_row.get('claimed_by')
+    return adapted
+
+
+# ---------------------------------------------------------------------------
 # Worker thread loop
 # ---------------------------------------------------------------------------
 
@@ -2208,62 +2445,95 @@ def _run_worker_loop(db_path: str, archive_root: str,
         new_status: Optional[str] = None
         claim_failed = False
         try:
-            # Wave 4 PR-E (issue #184): shadow-mode peek at
-            # ``pipeline_queue`` BEFORE the legacy claim so we can
-            # compare the two readers' picks against the same queue
-            # state. Pure observability — the result drives a log
-            # line only; no behavioural change. Done before the
-            # legacy claim because the dual-write fires on UPDATE,
-            # which would move the pipeline_queue row to in_progress
-            # and invalidate the comparison.
+            # Wave 4 PR-F1 (issue #184): when the cutover flag is on,
+            # claim from pipeline_queue and mirror to archive_queue.
+            # Skip the shadow comparison — we ARE the pipeline reader
+            # now, so comparing against the legacy reader is moot.
+            # Default OFF preserves the legacy claim path (and its
+            # PR-E shadow comparison) so a fresh deploy is a no-op.
             #
-            # We peek the top-N (not just top-1) so the documented
-            # secondary-key divergence between archive_queue
-            # (expected_mtime) and pipeline_queue (enqueued_at)
-            # doesn't generate noisy WARNINGs on benign reorderings
-            # within a priority band — see ``_shadow_compare_picks``
-            # docstring for the rationale.
-            shadow_candidates: Tuple[str, ...] = ()
-            if _shadow_pipeline_queue_enabled():
+            # TODO(PR-F2 / future): consider an *inverse* shadow when
+            # the flag is ON — peek the legacy reader's pick (via a
+            # non-mutating SELECT against archive_queue, mirroring
+            # ``peek_next_for_stage``) and compare against the
+            # pipeline pick we just claimed. Same purpose as PR-E's
+            # shadow but in the opposite direction, giving operators
+            # confidence during the cutover window. Out of scope for
+            # PR-F1 because (a) the single-worker invariant means a
+            # divergence couldn't actually starve the legacy queue,
+            # and (b) the legacy reader has no equivalent of
+            # ``peek_top_n_paths_for_stage`` yet — would need a new
+            # ``archive_queue.peek_next_for_worker`` helper. Track
+            # via the relevant sub-PR (see issue body's Wave 4 plan).
+            if _use_pipeline_reader_enabled():
                 try:
-                    from services import pipeline_queue_service as pqs
-                    shadow_candidates = pqs.peek_top_n_paths_for_stage(
-                        stage='archive_pending',
-                        limit=_SHADOW_PEEK_CANDIDATE_COUNT,
+                    row = _claim_via_pipeline_reader(worker_id, db_path)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "_claim_via_pipeline_reader raised: %s", e,
+                    )
+                    _set_state(last_error=f'claim (pipeline): {e!r}')
+                    claim_failed = True
+                    row = None
+                if row is None and not claim_failed:
+                    _set_state(last_drained_at=time.time())
+            else:
+                # Wave 4 PR-E (issue #184): shadow-mode peek at
+                # ``pipeline_queue`` BEFORE the legacy claim so we can
+                # compare the two readers' picks against the same queue
+                # state. Pure observability — the result drives a log
+                # line only; no behavioural change. Done before the
+                # legacy claim because the dual-write fires on UPDATE,
+                # which would move the pipeline_queue row to in_progress
+                # and invalidate the comparison.
+                #
+                # We peek the top-N (not just top-1) so the documented
+                # secondary-key divergence between archive_queue
+                # (expected_mtime) and pipeline_queue (enqueued_at)
+                # doesn't generate noisy WARNINGs on benign reorderings
+                # within a priority band — see ``_shadow_compare_picks``
+                # docstring for the rationale.
+                shadow_candidates: Tuple[str, ...] = ()
+                if _shadow_pipeline_queue_enabled():
+                    try:
+                        from services import pipeline_queue_service as pqs
+                        shadow_candidates = pqs.peek_top_n_paths_for_stage(
+                            stage='archive_pending',
+                            limit=_SHADOW_PEEK_CANDIDATE_COUNT,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        # Shadow path must NEVER affect the worker. Log
+                        # at DEBUG so a misconfigured DB path doesn't
+                        # spam WARNING on every iteration.
+                        logger.debug(
+                            "shadow peek_top_n_paths_for_stage failed: "
+                            "%s", e,
+                        )
+
+                try:
+                    row = archive_queue.claim_next_for_worker(
+                        worker_id, db_path=db_path,
                     )
                 except Exception as e:  # noqa: BLE001
-                    # Shadow path must NEVER affect the worker. Log
-                    # at DEBUG so a misconfigured DB path doesn't
-                    # spam WARNING on every iteration.
-                    logger.debug(
-                        "shadow peek_top_n_paths_for_stage failed: "
-                        "%s", e,
+                    logger.warning("claim_next_for_worker raised: %s", e)
+                    _set_state(last_error=f'claim: {e!r}')
+                    claim_failed = True
+                    row = None
+
+                if row is None and not claim_failed:
+                    _set_state(last_drained_at=time.time())
+
+                # Wave 4 PR-E: compare the legacy pick against the
+                # pipeline_queue top-N. Agreement = legacy_path appears
+                # in the candidate set (or both empty). Disagreement =
+                # legacy picked a path absent from the top-N — a real
+                # dual-write gap.
+                if shadow_candidates or row is not None or \
+                        _shadow_pipeline_queue_enabled():
+                    _shadow_compare_picks(
+                        legacy_path=row.get('source_path') if row else None,
+                        pipeline_candidates=shadow_candidates,
                     )
-
-            try:
-                row = archive_queue.claim_next_for_worker(
-                    worker_id, db_path=db_path,
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("claim_next_for_worker raised: %s", e)
-                _set_state(last_error=f'claim: {e!r}')
-                claim_failed = True
-                row = None
-
-            if row is None and not claim_failed:
-                _set_state(last_drained_at=time.time())
-
-            # Wave 4 PR-E: compare the legacy pick against the
-            # pipeline_queue top-N. Agreement = legacy_path appears
-            # in the candidate set (or both empty). Disagreement =
-            # legacy picked a path absent from the top-N — a real
-            # dual-write gap.
-            if shadow_candidates or row is not None or \
-                    _shadow_pipeline_queue_enabled():
-                _shadow_compare_picks(
-                    legacy_path=row.get('source_path') if row else None,
-                    pipeline_candidates=shadow_candidates,
-                )
 
             if row is not None:
                 # If pause arrived between claim and process, release

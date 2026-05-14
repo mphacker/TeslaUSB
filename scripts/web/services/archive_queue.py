@@ -1343,6 +1343,116 @@ def claim_next_for_worker(claimed_by: str, *,
     return claimed
 
 
+def claim_specific_pending(row_id: int, claimed_by: str, *,
+                           db_path: Optional[str] = None
+                           ) -> Optional[Dict]:
+    """Claim a SPECIFIC pending row by primary key, if it is pending.
+
+    Wave 4 PR-F1 (issue #184): used by the archive worker when
+    claiming from the unified ``pipeline_queue`` reader. The pipeline
+    claim is atomic on the pipeline row but the legacy ``archive_queue``
+    row is still ``pending`` until we mirror the status here. This
+    helper exists to keep that mirror narrowly-scoped (one row by id)
+    so it cannot accidentally claim some OTHER pending row in a race
+    with the legacy reader.
+
+    Behaviour mirrors ``claim_next_for_worker`` for one specific row:
+
+    * Atomic conditional UPDATE — ``WHERE id=? AND status='pending'``.
+      If the row was already claimed, deleted, or never existed, the
+      rowcount is 0 and we return ``None``.
+    * On success, returns the row dict (post-update) AND fires the
+      pipeline_queue dual-write hook. In the PR-F1 caller flow the
+      hook is **functionally idempotent** — the pipeline_queue row
+      is already ``in_progress`` because the caller claimed it via
+      ``pipeline_queue_service.claim_next_for_stage`` before invoking
+      us, so re-writing ``status='in_progress'`` is a write of the
+      same value and does not reset ``attempts``, ``claimed_at``, or
+      any other column. Keeping the hook call is intentional so a
+      future caller invoking this helper directly (without a prior
+      pipeline_queue claim) still keeps the two tables in sync.
+
+    Args:
+        row_id: ``archive_queue.id`` to claim.
+        claimed_by: Stamped into ``claimed_by`` for diagnostics.
+        db_path: Override the default ``geodata.db`` path.
+
+    Returns:
+        The claimed row as a plain ``dict`` (with the post-update
+        ``status='claimed'`` / ``claimed_at`` / ``claimed_by``
+        values), or ``None`` if the row is missing / already claimed
+        / on any sqlite error.
+    """
+    if not row_id:
+        return None
+    db_path = _resolve_db_path(db_path)
+    claimed_at = _iso_now()
+    claimed: Optional[Dict] = None
+    try:
+        with _atomic_archive_op(db_path) as conn:
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE archive_queue
+                       SET status = 'claimed',
+                           claimed_at = ?,
+                           claimed_by = ?
+                     WHERE id = ? AND status = 'pending'
+                    RETURNING *
+                    """,
+                    (claimed_at, claimed_by, int(row_id)),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    claimed = dict(row)
+            except sqlite3.OperationalError:
+                # Older SQLite — no RETURNING clause. Fall back to
+                # SELECT-then-UPDATE within the same transaction.
+                row = conn.execute(
+                    "SELECT * FROM archive_queue WHERE id = ?",
+                    (int(row_id),),
+                ).fetchone()
+                if row is None or row['status'] != 'pending':
+                    return None
+                cur = conn.execute(
+                    """
+                    UPDATE archive_queue
+                       SET status = 'claimed',
+                           claimed_at = ?,
+                           claimed_by = ?
+                     WHERE id = ? AND status = 'pending'
+                    """,
+                    (claimed_at, claimed_by, int(row_id)),
+                )
+                if cur.rowcount != 1:
+                    return None
+                claimed = dict(row)
+                claimed['status'] = 'claimed'
+                claimed['claimed_at'] = claimed_at
+                claimed['claimed_by'] = claimed_by
+    except sqlite3.Error as e:
+        logger.warning(
+            "claim_specific_pending failed for id=%s: %s", row_id, e,
+        )
+        return None
+    if claimed is not None:
+        # Mirror the claim into pipeline_queue. In PR-F1's caller flow
+        # this is **functionally idempotent** — the pipeline row is
+        # already 'in_progress' because the caller claimed it via
+        # pipeline_queue.claim_next_for_stage before invoking us, so
+        # re-writing status='in_progress' is a write of the same
+        # value (does not reset attempts/claimed_at/claimed_by). Kept
+        # intentionally so a future caller invoking this helper
+        # directly (without a prior pipeline_queue claim) still keeps
+        # the two tables in sync.
+        _dual_write_pipeline_archive_state(
+            claimed.get('source_path', ''),
+            status='in_progress',
+            db_path=db_path,
+        )
+    return claimed
+
+
 def mark_copied(row_id: int, dest_path: str, *,
                 db_path: Optional[str] = None) -> bool:
     """Mark a claimed row as successfully copied.

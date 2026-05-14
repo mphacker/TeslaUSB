@@ -287,3 +287,14 @@ archive_queue:
   # production validation data while it's still cheap to fix
   # mismatches.
   shadow_pipeline_queue: true
+
+  # Wave 4 PR-F1 (issue #184): unified-queue reader cutover.
+  # When enabled, the archive worker claims its next row from
+  # ``pipeline_queue`` (via ``claim_next_for_stage``) instead of from
+  # the legacy ``archive_queue``. The legacy table continues to receive
+  # state mirrors via the existing dual-write hooks so it stays a
+  # consistent shadow during the cutover. Default ``false`` so a fresh
+  # deploy is a no-op; flip to ``true`` after PR-E shadow telemetry
+  # confirms the two readers agree on production traffic. Reverting is
+  # a single config-flag flip — no DB rollback needed.
+  use_pipeline_reader: false

@@ -433,7 +433,7 @@
             if (r.recommendation && r.recommendation.action) {
                 const rec = r.recommendation;
                 const recClass = 'job-recommendation job-recommendation-' + rec.action;
-                const recIcon = RECOMMENDATION_ICON[rec.action] || 'icon-help-circle';
+                const recIcon = RECOMMENDATION_ICON[rec.action] || 'icon-alert-circle';
                 const recLabel = RECOMMENDATION_LABEL[rec.action] || 'Suggested';
                 recommendation = document.createElement('div');
                 recommendation.className = recClass;

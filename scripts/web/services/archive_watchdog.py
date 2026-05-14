@@ -524,25 +524,38 @@ def _classify_severity(*,
             f"{int(last_copy_age_seconds)}s ago)."
         )
     elif last_copy_age_seconds < _STALE_ERROR_SECONDS:
+        # Issue #180 — informative rather than alarming. 5–10 min
+        # without a copy is the normal signature of a load-pause
+        # under heavy backlog (Pi Zero 2 W's SDIO bus contention),
+        # not a "videos may be lost" emergency. Keep the metric so
+        # the operator can correlate with system load.
         stale_sev = 'warning'
         stale_msg = (
-            f"Archive worker is slow: no copy in "
+            f"Archive worker slow: no copy in "
             f"{int(last_copy_age_seconds // 60)} min "
-            f"({pending_count} pending)."
+            f"({pending_count} queued). Often caused by SD-card load."
         )
     elif last_copy_age_seconds < _STALE_CRITICAL_SECONDS:
+        # Issue #180 — escalate the wording rather than the alarm.
+        # 10–20 min is concerning but not yet "videos are being
+        # lost" — Tesla's RecentClips circular buffer is ~60 min,
+        # so we still have time to drain.
         stale_sev = 'error'
         stale_msg = (
-            f"Archive worker may be stalled: no copy in "
+            f"Archive worker not making progress: no copy in "
             f"{int(last_copy_age_seconds // 60)} min "
-            f"({pending_count} pending) — videos may be lost!"
+            f"({pending_count} queued). Check system load and "
+            f"SD-card health."
         )
     else:
+        # 20 min+ stall with pending work IS the genuine emergency —
+        # Tesla's RecentClips ring buffer is rolling clips out faster
+        # than we can copy them. Keep the loud alarm for this case.
         stale_sev = 'critical'
         stale_msg = (
             f"Archive worker is STALLED: no copy in "
             f"{int(last_copy_age_seconds // 60)} min "
-            f"({pending_count} pending) — videos are being lost!"
+            f"({pending_count} queued) — videos are being lost!"
         )
 
     # Worker-down with pending work is critical regardless of staleness.

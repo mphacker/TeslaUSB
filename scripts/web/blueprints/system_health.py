@@ -151,8 +151,12 @@ def _indexer_block() -> Dict[str, Any]:
         sev = SEV_ERROR
         msg = 'Worker not running'
     elif dead > 0:
+        # Issue #180 — "13 dead-letter rows" is uninformative. Tell
+        # the operator what to do. The card's overall row is already
+        # clickable (jumps to /jobs) when severity != ok.
         sev = SEV_WARN
-        msg = f'{dead} dead-letter row{"s" if dead != 1 else ""}'
+        msg = (f'{dead} job{"s" if dead != 1 else ""} need attention '
+               '— open Failed Jobs')
     elif queue_depth > 100:
         sev = SEV_WARN
         msg = f'{queue_depth} queued (catch-up)'
@@ -332,22 +336,49 @@ def _archive_block() -> Dict[str, Any]:
     if wd_sev not in (SEV_OK, SEV_WARN, SEV_ERROR):
         wd_sev = SEV_UNKNOWN
 
+    # Issue #180 — keep an at-a-glance "queued, est. ETA" tail visible
+    # whenever there's pending work, regardless of which severity
+    # branch wins. Without this the message flaps between completely
+    # different topics ("13 jobs need attention" → "Worker stalled: no
+    # copy in 12 min" → "13 jobs need attention") which makes the
+    # card look chaotic. The tail anchors the message to the same two
+    # data points (queue depth, ETA) every poll so the operator can
+    # see WHAT changed across transitions, not have the whole thing
+    # rewritten.
+    queue_tail = ''
+    if pending > 0:
+        if eta_human:
+            queue_tail = f' \u00b7 {pending} queued, est. {eta_human}'
+        else:
+            queue_tail = f' \u00b7 {pending} queued'
+    # Issue #180 — when the watchdog severity (or paused / lost-files
+    # branch) wins, we still want the dead-letter count visible so the
+    # operator knows there's also failed work waiting in /jobs. The
+    # watchdog message itself already includes "(N queued)", so we
+    # don't append queue_tail to that branch — only the failed tail.
+    dead_tail = ''
+    if dead > 0:
+        dead_tail = f' \u00b7 {dead} failed'
+
     if not running:
         sev = SEV_ERROR
-        msg = 'Worker not running'
+        msg = 'Worker not running' + queue_tail + dead_tail
     elif wd_sev == SEV_ERROR:
         sev = SEV_ERROR
-        msg = (watchdog.get('message') or 'Watchdog error')[:80]
+        msg = (watchdog.get('message') or 'Watchdog error')[:160] + dead_tail
     elif lost_24h > 0:
         # Lost-files dominates dead-letters because lost footage is
         # unrecoverable, whereas a dead-letter row still has the source
         # data on the SD card and can be retried.
         sev = SEV_WARN
         msg = (f'{lost_24h} clip{"s" if lost_24h != 1 else ""} '
-               'lost in last 24h')
+               'lost in last 24h') + queue_tail + dead_tail
     elif dead > 0:
+        # Issue #180 — actionable wording instead of "N dead-letter
+        # rows" jargon. The card's overall row links to /jobs.
         sev = SEV_WARN
-        msg = f'{dead} dead-letter row{"s" if dead != 1 else ""}'
+        msg = (f'{dead} job{"s" if dead != 1 else ""} need attention '
+               '— open Failed Jobs') + queue_tail
     elif paused_effective:
         sev = SEV_WARN
         # Phase 4.5 — render the actual reason instead of an opaque
@@ -356,12 +387,12 @@ def _archive_block() -> Dict[str, Any]:
         # quick-edit), ``_format_pause_reason`` returns "background"
         # which we surface as the human-friendly fallback.
         if pause_reason == 'background':
-            msg = 'Paused (background task)'
+            msg = 'Paused (background task)' + queue_tail
         else:
-            msg = f'Paused: {pause_reason}'
+            msg = f'Paused: {pause_reason}' + queue_tail
     elif wd_sev == SEV_WARN:
         sev = SEV_WARN
-        msg = (watchdog.get('message') or 'Watchdog warn')[:80]
+        msg = (watchdog.get('message') or 'Watchdog warn')[:160] + dead_tail
     elif pending > 200:
         sev = SEV_WARN
         if eta_human:
@@ -431,8 +462,11 @@ def _cloud_block() -> Dict[str, Any]:
         pending = 0
 
     if dead > 0:
+        # Issue #180 — make the message actionable rather than just
+        # restating the row count. The card links to /jobs.
         sev = SEV_WARN
-        msg = f'{dead} dead-letter row{"s" if dead != 1 else ""}'
+        msg = (f'{dead} job{"s" if dead != 1 else ""} need attention '
+               '— open Failed Jobs')
     elif running:
         sev = SEV_OK
         msg = (f'Uploading ({pending} pending)'

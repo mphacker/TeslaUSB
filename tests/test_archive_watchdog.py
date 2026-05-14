@@ -224,6 +224,12 @@ class TestArchiveWatchdogSeverity:
 
     def test_error_at_10_min_stale_with_pending(self):
         # Acceptance criterion 6: 10 min trigger — banner-worthy.
+        # Issue #180 — wording was toned down from the alarmist
+        # "may be stalled — videos may be lost!" to a neutral
+        # "not making progress" since 10 min without a copy is the
+        # normal signature of a load-pause under heavy backlog,
+        # not yet an emergency. CRITICAL (20 min+) keeps the loud
+        # "STALLED ... videos are being lost!" wording.
         sev, msg = archive_watchdog._classify_severity(
             worker_running=True,
             pending_count=5,
@@ -233,7 +239,9 @@ class TestArchiveWatchdogSeverity:
             disk_critical_mb=100,
         )
         assert sev == 'error'
-        assert 'stalled' in msg.lower() or 'lost' in msg.lower()
+        assert 'no copy in' in msg.lower()
+        assert 'min' in msg.lower()
+        assert '5 queued' in msg.lower()
 
     def test_critical_at_20_min_stale_with_pending(self):
         sev, msg = archive_watchdog._classify_severity(

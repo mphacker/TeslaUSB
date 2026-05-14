@@ -795,6 +795,12 @@ def _enqueue_event_to_pipeline(
     succeeds, so a failed producer hook only delays PR-F3's reader
     by one cycle (the next ``_discover_events`` call retries).
 
+    Single-row entry point — kept for direct callers and tests.
+    The bulk discovery path uses
+    :func:`_enqueue_events_to_pipeline_batch` instead, which
+    collapses N per-row connections into one fsync (~25-35 s of
+    SDIO savings on a 1000-event reconcile per PR-E review).
+
     Args:
         rel_path: Canonical relative POSIX path of the event (matches
             ``cloud_synced_files.file_path`` form). MUST be the same
@@ -843,6 +849,70 @@ def _enqueue_event_to_pipeline(
         return False
 
 
+def _enqueue_events_to_pipeline_batch(
+    scored_events: List[Tuple[Tuple[str, str, int], int]],
+) -> int:
+    """Batched producer hook for the discovery path.
+
+    Replaces N per-row :func:`_enqueue_event_to_pipeline` calls
+    with one :func:`pipeline_queue_service.dual_write_enqueue_many`
+    call. The single-connection / single-fsync save is significant
+    on Pi Zero 2 W: ``_dual_write_pipeline_cloud_synced_batch``
+    quantifies the equivalent reconcile-loop cost as ~25-35 s of
+    extra SDIO work per 1000 rows; the producer-hook savings here
+    scale identically since the underlying ``executemany``
+    primitive is shared.
+
+    ``scored_events`` is the post-sort output of
+    :func:`_discover_events`'s scoring step:
+    ``[((event_dir, rel_path, event_size), score), ...]``.
+
+    Returns the count of newly-inserted rows. Re-enqueues that hit
+    the UNIQUE index (idempotent no-op) do NOT count. Failures are
+    logged at WARNING by ``dual_write_enqueue_many`` and NEVER
+    propagate; the legacy disk-walk path continues unaffected.
+
+    The producer-telemetry counter is bumped by the actual insert
+    count (not by the input length) so the metric stays meaningful
+    after the unique-index dedup.
+    """
+    global _cloud_pipeline_enqueue_count
+    if not scored_events:
+        return 0
+    try:
+        from services import pipeline_queue_service as pqs
+        rows = []
+        for ((event_dir, rel_path, event_size), score) in scored_events:
+            if not rel_path:
+                continue
+            rows.append({
+                'source_path': rel_path,
+                'stage': pqs.STAGE_CLOUD_PENDING,
+                'legacy_table': pqs.LEGACY_TABLE_CLOUD_SYNCED,
+                'priority': pqs.PRIORITY_CLOUD_BULK,
+                'payload': {
+                    'event_dir': event_dir,
+                    'event_size': event_size,
+                    'score': score,
+                    'producer': 'cloud_archive._discover_events',
+                },
+                'status': 'pending',
+            })
+        if not rows:
+            return 0
+        inserted = pqs.dual_write_enqueue_many(rows)
+        if inserted:
+            with _cloud_shadow_lock:
+                _cloud_pipeline_enqueue_count += int(inserted)
+        return int(inserted)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue cloud-pending batched producer hook "
+            "failed (%d rows): %s", len(scored_events), e,
+        )
+        return 0
+
+
 def _shadow_compare_cloud_picks(
     *,
     legacy_path: Optional[str],
@@ -853,12 +923,32 @@ def _shadow_compare_cloud_picks(
     Mirrors :func:`archive_worker._shadow_compare_picks` for the cloud
     queue. The legacy ``_discover_events`` ranker uses
     ``_score_event_priority`` (event > geo > none) while
-    ``pipeline_queue`` orders by ``priority, enqueued_at, id``. Both
-    readers should agree on the high-priority bucket; the top-N
-    window absorbs intra-band reordering. Only when the legacy pick
-    is **absent** from the pipeline's top-N does the WARNING fire —
-    that's a real producer-hook gap (the legacy disk-walk found a
-    file the producer somehow missed).
+    ``pipeline_queue`` orders by ``priority, enqueued_at, id``.
+
+    Cloud-specific subtlety: every ``cloud_pending`` row enqueued by
+    the producer hook lands at the same ``PRIORITY_CLOUD_BULK`` value
+    (the per-event score is stored in ``payload_json`` for PR-F3 but
+    NOT used as the queue's primary sort key). So the pipeline reader's
+    intra-band order collapses to ``enqueued_at, id`` — purely the
+    discovery-time sequence. That diverges in two benign ways from
+    the legacy disk-walk's ranking:
+
+    * **Score reordering.** The legacy reader sorts by score; a high-
+      priority Sentry event arriving after a long backlog band of
+      lower-score clips lands at the BOTTOM of the pipeline top-N
+      (newest enqueued_at) but at the TOP of the legacy pick. PR-F3's
+      claim path will need to honour the score-from-payload to match
+      the legacy ranker; until then this manifests as a top-N miss.
+    * **Discovery cadence.** The legacy disk-walk re-sorts every
+      ``_drain_once``; pipeline rows preserve their original
+      enqueued_at across drains, so an event re-enqueued by an
+      idempotent producer doesn't bubble up.
+
+    To absorb both, agreement requires only that the legacy pick
+    appear ANYWHERE in the pipeline's top-N window. Only when it's
+    absent (a real producer-hook gap — a file the legacy walker
+    found that the producer somehow missed enqueueing) does the
+    WARNING fire.
 
     Empty queue case: both ``legacy_path`` is ``None`` AND
     ``pipeline_candidates`` is empty ⇒ both readers say "queue
@@ -908,13 +998,23 @@ def _shadow_compare_cloud_picks(
         logger.warning(
             "Wave 4 PR-F2 cloud shadow: cloud_archive picked %r but "
             "it is absent from the top-%d pipeline_queue candidates "
-            "(disagreement #%d). pipeline top-%d=%r. The producer "
-            "hook should have enqueued this row before the "
-            "disk-walk completed; investigate before PR-F3 cuts "
-            "over the cloud reader.",
+            "(disagreement #%d). pipeline top-%d=%r. Cloud "
+            "pipeline_queue rows all share priority "
+            "PRIORITY_CLOUD_BULK so the intra-band order is purely "
+            "enqueued_at — a high-score event arriving after a long "
+            "backlog band can legitimately land below the top-%d "
+            "window even though the producer hook fired correctly. "
+            "A miss is therefore EITHER a real producer-hook gap "
+            "(the file is absent from pipeline_queue entirely — "
+            "investigate before PR-F3) OR a transient score-reorder "
+            "near the window boundary (will self-correct as the "
+            "queue drains). Cross-check with COUNT(*) FROM "
+            "pipeline_queue WHERE source_path = the missed path to "
+            "tell the two cases apart.",
             legacy_path, _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT, d_count,
             _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT,
             tuple(pipeline_candidates),
+            _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT,
         )
     elif d_count % _CLOUD_SHADOW_DISAGREEMENT_LOG_EVERY == 0:
         logger.warning(
@@ -1672,14 +1772,14 @@ def _discover_events(
     # and NEVER block the disk-walk path; the legacy reader continues
     # to drive uploads regardless of producer-hook outcome. PR-F3 will
     # then flip the reader to claim from pipeline_queue.
+    #
+    # Batched (single connection / single fsync) — the per-row variant
+    # would cost ~25-35 s of extra SDIO work per 1000 events on a Pi
+    # Zero 2 W (per ``_dual_write_pipeline_cloud_synced_batch`` docstring).
+    # On a fresh-install backlog this matters; on incremental drains
+    # it's still measurably cheaper than N round-trips.
     if _enqueue_to_pipeline_enabled():
-        for ((event_dir, rel_path, event_size), score) in scored:
-            _enqueue_event_to_pipeline(
-                rel_path,
-                event_dir=event_dir,
-                event_size=event_size,
-                score=score,
-            )
+        _enqueue_events_to_pipeline_batch(scored)
 
     return result
 

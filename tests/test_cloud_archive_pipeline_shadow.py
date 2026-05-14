@@ -239,6 +239,99 @@ class TestEnqueueEventToPipeline:
 
 
 # ---------------------------------------------------------------------------
+# Batched producer hook: _enqueue_events_to_pipeline_batch
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueEventsToPipelineBatch:
+    """Batched variant pins the I/O-savings path used by _discover_events."""
+
+    def test_batch_inserts_all_rows_in_one_call(
+            self, geodata_db, monkeypatch):
+        # Spy on dual_write_enqueue_many to assert exactly one call.
+        # Spy on dual_write_enqueue (single-row) to assert ZERO calls
+        # — otherwise we'd silently regress to per-row writes.
+        many_calls: list = []
+        single_calls: list = []
+        real_many = pqs.dual_write_enqueue_many
+
+        def _many_spy(rows, db_path=None):
+            rows = list(rows)
+            many_calls.append(rows)
+            return real_many(rows, db_path=db_path)
+
+        def _single_spy(**kw):
+            single_calls.append(kw)
+            raise AssertionError(
+                "dual_write_enqueue must NOT be called from "
+                "_enqueue_events_to_pipeline_batch"
+            )
+
+        monkeypatch.setattr(pqs, 'dual_write_enqueue_many', _many_spy)
+        monkeypatch.setattr(pqs, 'dual_write_enqueue', _single_spy)
+
+        scored = [
+            (('/srv/SentryClips/a', 'SentryClips/a', 100), 0),
+            (('/srv/SentryClips/b', 'SentryClips/b', 200), 100),
+            (('/srv/SentryClips/c', 'SentryClips/c', 300), 200),
+        ]
+        inserted = svc._enqueue_events_to_pipeline_batch(scored)
+        assert inserted == 3
+        assert len(many_calls) == 1, \
+            "Batched path must collapse N rows into ONE call"
+        assert len(single_calls) == 0
+        # Telemetry reflects the actual insert count.
+        tel = svc.get_cloud_shadow_telemetry()
+        assert tel['cloud_pipeline_enqueue_count'] == 3
+
+    def test_batch_idempotent_dupes_do_not_bump_counter(self, geodata_db):
+        scored = [
+            (('/srv/Sentry/a', 'Sentry/a', 100), 10),
+        ]
+        first = svc._enqueue_events_to_pipeline_batch(scored)
+        second = svc._enqueue_events_to_pipeline_batch(scored)
+        assert first == 1
+        assert second == 0  # UNIQUE index suppressed
+        tel = svc.get_cloud_shadow_telemetry()
+        assert tel['cloud_pipeline_enqueue_count'] == 1
+
+    def test_batch_skips_blank_paths_silently(self, geodata_db):
+        scored = [
+            (('/srv/Sentry/a', 'Sentry/a', 100), 10),
+            (('/srv/Sentry/b', '', 200), 20),  # blank path filtered
+            (('/srv/Sentry/c', 'Sentry/c', 300), 30),
+        ]
+        inserted = svc._enqueue_events_to_pipeline_batch(scored)
+        assert inserted == 2
+
+    def test_batch_empty_input_short_circuits(
+            self, geodata_db, monkeypatch):
+        called = {'n': 0}
+        def _many_spy(rows, db_path=None):
+            called['n'] += 1
+            return 0
+        monkeypatch.setattr(pqs, 'dual_write_enqueue_many', _many_spy)
+        result = svc._enqueue_events_to_pipeline_batch([])
+        assert result == 0
+        assert called['n'] == 0  # MUST NOT open a connection for nothing
+
+    def test_batch_swallows_pqs_exception(
+            self, geodata_db, monkeypatch, caplog):
+        def _raises(rows, db_path=None):
+            raise RuntimeError('boom')
+        monkeypatch.setattr(pqs, 'dual_write_enqueue_many', _raises)
+        scored = [(('/srv/Sentry/a', 'Sentry/a', 100), 10)]
+        with caplog.at_level(logging.WARNING):
+            result = svc._enqueue_events_to_pipeline_batch(scored)
+        assert result == 0
+        # Batched hook MUST NEVER propagate exceptions to the disk-walk.
+        assert any(
+            'batched producer hook' in r.getMessage()
+            for r in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
 # Shadow comparator: _shadow_compare_cloud_picks
 # ---------------------------------------------------------------------------
 
@@ -504,4 +597,141 @@ class TestDiscoverEventsProducerIntegration:
         assert count == 0  # producer hook stayed quiet
         tel = svc.get_cloud_shadow_telemetry()
         assert tel['cloud_pipeline_enqueue_count'] == 0
+
+
+# ---------------------------------------------------------------------------
+# Priority-collapse / score-mismatch shadow scenarios
+# ---------------------------------------------------------------------------
+
+
+class TestShadowScoreCollapseScenarios:
+    """All cloud_pending rows share priority PRIORITY_CLOUD_BULK; the
+    intra-band order collapses to enqueued_at. Pin the resulting
+    legitimate disagreement scenarios so PR-F3 can re-rank by payload
+    score without breaking the shadow contract."""
+
+    def test_legacy_picks_high_score_event_arriving_after_backlog(
+            self, geodata_db):
+        """A late-arriving high-priority event lands at bottom of pipeline.
+
+        Scenario:
+        1. Producer enqueues 12 low-score (geo) events first (oldest
+           enqueued_at). All sit in pipeline at PRIORITY_CLOUD_BULK.
+        2. Producer enqueues 1 high-score Sentry event last.
+        3. Legacy disk-walk reorders by score and picks the Sentry
+           event first.
+        4. Pipeline's top-8 (peek window) is dominated by the older
+           backlog rows; the Sentry event ranks #13 by enqueued_at.
+        5. Shadow comparator sees legacy_pick='Sentry/...' is ABSENT
+           from the pipeline top-8 → disagreement counter increments.
+
+        This is the documented "score-collapse near the window
+        boundary" case from the WARNING text. PR-F3 must use
+        payload['score'] for re-ranking to eliminate it.
+        """
+        # Enqueue 12 backlog rows first.
+        for i in range(12):
+            pqs.dual_write_enqueue(
+                source_path=f'SentryClips/backlog_{i:03d}',
+                stage=pqs.STAGE_CLOUD_PENDING,
+                legacy_table=pqs.LEGACY_TABLE_CLOUD_SYNCED,
+                priority=pqs.PRIORITY_CLOUD_BULK,
+                payload={'score': 200},  # geo-only score
+            )
+        # Enqueue the late high-score Sentry event.
+        pqs.dual_write_enqueue(
+            source_path='SentryClips/late_sentry',
+            stage=pqs.STAGE_CLOUD_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_CLOUD_SYNCED,
+            priority=pqs.PRIORITY_CLOUD_BULK,
+            payload={'score': 0},  # event score
+        )
+
+        # Pipeline peek returns top-8 ordered by enqueued_at.
+        top_n = svc._peek_pipeline_cloud_pending(limit=8)
+        assert 'SentryClips/late_sentry' not in top_n, \
+            "test premise — late-enqueued row must be outside top-8"
+
+        # Legacy reader picks the Sentry event (lowest score wins).
+        before = svc.get_cloud_shadow_telemetry()
+        svc._shadow_compare_cloud_picks(
+            legacy_path='SentryClips/late_sentry',
+            pipeline_candidates=top_n,
+        )
+        after = svc.get_cloud_shadow_telemetry()
+        # This is the disagreement that PR-F3 will address.
+        assert after['cloud_shadow_disagreement_count'] == \
+            before['cloud_shadow_disagreement_count'] + 1
+        assert after['cloud_shadow_agreement_count'] == \
+            before['cloud_shadow_agreement_count']
+
+    def test_legacy_pick_within_top_n_window_when_band_is_small(
+            self, geodata_db):
+        """When backlog fits in the top-N window, no disagreement fires.
+
+        With ≤ 8 rows total in cloud_pending, the legacy pick is
+        guaranteed to be in the peek window regardless of score
+        ranking. Pins the absence of false-positive disagreements
+        on a typical (small) drain.
+        """
+        # Enqueue 5 events in arbitrary order with mixed scores.
+        events_and_scores = [
+            ('SentryClips/c', 200),
+            ('SentryClips/a', 0),
+            ('SentryClips/e', 100),
+            ('SentryClips/b', 50),
+            ('SentryClips/d', 150),
+        ]
+        for path, score in events_and_scores:
+            pqs.dual_write_enqueue(
+                source_path=path,
+                stage=pqs.STAGE_CLOUD_PENDING,
+                legacy_table=pqs.LEGACY_TABLE_CLOUD_SYNCED,
+                priority=pqs.PRIORITY_CLOUD_BULK,
+                payload={'score': score},
+            )
+
+        # Legacy picks the lowest-score event.
+        legacy_pick = 'SentryClips/a'
+        top_n = svc._peek_pipeline_cloud_pending(limit=8)
+        assert legacy_pick in top_n  # band fits in window
+
+        before = svc.get_cloud_shadow_telemetry()
+        svc._shadow_compare_cloud_picks(
+            legacy_path=legacy_pick,
+            pipeline_candidates=top_n,
+        )
+        after = svc.get_cloud_shadow_telemetry()
+        # Agreement: small backlog never produces false positives.
+        assert after['cloud_shadow_agreement_count'] == \
+            before['cloud_shadow_agreement_count'] + 1
+        assert after['cloud_shadow_disagreement_count'] == \
+            before['cloud_shadow_disagreement_count']
+
+    def test_warning_text_mentions_priority_collapse(
+            self, geodata_db, caplog):
+        """The disagreement WARNING explicitly cites the score-collapse
+        cause so an operator reading the journal can immediately tell
+        whether the miss is benign (transient reorder) or real
+        (producer-hook gap).
+        """
+        svc._reset_cloud_shadow_telemetry_for_tests()
+        with caplog.at_level(logging.WARNING):
+            svc._shadow_compare_cloud_picks(
+                legacy_path='SentryClips/missed',
+                pipeline_candidates=('SentryClips/other',),
+            )
+        # The first verbatim WARNING must include the priority-collapse
+        # explanation so operators can self-diagnose without reading
+        # source.
+        verbatim = [
+            r.getMessage() for r in caplog.records
+            if 'absent from the top-' in r.getMessage()
+        ]
+        assert len(verbatim) == 1
+        msg = verbatim[0]
+        assert 'PRIORITY_CLOUD_BULK' in msg
+        assert 'enqueued_at' in msg
+        assert ('producer-hook gap' in msg
+                or 'producer hook gap' in msg)
 

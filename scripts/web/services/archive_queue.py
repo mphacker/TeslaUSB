@@ -156,6 +156,16 @@ def _infer_priority(path: str) -> int:
     return PRIORITY_OTHER
 
 
+# Public alias for callers outside the archive_queue module that need
+# to compute the priority for a path before enqueueing (e.g.
+# ``archive_producer.enqueue_with_peek`` decides whether to apply the
+# SEI peek based on whether a candidate is a RecentClips clip). Kept
+# as an alias rather than a renamed function so the original
+# underscore-prefixed name remains valid for in-module callers and
+# downstream tests that monkeypatch it.
+infer_priority = _infer_priority
+
+
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------

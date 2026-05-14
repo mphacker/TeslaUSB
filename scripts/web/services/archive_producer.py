@@ -185,10 +185,17 @@ def _peek_clip_for_gps(source_path: str) -> Optional[bool]:
     """Producer-side wrapper around the worker's SEI peek.
 
     Mirrors :func:`archive_worker._clip_has_gps_signal` so the producer
-    doesn't have to import the worker module (one-way dependency:
-    worker imports producer-side helpers, never the reverse).
-    Returns the same tri-state: True (has GPS), False (no GPS / skip),
-    None (parse error / fall through).
+    doesn't have to import the worker module at load time (one-way
+    dependency: the worker may import producer-side helpers, never
+    the reverse). Returns the same tri-state: True (has GPS), False
+    (no GPS / skip), None (parse error / fall through).
+
+    The peek tunables (``MAX_MESSAGES``, ``SAMPLE_RATE``,
+    ``MAX_WALK_BYTES``) are pulled from the worker module at call time
+    so a tuning change in one place takes effect in both. Lazy import
+    keeps the producer's load-time footprint light and avoids a
+    circular dependency (worker imports producer, never the other way
+    at module load).
     """
     try:
         from services import sei_parser
@@ -199,12 +206,19 @@ def _peek_clip_for_gps(source_path: str) -> Optional[bool]:
         )
         return None
 
-    # Mirror archive_worker constants exactly. They live there for the
-    # worker-side defense-in-depth peek; we don't import them to keep
-    # the producer module's load profile light.
-    _MAX_MESSAGES = 90
-    _SAMPLE_RATE = 30
-    _MAX_WALK_BYTES = 2 * 1024 * 1024
+    try:
+        from services.archive_worker import (
+            _SKIP_GPS_PEEK_MAX_MESSAGES as _MAX_MESSAGES,
+            _SKIP_GPS_PEEK_SAMPLE_RATE as _SAMPLE_RATE,
+            _SKIP_GPS_PEEK_MAX_WALK_BYTES as _MAX_WALK_BYTES,
+        )
+    except Exception:  # noqa: BLE001
+        # Worker not importable in this context (e.g., a focused
+        # producer-only test); fall back to the same defaults the
+        # worker uses today. Keep these in sync with archive_worker.py.
+        _MAX_MESSAGES = 90
+        _SAMPLE_RATE = 30
+        _MAX_WALK_BYTES = 2 * 1024 * 1024
 
     scanned = 0
     try:
@@ -258,7 +272,7 @@ def enqueue_with_peek(paths: Iterable[str],
         if not raw:
             continue
         considered += 1
-        priority = archive_queue._infer_priority(raw)
+        priority = archive_queue.infer_priority(raw)
         if priority != archive_queue.PRIORITY_RECENT_CLIPS:
             pending_enqueue.append(raw)
             continue

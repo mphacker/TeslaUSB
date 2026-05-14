@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Database Schema & Management
 # ---------------------------------------------------------------------------
 
-_SCHEMA_VERSION = 16
+_SCHEMA_VERSION = 17
 _BACKUP_RETENTION = 3  # Keep this many migration backups before pruning oldest
 
 _SCHEMA_SQL = """
@@ -320,6 +320,16 @@ CREATE TABLE IF NOT EXISTS pipeline_queue (
     payload_json TEXT,
     legacy_id INTEGER,
     legacy_table TEXT,
+    -- v17 (issue #184 Wave 4 PR-D / issue #193): worker-claim
+    -- bookkeeping. ``claimed_by`` is the worker id stamped at claim
+    -- time (e.g. ``"archive_worker-12345"``). ``claimed_at`` is the
+    -- epoch seconds the claim was acquired — used by
+    -- ``recover_stale_claims_pipeline()`` to detect crashed workers
+    -- and recycle their rows back to ``status='pending'``. Without
+    -- these columns an ``in_progress`` row whose claimer crashes
+    -- mid-work would be orphaned forever (no timeout, no recovery).
+    claimed_by TEXT,
+    claimed_at REAL,
     UNIQUE(source_path, stage, legacy_table)
 );
 -- Worker pick-next index (used in Wave 4 PR-B): partial over only
@@ -331,6 +341,12 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_ready
 -- to find the pipeline row matching a legacy queue row).
 CREATE INDEX IF NOT EXISTS idx_pipeline_legacy
     ON pipeline_queue(legacy_table, legacy_id);
+-- v17: stale-claim recovery scan (used by recover_stale_claims_pipeline).
+-- Partial index covers only rows that COULD be stale — keeps the
+-- index small even on a queue with thousands of done rows.
+CREATE INDEX IF NOT EXISTS idx_pipeline_stale_claims
+    ON pipeline_queue(claimed_at)
+    WHERE status = 'in_progress' AND claimed_at IS NOT NULL;
 """
 
 
@@ -402,6 +418,41 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         # is being upgraded, not on first install)
         if current > 0:
             _backup_db(db_path, _SCHEMA_VERSION)
+
+        # v16 -> v17 pre-script ALTER TABLE: must run BEFORE
+        # executescript because the schema's
+        # ``idx_pipeline_stale_claims`` index references columns
+        # (``claimed_at``, ``status``) that don't exist yet on a
+        # legacy v16 ``pipeline_queue`` table. Without this, the
+        # CREATE INDEX IF NOT EXISTS would raise
+        # ``sqlite3.OperationalError: no such column: claimed_at``.
+        # Adding the columns first is safe — the schema's CREATE
+        # TABLE IF NOT EXISTS won't touch the existing table, and
+        # subsequent indices then reference real columns. On a
+        # fresh install the table doesn't exist yet so this block
+        # is a no-op (caught OperationalError).
+        if current > 0 and current < 17:
+            try:
+                cols = {r[1] for r in conn.execute(
+                    "PRAGMA table_info(pipeline_queue)"
+                ).fetchall()}
+                if cols:  # table exists from v16
+                    if 'claimed_by' not in cols:
+                        conn.execute(
+                            "ALTER TABLE pipeline_queue "
+                            "ADD COLUMN claimed_by TEXT"
+                        )
+                    if 'claimed_at' not in cols:
+                        conn.execute(
+                            "ALTER TABLE pipeline_queue "
+                            "ADD COLUMN claimed_at REAL"
+                        )
+            except sqlite3.OperationalError as e:
+                # Table absent (pre-v16 install path) — schema script
+                # will create it WITH the v17 columns. Safe to ignore.
+                logger.debug(
+                    "Pre-script v16->v17 ALTER TABLE skipped: %s", e,
+                )
 
         conn.executescript(_SCHEMA_SQL)
         # Migrations for existing databases
@@ -647,6 +698,19 @@ def _init_db(db_path: str) -> sqlite3.Connection:
             # background thread after gadget_web is serving requests,
             # so the user never waits on it.
             logger.info("Migration v15->v16: pipeline_queue table ready")
+        if current > 0 and current < 17:
+            # v17 (issue #184 Wave 4 PR-D / issue #193): the
+            # ``claimed_by`` and ``claimed_at`` columns and the
+            # ``idx_pipeline_stale_claims`` partial index were
+            # already added by the v16->v17 pre-script ALTER TABLE
+            # block (above) and the ``executescript(_SCHEMA_SQL)``
+            # call (CREATE INDEX IF NOT EXISTS). This block exists
+            # only to log the version bump for operators tailing
+            # the journal during upgrade.
+            logger.info(
+                "Migration v16->v17: pipeline_queue claim-bookkeeping "
+                "columns + idx_pipeline_stale_claims ready"
+            )
         conn.execute("DELETE FROM schema_version")
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",

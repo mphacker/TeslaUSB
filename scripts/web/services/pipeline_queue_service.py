@@ -48,6 +48,9 @@ Public API:
   next" lookup (parity tests + Settings page).
 * :func:`ready_count_for_stage` — Wave 4 PR-C; cheap COUNT(*) of
   eligible rows for a stage.
+* :func:`recover_stale_claims_pipeline` — Wave 4 PR-D; release
+  ``in_progress`` rows whose claimer crashed (claimed_at older
+  than threshold). Called once at worker startup.
 * :func:`pipeline_status` — debug / verification view (counts grouped
   by legacy_table + stage + status).
 * :func:`backfill_legacy_queues` — one-time migration helper.
@@ -96,6 +99,18 @@ PRIORITY_ARCHIVE_RECENT = 2      # RecentClips (age-bound)
 PRIORITY_ARCHIVE_OTHER = 3       # ArchivedClips back-fill / other
 PRIORITY_CLOUD_BULK = 4          # cloud_synced_files bulk catch-up
 PRIORITY_INDEXING = 5            # default indexing
+
+
+# Stale-claim threshold for ``recover_stale_claims_pipeline`` — same
+# default as ``indexing_queue_service._STALE_CLAIM_SECONDS`` (30 min).
+# A claim older than this is presumed orphaned by a crashed worker
+# and recycled back to ``status='pending'`` on the next worker
+# startup. Tuned to be longer than the longest legitimate
+# single-row processing time (an extreme archive copy of a 60s
+# multi-camera Sentry event may take ~5 minutes under load + the
+# task_coordinator may pause on high loadavg) but short enough that
+# a real crash is detected within the same boot cycle.
+_PIPELINE_STALE_CLAIM_SECONDS = 1800.0
 
 
 # ---------------------------------------------------------------------------
@@ -574,15 +589,19 @@ def claim_next_for_stage(
             on stage is required — this function refuses to operate
             without one (returns ``None``) so a caller bug can't
             sweep the entire queue indiscriminately.
-        claimed_by: Operator-readable string for diagnostics. Stamped
-            into the returned dict's ``_claimed_by`` key only — NOT
-            written to the DB. The legacy queue's ``claimed_by``
-            column remains the operational record during the dual-
-            write transition; pipeline_queue gets a dedicated
-            ``claimed_by`` column when PR-D adds the column.
+        claimed_by: Operator-readable string for diagnostics.
+            Persisted to the row's ``claimed_by`` column AND echoed
+            back as the synthesised ``_claimed_by`` key in the
+            returned dict (the latter is preserved for backward
+            compat with PR-C callers — it equals the persisted
+            value). The persistence (added in PR-D / schema v17)
+            lets :func:`recover_stale_claims_pipeline` detect rows
+            whose claimer crashed and recycle them back to
+            ``status='pending'``.
         db_path: Override the geodata.db path (test injection).
         now: Override the "current time" used for ``next_retry_at``
-            comparisons. Test injection only.
+            comparisons AND for the ``claimed_at`` timestamp
+            written into the row. Test injection only.
 
     Returns:
         A dict snapshot of the claimed row, augmented with two
@@ -627,9 +646,11 @@ def claim_next_for_stage(
         cur = conn.execute(
             """UPDATE pipeline_queue
                   SET status = 'in_progress',
-                      attempts = attempts + 1
+                      attempts = attempts + 1,
+                      claimed_by = ?,
+                      claimed_at = ?
                 WHERE id = ? AND status = 'pending'""",
-            (sel['id'],),
+            (claimed_by, now, sel['id']),
         )
         if cur.rowcount != 1:
             # Another worker raced us between the SELECT and the
@@ -642,6 +663,12 @@ def claim_next_for_stage(
         row = dict(sel)
         row['status'] = 'in_progress'
         row['attempts'] = (sel['attempts'] or 0) + 1
+        # v17: persist the claim so ``recover_stale_claims_pipeline``
+        # can detect crashed workers. The legacy ``_claimed_by``
+        # synthesised key is preserved for callers that already
+        # consume it (it's identical to the new persisted column).
+        row['claimed_by'] = claimed_by
+        row['claimed_at'] = now
         if row.get('payload_json'):
             try:
                 parsed = json.loads(row['payload_json'])
@@ -760,6 +787,79 @@ def ready_count_for_stage(
         logger.debug(
             "ready_count_for_stage(stage=%s) failed: %s", stage, e,
         )
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def recover_stale_claims_pipeline(
+    *,
+    db_path: Optional[str] = None,
+    max_age_seconds: float = _PIPELINE_STALE_CLAIM_SECONDS,
+    now: Optional[float] = None,
+) -> int:
+    """Release ``in_progress`` rows whose ``claimed_at`` is older
+    than ``max_age_seconds``, recycling them back to ``status='pending'``.
+
+    Mirror of :func:`indexing_queue_service.recover_stale_claims` for
+    ``pipeline_queue``. Called once at worker startup so a previous
+    crash can't permanently lock a row in ``in_progress``. Without
+    this, an ``in_progress`` row whose claimer crashed mid-work
+    would be orphaned forever (no ``claimed_at`` timeout, no
+    recovery mechanism — exactly the gap PR-D closes per issue #193).
+
+    The reset clears ``claimed_by`` and ``claimed_at`` (returning the
+    row to its pre-claim state) but DELIBERATELY preserves
+    ``attempts`` so a row that has already been attempted N times
+    isn't given a free retry — the next ``claim_next_for_stage``
+    will increment to N+1. ``next_retry_at`` is left untouched so a
+    failure-driven backoff (set by the failed-claim path) still
+    fires correctly.
+
+    Args:
+        db_path: Override the geodata.db path.
+        max_age_seconds: Claims older than this are released.
+            Default ``_PIPELINE_STALE_CLAIM_SECONDS`` (1800 s = 30 min).
+        now: Override "current time" (test injection only).
+
+    Returns:
+        The count of rows released. Returns 0 on missing DB / sqlite
+        error (logged at WARNING). NEVER raises.
+    """
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return 0
+    if now is None:
+        now = _now_epoch()
+    cutoff = now - max_age_seconds
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        cur = conn.execute(
+            """UPDATE pipeline_queue
+                  SET status = 'pending',
+                      claimed_by = NULL,
+                      claimed_at = NULL
+                WHERE status = 'in_progress'
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < ?""",
+            (cutoff,),
+        )
+        released = cur.rowcount or 0
+        conn.commit()
+        if released:
+            logger.warning(
+                "Released %d stale pipeline_queue claim(s) (>%ds old)",
+                released, int(max_age_seconds),
+            )
+        return released
+    except sqlite3.Error as e:
+        logger.warning("recover_stale_claims_pipeline failed: %s", e)
         return 0
     finally:
         if conn is not None:

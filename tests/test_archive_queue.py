@@ -2553,12 +2553,16 @@ class TestPriorityMigrationV12ToV13:
         conn.commit()
         conn.close()
 
-        # Should not raise.
+        # Should not raise. Re-initializing must bump us to whatever
+        # the current schema version is (Phase E added v14, so this
+        # passes through both the v12→v13 priority migration and the
+        # v13→v14 kv_meta table creation in one shot).
         conn = _init_db(db_path)
         try:
+            from services.mapping_migrations import _SCHEMA_VERSION
             row = conn.execute(
                 "SELECT MAX(version) AS v FROM schema_version"
             ).fetchone()
-            assert row['v'] == 13
+            assert row['v'] == _SCHEMA_VERSION
         finally:
             conn.close()

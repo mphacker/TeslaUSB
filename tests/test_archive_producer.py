@@ -137,13 +137,13 @@ class TestIterArchiveCandidates:
 class TestRunBootCatchupOnce:
     def test_enqueues_all_clips_first_run(self, db, teslacam):
         result = archive_producer.run_boot_catchup_once(teslacam, db_path=db)
-        assert result == {'seen': 5, 'enqueued': 5}
+        assert result == {'seen': 5, 'enqueued': 5, 'skipped_stationary': 0}
         assert archive_queue.get_queue_status(db_path=db)['pending'] == 5
 
     def test_second_run_enqueues_zero_due_to_dedup(self, db, teslacam):
         archive_producer.run_boot_catchup_once(teslacam, db_path=db)
         result = archive_producer.run_boot_catchup_once(teslacam, db_path=db)
-        assert result == {'seen': 5, 'enqueued': 0}
+        assert result == {'seen': 5, 'enqueued': 0, 'skipped_stationary': 0}
         assert archive_queue.get_queue_status(db_path=db)['pending'] == 5
 
     def test_picks_up_new_clip_between_runs(self, db, teslacam):
@@ -154,7 +154,7 @@ class TestRunBootCatchupOnce:
         with open(new_clip, 'wb') as f:
             f.write(b"new")
         result = archive_producer.run_boot_catchup_once(teslacam, db_path=db)
-        assert result == {'seen': 6, 'enqueued': 1}
+        assert result == {'seen': 6, 'enqueued': 1, 'skipped_stationary': 0}
 
     def test_priorities_are_inferred(self, db, teslacam):
         archive_producer.run_boot_catchup_once(teslacam, db_path=db)
@@ -351,3 +351,151 @@ class TestProducerStatus:
         assert status['rescan_interval_seconds'] == 42.0
         assert status['boot_catchup_enabled'] is False
         archive_producer.stop_producer(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Issue #184 Wave 2 — Phase B: SEI peek at the producer
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueWithPeek:
+    """Phase B moves the stationary-clip skip from the worker to the
+    producer. Tests cover the three peek outcomes (True / False / None)
+    and the freshness gate that defers fresh files to the worker."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_tally(self):
+        archive_producer.reset_skipped_stationary_tally()
+        yield
+        archive_producer.reset_skipped_stationary_tally()
+
+    def test_event_clips_skip_peek_and_enqueue_directly(self, db, tmp_path,
+                                                         monkeypatch):
+        # Sentry/Saved event clips bypass the SEI peek entirely.
+        # Force the peek function to assert it's NOT called for these.
+        called = {'count': 0}
+
+        def _fail_peek(_path):
+            called['count'] += 1
+            return False  # if we wrongly called it, force a skip
+
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', _fail_peek,
+        )
+        sentry_clip = tmp_path / "TeslaCam" / "SentryClips" / "evt"
+        sentry_clip.mkdir(parents=True)
+        path = str(sentry_clip / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        result = archive_producer.enqueue_with_peek([path], db_path=db)
+        assert result['enqueued'] == 1
+        assert result['skipped_stationary'] == 0
+        assert called['count'] == 0
+
+    def test_recentclips_with_no_gps_is_skipped(self, db, tmp_path,
+                                                  monkeypatch):
+        # SEI peek returns False → producer drops the clip and bumps
+        # the in-memory tally.
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        # Backdate the file so the freshness gate doesn't bypass the peek.
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', lambda _p: False,
+        )
+        result = archive_producer.enqueue_with_peek([path], db_path=db)
+        assert result['enqueued'] == 0
+        assert result['skipped_stationary'] == 1
+        assert archive_producer.get_skipped_stationary_count(24) == 1
+        # Confirm no row was written.
+        from services import archive_queue
+        assert archive_queue.get_queue_status(db_path=db)['pending'] == 0
+
+    def test_recentclips_with_gps_is_enqueued(self, db, tmp_path,
+                                                monkeypatch):
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', lambda _p: True,
+        )
+        result = archive_producer.enqueue_with_peek([path], db_path=db)
+        assert result['enqueued'] == 1
+        assert result['skipped_stationary'] == 0
+
+    def test_recentclips_with_unknown_verdict_is_enqueued(self, db, tmp_path,
+                                                            monkeypatch):
+        # Peek returns None (parse error) — must fall through to enqueue
+        # so a parser bug never silently drops a clip.
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', lambda _p: None,
+        )
+        result = archive_producer.enqueue_with_peek([path], db_path=db)
+        assert result['enqueued'] == 1
+        assert result['skipped_stationary'] == 0
+
+    def test_fresh_recentclips_bypass_peek(self, db, tmp_path, monkeypatch):
+        # File mtime is now() — younger than stable_write_age. Producer
+        # must enqueue without calling the peek so the worker's stable-
+        # write gate can handle freshness.
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        called = {'count': 0}
+
+        def _peek_should_not_run(_path):
+            called['count'] += 1
+            return False
+
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', _peek_should_not_run,
+        )
+        result = archive_producer.enqueue_with_peek([path], db_path=db)
+        assert called['count'] == 0
+        assert result['enqueued'] == 1
+        assert result['skipped_stationary'] == 0
+
+    def test_skipped_stationary_count_horizon_evicts_old_entries(self):
+        # Manually push timestamps from 25 hours ago into the deque.
+        from services.archive_producer import (
+            _skipped_tally, _skipped_tally_lock,
+        )
+        ancient = time.time() - 25 * 3600
+        with _skipped_tally_lock:
+            _skipped_tally.append(ancient)
+        # 24-hour horizon must drop the ancient entry.
+        assert archive_producer.get_skipped_stationary_count(24) == 0
+
+    def test_reset_skipped_stationary_tally_clears(self, db, tmp_path,
+                                                     monkeypatch):
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', lambda _p: False,
+        )
+        archive_producer.enqueue_with_peek([path], db_path=db)
+        assert archive_producer.get_skipped_stationary_count(24) == 1
+        archive_producer.reset_skipped_stationary_tally()
+        assert archive_producer.get_skipped_stationary_count(24) == 0

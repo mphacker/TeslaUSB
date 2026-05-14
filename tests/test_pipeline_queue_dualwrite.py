@@ -2265,3 +2265,127 @@ class TestRecoverStaleClaimsPipeline:
         assert pqs.recover_stale_claims_pipeline(
             db_path=str(bad),
         ) == 0
+
+
+# ============================================================================
+# Wave 4 PR-E ??? stale-recovery telemetry (#184 / closes #195)
+# ============================================================================
+# Counters live at module scope, reset on import. To keep tests
+# isolated we manually reset them inside each test.
+
+
+class TestRecoveryTelemetry:
+    def _reset(self):
+        with pqs._recover_stale_claims_lock:
+            pqs._recover_stale_claims_total = 0
+            pqs._recover_stale_claims_last_at = None
+            pqs._recover_stale_claims_last_count = 0
+            pqs._recover_stale_claims_call_count = 0
+
+    def test_initial_telemetry_is_zeroed(self, geodata_db):
+        self._reset()
+        t = pqs.get_recovery_telemetry()
+        assert t['stale_recoveries_total'] == 0
+        assert t['stale_recoveries_last_at'] is None
+        assert t['stale_recoveries_last_count'] == 0
+        assert t['stale_recoveries_call_count'] == 0
+
+    def test_zero_result_call_bumps_call_count_only(self, geodata_db):
+        # Empty DB ??? recovery returns 0, telemetry's call_count
+        # bumps but totals/last fields stay zero/None.
+        self._reset()
+        n = pqs.recover_stale_claims_pipeline(db_path=geodata_db)
+        assert n == 0
+        t = pqs.get_recovery_telemetry()
+        assert t['stale_recoveries_total'] == 0
+        assert t['stale_recoveries_last_at'] is None
+        assert t['stale_recoveries_last_count'] == 0
+        assert t['stale_recoveries_call_count'] == 1
+
+    def test_non_zero_result_bumps_all_counters(self, geodata_db):
+        self._reset()
+        # Seed a stale claim then recover.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute(
+                """INSERT INTO pipeline_queue
+                       (source_path, stage, status, priority,
+                        enqueued_at, claimed_by, claimed_at, attempts,
+                        legacy_table)
+                   VALUES (?, 'archive_pending', 'in_progress', 2,
+                           100.0, ?, ?, 1, 'archive_queue')""",
+                ('/x/orphan-1.mp4', 'crashed', 1.0),
+            )
+            c.commit()
+        finally:
+            c.close()
+        n = pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=10.0, now=10000.0,
+        )
+        assert n == 1
+        t = pqs.get_recovery_telemetry()
+        assert t['stale_recoveries_total'] == 1
+        assert t['stale_recoveries_last_at'] == 10000.0
+        assert t['stale_recoveries_last_count'] == 1
+        assert t['stale_recoveries_call_count'] == 1
+
+    def test_total_accumulates_across_calls(self, geodata_db):
+        self._reset()
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            for i in range(3):
+                c.execute(
+                    """INSERT INTO pipeline_queue
+                           (source_path, stage, status, priority,
+                            enqueued_at, claimed_by, claimed_at, attempts,
+                            legacy_table)
+                       VALUES (?, 'archive_pending', 'in_progress', 2,
+                               100.0, ?, ?, 1, 'archive_queue')""",
+                    (f'/x/orphan-{i}.mp4', f'crashed-{i}', float(i)),
+                )
+            c.commit()
+        finally:
+            c.close()
+        # First call recovers 3 rows.
+        n1 = pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=1.0, now=100.0,
+        )
+        assert n1 == 3
+        # Second call recovers 0 (already pending).
+        n2 = pqs.recover_stale_claims_pipeline(
+            db_path=geodata_db, max_age_seconds=1.0, now=200.0,
+        )
+        assert n2 == 0
+        t = pqs.get_recovery_telemetry()
+        assert t['stale_recoveries_total'] == 3
+        # last_at + last_count from the FIRST (non-zero) call,
+        # not overwritten by the zero-result second call.
+        assert t['stale_recoveries_last_at'] == 100.0
+        assert t['stale_recoveries_last_count'] == 3
+        assert t['stale_recoveries_call_count'] == 2
+
+
+class TestPipelineStatusMergesRecoveryTelemetry:
+    def test_status_includes_telemetry_keys(self, geodata_db):
+        with pqs._recover_stale_claims_lock:
+            pqs._recover_stale_claims_total = 17
+            pqs._recover_stale_claims_last_at = 9999.0
+            pqs._recover_stale_claims_last_count = 5
+            pqs._recover_stale_claims_call_count = 23
+        try:
+            status = pqs.pipeline_status(db_path=geodata_db)
+            assert status.get('stale_recoveries_total') == 17
+            assert status.get('stale_recoveries_last_at') == 9999.0
+            assert status.get('stale_recoveries_last_count') == 5
+            assert status.get('stale_recoveries_call_count') == 23
+            # Existing keys still present.
+            assert 'total' in status
+            assert 'by_legacy_stage_status' in status
+        finally:
+            with pqs._recover_stale_claims_lock:
+                pqs._recover_stale_claims_total = 0
+                pqs._recover_stale_claims_last_at = None
+                pqs._recover_stale_claims_last_count = 0
+                pqs._recover_stale_claims_call_count = 0

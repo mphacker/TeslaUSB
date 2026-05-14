@@ -1860,6 +1860,92 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
 
 
 # ---------------------------------------------------------------------------
+# Wave 4 PR-E (issue #184): pipeline_queue shadow comparison
+# ---------------------------------------------------------------------------
+# Pure observability — peek at what the unified ``pipeline_queue``
+# reader would pick BEFORE each legacy ``archive_queue`` claim, log
+# WARNING when they disagree. Validates the dual-write end-to-end
+# against real production traffic so we can confirm the unified
+# reader is safe to switch on (PR-F) before flipping the cutover.
+# Counters live at module scope (process-local, reset on restart) so
+# operators can read totals via the upcoming status endpoint without
+# grepping the journal for every line.
+
+# Throttle for "agreement" log lines so a healthy queue doesn't
+# flood the journal — log every Nth match at INFO so operators can
+# see the shadow path is still firing, while disagreements always
+# log at WARNING with both paths.
+_SHADOW_AGREEMENT_LOG_EVERY = 500
+
+_shadow_lock = threading.Lock()
+_shadow_agreement_count = 0
+_shadow_disagreement_count = 0
+
+
+def _shadow_pipeline_queue_enabled() -> bool:
+    """Return True iff the operator has the shadow-mode flag on.
+
+    Wrapped in a function so a config reload (or test override) is
+    picked up on the next worker iteration without restarting the
+    thread. Lazy import so the worker module can still be imported
+    in test contexts where ``config`` isn't bootstrapped.
+    """
+    try:
+        from config import ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE
+        return bool(ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _shadow_compare_picks(*, legacy_path: Optional[str],
+                          pipeline_path: Optional[str]) -> None:
+    """Compare the legacy and pipeline_queue picks; log on mismatch.
+
+    Both ``None`` ⇒ both readers say "queue empty" — no log.
+    Both equal ⇒ readers agree — bump the agreement counter and log
+    every ``_SHADOW_AGREEMENT_LOG_EVERY`` matches at INFO.
+    Disagreement ⇒ log WARNING with both paths and bump the
+    disagreement counter. The counters are read by tests and (in a
+    later PR) surfaced in the status endpoint.
+    """
+    global _shadow_agreement_count, _shadow_disagreement_count
+    if legacy_path == pipeline_path:
+        with _shadow_lock:
+            _shadow_agreement_count += 1
+            count = _shadow_agreement_count
+        if count % _SHADOW_AGREEMENT_LOG_EVERY == 0:
+            logger.info(
+                "Wave 4 PR-E shadow: pipeline_queue agreed with "
+                "archive_queue on %d consecutive picks",
+                count,
+            )
+        return
+    with _shadow_lock:
+        _shadow_disagreement_count += 1
+    logger.warning(
+        "Wave 4 PR-E shadow: pipeline_queue and archive_queue "
+        "disagreed on next pick — legacy=%r pipeline=%r "
+        "(disagreement #%d). This indicates a dual-write gap; "
+        "investigate before PR-F cuts over the reader.",
+        legacy_path, pipeline_path, _shadow_disagreement_count,
+    )
+
+
+def get_shadow_telemetry() -> Dict[str, int]:
+    """Return the in-memory shadow comparison counters as a snapshot.
+
+    Process-local, reset on restart. Used by tests and by the
+    Settings page to confirm the shadow mode is firing in
+    production.
+    """
+    with _shadow_lock:
+        return {
+            'shadow_agreement_count': _shadow_agreement_count,
+            'shadow_disagreement_count': _shadow_disagreement_count,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Worker thread loop
 # ---------------------------------------------------------------------------
 
@@ -1892,6 +1978,25 @@ def _run_worker_loop(db_path: str, archive_root: str,
             )
     except Exception as e:  # noqa: BLE001
         logger.warning("recover_stale_claims failed at startup: %s", e)
+
+    # Wave 4 PR-E (issue #184 / #193): also recover stale claims in
+    # the unified ``pipeline_queue``. Idempotent — returns 0 when
+    # nothing to do (the common case during the dual-write window
+    # because the pipeline_queue claim path isn't wired in production
+    # yet). NEVER raises. Decoupled from the legacy recovery above so
+    # one failing doesn't suppress the other.
+    try:
+        from services import pipeline_queue_service as pqs
+        pq_released = pqs.recover_stale_claims_pipeline()
+        if pq_released:
+            logger.info(
+                "Archive worker %s released %d stale pipeline_queue claims at startup",
+                worker_id, pq_released,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "recover_stale_claims_pipeline failed at startup: %s", e,
+        )
 
     # Sweep .partial orphans left behind by a prior crash. Runs once
     # at worker startup, before the loop begins claiming rows; safe
@@ -2022,6 +2127,31 @@ def _run_worker_loop(db_path: str, archive_root: str,
         new_status: Optional[str] = None
         claim_failed = False
         try:
+            # Wave 4 PR-E (issue #184): shadow-mode peek at
+            # ``pipeline_queue`` BEFORE the legacy claim so we can
+            # compare the two readers' picks against the same queue
+            # state. Pure observability — the result drives a log
+            # line only; no behavioural change. Done before the
+            # legacy claim because the dual-write fires on UPDATE,
+            # which would move the pipeline_queue row to in_progress
+            # and invalidate the comparison.
+            shadow_peek_path: Optional[str] = None
+            if _shadow_pipeline_queue_enabled():
+                try:
+                    from services import pipeline_queue_service as pqs
+                    peeked = pqs.peek_next_for_stage(
+                        stage='archive_pending',
+                    )
+                    if peeked is not None:
+                        shadow_peek_path = peeked.get('source_path')
+                except Exception as e:  # noqa: BLE001
+                    # Shadow path must NEVER affect the worker. Log
+                    # at DEBUG so a misconfigured DB path doesn't
+                    # spam WARNING on every iteration.
+                    logger.debug(
+                        "shadow peek_next_for_stage failed: %s", e,
+                    )
+
             try:
                 row = archive_queue.claim_next_for_worker(
                     worker_id, db_path=db_path,
@@ -2034,6 +2164,16 @@ def _run_worker_loop(db_path: str, archive_root: str,
 
             if row is None and not claim_failed:
                 _set_state(last_drained_at=time.time())
+
+            # Wave 4 PR-E: compare the two readers' picks. If they
+            # disagree, log WARNING with both paths so dual-write
+            # gaps surface in journalctl. If both are None or both
+            # match, no log (steady-state silence).
+            if shadow_peek_path is not None or row is not None:
+                _shadow_compare_picks(
+                    legacy_path=row.get('source_path') if row else None,
+                    pipeline_path=shadow_peek_path,
+                )
 
             if row is not None:
                 # If pause arrived between claim and process, release

@@ -276,3 +276,14 @@ archive_queue:
   # editing this file by SSH.
   stable_write_age_seconds: 5.0          # Re-queue clips whose mtime is fresher than this many seconds (avoids copying mid-write)
   stale_claim_max_age_seconds: 600.0     # Reset 'claimed' rows older than this back to 'pending' on worker startup (recovers crashed/OOMed claims)
+  # Wave 4 PR-E (issue #184): shadow-mode validation of the unified
+  # ``pipeline_queue``. When enabled, the archive worker peeks at
+  # ``pipeline_queue`` immediately before each ``archive_queue`` claim
+  # and logs a WARNING if the two readers disagree on which row is
+  # next. Pure observability — no behavioural change. Used to verify
+  # the dual-write produces correct ordering against real production
+  # traffic before PR-F cuts over the actual reader. Disable to
+  # silence the (cheap) extra peek; default ``true`` so we get
+  # production validation data while it's still cheap to fix
+  # mismatches.
+  shadow_pipeline_queue: true

@@ -51,8 +51,13 @@ Public API:
 * :func:`recover_stale_claims_pipeline` — Wave 4 PR-D; release
   ``in_progress`` rows whose claimer crashed (claimed_at older
   than threshold). Called once at worker startup.
+* :func:`get_recovery_telemetry` — Wave 4 PR-E (#195); read the
+  in-memory stale-recovery counters (total recovered, last call
+  timestamp, last call count, total call count). Reset on
+  ``gadget_web`` restart.
 * :func:`pipeline_status` — debug / verification view (counts grouped
-  by legacy_table + stage + status).
+  by legacy_table + stage + status), augmented with the
+  ``get_recovery_telemetry`` counters.
 * :func:`backfill_legacy_queues` — one-time migration helper.
 """
 
@@ -62,6 +67,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -111,6 +117,21 @@ PRIORITY_INDEXING = 5            # default indexing
 # task_coordinator may pause on high loadavg) but short enough that
 # a real crash is detected within the same boot cycle.
 _PIPELINE_STALE_CLAIM_SECONDS = 1800.0
+
+
+# Wave 4 PR-E (issue #195): stale-recovery telemetry counters.
+# Process-local (no DB write), reset on gadget_web restart. Surfaced
+# via :func:`pipeline_status` so operators can spot a flapping crash
+# loop that releases the same rows over and over (which would
+# otherwise only show up as repeated WARNING lines in the journal).
+# A monotonic counter, the timestamp of the last non-zero recovery
+# call, and the count from that call are all the operator needs to
+# answer "is recovery healthy or pathological?".
+_recover_stale_claims_lock = threading.Lock()
+_recover_stale_claims_total = 0
+_recover_stale_claims_last_at: Optional[float] = None
+_recover_stale_claims_last_count = 0
+_recover_stale_claims_call_count = 0  # incl. zero-result calls
 
 
 # ---------------------------------------------------------------------------
@@ -884,6 +905,23 @@ def recover_stale_claims_pipeline(
                 "Released %d stale pipeline_queue claim(s) (>%ds old)",
                 released, int(max_age_seconds),
             )
+        # Wave 4 PR-E (issue #195): bump telemetry counters under
+        # lock so concurrent recovery calls (only ever one, but
+        # defensive for future workers) don't race on the read-modify-
+        # write of the running totals. Always bumped — the call_count
+        # / last_at pair tells operators "recovery is being called
+        # but finds nothing" vs. "recovery is repeatedly releasing
+        # rows", which is the actual diagnostic question.
+        global _recover_stale_claims_total
+        global _recover_stale_claims_last_at
+        global _recover_stale_claims_last_count
+        global _recover_stale_claims_call_count
+        with _recover_stale_claims_lock:
+            _recover_stale_claims_call_count += 1
+            if released > 0:
+                _recover_stale_claims_total += released
+                _recover_stale_claims_last_at = now
+                _recover_stale_claims_last_count = released
         return released
     except sqlite3.Error as e:
         logger.warning("recover_stale_claims_pipeline failed: %s", e)
@@ -894,6 +932,36 @@ def recover_stale_claims_pipeline(
                 conn.close()
             except sqlite3.Error:
                 pass
+
+
+def get_recovery_telemetry() -> Dict[str, Any]:
+    """Return the in-memory stale-recovery counters as a snapshot dict.
+
+    Process-local counters reset on ``gadget_web`` restart. Used by
+    :func:`pipeline_status` so the Settings page / status endpoint
+    can show "recovery is healthy" vs. "recovery is repeatedly
+    releasing rows" — the latter is a strong signal that a worker is
+    crash-looping. Per follow-up issue #195.
+
+    Keys:
+      * ``stale_recoveries_total``: monotonic count of rows recovered
+        since process start.
+      * ``stale_recoveries_last_at``: epoch seconds of the last
+        non-zero recovery call (``None`` if never).
+      * ``stale_recoveries_last_count``: count from the last
+        non-zero recovery call (0 if never).
+      * ``stale_recoveries_call_count``: total recovery calls made
+        (including zero-result calls). High call_count + zero total
+        = "called but found nothing", which is the healthy steady
+        state.
+    """
+    with _recover_stale_claims_lock:
+        return {
+            'stale_recoveries_total': _recover_stale_claims_total,
+            'stale_recoveries_last_at': _recover_stale_claims_last_at,
+            'stale_recoveries_last_count': _recover_stale_claims_last_count,
+            'stale_recoveries_call_count': _recover_stale_claims_call_count,
+        }
 
 
 def pipeline_status(db_path: Optional[str] = None) -> Dict[str, Any]:
@@ -916,7 +984,7 @@ def pipeline_status(db_path: Optional[str] = None) -> Dict[str, Any]:
                GROUP BY legacy_table, stage, status
                ORDER BY legacy_table, stage, status"""
         ).fetchall()
-        return {
+        result: Dict[str, Any] = {
             'total': sum(r['n'] for r in rows),
             'by_legacy_stage_status': [
                 {
@@ -928,6 +996,11 @@ def pipeline_status(db_path: Optional[str] = None) -> Dict[str, Any]:
                 for r in rows
             ],
         }
+        # Wave 4 PR-E (issue #195): merge in the in-memory
+        # stale-recovery counters so a single endpoint payload
+        # answers "is the queue OK and is the recovery healthy?"
+        result.update(get_recovery_telemetry())
+        return result
     except sqlite3.Error as e:
         logger.warning("pipeline_status failed: %s", e)
         return {}

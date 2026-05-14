@@ -271,6 +271,95 @@ class TestV14ToV15Migration:
         finally:
             c2.close()
 
+    def test_migration_skips_jitter_and_park(self, tmp_path):
+        # PR #187 review #3 + #4 regression test. v14→v15 must use the
+        # same noise-floor + PARK semantics as the runtime path —
+        # otherwise a v14→v15 upgrade backfills cold rows for every
+        # parked-Sentry waypoint, while a fresh-install v15 would
+        # produce zero rows for the same data. Asymmetry would
+        # silently corrupt analytics dashboards.
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        # Seed 4 waypoints directly: jitter-only, PARK-only,
+        # UNKNOWN-only, and a real-driving row.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO trips (id, start_time, source_folder) "
+                "VALUES (1, '2026-05-04T08:00:00', 'RecentClips')"
+            )
+            # 1: pure jitter (accel below 0.05 threshold, gear UNKNOWN)
+            conn.execute(
+                """INSERT INTO waypoints
+                    (trip_id, timestamp, lat, lon, heading, speed_mps,
+                     autopilot_state, video_path, frame_offset,
+                     acceleration_x, acceleration_y, acceleration_z,
+                     gear, steering_angle, brake_applied,
+                     blinker_on_left, blinker_on_right)
+                   VALUES (1, '2026-05-04T08:00:00', 37.0, -122.0, 0,
+                           0, 'NONE', 'a.mp4', 0,
+                           0.01, -0.02, 0.03,
+                           'UNKNOWN', 0.2, 0, 0, 0)"""
+            )
+            # 2: PARK with no other signal — should NOT backfill
+            conn.execute(
+                """INSERT INTO waypoints
+                    (trip_id, timestamp, lat, lon, heading, speed_mps,
+                     autopilot_state, video_path, frame_offset,
+                     acceleration_x, acceleration_y, acceleration_z,
+                     gear, steering_angle, brake_applied,
+                     blinker_on_left, blinker_on_right)
+                   VALUES (1, '2026-05-04T08:00:01', 37.0, -122.0, 0,
+                           0, 'NONE', 'a.mp4', 1,
+                           0.0, 0.0, 0.0,
+                           'PARK', 0.0, 0, 0, 0)"""
+            )
+            # 3: UNKNOWN + zero — should NOT backfill
+            conn.execute(
+                """INSERT INTO waypoints
+                    (trip_id, timestamp, lat, lon, heading, speed_mps,
+                     autopilot_state, video_path, frame_offset,
+                     acceleration_x, acceleration_y, acceleration_z,
+                     gear, steering_angle, brake_applied,
+                     blinker_on_left, blinker_on_right)
+                   VALUES (1, '2026-05-04T08:00:02', 37.0, -122.0, 0,
+                           0, 'NONE', 'a.mp4', 2,
+                           0.0, 0.0, 0.0,
+                           'UNKNOWN', 0.0, 0, 0, 0)"""
+            )
+            # 4: real driving — DOES backfill
+            conn.execute(
+                """INSERT INTO waypoints
+                    (trip_id, timestamp, lat, lon, heading, speed_mps,
+                     autopilot_state, video_path, frame_offset,
+                     acceleration_x, acceleration_y, acceleration_z,
+                     gear, steering_angle, brake_applied,
+                     blinker_on_left, blinker_on_right)
+                   VALUES (1, '2026-05-04T08:00:03', 37.0, -122.0, 0,
+                           20, 'NONE', 'a.mp4', 3,
+                           1.5, 0.0, 0.0,
+                           'DRIVE', 5.0, 0, 0, 0)"""
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        conn = _init_db(db_path)
+        try:
+            cold = conn.execute(
+                "SELECT id, gear, acceleration_x FROM waypoints_cold "
+                "ORDER BY id"
+            ).fetchall()
+            # Only the real-driving row (id=4) should be in cold.
+            assert len(cold) == 1, (
+                f"only DRIVE row should backfill; got: "
+                f"{[dict(r) for r in cold]}"
+            )
+            assert cold[0]['gear'] == 'DRIVE'
+            assert cold[0]['acceleration_x'] == 1.5
+        finally:
+            conn.close()
+
     def test_fresh_install_at_v15_has_no_cold_cols_on_hot_table(self, tmp_path):
         db_path = str(tmp_path / "geodata.db")
         conn = _init_db(db_path)
@@ -457,6 +546,110 @@ class TestIndexVideoColdSplit:
             for row in cold:
                 assert row['gear'] == 'DRIVE'
                 assert row['acceleration_x'] != 0
+        finally:
+            conn.close()
+
+    def test_jitter_below_threshold_creates_no_cold_rows(self, tmp_path):
+        # PR #187 review Warning #1 regression test. A real Tesla IMU
+        # never reports exactly 0.0 — sensor noise floor is typically
+        # ±0.001–±0.05 m/s². If the runtime filter were ``!= 0`` (the
+        # original Wave 3 implementation), every parked-car Sentry
+        # frame would create a cold row and the hot/cold split would
+        # provide ZERO read-path benefit. The threshold must be tight
+        # enough to skip jitter but loose enough that any real coast
+        # / cruise / brake creates cold rows.
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        try:
+            # gear='UNKNOWN' (gear_state=99 falls outside _GEAR_NAMES);
+            # accel below 0.05 m/s² threshold. Steering is hardcoded to
+            # 0.0 in the test helper; the runtime path treats 0.0 as
+            # below the 0.5° threshold so it doesn't contribute signal.
+            payloads = [
+                _make_sei_protobuf(lat=37.7749, lon=-122.4194, speed=0.0,
+                                   gear=99, accel_x=0.005, accel_y=-0.01),
+                _make_sei_protobuf(lat=37.7749, lon=-122.4194, speed=0.0,
+                                   gear=99, accel_x=-0.02, accel_y=0.03),
+                _make_sei_protobuf(lat=37.7749, lon=-122.4194, speed=0.0,
+                                   gear=99, accel_x=0.04, accel_y=0.02),
+            ]
+            clip, root = self._seed_clip(tmp_path, payloads)
+            wc, _ = _unpack(_index_video(
+                conn, str(clip), root,
+                sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
+                trip_gap_minutes=5,
+            ))
+            assert wc == 3
+
+            cold = conn.execute(
+                "SELECT COUNT(*) AS n FROM waypoints_cold"
+            ).fetchone()['n']
+            assert cold == 0, (
+                "sensor jitter below noise threshold MUST NOT bloat "
+                "waypoints_cold; runtime filter is too loose if this fails"
+            )
+        finally:
+            conn.close()
+
+    def test_jitter_above_threshold_creates_cold_rows(self, tmp_path):
+        # Companion to the test above: as soon as jitter clearly exceeds
+        # the noise floor, we DO want a cold row — that's a real coast/
+        # brake transition, not sensor wander.
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        try:
+            # accel comfortably above 0.05 m/s² threshold.
+            payloads = [
+                _make_sei_protobuf(lat=37.7749, lon=-122.4194, speed=15.0,
+                                   gear=1, accel_x=0.15),
+                _make_sei_protobuf(lat=37.7750, lon=-122.4195, speed=15.0,
+                                   gear=1, accel_x=0.20),
+                _make_sei_protobuf(lat=37.7751, lon=-122.4196, speed=15.0,
+                                   gear=1, accel_x=0.25),
+            ]
+            clip, root = self._seed_clip(tmp_path, payloads)
+            _index_video(
+                conn, str(clip), root,
+                sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
+                trip_gap_minutes=5,
+            )
+            cold = conn.execute(
+                "SELECT COUNT(*) AS n FROM waypoints_cold"
+            ).fetchone()['n']
+            assert cold == 3, "real coast/brake must create cold rows"
+        finally:
+            conn.close()
+
+    def test_park_gear_alone_creates_no_cold_rows(self, tmp_path):
+        # Sentry events on a parked car emit gear='PARK' for every
+        # 30 Hz × 60 s = 1 800 waypoints in the clip. Recording 1 800
+        # identical "still parked" cold rows per parked event would
+        # dwarf the few thousand driving rows that actually carry
+        # telemetry signal — defeating the design goal documented in
+        # the v15 ``waypoints_cold`` table comment ("parked-car
+        # waypoints (all-null telemetry) consume zero cold pages").
+        db_path = str(tmp_path / "test.db")
+        conn = _init_db(db_path)
+        try:
+            payloads = [
+                _make_sei_protobuf(lat=37.7749, lon=-122.4194, speed=0.0,
+                                   gear=0, accel_x=0.0, accel_y=0.0),
+                _make_sei_protobuf(lat=37.7749, lon=-122.4194, speed=0.0,
+                                   gear=0, accel_x=0.0, accel_y=0.0),
+            ]
+            clip, root = self._seed_clip(tmp_path, payloads)
+            _index_video(
+                conn, str(clip), root,
+                sample_rate=1, thresholds=DEFAULT_THRESHOLDS,
+                trip_gap_minutes=5,
+            )
+            cold = conn.execute(
+                "SELECT COUNT(*) AS n FROM waypoints_cold"
+            ).fetchone()['n']
+            assert cold == 0, (
+                "PARK alone with no other signal MUST NOT create cold "
+                "rows — see _COLD_GEAR_NO_SIGNAL in mapping_service"
+            )
         finally:
             conn.close()
 

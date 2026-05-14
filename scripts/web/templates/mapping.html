@@ -3086,6 +3086,14 @@ document.addEventListener('click', function(e) {
 });
 
 function closeVideoOverlay() {
+    // Bump the open-sequence counter so any in-flight lazy-load
+    // telemetry fetch (started by openVideoOverlay) discards its
+    // response when it returns. The fetch's own ``opSeq !== overlayOpenSeq``
+    // check below is the single source of truth for "is this response
+    // still relevant?" — keep it that way by always invalidating here,
+    // not by relying on overlayWaypoints being empty (a future change
+    // that re-populates the array after close would silently break).
+    ++overlayOpenSeq;
     const existing = document.getElementById('videoOverlay');
     if (existing) {
         const video = existing.querySelector('video');

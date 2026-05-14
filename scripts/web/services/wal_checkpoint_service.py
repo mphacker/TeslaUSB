@@ -86,6 +86,18 @@ def _checkpoint_one(db_path: str) -> None:
     same conservative pragmas as
     :func:`services.mapping_migrations._init_db` so we don't re-mmap
     or grow the page cache.
+
+    Design note (PR #187 Info #8): we deliberately open a fresh
+    ``sqlite3.connect()`` per tick per DB rather than caching a
+    module-level connection. Per-tick cost on a Pi Zero 2 W is ~5 ms
+    × 2 DBs × every 30 s ≈ 0.05 % CPU — negligible. The benefit of
+    fresh connections is that we carry no long-lived state across
+    DB-file lifecycle events: a future feature that swaps
+    ``geodata.db`` after a corruption-recovery import (or the v15
+    migration's table-rebuild path) cannot leave us holding a stale
+    file descriptor. If profiling ever shows this loop as hot, cache
+    a per-DB connection and add a "rebind on file mtime change"
+    invalidation hook — but until then the simpler design wins.
     """
     if not db_path or not os.path.isfile(db_path):
         return

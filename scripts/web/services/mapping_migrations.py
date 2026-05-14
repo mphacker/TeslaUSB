@@ -868,21 +868,32 @@ def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
         # collide on PRIMARY KEY ``id``.
         #
         # The WHERE clause filters out rows whose cold telemetry is
-        # entirely at the v14 SQL DEFAULT (0 for numerics, NULL for
-        # ``gear``). Without this filter the cold table would get
-        # one row per waypoint — bloating the very table the split
-        # exists to keep small. The DEFAULT comparison is verbose
-        # but it's the only correct semantic: a row where all cold
-        # fields are exactly the SQL default carries no telemetry
-        # signal, so it doesn't need a cold row.
+        # entirely at sensor noise / no-signal defaults. The thresholds
+        # mirror ``mapping_service._index_video`` exactly so a v14→v15
+        # upgrade and a fresh v15 install populate ``waypoints_cold``
+        # with the same row set. Without absolute-tolerance thresholds
+        # the cold table would get one row per waypoint (Tesla's IMU
+        # noise floor of ±0.001–±0.05 m/s² makes ``acceleration_x != 0``
+        # true on virtually every parked-car waypoint), defeating the
+        # split's purpose.
+        from services.mapping_service import (
+            _COLD_ACCEL_THRESHOLD_MPS2,
+            _COLD_STEERING_THRESHOLD_DEG,
+            _COLD_GEAR_NO_SIGNAL,
+        )
+        accel_thresh = float(_COLD_ACCEL_THRESHOLD_MPS2)
+        steering_thresh = float(_COLD_STEERING_THRESHOLD_DEG)
+        gear_no_signal_csv = ", ".join(
+            f"'{g}'" for g in sorted(_COLD_GEAR_NO_SIGNAL)
+        )
         conn.execute(
             f"INSERT OR IGNORE INTO waypoints_cold (id, {col_list}) "
             f"SELECT id, {col_list} FROM waypoints "
-            "WHERE (acceleration_x IS NOT NULL AND acceleration_x != 0) "
-            "   OR (acceleration_y IS NOT NULL AND acceleration_y != 0) "
-            "   OR (acceleration_z IS NOT NULL AND acceleration_z != 0) "
-            "   OR gear IS NOT NULL "
-            "   OR (steering_angle IS NOT NULL AND steering_angle != 0) "
+            f"WHERE (acceleration_x IS NOT NULL AND ABS(acceleration_x) > {accel_thresh}) "
+            f"   OR (acceleration_y IS NOT NULL AND ABS(acceleration_y) > {accel_thresh}) "
+            f"   OR (acceleration_z IS NOT NULL AND ABS(acceleration_z) > {accel_thresh}) "
+            f"   OR (gear IS NOT NULL AND gear NOT IN ({gear_no_signal_csv})) "
+            f"   OR (steering_angle IS NOT NULL AND ABS(steering_angle) > {steering_thresh}) "
             "   OR brake_applied != 0 "
             "   OR blinker_on_left != 0 "
             "   OR blinker_on_right != 0"

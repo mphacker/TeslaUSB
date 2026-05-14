@@ -644,9 +644,16 @@ def claim_next_for_stage(
         row['attempts'] = (sel['attempts'] or 0) + 1
         if row.get('payload_json'):
             try:
-                row['payload'] = json.loads(row['payload_json'])
+                parsed = json.loads(row['payload_json'])
             except (json.JSONDecodeError, TypeError):
-                row['payload'] = {}
+                parsed = {}
+            # Defensive: producers declare ``payload: Dict[str, Any]``
+            # but a hand-crafted (or future) row could store a JSON
+            # list / number / string. Callers expect ``.get(...)`` to
+            # work, so coerce non-dict to empty dict — matches the
+            # docstring's "(or `{}` when JSON is absent/malformed)"
+            # contract.
+            row['payload'] = parsed if isinstance(parsed, dict) else {}
         else:
             row['payload'] = {}
         row['_claimed_by'] = claimed_by

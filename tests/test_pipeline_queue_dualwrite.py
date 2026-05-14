@@ -1574,7 +1574,12 @@ class TestClaimNextForStage:
         )
         assert claimed is not None
 
-    def test_two_concurrent_claims_get_different_rows(self, geodata_db):
+    def test_sequential_claims_pick_different_rows(self, geodata_db):
+        # Sequential depletion: each call returns a distinct row,
+        # the third returns None when both rows are in_progress.
+        # The actual race-defense (BEGIN IMMEDIATE + WHERE rowcount
+        # check) is exercised by
+        # ``test_two_threaded_claims_get_different_rows`` below.
         self._enqueue(geodata_db, '/x/a.mp4', priority=1)
         self._enqueue(geodata_db, '/x/b.mp4', priority=1)
         c1 = pqs.claim_next_for_stage(
@@ -1585,11 +1590,115 @@ class TestClaimNextForStage:
         )
         assert c1 is not None and c2 is not None
         assert c1['id'] != c2['id']
-        # Third claim should return None ? both rows are in_progress.
+        # Third claim should return None - both rows are in_progress.
         c3 = pqs.claim_next_for_stage(
             stage='archive_pending', claimed_by='w3', db_path=geodata_db,
         )
         assert c3 is None
+
+    def test_two_threaded_claims_get_different_rows(self, geodata_db):
+        # Real concurrency: two threads race through ``claim_next_for_stage``
+        # against the same DB. The BEGIN IMMEDIATE write-lock + the
+        # defensive ``WHERE status='pending'`` rowcount check together
+        # guarantee that each row is claimed by at most one worker even
+        # when both threads enter the function simultaneously. Without
+        # the atomicity primitives in place, this test would
+        # occasionally see the same row returned twice (or one thread
+        # succeeding with a row and the other returning the same row's
+        # post-update view).
+        import threading
+        self._enqueue(geodata_db, '/x/race-a.mp4', priority=1)
+        self._enqueue(geodata_db, '/x/race-b.mp4', priority=1)
+        results = [None, None]
+        barrier = threading.Barrier(2)
+
+        def _worker(idx, name):
+            barrier.wait(timeout=5.0)
+            results[idx] = pqs.claim_next_for_stage(
+                stage='archive_pending', claimed_by=name,
+                db_path=geodata_db,
+            )
+
+        t1 = threading.Thread(target=_worker, args=(0, 'thread-1'))
+        t2 = threading.Thread(target=_worker, args=(1, 'thread-2'))
+        t1.start(); t2.start()
+        t1.join(timeout=10.0); t2.join(timeout=10.0)
+        assert not t1.is_alive() and not t2.is_alive()
+        assert results[0] is not None and results[1] is not None
+        # Distinct ids: the BEGIN IMMEDIATE serialised the two
+        # SELECT-then-UPDATE pairs so no double-pick happened.
+        assert results[0]['id'] != results[1]['id']
+        # Both rows are now in_progress.
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            n = c.execute(
+                "SELECT COUNT(*) FROM pipeline_queue "
+                "WHERE status = 'in_progress'"
+            ).fetchone()[0]
+            assert n == 2
+        finally:
+            c.close()
+
+    def test_returns_none_when_db_corrupt(self, tmp_path):
+        # Write non-SQLite bytes into a path with the right extension;
+        # ``sqlite3.connect`` succeeds (it's lazy) but the first
+        # statement raises ``sqlite3.DatabaseError`` (a subclass of
+        # ``sqlite3.Error``). The function must swallow it and return
+        # None per the documented contract — no exception propagation.
+        bad = tmp_path / 'corrupt.db'
+        bad.write_bytes(b'this is not a sqlite database file at all\x00\x00')
+        result = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=str(bad),
+        )
+        assert result is None
+        # peek_next and ready_count must also degrade gracefully —
+        # they share the same swallow contract.
+        assert pqs.peek_next_for_stage(
+            stage='archive_pending', db_path=str(bad),
+        ) is None
+        assert pqs.ready_count_for_stage(
+            stage='archive_pending', db_path=str(bad),
+        ) == 0
+
+    def test_payload_non_dict_json_coerced_to_empty(self, geodata_db):
+        # Producers declare payload as Dict[str, Any] but a hand-crafted
+        # row (or a future producer bug) could store a JSON list /
+        # number / string / null. Callers expect ``.get(...)`` on
+        # ``row['payload']`` to work, so the helper must coerce
+        # non-dict to {} matching the docstring.
+        self._enqueue(geodata_db, '/x/list-payload.mp4')
+        import sqlite3 as _sql
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute(
+                "UPDATE pipeline_queue SET payload_json = '[1, 2, 3]' "
+                "WHERE source_path = ?", ('/x/list-payload.mp4',),
+            )
+            c.commit()
+        finally:
+            c.close()
+        claimed = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed is not None
+        assert claimed['payload'] == {}
+        # Same for a JSON null.
+        self._enqueue(geodata_db, '/x/null-payload.mp4')
+        c = _sql.connect(geodata_db)
+        try:
+            c.execute(
+                "UPDATE pipeline_queue SET payload_json = 'null' "
+                "WHERE source_path = ?", ('/x/null-payload.mp4',),
+            )
+            c.commit()
+        finally:
+            c.close()
+        claimed2 = pqs.claim_next_for_stage(
+            stage='archive_pending', claimed_by='w1', db_path=geodata_db,
+        )
+        assert claimed2 is not None
+        assert claimed2['payload'] == {}
 
     def test_payload_dict_synthesized_even_when_json_missing(self, geodata_db):
         self._enqueue(geodata_db, '/x/no-payload.mp4', payload=None)

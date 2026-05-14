@@ -48,7 +48,8 @@ import logging
 import os
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -94,20 +95,37 @@ def _resolve_pipeline_db() -> Optional[str]:
 
     Lazy import of ``config`` so unit tests that don't bootstrap the
     Flask app can still import this module without side effects.
+    Logs at DEBUG when the import fails so a broken bootstrap is at
+    least detectable in ``journalctl -u gadget_web`` (the dual-write
+    helpers swallow the resulting ``False`` return at WARNING via
+    their own paths, but a silent ``None`` here would otherwise look
+    indistinguishable from a deliberate test injection).
     """
     try:
         from config import MAPPING_DB_PATH  # type: ignore
         return MAPPING_DB_PATH
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.debug("pipeline_queue config not loaded: %s", e)
         return None
 
 
 def _open_pipeline_conn(db_path: str) -> sqlite3.Connection:
     """Open the pipeline DB with the same conservative pragmas as the
     rest of the geodata.db consumers. Caller must close.
+
+    ``synchronous=NORMAL`` + ``journal_mode=WAL`` are set here
+    defensively even though both are technically DB-wide and already
+    set by other geodata.db openers (`archive_queue._open_archive_conn`,
+    `indexing_queue_service._open_queue_conn`). ``journal_mode`` is
+    DB-wide and persistent; ``synchronous`` is per-connection and
+    defaults to ``FULL`` (~2× fsync latency) — without this line the
+    pipeline_queue path would be slower than the legacy queues that
+    sit beside it.
     """
     conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA mmap_size=0")
     conn.execute("PRAGMA cache_size=-256")
     conn.execute("PRAGMA busy_timeout=15000")
@@ -130,6 +148,7 @@ def dual_write_enqueue(*,
                        priority: int = PRIORITY_INDEXING,
                        dest_path: Optional[str] = None,
                        payload: Optional[Dict[str, Any]] = None,
+                       status: str = 'pending',
                        db_path: Optional[str] = None) -> bool:
     """Insert a row into ``pipeline_queue`` mirroring a legacy enqueue.
 
@@ -156,6 +175,12 @@ def dual_write_enqueue(*,
             ``{'expected_size': 1234, 'expected_mtime': 1.0}`` for
             archive; ``{'event_reason': 'sentry', 'upload_scope':
             'event_minute'}`` for LES.
+        status: Initial within-stage status. Defaults to ``'pending'``
+            for live producer hooks. Backfill paths pass the
+            translated legacy status (``'in_progress'`` / ``'done'`` /
+            ``'failed'``) so an already-completed legacy row lands as
+            ``stage='X_done', status='done'`` rather than
+            ``status='pending'`` (which would re-process it).
         db_path: Override the geodata.db path (test injection).
     """
     if not source_path or not stage or not legacy_table:
@@ -163,6 +188,13 @@ def dual_write_enqueue(*,
     if db_path is None:
         db_path = _resolve_pipeline_db()
     if not db_path:
+        return False
+    # Don't auto-create the DB on a misconfigured deploy; signal
+    # missing-DB consistently with ``pipeline_status``.
+    if not os.path.isfile(db_path):
+        logger.debug(
+            "pipeline_queue dual-write skipped (DB %s missing)", db_path,
+        )
         return False
     payload_text = json.dumps(payload, separators=(',', ':')) if payload else None
     conn = None
@@ -173,9 +205,9 @@ def dual_write_enqueue(*,
             INSERT OR IGNORE INTO pipeline_queue
                 (source_path, dest_path, stage, status, priority,
                  enqueued_at, payload_json, legacy_id, legacy_table)
-            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (source_path, dest_path, stage, int(priority),
+            (source_path, dest_path, stage, status, int(priority),
              _now_epoch(), payload_text, legacy_id, legacy_table),
         )
         conn.commit()
@@ -203,14 +235,26 @@ def dual_write_enqueue_many(rows: Iterable[Dict[str, Any]],
     but for a list of rows.
 
     ``rows`` is an iterable of dicts with keys matching the named
-    arguments of :func:`dual_write_enqueue`. Returns the count of
-    newly-inserted rows. Errors on individual rows are NOT raised;
-    the batch continues. SQLite errors at the executemany level
-    return 0 and log a warning.
+    arguments of :func:`dual_write_enqueue` (including the optional
+    ``status`` key). Returns the count of newly-inserted rows.
+    Errors on individual rows are NOT raised; the batch continues.
+    SQLite errors at the executemany level return 0 and log a
+    warning.
+
+    The returned count uses ``conn.total_changes`` deltas around the
+    ``executemany`` because SQLite's ``cur.rowcount`` after
+    ``executemany`` is the LAST statement's row count, not the sum,
+    and is unreliable when ``INSERT OR IGNORE`` skips some rows.
     """
     if db_path is None:
         db_path = _resolve_pipeline_db()
     if not db_path:
+        return 0
+    if not os.path.isfile(db_path):
+        logger.debug(
+            "pipeline_queue batched dual-write skipped (DB %s missing)",
+            db_path,
+        )
         return 0
     rows = list(rows)
     if not rows:
@@ -227,6 +271,7 @@ def dual_write_enqueue_many(rows: Iterable[Dict[str, Any]],
         payload_text = json.dumps(payload, separators=(',', ':')) if payload else None
         tuples.append((
             src, r.get('dest_path'), stage,
+            r.get('status', 'pending'),
             int(r.get('priority', PRIORITY_INDEXING)),
             now, payload_text,
             r.get('legacy_id'), legacy_table,
@@ -236,20 +281,19 @@ def dual_write_enqueue_many(rows: Iterable[Dict[str, Any]],
     conn = None
     try:
         conn = _open_pipeline_conn(db_path)
+        before = conn.total_changes
         conn.execute("BEGIN IMMEDIATE")
-        cur = conn.executemany(
+        conn.executemany(
             """
             INSERT OR IGNORE INTO pipeline_queue
                 (source_path, dest_path, stage, status, priority,
                  enqueued_at, payload_json, legacy_id, legacy_table)
-            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             tuples,
         )
         conn.commit()
-        # cur.rowcount in SQLite for executemany is the LAST statement's
-        # rowcount, not a sum — safer to count via a fresh SELECT.
-        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else len(tuples)
+        return max(0, conn.total_changes - before)
     except sqlite3.Error as e:
         logger.warning(
             "pipeline_queue dual-write batch failed (%d rows): %s",
@@ -313,7 +357,8 @@ def pipeline_status(db_path: Optional[str] = None) -> Dict[str, Any]:
 
 def backfill_legacy_queues(*,
                            pipeline_db_path: Optional[str] = None,
-                           cloud_db_path: Optional[str] = None) -> Dict[str, int]:
+                           cloud_db_path: Optional[str] = None,
+                           force: bool = False) -> Dict[str, int]:
     """Backfill ``pipeline_queue`` from the four legacy queue tables.
 
     Idempotent — re-running is safe (the unique constraint catches
@@ -323,6 +368,16 @@ def backfill_legacy_queues(*,
     BEFORE the dual-write hooks were installed (i.e., the backlog at
     upgrade time). After upgrade, dual-write keeps both tables in
     sync; this backfill only covers the upgrade gap.
+
+    **One-shot guard.** After the first successful run we record the
+    completion timestamp in ``kv_meta`` (key:
+    ``pipeline_backfill_completed_at``). Subsequent calls SKIP the
+    work and return zeroes — without this guard the backfill would
+    re-scan all four legacy tables on every boot and (for the
+    cross-DB tables) open one geodata.db connection per legacy row,
+    which on a Pi Zero 2 W stacks tens of seconds of useless SDIO
+    fsync work onto the most fragile boot phase. Set ``force=True``
+    to bypass the guard (tests and recovery use this).
 
     Two source DBs:
       * ``pipeline_db_path`` (geodata.db): archive_queue + indexing_queue
@@ -345,6 +400,18 @@ def backfill_legacy_queues(*,
         LEGACY_TABLE_LIVE_EVENT: 0,
         LEGACY_TABLE_CLOUD_SYNCED: 0,
     }
+
+    # One-shot guard — skip if a prior run completed successfully.
+    if not force and pipeline_db_path and os.path.isfile(pipeline_db_path):
+        prior = _kv_meta_get(pipeline_db_path,
+                             'pipeline_backfill_completed_at')
+        if prior:
+            logger.debug(
+                "pipeline_queue backfill already completed at %s — skipping",
+                prior,
+            )
+            return counts
+
     if pipeline_db_path and os.path.isfile(pipeline_db_path):
         counts[LEGACY_TABLE_ARCHIVE] = _backfill_archive_queue(pipeline_db_path)
         counts[LEGACY_TABLE_INDEXING] = _backfill_indexing_queue(pipeline_db_path)
@@ -358,7 +425,57 @@ def backfill_legacy_queues(*,
     total = sum(counts.values())
     if total:
         logger.info("pipeline_queue backfill: %s (total %d)", counts, total)
+
+    # Mark complete on success — even if total==0 (no backlog rows).
+    # The guarantee is "we have run the scan"; whether the legacy
+    # tables had rows is irrelevant.
+    if pipeline_db_path and os.path.isfile(pipeline_db_path):
+        _kv_meta_set(pipeline_db_path,
+                     'pipeline_backfill_completed_at',
+                     datetime.now(timezone.utc).isoformat())
     return counts
+
+
+def _kv_meta_get(db_path: str, key: str) -> Optional[str]:
+    """Read ``kv_meta`` value or return None."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        row = conn.execute(
+            "SELECT value FROM kv_meta WHERE key = ?", (key,),
+        ).fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def _kv_meta_set(db_path: str, key: str, value: str) -> bool:
+    """Upsert ``kv_meta`` value. Returns True on success."""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.execute(
+            "INSERT INTO kv_meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        logger.warning("kv_meta set %s failed: %s", key, e)
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
 
 def _backfill_archive_queue(pipeline_db: str) -> int:
@@ -502,6 +619,11 @@ def _backfill_live_event_queue(cloud_db: str, pipeline_db: Optional[str]) -> int
             STAGE_LIVE_EVENT_DONE if r['status'] == 'uploaded'
             else STAGE_LIVE_EVENT_PENDING
         )
+        # Translate the legacy status to the unified within-stage
+        # status. Without this mapping an already-uploaded LES row
+        # would land as ``stage='live_event_done', status='pending'``,
+        # causing the Phase I.2 worker to either skip it or
+        # re-process completed work.
         status = {
             'pending': 'pending',
             'uploading': 'in_progress',
@@ -520,6 +642,7 @@ def _backfill_live_event_queue(cloud_db: str, pipeline_db: Optional[str]) -> int
                 'event_reason': r['event_reason'],
                 'upload_scope': r['upload_scope'],
             },
+            status=status,
             db_path=pipeline_db,
         ):
             inserted += 1
@@ -564,8 +687,14 @@ def _backfill_cloud_synced_files(cloud_db: str, pipeline_db: Optional[str]) -> i
             STAGE_CLOUD_DONE if r['status'] == 'synced'
             else STAGE_CLOUD_PENDING
         )
+        # Translate the legacy status to the unified within-stage
+        # status. Without this an already-synced row would land
+        # ``stage='cloud_done', status='pending'`` and look like
+        # work that still needs to be done.
         status = {
             'pending': 'pending',
+            'queued': 'pending',
+            'uploading': 'in_progress',
             'syncing': 'in_progress',
             'synced': 'done',
             'failed': 'failed',
@@ -582,6 +711,7 @@ def _backfill_cloud_synced_files(cloud_db: str, pipeline_db: Optional[str]) -> i
                 'file_mtime': r['file_mtime'],
                 'last_error': r['last_error'],
             },
+            status=status,
             db_path=pipeline_db,
         ):
             inserted += 1

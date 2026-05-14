@@ -465,6 +465,7 @@ def enqueue_event_json(event_json_paths: List[str]) -> int:
         return 0
 
     inserted = 0
+    pending_dual_writes = []  # (path, dir, ts, reason, scope, id)
     try:
         conn = _open_db()
         try:
@@ -491,10 +492,17 @@ def enqueue_event_json(event_json_paths: List[str]) -> int:
                     logger.info(
                         "LES enqueued: %s reason=%s", event_dir, reason,
                     )
-                    _dual_write_pipeline_live_event(
+                    # Defer the dual-write: if we crash between this
+                    # point and ``conn.commit()`` below, the legacy
+                    # row vanishes (it was never committed) and we
+                    # MUST NOT leave an orphan pipeline_queue row
+                    # with a now-stale ``legacy_id``. Phase I.2's
+                    # worker uses ``legacy_id`` to cross-reference;
+                    # an orphan would point at a non-existent row.
+                    pending_dual_writes.append((
                         ej_path, event_dir, ts, reason,
                         LIVE_EVENT_UPLOAD_SCOPE, new_id,
-                    )
+                    ))
             if inserted:
                 conn.commit()
         finally:
@@ -504,6 +512,13 @@ def enqueue_event_json(event_json_paths: List[str]) -> int:
         # would silence MP4 callbacks for the indexer.
         logger.error("LES enqueue_event_json failed: %s", e)
         return 0
+
+    # Dual-write to pipeline_queue ONLY after the legacy commit
+    # succeeded — guarantees no orphans on crash mid-loop.
+    for ej_path, event_dir, ts, reason, scope, new_id in pending_dual_writes:
+        _dual_write_pipeline_live_event(
+            ej_path, event_dir, ts, reason, scope, new_id,
+        )
 
     if inserted:
         _wake.set()

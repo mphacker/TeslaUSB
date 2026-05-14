@@ -393,6 +393,15 @@ class TestBackfill:
             stages = {r['stage'] for r in rows}
             assert stages == {pqs.STAGE_LIVE_EVENT_PENDING,
                               pqs.STAGE_LIVE_EVENT_DONE}
+            # Pair assertion would have caught W1 in PR #190 review:
+            # cross-DB backfill computed the translated status but
+            # discarded it, so 'uploaded' rows landed as
+            # ``stage='live_event_done'`` with ``status='pending'``.
+            stage_status_pairs = {(r['stage'], r['status']) for r in rows}
+            assert stage_status_pairs == {
+                (pqs.STAGE_LIVE_EVENT_PENDING, 'pending'),
+                (pqs.STAGE_LIVE_EVENT_DONE, 'done'),
+            }
             for r in rows:
                 payload = json.loads(r['payload_json'])
                 assert 'event_dir' in payload
@@ -426,6 +435,30 @@ class TestBackfill:
         )
         assert counts[pqs.LEGACY_TABLE_CLOUD_SYNCED] == 2
 
+        # Pair assertion — the W1 review finding noted that the
+        # status translation map was computed but the value was
+        # discarded by ``dual_write_enqueue`` (which hardcoded
+        # ``status='pending'``). Now that ``dual_write_enqueue``
+        # accepts a ``status`` parameter, the 'synced' row must
+        # land as ``status='done'`` and the 'pending' row stays
+        # ``status='pending'``.
+        conn = sqlite3.connect(geodata_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT * FROM pipeline_queue "
+                "WHERE legacy_table = ? ORDER BY source_path",
+                (pqs.LEGACY_TABLE_CLOUD_SYNCED,),
+            ).fetchall()
+            assert len(rows) == 2
+            stage_status_pairs = {(r['stage'], r['status']) for r in rows}
+            assert stage_status_pairs == {
+                (pqs.STAGE_CLOUD_DONE, 'done'),
+                (pqs.STAGE_CLOUD_PENDING, 'pending'),
+            }
+        finally:
+            conn.close()
+
     def test_backfill_is_idempotent(self, geodata_db):
         conn = sqlite3.connect(geodata_db)
         conn.execute(
@@ -444,6 +477,65 @@ class TestBackfill:
         # First run inserts, second run is a no-op.
         assert a[pqs.LEGACY_TABLE_ARCHIVE] == 1
         assert b[pqs.LEGACY_TABLE_ARCHIVE] == 0
+
+    def test_backfill_one_shot_flag_skips_subsequent_calls(self, geodata_db):
+        """W4 fix: the one-shot ``kv_meta`` flag must short-circuit
+        every backfill call after the first. Verifies that legacy rows
+        added AFTER the first backfill are NOT picked up on the second
+        call (because dual-write hooks now own the upgrade-to-current
+        gap; the backfill is purely the one-time upgrade migration).
+        """
+        # First call: empty legacy queue → completes successfully and
+        # writes the kv_meta flag.
+        first = pqs.backfill_legacy_queues(pipeline_db_path=geodata_db,
+                                           cloud_db_path=None)
+        assert first[pqs.LEGACY_TABLE_ARCHIVE] == 0
+
+        # Verify the flag was set.
+        conn = sqlite3.connect(geodata_db)
+        try:
+            row = conn.execute(
+                "SELECT value FROM kv_meta WHERE key = ?",
+                ('pipeline_backfill_completed_at',),
+            ).fetchone()
+            assert row is not None
+            assert row[0]  # non-empty timestamp string
+        finally:
+            conn.close()
+
+        # Add a legacy row AFTER the flag was set.
+        conn = sqlite3.connect(geodata_db)
+        conn.execute(
+            "INSERT INTO archive_queue "
+            "(source_path, priority, status, enqueued_at) "
+            "VALUES (?, ?, ?, ?)",
+            ('/x/late.mp4', 2, 'pending', '2026-05-14T12:00:00'),
+        )
+        conn.commit()
+        conn.close()
+
+        # Second call must SKIP — the row is left for dual-write to
+        # handle on its next enqueue (or for ``force=True`` recovery).
+        second = pqs.backfill_legacy_queues(pipeline_db_path=geodata_db,
+                                            cloud_db_path=None)
+        assert second[pqs.LEGACY_TABLE_ARCHIVE] == 0
+
+        conn = sqlite3.connect(geodata_db)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM pipeline_queue "
+                "WHERE source_path = ?",
+                ('/x/late.mp4',),
+            ).fetchone()[0]
+            assert count == 0
+        finally:
+            conn.close()
+
+        # ``force=True`` bypasses the guard for recovery scenarios.
+        forced = pqs.backfill_legacy_queues(pipeline_db_path=geodata_db,
+                                            cloud_db_path=None,
+                                            force=True)
+        assert forced[pqs.LEGACY_TABLE_ARCHIVE] == 1
 
     def test_backfill_with_no_dbs(self, tmp_path):
         # Both DB paths missing — must return empty counts dict, not raise.

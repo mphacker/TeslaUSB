@@ -449,6 +449,44 @@ def _dual_write_pipeline_live_event(event_json_path: str,
         )
 
 
+def _dual_write_pipeline_live_event_state(
+    legacy_id: int,
+    *,
+    new_stage: Optional[str] = None,
+    status: Optional[str] = None,
+    attempts: Optional[int] = None,
+    last_error: Optional[str] = None,
+    completed_at: Optional[float] = None,
+    next_retry_at: Optional[float] = None,
+) -> None:
+    """State-transition dual-write for live_event_queue (Wave 4 PR-B).
+
+    Mirrors a legacy ``live_event_queue`` row's state transition into
+    ``pipeline_queue``. Looked up by ``legacy_table='live_event_queue'``
+    + ``legacy_id`` (the integer row id from live_event_queue).
+    Failures are swallowed at DEBUG.
+    """
+    if not legacy_id:
+        return
+    try:
+        from services import pipeline_queue_service as pqs
+        pqs.update_pipeline_row_by_legacy_id(
+            legacy_table=pqs.LEGACY_TABLE_LIVE_EVENT,
+            legacy_id=int(legacy_id),
+            new_stage=new_stage,
+            status=status,
+            attempts=attempts,
+            last_error=last_error,
+            completed_at=completed_at,
+            next_retry_at=next_retry_at,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "pipeline_queue LES state dual-write skipped for id=%s: %s",
+            legacy_id, e,
+        )
+
+
 def enqueue_event_json(event_json_paths: List[str]) -> int:
     """Producer: enqueue events from a list of ``event.json`` paths.
 
@@ -562,6 +600,13 @@ def _claim_next_pending(conn: sqlite3.Connection) -> Optional[Dict]:
     if cur.rowcount == 0:
         return None  # Someone else grabbed it
     conn.commit()
+    # Wave 4 PR-B: mirror the claim transition into pipeline_queue
+    # AFTER the legacy commit so a pipeline lock can't delay the
+    # legacy unlock.
+    _dual_write_pipeline_live_event_state(
+        int(row['id']),
+        status='in_progress',
+    )
     return dict(row)
 
 
@@ -571,12 +616,17 @@ def _release_claim_to_pending(conn: sqlite3.Connection, row_id: int) -> None:
     Used when the worker can't proceed (task_coordinator busy, WiFi
     dropped between claim and upload, etc.). Idempotent.
     """
-    conn.execute(
+    cur = conn.execute(
         "UPDATE live_event_queue SET status = 'pending' "
         "WHERE id = ? AND status = 'uploading'",
         (row_id,),
     )
     conn.commit()
+    if cur.rowcount:
+        _dual_write_pipeline_live_event_state(
+            int(row_id),
+            status='pending',
+        )
 
 
 def _record_attempt_start(conn: sqlite3.Connection, row_id: int) -> int:
@@ -602,7 +652,19 @@ def _record_attempt_start(conn: sqlite3.Connection, row_id: int) -> int:
         "SELECT attempts FROM live_event_queue WHERE id = ?",
         (row_id,),
     ).fetchone()
-    return int(row['attempts']) if row else 0
+    new_attempts = int(row['attempts']) if row else 0
+    # Wave 4 PR-B: gate on row existence, not on the new value.
+    # ``attempts`` is unsigned and starts at 0; a future refactor that
+    # legitimately resets attempts to 0 (e.g. retry_failed) would skip
+    # the mirror under the old ``if new_attempts:`` gate. ``row is not
+    # None`` matches the real precondition: there is a legacy row to
+    # mirror.
+    if row is not None:
+        _dual_write_pipeline_live_event_state(
+            int(row_id),
+            attempts=new_attempts,
+        )
+    return new_attempts
 
 
 def _mark_uploaded(conn: sqlite3.Connection, row_id: int,
@@ -614,6 +676,15 @@ def _mark_uploaded(conn: sqlite3.Connection, row_id: int,
         (_now_iso(), bytes_uploaded, row_id),
     )
     conn.commit()
+    # Wave 4 PR-B: terminal — promote pipeline_queue row to
+    # ``live_event_done`` / ``done``.
+    _dual_write_pipeline_live_event_state(
+        int(row_id),
+        new_stage='live_event_done',
+        status='done',
+        completed_at=time.time(),
+        last_error='',
+    )
 
 
 def _mark_failed(conn: sqlite3.Connection, row_id: int, attempts: int,
@@ -645,6 +716,24 @@ def _mark_failed(conn: sqlite3.Connection, row_id: int, attempts: int,
         logger.info("LES row %d transient defer in %ds: %s",
                     row_id, backoff, err[:200])
         conn.commit()
+        # Wave 4 PR-B: mirror transient defer (attempts rolled back
+        # to max(N-1, 0)). Re-read for the authoritative post-rollback
+        # count so the mirror doesn't drift below zero.
+        try:
+            r = conn.execute(
+                "SELECT attempts FROM live_event_queue WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            new_attempts = int(r['attempts']) if r else 0
+        except sqlite3.Error:
+            new_attempts = None  # type: ignore[assignment]
+        _dual_write_pipeline_live_event_state(
+            int(row_id),
+            status='pending',
+            attempts=new_attempts,
+            last_error=err[:500],
+            next_retry_at=next_retry,
+        )
         return
 
     if attempts >= LIVE_EVENT_RETRY_MAX_ATTEMPTS:
@@ -655,25 +744,45 @@ def _mark_failed(conn: sqlite3.Connection, row_id: int, attempts: int,
             (err[:500], row_id),
         )
         logger.error("LES row %d exhausted retries: %s", row_id, err[:200])
-    else:
-        # Pick the backoff for this attempt (clamp to last entry).
-        idx = max(0, attempts - 1)
-        if LIVE_EVENT_RETRY_BACKOFF_SECONDS:
-            idx = min(idx, len(LIVE_EVENT_RETRY_BACKOFF_SECONDS) - 1)
-            backoff = (retry_in_seconds if retry_in_seconds is not None
-                       else LIVE_EVENT_RETRY_BACKOFF_SECONDS[idx])
-        else:
-            backoff = retry_in_seconds if retry_in_seconds is not None else 60
-        next_retry = time.time() + backoff
-        conn.execute(
-            "UPDATE live_event_queue SET status = 'pending', "
-            "previous_last_error = last_error, "
-            "last_error = ?, next_retry_at = ? WHERE id = ?",
-            (err[:500], next_retry, row_id),
+        conn.commit()
+        # Wave 4 PR-B: terminal failure — promote to ``live_event_done``
+        # stage with status='failed' so the row is no longer picked by
+        # the unified worker (Phase I.2).
+        _dual_write_pipeline_live_event_state(
+            int(row_id),
+            new_stage='live_event_done',
+            status='failed',
+            attempts=int(attempts),
+            last_error=err[:500],
+            completed_at=time.time(),
         )
-        logger.warning("LES row %d retry %d in %ds: %s",
-                       row_id, attempts, backoff, err[:200])
+        return
+    # Pick the backoff for this attempt (clamp to last entry).
+    idx = max(0, attempts - 1)
+    if LIVE_EVENT_RETRY_BACKOFF_SECONDS:
+        idx = min(idx, len(LIVE_EVENT_RETRY_BACKOFF_SECONDS) - 1)
+        backoff = (retry_in_seconds if retry_in_seconds is not None
+                   else LIVE_EVENT_RETRY_BACKOFF_SECONDS[idx])
+    else:
+        backoff = retry_in_seconds if retry_in_seconds is not None else 60
+    next_retry = time.time() + backoff
+    conn.execute(
+        "UPDATE live_event_queue SET status = 'pending', "
+        "previous_last_error = last_error, "
+        "last_error = ?, next_retry_at = ? WHERE id = ?",
+        (err[:500], next_retry, row_id),
+    )
+    logger.warning("LES row %d retry %d in %ds: %s",
+                   row_id, attempts, backoff, err[:200])
     conn.commit()
+    # Wave 4 PR-B: mirror retry-defer.
+    _dual_write_pipeline_live_event_state(
+        int(row_id),
+        status='pending',
+        attempts=int(attempts),
+        last_error=err[:500],
+        next_retry_at=next_retry,
+    )
 
 
 def retry_failed(row_id: Optional[int] = None) -> int:
@@ -694,31 +803,58 @@ def retry_failed(row_id: Optional[int] = None) -> int:
     usual; a successful retry takes the row out of the failed view
     so the stale error is no longer rendered.
     """
+    affected_ids: List[int] = []
     try:
         conn = _open_db()
         try:
             _ensure_schema(conn)
+            # Wave 4 PR-B: ``BEGIN IMMEDIATE`` so no concurrent writer
+            # can flip a row into ``'failed'`` between the SELECT
+            # (which captures ids for the mirror) and the UPDATE
+            # (which would also flip the new row but skip its mirror).
+            conn.execute("BEGIN IMMEDIATE")
             if row_id is not None:
+                # Single-row branch: the caller already supplied the
+                # id, and the WHERE filter restricts the UPDATE to
+                # ``status = 'failed'``. ``cur.rowcount > 0`` tells us
+                # the row matched, so no separate SELECT is needed.
                 cur = conn.execute(
                     "UPDATE live_event_queue SET status = 'pending', "
                     "attempts = 0, next_retry_at = NULL "
                     "WHERE id = ? AND status = 'failed'",
                     (row_id,),
                 )
+                if cur.rowcount:
+                    affected_ids.append(int(row_id))
             else:
+                rows = conn.execute(
+                    "SELECT id FROM live_event_queue "
+                    "WHERE status = 'failed'"
+                ).fetchall()
                 cur = conn.execute(
                     "UPDATE live_event_queue SET status = 'pending', "
                     "attempts = 0, next_retry_at = NULL "
                     "WHERE status = 'failed'"
                 )
+                if cur.rowcount:
+                    affected_ids.extend(int(r['id']) for r in rows)
             n = cur.rowcount
-            if n:
-                conn.commit()
+            conn.commit()
         finally:
             conn.close()
     except Exception as e:
         logger.error("LES retry_failed failed: %s", e)
         return 0
+    # Wave 4 PR-B: mirror the reset-to-pending into pipeline_queue.
+    # Done AFTER the legacy commit + close so a pipeline lock can't
+    # delay the legacy unlock.
+    for affected in affected_ids:
+        _dual_write_pipeline_live_event_state(
+            affected,
+            status='pending',
+            attempts=0,
+            next_retry_at=0.0,
+        )
     if n:
         _wake.set()
     return n

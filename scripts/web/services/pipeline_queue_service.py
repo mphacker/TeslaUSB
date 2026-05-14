@@ -308,6 +308,203 @@ def dual_write_enqueue_many(rows: Iterable[Dict[str, Any]],
                 pass
 
 
+_UPDATE_COLUMNS: Tuple[str, ...] = (
+    "new_stage", "status", "attempts", "last_error",
+    "completed_at", "next_retry_at", "payload_json",
+)
+"""Names of the optional kwargs accepted by both
+:func:`update_pipeline_row` and
+:func:`update_pipeline_row_by_legacy_id`.
+
+Used by the "no kwargs passed" gate AND the SET-clause builder so a
+future column addition needs to be made in exactly one place. The
+DB column name happens to differ from the kwarg name only for
+``new_stage`` (column is ``stage``); :data:`_KWARG_TO_COLUMN`
+translates.
+"""
+
+_KWARG_TO_COLUMN: Dict[str, str] = {
+    "new_stage": "stage",
+    "status": "status",
+    "attempts": "attempts",
+    "last_error": "last_error",
+    "completed_at": "completed_at",
+    "next_retry_at": "next_retry_at",
+    "payload_json": "payload_json",
+}
+
+
+def _build_update_sql_and_params(
+    where_clause: str,
+    where_params: List[Any],
+    **kwargs,
+) -> Optional[Tuple[str, List[Any]]]:
+    """Build the UPDATE SQL + bind params for the ``update_pipeline_row*``
+    helpers.
+
+    Returns ``None`` when no settable kwargs were passed (so the
+    caller can short-circuit with the documented "silent no-op"
+    semantics). Otherwise returns ``(sql, params)`` where ``params``
+    is in positional order: SET values first, then the ``where_params``
+    appended.
+    """
+    set_clauses: List[str] = []
+    set_params: List[Any] = []
+    for kwarg_name in _UPDATE_COLUMNS:
+        value = kwargs.get(kwarg_name)
+        if value is None:
+            continue
+        column = _KWARG_TO_COLUMN[kwarg_name]
+        set_clauses.append(f"{column} = ?")
+        set_params.append(value)
+    if not set_clauses:
+        return None
+    sql = (
+        "UPDATE pipeline_queue SET "
+        + ", ".join(set_clauses)
+        + " WHERE " + where_clause
+    )
+    return sql, set_params + list(where_params)
+
+
+def update_pipeline_row(
+    *,
+    stage: str,
+    source_path: str,
+    new_stage: Optional[str] = None,
+    status: Optional[str] = None,
+    attempts: Optional[int] = None,
+    last_error: Optional[str] = None,
+    completed_at: Optional[float] = None,
+    next_retry_at: Optional[float] = None,
+    payload_json: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Update an existing ``pipeline_queue`` row identified by
+    ``(stage, source_path)`` to reflect a state transition on the
+    legacy queue side (claim / complete / release / fail).
+
+    Used by the legacy queue mutation functions in ``archive_queue``,
+    ``indexing_queue_service``, ``live_event_sync_service`` and
+    ``cloud_archive_service`` to keep ``pipeline_queue`` in sync with
+    every state change — without that, the table stale-drifts to
+    ``status='pending'`` after PR-A's enqueue dual-write fires once
+    and is never updated again.
+
+    **Idempotent / silent no-op semantics.** Returns ``False`` (not an
+    error) when:
+      * the DB doesn't exist (test or pre-migration boot),
+      * the matching row doesn't exist (PR-A only mirrored enqueues
+        that happened AFTER the dual-write hooks went live; older
+        legacy rows backfilled at PR-A time also exist, but very old
+        rows from before any tracking may legitimately not be there),
+      * sqlite hits an OperationalError (lock contention etc.).
+
+    All ``None`` parameters are LEFT UNCHANGED in the row. Pass only
+    what changed. ``new_stage`` is the optional terminal-stage
+    transition (e.g. ``archive_pending`` → ``archive_done``); when
+    omitted, the existing stage is preserved.
+
+    Caller MUST hold the legacy queue write transaction or wrap this
+    in their own try/finally — this helper deliberately does not
+    raise so a pipeline_queue glitch can never abort a legacy
+    mutation.
+    """
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    built = _build_update_sql_and_params(
+        "stage = ? AND source_path = ?",
+        [stage, source_path],
+        new_stage=new_stage, status=status, attempts=attempts,
+        last_error=last_error, completed_at=completed_at,
+        next_retry_at=next_retry_at, payload_json=payload_json,
+    )
+    if built is None:
+        # Nothing to update — silently no-op so callers don't have to
+        # track which optional kwargs they passed.
+        return False
+    sql, params = built
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        cur = conn.execute(sql, params)
+        conn.commit()
+        # ``rowcount`` here is the count of ROWS matched/updated
+        # for a non-executemany UPDATE — accurate.
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.debug(
+            "update_pipeline_row(stage=%s, src=%s) failed: %s",
+            stage, source_path, e,
+        )
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def update_pipeline_row_by_legacy_id(
+    *,
+    legacy_table: str,
+    legacy_id: int,
+    new_stage: Optional[str] = None,
+    status: Optional[str] = None,
+    attempts: Optional[int] = None,
+    last_error: Optional[str] = None,
+    completed_at: Optional[float] = None,
+    next_retry_at: Optional[float] = None,
+    payload_json: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Same as :func:`update_pipeline_row` but matches the row by
+    ``(legacy_table, legacy_id)`` — the back-pointer columns
+    populated at enqueue time. Lets ``archive_queue`` /
+    ``cloud_archive_service`` update by the same integer ``row_id``
+    they already know without a second SELECT for ``source_path``.
+
+    Same silent no-op semantics as the source_path variant.
+    """
+    if db_path is None:
+        db_path = _resolve_pipeline_db()
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    if not legacy_table or legacy_id is None:
+        return False
+    built = _build_update_sql_and_params(
+        "legacy_table = ? AND legacy_id = ?",
+        [legacy_table, int(legacy_id)],
+        new_stage=new_stage, status=status, attempts=attempts,
+        last_error=last_error, completed_at=completed_at,
+        next_retry_at=next_retry_at, payload_json=payload_json,
+    )
+    if built is None:
+        return False
+    sql, params = built
+    conn = None
+    try:
+        conn = _open_pipeline_conn(db_path)
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.debug(
+            "update_pipeline_row_by_legacy_id(table=%s, id=%s) failed: %s",
+            legacy_table, legacy_id, e,
+        )
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
 def pipeline_status(db_path: Optional[str] = None) -> Dict[str, Any]:
     """Return a small dict summarising the pipeline_queue state.
 
@@ -535,7 +732,12 @@ def _backfill_archive_queue(pipeline_db: str) -> int:
 
 
 def _backfill_indexing_queue(pipeline_db: str) -> int:
-    """Backfill from ``indexing_queue`` (same DB as pipeline_queue)."""
+    """Backfill from ``indexing_queue`` (same DB as pipeline_queue).
+
+    Wave 4 PR-B: ``source_path`` is set to ``canonical_key`` (not
+    ``file_path``) so state-mutation lookups by canonical_key work
+    against pipeline_queue rows. ``file_path`` is preserved in payload.
+    """
     conn = None
     try:
         conn = _open_pipeline_conn(pipeline_db)
@@ -548,7 +750,7 @@ def _backfill_indexing_queue(pipeline_db: str) -> int:
                  attempts, last_error, enqueued_at, next_retry_at,
                  payload_json, legacy_id, legacy_table)
             SELECT
-                file_path,
+                canonical_key,
                 'index_pending',
                 CASE
                     WHEN claimed_by IS NOT NULL THEN 'in_progress'
@@ -559,7 +761,7 @@ def _backfill_indexing_queue(pipeline_db: str) -> int:
                 last_error,
                 COALESCE(enqueued_at, ?),
                 next_attempt_at,
-                json_object('canonical_key', canonical_key,
+                json_object('file_path', file_path,
                             'source', source),
                 NULL,
                 'indexing_queue'

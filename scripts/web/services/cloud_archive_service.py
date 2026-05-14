@@ -674,6 +674,323 @@ def _dual_write_pipeline_cloud_synced_state(
         )
 
 
+# ---------------------------------------------------------------------------
+# Wave 4 PR-F2 (issue #184): unified ``pipeline_queue`` integration helpers
+# ---------------------------------------------------------------------------
+# Three opt-in flags lay the foundation for PR-F3's reader cutover:
+#
+#   * ``CLOUD_ARCHIVE_ENQUEUE_TO_PIPELINE`` — PRODUCER. When True,
+#     ``_discover_events`` enqueues each event into ``pipeline_queue``
+#     with ``stage='cloud_pending'`` (idempotent via the existing
+#     UNIQUE index). The legacy disk-walk + ``cloud_synced_files``
+#     path continues to drive uploads — the producer hook only
+#     POPULATES the unified queue so PR-F3's ``claim_next_for_stage``
+#     reader has rows to claim instead of an empty table.
+#
+#   * ``CLOUD_ARCHIVE_SHADOW_PIPELINE_QUEUE`` — OBSERVABILITY. When
+#     True (and the producer is also True), ``_drain_once`` peeks at
+#     the top-N ``cloud_pending`` rows in ``pipeline_queue`` before
+#     each upload pass and logs WARNING if the legacy reader's first
+#     pick is absent from the pipeline's top-N window. Pure
+#     observability — no behavioural change. Skipped when the
+#     producer is OFF (would always disagree — no rows to compare)
+#     and when the reader is ON (we ARE the pipeline reader, moot
+#     comparison).
+#
+#   * ``CLOUD_ARCHIVE_USE_PIPELINE_READER`` — RESERVED for PR-F3.
+#     Read here only for the shadow-skip predicate; PR-F3 will wire
+#     the actual reader switch.
+#
+# All three default OFF (except the shadow flag which defaults ON
+# but is gated on the producer flag) so a fresh deploy is a no-op
+# pending operator opt-in.
+# ---------------------------------------------------------------------------
+
+# Shadow-mode log-rate limits (mirror archive_worker for journal
+# hygiene). The first ``_CLOUD_SHADOW_DISAGREEMENT_LOG_VERBATIM``
+# mismatches log verbatim; after that we drop to one heartbeat
+# WARNING per ``_CLOUD_SHADOW_DISAGREEMENT_LOG_EVERY`` mismatches
+# with the running count.
+_CLOUD_SHADOW_AGREEMENT_LOG_EVERY = 500
+_CLOUD_SHADOW_DISAGREEMENT_LOG_VERBATIM = 10
+_CLOUD_SHADOW_DISAGREEMENT_LOG_EVERY = 100
+# Number of pipeline_queue candidates we peek at when comparing
+# against the legacy disk-walk's first pick. The legacy ranker uses
+# ``_score_event_priority`` (event > geo > none) while pipeline_queue
+# orders by ``priority, enqueued_at, id``. Both readers should agree
+# on the high-priority bucket; the top-N window absorbs intra-band
+# reordering (e.g. multiple Sentry events enqueued in a single boot
+# scan all land at PRIORITY_CLOUD_BULK and tie on priority).
+_CLOUD_SHADOW_PEEK_CANDIDATE_COUNT = 8
+
+_cloud_shadow_lock = threading.Lock()
+_cloud_shadow_agreement_count = 0
+_cloud_shadow_disagreement_count = 0
+_cloud_pipeline_enqueue_count = 0
+
+
+def _enqueue_to_pipeline_enabled() -> bool:
+    """Return True iff the producer hook is enabled.
+
+    Wrapped in a function so a config reload (or test override) is
+    picked up on the next ``_discover_events`` call without
+    restarting the worker thread. Lazy import so the module can
+    still be imported in test contexts where ``config`` isn't
+    bootstrapped.
+    """
+    try:
+        from config import CLOUD_ARCHIVE_ENQUEUE_TO_PIPELINE
+        return bool(CLOUD_ARCHIVE_ENQUEUE_TO_PIPELINE)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _shadow_pipeline_queue_enabled() -> bool:
+    """Return True iff the shadow-mode flag is enabled.
+
+    Shadow comparison is only meaningful when the producer hook is
+    also enabled (otherwise pipeline_queue has no ``cloud_pending``
+    rows to compare against the disk-walk pick). Callers MUST also
+    check :func:`_enqueue_to_pipeline_enabled` before invoking the
+    shadow path; this helper only checks the flag itself.
+    """
+    try:
+        from config import CLOUD_ARCHIVE_SHADOW_PIPELINE_QUEUE
+        return bool(CLOUD_ARCHIVE_SHADOW_PIPELINE_QUEUE)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _use_pipeline_reader_enabled() -> bool:
+    """Return True iff PR-F3's reader cutover flag is enabled.
+
+    PR-F2 only reads this for the shadow-skip predicate (when the
+    reader is ON we ARE the pipeline reader, so comparing ourselves
+    to ourselves is moot). PR-F3 will wire the actual reader switch.
+    """
+    try:
+        from config import CLOUD_ARCHIVE_USE_PIPELINE_READER
+        return bool(CLOUD_ARCHIVE_USE_PIPELINE_READER)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _enqueue_event_to_pipeline(
+    rel_path: str,
+    *,
+    event_dir: Optional[str] = None,
+    event_size: Optional[int] = None,
+    score: Optional[int] = None,
+) -> bool:
+    """Enqueue one event into ``pipeline_queue`` with cloud_pending stage.
+
+    PRODUCER hook for the unified queue. Idempotent: the
+    ``pipeline_queue`` UNIQUE index on ``(stage, source_path)``
+    means re-enqueuing the same event is a no-op (INSERT OR IGNORE
+    inside :func:`pipeline_queue_service.dual_write_enqueue`).
+
+    Best-effort — failures NEVER propagate (logged at WARNING by
+    ``dual_write_enqueue``). The legacy disk-walk + dual-write path
+    continues to drive uploads regardless of whether this enqueue
+    succeeds, so a failed producer hook only delays PR-F3's reader
+    by one cycle (the next ``_discover_events`` call retries).
+
+    Args:
+        rel_path: Canonical relative POSIX path of the event (matches
+            ``cloud_synced_files.file_path`` form). MUST be the same
+            string the existing dual-write uses so the two paths
+            collide on the UNIQUE index instead of producing two
+            rows.
+        event_dir: Local source directory (informational; stored in
+            payload for future debugging).
+        event_size: Total size in bytes (informational; stored in
+            payload).
+        score: ``_score_event_priority`` result. Lower is more
+            urgent. Stored in payload so PR-F3 can re-rank rows
+            without re-scoring against the disk.
+
+    Returns True iff a new pipeline_queue row was inserted (False
+    on idempotent re-enqueue OR error). The boolean is for tests
+    and telemetry only — the legacy upload path is unaffected.
+    """
+    global _cloud_pipeline_enqueue_count
+    if not rel_path:
+        return False
+    try:
+        from services import pipeline_queue_service as pqs
+        inserted = pqs.dual_write_enqueue(
+            source_path=rel_path,
+            stage=pqs.STAGE_CLOUD_PENDING,
+            legacy_table=pqs.LEGACY_TABLE_CLOUD_SYNCED,
+            priority=pqs.PRIORITY_CLOUD_BULK,
+            payload={
+                'event_dir': event_dir,
+                'event_size': event_size,
+                'score': score,
+                'producer': 'cloud_archive._discover_events',
+            },
+            status='pending',
+        )
+        if inserted:
+            with _cloud_shadow_lock:
+                _cloud_pipeline_enqueue_count += 1
+        return bool(inserted)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "pipeline_queue cloud-pending producer hook failed "
+            "for %s: %s", rel_path, e,
+        )
+        return False
+
+
+def _shadow_compare_cloud_picks(
+    *,
+    legacy_path: Optional[str],
+    pipeline_candidates: Tuple[str, ...] = (),
+) -> None:
+    """Compare the legacy disk-walk's first pick against the pipeline top-N.
+
+    Mirrors :func:`archive_worker._shadow_compare_picks` for the cloud
+    queue. The legacy ``_discover_events`` ranker uses
+    ``_score_event_priority`` (event > geo > none) while
+    ``pipeline_queue`` orders by ``priority, enqueued_at, id``. Both
+    readers should agree on the high-priority bucket; the top-N
+    window absorbs intra-band reordering. Only when the legacy pick
+    is **absent** from the pipeline's top-N does the WARNING fire —
+    that's a real producer-hook gap (the legacy disk-walk found a
+    file the producer somehow missed).
+
+    Empty queue case: both ``legacy_path`` is ``None`` AND
+    ``pipeline_candidates`` is empty ⇒ both readers say "queue
+    empty" ⇒ counted as agreement, no log. If the legacy reader has
+    work but the pipeline doesn't, that's a benign ordering case
+    (the producer enqueued but pipeline_queue's WAL hasn't
+    propagated yet — extremely rare); we treat it as a benign miss
+    rather than a gap.
+
+    Disagreement logging is rate-limited identically to the archive
+    shadow: first ``_CLOUD_SHADOW_DISAGREEMENT_LOG_VERBATIM``
+    mismatches log verbatim, then one heartbeat WARNING per
+    ``_CLOUD_SHADOW_DISAGREEMENT_LOG_EVERY``.
+    """
+    global _cloud_shadow_agreement_count, _cloud_shadow_disagreement_count
+    candidate_set = (
+        frozenset(p for p in pipeline_candidates if p)
+        if pipeline_candidates else frozenset()
+    )
+    if legacy_path is None:
+        with _cloud_shadow_lock:
+            _cloud_shadow_agreement_count += 1
+            count = _cloud_shadow_agreement_count
+        if count % _CLOUD_SHADOW_AGREEMENT_LOG_EVERY == 0:
+            logger.info(
+                "Wave 4 PR-F2 cloud shadow: pipeline_queue agreed "
+                "with cloud_archive on %d consecutive picks",
+                count,
+            )
+        return
+    if legacy_path in candidate_set:
+        with _cloud_shadow_lock:
+            _cloud_shadow_agreement_count += 1
+            count = _cloud_shadow_agreement_count
+        if count % _CLOUD_SHADOW_AGREEMENT_LOG_EVERY == 0:
+            logger.info(
+                "Wave 4 PR-F2 cloud shadow: pipeline_queue agreed "
+                "with cloud_archive on %d consecutive picks "
+                "(top-%d window)",
+                count, _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT,
+            )
+        return
+    with _cloud_shadow_lock:
+        _cloud_shadow_disagreement_count += 1
+        d_count = _cloud_shadow_disagreement_count
+    if d_count <= _CLOUD_SHADOW_DISAGREEMENT_LOG_VERBATIM:
+        logger.warning(
+            "Wave 4 PR-F2 cloud shadow: cloud_archive picked %r but "
+            "it is absent from the top-%d pipeline_queue candidates "
+            "(disagreement #%d). pipeline top-%d=%r. The producer "
+            "hook should have enqueued this row before the "
+            "disk-walk completed; investigate before PR-F3 cuts "
+            "over the cloud reader.",
+            legacy_path, _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT, d_count,
+            _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT,
+            tuple(pipeline_candidates),
+        )
+    elif d_count % _CLOUD_SHADOW_DISAGREEMENT_LOG_EVERY == 0:
+        logger.warning(
+            "Wave 4 PR-F2 cloud shadow: cloud_archive / "
+            "pipeline_queue disagreement count = %d (suppressing "
+            "per-event WARNINGs after the first %d; first %d are "
+            "above). Last legacy pick: %r.",
+            d_count, _CLOUD_SHADOW_DISAGREEMENT_LOG_VERBATIM,
+            _CLOUD_SHADOW_DISAGREEMENT_LOG_VERBATIM, legacy_path,
+        )
+
+
+def get_cloud_shadow_telemetry() -> Dict[str, int]:
+    """Return the in-memory cloud shadow + producer counters as a snapshot.
+
+    Process-local, reset on restart. Used by tests and by the
+    Settings page to confirm shadow mode is firing in production.
+    Keys:
+
+    * ``cloud_shadow_agreement_count`` — consecutive picks where
+      legacy and pipeline agreed (or both were empty).
+    * ``cloud_shadow_disagreement_count`` — picks where legacy's
+      choice was absent from the pipeline's top-N.
+    * ``cloud_pipeline_enqueue_count`` — successful (rowcount > 0)
+      producer-hook enqueues this process. Re-enqueues that hit the
+      UNIQUE index (idempotent no-op) do NOT increment.
+    """
+    with _cloud_shadow_lock:
+        return {
+            'cloud_shadow_agreement_count': _cloud_shadow_agreement_count,
+            'cloud_shadow_disagreement_count': _cloud_shadow_disagreement_count,
+            'cloud_pipeline_enqueue_count': _cloud_pipeline_enqueue_count,
+        }
+
+
+def _reset_cloud_shadow_telemetry_for_tests() -> None:
+    """Reset shadow + producer counters. Test-only helper.
+
+    Production code MUST NOT call this — the counters are intended
+    to monotonically increment for the process lifetime so the
+    Settings page can show "since boot" totals.
+    """
+    global _cloud_shadow_agreement_count, _cloud_shadow_disagreement_count
+    global _cloud_pipeline_enqueue_count
+    with _cloud_shadow_lock:
+        _cloud_shadow_agreement_count = 0
+        _cloud_shadow_disagreement_count = 0
+        _cloud_pipeline_enqueue_count = 0
+
+
+def _peek_pipeline_cloud_pending(limit: int = _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT
+                                 ) -> Tuple[str, ...]:
+    """Return the top-N source paths from pipeline_queue cloud_pending.
+
+    Best-effort wrapper around
+    :func:`pipeline_queue_service.peek_top_n_paths_for_stage`.
+    Failures return an empty tuple (logged at DEBUG); the caller
+    treats that as "pipeline queue empty" and the shadow comparison
+    continues with no false-positive disagreement.
+    """
+    try:
+        from services import pipeline_queue_service as pqs
+        return tuple(
+            pqs.peek_top_n_paths_for_stage(
+                stage=pqs.STAGE_CLOUD_PENDING,
+                limit=limit,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "shadow peek_top_n_paths_for_stage(cloud_pending) "
+            "failed: %s", e,
+        )
+        return ()
+
+
 def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
     """Open the cloud sync database and ensure all tables exist.
 
@@ -1345,7 +1662,26 @@ def _discover_events(
             )
 
     scored.sort(key=lambda x: x[1])
-    return [t for (t, _s) in scored]
+    result = [t for (t, _s) in scored]
+
+    # Wave 4 PR-F2 (issue #184): PRODUCER hook for unified pipeline_queue.
+    # When the operator opts in via ``cloud_archive.enqueue_to_pipeline``,
+    # mirror every discovered event into pipeline_queue with
+    # ``stage='cloud_pending'``. Idempotent (UNIQUE index) — re-enqueues
+    # are no-ops. Failures are logged at WARNING by the producer helper
+    # and NEVER block the disk-walk path; the legacy reader continues
+    # to drive uploads regardless of producer-hook outcome. PR-F3 will
+    # then flip the reader to claim from pipeline_queue.
+    if _enqueue_to_pipeline_enabled():
+        for ((event_dir, rel_path, event_size), score) in scored:
+            _enqueue_event_to_pipeline(
+                rel_path,
+                event_dir=event_dir,
+                event_size=event_size,
+                score=score,
+            )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2031,6 +2367,36 @@ def _drain_once(
             pass
 
         to_sync = _discover_events(teslacam_path, conn=conn)
+
+        # Wave 4 PR-F2 (issue #184): SHADOW comparison against the
+        # unified ``pipeline_queue`` cloud_pending stage. Cheap (one
+        # ``SELECT source_path FROM pipeline_queue WHERE
+        # stage='cloud_pending' ... LIMIT N``) and pure observability —
+        # no behavioural change. Gated on:
+        #   * Producer flag ON (otherwise pipeline has no rows to
+        #     compare; the helper does NOT log when both are empty so
+        #     the noise floor is zero).
+        #   * Reader flag OFF (when ON we ARE the pipeline reader, so
+        #     comparing ourselves to ourselves is moot — PR-F3 will
+        #     add an inverse shadow that compares the legacy
+        #     disk-walk against the unified worker's actual pick).
+        # Failures are swallowed at DEBUG by ``_peek_pipeline_cloud_pending``
+        # so a transient pipeline_queue read error never blocks the
+        # legacy upload path.
+        if (_enqueue_to_pipeline_enabled() and
+                _shadow_pipeline_queue_enabled() and
+                not _use_pipeline_reader_enabled()):
+            try:
+                shadow_candidates = _peek_pipeline_cloud_pending()
+                legacy_first = to_sync[0][1] if to_sync else None
+                _shadow_compare_cloud_picks(
+                    legacy_path=legacy_first,
+                    pipeline_candidates=shadow_candidates,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug(
+                    "Cloud shadow comparison swallowed exception: %s", e,
+                )
 
         if not to_sync:
             _sync_status.update({

@@ -158,6 +158,42 @@ cloud_archive:
   disk_space_critical_mb: 100            # Refuse new archive copies when free space drops below this
   disk_space_pause_seconds: 300          # How long the worker stays paused after a disk-critical refusal
 
+  # Wave 4 PR-F2 (issue #184): unified ``pipeline_queue`` integration.
+  #
+  # The cloud worker today does its own disk-walk discovery + state
+  # tracking via ``cloud_synced_files``. PR-F2 lays the foundation for
+  # PR-F3's reader cutover by adding three opt-in flags:
+  #
+  # ``enqueue_to_pipeline`` — PRODUCER hook. When true, every event
+  # discovered by ``_discover_events`` is also enqueued into
+  # ``pipeline_queue`` with ``stage='cloud_pending'`` (idempotent via
+  # the existing UNIQUE index). The legacy disk-walk + ``cloud_synced_files``
+  # path continues to drive uploads; this flag only POPULATES the
+  # unified queue so PR-F3 can switch the reader without a chicken-
+  # and-egg empty-queue problem. Default ``false`` so a fresh deploy
+  # is a no-op.
+  enqueue_to_pipeline: false
+  # ``shadow_pipeline_queue`` — OBSERVABILITY. When true (and
+  # ``enqueue_to_pipeline`` is also true), the cloud worker peeks at
+  # the top-N ``cloud_pending`` rows in ``pipeline_queue`` immediately
+  # before each ``_drain_once`` upload pass and logs a WARNING if the
+  # legacy reader's first pick is absent from the pipeline's top-N
+  # window. Pure observability — no behavioural change. Used to verify
+  # the producer hook is firing correctly against real production
+  # traffic before PR-F3 cuts over the actual reader. Default ``true``
+  # so any operator who flips ``enqueue_to_pipeline`` on automatically
+  # gets validation telemetry. Skipped (cheap) when the producer flag
+  # is off, since there are no rows to compare against.
+  shadow_pipeline_queue: true
+  # ``use_pipeline_reader`` — RESERVED for PR-F3. When true, the cloud
+  # worker will claim its next upload from
+  # ``pipeline_queue.claim_next_for_stage(stage='cloud_pending')``
+  # instead of disk-walking. The flag is wired into config now so the
+  # constant exists and operators can pre-seed ``true`` after PR-F3
+  # ships without touching ``config.yaml`` schema. Default ``false``
+  # so PR-F2 ships as a no-op.
+  use_pipeline_reader: false
+
 # ============================================================================
 # Storage & Retention Configuration (Phase 3a.2 — closes part of #98)
 # ============================================================================

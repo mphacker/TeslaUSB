@@ -667,6 +667,257 @@ class TestV14ToV15Migration:
         finally:
             c.close()
 
+    def test_migration_sqlite_sequence_is_single_row(self, tmp_path):
+        """Issue #188 (PR #203 Critical #1 regression): the
+        AUTOINCREMENT-restoration step must NEVER leave more than
+        one ``sqlite_sequence`` row for ``'waypoints'``. The
+        original fix used ``INSERT OR IGNORE``, which silently
+        appends a duplicate row because ``sqlite_sequence`` has no
+        UNIQUE constraint on ``name``. This regression test pins
+        the post-condition.
+        """
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=5, cold_data=True)
+
+        # Delete the highest-id row pre-migration so MAX(id) <
+        # sqlite_sequence.seq — exercises the restoration path.
+        c = sqlite3.connect(db_path)
+        try:
+            c.execute("DELETE FROM waypoints WHERE id = 5")
+            c.commit()
+        finally:
+            c.close()
+
+        _init_db(db_path).close()
+
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        try:
+            seq_rows = c.execute(
+                "SELECT name, seq FROM sqlite_sequence "
+                "WHERE name = 'waypoints'"
+            ).fetchall()
+            assert len(seq_rows) == 1, (
+                f"sqlite_sequence has {len(seq_rows)} rows for "
+                f"'waypoints'; expected exactly 1. Rows: "
+                f"{[tuple(r) for r in seq_rows]}. The IGNORE-then-"
+                "UPDATE pattern silently appends duplicates "
+                "because sqlite_sequence has no UNIQUE constraint "
+                "on name."
+            )
+            assert seq_rows[0]['seq'] >= 5, (
+                f"sqlite_sequence.seq dropped below the pre-"
+                f"migration high-water (got {seq_rows[0]['seq']}, "
+                f"expected >= 5)."
+            )
+        finally:
+            c.close()
+
+    def test_migration_partial_rerun_with_existing_waypoints_cold_rows(
+        self, tmp_path,
+    ):
+        """Issue #188 (PR #203 Info #8 regression): simulate a
+        partial-rerun scenario where the OLD pre-PR-#203 code's
+        BACKFILL succeeded (waypoints_cold has rows) but the OLD
+        DROP COLUMN loop crashed mid-way (waypoints still has cold
+        cols). The new snapshot-then-rewrite-then-backfill code
+        must handle this without losing data: snapshot rebuilds
+        the same row set from waypoints, the cascade-empties
+        waypoints_cold, then the backfill restores it identically.
+        Net: data preserved, schema at v15.
+        """
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=4, cold_data=True)
+
+        # Pre-create the v15 waypoints_cold table and pre-populate
+        # it as the OLD code's BACKFILL would have. Use the same
+        # cold-eligible row set (rows where any cold col is non-
+        # default) so the post-migration row count matches.
+        c = sqlite3.connect(db_path)
+        try:
+            c.execute("PRAGMA foreign_keys = ON")
+            c.execute(
+                "CREATE TABLE waypoints_cold ("
+                " id INTEGER PRIMARY KEY, "
+                " acceleration_x REAL, acceleration_y REAL, "
+                " acceleration_z REAL, gear TEXT, "
+                " steering_angle REAL, brake_applied INTEGER, "
+                " blinker_on_left INTEGER, blinker_on_right INTEGER, "
+                " FOREIGN KEY (id) REFERENCES waypoints(id) "
+                "  ON DELETE CASCADE"
+                ")"
+            )
+            c.execute(
+                "INSERT INTO waypoints_cold (id, acceleration_x, "
+                " acceleration_y, acceleration_z, gear, steering_angle, "
+                " brake_applied, blinker_on_left, blinker_on_right) "
+                "SELECT id, acceleration_x, acceleration_y, "
+                " acceleration_z, gear, steering_angle, brake_applied, "
+                " blinker_on_left, blinker_on_right "
+                "FROM waypoints"
+            )
+            pre_cold_count = c.execute(
+                "SELECT COUNT(*) AS n FROM waypoints_cold"
+            ).fetchone()[0]
+            c.commit()
+        finally:
+            c.close()
+
+        assert pre_cold_count == 4, "fixture sanity check"
+
+        _init_db(db_path).close()
+
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        try:
+            # Hot data preserved (4 rows, all original ids).
+            wps = c.execute(
+                "SELECT id, lat, lon FROM waypoints ORDER BY id"
+            ).fetchall()
+            assert len(wps) == 4
+            assert [w['id'] for w in wps] == [1, 2, 3, 4]
+            # Cold data preserved (same row count post-migration as
+            # pre-migration; the snapshot-then-restore is a no-op
+            # for the data even though waypoints_cold was
+            # cascade-emptied mid-flight).
+            post_cold_count = c.execute(
+                "SELECT COUNT(*) AS n FROM waypoints_cold"
+            ).fetchone()['n']
+            assert post_cold_count == 4
+            # Schema at v15.
+            ver = c.execute(
+                "SELECT MAX(version) AS v FROM schema_version"
+            ).fetchone()['v']
+            assert ver == _SCHEMA_VERSION
+        finally:
+            c.close()
+
+    def test_migration_fallback_runs_when_waypoints_new_zombie_exists(
+        self, tmp_path, caplog,
+    ):
+        """Issue #188 (PR #203 Warning #3 regression): a
+        previous-boot crash that landed between ``CREATE TABLE
+        waypoints_new`` and ``DROP TABLE waypoints`` leaves a
+        zombie ``waypoints_new`` table. The new ``DROP TABLE IF
+        EXISTS waypoints_new`` at the top of the rewrite helper
+        must clear the zombie so the rewrite can succeed on the
+        next boot — without it, every subsequent boot would
+        force the fallback path.
+
+        This is also a 'natural failure' regression for the prior
+        gap (Info #9): exercises the cleanup path without
+        monkeypatching.
+        """
+        import logging
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=3, cold_data=True)
+
+        # Pre-create the zombie table to simulate a crash between
+        # CREATE waypoints_new and DROP waypoints.
+        c = sqlite3.connect(db_path)
+        try:
+            c.execute(
+                "CREATE TABLE waypoints_new ("
+                " id INTEGER PRIMARY KEY, garbage TEXT)"
+            )
+            c.execute(
+                "INSERT INTO waypoints_new VALUES (999, 'leftover')"
+            )
+            c.commit()
+        finally:
+            c.close()
+
+        with caplog.at_level(logging.WARNING,
+                             logger='services.mapping_migrations'):
+            _init_db(db_path).close()
+
+        # The migration must NOT have fallen back — the rewrite
+        # cleared the zombie at step 1 and proceeded normally.
+        fallback_msgs = [r for r in caplog.records
+                         if 'falling back to per-column DROP COLUMN'
+                         in r.message]
+        assert not fallback_msgs, (
+            "Migration unexpectedly fell back instead of clearing "
+            "the zombie waypoints_new and proceeding with the "
+            f"rewrite. Records: {[r.message for r in caplog.records]}"
+        )
+
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        try:
+            # Schema at v15, hot data preserved, no zombie.
+            assert _waypoints_has_cold_columns(c) is False
+            wps = c.execute(
+                "SELECT id, lat, lon FROM waypoints ORDER BY id"
+            ).fetchall()
+            assert len(wps) == 3
+            zombie = c.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'waypoints_new'"
+            ).fetchone()
+            assert zombie is None, (
+                "waypoints_new zombie table was not cleaned up"
+            )
+        finally:
+            c.close()
+
+
+# ---------------------------------------------------------------------------
+# v15 hot-column constants — single source of truth pinned to schema.
+# ---------------------------------------------------------------------------
+
+
+def test_v15_hot_columns_match_schema_sql():
+    """Issue #188 (PR #203 Info #5 regression): the
+    ``_V15_HOT_COLUMNS`` tuple drives the rewrite helper's CREATE
+    / INSERT / SELECT statements. If a future column is added to
+    ``_SCHEMA_SQL``'s ``waypoints`` definition but forgotten in
+    ``_V15_HOT_COLUMNS``, the migration would silently DROP that
+    column from every existing v14 install. Pin the equivalence
+    here so the test fails loudly instead.
+    """
+    import re
+    from services.mapping_migrations import (
+        _SCHEMA_SQL, _V15_HOT_COLUMNS, _V15_HOT_COLUMN_DDL,
+    )
+
+    # Extract the column list from the live ``waypoints`` CREATE
+    # TABLE in _SCHEMA_SQL (not waypoints_cold — different table).
+    match = re.search(
+        r"CREATE TABLE IF NOT EXISTS waypoints \((.*?)\);",
+        _SCHEMA_SQL, re.DOTALL,
+    )
+    assert match, "Could not locate waypoints CREATE TABLE in _SCHEMA_SQL"
+
+    schema_cols = []
+    for line in match.group(1).strip().split('\n'):
+        line = line.strip().rstrip(',')
+        if not line:
+            continue
+        # Column name is the first whitespace-delimited token.
+        col_name = line.split()[0]
+        schema_cols.append(col_name)
+
+    assert tuple(schema_cols) == _V15_HOT_COLUMNS, (
+        f"_V15_HOT_COLUMNS drift detected!\n"
+        f"  _SCHEMA_SQL has:        {schema_cols}\n"
+        f"  _V15_HOT_COLUMNS has:   {list(_V15_HOT_COLUMNS)}\n"
+        "If you added a column to the live waypoints schema, also "
+        "add it to _V15_HOT_COLUMNS and _V15_HOT_COLUMN_DDL in "
+        "mapping_migrations.py — otherwise the v14->v15 rewrite "
+        "will silently drop it from every existing install."
+    )
+
+    # Every hot column must have a DDL fragment registered too.
+    missing_ddl = [c for c in _V15_HOT_COLUMNS
+                   if c not in _V15_HOT_COLUMN_DDL]
+    assert not missing_ddl, (
+        f"_V15_HOT_COLUMN_DDL missing entries for: {missing_ddl}"
+    )
+
 
 # ---------------------------------------------------------------------------
 # query_trip_route — must return ONLY hot columns (and ``id`` for

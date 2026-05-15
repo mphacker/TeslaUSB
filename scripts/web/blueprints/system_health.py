@@ -474,8 +474,46 @@ def _cloud_block() -> Dict[str, Any]:
     }
 
 
+def _resolve_disk_thresholds_mb() -> Tuple[int, int]:
+    """Return ``(warning_mb, critical_mb)`` from config or sensible defaults.
+
+    Mirrors :func:`services.archive_watchdog._resolve_disk_thresholds` so
+    the System Health card uses the SAME thresholds the archive worker
+    and watchdog use to decide "is this actually a problem". Resolved on
+    every call so a Settings → config edit takes effect on the next poll
+    without restart.
+    """
+    try:
+        from config import (
+            CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB,
+            CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB,
+        )
+        return (
+            int(CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB),
+            int(CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB),
+        )
+    except Exception:  # noqa: BLE001
+        return (500, 100)
+
+
 def _disk_block() -> Dict[str, Any]:
-    """SD card free space (the home-directory filesystem)."""
+    """SD card free space (the home-directory filesystem).
+
+    Severity is keyed off **absolute free MB** vs. the same configured
+    ``cloud_archive.disk_space_warning_mb`` / ``disk_space_critical_mb``
+    thresholds the archive watchdog and worker use:
+
+    * **error** — free < ``disk_space_critical_mb`` (default 100 MB).
+      The worker is actively refusing new copies; this is real.
+    * **warn**  — free < ``disk_space_warning_mb`` (default 500 MB).
+      We're within margin of error of the critical threshold; retention
+      should already be aggressively pruning.
+    * **ok**    — otherwise. **High used-% is expected**: with a
+      ``cleanup.free_space_target_pct: 10`` configuration, the system
+      actively prunes to maintain ~90% used. Showing yellow at 85% used
+      contradicts the configured retention policy and was misleading
+      operators (issue: see `index.html` System Health card).
+    """
     target = GADGET_DIR or '/home/pi'
     try:
         usage = shutil.disk_usage(target)
@@ -488,14 +526,17 @@ def _disk_block() -> Dict[str, Any]:
 
     total_gb = usage.total / (1024 ** 3)
     free_gb = usage.free / (1024 ** 3)
+    free_mb = usage.free // (1024 * 1024)
     used_pct = (usage.used / usage.total) * 100 if usage.total else 0.0
 
-    if used_pct >= 95:
+    warning_mb, critical_mb = _resolve_disk_thresholds_mb()
+
+    if free_mb < critical_mb:
         sev = SEV_ERROR
-        msg = f'Critical: {used_pct:.1f}% full'
-    elif used_pct >= 85:
+        msg = f'Critical: only {free_mb} MB free'
+    elif free_mb < warning_mb:
         sev = SEV_WARN
-        msg = f'{used_pct:.1f}% full'
+        msg = f'Low: only {free_mb} MB free'
     else:
         sev = SEV_OK
         msg = f'{free_gb:.1f} GB free'
@@ -506,6 +547,9 @@ def _disk_block() -> Dict[str, Any]:
         'used_pct': round(used_pct, 1),
         'free_gb': round(free_gb, 2),
         'total_gb': round(total_gb, 2),
+        'free_mb': int(free_mb),
+        'warning_mb': warning_mb,
+        'critical_mb': critical_mb,
     }
 
 

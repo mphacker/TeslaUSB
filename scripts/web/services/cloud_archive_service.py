@@ -2758,13 +2758,49 @@ def _write_rclone_conf(provider: str, creds: dict,
     yield/re-acquire cycle. When omitted the legacy fixed path
     ``/run/teslausb/rclone.conf`` is used (preserves existing
     cloud_archive behavior; LES MUST pass a unique name).
+
+    Issue #165: when ``creds`` carries an explicit ``"type"`` key (the
+    generic-rclone-remote flow puts the real backend type there), it
+    wins over the ``provider`` argument — that argument is then just
+    a label for the existing OAuth providers (``"onedrive"``, etc.).
+    Keys beginning with ``_`` are private metadata
+    (e.g. ``_obscure_keys``, ``_source``) and never reach the conf
+    file; rclone would treat them as unknown options and fail.
     """
     os.makedirs(_RCLONE_TMPFS_DIR, exist_ok=True)
 
-    # Build minimal rclone remote config
-    lines = ["[teslausb]"]
-    lines.append(f"type = {provider}")
+    # Resolve the rclone backend type. The creds dict's "type" wins
+    # because (a) the generic flow stores the truth there and (b) for
+    # legacy OAuth creds, save_credentials writes the same value to
+    # creds["type"] anyway, so this is a no-op for them.
+    rclone_type = creds.get("type") or provider
+
+    # Build minimal rclone remote config. Skip "type" in the loop
+    # (we just emitted it) and skip private metadata keys.
+    #
+    # Defense in depth (PR #218 review): keys/values that contain a
+    # forbidden control character would let an attacker inject extra
+    # config lines (e.g. an sftp ``ssh`` directive → command exec as
+    # root, an s3 ``endpoint`` override → upload redirection).
+    # ``save_credentials_generic`` already rejects these at save time;
+    # this is the last guard before rclone reads the file. We use a
+    # local helper instead of importing from cloud_rclone_service
+    # because cloud_rclone_service imports from THIS module and a
+    # circular import would break startup.
+    _BAD_CHARS = ("\n", "\r", "\x00")
+    lines = ["[teslausb]", f"type = {rclone_type}"]
     for key, value in creds.items():
+        if not isinstance(key, str):
+            continue
+        if key == "type" or key.startswith("_"):
+            continue
+        s_value = "" if value is None else str(value)
+        if any(c in key for c in _BAD_CHARS) or any(c in s_value for c in _BAD_CHARS):
+            logger.error(
+                "Refusing to write creds entry to rclone.conf "
+                "(control character in key=%r or value)", key,
+            )
+            continue
         lines.append(f"{key} = {value}")
 
     if conf_name:

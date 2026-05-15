@@ -412,25 +412,116 @@ def api_save_provider():
 
 @cloud_archive_bp.route('/api/connect', methods=['POST'])
 def api_connect_provider():
-    """Save rclone authorize token for a cloud provider.
+    """Save credentials for a cloud provider.
 
-    Expects JSON: { "provider": "onedrive", "token": "<pasted blob>" }
+    Three accepted payload shapes:
+
+    1. **OAuth token paste** (legacy — OneDrive / Google Drive / Dropbox)::
+
+           {"provider": "onedrive", "token": "<rclone authorize blob>"}
+
+    2. **Generic — pasted ``rclone.conf`` block** (issue #165)::
+
+           {"provider": "generic", "config_block": "[my-nas]\\ntype=sftp\\n..."}
+
+    3. **Generic — inline form** (issue #165)::
+
+           {
+             "provider": "generic",
+             "rclone_type": "sftp",
+             "fields": {"host": "nas.local", "user": "pi", "pass": "..."},
+             "obscure_keys": ["pass"]
+           }
+
+    For shape (3), ``obscure_keys`` is optional; if omitted the
+    backend's documented defaults from
+    :data:`services.cloud_rclone_service._DEFAULT_OBSCURE_KEYS` are
+    applied (``["pass"]`` for ``sftp``/``webdav``/``smb``/``ftp``;
+    ``[]`` for ``s3``/``b2``/``wasabi``/``azureblob``/``swift`` since
+    rclone does not obscure their secret keys).
+
+    Behaviour notes:
+        * On success the chosen provider is persisted to
+          ``cloud_archive.provider`` in ``config.yaml`` (always
+          ``"generic"`` for shapes 2 and 3) so that on the next boot
+          ``CLOUD_ARCHIVE_PROVIDER`` resolves correctly.
+        * Shapes 2 and 3 reject any backend type outside
+          ``_GENERIC_RCLONE_TYPES`` — see
+          :func:`services.cloud_rclone_service.parse_rclone_config_block`.
     """
     from services.cloud_rclone_service import (
-        parse_rclone_token, save_credentials, PROVIDERS,
+        parse_rclone_token, parse_rclone_config_block,
+        save_credentials, save_credentials_generic, PROVIDERS,
+        _DEFAULT_OBSCURE_KEYS,
     )
 
     data = request.get_json(silent=True) or {}
     provider = data.get('provider', '')
-    token_raw = data.get('token', '')
 
-    if not provider or not token_raw:
+    if not provider:
         return jsonify({"success": False,
-                        "message": "Missing provider or token."}), 400
-
+                        "message": "Missing provider."}), 400
     if provider not in PROVIDERS:
         return jsonify({"success": False,
                         "message": f"Unknown provider: {provider}"}), 400
+
+    # ----- Shape 2 / 3: generic rclone remote (#165) --------------------
+    if provider == 'generic':
+        config_block = data.get('config_block')
+        rclone_type = data.get('rclone_type')
+        fields = data.get('fields')
+
+        try:
+            if config_block:
+                parsed = parse_rclone_config_block(config_block)
+                rt = parsed.pop('type')
+                # Default obscure keys come from the single source of
+                # truth in cloud_rclone_service so a future backend
+                # added to _GENERIC_RCLONE_TYPES can never silently
+                # default to no-obscure here (PR #218 review I-3).
+                obscure_keys = data.get(
+                    'obscure_keys', _DEFAULT_OBSCURE_KEYS.get(rt, []),
+                )
+                save_credentials_generic(
+                    rt, parsed,
+                    obscure_keys=obscure_keys, source='paste',
+                )
+            elif rclone_type and isinstance(fields, dict):
+                obscure_keys = data.get(
+                    'obscure_keys',
+                    _DEFAULT_OBSCURE_KEYS.get(rclone_type, []),
+                )
+                save_credentials_generic(
+                    rclone_type, fields,
+                    obscure_keys=obscure_keys, source='form',
+                )
+            else:
+                return jsonify({"success": False, "message": (
+                    "Generic provider requires either 'config_block' "
+                    "or both 'rclone_type' and 'fields'."
+                )}), 400
+        except ValueError as e:
+            return jsonify({"success": False, "message": str(e)}), 400
+        except RuntimeError as e:
+            logger.exception("rclone obscure failed")
+            return jsonify({"success": False, "message": str(e)}), 500
+        except Exception as exc:
+            logger.exception("Failed to save generic cloud credentials")
+            return jsonify({"success": False, "message": str(exc)}), 500
+
+        try:
+            _update_config_yaml({'cloud_archive.provider': 'generic'})
+            return jsonify({"success": True,
+                            "message": "Connected successfully."})
+        except Exception as exc:
+            logger.exception("Failed to persist provider selection")
+            return jsonify({"success": False, "message": str(exc)}), 500
+
+    # ----- Shape 1: OAuth token paste (legacy) --------------------------
+    token_raw = data.get('token', '')
+    if not token_raw:
+        return jsonify({"success": False,
+                        "message": "Missing token."}), 400
 
     try:
         token = parse_rclone_token(token_raw)

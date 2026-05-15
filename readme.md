@@ -122,7 +122,8 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 - **WiFi Roaming**: Automatic switching between access points with the same SSID for optimal signal strength (mesh networks and WiFi extenders)
 
 ### Cloud Archive
-- **Queue-based continuous sync**: Automatically uploads dashcam events to cloud storage (Google Drive, S3, Dropbox, etc.) via rclone
+- **Queue-based continuous sync**: Automatically uploads dashcam events to cloud storage via rclone
+- **Wide provider support**: OAuth providers (Google Drive, OneDrive, Dropbox); S3-compatible (Amazon S3, Backblaze B2, Wasabi, MinIO); and **NAS / custom rclone** backends (SFTP, WebDAV, SMB/CIFS, FTP, Azure Blob, OpenStack Swift) — issue #165
 - **Priority ordering**: Events with Tesla event.json uploaded first, then geolocated trips, then remaining clips
 - **Power-loss safe**: Files marked as synced only after rclone confirms upload; partial uploads detected and re-queued on restart
 - **Low impact**: Runs with `nice`/`ionice` throttling, configurable bandwidth limits, one file at a time — web UI stays responsive

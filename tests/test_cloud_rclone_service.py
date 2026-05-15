@@ -72,11 +72,21 @@ class TestProviders:
     """Tests for provider configuration."""
 
     def test_all_providers_have_required_fields(self):
-        """Each provider has label, rclone_type, and authorize_cmd."""
+        """Each provider has label, rclone_type, and authorize_cmd.
+
+        Issue #165 added the ``generic`` provider where ``rclone_type``
+        and ``authorize_cmd`` are intentionally ``None`` (no static
+        backend type, no OAuth flow). All other providers must still
+        carry the rclone-authorize CLI string so the OAuth UX works.
+        """
         for key, meta in svc.PROVIDERS.items():
             assert "label" in meta, f"{key} missing label"
             assert "rclone_type" in meta, f"{key} missing rclone_type"
             assert "authorize_cmd" in meta, f"{key} missing authorize_cmd"
+            if key == "generic":
+                assert meta["rclone_type"] is None
+                assert meta["authorize_cmd"] is None
+                continue
             assert "rclone authorize" in meta["authorize_cmd"]
 
     def test_onedrive_metadata(self):

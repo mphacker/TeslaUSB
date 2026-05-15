@@ -53,7 +53,6 @@ from blueprints import (
     captive_portal_bp,
     catch_all_redirect,
     cloud_archive_bp,
-    live_events_bp,
     archive_queue_bp,
     storage_retention_bp,
     jobs_bp,
@@ -76,7 +75,6 @@ app.register_blueprint(cleanup_bp)
 app.register_blueprint(api_bp)
 app.register_blueprint(fsck_bp)
 app.register_blueprint(cloud_archive_bp)
-app.register_blueprint(live_events_bp)
 app.register_blueprint(archive_queue_bp)
 app.register_blueprint(storage_retention_bp)
 app.register_blueprint(jobs_bp)
@@ -202,26 +200,28 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Warning: Failed to register watcher callbacks: {e}")
 
-            # Live Event Sync producer: enqueue Sentry/Saved events the
-            # moment Tesla writes event.json. Independent of the
-            # indexing callback above; both fire from the same inotify
-            # watcher with no extra file descriptors.
+            # Wave 4 PR-F4 (issue #184): live-event upload producer.
+            # Replaces the standalone Live Event Sync subsystem. The
+            # file_watcher fires ``register_event_json_callback`` the
+            # moment Tesla writes a new event.json; we enqueue at
+            # ``PRIORITY_LIVE_EVENT`` into the unified pipeline_queue
+            # so the cloud_archive worker picks it up before any
+            # bulk catch-up rows. Same inotify watcher, no separate
+            # service / queue / worker / config flag.
             try:
-                from config import LIVE_EVENT_SYNC_ENABLED
-                if LIVE_EVENT_SYNC_ENABLED:
-                    def _on_new_event_json(file_paths):
-                        from services.live_event_sync_service import (
-                            enqueue_event_json,
-                        )
-                        try:
-                            enqueue_event_json(list(file_paths))
-                        except Exception as e:
-                            print(f"Warning: LES enqueue failed: {e}")
+                def _on_new_event_json(file_paths):
+                    from services.cloud_archive_service import (
+                        enqueue_live_event_from_event_json,
+                    )
+                    try:
+                        enqueue_live_event_from_event_json(list(file_paths))
+                    except Exception as e:
+                        print(f"Warning: live-event enqueue failed: {e}")
 
-                    register_event_json_callback(_on_new_event_json)
-                    print("File watcher → Live Event Sync producer registered")
+                register_event_json_callback(_on_new_event_json)
+                print("File watcher → cloud live-event producer registered")
             except Exception as e:
-                print(f"Warning: Failed to register LES watcher callback: {e}")
+                print(f"Warning: Failed to register live-event watcher callback: {e}")
 
             # Archive queue producer (issue #76 Phase 2a): mirror the
             # mp4 callback into the archive_queue table. Issue #184 Wave 1
@@ -404,21 +404,12 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Warning: Failed to start archive queue worker: {e}")
 
-    # Live Event Sync worker: starts BEFORE cloud_archive auto-trigger so
-    # any persistent LES queue (from a prior reboot/WiFi outage) gets
-    # the priority it's contractually owed. The trigger_auto_sync()
-    # call below will then see ready LES work and skip — letting LES
-    # drain first. Worker thread blocks on threading.Event.wait() when
-    # idle (< 0.1% CPU baseline).
-    try:
-        from config import LIVE_EVENT_SYNC_ENABLED
-        if LIVE_EVENT_SYNC_ENABLED:
-            from services.live_event_sync_service import start as _les_start
-            if _les_start():
-                print("Live Event Sync worker started")
-    except Exception as e:
-        # LES failure must NEVER take down gadget_web. Log and continue.
-        print(f"Warning: Failed to start Live Event Sync worker: {e}")
+    # Wave 4 PR-F4 (issue #184): the standalone Live Event Sync
+    # worker has been deleted. Live-event uploads are now first-class
+    # ``pipeline_queue`` rows enqueued by the file_watcher's
+    # event.json callback (see ``_on_new_event_json`` above) at
+    # ``PRIORITY_LIVE_EVENT`` so the cloud_archive worker picks them
+    # up before any bulk catch-up rows.
 
     # Auto-start the continuous cloud archive worker (Phase 3b #99).
     # The worker is a long-lived daemon thread that idles on
@@ -427,9 +418,9 @@ if __name__ == "__main__":
     # manual UI button. Replaces the old one-shot timer + per-trigger
     # thread spawn pattern.
     #
-    # NOTE: the worker yields to LES on every wake (and inside every
-    # drain between files), so the LES start above takes effect even
-    # on the very first wake.
+    # Wave 4 PR-F4 (issue #184): the inter-file LES yield has been
+    # removed; live events are pipeline_queue rows at
+    # ``PRIORITY_LIVE_EVENT`` that the worker naturally picks first.
     try:
         from config import (
             CLOUD_ARCHIVE_ENABLED, CLOUD_ARCHIVE_PROVIDER,

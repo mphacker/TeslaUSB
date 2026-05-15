@@ -188,6 +188,15 @@ class TestScorePriorityBatching:
         """
         teslacam, db_path = teslacam_with_geo
 
+        # Disable the Wave 4 PR-F4 producer hook for this test — it
+        # opens its own batched connection to enqueue rows into
+        # pipeline_queue (which lives in geodata.db). That extra
+        # connection is intentional and exercised by
+        # tests/test_pipeline_queue_dualwrite.py; here we want to pin
+        # the ``_load_geo_hits`` batching contract in isolation.
+        monkeypatch.setattr(svc, '_enqueue_to_pipeline_enabled',
+                            lambda: False)
+
         # Spy on sqlite3.connect to count opens.
         original_connect = sqlite3.connect
         call_count = {"n": 0, "paths": []}

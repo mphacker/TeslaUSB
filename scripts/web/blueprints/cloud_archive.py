@@ -61,25 +61,9 @@ def _get_cloud_config_cached() -> dict:
         data = cfg.get('cloud_archive', {})
         _cloud_config_cache['data'] = data
         _cloud_config_cache['ts'] = now
-        # Piggyback the live_event_sync section on the same disk read so
-        # the cloud archive page can render LES settings without a
-        # second yaml.load() per pageview.
-        _cloud_config_cache['les_data'] = cfg.get('live_event_sync', {}) or {}
         return data
     except Exception:
         return _cloud_config_cache.get('data', {})
-
-
-def _get_les_config_cached() -> dict:
-    """Return live_event_sync section from config.yaml, cached for 30s.
-
-    Always cache-coherent with ``_get_cloud_config_cached()`` because
-    they share the same dict; calling either one refreshes both.
-    """
-    if 'les_data' not in _cloud_config_cache:
-        # Force a populate.
-        _get_cloud_config_cached()
-    return _cloud_config_cache.get('les_data', {})
 
 
 def _resolve_keep_clips_until_synced(cloud_cfg: dict) -> bool:
@@ -173,20 +157,6 @@ def index():
 
     ctx = get_base_context()
 
-    # Load Live Event Sync (LES) config from config.yaml so the LES card
-    # in the cloud sync page can render with current values. Reads come
-    # from the same 30s cache that backs cloud_archive settings.
-    _les_cfg = _get_les_config_cached()
-    les_enabled = bool(_les_cfg.get('enabled', False))
-    les_watch_folders = list(_les_cfg.get('watch_folders', ['SentryClips', 'SavedClips']))
-    les_upload_scope = str(_les_cfg.get('upload_scope', 'event_minute'))
-    les_retry_max_attempts = int(_les_cfg.get('retry_max_attempts', 5))
-    les_retry_backoff_seconds = list(
-        _les_cfg.get('retry_backoff_seconds', [30, 120, 300, 900, 3600])
-    )
-    les_daily_data_cap_mb = int(_les_cfg.get('daily_data_cap_mb', 0))
-    les_notify_webhook_url = str(_les_cfg.get('notify_webhook_url', '') or '')
-
     return render_template(
         'cloud_archive.html',
         page='cloud',
@@ -215,13 +185,6 @@ def index():
         # backend ``cloud_archive.delete_unsynced`` config key.
         keep_clips_until_synced=_resolve_keep_clips_until_synced(_cloud),
         kept_unsynced_count=_get_last_prune_kept_unsynced_count(),
-        les_enabled=les_enabled,
-        les_watch_folders=les_watch_folders,
-        les_upload_scope=les_upload_scope,
-        les_retry_max_attempts=les_retry_max_attempts,
-        les_retry_backoff_seconds=les_retry_backoff_seconds,
-        les_daily_data_cap_mb=les_daily_data_cap_mb,
-        les_notify_webhook_url=les_notify_webhook_url,
         **ctx,
     )
 

@@ -340,82 +340,6 @@ class TestCloudDelete:
         assert self._count(db) == 1
 
 
-# ---------------------------------------------------------------------------
-# live_event_sync_service.delete_failed
-# ---------------------------------------------------------------------------
-
-
-class TestLESDelete:
-
-    def _setup_les_db(self, tmp_path, monkeypatch):
-        from services import live_event_sync_service as les
-        from services import cloud_archive_service as svc
-        db = str(tmp_path / "cloud_sync.db")
-        monkeypatch.setattr(svc, "CLOUD_ARCHIVE_DB_PATH", db)
-        monkeypatch.setattr(les, "CLOUD_ARCHIVE_DB_PATH", db)
-        conn = les._open_db()
-        try:
-            les._ensure_schema(conn)
-        finally:
-            conn.close()
-        return les, db
-
-    def _seed(self, les, db, event_dir, status):
-        conn = les._open_db()
-        try:
-            conn.execute(
-                "INSERT INTO live_event_queue "
-                "(event_dir, event_json_path, status, enqueued_at) "
-                "VALUES (?, ?, ?, '2026-01-01T00:00:00Z')",
-                (event_dir, event_dir + "/event.json", status),
-            )
-            conn.commit()
-            row_id = conn.execute(
-                "SELECT id FROM live_event_queue WHERE event_dir = ?",
-                (event_dir,),
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        return row_id
-
-    def _count(self, les, status=None):
-        conn = les._open_db()
-        try:
-            if status is None:
-                n = conn.execute("SELECT COUNT(*) FROM live_event_queue").fetchone()[0]
-            else:
-                n = conn.execute(
-                    "SELECT COUNT(*) FROM live_event_queue WHERE status = ?",
-                    (status,),
-                ).fetchone()[0]
-        finally:
-            conn.close()
-        return n
-
-    def test_delete_single_failed_row(self, tmp_path, monkeypatch):
-        les, db = self._setup_les_db(tmp_path, monkeypatch)
-        rid = self._seed(les, db, "/dir1", "failed")
-        n = les.delete_failed(row_id=rid)
-        assert n == 1
-        assert self._count(les) == 0
-
-    def test_delete_all_failed_rows(self, tmp_path, monkeypatch):
-        les, db = self._setup_les_db(tmp_path, monkeypatch)
-        self._seed(les, db, "/dir1", "failed")
-        self._seed(les, db, "/dir2", "failed")
-        self._seed(les, db, "/dir3", "pending")
-        n = les.delete_failed(row_id=None)
-        assert n == 2
-        assert self._count(les, 'failed') == 0
-        assert self._count(les, 'pending') == 1
-
-    def test_delete_does_not_touch_pending(self, tmp_path, monkeypatch):
-        les, db = self._setup_les_db(tmp_path, monkeypatch)
-        rid = self._seed(les, db, "/dir_pending", "pending")
-        # Targeted delete with id of a non-failed row is a no-op.
-        assert les.delete_failed(row_id=rid) == 0
-        assert self._count(les) == 1
-
 
 # ---------------------------------------------------------------------------
 # Blueprint routes — POST /api/jobs/delete
@@ -440,7 +364,6 @@ class TestDeleteRoute:
             'archive': fake_delete('archive'),
             'indexer': fake_delete('indexer'),
             'cloud_sync': fake_delete('cloud_sync'),
-            'live_event_sync': fake_delete('live_event_sync'),
         })
 
         app = Flask(__name__)
@@ -515,7 +438,7 @@ class TestDeleteRoute:
 
         monkeypatch.setattr(jobs_bp, "_DELETERS", {
             'archive': boom, 'indexer': boom,
-            'cloud_sync': boom, 'live_event_sync': boom,
+            'cloud_sync': boom,
         })
         app = Flask(__name__)
         app.register_blueprint(jobs_bp.jobs_bp)
@@ -580,9 +503,7 @@ class TestDeleteRoute:
         from blueprints import jobs as jobs_bp
         monkeypatch.setattr(jobs_bp, "MAPPING_ENABLED", False)
         monkeypatch.setattr(jobs_bp, "CLOUD_ARCHIVE_ENABLED", False)
-        monkeypatch.setattr(jobs_bp, "LIVE_EVENT_SYNC_ENABLED", False)
-        # All three guard at the top of the adapter and return 0
-        # without importing or calling the service module.
+        # Both adapters guard at the top and return 0 without
+        # importing or calling the service module.
         assert jobs_bp._delete_indexer("any") == 0
         assert jobs_bp._delete_cloud_sync("any") == 0
-        assert jobs_bp._delete_live_event_sync(1) == 0

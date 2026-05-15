@@ -39,7 +39,6 @@ from flask import Blueprint, jsonify, request
 from config import (
     CLOUD_ARCHIVE_ENABLED,
     GADGET_DIR,
-    LIVE_EVENT_SYNC_ENABLED,
     MAPPING_ENABLED,
 )
 
@@ -475,58 +474,6 @@ def _cloud_block() -> Dict[str, Any]:
     }
 
 
-def _les_block() -> Dict[str, Any]:
-    """Live Event Sync status."""
-    if not LIVE_EVENT_SYNC_ENABLED:
-        return {
-            'severity': SEV_UNKNOWN,
-            'message': 'LES disabled in config',
-            'enabled': False,
-            'queue_depth': 0,
-        }
-    try:
-        from services.live_event_sync_service import (
-            count_failed, get_status,
-        )
-        snap = get_status() or {}
-        failed = int(count_failed() or 0)
-    except Exception as e:  # noqa: BLE001
-        return {
-            'severity': SEV_UNKNOWN,
-            'message': 'Status fetch failed',
-            'enabled': True,
-            'queue_depth': 0,
-            '_error': str(e)[:120],
-        }
-
-    counts = snap.get('queue_counts') or {}
-    pending = int(counts.get('pending', 0)) + int(counts.get('uploading', 0))
-    running = bool(snap.get('worker_running'))
-
-    if failed > 0:
-        sev = SEV_WARN
-        msg = f'{failed} failed event{"s" if failed != 1 else ""}'
-    elif not running:
-        sev = SEV_WARN
-        msg = 'Worker idle'
-    elif pending > 0:
-        sev = SEV_OK
-        msg = f'{pending} pending'
-    else:
-        sev = SEV_OK
-        msg = 'Idle, queue empty'
-
-    return {
-        'severity': sev,
-        'message': msg,
-        'enabled': True,
-        'worker_running': running,
-        'queue_depth': pending,
-        'failed_count': failed,
-        'last_uploaded_at': snap.get('last_uploaded_at'),
-    }
-
-
 def _disk_block() -> Dict[str, Any]:
     """SD card free space (the home-directory filesystem)."""
     target = GADGET_DIR or '/home/pi'
@@ -627,7 +574,6 @@ _BLOCKS: Tuple[Tuple[str, Callable[[], Dict[str, Any]]], ...] = (
     ('indexer', _indexer_block),
     ('archive', _archive_block),
     ('cloud', _cloud_block),
-    ('live_event_sync', _les_block),
     ('disk', _disk_block),
     ('wifi', _wifi_block),
 )

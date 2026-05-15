@@ -142,7 +142,7 @@ cloud_archive:
   # failures, a row moves from 'failed' to 'dead_letter' and is excluded
   # from automatic re-picking. Failed rows can still be retried manually
   # from the Failed Jobs page (Phase 4) or by manually setting status
-  # back to 'pending' in cloud_sync.db. Mirrors live_event_sync.retry_max_attempts.
+  # back to 'pending' in cloud_sync.db.
   retry_max_attempts: 5                  # 1-20; default 5
   # Phase 1 item 1.3 — "retention respects cloud". Controls whether the
   # retention prune is allowed to delete clips that have NOT yet been
@@ -158,41 +158,34 @@ cloud_archive:
   disk_space_critical_mb: 100            # Refuse new archive copies when free space drops below this
   disk_space_pause_seconds: 300          # How long the worker stays paused after a disk-critical refusal
 
-  # Wave 4 PR-F2 (issue #184): unified ``pipeline_queue`` integration.
+  # Wave 4 (issue #184): unified ``pipeline_queue`` integration.
   #
-  # The cloud worker today does its own disk-walk discovery + state
-  # tracking via ``cloud_synced_files``. PR-F2 lays the foundation for
-  # PR-F3's reader cutover by adding three opt-in flags:
+  # The cloud worker now reads its work from the unified
+  # ``pipeline_queue`` (added in PR-A → PR-F3). The flags below are
+  # the cutover knobs. PR-F4 flipped them ON by default; existing
+  # installs upgrading from a pre-PR-F4 release will automatically
+  # adopt the unified pipeline on next service restart.
   #
   # ``enqueue_to_pipeline`` — PRODUCER hook. When true, every event
   # discovered by ``_discover_events`` is also enqueued into
   # ``pipeline_queue`` with ``stage='cloud_pending'`` (idempotent via
-  # the existing UNIQUE index). The legacy disk-walk + ``cloud_synced_files``
-  # path continues to drive uploads; this flag only POPULATES the
-  # unified queue so PR-F3 can switch the reader without a chicken-
-  # and-egg empty-queue problem. Default ``false`` so a fresh deploy
-  # is a no-op.
-  enqueue_to_pipeline: false
-  # ``shadow_pipeline_queue`` — OBSERVABILITY. When true (and
-  # ``enqueue_to_pipeline`` is also true), the cloud worker peeks at
-  # the top-N ``cloud_pending`` rows in ``pipeline_queue`` immediately
-  # before each ``_drain_once`` upload pass and logs a WARNING if the
-  # legacy reader's first pick is absent from the pipeline's top-N
-  # window. Pure observability — no behavioural change. Used to verify
-  # the producer hook is firing correctly against real production
-  # traffic before PR-F3 cuts over the actual reader. Default ``true``
-  # so any operator who flips ``enqueue_to_pipeline`` on automatically
-  # gets validation telemetry. Skipped (cheap) when the producer flag
-  # is off, since there are no rows to compare against.
-  shadow_pipeline_queue: true
-  # ``use_pipeline_reader`` — RESERVED for PR-F3. When true, the cloud
-  # worker will claim its next upload from
-  # ``pipeline_queue.claim_next_for_stage(stage='cloud_pending')``
-  # instead of disk-walking. The flag is wired into config now so the
-  # constant exists and operators can pre-seed ``true`` after PR-F3
-  # ships without touching ``config.yaml`` schema. Default ``false``
-  # so PR-F2 ships as a no-op.
-  use_pipeline_reader: false
+  # the existing UNIQUE index). Default ``true`` (was ``false`` until
+  # PR-F4) — operators who need to roll back to the legacy disk-walk
+  # path can flip this off.
+  enqueue_to_pipeline: true
+  # ``shadow_pipeline_queue`` — OBSERVABILITY shim used during the
+  # cutover. Compares the legacy reader's first pick against the
+  # ``pipeline_queue`` top-N and logs a WARNING on disagreement.
+  # Default ``false`` (was ``true`` until PR-F4) — the reader is now
+  # the unified queue itself, so the comparison is a tautology.
+  shadow_pipeline_queue: false
+  # ``use_pipeline_reader`` — when true, the cloud worker claims its
+  # next upload from ``pipeline_queue.claim_next_for_stage(stage=
+  # 'cloud_pending')`` instead of disk-walking. PR-F3 added the
+  # reader; PR-F4 flips the default to ``true``. The legacy reader
+  # path is preserved behind ``false`` only as a one-release rollback
+  # safety net; it will be removed entirely in a follow-up.
+  use_pipeline_reader: true
 
 # ============================================================================
 # Storage & Retention Configuration (Phase 3a.2 — closes part of #98)
@@ -231,27 +224,19 @@ cleanup:
     #   enabled: true
     #   retention_days: 30
 
-# ============================================================================
-# Live Event Sync Configuration
-# ============================================================================
-# Real-time upload of Sentry/Saved events as soon as Tesla writes the
-# event.json metadata. Separate first-class subsystem from cloud_archive:
-#   - own enable flag, queue, and worker thread
-#   - shares only the cloud provider credentials (configured in the web UI)
-#   - takes priority over cloud_archive when both want WiFi
-#   - persists the queue across reboots and WiFi outages
-# Pi Zero 2 W resource budget: < 25 MB RSS steady state, < 0.1% idle CPU.
-live_event_sync:
-  enabled: false                         # Opt-in default; existing installs unchanged
-  watch_folders:                         # Tesla event subfolders to react to
-    - SentryClips
-    - SavedClips
-  upload_scope: "event_minute"           # event_minute = 6 cams + event.json (~150-200 MB);
-                                         # event_folder = all .mp4 in the event dir (~0.7-2 GB)
-  retry_max_attempts: 5                  # Move row to 'failed' after this many attempts
-  retry_backoff_seconds: [30, 120, 300, 900, 3600]  # 30s, 2m, 5m, 15m, 1h
-  daily_data_cap_mb: 0                   # 0 = unlimited; pause uploads when exceeded
-  notify_webhook_url: ""                 # Optional POST URL on successful upload
+# Wave 4 PR-F4 (issue #184): the standalone ``live_event_sync``
+# configuration block has been removed. Live-event uploads (Sentry/
+# Saved) are now first-class ``pipeline_queue`` rows enqueued by the
+# file_watcher event.json hook at ``PRIORITY_LIVE_EVENT`` (= 0), so
+# the unified cloud_archive worker picks them up before any bulk
+# catch-up rows automatically. There is no separate enable flag,
+# queue, worker, retry policy, or daily data cap — the
+# ``cloud_archive`` retry/cap settings apply to live events too.
+# (The previous ``live_event_sync.upload_scope: "event_minute"``
+# camera-subset selection is gone; live events upload the full event
+# directory, same as bulk events. The "minute-only" optimisation was
+# undocumented in the public docs and almost no Tesla event spans
+# more than a minute anyway.)
 
 # ============================================================================
 # RecentClips Archive Configuration

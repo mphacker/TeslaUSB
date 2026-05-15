@@ -211,11 +211,14 @@ CREATE INDEX IF NOT EXISTS idx_cloud_sessions_started ON cloud_sync_sessions(sta
 # 1. Newly-archived clips couldn't upload until the *next* trigger.
 #    Inotify saw the file, the indexer caught up — but cloud sync only
 #    woke on the 24h safety timer or on a WiFi reconnect event.
-# 2. The LES priority contract depended on ``trigger_auto_sync`` checking
-#    ``has_ready_live_event_work`` BEFORE starting. Once the bulk sync
-#    was running, the LES yield-between-files path was the only safety
-#    net — fine, but stripping the start-time check off the timer
-#    means LES has no head start.
+# 2. Wave 4 PR-F4 (issue #184): live-event uploads (Sentry/Saved) are
+#    now first-class ``pipeline_queue`` rows at ``PRIORITY_LIVE_EVENT``
+#    instead of a separate ``live_event_sync`` subsystem with its own
+#    queue, worker, and yield-coordination. The unified worker's
+#    natural priority ordering means a live event always leapfrogs
+#    bulk catch-up rows on the very next claim — no separate LES
+#    head-start, no inter-file yield dance, no second rclone
+#    subprocess.
 # 3. Status was scattered across "sync running?" (in ``_sync_status``)
 #    and "thread alive?" (in ``_sync_thread``) — two different sources
 #    of truth that periodically disagreed.
@@ -781,6 +784,8 @@ def _enqueue_event_to_pipeline(
     event_dir: Optional[str] = None,
     event_size: Optional[int] = None,
     score: Optional[int] = None,
+    priority: Optional[int] = None,
+    producer: str = 'cloud_archive._discover_events',
 ) -> bool:
     """Enqueue one event into ``pipeline_queue`` with cloud_pending stage.
 
@@ -795,7 +800,13 @@ def _enqueue_event_to_pipeline(
     succeeds, so a failed producer hook only delays PR-F3's reader
     by one cycle (the next ``_discover_events`` call retries).
 
-    Single-row entry point — kept for direct callers and tests.
+    Single-row entry point — used by:
+      * The bulk discovery loop (one row at a time fallback)
+      * Wave 4 PR-F4 LIVE-EVENT hook: the file_watcher
+        ``register_event_json_callback`` enqueues with
+        ``priority=PRIORITY_LIVE_EVENT`` so cloud_archive picks the
+        event up before any bulk catch-up rows
+      * Tests
     The bulk discovery path uses
     :func:`_enqueue_events_to_pipeline_batch` instead, which
     collapses N per-row connections into one fsync (~25-35 s of
@@ -814,6 +825,13 @@ def _enqueue_event_to_pipeline(
         score: ``_score_event_priority`` result. Lower is more
             urgent. Stored in payload so PR-F3 can re-rank rows
             without re-scoring against the disk.
+        priority: Override the default ``PRIORITY_CLOUD_BULK``.
+            Pass ``PRIORITY_LIVE_EVENT`` (= 0) from the file_watcher
+            event.json hook to leapfrog the bulk catch-up queue.
+            ``None`` → use the default (PR-F2 bulk producer).
+        producer: Free-form provenance string stored in the payload.
+            Defaults to the bulk producer name. The PR-F4 live-event
+            hook passes ``'file_watcher.event_json'``.
 
     Returns True iff a new pipeline_queue row was inserted (False
     on idempotent re-enqueue OR error). The boolean is for tests
@@ -824,16 +842,19 @@ def _enqueue_event_to_pipeline(
         return False
     try:
         from services import pipeline_queue_service as pqs
+        chosen_priority = (
+            priority if priority is not None else pqs.PRIORITY_CLOUD_BULK
+        )
         inserted = pqs.dual_write_enqueue(
             source_path=rel_path,
             stage=pqs.STAGE_CLOUD_PENDING,
             legacy_table=pqs.LEGACY_TABLE_CLOUD_SYNCED,
-            priority=pqs.PRIORITY_CLOUD_BULK,
+            priority=chosen_priority,
             payload={
                 'event_dir': event_dir,
                 'event_size': event_size,
                 'score': score,
-                'producer': 'cloud_archive._discover_events',
+                'producer': producer,
             },
             status='pending',
         )
@@ -911,6 +932,211 @@ def _enqueue_events_to_pipeline_batch(
             "failed (%d rows): %s", len(scored_events), e,
         )
         return 0
+
+
+def enqueue_live_event_from_event_json(event_json_paths: List[str]) -> int:
+    """Enqueue Sentry/Saved events at LIVE priority into pipeline_queue.
+
+    Wave 4 PR-F4 (issue #184): replaces the standalone
+    ``live_event_sync_service`` worker. The file_watcher's
+    ``register_event_json_callback`` fires this helper the moment Tesla
+    writes a new ``event.json``; the unified cloud_archive worker (now
+    a ``pipeline_queue`` reader after PR-F3 + flag flip) picks the row
+    up before any bulk catch-up rows because the row is enqueued at
+    ``PRIORITY_LIVE_EVENT = 0`` (vs. ``PRIORITY_CLOUD_BULK = 4``).
+
+    The caller is the file_watcher inotify callback. Callbacks are
+    invoked from the watcher thread so this MUST be cheap and MUST
+    NEVER raise: failures only delay the upload by one bulk-discovery
+    cycle (the next ``_discover_events`` pass will pick up the same
+    event at the bulk priority).
+
+    Canonical key — IMPORTANT
+    -------------------------
+    The ``source_path`` we enqueue MUST exactly match the form
+    :func:`_discover_events` produces for the same event so the
+    ``pipeline_queue.idx_pipeline_source_unique`` UNIQUE index dedups
+    correctly. ``_discover_events`` enqueues the **event directory** as
+    ``canonical_cloud_path("SentryClips/<dir>")`` — NOT the event.json
+    path inside it. This helper therefore derives the directory from
+    the inotify event_json path and runs the SAME canonicalisation.
+    Mismatch = double-upload (one row at LIVE priority, one at BULK) —
+    the regression PR-F4's review caught and this docstring exists to
+    prevent recurrence.
+
+    For each ``event.json`` path:
+
+    * Compute the event directory (``os.path.dirname``); skip if the
+      dir vanished between the inotify event and this call.
+    * Canonicalise the **event directory** (not the event.json path)
+      via :func:`_canonical_rel_path_from_local` so the resulting
+      ``source_path`` matches the bulk producer's form exactly.
+    * Compute the event size by summing the file sizes in the event
+      directory; falls back to ``0`` if the dir vanished mid-call.
+    * Call :func:`_enqueue_event_to_pipeline` with
+      ``priority=PRIORITY_LIVE_EVENT`` and a ``producer`` tag that
+      identifies this code path in pipeline forensics.
+
+    Returns the count of newly-inserted rows. Re-enqueues that hit
+    the UNIQUE index (the same event dir processed twice, OR a bulk
+    discovery beat us to it) count as no-ops.
+
+    Resource budget: this helper does NOT spawn a thread, NOT touch
+    rclone, NOT open any heavy library. The whole call is one fsync
+    per event in the same SQLite WAL the producer already uses.
+    Steady-state RSS unchanged.
+    """
+    if not event_json_paths:
+        return 0
+    try:
+        from services import pipeline_queue_service as pqs
+        live_priority = pqs.PRIORITY_LIVE_EVENT
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "PR-F4 live-event hook: pipeline_queue_service import "
+            "failed: %s — events will be picked up by next bulk pass",
+            e,
+        )
+        return 0
+
+    inserted_total = 0
+    for event_json_path in event_json_paths:
+        try:
+            if not event_json_path:
+                continue
+            # Tesla writes event.json as the LAST file in the dir, so
+            # the dir contents are stable by the time we get here.
+            event_dir = os.path.dirname(event_json_path)
+            if not event_dir or not os.path.isdir(event_dir):
+                continue
+            # Canonical relative path of the event DIRECTORY (not the
+            # event.json file). MUST match _discover_events'
+            # canonical_cloud_path("SentryClips/<dir>") form exactly so
+            # the UNIQUE index dedups. See "Canonical key" docstring
+            # section above for why a mismatch causes double-upload.
+            try:
+                rel_path = _canonical_rel_path_from_local(event_dir)
+            except Exception:  # noqa: BLE001
+                # Fall back to bulk-pass: skip enqueue rather than
+                # risk a malformed key colliding with unrelated rows.
+                logger.warning(
+                    "PR-F4 live-event hook: canonical key derivation "
+                    "raised for %r — deferring to next bulk pass",
+                    event_dir,
+                )
+                continue
+            if not rel_path:
+                continue
+            try:
+                event_size = sum(
+                    os.path.getsize(os.path.join(event_dir, name))
+                    for name in os.listdir(event_dir)
+                    if os.path.isfile(os.path.join(event_dir, name))
+                )
+            except OSError:
+                event_size = 0
+            try:
+                ok = _enqueue_event_to_pipeline(
+                    rel_path,
+                    event_dir=event_dir,
+                    event_size=event_size,
+                    score=None,
+                    priority=live_priority,
+                    producer='file_watcher.event_json',
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "PR-F4 live-event hook: enqueue failed for %s: %s",
+                    event_json_path, e,
+                )
+                continue
+            if ok:
+                inserted_total += 1
+                logger.info(
+                    "PR-F4 live-event: enqueued %s at LIVE priority",
+                    rel_path,
+                )
+        except Exception as e:  # noqa: BLE001
+            # Outer guard so a single bad path never breaks the batch.
+            logger.warning(
+                "PR-F4 live-event hook: unexpected error for %r: %s",
+                event_json_path, e,
+            )
+
+    # Wake the cloud_archive worker so it picks up the live event
+    # immediately (the worker idles on threading.Event.wait() between
+    # cycles; without a wake it'd sit until the idle timeout).
+    if inserted_total > 0:
+        try:
+            _wake.set()
+        except Exception:  # noqa: BLE001
+            pass
+    return inserted_total
+
+
+def _canonical_rel_path_from_local(local_path: str) -> str:
+    """Convert an absolute local file/dir path to the canonical relative
+    POSIX form used by ``cloud_synced_files.file_path`` and the
+    ``pipeline_queue.source_path`` UNIQUE index.
+
+    Strategy: strip the configured TeslaCam root prefix (RO mount or
+    ArchivedClips) so SentryClips/Saved events normalize to the same
+    relative path regardless of which view of the file was the inotify
+    trigger source. Mirrors what :func:`_discover_events` does at
+    discovery time so the producer hook's path collides on the UNIQUE
+    index instead of producing two rows.
+
+    The basename-only fallback at the end exists so an unexpected path
+    shape never crashes the file_watcher thread, but it is **not** a
+    safe canonical key — every unrelated unknown path would collapse
+    onto the same row (the basename of every event dir is just the
+    timestamp prefix, so all events from the same minute across all
+    sources would alias). The fallback therefore logs at WARNING so a
+    misconfigured deploy (RO_MNT_DIR / ARCHIVE_DIR pointing somewhere
+    the watcher isn't actually reading from) is visible in
+    ``journalctl -u gadget_web``; the row is still enqueued so the
+    bulk pass can correct the canonical form on the next discovery.
+    """
+    candidates: List[str] = []
+    try:
+        from config import RO_MNT_DIR
+        candidates.append(os.path.join(RO_MNT_DIR, 'part1-ro', 'TeslaCam'))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from config import ARCHIVE_DIR
+        candidates.append(ARCHIVE_DIR)
+    except Exception:  # noqa: BLE001
+        pass
+
+    abs_path = os.path.abspath(local_path)
+    for prefix in candidates:
+        if not prefix:
+            continue
+        prefix_abs = os.path.abspath(prefix)
+        # commonpath returns the prefix only when abs_path is inside
+        # it; otherwise it raises ValueError or returns a shorter root.
+        try:
+            common = os.path.commonpath([prefix_abs, abs_path])
+        except ValueError:
+            continue
+        if common == prefix_abs:
+            rel = os.path.relpath(abs_path, prefix_abs)
+            # Force POSIX separators so Linux paths match canonical
+            # form even on Windows test runs.
+            return rel.replace(os.sep, '/')
+    # Last resort: return the basename so we don't crash the watcher
+    # thread. NOT a safe canonical key — see docstring above. Logged
+    # at WARNING because silent collapse would otherwise look like
+    # successful enqueues that secretly all alias the same row.
+    logger.warning(
+        "PR-F4 live-event hook: %r is not under any known TeslaCam "
+        "root (checked %r). Falling back to basename %r — UNIQUE-index "
+        "collisions are likely. Verify RO_MNT_DIR and ARCHIVE_DIR "
+        "config values match where the file_watcher is observing.",
+        abs_path, candidates, os.path.basename(abs_path),
+    )
+    return os.path.basename(abs_path)
 
 
 def _shadow_compare_cloud_picks(
@@ -1105,12 +1331,17 @@ def _peek_pipeline_cloud_pending(limit: int = _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT
 # ``cloud_synced_files`` UPDATE on success) without any new wiring.
 #
 # Cloud rows are mirrored from ``cloud_synced_files`` LAZILY: the
-# producer in ``_discover_events`` enqueues with ``source_path = <rel
-# event.json path>`` but does NOT set ``legacy_id`` because the
-# corresponding ``cloud_synced_files`` row is not created until upload
-# starts. That's why the release-claim helper uses the cloud-specific
-# :func:`pqs.release_pipeline_claim_by_source_path` (added by PR-F3)
-# instead of the legacy_id-keyed PR-F1 helper.
+# producer in ``_discover_events`` enqueues with
+# ``source_path = canonical_cloud_path("SentryClips/<event_dir>")`` (the
+# event DIRECTORY, NOT the event.json file inside it) but does NOT set
+# ``legacy_id`` because the corresponding ``cloud_synced_files`` row is
+# not created until upload starts. The PR-F4 live-event hook
+# (:func:`enqueue_live_event_from_event_json`) MUST canonicalise the
+# event directory the same way so the ``idx_pipeline_source_unique``
+# index dedups across producers — see that helper's "Canonical key"
+# docstring section. That's also why the release-claim helper uses the
+# cloud-specific :func:`pqs.release_pipeline_claim_by_source_path`
+# (added by PR-F3) instead of the legacy_id-keyed PR-F1 helper.
 # ---------------------------------------------------------------------------
 
 # Default upper bound on the number of rows claimed in a single drain
@@ -3096,51 +3327,20 @@ def _drain_once(
                     # or duplicate processing). Safe to ignore.
                     pass
 
-            # Yield to Live Event Sync if it has READY pending event work.
-            # LES gets priority over normal cloud_archive uploads when both
-            # want WiFi. The helper checks status, next_retry_at, attempts,
-            # and the daily data cap so a stuck row never blocks us forever.
-            try:
-                from services.live_event_sync_service import (
-                    has_ready_live_event_work,
-                )
-                _les_pending = has_ready_live_event_work(db_path)
-            except Exception:
-                _les_pending = False
-            if _les_pending:
-                logger.info(
-                    "Cloud sync yielding to Live Event Sync (queue has ready events)",
-                )
-                # Drop the heavy-task lock so LES worker can grab it.
-                # We re-acquire on the next loop iteration.
-                from services.task_coordinator import (
-                    acquire_task as _acq, release_task as _rel,
-                )
-                _rel('cloud_sync')
-                lock_held = False
-                # Wait for LES to drain (or up to 5 minutes per yield).
-                yield_deadline = time.time() + 300
-                while time.time() < yield_deadline:
-                    if cancel_event.is_set():
-                        break
-                    time.sleep(2)
-                    try:
-                        if not has_ready_live_event_work(db_path):
-                            break
-                    except Exception:
-                        break
-                # Re-acquire the lock; if a different task grabbed it
-                # while we yielded, we treat that as cooperative and
-                # bail out — the next dispatcher fire will resume.
-                if not _acq('cloud_sync'):
-                    logger.info(
-                        "Cloud sync: another task acquired lock during yield; "
-                        "stopping this run (will resume on next trigger)",
-                    )
-                    break
-                lock_held = True
-
-            # Pause between uploads to let the system breathe
+            # Wave 4 PR-F4 (issue #184): the inter-file LES yield has
+            # been removed. Live events are now first-class
+            # ``pipeline_queue`` rows enqueued at
+            # ``PRIORITY_LIVE_EVENT = 0`` by the file_watcher
+            # event.json hook (see :func:`enqueue_live_event_from_event_json`).
+            # The reader's natural priority order means a live event
+            # arriving mid-drain is picked up on the very next claim
+            # — no separate worker, no separate queue, no inter-file
+            # yielding logic needed. (The previous implementation
+            # released the task_coordinator lock and slept up to 5
+            # minutes per yield, which added measurable latency to
+            # every drain even when LES had nothing to do.)
+            #
+            # Pause between uploads to let the system breathe.
             time.sleep(_INTER_UPLOAD_SLEEP)
 
         # Determine final session status
@@ -3338,25 +3538,15 @@ def _worker_loop(teslacam_path: str, db_path: str) -> None:
             if not CLOUD_ARCHIVE_PROVIDER:
                 continue
 
-            # Yield to LES BEFORE acquiring our own lock — same
-            # contract as the legacy ``trigger_auto_sync``.
-            try:
-                from services.live_event_sync_service import (
-                    has_ready_live_event_work,
-                )
-                if has_ready_live_event_work(db_path):
-                    logger.debug(
-                        "Cloud archive worker yielding wake to LES "
-                        "(ready events in queue)",
-                    )
-                    # Backoff that preserves _wake so a producer's
-                    # wake during the LES window isn't discarded.
-                    _backoff_wait(_WAIT_WHEN_BUSY_SECONDS)
-                    if _worker_stop.is_set():
-                        break
-                    continue
-            except Exception:  # noqa: BLE001
-                pass
+            # Wave 4 PR-F4 (issue #184): the LES yield path here has
+            # been removed. Live events are now first-class
+            # ``pipeline_queue`` rows enqueued at
+            # ``PRIORITY_LIVE_EVENT = 0`` by the file_watcher
+            # event.json hook (see :func:`enqueue_live_event_from_event_json`).
+            # The reader's natural priority order means the worker
+            # always claims a live-event row before any bulk
+            # ``PRIORITY_CLOUD_BULK`` row — no separate worker, no
+            # separate queue, no yield-and-wait dance needed.
 
             # Skip if WiFi is down — we'll wake again on the next
             # NM dispatcher event when WiFi comes back. The idle

@@ -141,6 +141,43 @@ _skipped_tally: 'collections.deque[float]' = collections.deque(
 )
 
 
+# Issue #208: in-memory cache of "this RecentClips path is stationary"
+# decisions so the once-a-minute producer scan does NOT re-mmap every
+# parked clip on every iteration. Each cache entry maps
+# ``path -> (mtime, size, cached_at_monotonic)``. A cache hit means we
+# previously SEI-peeked this exact file (same mtime & size) and found
+# no GPS-bearing message; we can skip the peek and record the skip
+# without touching the file at all.
+#
+# Why ``mtime`` AND ``size``? Tesla rotates the RecentClips slot by
+# overwriting the file in place. The new clip will have a different
+# mtime AND a different size (camera bitrates vary clip-to-clip). Any
+# mismatch invalidates the cache entry and forces a re-peek.
+#
+# Why bounded? RecentClips holds ~360 .mp4s (6 cameras x 60 minutes).
+# We cap at 1000 entries so even a transient mount-point glitch that
+# enumerates other directories cannot grow this without limit. LRU
+# eviction is approximated by deleting the oldest 25% of entries when
+# we hit the cap — cheap (one sort) vs. maintaining a true LRU and
+# rare enough (only on overflow) that the approximation is fine.
+#
+# Why ``time.monotonic()`` for the timestamp? We use it for TTL
+# eviction (``_PEEK_CACHE_TTL_SECONDS``) which protects against an
+# entry living forever after the file is deleted but the cache key is
+# stale. Wall clock would be wrong if the system clock jumps.
+_PEEK_CACHE_MAX_ENTRIES = 1000
+_PEEK_CACHE_TTL_SECONDS = 24 * 3600  # one day; well past Tesla rotation
+_peek_cache_lock = threading.Lock()
+_peek_cache: Dict[str, tuple] = {}
+# Stats for the System Health metrics widget — reset on service start.
+_peek_cache_stats: Dict[str, int] = {
+    'hits': 0,         # cumulative cache hits (peek skipped)
+    'misses': 0,       # cumulative cache misses (peek ran, result added)
+    'invalidations': 0,  # entries rejected because mtime/size changed
+    'evictions': 0,    # entries dropped due to TTL or LRU pressure
+}
+
+
 def _is_running() -> bool:
     with _state_lock:
         t = _thread
@@ -179,6 +216,100 @@ def _record_skip() -> None:
     """Append a skip timestamp to the in-memory tally."""
     with _skipped_tally_lock:
         _skipped_tally.append(time.time())
+
+
+# ---------------------------------------------------------------------------
+# Issue #208: SEI-peek decision cache for stationary RecentClips.
+# ---------------------------------------------------------------------------
+
+
+def _peek_cache_lookup(path: str, mtime: float, size: int) -> bool:
+    """Return True if ``path`` is cached as stationary at this ``(mtime, size)``.
+
+    A False return means either no entry, or the entry is stale
+    (mtime/size differ — Tesla rotated the slot, file content changed).
+    Stale entries are evicted on lookup so a hot file gets re-peeked
+    immediately rather than next sweep.
+
+    Pure read path: caller still needs to ``_peek_clip_for_gps`` on a
+    miss.
+    """
+    now = time.monotonic()
+    with _peek_cache_lock:
+        entry = _peek_cache.get(path)
+        if entry is None:
+            _peek_cache_stats['misses'] += 1
+            return False
+        cached_mtime, cached_size, cached_at = entry
+        # TTL safety net — entries should be invalidated by mtime/size
+        # change long before this fires, but if a file lingered for a
+        # full day with the same metadata (RecentClips slot Tesla
+        # stopped writing to), refresh so we don't trust forever-old
+        # decisions.
+        if now - cached_at > _PEEK_CACHE_TTL_SECONDS:
+            del _peek_cache[path]
+            _peek_cache_stats['evictions'] += 1
+            _peek_cache_stats['misses'] += 1
+            return False
+        if cached_mtime == mtime and cached_size == size:
+            _peek_cache_stats['hits'] += 1
+            return True
+        # mtime / size mismatch — Tesla rotated this slot, or some
+        # other writer modified the file. Drop the stale entry and
+        # signal a miss so the caller re-peeks.
+        del _peek_cache[path]
+        _peek_cache_stats['invalidations'] += 1
+        _peek_cache_stats['misses'] += 1
+        return False
+
+
+def _peek_cache_store(path: str, mtime: float, size: int) -> None:
+    """Record that ``path`` was peeked and found to be stationary.
+
+    Only call after :func:`_peek_clip_for_gps` returned ``False``.
+    Caching ``True`` (has GPS) is pointless because the caller
+    enqueues those clips immediately and the queue's UNIQUE constraint
+    handles dedup; caching ``None`` (parse error) is harmful because
+    we WANT to retry next sweep in case the error was transient.
+
+    Bounded eviction: when the cache is at capacity, drop the oldest
+    25% of entries by ``cached_at``. This is cheap (one sort over
+    1000 entries) and rare (only happens when the cache is genuinely
+    full).
+    """
+    now = time.monotonic()
+    with _peek_cache_lock:
+        if (path not in _peek_cache
+                and len(_peek_cache) >= _PEEK_CACHE_MAX_ENTRIES):
+            # LRU-ish eviction: drop oldest 25% by cached_at.
+            victims = sorted(
+                _peek_cache.items(),
+                key=lambda kv: kv[1][2],
+            )[: max(1, _PEEK_CACHE_MAX_ENTRIES // 4)]
+            for victim_path, _ in victims:
+                del _peek_cache[victim_path]
+                _peek_cache_stats['evictions'] += 1
+        _peek_cache[path] = (mtime, size, now)
+
+
+def reset_peek_cache() -> None:
+    """Clear the SEI-peek decision cache. Test / admin helper."""
+    with _peek_cache_lock:
+        _peek_cache.clear()
+
+
+def get_peek_cache_stats() -> Dict[str, int]:
+    """Return cache size and cumulative hit/miss counters.
+
+    Surfaced through ``/api/system/metrics`` (Issue #208) so operators
+    can see the cache is actually doing its job. Returns a copy so
+    callers can mutate freely.
+    """
+    with _peek_cache_lock:
+        snapshot = dict(_peek_cache_stats)
+        snapshot['size'] = len(_peek_cache)
+        snapshot['capacity'] = _PEEK_CACHE_MAX_ENTRIES
+    return snapshot
 
 
 def _peek_clip_for_gps(source_path: str) -> Optional[bool]:
@@ -278,20 +409,35 @@ def enqueue_with_peek(paths: Iterable[str],
             continue
         # RecentClips — apply the freshness gate, then peek.
         try:
-            mtime = os.path.getmtime(raw)
+            st = os.stat(raw)
         except OSError:
             # Source vanished between watcher fire and our stat;
             # silently drop — next scan will not see it either.
             continue
+        mtime = st.st_mtime
+        size = st.st_size
         if (time.time() - mtime) < stable_age:
             # Too fresh — defer to the worker so we never misclassify
             # a half-written clip as stationary.
             pending_enqueue.append(raw)
             continue
+        # Issue #208: skip the SEI peek if we already decided this
+        # exact ``(path, mtime, size)`` was stationary on a prior
+        # iteration. Eliminates the ~700 MB/min of mmap reads the
+        # naive 60-s rescan was doing on parked-overnight RecentClips.
+        if _peek_cache_lookup(raw, mtime, size):
+            _record_skip()
+            skipped += 1
+            logger.debug(
+                "archive_producer: skipped stationary RecentClips "
+                "(cached): %s", raw,
+            )
+            continue
         verdict = _peek_clip_for_gps(raw)
         if verdict is False:
             _record_skip()
             skipped += 1
+            _peek_cache_store(raw, mtime, size)
             logger.debug(
                 "archive_producer: skipped stationary RecentClips at "
                 "source: %s", raw,

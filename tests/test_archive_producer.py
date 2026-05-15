@@ -499,3 +499,167 @@ class TestEnqueueWithPeek:
         assert archive_producer.get_skipped_stationary_count(24) == 1
         archive_producer.reset_skipped_stationary_tally()
         assert archive_producer.get_skipped_stationary_count(24) == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #208: SEI-peek decision cache
+# ---------------------------------------------------------------------------
+
+class TestPeekCache:
+    """Cache should eliminate repeated SEI peeks on stationary RecentClips.
+
+    Pre-fix the producer mmap-read every parked clip on every 60s sweep
+    (~700 MB/min on a parked overnight Pi). The cache stores ``False``
+    verdicts keyed by ``(path, mtime, size)`` so a re-scan with no file
+    change skips the peek entirely.
+    """
+
+    def setup_method(self):
+        archive_producer.reset_peek_cache()
+        archive_producer.reset_skipped_stationary_tally()
+
+    def teardown_method(self):
+        # Reset both the cache AND the skipped-stationary tally so the
+        # in-memory deque doesn't leak across tests (the storage_retention
+        # blueprint's badge endpoint sums producer skips into its
+        # 24-hour count, and would otherwise see our test skips as
+        # real skips).
+        archive_producer.reset_peek_cache()
+        archive_producer.reset_skipped_stationary_tally()
+
+    def test_first_call_runs_peek_subsequent_call_uses_cache(
+            self, db, tmp_path, monkeypatch,
+    ):
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        called = {'count': 0}
+
+        def _fake_peek(_p):
+            called['count'] += 1
+            return False
+
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', _fake_peek,
+        )
+        # First sweep: peek runs, verdict is cached.
+        r1 = archive_producer.enqueue_with_peek([path], db_path=db)
+        assert called['count'] == 1
+        assert r1['skipped_stationary'] == 1
+        # Second sweep with the file unchanged: peek MUST NOT run again.
+        r2 = archive_producer.enqueue_with_peek([path], db_path=db)
+        assert called['count'] == 1, (
+            "cache hit must skip the SEI peek on the second sweep"
+        )
+        assert r2['skipped_stationary'] == 1
+
+    def test_mtime_change_invalidates_cache_and_repeeks(
+            self, db, tmp_path, monkeypatch,
+    ):
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        called = {'count': 0}
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps',
+            lambda _p: (called.update(count=called['count'] + 1) or False),
+        )
+        archive_producer.enqueue_with_peek([path], db_path=db)
+        assert called['count'] == 1
+        # Tesla rotates the slot — mtime changes.
+        newer = time.time() - 30
+        os.utime(path, (newer, newer))
+        archive_producer.enqueue_with_peek([path], db_path=db)
+        assert called['count'] == 2, (
+            "mtime change must invalidate the cache entry"
+        )
+        stats = archive_producer.get_peek_cache_stats()
+        assert stats['invalidations'] >= 1
+
+    def test_size_change_invalidates_cache_and_repeeks(
+            self, db, tmp_path, monkeypatch,
+    ):
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        called = {'count': 0}
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps',
+            lambda _p: (called.update(count=called['count'] + 1) or False),
+        )
+        archive_producer.enqueue_with_peek([path], db_path=db)
+        assert called['count'] == 1
+        # Same mtime but a different size — Tesla reused the slot with
+        # a different-bitrate camera. Cache must invalidate.
+        with open(path, 'wb') as f:
+            f.write(b"x" * 4096)
+        os.utime(path, (old, old))
+        archive_producer.enqueue_with_peek([path], db_path=db)
+        assert called['count'] == 2
+
+    def test_true_verdict_is_not_cached(self, db, tmp_path, monkeypatch):
+        # Caching ``True`` would be pointless (the file gets enqueued
+        # and removed from RecentClips by the worker). Verify only False
+        # is cached.
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', lambda _p: True,
+        )
+        archive_producer.enqueue_with_peek([path], db_path=db)
+        stats = archive_producer.get_peek_cache_stats()
+        assert stats['size'] == 0
+
+    def test_none_verdict_is_not_cached(self, db, tmp_path, monkeypatch):
+        # Caching ``None`` (parser failure) is harmful — the next sweep
+        # would never retry. Verify only False is cached.
+        recent = tmp_path / "TeslaCam" / "RecentClips"
+        recent.mkdir(parents=True)
+        path = str(recent / "2026-05-11_09-00-00-front.mp4")
+        with open(path, 'wb') as f:
+            f.write(b"x")
+        old = time.time() - 60
+        os.utime(path, (old, old))
+        monkeypatch.setattr(
+            archive_producer, '_peek_clip_for_gps', lambda _p: None,
+        )
+        archive_producer.enqueue_with_peek([path], db_path=db)
+        stats = archive_producer.get_peek_cache_stats()
+        assert stats['size'] == 0
+
+    def test_cache_bounded_by_max_entries(self, monkeypatch):
+        # Stuff more than _PEEK_CACHE_MAX_ENTRIES synthetic entries and
+        # verify the cache stays bounded with a non-zero eviction count.
+        archive_producer.reset_peek_cache()
+        cap = archive_producer._PEEK_CACHE_MAX_ENTRIES
+        for i in range(cap + 50):
+            archive_producer._peek_cache_store(
+                f'/fake/path/{i}.mp4', mtime=1000.0 + i, size=100 + i,
+            )
+        stats = archive_producer.get_peek_cache_stats()
+        assert stats['size'] <= cap
+        assert stats['evictions'] > 0
+
+    def test_get_peek_cache_stats_returns_copy(self):
+        archive_producer.reset_peek_cache()
+        s1 = archive_producer.get_peek_cache_stats()
+        s1['size'] = 99999
+        s2 = archive_producer.get_peek_cache_stats()
+        assert s2['size'] == 0, "stats dict mutation must not leak"

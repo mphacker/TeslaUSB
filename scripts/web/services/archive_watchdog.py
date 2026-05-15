@@ -90,6 +90,18 @@ _RETENTION_FIRST_RUN_JITTER_MAX_SECONDS = 15 * 60
 _RETENTION_COORDINATOR_WAIT_SECONDS = 60.0
 _RETENTION_COORDINATOR_TASK = 'retention'
 
+# Issue #208: yield the 'retention' task_coordinator lock every N files
+# so a multi-thousand-file sweep doesn't block the indexer / archive
+# worker for 5+ minutes (observed pre-fix max_hold = 311 s on 5904
+# clips, which is 3.5x the 90 s hardware watchdog timeout). At 100 files
+# per batch and ~30-50 ms per delete decision (stat + DB reconcile),
+# each held window is ≤ 5 s — well within safety.
+_RETENTION_YIELD_EVERY_N_FILES = 100
+# Brief sleep between batches so other workers can actually grab the
+# lock before we re-acquire. Long enough to let a waiter through, short
+# enough that a 5904-file sweep adds < 4 s of yield overhead total.
+_RETENTION_YIELD_SLEEP_SECONDS = 0.05
+
 # Diagnostic subdirectory inside ``archive_root`` that the prune must
 # never touch. Mirrors the worker's dead-letter sidecar location.
 _DEAD_LETTER_DIRNAME = '.dead_letter'
@@ -777,6 +789,30 @@ def _delete_one_mp4(path: str, db_path: str) -> int:
     return result.bytes_freed
 
 
+def _yield_retention_lock() -> bool:
+    """Issue #208: drop the 'retention' task slot, sleep briefly, re-acquire.
+
+    Lets a waiting indexer / archive_worker get a turn between
+    batches of N files. Returns True when the lock was reacquired
+    (caller should keep going), False when reacquire failed (caller
+    should bail with a partial summary — something else is genuinely
+    holding the lock and we shouldn't starve it forever).
+
+    Implementation note: we always sleep ``_RETENTION_YIELD_SLEEP_SECONDS``
+    even if no waiter exists. Asking ``task_coordinator.waiter_count()``
+    is cheap, but the sleep itself is the cooperation primitive — without
+    it a quick release/reacquire round-trip would not give a competing
+    thread enough time to actually wake from its ``threading.Event.wait``
+    and grab the lock.
+    """
+    task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
+    time.sleep(_RETENTION_YIELD_SLEEP_SECONDS)
+    return task_coordinator.acquire_task(
+        _RETENTION_COORDINATOR_TASK,
+        wait_seconds=_RETENTION_COORDINATOR_WAIT_SECONDS,
+    )
+
+
 def _run_retention_prune(archive_root: str, db_path: str,
                          retention_days: int) -> Dict[str, Any]:
     """Walk ``archive_root`` and delete .mp4 files older than retention.
@@ -857,7 +893,13 @@ def _run_retention_prune(archive_root: str, db_path: str,
             summary['duration_seconds'] = round(time.time() - started, 3)
             return summary
 
+        # ``lock_held`` tracks whether we still own the 'retention'
+        # task slot at any given point in the loop body. It is set
+        # to False by the yield-bailout branch so the ``finally`` below
+        # knows not to double-release a lock we already gave up.
+        lock_held = True
         try:
+            files_since_yield = 0
             for path, mtime, _size in _iter_archive_mp4_files(archive_root):
                 summary['scanned'] += 1
                 if mtime > cutoff:
@@ -881,9 +923,34 @@ def _run_retention_prune(archive_root: str, db_path: str,
                         "freed=%d bytes)",
                         path, age_days, freed,
                     )
+                # Issue #208: yield the lock every N files so a 5904-clip
+                # sweep doesn't block the indexer / archive worker for
+                # 5+ minutes (max_hold = 311 s observed pre-fix).
+                files_since_yield += 1
+                if files_since_yield >= _RETENTION_YIELD_EVERY_N_FILES:
+                    files_since_yield = 0
+                    if not _yield_retention_lock():
+                        # Couldn't reacquire — something else is
+                        # genuinely holding the lock. Bail with the
+                        # partial summary we've built so far; next
+                        # retention tick will pick up where we left off.
+                        lock_held = False
+                        summary['status'] = 'yielded_lost_lock'
+                        logger.info(
+                            "archive_retention: yielded 'retention' "
+                            "lock after %d scanned/%d deleted and could "
+                            "not reacquire within %.1fs — bailing with "
+                            "partial summary; next tick will resume",
+                            summary['scanned'], summary['deleted_count'],
+                            _RETENTION_COORDINATOR_WAIT_SECONDS,
+                        )
+                        break
         finally:
             # Release BEFORE any further sleep / outside callers.
-            task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
+            # When the loop bailed via yielded_lost_lock we already do
+            # NOT hold the lock; only release if we still do.
+            if lock_held:
+                task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
             summary['duration_seconds'] = round(time.time() - started, 3)
     finally:
         # Always clear the duplicate-trigger guard, even on exception
@@ -1098,6 +1165,8 @@ def reclaim_stationary_recent_clips(*,
             )
             event_basenames = _collect_event_basenames(archive_root)
 
+            lock_held = True
+            files_since_yield = 0
             for raw_path, mtime, _size in _iter_archive_mp4_files(
                 recent_root,
             ):
@@ -1138,8 +1207,27 @@ def reclaim_stationary_recent_clips(*,
                         "reclaim_stationary: removed %s (freed=%d bytes)",
                         path, freed,
                     )
+                # Issue #208: yield the lock every N files so a
+                # large RecentClips sweep doesn't block the indexer /
+                # archive worker for minutes at a time.
+                files_since_yield += 1
+                if files_since_yield >= _RETENTION_YIELD_EVERY_N_FILES:
+                    files_since_yield = 0
+                    if not _yield_retention_lock():
+                        lock_held = False
+                        summary['status'] = 'yielded_lost_lock'
+                        logger.info(
+                            "reclaim_stationary: yielded 'retention' "
+                            "lock after %d scanned/%d deleted and "
+                            "could not reacquire within %.1fs — bailing "
+                            "with partial summary; next tick will resume",
+                            summary['scanned'], summary['deleted_count'],
+                            _RETENTION_COORDINATOR_WAIT_SECONDS,
+                        )
+                        break
         finally:
-            task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
+            if lock_held:
+                task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
             summary['duration_seconds'] = round(time.time() - started, 3)
     finally:
         with _state_lock:

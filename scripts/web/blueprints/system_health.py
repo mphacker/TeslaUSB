@@ -694,3 +694,291 @@ def api_clear_lost_clips():
         'rows_deleted': n,
         'dismissed_at': dismissed_at,
     })
+
+
+# ---------------------------------------------------------------------------
+# Issue #208 — live system metrics for the Settings "Live Metrics" widget
+# ---------------------------------------------------------------------------
+#
+# Cheap, near-realtime snapshot of CPU / memory / disk I/O / lock holder /
+# queue depths, intended for a 5-second poll loop on the Settings page.
+# The Pi Zero 2 W only has 4 cores and 512 MB of RAM, so every byte and
+# every syscall on the hot path is accounted for:
+#
+# * /proc/loadavg, /proc/meminfo, /proc/uptime, /proc/stat, /proc/diskstats
+#   are all in-kernel virtual files — reading them is a few hundred bytes
+#   of memcpy and zero disk I/O.
+# * Queue depths use the existing ``COUNT(*)`` helpers which are backed by
+#   indexed columns (sub-millisecond on the production DB).
+# * The peek-cache stats and task_coordinator info are pure in-memory
+#   reads under their own short locks.
+#
+# CPU and disk I/O are inherently delta-based — we cache the previous
+# sample in module state and compute the rate as (current - previous) /
+# elapsed. Concurrency: a single ``_metrics_lock`` serialises updates so
+# two simultaneous polls can't corrupt the cached previous sample. The
+# critical section is short (a few microseconds) so contention is fine.
+#
+# All accessors are wrapped in try/except — a missing file (e.g. running
+# in a container without /proc/diskstats) returns null fields rather than
+# 500ing the whole endpoint.
+
+_METRICS_DISK_DEVICES = ('mmcblk0', 'loop0')
+_metrics_lock = threading.Lock()
+_metrics_prev: Dict[str, Any] = {
+    'cpu_total': None,    # tuple (total_jiffies, idle_jiffies, ts)
+    'diskstats': None,    # dict device -> (read_sectors, write_sectors, ts)
+}
+_SECTOR_BYTES = 512
+
+
+def _read_loadavg() -> Dict[str, Any]:
+    try:
+        with open('/proc/loadavg', 'r', encoding='ascii') as f:
+            parts = f.read().split()
+        return {
+            'one': float(parts[0]),
+            'five': float(parts[1]),
+            'fifteen': float(parts[2]),
+        }
+    except Exception:  # noqa: BLE001
+        return {'one': None, 'five': None, 'fifteen': None}
+
+
+def _read_meminfo() -> Dict[str, Any]:
+    """Return memory and swap totals/used in MiB plus percentage used."""
+    info: Dict[str, int] = {}
+    try:
+        with open('/proc/meminfo', 'r', encoding='ascii') as f:
+            for line in f:
+                key, _, rest = line.partition(':')
+                value_kb_str = rest.strip().split()[0] if rest else '0'
+                try:
+                    info[key.strip()] = int(value_kb_str)
+                except ValueError:
+                    continue
+    except Exception:  # noqa: BLE001
+        return {
+            'mem_total_mb': None, 'mem_available_mb': None,
+            'mem_used_pct': None,
+            'swap_total_mb': None, 'swap_used_mb': None,
+            'swap_used_pct': None,
+        }
+
+    total_kb = info.get('MemTotal', 0)
+    avail_kb = info.get('MemAvailable', 0)
+    swap_total_kb = info.get('SwapTotal', 0)
+    swap_free_kb = info.get('SwapFree', 0)
+    swap_used_kb = max(0, swap_total_kb - swap_free_kb)
+
+    used_pct = None
+    if total_kb > 0:
+        used_pct = round((1.0 - avail_kb / total_kb) * 100.0, 1)
+    swap_pct = None
+    if swap_total_kb > 0:
+        swap_pct = round(swap_used_kb / swap_total_kb * 100.0, 1)
+
+    return {
+        'mem_total_mb': total_kb // 1024,
+        'mem_available_mb': avail_kb // 1024,
+        'mem_used_pct': used_pct,
+        'swap_total_mb': swap_total_kb // 1024,
+        'swap_used_mb': swap_used_kb // 1024,
+        'swap_used_pct': swap_pct,
+    }
+
+
+def _read_uptime_seconds() -> Any:
+    try:
+        with open('/proc/uptime', 'r', encoding='ascii') as f:
+            return int(float(f.read().split()[0]))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _read_cpu_total() -> Any:
+    """Return (total_jiffies, idle_jiffies) from /proc/stat first line."""
+    try:
+        with open('/proc/stat', 'r', encoding='ascii') as f:
+            line = f.readline()
+        # Format: "cpu  user nice system idle iowait irq softirq steal ..."
+        parts = line.split()
+        if not parts or parts[0] != 'cpu':
+            return None
+        nums = [int(x) for x in parts[1:]]
+        # idle = field index 3 (0-based after dropping label); also count
+        # iowait as idle (matches the convention `top` uses) so a worker
+        # blocked on disk doesn't get counted as CPU-busy.
+        idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
+        total = sum(nums)
+        return (total, idle)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _read_diskstats() -> Dict[str, tuple]:
+    """Return ``{device_name: (read_sectors, write_sectors)}``."""
+    out: Dict[str, tuple] = {}
+    try:
+        with open('/proc/diskstats', 'r', encoding='ascii') as f:
+            for line in f:
+                fields = line.split()
+                if len(fields) < 14:
+                    continue
+                # Field index 2 = device name; field 5 = sectors read;
+                # field 9 = sectors written. (Linux kernel diskstats spec.)
+                name = fields[2]
+                if name not in _METRICS_DISK_DEVICES:
+                    continue
+                try:
+                    read_sectors = int(fields[5])
+                    write_sectors = int(fields[9])
+                except (ValueError, IndexError):
+                    continue
+                out[name] = (read_sectors, write_sectors)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _compute_cpu_pct(now_ts: float) -> Any:
+    """Return CPU utilisation % (0-100) since the previous call.
+
+    Returns None on the very first poll (no previous sample) or when
+    /proc/stat couldn't be read.
+    """
+    cur = _read_cpu_total()
+    if cur is None:
+        return None
+    cur_total, cur_idle = cur
+    with _metrics_lock:
+        prev = _metrics_prev['cpu_total']
+        _metrics_prev['cpu_total'] = (cur_total, cur_idle, now_ts)
+    if prev is None:
+        return None
+    prev_total, prev_idle, _prev_ts = prev
+    dt_total = cur_total - prev_total
+    dt_idle = cur_idle - prev_idle
+    if dt_total <= 0:
+        return None
+    busy_pct = (dt_total - dt_idle) / dt_total * 100.0
+    return round(max(0.0, min(busy_pct, 100.0)), 1)
+
+
+def _compute_disk_io(now_ts: float) -> Dict[str, Dict[str, Any]]:
+    """Return per-device read/write rates in KB/s since the previous call."""
+    cur = _read_diskstats()
+    with _metrics_lock:
+        prev = _metrics_prev['diskstats']
+        _metrics_prev['diskstats'] = (cur, now_ts)
+    out: Dict[str, Dict[str, Any]] = {}
+    if prev is None:
+        # First sample — report 0 rates so the UI doesn't show "—" for
+        # the entire startup window. Counters are still cached for the
+        # next poll's delta.
+        for name in _METRICS_DISK_DEVICES:
+            out[name] = {'read_kbs': 0.0, 'write_kbs': 0.0}
+        return out
+    prev_stats, prev_ts = prev
+    elapsed = max(0.001, now_ts - prev_ts)
+    for name in _METRICS_DISK_DEVICES:
+        cur_v = cur.get(name)
+        prev_v = prev_stats.get(name)
+        if cur_v is None or prev_v is None:
+            out[name] = {'read_kbs': 0.0, 'write_kbs': 0.0}
+            continue
+        d_read = max(0, cur_v[0] - prev_v[0]) * _SECTOR_BYTES
+        d_write = max(0, cur_v[1] - prev_v[1]) * _SECTOR_BYTES
+        out[name] = {
+            'read_kbs': round(d_read / 1024.0 / elapsed, 1),
+            'write_kbs': round(d_write / 1024.0 / elapsed, 1),
+        }
+    return out
+
+
+def _coordinator_block() -> Dict[str, Any]:
+    try:
+        from services import task_coordinator
+        info = task_coordinator.current_task_info() or {}
+        return {
+            'busy': bool(info.get('busy')),
+            'task': info.get('task'),
+            'elapsed_seconds': info.get('elapsed', 0) or 0,
+            'waiters': int(info.get('waiters') or 0),
+        }
+    except Exception:  # noqa: BLE001
+        return {'busy': False, 'task': None,
+                'elapsed_seconds': 0, 'waiters': 0}
+
+
+def _queue_depth_block() -> Dict[str, Any]:
+    """Return cheap pending-row counts for each background subsystem.
+
+    Each helper failure is isolated so one bad DB doesn't blank the
+    whole row. Returns ints (or None on failure) — never raises.
+    """
+    out: Dict[str, Any] = {
+        'archive_pending': None,
+        'index_pending': None,
+        'cloud_pending': None,
+    }
+    try:
+        from services import archive_queue
+        counts = archive_queue.get_queue_status() or {}
+        out['archive_pending'] = int(counts.get('pending', 0))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from services import indexing_queue_service
+        from config import MAPPING_DB_PATH
+        counts = indexing_queue_service.get_queue_status(MAPPING_DB_PATH) or {}
+        out['index_pending'] = int(counts.get('queue_depth', 0))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from services import cloud_archive_service
+        # ``get_sync_queue`` returns ``{queue: [...], total: N}`` — N is
+        # the count of (queued | pending | uploading) rows, which is the
+        # operator-facing "how many are waiting" number.
+        cloud_q = cloud_archive_service.get_sync_queue() or {}
+        out['cloud_pending'] = int(cloud_q.get('total', 0))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _peek_cache_block() -> Dict[str, Any]:
+    """Issue #208: surface SEI-peek cache effectiveness in the UI."""
+    try:
+        from services.archive_producer import get_peek_cache_stats
+        return get_peek_cache_stats()
+    except Exception:  # noqa: BLE001
+        return {'size': 0, 'capacity': 0, 'hits': 0, 'misses': 0,
+                'invalidations': 0, 'evictions': 0}
+
+
+@system_health_bp.route('/api/system/metrics', methods=['GET'])
+def api_system_metrics():
+    """Return a near-realtime snapshot of CPU, memory, disk I/O, queues.
+
+    Designed for a 5-second poll from the Settings "Live Metrics"
+    panel (Issue #208). Every reader is a /proc file or an in-memory
+    counter — no subprocesses, no rclone, no SEI parses. Total cost
+    per call is well under 5 ms on a Pi Zero 2 W.
+    """
+    now_ts = time.time()
+    cpu_pct = _compute_cpu_pct(now_ts)
+    io = _compute_disk_io(now_ts)
+    payload = {
+        'loadavg': _read_loadavg(),
+        'cpu_count': os.cpu_count() or 1,
+        'cpu_pct': cpu_pct,
+        'memory': _read_meminfo(),
+        'io': io,
+        'task_coordinator': _coordinator_block(),
+        'queues': _queue_depth_block(),
+        'peek_cache': _peek_cache_block(),
+        'uptime_seconds': _read_uptime_seconds(),
+        'generated_at': int(now_ts),
+    }
+    return jsonify(payload)

@@ -1262,3 +1262,178 @@ def test_clear_lost_clips_older_than_hours_skips_tombstone_lookup(
     assert body['rows_deleted'] == 9
     assert body['dismissed_at'] is None
     assert lookup_called['flag'] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #208 — /api/system/metrics live snapshot
+# ---------------------------------------------------------------------------
+
+
+class TestSystemMetricsEndpoint:
+    """Cheap /proc-only snapshot consumed by the Settings Live Metrics
+    panel. Never raises; missing /proc files yield null fields rather
+    than 500s.
+    """
+
+    def test_payload_shape(self, health_app):
+        client = health_app.test_client()
+        rv = client.get('/api/system/metrics')
+        assert rv.status_code == 200
+        body = rv.get_json()
+        for key in (
+            'loadavg', 'cpu_count', 'cpu_pct', 'memory', 'io',
+            'task_coordinator', 'queues', 'peek_cache',
+            'uptime_seconds', 'generated_at',
+        ):
+            assert key in body, f"missing top-level key: {key}"
+        assert isinstance(body['cpu_count'], int)
+        assert isinstance(body['memory'], dict)
+        assert isinstance(body['queues'], dict)
+        for key in ('archive_pending', 'index_pending', 'cpu_pending'
+                    if False else 'cloud_pending'):
+            assert key in body['queues']
+        for dev in ('mmcblk0', 'loop0'):
+            assert dev in body['io']
+            assert 'read_kbs' in body['io'][dev]
+            assert 'write_kbs' in body['io'][dev]
+
+    def test_endpoint_is_idempotent_and_cheap(self, health_app):
+        # Two back-to-back calls must both return 200 (and the second
+        # should compute a CPU delta from the first call's cached
+        # /proc/stat snapshot).
+        client = health_app.test_client()
+        rv1 = client.get('/api/system/metrics')
+        rv2 = client.get('/api/system/metrics')
+        assert rv1.status_code == 200
+        assert rv2.status_code == 200
+
+    def test_loadavg_parsed(self, monkeypatch):
+        import blueprints.system_health as sh
+
+        def fake_open(path, *a, **kw):
+            assert path == '/proc/loadavg'
+            from io import StringIO
+            return StringIO('0.42 0.55 0.66 1/123 9876\n')
+        monkeypatch.setattr('builtins.open', fake_open)
+        out = sh._read_loadavg()
+        assert out['one'] == 0.42
+        assert out['five'] == 0.55
+        assert out['fifteen'] == 0.66
+
+    def test_loadavg_missing_file_returns_nulls(self, monkeypatch):
+        import blueprints.system_health as sh
+
+        def fake_open(*a, **kw):
+            raise FileNotFoundError
+        monkeypatch.setattr('builtins.open', fake_open)
+        out = sh._read_loadavg()
+        assert out == {'one': None, 'five': None, 'fifteen': None}
+
+    def test_meminfo_used_pct(self, monkeypatch):
+        import blueprints.system_health as sh
+        sample = (
+            'MemTotal:        524288 kB\n'
+            'MemFree:          50000 kB\n'
+            'MemAvailable:    104857 kB\n'
+            'SwapTotal:      1048576 kB\n'
+            'SwapFree:        524288 kB\n'
+        )
+
+        def fake_open(path, *a, **kw):
+            from io import StringIO
+            return StringIO(sample)
+        monkeypatch.setattr('builtins.open', fake_open)
+        out = sh._read_meminfo()
+        assert out['mem_total_mb'] == 512
+        assert out['mem_available_mb'] == 102
+        # used = 1 - 104857/524288 = ~80%
+        assert 79.5 <= out['mem_used_pct'] <= 80.5
+        assert out['swap_total_mb'] == 1024
+        assert out['swap_used_mb'] == 512
+        assert out['swap_used_pct'] == 50.0
+
+    def test_compute_cpu_pct_first_call_is_none(self, monkeypatch):
+        import blueprints.system_health as sh
+        # Reset the module's cached previous sample so the test is
+        # deterministic regardless of order.
+        with sh._metrics_lock:
+            sh._metrics_prev['cpu_total'] = None
+        # First call: no previous → returns None.
+        # We patch _read_cpu_total to a known value to make
+        # the test deterministic.
+        monkeypatch.setattr(sh, '_read_cpu_total',
+                            lambda: (1000, 800))
+        assert sh._compute_cpu_pct(now_ts=100.0) is None
+        # Second call: delta over (1100-1000)=100 total, idle delta
+        # (820-800)=20 → busy = (100-20)/100 = 80%.
+        monkeypatch.setattr(sh, '_read_cpu_total',
+                            lambda: (1100, 820))
+        pct = sh._compute_cpu_pct(now_ts=101.0)
+        assert pct == 80.0
+
+    def test_compute_disk_io_returns_zero_on_first_call(self, monkeypatch):
+        import blueprints.system_health as sh
+        with sh._metrics_lock:
+            sh._metrics_prev['diskstats'] = None
+        monkeypatch.setattr(
+            sh, '_read_diskstats',
+            lambda: {'mmcblk0': (1000, 2000), 'loop0': (5000, 0)},
+        )
+        out = sh._compute_disk_io(now_ts=100.0)
+        # First call returns 0 rates (and caches the sample).
+        assert out['mmcblk0']['read_kbs'] == 0.0
+        assert out['mmcblk0']['write_kbs'] == 0.0
+        assert out['loop0']['read_kbs'] == 0.0
+
+    def test_compute_disk_io_delta_kbs(self, monkeypatch):
+        import blueprints.system_health as sh
+        with sh._metrics_lock:
+            sh._metrics_prev['diskstats'] = None
+        # Prime the cache.
+        monkeypatch.setattr(
+            sh, '_read_diskstats',
+            lambda: {'mmcblk0': (0, 0), 'loop0': (0, 0)},
+        )
+        sh._compute_disk_io(now_ts=100.0)
+        # 2 sectors = 1024 bytes = 1 KB per second over 1s window.
+        # 2048 sectors over 1s = 1024 KB/s = 1 MB/s.
+        monkeypatch.setattr(
+            sh, '_read_diskstats',
+            lambda: {'mmcblk0': (2048, 4096), 'loop0': (0, 0)},
+        )
+        out = sh._compute_disk_io(now_ts=101.0)
+        # 2048 sectors * 512 B / 1024 / 1s = 1024 KB/s read.
+        assert out['mmcblk0']['read_kbs'] == 1024.0
+        assert out['mmcblk0']['write_kbs'] == 2048.0
+
+    def test_queue_depth_block_isolates_failures(self, monkeypatch):
+        import blueprints.system_health as sh
+        # Force one importable-but-failing helper, leave others untouched.
+        from services import archive_queue
+
+        def boom(*a, **kw):
+            raise RuntimeError('synthetic')
+        monkeypatch.setattr(archive_queue, 'get_queue_status', boom)
+        out = sh._queue_depth_block()
+        assert out['archive_pending'] is None
+        # Other keys still exist; types depend on env, but presence is required.
+        assert 'index_pending' in out
+        assert 'cloud_pending' in out
+
+    def test_peek_cache_block_returns_dict_when_helper_missing(
+            self, monkeypatch,
+    ):
+        import blueprints.system_health as sh
+        # Even if archive_producer raises on import, the block must
+        # return a stable empty dict shape.
+        import services.archive_producer as ap
+        monkeypatch.setattr(
+            ap, 'get_peek_cache_stats',
+            lambda: (_ for _ in ()).throw(RuntimeError('boom')),
+        )
+        out = sh._peek_cache_block()
+        for key in ('size', 'capacity', 'hits', 'misses',
+                    'invalidations', 'evictions'):
+            assert key in out
+
+

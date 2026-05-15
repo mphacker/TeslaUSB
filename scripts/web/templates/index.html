@@ -170,6 +170,131 @@
         </div>
     </details>
 
+    <!-- Live Metrics (Issue #208) — near-realtime CPU / memory / I/O.
+         Auto-pauses when the tab is hidden so we never poll a backgrounded
+         page. /api/system/metrics is /proc-only (no subprocesses, no DB
+         writes), so a 5 s poll on the device itself is essentially free. -->
+    <details class="settings-section" id="live-metrics-section" open>
+        <summary>Live Metrics</summary>
+        <div class="section-content">
+            <div id="live-metrics-card"
+                 data-poll-url="{{ url_for('system_health.api_system_metrics') }}"
+                 style="display:flex; flex-direction:column; gap:8px;">
+                <div id="live-metrics-grid"
+                     style="display:grid;
+                            grid-template-columns:repeat(auto-fit,
+                                                  minmax(200px, 1fr));
+                            gap:10px;">
+                    <!-- Tiles rendered by JS from /api/system/metrics -->
+                    <div class="metric-tile" id="metric-load">
+                        <div class="metric-label">Load (1m / 5m / 15m)</div>
+                        <div class="metric-value" data-field="load">—</div>
+                        <div class="metric-detail" data-field="load-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-cpu">
+                        <div class="metric-label">CPU</div>
+                        <div class="metric-value" data-field="cpu">—</div>
+                        <div class="metric-detail" data-field="cpu-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-mem">
+                        <div class="metric-label">Memory</div>
+                        <div class="metric-value" data-field="mem">—</div>
+                        <div class="metric-detail" data-field="mem-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-swap">
+                        <div class="metric-label">Swap</div>
+                        <div class="metric-value" data-field="swap">—</div>
+                        <div class="metric-detail" data-field="swap-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-sd">
+                        <div class="metric-label">SD Card I/O</div>
+                        <div class="metric-value" data-field="sd">—</div>
+                        <div class="metric-detail" data-field="sd-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-loop">
+                        <div class="metric-label">USB Image I/O</div>
+                        <div class="metric-value" data-field="loop">—</div>
+                        <div class="metric-detail" data-field="loop-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-coord">
+                        <div class="metric-label">Active Worker</div>
+                        <div class="metric-value" data-field="coord">—</div>
+                        <div class="metric-detail" data-field="coord-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-queues">
+                        <div class="metric-label">Queue Depths</div>
+                        <div class="metric-value" data-field="queues">—</div>
+                        <div class="metric-detail" data-field="queues-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-cache">
+                        <div class="metric-label">Stationary Cache</div>
+                        <div class="metric-value" data-field="cache">—</div>
+                        <div class="metric-detail" data-field="cache-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                </div>
+                <p id="live-metrics-foot"
+                   style="margin:0; font-size:0.78rem;
+                          color:var(--text-secondary);">
+                    Updated <span id="live-metrics-updated">—</span>
+                    · <span id="live-metrics-uptime">—</span>
+                </p>
+            </div>
+        </div>
+    </details>
+    <style>
+        #live-metrics-card .metric-tile {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-height: 72px;
+        }
+        #live-metrics-card .metric-label {
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        #live-metrics-card .metric-value {
+            font-size: 1.15rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            font-variant-numeric: tabular-nums;
+        }
+        #live-metrics-card .metric-detail {
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+        }
+        #live-metrics-card .metric-tile.warn {
+            border-color: var(--accent-warning, #ff9800);
+        }
+        #live-metrics-card .metric-tile.error {
+            border-color: var(--accent-error, #f44336);
+        }
+    </style>
+
     <!-- WiFi Networks -->
     <details class="settings-section" open>
         <summary>WiFi Networks</summary>
@@ -2210,6 +2335,214 @@ if (document.getElementById('fsck-status-container')) {
     }
 
     if (retryBtn) retryBtn.addEventListener('click', loadHealth);
+
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) stopPoll();
+        else startPoll();
+    });
+
+    if (!document.hidden) startPoll();
+})();
+
+// ---------------------------------------------------------------------------
+// Live Metrics card (Issue #208)
+// Polls /api/system/metrics every 5 s while the tab is visible. The endpoint
+// reads /proc files + in-memory counters only — no subprocesses, no DB
+// writes, no SEI parses — so this is essentially free even on a Pi Zero 2 W.
+// Stops polling on visibilitychange to avoid wasted cycles when the user has
+// the tab in the background.
+// ---------------------------------------------------------------------------
+(function() {
+    var card = document.getElementById('live-metrics-card');
+    if (!card) return;
+    var pollUrl = card.getAttribute('data-poll-url');
+    var POLL_MS = 5000;
+    var pollHandle = null;
+    var grid = document.getElementById('live-metrics-grid');
+    var updatedEl = document.getElementById('live-metrics-updated');
+    var uptimeEl = document.getElementById('live-metrics-uptime');
+
+    function fmtNum(n, digits) {
+        if (n == null || isNaN(n)) return '—';
+        if (digits == null) digits = 1;
+        return Number(n).toFixed(digits);
+    }
+
+    function fmtBytes(kbs) {
+        if (kbs == null || isNaN(kbs)) return '—';
+        if (kbs >= 1024) return fmtNum(kbs / 1024, 1) + ' MB/s';
+        return fmtNum(kbs, 1) + ' KB/s';
+    }
+
+    function fmtUptime(secs) {
+        if (secs == null || isNaN(secs)) return 'uptime —';
+        var d = Math.floor(secs / 86400);
+        var h = Math.floor((secs % 86400) / 3600);
+        var m = Math.floor((secs % 3600) / 60);
+        if (d > 0) return 'uptime ' + d + 'd ' + h + 'h';
+        if (h > 0) return 'uptime ' + h + 'h ' + m + 'm';
+        return 'uptime ' + m + 'm';
+    }
+
+    function setTile(tileId, value, detail, severity) {
+        var tile = document.getElementById(tileId);
+        if (!tile) return;
+        var v = tile.querySelector('[data-field]:not([data-field$=detail])');
+        var d = tile.querySelector('[data-field$=detail]');
+        if (v) v.textContent = value;
+        if (d) d.textContent = detail || '\u00a0';
+        tile.classList.remove('warn', 'error');
+        if (severity === 'warn') tile.classList.add('warn');
+        else if (severity === 'error') tile.classList.add('error');
+    }
+
+    function severityFromLoad(loadOne, cpuCount) {
+        if (loadOne == null || cpuCount == null) return 'ok';
+        var ratio = loadOne / cpuCount;
+        if (ratio > 1.5) return 'error';
+        if (ratio > 1.0) return 'warn';
+        return 'ok';
+    }
+
+    function severityFromPct(pct, warn, err) {
+        if (pct == null) return 'ok';
+        if (pct >= err) return 'error';
+        if (pct >= warn) return 'warn';
+        return 'ok';
+    }
+
+    function renderMetrics(p) {
+        var load = p.loadavg || {};
+        var cpuCount = p.cpu_count || 1;
+        var loadStr = fmtNum(load.one, 2) + '  ' +
+                      fmtNum(load.five, 2) + '  ' +
+                      fmtNum(load.fifteen, 2);
+        var loadDetail = cpuCount > 0 && load.one != null
+            ? fmtNum(load.one / cpuCount * 100, 0) + '% of ' +
+              cpuCount + ' cores'
+            : cpuCount + ' cores';
+        setTile('metric-load', loadStr, loadDetail,
+                severityFromLoad(load.one, cpuCount));
+
+        var cpuPct = p.cpu_pct;
+        setTile('metric-cpu',
+                cpuPct != null ? fmtNum(cpuPct, 1) + '%' : '—',
+                'across ' + cpuCount + ' cores',
+                severityFromPct(cpuPct, 70, 90));
+
+        var mem = p.memory || {};
+        setTile('metric-mem',
+                mem.mem_used_pct != null
+                    ? fmtNum(mem.mem_used_pct, 0) + '%'
+                    : '—',
+                mem.mem_total_mb != null
+                    ? (mem.mem_total_mb - (mem.mem_available_mb || 0)) +
+                      ' / ' + mem.mem_total_mb + ' MB used'
+                    : '—',
+                severityFromPct(mem.mem_used_pct, 80, 95));
+
+        setTile('metric-swap',
+                mem.swap_used_pct != null
+                    ? fmtNum(mem.swap_used_pct, 0) + '%'
+                    : '—',
+                mem.swap_total_mb != null
+                    ? (mem.swap_used_mb || 0) + ' / ' +
+                      mem.swap_total_mb + ' MB used'
+                    : '—',
+                severityFromPct(mem.swap_used_pct, 30, 60));
+
+        var io = p.io || {};
+        var sd = io.mmcblk0 || {};
+        setTile('metric-sd',
+                fmtBytes((sd.read_kbs || 0) + (sd.write_kbs || 0)),
+                'r ' + fmtBytes(sd.read_kbs) + '  w ' + fmtBytes(sd.write_kbs),
+                'ok');
+
+        var loop = io.loop0 || {};
+        // Loop reads are the producer SEI peeks (Issue #208). Sustained
+        // reads above ~3 MB/s with no driving means the cache isn't
+        // catching — surface as warn so the operator notices.
+        var loopTotal = (loop.read_kbs || 0) + (loop.write_kbs || 0);
+        var loopSev = loopTotal > 6144
+            ? 'error'
+            : (loopTotal > 3072 ? 'warn' : 'ok');
+        setTile('metric-loop',
+                fmtBytes(loopTotal),
+                'r ' + fmtBytes(loop.read_kbs) +
+                '  w ' + fmtBytes(loop.write_kbs),
+                loopSev);
+
+        var coord = p.task_coordinator || {};
+        var coordVal, coordDetail, coordSev;
+        if (coord.busy && coord.task) {
+            coordVal = coord.task;
+            coordDetail = 'held ' + fmtNum(coord.elapsed_seconds, 1) +
+                          's, ' + (coord.waiters || 0) + ' waiting';
+            coordSev = coord.elapsed_seconds > 60
+                ? 'error'
+                : (coord.elapsed_seconds > 30 ? 'warn' : 'ok');
+        } else {
+            coordVal = 'idle';
+            coordDetail = (coord.waiters || 0) + ' waiting';
+            coordSev = 'ok';
+        }
+        setTile('metric-coord', coordVal, coordDetail, coordSev);
+
+        var q = p.queues || {};
+        function qStr(n) { return n == null ? '—' : String(n); }
+        setTile('metric-queues',
+                qStr(q.archive_pending) + ' / ' +
+                qStr(q.index_pending) + ' / ' +
+                qStr(q.cloud_pending),
+                'archive / index / cloud',
+                'ok');
+
+        var pc = p.peek_cache || {};
+        var hits = pc.hits || 0;
+        var misses = pc.misses || 0;
+        var total = hits + misses;
+        var hitRate = total > 0 ? (hits / total * 100) : null;
+        setTile('metric-cache',
+                hitRate != null
+                    ? fmtNum(hitRate, 0) + '% hit'
+                    : '—',
+                (pc.size || 0) + ' / ' + (pc.capacity || 0) +
+                ' entries, ' + hits + ' hits / ' + misses + ' misses',
+                'ok');
+
+        var ts = p.generated_at
+            ? new Date(p.generated_at * 1000)
+            : new Date();
+        if (updatedEl) {
+            updatedEl.textContent = ts.toLocaleTimeString();
+        }
+        if (uptimeEl) {
+            uptimeEl.textContent = fmtUptime(p.uptime_seconds);
+        }
+    }
+
+    function loadMetrics() {
+        fetch(pollUrl, { cache: 'no-store' })
+            .then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(renderMetrics)
+            .catch(function(e) {
+                console.warn('live_metrics load failed:', e);
+            });
+    }
+
+    function startPoll() {
+        if (pollHandle) return;
+        loadMetrics();
+        pollHandle = setInterval(loadMetrics, POLL_MS);
+    }
+
+    function stopPoll() {
+        if (pollHandle) clearInterval(pollHandle);
+        pollHandle = null;
+    }
 
     document.addEventListener('visibilitychange', function() {
         if (document.hidden) stopPoll();

@@ -941,6 +941,127 @@ class TestArchiveRetention:
 
 
 # ---------------------------------------------------------------------------
+# Issue #208 — retention prune yields the 'retention' lock between batches
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionLockYield:
+    """Pre-fix the prune held the 'retention' task slot for 5+ minutes
+    on a 5904-file sweep, blocking the indexer / archive worker and
+    triggering hardware watchdog resets. The fix releases & re-acquires
+    every N files so other workers get a turn.
+    """
+
+    def test_yield_releases_then_reacquires_lock(self):
+        # Take the lock manually, then exercise the helper. After the
+        # call the helper must own the lock again.
+        ok = task_coordinator.acquire_task('retention', wait_seconds=1.0)
+        assert ok
+        try:
+            assert archive_watchdog._yield_retention_lock() is True
+            info = task_coordinator.current_task_info()
+            assert info['busy'] is True
+            assert info['task'] == 'retention'
+        finally:
+            task_coordinator.release_task('retention')
+
+    def test_prune_yields_every_n_files(
+            self, db, archive_root, monkeypatch,
+    ):
+        # Force a tiny yield batch so the test stays fast.
+        monkeypatch.setattr(
+            archive_watchdog, '_RETENTION_YIELD_EVERY_N_FILES', 3,
+        )
+        old = time.time() - (40 * 86400)
+        # 7 old files → expect 2 yields (after files 3 and 6).
+        for i in range(7):
+            _make_archive_mp4(
+                archive_root, f"RecentClips/old_{i}.mp4", mtime=old,
+            )
+        yields = {'count': 0}
+        real_yield = archive_watchdog._yield_retention_lock
+
+        def _spy():
+            yields['count'] += 1
+            return real_yield()
+
+        monkeypatch.setattr(
+            archive_watchdog, '_yield_retention_lock', _spy,
+        )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['deleted_count'] == 7
+        # Floor(7/3) = 2 yields.
+        assert yields['count'] == 2
+
+    def test_prune_bails_with_partial_summary_when_reacquire_fails(
+            self, db, archive_root, monkeypatch,
+    ):
+        # Configure tiny batch so we yield after the first file.
+        monkeypatch.setattr(
+            archive_watchdog, '_RETENTION_YIELD_EVERY_N_FILES', 1,
+        )
+        # Stub the yield helper to simulate "we released the slot and
+        # another worker grabbed it and won't release it within the
+        # wait window" — including the actual release so the lock state
+        # the prune sees matches the real failure mode.
+        def _release_and_fail():
+            task_coordinator.release_task('retention')
+            return False
+        monkeypatch.setattr(
+            archive_watchdog, '_yield_retention_lock', _release_and_fail,
+        )
+        old = time.time() - (40 * 86400)
+        for i in range(5):
+            _make_archive_mp4(
+                archive_root, f"RecentClips/old_{i}.mp4", mtime=old,
+            )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        # First file deleted before the yield. Loop bails with a
+        # partial summary tagged ``yielded_lost_lock``; the unprocessed
+        # files remain on disk for the next prune tick.
+        assert summary['deleted_count'] >= 1
+        assert summary['deleted_count'] < 5
+        assert summary['status'] == 'yielded_lost_lock'
+        # The duplicate-trigger guard MUST still be cleared so the
+        # next caller is not locked out.
+        assert archive_watchdog._retention_running is False
+        # And the lock itself must be released so other tasks can run.
+        assert task_coordinator.current_task_info()['busy'] is False
+
+    def test_prune_releases_lock_normally_when_no_yield_needed(
+            self, db, archive_root, monkeypatch,
+    ):
+        # Yield batch larger than the file count → no yield should fire.
+        monkeypatch.setattr(
+            archive_watchdog, '_RETENTION_YIELD_EVERY_N_FILES', 1000,
+        )
+        called = {'count': 0}
+
+        def _should_not_run():
+            called['count'] += 1
+            return True
+        monkeypatch.setattr(
+            archive_watchdog, '_yield_retention_lock', _should_not_run,
+        )
+        old = time.time() - (40 * 86400)
+        for i in range(3):
+            _make_archive_mp4(
+                archive_root, f"RecentClips/old_{i}.mp4", mtime=old,
+            )
+        summary = archive_watchdog._run_retention_prune(
+            archive_root, db, retention_days=30,
+        )
+        assert summary['deleted_count'] == 3
+        assert called['count'] == 0
+        # And the lock must be free at the end.
+        assert task_coordinator.current_task_info()['busy'] is False
+
+
+# ---------------------------------------------------------------------------
 # Hard-contract grep (mirrors the archive_worker test pattern)
 # ---------------------------------------------------------------------------
 

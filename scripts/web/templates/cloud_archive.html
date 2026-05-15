@@ -105,25 +105,35 @@
     {% if sync_stats %}
     <div style="display: flex; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-4);">
         <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
-            <div style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_synced|default(0) }}</div>
+            <div id="statSyncedCount" style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_synced|default(0) }}</div>
             <div style="font-size: var(--text-sm); color: var(--text-secondary);">Events Synced</div>
         </div>
         <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
-            <div style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_pending|default(0) }}</div>
+            <div id="statPendingCount" style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_pending|default(0) }}</div>
             <div style="font-size: var(--text-sm); color: var(--text-secondary);">Events Pending</div>
         </div>
         <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
-            <div style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_failed|default(0) }}</div>
+            <div id="statFailedCount" style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_failed|default(0) }}</div>
             <div style="font-size: var(--text-sm); color: var(--text-secondary);">Failed</div>
         </div>
         <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
-            <div style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">
+            <div id="statTotalBytes" style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">
                 {% if sync_stats.total_bytes %}{{ sync_stats.total_bytes|filesizeformat }}{% else %}0 B{% endif %}
             </div>
             <div style="font-size: var(--text-sm); color: var(--text-secondary);">Transferred</div>
         </div>
     </div>
-    <p style="font-size: var(--text-xs); color: var(--text-muted); margin: -8px 0 var(--space-4); text-align: center;">Each event contains multiple camera files (up to 6 angles per clip)</p>
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; margin: -8px 0 var(--space-4);">
+        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 0;">
+            Each event contains multiple camera files (up to 6 angles per clip).
+            <span id="statBaselineHint">{% if sync_stats.stats_baseline_at %}Synced/Transferred counts since {{ sync_stats.stats_baseline_at[:10] }}.{% endif %}</span>
+        </p>
+        <button type="button" id="resetStatsBtn" onclick="resetSyncStats()"
+                title="Reset Synced/Transferred counters. Does NOT delete the sync history that prevents re-uploads."
+                style="padding: 4px 12px; font-size: var(--text-xs); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--text-secondary); cursor: pointer;">
+            Reset counters
+        </button>
+    </div>
     {% endif %}
 
     <!-- ================================================================
@@ -428,8 +438,8 @@
                 <strong style="color: var(--text-primary);">How sync works:</strong>
                 <ul style="margin: 6px 0 0; padding-left: 18px;">
                     <li><strong>Automatic:</strong> Starts syncing whenever WiFi connects</li>
-                    <li><strong>Events only:</strong> Syncs Sentry and Saved clips (not RecentClips rolling buffer)</li>
-                    <li><strong>Oldest first:</strong> Preserves the most at-risk clips first</li>
+                    <li><strong>Events &amp; archived clips:</strong> Syncs Sentry / Saved event folders and the SD-card-resident <em>ArchivedClips</em> snapshot (RecentClips itself is skipped because Tesla rotates it hourly)</li>
+                    <li><strong>Oldest first:</strong> Within each folder, preserves the most at-risk clips first</li>
                     <li><strong>Skip existing:</strong> Files already on cloud storage are never re-uploaded</li>
                     <li><strong>Manual:</strong> Click &ldquo;Sync Now&rdquo; at any time</li>
                 </ul>
@@ -445,14 +455,21 @@
                 <div style="margin-bottom: var(--space-4);">
                     <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">Folders to sync:</label>
                     <div style="display: flex; flex-direction: column; gap: var(--space-2);">
-                        {% set folder_options = ['SentryClips', 'SavedClips', 'RecentClips'] %}
-                        {% for folder in folder_options %}
-                        <label style="display: flex; align-items: center; gap: var(--space-2); padding: 8px; border-radius: var(--radius-md); cursor: pointer; transition: background var(--transition-fast);"
+                        {% set folder_options = [
+                            ('SentryClips',   'Sentry-triggered events (impacts, intrusions)'),
+                            ('SavedClips',    'Manually saved clips (horn-honk / on-screen save)'),
+                            ('ArchivedClips', 'SD-card snapshot of RecentClips (RecentClips itself rotates hourly)'),
+                        ] %}
+                        {% for folder, blurb in folder_options %}
+                        <label style="display: flex; align-items: flex-start; gap: var(--space-2); padding: 8px; border-radius: var(--radius-md); cursor: pointer; transition: background var(--transition-fast);"
                                onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">
                             <input type="checkbox" name="sync_folders" value="{{ folder }}"
                                    {% if folder in sync_folders %}checked{% endif %}
-                                   style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--btn-success-bg);">
-                            <span style="color: var(--text-primary); font-size: 15px;">{{ folder }}</span>
+                                   style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--btn-success-bg); margin-top: 2px;">
+                            <span style="display: flex; flex-direction: column; gap: 2px;">
+                                <span style="color: var(--text-primary); font-size: 15px; font-weight: 500;">{{ folder }}</span>
+                                <span style="color: var(--text-muted); font-size: var(--text-xs);">{{ blurb }}</span>
+                            </span>
                         </label>
                         {% endfor %}
                     </div>
@@ -854,6 +871,7 @@
                 if (!resp.ok) return;
                 var data = await resp.json();
                 updateStatusCard(data.status || {}, data.stats || {});
+                updateStatCounters(data.stats || {});
                 if (!(data.status && data.status.running)) {
                     stopPolling();
                 }
@@ -865,6 +883,82 @@
 
     function stopPolling() {
         if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    }
+
+    /* ===================================================================
+       Counter card updaters (kept fresh by both the polling loop while
+       sync is running AND the manual ``Reset counters`` button so the
+       user sees the change immediately).
+       =================================================================== */
+    function _formatBytesPretty(n) {
+        if (!n) return '0 B';
+        if (n < 1024) return n + ' B';
+        var units = ['KB','MB','GB','TB'];
+        var i = -1; var v = n;
+        do { v /= 1024; i++; } while (v >= 1024 && i < units.length - 1);
+        return v.toFixed(v >= 100 ? 0 : 1) + ' ' + units[i];
+    }
+
+    function updateStatCounters(stats) {
+        if (!stats) return;
+        var ids = [
+            ['statSyncedCount',  stats.total_synced  || 0],
+            ['statPendingCount', stats.total_pending || 0],
+            ['statFailedCount',  stats.total_failed  || 0],
+        ];
+        ids.forEach(function(pair) {
+            var el = document.getElementById(pair[0]);
+            if (el) el.textContent = pair[1];
+        });
+        var bytesEl = document.getElementById('statTotalBytes');
+        if (bytesEl) bytesEl.textContent = _formatBytesPretty(stats.total_bytes || 0);
+        var hintEl = document.getElementById('statBaselineHint');
+        if (hintEl) {
+            if (stats.stats_baseline_at) {
+                hintEl.textContent = 'Synced/Transferred counts since ' +
+                    String(stats.stats_baseline_at).slice(0, 10) + '.';
+            } else {
+                hintEl.textContent = '';
+            }
+        }
+    }
+
+    async function resetSyncStats() {
+        if (!confirm("Reset the Synced and Transferred counters?\n\n" +
+                     "This only clears the displayed totals. Files already " +
+                     "uploaded to the cloud will NOT be re-uploaded — the " +
+                     "sync history that prevents duplicates is preserved.")) {
+            return;
+        }
+        var btn = document.getElementById('resetStatsBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Resetting…'; }
+        try {
+            var resp = await fetch(
+                '{{ url_for("cloud_archive.api_reset_stats") }}',
+                {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}}
+            );
+            var data = await resp.json();
+            if (!resp.ok || data.success === false) {
+                throw new Error((data && data.message) || 'Reset failed');
+            }
+            /* Immediately reflect zeroes in the UI; poll will refresh
+               the live state on the next tick. */
+            updateStatCounters({
+                total_synced: 0,
+                total_pending: parseInt(
+                    (document.getElementById('statPendingCount') || {}).textContent || '0', 10
+                ),
+                total_failed: parseInt(
+                    (document.getElementById('statFailedCount') || {}).textContent || '0', 10
+                ),
+                total_bytes: 0,
+                stats_baseline_at: data.stats_baseline_at,
+            });
+        } catch (e) {
+            alert('Reset failed: ' + (e && e.message ? e.message : e));
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Reset counters'; }
+        }
     }
 
     function updateStatusCard(status, stats) {

@@ -61,6 +61,18 @@ _RETRY_MAX_ATTEMPTS_MAX = 20
 _KNOWN_CLOUD_ROOTS = ("ArchivedClips", "RecentClips", "SentryClips",
                       "SavedClips", "TeslaTrackMode")
 
+# Event-style folder names — every entry under one of these on the
+# remote is a per-event SUBDIRECTORY containing the 6 cam clips +
+# event.json. Used by ``_reconcile_with_remote_legacy`` to know which
+# folders are worth a ``--dirs-only`` listing. These names are dictated
+# by Tesla firmware and never change at user request; they are
+# independent of the user-configurable ``cloud_archive.sync_folders``
+# setting (which controls what to UPLOAD, not what to RECONCILE — we
+# always want to mark already-uploaded events ``synced`` so a folder
+# the user temporarily unchecks doesn't trigger a re-upload when they
+# re-check it).
+_EVENT_FOLDER_NAMES = ("SentryClips", "SavedClips")
+
 
 def canonical_cloud_path(file_path: str) -> str:
     """Normalize a cloud-sync ``file_path`` to canonical relative form.
@@ -158,7 +170,16 @@ def canonical_cloud_path(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 _CLOUD_MODULE = "cloud_archive"
-_CLOUD_SCHEMA_VERSION = 4
+_CLOUD_SCHEMA_VERSION = 5
+
+# Key in ``cloud_archive_meta`` holding the ISO-8601 UTC timestamp at
+# which the user last reset the dashboard counters. ``get_sync_stats``
+# uses this to filter the cumulative ``total_synced`` / ``total_bytes``
+# values without touching the underlying ``cloud_synced_files`` rows
+# (preserving dedup so already-synced files are never re-uploaded).
+# Absent row / NULL value = no reset performed (counters show full
+# lifetime totals).
+_CLOUD_STATS_BASELINE_KEY = "stats_baseline_at"
 
 _CLOUD_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS module_versions (
@@ -192,8 +213,19 @@ CREATE TABLE IF NOT EXISTS cloud_sync_sessions (
     error_msg TEXT
 );
 
+-- v5: simple key/value table for user-controlled UI state. Currently
+-- holds the dashboard counter reset timestamp (stats_baseline_at) so
+-- the "Reset Stats" button on the cloud sync page can hide historical
+-- synced counts WITHOUT deleting the dedup-critical cloud_synced_files
+-- rows (which would cause everything-on-cloud to be re-uploaded).
+CREATE TABLE IF NOT EXISTS cloud_archive_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_cloud_synced_status ON cloud_synced_files(status);
 CREATE INDEX IF NOT EXISTS idx_cloud_synced_mtime ON cloud_synced_files(file_mtime);
+CREATE INDEX IF NOT EXISTS idx_cloud_synced_synced_at ON cloud_synced_files(synced_at);
 CREATE INDEX IF NOT EXISTS idx_cloud_sessions_started ON cloud_sync_sessions(started_at);
 """
 
@@ -2136,6 +2168,17 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
                     e, current,
                 )
 
+        # v5 (#218 follow-up): adds the ``cloud_archive_meta`` key/value
+        # table and the ``idx_cloud_synced_synced_at`` index. Both are
+        # created idempotently by the ``executescript(_CLOUD_TABLES_SQL)``
+        # call at the top of this block, so no separate migration
+        # function is needed. The table backs the dashboard "Reset
+        # Stats" button (stats_baseline_at row) WITHOUT touching the
+        # dedup-critical cloud_synced_files rows that prevent
+        # already-synced clips from being re-uploaded. The new index
+        # makes the baseline-filtered SUM(file_size) / COUNT(*) queries
+        # in ``get_sync_stats`` cheap even after years of sync history.
+
         if migration_ok:
             conn.execute(
                 "INSERT OR REPLACE INTO module_versions (module, version, updated_at) "
@@ -2460,6 +2503,102 @@ def _read_sync_non_event_setting() -> bool:
         return CLOUD_ARCHIVE_SYNC_NON_EVENT
 
 
+# Valid sync-folder names. ``RecentClips`` was supported historically
+# but is excluded from the allow-list because Tesla rotates that folder
+# hourly — uploading the rolling buffer wastes bandwidth and the clips
+# disappear before the next sync run anyway. ``ArchivedClips`` (the
+# SD-card-resident copy preserved by the archive subsystem) is the
+# correct target for "all driving footage" uploads.
+_VALID_SYNC_FOLDERS = ("SentryClips", "SavedClips", "ArchivedClips")
+
+# Multiplier applied to the folder-priority index when composing the
+# per-event sort key in ``_discover_events``. Must be strictly larger
+# than the maximum content score returned by ``_score_event_priority``
+# (currently 200 + 99 age = 299) so the user-configured folder order
+# is guaranteed to dominate the sort regardless of clip age or trigger
+# type.
+_FOLDER_PRIORITY_MULTIPLIER = 1000
+
+
+def _normalize_folder_list(values: object) -> List[str]:
+    """Coerce a config value into a clean folder list.
+
+    * Filters out non-string entries (defensive against malformed YAML).
+    * Normalises legacy ``RecentClips`` entries to ``ArchivedClips`` —
+      RecentClips rotates hourly so it was never a useful sync target;
+      operators with old config.yaml installs (RecentClips checked)
+      should silently start syncing the SD-card archive instead.
+    * Drops anything not in ``_VALID_SYNC_FOLDERS`` after normalisation.
+    * Deduplicates while preserving order (so ``priority_order``
+      semantics survive the rewrite).
+    """
+    if not isinstance(values, (list, tuple)):
+        return []
+    seen = []
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        folder = v.strip()
+        if folder == "RecentClips":
+            folder = "ArchivedClips"
+        if folder in _VALID_SYNC_FOLDERS and folder not in seen:
+            seen.append(folder)
+    return seen
+
+
+def _read_sync_folders_setting() -> List[str]:
+    """Re-read ``cloud_archive.sync_folders`` from config.yaml.
+
+    Same per-call YAML re-read pattern as
+    :func:`_read_sync_non_event_setting` so a Settings change takes
+    effect on the next sync iteration without restarting
+    ``gadget_web.service``. The returned list is filtered through
+    :func:`_normalize_folder_list` so legacy ``RecentClips`` values are
+    silently rewritten to ``ArchivedClips`` and unknown folder names
+    are dropped. Empty result falls back to the import-time default to
+    avoid a config typo silently disabling all sync.
+    """
+    try:
+        import yaml
+        from config import CONFIG_YAML
+        with open(CONFIG_YAML, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        raw = cfg.get('cloud_archive', {}).get('sync_folders', None)
+        normalised = _normalize_folder_list(raw) if raw is not None else []
+        if normalised:
+            return normalised
+    except Exception:
+        pass
+    fallback = _normalize_folder_list(list(CLOUD_ARCHIVE_SYNC_FOLDERS))
+    return fallback or list(_VALID_SYNC_FOLDERS)
+
+
+def _read_priority_order_setting() -> List[str]:
+    """Re-read ``cloud_archive.priority_order`` from config.yaml.
+
+    Same per-call YAML re-read pattern as
+    :func:`_read_sync_non_event_setting`. The returned list is filtered
+    through :func:`_normalize_folder_list`. Empty result falls back to
+    the live ``sync_folders`` order (any folder being synced is at
+    least as important as not being in the priority list at all).
+    """
+    try:
+        import yaml
+        from config import CONFIG_YAML
+        with open(CONFIG_YAML, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        raw = cfg.get('cloud_archive', {}).get('priority_order', None)
+        normalised = _normalize_folder_list(raw) if raw is not None else []
+        if normalised:
+            return normalised
+    except Exception:
+        pass
+    # Final fallback: import-time default, then if even that's empty
+    # use sync_folders so priority sort still does something useful.
+    fallback = _normalize_folder_list(list(CLOUD_ARCHIVE_PRIORITY_ORDER))
+    return fallback or _read_sync_folders_setting()
+
+
 def _read_retry_max_attempts_setting() -> int:
     """Re-read ``cloud_archive.retry_max_attempts`` from config.yaml.
 
@@ -2595,6 +2734,39 @@ def _is_path_skipped(
         return False
 
 
+def _folder_priority_index(folder: str, priority_order: List[str]) -> int:
+    """Return the position of *folder* in *priority_order*, or len() if absent.
+
+    Used by ``_discover_events`` to multiply against the per-event content
+    score so the user-configured folder order is the PRIMARY sort axis.
+    Folders not in the priority list are sorted to the end of the queue
+    (they'll still upload, but only after every configured folder is
+    drained).
+    """
+    try:
+        return priority_order.index(folder)
+    except ValueError:
+        return len(priority_order)
+
+
+def _folder_of_event_rel(rel_path: str) -> str:
+    """Extract the parent folder name from a canonical relative path.
+
+    ``"SentryClips/2026-05-12_10-00-00"`` → ``"SentryClips"``
+    ``"ArchivedClips/foo.mp4"``           → ``"ArchivedClips"``
+
+    Returns ``""`` if the path has no leading folder component (which
+    should not happen for paths produced by ``canonical_cloud_path``
+    but is handled defensively so a malformed entry sorts to the end).
+    """
+    if not rel_path:
+        return ""
+    first_slash = rel_path.find("/")
+    if first_slash < 0:
+        return ""
+    return rel_path[:first_slash]
+
+
 def _discover_events(
     teslacam_path: str,
     conn: Optional[sqlite3.Connection] = None,
@@ -2603,13 +2775,24 @@ def _discover_events(
 
     Syncs event subdirectories from SentryClips/SavedClips plus flat files
     from ArchivedClips on the SD card. Returns a list of
-    ``(event_dir_path, relative_path, total_size)`` sorted **oldest-first**
-    so the most at-risk clips get preserved first.
+    ``(event_dir_path, relative_path, total_size)`` sorted by the
+    user-configured ``cloud_archive.priority_order`` (folder-level
+    primary axis) and then by ``_score_event_priority`` within each
+    folder (event-trigger > geo-located > other, oldest-first within
+    each band).
 
     If *conn* is provided, events already marked ``synced`` or ``dead_letter``
     in the database are excluded via ``_is_path_skipped`` (Phase 5.3
     streaming dedup — one indexed point-lookup per candidate, no in-memory
     snapshot of the table).
+
+    ``ArchivedClips`` is gated on membership in
+    ``CLOUD_ARCHIVE_SYNC_FOLDERS``. Removing it from the Settings page
+    therefore stops including SD-card archived clips in the upload
+    queue (mirroring the behaviour of unchecking ``SentryClips`` or
+    ``SavedClips``). The legacy "always-on" behaviour was a foot-gun
+    because the UI exposed a checkbox that had no effect on
+    ArchivedClips.
     """
     # Phase 5.3 — streaming dedup. Each candidate event is checked with a
     # single indexed ``_is_path_skipped`` lookup; we no longer load the
@@ -2619,7 +2802,19 @@ def _discover_events(
 
     events: List[Tuple[str, str, int]] = []
 
-    for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
+    # Re-read sync_folders from the live config so a Settings save
+    # takes effect on the next discovery without restarting the
+    # service. CLOUD_ARCHIVE_SYNC_FOLDERS is snapshotted at config.py
+    # import time, so we re-read here for the freshest view.
+    sync_folders = _read_sync_folders_setting()
+
+    for folder in sync_folders:
+        # ArchivedClips lives on the SD card (ARCHIVE_DIR), not under
+        # ``teslacam_path``. Handle it in the dedicated block below so
+        # we walk the right directory tree.
+        if folder == "ArchivedClips":
+            continue
+
         folder_path = os.path.join(teslacam_path, folder)
         if not os.path.isdir(folder_path):
             continue
@@ -2659,25 +2854,31 @@ def _discover_events(
 
             events.append((event_dir, rel_path, total_size))
 
-    # Also include ArchivedClips from SD card (individual files)
-    try:
-        from config import ARCHIVE_DIR, ARCHIVE_ENABLED
-        if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
-            try:
-                for f in sorted(os.listdir(ARCHIVE_DIR)):
-                    fpath = os.path.join(ARCHIVE_DIR, f)
-                    if os.path.isfile(fpath) and f.lower().endswith(('.mp4', '.ts')):
-                        rel_path = canonical_cloud_path(f"ArchivedClips/{f}")
-                        if _is_path_skipped(conn, rel_path):
-                            continue
-                        fsize = os.path.getsize(fpath)
-                        # Use the individual file path (not ARCHIVE_DIR)
-                        # so rclone copyto can handle file-to-file copy
-                        events.append((fpath, rel_path, fsize))
-            except OSError:
-                pass
-    except ImportError:
-        pass
+    # ArchivedClips on the SD card — flat files. Only include when the
+    # user has checked ArchivedClips in the Settings ``sync_folders``
+    # list. The legacy code unconditionally appended these clips even
+    # when the user had unchecked every folder; that silently uploaded
+    # archived footage the operator had explicitly opted out of and is
+    # exactly the foot-gun this gate fixes.
+    if "ArchivedClips" in sync_folders:
+        try:
+            from config import ARCHIVE_DIR, ARCHIVE_ENABLED
+            if ARCHIVE_ENABLED and os.path.isdir(ARCHIVE_DIR):
+                try:
+                    for f in sorted(os.listdir(ARCHIVE_DIR)):
+                        fpath = os.path.join(ARCHIVE_DIR, f)
+                        if os.path.isfile(fpath) and f.lower().endswith(('.mp4', '.ts')):
+                            rel_path = canonical_cloud_path(f"ArchivedClips/{f}")
+                            if _is_path_skipped(conn, rel_path):
+                                continue
+                            fsize = os.path.getsize(fpath)
+                            # Use the individual file path (not ARCHIVE_DIR)
+                            # so rclone copyto can handle file-to-file copy
+                            events.append((fpath, rel_path, fsize))
+                except OSError:
+                    pass
+        except ImportError:
+            pass
 
     # Phase 5.2 — pre-fetch the geo-hit set ONCE so the scorer doesn't
     # open a fresh SQLite connection per event. For a queue of N candidate
@@ -2719,7 +2920,31 @@ def _discover_events(
                 "(sync_non_event_videos=false)", dropped,
             )
 
-    scored.sort(key=lambda x: x[1])
+    # Apply the user-configured folder priority as the PRIMARY sort axis.
+    # ``priority_order`` is a list like ``['SentryClips', 'SavedClips',
+    # 'ArchivedClips']`` — items in earlier positions get a smaller
+    # composite score and are uploaded first. Within each folder the
+    # existing per-event content score (event-trigger > geo-located >
+    # other, oldest-first within each band) preserves the
+    # "preserve-the-most-at-risk-first" intent.
+    #
+    # Composite score = folder_index * _FOLDER_PRIORITY_MULTIPLIER + content_score.
+    # _FOLDER_PRIORITY_MULTIPLIER (1000) is strictly larger than the
+    # maximum content score (200 + age cap of 99 = 299), so the folder
+    # axis is guaranteed to dominate even for ancient clips in a
+    # lower-priority folder.
+    priority_order = _read_priority_order_setting()
+    composite = [
+        (
+            t,
+            _folder_priority_index(
+                _folder_of_event_rel(t[1]), priority_order,
+            ) * _FOLDER_PRIORITY_MULTIPLIER + s,
+        )
+        for (t, s) in scored
+    ]
+    composite.sort(key=lambda x: x[1])
+    scored = composite
     result = [t for (t, _s) in scored]
 
     # Wave 4 PR-F2 (issue #184): PRODUCER hook for unified pipeline_queue.
@@ -2899,7 +3124,16 @@ def _list_remote_tree(
     to the legacy per-folder path so reconciliation still happens (just
     slower). Returns an empty dict if the remote is reachable but empty.
     """
-    interest = list(CLOUD_ARCHIVE_SYNC_FOLDERS) + ["ArchivedClips"]
+    # Reconciliation must scan EVERY folder that could possibly contain
+    # previously-uploaded rows, not just the folders the operator is
+    # currently configured to sync. If the user unchecks ``SentryClips``
+    # today we still need to discover existing SentryClips rows on the
+    # remote so they get marked ``synced`` rather than re-uploaded the
+    # next time the box is checked. Use the canonical ``_KNOWN_CLOUD_ROOTS``
+    # list — it includes legacy ``RecentClips`` for installs that ever
+    # uploaded the rolling buffer before the folder choice was
+    # narrowed.
+    interest = list(_KNOWN_CLOUD_ROOTS)
     try:
         result = subprocess.run(
             ["rclone", "lsf", "--config", conf_path,
@@ -2983,8 +3217,11 @@ def _reconcile_with_remote(
         )
 
     # List event directories on remote (SentryClips/*, SavedClips/*) — now
-    # served from the single batched listing.
-    for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
+    # served from the single batched listing. Folder set is fixed by Tesla
+    # firmware (``_EVENT_FOLDER_NAMES``); reconciliation must scan these
+    # regardless of which folders the user currently has checked in
+    # Settings — see ``_EVENT_FOLDER_NAMES`` docstring for why.
+    for folder in _EVENT_FOLDER_NAMES:
         try:
             entries = tree.get(folder, set())
             # event-dir entries have a trailing slash from rclone lsf;
@@ -3098,8 +3335,11 @@ def _reconcile_with_remote_legacy(
     reconciled = 0
     pending_pipeline: List[Tuple[str, Optional[str], str]] = []
 
-    # List event directories on remote (SentryClips/*, SavedClips/*)
-    for folder in CLOUD_ARCHIVE_SYNC_FOLDERS:
+    # List event directories on remote (SentryClips/*, SavedClips/*).
+    # Folder set is fixed by Tesla firmware (``_EVENT_FOLDER_NAMES``); see
+    # the constant docstring for why this is NOT
+    # ``CLOUD_ARCHIVE_SYNC_FOLDERS``.
+    for folder in _EVENT_FOLDER_NAMES:
         try:
             result = subprocess.run(
                 ["rclone", "lsf", "--config", conf_path,
@@ -4404,11 +4644,76 @@ def get_sync_history(db_path: str, limit: int = 20) -> List[dict]:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Dashboard counter "Reset Stats" — baseline-timestamp model
+# ---------------------------------------------------------------------------
+
+def get_stats_baseline(db_path: str) -> Optional[str]:
+    """Return the ISO-8601 UTC timestamp of the last counter reset, or ``None``.
+
+    Stored in the ``cloud_archive_meta`` table under the
+    ``stats_baseline_at`` key. ``get_sync_stats`` filters the cumulative
+    ``total_synced`` count and ``total_bytes`` sum by ``synced_at >
+    baseline``, so the UI can show a fresh starting point WITHOUT
+    deleting the dedup-critical ``cloud_synced_files`` rows that prevent
+    already-synced clips from being re-uploaded on the next sync pass.
+
+    Returns ``None`` when no reset has been performed (counters then
+    show full lifetime totals).
+    """
+    conn = _init_cloud_tables(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM cloud_archive_meta WHERE key = ?",
+            (_CLOUD_STATS_BASELINE_KEY,),
+        ).fetchone()
+        if not row or row["value"] is None:
+            return None
+        value = str(row["value"]).strip()
+        return value or None
+    finally:
+        conn.close()
+
+
+def reset_stats_baseline(db_path: str) -> Tuple[bool, str]:
+    """Record "now" as the dashboard counter baseline.
+
+    The reset is non-destructive: ``cloud_synced_files`` rows are
+    untouched, so the next sync cycle's dedup check still sees every
+    file that was previously uploaded and skips them. The UI's
+    ``total_synced`` and ``total_bytes`` counters will start counting
+    from zero again, but the cloud archive itself is unchanged.
+
+    Returns ``(True, message)`` with the persisted baseline timestamp on
+    success, or ``(False, error_message)`` on any failure.
+    """
+    baseline_at = datetime.now(timezone.utc).isoformat()
+    conn = _init_cloud_tables(db_path)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO cloud_archive_meta (key, value) "
+            "VALUES (?, ?)",
+            (_CLOUD_STATS_BASELINE_KEY, baseline_at),
+        )
+        conn.commit()
+        logger.info(
+            "Cloud sync stats baseline reset to %s (cloud_synced_files "
+            "rows preserved for dedup)",
+            baseline_at,
+        )
+        return True, baseline_at
+    except sqlite3.Error as exc:  # noqa: BLE001
+        logger.exception("Failed to reset cloud sync stats baseline")
+        return False, str(exc)
+    finally:
+        conn.close()
+
+
 def get_sync_stats(db_path: str) -> dict:
     """Return aggregate sync statistics for the UI dashboard.
 
     Keys: total_synced, total_pending, total_failed, total_dead_letter,
-    total_bytes.
+    total_bytes, stats_baseline_at.
 
     ``total_failed`` is the SUM of ``failed`` and ``dead_letter`` rows
     so the dashboard counter does NOT silently DECREASE when a row hits
@@ -4420,25 +4725,54 @@ def get_sync_stats(db_path: str) -> dict:
     ``total_dead_letter`` is also exposed as a subset so a future
     Failed Jobs page (Phase 4) can break the count down by terminal
     state without changing this aggregate.
+
+    ``total_synced`` and ``total_bytes`` are filtered by
+    ``stats_baseline_at`` when set: only rows whose ``synced_at`` is
+    strictly greater than the baseline are counted. ``total_pending``
+    and ``total_failed`` are NOT filtered because they reflect current
+    work / current failures, not cumulative history — resetting them
+    would lie about the current state of the queue.
     """
     conn = _init_cloud_tables(db_path)
     try:
+        # Read baseline once per call so the COUNT and SUM stay
+        # consistent against the same cutoff.
+        baseline_row = conn.execute(
+            "SELECT value FROM cloud_archive_meta WHERE key = ?",
+            (_CLOUD_STATS_BASELINE_KEY,),
+        ).fetchone()
+        baseline = baseline_row["value"] if baseline_row else None
+        baseline = (baseline or "").strip() or None
+
         counts = {}
-        for status in ("synced", "pending", "failed", "uploading",
-                       "dead_letter"):
+        for status in ("pending", "failed", "uploading", "dead_letter"):
             row = conn.execute(
                 "SELECT COUNT(*) AS cnt FROM cloud_synced_files WHERE status = ?",
                 (status,),
             ).fetchone()
             counts[status] = row["cnt"] if row else 0
 
-        # Sum bytes from individual synced files (more accurate than session
-        # totals which are lost when sessions are interrupted by restart).
-        row = conn.execute(
-            "SELECT COALESCE(SUM(file_size), 0) AS total "
-            "FROM cloud_synced_files WHERE status = 'synced'"
-        ).fetchone()
-        total_bytes = row["total"] if row else 0
+        # Synced count + bytes honor the baseline. ``synced_at`` is
+        # written by ``_mark_upload_success`` as ISO-8601 UTC, so
+        # lexicographic comparison is correct. Rows with NULL
+        # ``synced_at`` (legacy / pre-fix data) are conservatively
+        # included so the post-reset counter never under-counts work
+        # the user actually saw complete.
+        if baseline:
+            synced_row = conn.execute(
+                "SELECT COUNT(*) AS cnt, COALESCE(SUM(file_size), 0) AS total "
+                "FROM cloud_synced_files "
+                "WHERE status = 'synced' "
+                "  AND (synced_at IS NULL OR synced_at > ?)",
+                (baseline,),
+            ).fetchone()
+        else:
+            synced_row = conn.execute(
+                "SELECT COUNT(*) AS cnt, COALESCE(SUM(file_size), 0) AS total "
+                "FROM cloud_synced_files WHERE status = 'synced'"
+            ).fetchone()
+        counts["synced"] = synced_row["cnt"] if synced_row else 0
+        total_bytes = synced_row["total"] if synced_row else 0
 
         # Use the higher of DB pending count vs in-memory discovery count.
         # The DB may not have entries for all events on disk (events only get
@@ -4456,6 +4790,7 @@ def get_sync_stats(db_path: str) -> dict:
             "total_failed": counts["failed"] + counts["dead_letter"],
             "total_dead_letter": counts["dead_letter"],
             "total_bytes": total_bytes,
+            "stats_baseline_at": baseline,
         }
     finally:
         conn.close()

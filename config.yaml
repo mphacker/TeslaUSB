@@ -120,11 +120,11 @@ cloud_archive:
   sync_folders:                          # Which TeslaCam subfolders to sync
     - SentryClips
     - SavedClips
-    - RecentClips
+    - ArchivedClips                      # SD-card-resident copy of clips (RecentClips rotates hourly, so we sync the archived snapshot instead)
   priority_order:                        # Sync priority (first = highest, user-configurable)
     - SentryClips
     - SavedClips
-    - RecentClips
+    - ArchivedClips
   max_upload_mbps: 5                     # Bandwidth limit (Pi has limited upload)
   cloud_reserve_gb: 1                    # Keep this much free on cloud (don't fill to 100%)
   keep_local_after_upload: true          # Keep local files after uploading to cloud

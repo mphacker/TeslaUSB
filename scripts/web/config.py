@@ -101,8 +101,46 @@ CLOUD_ARCHIVE_ENABLED = bool(_cloud.get('enabled', False))
 CLOUD_ARCHIVE_SYNC_ENABLED = bool(_cloud.get('sync_enabled', True))  # auto-sync on/off (separate from page access)
 CLOUD_ARCHIVE_PROVIDER = _cloud.get('provider', '')
 CLOUD_ARCHIVE_REMOTE_PATH = _cloud.get('remote_path', 'TeslaUSB')
-CLOUD_ARCHIVE_SYNC_FOLDERS = _cloud.get('sync_folders', ['SentryClips', 'SavedClips'])
-CLOUD_ARCHIVE_PRIORITY_ORDER = _cloud.get('priority_order', ['SentryClips', 'SavedClips'])
+
+
+def _normalize_cloud_folder_list(values, default):
+    """Filter a cloud_archive folder list to the supported set.
+
+    * Drops non-string entries.
+    * Rewrites legacy ``RecentClips`` → ``ArchivedClips`` so installs
+      that ever had RecentClips checked silently switch to the
+      SD-card-resident ArchivedClips (RecentClips rotates hourly and
+      was never a useful sync target; the previous default produced
+      misleading UI without doing real work).
+    * Keeps only ``SentryClips`` / ``SavedClips`` / ``ArchivedClips``.
+    * Deduplicates while preserving order.
+    * Falls back to *default* if the normalised result is empty (so a
+      typo in config.yaml cannot silently disable all sync).
+    """
+    valid = ("SentryClips", "SavedClips", "ArchivedClips")
+    if not isinstance(values, (list, tuple)):
+        return list(default)
+    seen = []
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        folder = v.strip()
+        if folder == "RecentClips":
+            folder = "ArchivedClips"
+        if folder in valid and folder not in seen:
+            seen.append(folder)
+    return seen if seen else list(default)
+
+
+_CLOUD_DEFAULT_FOLDERS = ['SentryClips', 'SavedClips', 'ArchivedClips']
+CLOUD_ARCHIVE_SYNC_FOLDERS = _normalize_cloud_folder_list(
+    _cloud.get('sync_folders', _CLOUD_DEFAULT_FOLDERS),
+    _CLOUD_DEFAULT_FOLDERS,
+)
+CLOUD_ARCHIVE_PRIORITY_ORDER = _normalize_cloud_folder_list(
+    _cloud.get('priority_order', _CLOUD_DEFAULT_FOLDERS),
+    CLOUD_ARCHIVE_SYNC_FOLDERS,
+)
 CLOUD_ARCHIVE_MAX_UPLOAD_MBPS = int(_cloud.get('max_upload_mbps', 5))
 CLOUD_ARCHIVE_RESERVE_GB = float(_cloud.get('cloud_reserve_gb', 1))
 CLOUD_ARCHIVE_SYNC_NON_EVENT = bool(_cloud.get('sync_non_event_videos', False))

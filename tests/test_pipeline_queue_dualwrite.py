@@ -178,6 +178,26 @@ class TestSchema:
         # Backward-compat alias still works.
         assert pqs._resolve_pipeline_db is pqs.resolve_pipeline_db
 
+    def test_table_exists_is_public(self, geodata_db):
+        """Issue #202 / re-review N1: ``table_exists`` was promoted
+        from a private helper (``_table_exists``) to a public
+        function so sibling service modules (cloud_archive_service
+        v4 migration) can call it without ``# noqa: SLF001``,
+        mirroring the ``resolve_pipeline_db`` promotion in
+        finding #7. The legacy private alias is preserved for
+        backward compatibility."""
+        assert hasattr(pqs, 'table_exists')
+        assert callable(pqs.table_exists)
+        # Backward-compat alias still works.
+        assert pqs._table_exists is pqs.table_exists
+        # Functional check.
+        conn = sqlite3.connect(geodata_db)
+        try:
+            assert pqs.table_exists(conn, 'pipeline_queue') is True
+            assert pqs.table_exists(conn, 'no_such_table') is False
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Dual-write helpers (direct calls)

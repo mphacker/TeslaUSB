@@ -625,6 +625,175 @@ class TestDropMigrationDirect:
             is cas._backfill_missing_live_event_mirrors
         )
 
+    def test_stale_mirror_refresh_clears_claim_metadata(
+        self, cloud_db_v3_with_les, geodata_db,
+    ):
+        """Re-review N4: when a stale mirror is refreshed to
+        ``cloud_done``, any leftover ``claimed_by`` / ``claimed_at``
+        from a previous in-progress worker claim must be cleared.
+        Stale claim metadata on a ``cloud_done`` row is harmless but
+        confuses ``recover_stale_claims_pipeline`` and operator
+        diagnostics."""
+        _seed_les_rows(cloud_db_v3_with_les, [
+            ('/Sentry/clm', '/Sentry/clm/event.json',
+             '2026-05-14T10:00:00', 'r', 'event_minute',
+             'uploaded', '2026-05-14T10:00:00'),
+        ])
+        _seed_pipeline_mirror(geodata_db, 1,
+                              '/Sentry/clm/event.json',
+                              stage='cloud_pending')
+        # Inject leftover claim metadata to simulate a worker that
+        # claimed the row, started uploading, then crashed.
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            gconn.execute(
+                "UPDATE pipeline_queue "
+                "SET claimed_by='ghost-worker-pid-9999', "
+                "    claimed_at=1234567890.0 "
+                "WHERE legacy_table='live_event_queue' "
+                "AND legacy_id=1"
+            )
+            gconn.commit()
+        finally:
+            gconn.close()
+
+        conn = sqlite3.connect(cloud_db_v3_with_les)
+        try:
+            cas._migrate_drop_live_event_queue_v4(
+                conn, cloud_db_v3_with_les,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            gconn.row_factory = sqlite3.Row
+            row = gconn.execute(
+                "SELECT stage, status, claimed_by, claimed_at "
+                "FROM pipeline_queue "
+                "WHERE legacy_table='live_event_queue' "
+                "AND legacy_id=1"
+            ).fetchone()
+        finally:
+            gconn.close()
+        assert row is not None
+        assert row['stage'] == pqs.STAGE_CLOUD_DONE
+        assert row['status'] == 'done'
+        assert row['claimed_by'] is None
+        assert row['claimed_at'] is None
+
+    def test_refresh_returns_actual_rowcount(self, geodata_db):
+        """Re-review N2: ``_refresh_stale_mirrors_to_done`` must return
+        the actual ``cur.rowcount`` summed across iterations, not the
+        input length. A row that's already ``cloud_done`` short-
+        circuits via the ``stage <> 'cloud_done'`` WHERE clause and
+        must NOT be counted."""
+        # Two mirrors: one at pending (will be updated), one already
+        # at done (no-op under the WHERE clause).
+        _seed_pipeline_mirror(geodata_db, 1, '/Sentry/a/event.json',
+                              stage='cloud_pending')
+        _seed_pipeline_mirror(geodata_db, 2, '/Sentry/b/event.json',
+                              stage='cloud_done')
+        # Pretend both legacy rows are stale candidates; the helper's
+        # SQL will short-circuit row 2.
+        n = cas._refresh_stale_mirrors_to_done(geodata_db, [1, 2])
+        assert n == 1  # only row 1 was actually updated
+
+    def test_orphan_mirror_with_null_legacy_id_recognised(
+        self, cloud_db_v3_with_les, geodata_db,
+    ):
+        """Re-review N5 (was: issue #207, fixed inline): a residual
+        mirror row from an early dev branch with the right
+        ``source_path`` but ``legacy_id = NULL`` would otherwise be
+        invisible to the legacy-id ``IN (...)`` lookup, hit the
+        UNIQUE constraint on backfill INSERT, fail post-loop
+        verification, and abort-loop on every service start. The
+        fix: ``_query_existing_mirrors`` also looks up by
+        ``source_path`` and a row counts as mirrored if EITHER key
+        matches. Migration completes; DROP runs; orphan row stays
+        intact (caller decides whether to reconcile its NULL id)."""
+        _seed_les_rows(cloud_db_v3_with_les, [
+            ('/Sentry/orphan', '/Sentry/orphan/event.json',
+             '2026-05-14T10:00:00', 'r', 'event_minute',
+             'pending', '2026-05-14T10:00:00'),
+        ])
+        # Insert an orphan mirror directly so we can set legacy_id=NULL.
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            gconn.execute(
+                "INSERT INTO pipeline_queue "
+                "(source_path, stage, status, priority, "
+                " legacy_table, legacy_id, payload_json, "
+                " enqueued_at, attempts) "
+                "VALUES (?, ?, 'pending', ?, "
+                " 'live_event_queue', NULL, '{}', ?, 0)",
+                ('/Sentry/orphan/event.json', pqs.STAGE_CLOUD_PENDING,
+                 pqs.PRIORITY_LIVE_EVENT, 1234567890.0),
+            )
+            gconn.commit()
+        finally:
+            gconn.close()
+
+        conn = sqlite3.connect(cloud_db_v3_with_les)
+        try:
+            cas._migrate_drop_live_event_queue_v4(
+                conn, cloud_db_v3_with_les,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Migration completed — table dropped.
+        assert not _table_exists(cloud_db_v3_with_les, 'live_event_queue')
+        # Orphan row preserved (no INSERT collision, no overwrite).
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            cnt = gconn.execute(
+                "SELECT COUNT(*) FROM pipeline_queue "
+                "WHERE source_path='/Sentry/orphan/event.json' "
+                "AND legacy_table='live_event_queue'"
+            ).fetchone()[0]
+        finally:
+            gconn.close()
+        assert cnt == 1  # exactly one row, no duplicate
+
+    def test_query_existing_mirrors_returns_both_sets(
+        self, geodata_db,
+    ):
+        """N5 lower-level: ``_query_existing_mirrors`` returns a
+        ``(legacy_ids, source_paths)`` tuple. Verify both sets are
+        populated independently when the mirrors have different keys
+        (one has legacy_id, one has NULL legacy_id)."""
+        _seed_pipeline_mirror(geodata_db, 42, '/Sentry/with_id.json')
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            gconn.execute(
+                "INSERT INTO pipeline_queue "
+                "(source_path, stage, status, priority, "
+                " legacy_table, legacy_id, payload_json, "
+                " enqueued_at, attempts) "
+                "VALUES (?, 'cloud_pending', 'pending', ?, "
+                " 'live_event_queue', NULL, '{}', ?, 0)",
+                ('/Sentry/no_id.json', pqs.PRIORITY_LIVE_EVENT,
+                 1234567890.0),
+            )
+            gconn.commit()
+        finally:
+            gconn.close()
+
+        ids, paths = cas._query_existing_mirrors(
+            geodata_db,
+            [42, 99],  # 99 doesn't exist
+            ['/Sentry/with_id.json', '/Sentry/no_id.json',
+             '/Sentry/missing.json'],
+        )
+        assert 42 in ids
+        assert 99 not in ids
+        assert '/Sentry/with_id.json' in paths
+        assert '/Sentry/no_id.json' in paths
+        assert '/Sentry/missing.json' not in paths
+
 
 # ---------------------------------------------------------------------------
 # End-to-end migration via _init_cloud_tables

@@ -1681,7 +1681,16 @@ def _backfill_cloud_synced_files(cloud_db: str, pipeline_db: Optional[str]) -> i
     return inserted
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+def table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """Public helper: True iff ``table`` exists in the connected DB.
+
+    Promoted from the private ``_table_exists`` to a public helper so
+    sibling service modules (e.g. cloud_archive_service v4 migration)
+    can call it without ``# noqa: SLF001`` (issue #202 review-pr
+    finding N1, mirroring how ``resolve_pipeline_db`` was promoted
+    for finding #7). The legacy private alias is preserved below for
+    backward compatibility.
+    """
     try:
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -1690,3 +1699,9 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         return row is not None
     except sqlite3.Error:
         return False
+
+
+# Backward-compat private alias. Existing in-tree callers and tests
+# referenced ``_table_exists`` before it was promoted; keep the name
+# working so we don't have to touch every call site at once.
+_table_exists = table_exists

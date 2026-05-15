@@ -603,17 +603,21 @@ def _migrate_drop_live_event_queue_v4(
 def _table_exists_local(conn: sqlite3.Connection, table: str) -> bool:
     """Return True if ``table`` exists in the connected DB.
 
-    Thin wrapper around :func:`pipeline_queue_service._table_exists`
+    Thin wrapper around :func:`pipeline_queue_service.table_exists`
     via lazy import — the lazy-import pattern is already used inside
     :func:`_backfill_missing_live_event_mirrors`, so the no-cycle
     constraint is satisfied. Falls back to an inline ``sqlite_master``
     lookup if the import fails (corrupt install / deferred package
     init during early gadget_web boot — same scenarios as the lazy
     import below).
+
+    Public ``table_exists`` was promoted from ``_table_exists`` per
+    review-pr finding N1; this wrapper now uses the public name and
+    drops the prior ``# noqa: SLF001``.
     """
     try:
         from services import pipeline_queue_service as pqs
-        return pqs._table_exists(conn, table)  # noqa: SLF001
+        return pqs.table_exists(conn, table)
     except Exception:  # noqa: BLE001
         try:
             row = conn.execute(
@@ -694,27 +698,40 @@ def _backfill_missing_live_event_mirrors(
         )
 
     legacy_ids = [r[0] for r in rows]
-    existing_mirrors = _query_existing_mirrors(pipeline_db, legacy_ids)
+    source_paths = [r[2] for r in rows if r[2]]
+    existing_ids, existing_paths = _query_existing_mirrors(
+        pipeline_db, legacy_ids, source_paths,
+    )
+
+    def _is_mirrored(row) -> bool:
+        # A row is mirrored if EITHER its legacy_id is present OR its
+        # event_json_path matches an existing pipeline_queue row's
+        # source_path. The path-based fallback (originally filed as
+        # #207, fixed inline) catches dev-branch installs where a
+        # residual mirror row has NULL legacy_id but the right path.
+        return row[0] in existing_ids or (row[2] and row[2] in existing_paths)
 
     # ------------------------------------------------------------------
     # Stale-mirror UPDATE (finding #5): for rows that ARE mirrored but
     # whose legacy status has advanced past the mirror's stage/status,
     # update the mirror so the worker doesn't re-upload completed work.
+    # Carry just the legacy_id (re-review N3 — the row is unused below).
     # ------------------------------------------------------------------
-    stale_updates = [
-        (r[0], r) for r in rows
-        if r[0] in existing_mirrors and r[6] == 'uploaded'
+    stale_updates: List[int] = [
+        r[0] for r in rows
+        if _is_mirrored(r) and r[6] == 'uploaded'
     ]
+    refreshed = 0
     if stale_updates:
-        _refresh_stale_mirrors_to_done(pipeline_db, stale_updates)
+        refreshed = _refresh_stale_mirrors_to_done(pipeline_db, stale_updates)
 
-    unmirrored = [r for r in rows if r[0] not in existing_mirrors]
+    unmirrored = [r for r in rows if not _is_mirrored(r)]
     if not unmirrored:
         logger.info(
             "Cloud archive v4 migration: all %d live_event_queue "
             "row(s) already mirrored into pipeline_queue (%d stale "
             "mirror(s) refreshed); safe to DROP.",
-            len(rows), len(stale_updates),
+            len(rows), refreshed,
         )
         return
 
@@ -781,17 +798,25 @@ def _backfill_missing_live_event_mirrors(
 
     # --------------------------------------------------------------
     # Post-loop verification (review-pr finding #1): re-query the
-    # pipeline_queue for every unmirrored legacy_id. Anything still
-    # missing means dual_write_enqueue silently returned False on a
-    # sqlite3.Error and the row would be lost on DROP. Raise so the
-    # caller rolls back and the DROP is skipped — the LES table and
-    # its rows remain intact for the next migration attempt.
+    # pipeline_queue for every unmirrored legacy_id AND source_path.
+    # Anything still missing on BOTH keys means dual_write_enqueue
+    # silently returned False on a sqlite3.Error (not a UNIQUE
+    # idempotency match) and the row would be lost on DROP. Raise
+    # so the caller rolls back and the DROP is skipped — the LES
+    # table and its rows remain intact for the next migration
+    # attempt. Using both keys lets the orphan-mirror edge (#207
+    # fix) be recognised as "already mirrored" instead of triggering
+    # an abort loop.
     # --------------------------------------------------------------
-    after_backfill_mirrors = _query_existing_mirrors(
-        pipeline_db, [r[0] for r in unmirrored]
+    after_ids, after_paths = _query_existing_mirrors(
+        pipeline_db,
+        [r[0] for r in unmirrored],
+        [r[2] for r in unmirrored if r[2]],
     )
     still_missing = [
-        r[0] for r in unmirrored if r[0] not in after_backfill_mirrors
+        r[0] for r in unmirrored
+        if r[0] not in after_ids
+        and not (r[2] and r[2] in after_paths)
     ]
     if still_missing:
         logger.error(
@@ -816,34 +841,74 @@ _LIVE_EVENT_BACKFILL_CHUNK = 500
 
 
 def _query_existing_mirrors(
-    pipeline_db: str, legacy_ids: List[int],
-) -> set:
-    """Return the set of ``legacy_id`` values that already have a
-    ``pipeline_queue`` row with ``legacy_table='live_event_queue'``.
+    pipeline_db: str,
+    legacy_ids: List[int],
+    source_paths: Optional[List[str]] = None,
+) -> Tuple[set, set]:
+    """Return ``(existing_legacy_ids, existing_source_paths)`` — the set
+    of ``legacy_id`` values AND the set of ``source_path`` values that
+    already have a ``pipeline_queue`` row with
+    ``legacy_table='live_event_queue'``.
+
+    Looking up by both keys is defensive against an edge case observed
+    on dev-branch installs (originally filed as #207, fixed inline
+    here): a pre-existing mirror row that has the right
+    ``source_path`` but a NULL ``legacy_id`` would otherwise be
+    invisible to the legacy-id ``IN (...)`` lookup, causing the
+    backfill INSERT to hit the
+    ``(source_path, stage, legacy_table)`` UNIQUE constraint, the
+    post-loop verification to keep failing, and the migration to
+    abort-loop on every service start. SQLite NULL never matches
+    ``IN (...)``, so we widen the query to OR-match on
+    ``source_path`` for the same ``legacy_table``. Canonical installs
+    (0 LES rows or all-mirrored-by-id) are unaffected.
 
     Chunks the input into batches of :data:`_LIVE_EVENT_BACKFILL_CHUNK`
     to stay under SQLite's variable-count ceiling on older builds
     (``SQLITE_MAX_VARIABLE_NUMBER`` is 999 on pre-3.32 SQLite).
-    Single short-lived connection across all chunks.
+    Single short-lived connection across all chunks. The two input
+    lists are chunked independently; the result sets are unioned
+    across chunks.
     """
-    if not legacy_ids:
-        return set()
+    if not legacy_ids and not source_paths:
+        return set(), set()
 
     pipeline_conn = sqlite3.connect(pipeline_db, timeout=10.0)
     try:
-        existing: set = set()
-        for start in range(0, len(legacy_ids), _LIVE_EVENT_BACKFILL_CHUNK):
-            chunk = legacy_ids[start:start + _LIVE_EVENT_BACKFILL_CHUNK]
-            placeholders = ','.join('?' * len(chunk))
-            existing.update(
-                row[0] for row in pipeline_conn.execute(
-                    f"SELECT legacy_id FROM pipeline_queue "
+        existing_ids: set = set()
+        existing_paths: set = set()
+
+        if legacy_ids:
+            for start in range(0, len(legacy_ids), _LIVE_EVENT_BACKFILL_CHUNK):
+                chunk = legacy_ids[start:start + _LIVE_EVENT_BACKFILL_CHUNK]
+                placeholders = ','.join('?' * len(chunk))
+                for row in pipeline_conn.execute(
+                    f"SELECT legacy_id, source_path FROM pipeline_queue "
                     f"WHERE legacy_table='live_event_queue' "
                     f"AND legacy_id IN ({placeholders})",
                     chunk,
-                ).fetchall()
-            )
-        return existing
+                ).fetchall():
+                    if row[0] is not None:
+                        existing_ids.add(row[0])
+                    if row[1]:
+                        existing_paths.add(row[1])
+
+        if source_paths:
+            for start in range(0, len(source_paths), _LIVE_EVENT_BACKFILL_CHUNK):
+                chunk = source_paths[start:start + _LIVE_EVENT_BACKFILL_CHUNK]
+                placeholders = ','.join('?' * len(chunk))
+                for row in pipeline_conn.execute(
+                    f"SELECT legacy_id, source_path FROM pipeline_queue "
+                    f"WHERE legacy_table='live_event_queue' "
+                    f"AND source_path IN ({placeholders})",
+                    chunk,
+                ).fetchall():
+                    if row[0] is not None:
+                        existing_ids.add(row[0])
+                    if row[1]:
+                        existing_paths.add(row[1])
+
+        return existing_ids, existing_paths
     finally:
         try:
             pipeline_conn.close()
@@ -853,40 +918,58 @@ def _query_existing_mirrors(
 
 def _refresh_stale_mirrors_to_done(
     pipeline_db: str,
-    stale_updates: List[Tuple[int, sqlite3.Row]],
-) -> None:
+    stale_updates: List[int],
+) -> int:
     """UPDATE existing pipeline_queue mirrors whose legacy status has
     advanced to ``'uploaded'`` but whose mirror is still in
     ``cloud_pending``. Without this, the cloud worker re-uploads
     completed live-event clips after the v4 migration runs.
 
     Single short-lived connection, single transaction. WHERE clause
-    matches on ``(legacy_table, legacy_id)`` to be specific.
+    matches on ``(legacy_table, legacy_id)`` and is gated on
+    ``stage <> 'cloud_done'`` so a re-running migration is a no-op for
+    rows that are already done.
+
+    Also clears ``claimed_by`` and ``claimed_at`` (re-review N4): if a
+    previous cloud-worker run had claimed the row (``status='in_progress'``)
+    and crashed before completing, the mirror would have stale claim
+    metadata that survives the migration. Clearing it matches the
+    pattern used by ``complete_pipeline_row``.
+
+    Returns the number of rows actually updated (re-review N2 — the
+    log line uses this rather than the input length so a partial
+    no-op retry doesn't inflate the count).
     """
     if not stale_updates:
-        return
+        return 0
 
     pipeline_conn = sqlite3.connect(pipeline_db, timeout=10.0)
     try:
-        for legacy_id, _row in stale_updates:
-            pipeline_conn.execute(
+        total_changed = 0
+        for legacy_id in stale_updates:
+            cur = pipeline_conn.execute(
                 """
                 UPDATE pipeline_queue
                 SET stage='cloud_done',
                     status='done',
-                    completed_at=?
+                    completed_at=?,
+                    claimed_by=NULL,
+                    claimed_at=NULL
                 WHERE legacy_table='live_event_queue'
                   AND legacy_id=?
                   AND stage <> 'cloud_done'
                 """,
                 (time.time(), legacy_id),
             )
+            total_changed += cur.rowcount
         pipeline_conn.commit()
         logger.info(
             "Cloud archive v4 migration: refreshed %d stale "
-            "live-event mirror(s) to cloud_done.",
-            len(stale_updates),
+            "live-event mirror(s) to cloud_done (%d candidate(s) "
+            "considered).",
+            total_changed, len(stale_updates),
         )
+        return total_changed
     finally:
         try:
             pipeline_conn.close()

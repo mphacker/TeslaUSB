@@ -4169,6 +4169,16 @@ class TestMoovIncompleteDefer:
     first attempted the copy.
     """
 
+    @pytest.fixture(autouse=True)
+    def _reset_moov_defer_counts(self):
+        # Module-level OrderedDict is shared across tests in this class;
+        # reset before each test so per-source_path counts don't leak
+        # between tests (would otherwise trip the cap test or pollute
+        # the "5 defers" assertion in the no-bump test).
+        archive_worker._moov_defer_counts.clear()
+        yield
+        archive_worker._moov_defer_counts.clear()
+
     def test_copy_moov_incomplete_is_distinct_oserror_subclass(self):
         # Production code in ``process_one_claim`` dispatches on the
         # exception type. Subclassing ``OSError`` keeps backward
@@ -4321,6 +4331,10 @@ class TestMoovIncompleteDefer:
         # If the source vanishes between the failed copy and the
         # post-failure _safe_stat refresh (Tesla rotated the slot
         # mid-defer), transition to source_gone — not pending.
+        # We must let the FIRST _safe_stat call (top of
+        # process_one_claim) succeed so the function actually reaches
+        # _atomic_copy and the _CopyMoovIncomplete handler — only
+        # the SECOND call (inside the handler) should return None.
         bad_mp4 = (
             b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
             + b'\x00\x00\x00\x10mdat' + b'\x00' * 8
@@ -4328,22 +4342,39 @@ class TestMoovIncompleteDefer:
         clip = make_clip("RecentClips/vanishing.mp4", content=bad_mp4)
         enqueue_for_archive(clip, db_path=db)
         row = claim_next_for_worker('w', db_path=db)
-        # Monkey-patch _safe_stat in the worker module so it returns
-        # None ONLY in the post-OSError refresh call (after _atomic_copy
-        # has already failed). Easier: delete the source file mid-claim
-        # via an os.remove right before process_one_claim runs the copy.
-        # The simplest equivalent: patch _safe_stat to always return None.
+        # Capture the real stat BEFORE patching so the first
+        # _safe_stat call returns truthful metadata.
+        real_st = os.stat(clip)
+        # side_effect=[real_st, None, None, ...] — first call gets the
+        # real stat, every subsequent call returns None (the post-
+        # OSError stat in the _CopyMoovIncomplete handler is the one
+        # we want to exercise).
+        call_count = {'n': 0}
+        def _fake_safe_stat(path):
+            call_count['n'] += 1
+            if call_count['n'] == 1:
+                return real_st
+            return None
         with patch.object(archive_worker, '_safe_stat',
-                          return_value=None):
+                          side_effect=_fake_safe_stat):
             outcome = archive_worker.process_one_claim(
                 row, db, archive_root, teslacam_root,
                 chunk_size=4096, max_attempts=3,
             )
-        # When _safe_stat is None at the very first stat at the top
-        # of process_one_claim, we get 'source_gone' immediately —
-        # never reach the moov-verify path. This guards the symmetric
-        # case for the post-OSError path too (same helper).
-        assert outcome == 'source_gone'
+        # The handler reached _atomic_copy (first _safe_stat returned
+        # truthful metadata), the copy raised _CopyMoovIncomplete,
+        # the post-OSError _safe_stat returned None, and the handler
+        # transitioned the row to source_gone instead of release_claim.
+        assert outcome == 'source_gone', (
+            f"expected 'source_gone', got {outcome!r} "
+            f"(_safe_stat called {call_count['n']} times)"
+        )
+        assert call_count['n'] >= 2, (
+            "expected _safe_stat to be called at least twice "
+            "(once at top of process_one_claim, once in moov-incomplete "
+            f"handler) but was only called {call_count['n']} times — "
+            "the test isn't actually exercising the branch it claims"
+        )
 
     def test_existing_moov_verify_test_still_passes_via_subclass(
             self, tmp_path,
@@ -4365,3 +4396,136 @@ class TestMoovIncompleteDefer:
             archive_worker._atomic_copy(
                 str(src), str(dst), chunk_size=4096,
             )
+
+    def test_moov_defer_cap_escalates_to_mark_failed(
+            self, db, archive_root, teslacam_root, make_clip,
+            monkeypatch,
+    ):
+        # Backstop for the "stable + corrupt" case (rare: bad SD block,
+        # Tesla crashed mid-segment then never rotated the slot). After
+        # _MOOV_DEFER_CAP defers the handler MUST fall through to
+        # mark_failed so attempts grows and the row can eventually
+        # dead_letter — otherwise the worker re-amplifies SDIO IO
+        # forever on a file Tesla will never finish.
+        # Lower the cap so the test is fast.
+        monkeypatch.setattr(archive_worker, '_MOOV_DEFER_CAP', 3)
+        bad_mp4 = (
+            b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+            + b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        )
+        clip = make_clip("RecentClips/stable-corrupt.mp4", content=bad_mp4)
+        enqueue_for_archive(clip, db_path=db)
+        # First _MOOV_DEFER_CAP defers stay at attempts=0, status=pending.
+        for i in range(3):
+            row = claim_next_for_worker('w', db_path=db)
+            outcome = archive_worker.process_one_claim(
+                row, db, archive_root, teslacam_root,
+                chunk_size=4096, max_attempts=10,
+            )
+            assert outcome == 'pending', (
+                f"defer #{i + 1} should have stayed pending, got {outcome!r}"
+            )
+        rows = list_queue(db_path=db)
+        assert rows[0]['attempts'] == 0
+        # Defer #4 (cap+1) escalates: attempts bumps via mark_failed.
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=10,
+        )
+        assert outcome == 'pending', (
+            f"defer #4 should have escalated to mark_failed (returns "
+            f"'pending' since attempts=1 < max_attempts=10), got {outcome!r}"
+        )
+        rows = list_queue(db_path=db)
+        assert rows[0]['attempts'] == 1, (
+            f"after cap escalation, attempts must equal 1, got "
+            f"{rows[0]['attempts']!r} — escalation didn't reach mark_failed"
+        )
+        assert 'moov-incomplete after' in (rows[0]['last_error'] or ''), (
+            "escalation last_error must record the defer count for "
+            "operator forensics; got: %r" % (rows[0]['last_error'],)
+        )
+        # Counter resets on escalation so the "next" pick (after the
+        # mark_failed-to-pending transition) starts fresh.
+        assert clip not in archive_worker._moov_defer_counts, (
+            "counter must reset on cap escalation — otherwise the "
+            "first re-attempt after a mark_failed would immediately "
+            "re-escalate, defeating the regular retry path"
+        )
+
+    def test_moov_defer_count_resets_on_successful_copy(
+            self, db, archive_root, teslacam_root, make_clip,
+    ):
+        # If a row defers a few times (Tesla still writing), then
+        # eventually copies successfully, the counter for that path
+        # must NOT linger — otherwise an unrelated future row at the
+        # same path (after Tesla rotates and re-uses the slot) would
+        # start with stale defer state and escalate prematurely.
+        # Drive one defer manually, then swap the source content for
+        # a well-formed MP4 and run again — the counter should be 0
+        # afterwards.
+        bad_mp4 = (
+            b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41'
+            + b'\x00\x00\x00\x10mdat' + b'\x00' * 8
+        )
+        clip = make_clip("RecentClips/recovers.mp4", content=bad_mp4)
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'pending'
+        assert archive_worker._moov_defer_counts.get(clip) == 1
+        # Swap in a complete MP4 (uses the same _build_minimal_mp4
+        # helper that make_clip uses by default).
+        good_mp4 = _build_minimal_mp4()
+        with open(clip, 'wb') as f:
+            f.write(good_mp4)
+        # Backdate so the stable-write gate doesn't fire (the test
+        # fixture make_clip backdates by default; an in-place rewrite
+        # would otherwise reset mtime to "now").
+        backdated = time.time() - 120
+        os.utime(clip, (backdated, backdated))
+        row = claim_next_for_worker('w', db_path=db)
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'copied', (
+            f"second pick should have succeeded, got {outcome!r}"
+        )
+        assert clip not in archive_worker._moov_defer_counts, (
+            "successful copy must drop the counter for source_path"
+        )
+
+    def test_moov_defer_lru_evicts_oldest_when_full(self):
+        # Direct unit test of _bump_moov_defer_count's LRU semantics:
+        # past _MOOV_DEFER_LRU_SIZE entries, oldest-by-insertion-order
+        # gets evicted on next add.
+        original_size = archive_worker._MOOV_DEFER_LRU_SIZE
+        try:
+            # Use a tiny size for fast, deterministic test.
+            archive_worker._MOOV_DEFER_LRU_SIZE = 3
+            archive_worker._moov_defer_counts.clear()
+            archive_worker._bump_moov_defer_count('/path/a')
+            archive_worker._bump_moov_defer_count('/path/b')
+            archive_worker._bump_moov_defer_count('/path/c')
+            assert len(archive_worker._moov_defer_counts) == 3
+            # Adding a 4th evicts /path/a (oldest).
+            archive_worker._bump_moov_defer_count('/path/d')
+            assert len(archive_worker._moov_defer_counts) == 3
+            assert '/path/a' not in archive_worker._moov_defer_counts
+            assert '/path/b' in archive_worker._moov_defer_counts
+            assert '/path/c' in archive_worker._moov_defer_counts
+            assert '/path/d' in archive_worker._moov_defer_counts
+            # Re-touching /path/b moves it to the end (most-recently-used).
+            archive_worker._bump_moov_defer_count('/path/b')
+            archive_worker._bump_moov_defer_count('/path/e')
+            # /path/c is now the oldest and should be evicted.
+            assert '/path/c' not in archive_worker._moov_defer_counts
+            assert '/path/b' in archive_worker._moov_defer_counts
+        finally:
+            archive_worker._MOOV_DEFER_LRU_SIZE = original_size
+            archive_worker._moov_defer_counts.clear()

@@ -739,6 +739,30 @@ def _watcher_loop(my_generation: int):
         if _watcher_stop.is_set():
             break
 
+        # Issue #214 — VFS cache invalidation: when inotify is
+        # unavailable we are the only mechanism that detects Tesla's
+        # gadget-block-layer writes on the RO USB mount. inotify
+        # itself doesn't fire for those writes (they bypass VFS), and
+        # Linux's dentry cache can stay stale for tens of minutes
+        # absent memory pressure. Without this refresh, ``os.scandir``
+        # below returns a frozen snapshot and clips are lost when
+        # Tesla's RecentClips circular buffer (~60 min) rotates them
+        # out before we ever see them. ``_refresh_ro_mount`` evicts
+        # only the slab cache (``echo 2 > /proc/sys/vm/drop_caches``)
+        # — sub-10ms, no mount/loop/image disruption, internally
+        # non-fatal. Lazy import to keep this module's start-up cheap
+        # and avoid any chance of an import cycle.
+        try:
+            from services.mapping_service import _refresh_ro_mount
+            for path in paths:
+                _refresh_ro_mount(path)
+                break  # process-global slab evict; one call is enough
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "file_watcher_service: VFS cache refresh skipped "
+                "(non-fatal): %s", e,
+            )
+
         new_files = _scan_for_new_files(paths, known_files)
         if new_files:
             logger.info("Polling detected %d new files", len(new_files))

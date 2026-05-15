@@ -381,3 +381,91 @@ class TestPathClassification:
         assert archive == []
         assert indexing == [path]
         assert dropped == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #214 — VFS cache invalidation in polling fallback
+# ---------------------------------------------------------------------------
+
+class TestPollingRefreshesRoMount:
+    """Pin issue #214 fix on the polling-fallback side: when inotify
+    is unavailable the polling loop is the ONLY mechanism that can
+    detect Tesla's gadget-block-layer writes on the RO USB mount,
+    and inotify itself doesn't fire for those writes (they bypass
+    VFS). Without ``_refresh_ro_mount`` the loop reads a frozen
+    dentry cache and misses Tesla's clips before Tesla's RecentClips
+    circular buffer rotates them out.
+    """
+
+    def test_polling_loop_calls_refresh_ro_mount_each_tick(
+        self, tmp_path, monkeypatch,
+    ):
+        # Force polling mode and make the loop tick fast.
+        monkeypatch.setattr(fws, '_try_inotify', lambda *a, **k: False)
+        monkeypatch.setattr(fws, '_POLL_INTERVAL_SECONDS', 0.2)
+        monkeypatch.setattr(fws, '_MIN_FILE_AGE_SECONDS', 0)
+
+        call_count = {'n': 0}
+        captured: list[str] = []
+
+        def counter(path):
+            call_count['n'] += 1
+            captured.append(path)
+
+        # Patch the symbol that the lazy import inside the polling
+        # loop resolves to.
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', counter)
+
+        assert fws.start_watcher([str(tmp_path)]) is True
+        try:
+            # Wait long enough for ~3 polling ticks at 0.2s each.
+            time.sleep(0.9)
+        finally:
+            fws.stop_watcher(timeout=3.0)
+
+        assert call_count['n'] >= 2, (
+            f"polling loop must call _refresh_ro_mount on each tick, "
+            f"got {call_count['n']} calls in ~0.9s with 0.2s interval"
+        )
+        # Cache evict is process-global, so we only call once per
+        # tick even with multiple watch paths — pin that exactly one
+        # path was passed (the first one we registered).
+        assert all(p == str(tmp_path) for p in captured), (
+            f"polling loop must pass a registered watch path, "
+            f"got {captured}"
+        )
+
+    def test_polling_loop_survives_refresh_failure(
+        self, tmp_path, monkeypatch,
+    ):
+        """Broken refresh must NOT kill the polling thread — without
+        this guard, a misconfigured sudoers entry would silently
+        disable Tesla's last-resort discovery path on Pis where
+        inotify is unavailable.
+        """
+        monkeypatch.setattr(fws, '_try_inotify', lambda *a, **k: False)
+        monkeypatch.setattr(fws, '_POLL_INTERVAL_SECONDS', 0.2)
+        monkeypatch.setattr(fws, '_MIN_FILE_AGE_SECONDS', 0)
+
+        def boom(_path):
+            raise RuntimeError("simulated broken sudoers")
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', boom)
+
+        # Verify the loop keeps ticking despite refresh raising. Use
+        # the public _status['last_scan'] field as the heartbeat —
+        # the polling loop updates it at the END of each iteration,
+        # so a non-None value after start proves the loop survived
+        # the refresh exception.
+        assert fws.start_watcher([str(tmp_path)]) is True
+        try:
+            # Give the loop ~3 ticks to actually run.
+            time.sleep(0.9)
+            assert fws._status.get('last_scan') is not None, (
+                "polling loop crashed on refresh failure — last_scan "
+                "never updated"
+            )
+        finally:
+            fws.stop_watcher(timeout=3.0)

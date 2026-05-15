@@ -166,6 +166,42 @@ def _build_tunables() -> List[Dict[str, Any]]:
             'cast': _bounded_float(0.0, 60.0),
         },
         {
+            'key': 'archive_queue.recent_clips_stable_write_age_seconds',
+            'form_name': 'archive_recent_clips_stable_write_age_seconds',
+            'label': 'Archive: RecentClips stable-write age',
+            'description': (
+                'Higher stable-write threshold for RecentClips. Tesla '
+                'writes the moov atom at the end of each ~60s segment, '
+                'so RecentClips need extra settling time before copy '
+                '(see archive_worker._CopyMoovIncomplete).'
+            ),
+            'current': float(
+                config.ARCHIVE_QUEUE_RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS
+            ),
+            'default': 90.0,
+            'unit': 'seconds',
+            'min': 30.0, 'max': 300.0, 'step': 5.0,
+            'cast': _bounded_float(30.0, 300.0),
+        },
+        {
+            'key': 'archive_queue.peek_give_up_age_seconds',
+            'form_name': 'archive_peek_give_up_age_seconds',
+            'label': 'Archive: peek give-up age',
+            'description': (
+                'When the SEI peek raises a parser error AND the '
+                'file is older than this, treat it as stationary '
+                '(skip) instead of falling through to copy. Prevents '
+                'the worker from cycling on files Tesla wrote via the '
+                'gadget block layer where the Pi VFS page cache holds '
+                'a stale view.'
+            ),
+            'current': float(config.ARCHIVE_QUEUE_PEEK_GIVE_UP_AGE_SECONDS),
+            'default': 300.0,
+            'unit': 'seconds',
+            'min': 60.0, 'max': 3600.0, 'step': 30.0,
+            'cast': _bounded_float(60.0, 3600.0),
+        },
+        {
             'key': 'archive_queue.stale_claim_max_age_seconds',
             'form_name': 'archive_stale_claim_max_age_seconds',
             'label': 'Archive: stale-claim max age',

@@ -158,7 +158,7 @@ def canonical_cloud_path(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 _CLOUD_MODULE = "cloud_archive"
-_CLOUD_SCHEMA_VERSION = 3
+_CLOUD_SCHEMA_VERSION = 4
 
 _CLOUD_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS module_versions (
@@ -523,6 +523,469 @@ def _migrate_canonicalize_paths_v2(
             rewrites, merges,
         )
     return (rewrites, merges)
+
+
+def _migrate_drop_live_event_queue_v4(
+    conn: sqlite3.Connection, db_path: str,
+) -> None:
+    """Drop the orphaned ``live_event_queue`` table from cloud_sync.db.
+
+    Issue #202 — Wave 4 PR-F4 (issue #184 / PR #201) deleted the
+    standalone Live Event Sync subsystem (the service, blueprints,
+    routes, and config block). The ``live_event_queue`` table created
+    by that subsystem was deliberately left behind so any rows still
+    pending at deploy time could survive a rollback. After at least
+    one stable release post-PR-F4, the table is now safe to drop:
+    every install has had time to either (a) drain the table to zero
+    via the cloud worker (which now reads from ``pipeline_queue``
+    priority-0 rows), or (b) leave it untouched at zero rows because
+    LES was never enabled on that install.
+
+    Defensive cross-DB check (the issue body explicitly asks for this):
+    if the table contains any rows, verify each row is mirrored into
+    ``pipeline_queue.legacy_table='live_event_queue'`` in geodata.db.
+    For any unmirrored rows, log a WARNING with the row IDs and
+    backfill them via :func:`pipeline_queue_service.dual_write_enqueue`
+    BEFORE the DROP, so no live-event upload work is lost. This is a
+    safety net — the canonical install verified pre-merge had 0 rows
+    on both sides — but it remains the correct shape because some
+    third-party install may have captured rows between PR-F4 deploy
+    and this PR's deploy.
+
+    Order:
+      1. Existence check (no-op if table already absent).
+      2. Defensive zero-row check + cross-DB mirror reconciliation
+         (backfill missing mirrors AND re-verify after the loop —
+         see :func:`_backfill_missing_live_event_mirrors` for the
+         post-loop verification that closes the silent-data-loss
+         path through ``dual_write_enqueue``'s ``sqlite3.Error →
+         return False`` branch).
+      3. Drop secondary indexes (``idx_les_status``,
+         ``idx_les_next_retry``).
+      4. Drop the table itself (autoindex from UNIQUE drops with it).
+
+    The caller (``_init_cloud_tables``) wraps this in a
+    ``try / except → conn.rollback() → migration_ok=False``
+    envelope. On any exception here the version bump is skipped and
+    the migration retries on next service start. Crucially, the call
+    site is gated on ``migration_ok`` being True from prior versions
+    so a v2 failure does not allow v4 work to land in a fresh
+    implicit transaction that downstream commits would persist
+    (review-pr finding #3).
+    """
+    if not _table_exists_local(conn, 'live_event_queue'):
+        return
+
+    row_count = conn.execute(
+        "SELECT COUNT(*) FROM live_event_queue"
+    ).fetchone()[0]
+
+    if row_count > 0:
+        logger.warning(
+            "Cloud archive v4 migration: live_event_queue contains "
+            "%d row(s); reconciling against pipeline_queue before DROP.",
+            row_count,
+        )
+        _backfill_missing_live_event_mirrors(conn, db_path)
+
+    # Drop secondary indexes first. The autoindex from the UNIQUE
+    # constraint drops automatically with the table itself.
+    conn.execute("DROP INDEX IF EXISTS idx_les_status")
+    conn.execute("DROP INDEX IF EXISTS idx_les_next_retry")
+    conn.execute("DROP TABLE IF EXISTS live_event_queue")
+    logger.info(
+        "Cloud archive v4 migration: dropped live_event_queue table "
+        "and indexes from %s",
+        db_path,
+    )
+
+
+def _table_exists_local(conn: sqlite3.Connection, table: str) -> bool:
+    """Return True if ``table`` exists in the connected DB.
+
+    Thin wrapper around :func:`pipeline_queue_service.table_exists`
+    via lazy import — the lazy-import pattern is already used inside
+    :func:`_backfill_missing_live_event_mirrors`, so the no-cycle
+    constraint is satisfied. Falls back to an inline ``sqlite_master``
+    lookup if the import fails (corrupt install / deferred package
+    init during early gadget_web boot — same scenarios as the lazy
+    import below).
+
+    Public ``table_exists`` was promoted from ``_table_exists`` per
+    review-pr finding N1; this wrapper now uses the public name and
+    drops the prior ``# noqa: SLF001``.
+    """
+    try:
+        from services import pipeline_queue_service as pqs
+        return pqs.table_exists(conn, table)
+    except Exception:  # noqa: BLE001
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            return row is not None
+        except sqlite3.Error:
+            return False
+
+
+def _backfill_missing_live_event_mirrors(
+    conn: sqlite3.Connection, db_path: str,
+) -> None:
+    """Cross-DB reconciliation: ensure every ``live_event_queue`` row
+    has a matching ``pipeline_queue`` row before the DROP.
+
+    Reads the LES rows from the connected cloud_sync.db, opens a
+    short-lived geodata.db connection via
+    :func:`pipeline_queue_service.dual_write_enqueue`, INSERTs any
+    missing mirrors at ``priority=PRIORITY_LIVE_EVENT,
+    stage='cloud_pending'`` (or ``stage='cloud_done', status='done'``
+    when the legacy row was already ``'uploaded'``) so the unified
+    cloud worker picks them up on its next claim. **Does not UPDATE
+    existing mirrors** — see the stale-mirror handling below.
+
+    Stale-mirror handling (review-pr finding #5): if a non-canonical
+    install mirrored a row at LES ``status='pending'`` time and LES
+    later finished the upload, the legacy row will say
+    ``status='uploaded'`` while the mirror still says ``cloud_pending``.
+    For each such row we UPDATE the mirror's stage to ``cloud_done``
+    and status to ``done`` so the worker doesn't re-upload completed
+    work.
+
+    Status mapping mirrors the deleted ``_backfill_live_event_queue``:
+    legacy ``uploaded`` → unified ``done`` at ``stage='cloud_done'``;
+    legacy ``uploading`` → unified ``in_progress``; legacy ``failed``
+    → unified ``failed``; everything else → ``failed`` (review-pr
+    finding #4 — conservative default; an unknown legacy status
+    must NOT accidentally cause re-upload).
+
+    Post-loop verification (review-pr finding #1): after backfill,
+    re-query ``pipeline_queue`` for the unmirrored set. If any
+    legacy_id is still missing, raise ``RuntimeError`` so the caller
+    rolls back and the DROP doesn't run. This converts
+    ``dual_write_enqueue``'s ``sqlite3.Error → return False`` branch
+    (which only logs a WARNING in pqs) into the documented
+    abort-and-retry path.
+
+    A failure here re-raises so the caller can rollback and leave
+    the schema at v3 for retry.
+    """
+    rows = conn.execute(
+        "SELECT id, event_dir, event_json_path, event_timestamp, "
+        "event_reason, upload_scope, status FROM live_event_queue"
+    ).fetchall()
+    if not rows:
+        return
+
+    # Lazy import to avoid a load-time dependency cycle and to keep
+    # cloud_archive importable even if pipeline_queue_service is
+    # somehow unavailable (a corrupt install or deferred package
+    # initialisation during early gadget_web boot).
+    from services import pipeline_queue_service as pqs
+
+    pipeline_db = pqs.resolve_pipeline_db()
+    if not pipeline_db or not os.path.exists(pipeline_db):
+        logger.warning(
+            "Cloud archive v4 migration: pipeline_queue DB not "
+            "available (%s); cannot mirror %d live_event_queue row(s) "
+            "before DROP. The DROP is aborted to preserve the rows.",
+            pipeline_db, len(rows),
+        )
+        raise RuntimeError(
+            "pipeline_queue DB unavailable; cannot mirror "
+            "live_event_queue rows before DROP"
+        )
+
+    legacy_ids = [r[0] for r in rows]
+    source_paths = [r[2] for r in rows if r[2]]
+    existing_ids, existing_paths = _query_existing_mirrors(
+        pipeline_db, legacy_ids, source_paths,
+    )
+
+    def _is_mirrored(row) -> bool:
+        # A row is mirrored if EITHER its legacy_id is present OR its
+        # event_json_path matches an existing pipeline_queue row's
+        # source_path. The path-based fallback (originally filed as
+        # #207, fixed inline) catches dev-branch installs where a
+        # residual mirror row has NULL legacy_id but the right path.
+        return row[0] in existing_ids or (row[2] and row[2] in existing_paths)
+
+    # ------------------------------------------------------------------
+    # Stale-mirror UPDATE (finding #5): for rows that ARE mirrored but
+    # whose legacy status has advanced past the mirror's stage/status,
+    # update the mirror so the worker doesn't re-upload completed work.
+    # Carry just the legacy_id (re-review N3 — the row is unused below).
+    # ------------------------------------------------------------------
+    stale_updates: List[int] = [
+        r[0] for r in rows
+        if _is_mirrored(r) and r[6] == 'uploaded'
+    ]
+    refreshed = 0
+    if stale_updates:
+        refreshed = _refresh_stale_mirrors_to_done(pipeline_db, stale_updates)
+
+    unmirrored = [r for r in rows if not _is_mirrored(r)]
+    if not unmirrored:
+        logger.info(
+            "Cloud archive v4 migration: all %d live_event_queue "
+            "row(s) already mirrored into pipeline_queue (%d stale "
+            "mirror(s) refreshed); safe to DROP.",
+            len(rows), refreshed,
+        )
+        return
+
+    logger.warning(
+        "Cloud archive v4 migration: %d unmirrored live_event_queue "
+        "row(s) found (ids=%s); backfilling into pipeline_queue at "
+        "PRIORITY_LIVE_EVENT before DROP.",
+        len(unmirrored), [r[0] for r in unmirrored],
+    )
+
+    # Default 'failed' is conservative (review-pr finding #4): an
+    # unrecognized legacy status must NOT accidentally cause the
+    # cloud worker to re-upload a row whose true state we don't know.
+    status_map = {
+        'pending': 'pending',
+        'uploading': 'in_progress',
+        'uploaded': 'done',
+        'failed': 'failed',
+    }
+    for r in unmirrored:
+        legacy_id, event_dir, event_json_path, event_timestamp, \
+            event_reason, upload_scope, legacy_status = r
+        unified_status = status_map.get(legacy_status, 'failed')
+        # Mirror as a cloud_pending/cloud_done row at PRIORITY_LIVE_EVENT
+        # so the unified cloud worker picks it up on its next claim.
+        # The ``stage='cloud_done'`` mapping for already-uploaded rows
+        # ensures we don't re-upload completed work.
+        stage = (
+            pqs.STAGE_CLOUD_DONE if legacy_status == 'uploaded'
+            else pqs.STAGE_CLOUD_PENDING
+        )
+        ok = pqs.dual_write_enqueue(
+            source_path=event_json_path,
+            stage=stage,
+            legacy_table='live_event_queue',
+            legacy_id=legacy_id,
+            priority=pqs.PRIORITY_LIVE_EVENT,
+            payload={
+                'event_dir': event_dir,
+                'event_timestamp': event_timestamp,
+                'event_reason': event_reason,
+                'upload_scope': upload_scope,
+            },
+            status=unified_status,
+            db_path=pipeline_db,
+        )
+        if not ok:
+            # ok=False can mean either:
+            #   (a) UNIQUE-conflict idempotency — another writer (or
+            #       a prior partial migration) already inserted a row
+            #       with the same composite. Detected by the post-loop
+            #       verification below — that row IS mirrored.
+            #   (b) sqlite3.Error inside dual_write_enqueue (logged
+            #       there at WARNING). Detected by the post-loop
+            #       verification — that row is STILL not mirrored,
+            #       and we must abort to preserve it.
+            logger.info(
+                "Cloud archive v4 migration: dual_write_enqueue "
+                "returned False for live_event_queue.id=%d (%r); "
+                "post-loop verification will distinguish UNIQUE-"
+                "conflict idempotency from a DB error.",
+                legacy_id, event_json_path,
+            )
+
+    # --------------------------------------------------------------
+    # Post-loop verification (review-pr finding #1): re-query the
+    # pipeline_queue for every unmirrored legacy_id AND source_path.
+    # Anything still missing on BOTH keys means dual_write_enqueue
+    # silently returned False on a sqlite3.Error (not a UNIQUE
+    # idempotency match) and the row would be lost on DROP. Raise
+    # so the caller rolls back and the DROP is skipped — the LES
+    # table and its rows remain intact for the next migration
+    # attempt. Using both keys lets the orphan-mirror edge (#207
+    # fix) be recognised as "already mirrored" instead of triggering
+    # an abort loop.
+    # --------------------------------------------------------------
+    after_ids, after_paths = _query_existing_mirrors(
+        pipeline_db,
+        [r[0] for r in unmirrored],
+        [r[2] for r in unmirrored if r[2]],
+    )
+    still_missing = [
+        r[0] for r in unmirrored
+        if r[0] not in after_ids
+        and not (r[2] and r[2] in after_paths)
+    ]
+    if still_missing:
+        logger.error(
+            "Cloud archive v4 migration: backfill failed for %d "
+            "live_event_queue row(s) (ids=%s); aborting DROP to "
+            "preserve the rows. The migration will retry on the "
+            "next service start.",
+            len(still_missing), still_missing,
+        )
+        raise RuntimeError(
+            f"backfill incomplete: {len(still_missing)} "
+            f"live_event_queue row(s) still unmirrored "
+            f"(ids={still_missing}); aborting DROP"
+        )
+
+
+# Chunk size for ``WHERE legacy_id IN (?,?,...)`` queries.
+# SQLite's SQLITE_MAX_VARIABLE_NUMBER is 32766 (3.32+) or 999 (older
+# builds). 500 stays well under both ceilings (review-pr finding #2)
+# while keeping per-query overhead negligible.
+_LIVE_EVENT_BACKFILL_CHUNK = 500
+
+
+def _query_existing_mirrors(
+    pipeline_db: str,
+    legacy_ids: List[int],
+    source_paths: Optional[List[str]] = None,
+) -> Tuple[set, set]:
+    """Return ``(existing_legacy_ids, existing_source_paths)`` — the set
+    of ``legacy_id`` values AND the set of ``source_path`` values that
+    already have a ``pipeline_queue`` row with
+    ``legacy_table='live_event_queue'``.
+
+    Looking up by both keys is defensive against an edge case observed
+    on dev-branch installs (originally filed as #207, fixed inline
+    here): a pre-existing mirror row that has the right
+    ``source_path`` but a NULL ``legacy_id`` would otherwise be
+    invisible to the legacy-id ``IN (...)`` lookup, causing the
+    backfill INSERT to hit the
+    ``(source_path, stage, legacy_table)`` UNIQUE constraint, the
+    post-loop verification to keep failing, and the migration to
+    abort-loop on every service start. SQLite NULL never matches
+    ``IN (...)``, so we widen the query to OR-match on
+    ``source_path`` for the same ``legacy_table``. Canonical installs
+    (0 LES rows or all-mirrored-by-id) are unaffected.
+
+    Chunks the input into batches of :data:`_LIVE_EVENT_BACKFILL_CHUNK`
+    to stay under SQLite's variable-count ceiling on older builds
+    (``SQLITE_MAX_VARIABLE_NUMBER`` is 999 on pre-3.32 SQLite).
+    Single short-lived connection across all chunks. The two input
+    lists are chunked independently; the result sets are unioned
+    across chunks.
+    """
+    if not legacy_ids and not source_paths:
+        return set(), set()
+
+    pipeline_conn = sqlite3.connect(pipeline_db, timeout=10.0)
+    try:
+        existing_ids: set = set()
+        existing_paths: set = set()
+
+        if legacy_ids:
+            for start in range(0, len(legacy_ids), _LIVE_EVENT_BACKFILL_CHUNK):
+                chunk = legacy_ids[start:start + _LIVE_EVENT_BACKFILL_CHUNK]
+                placeholders = ','.join('?' * len(chunk))
+                for row in pipeline_conn.execute(
+                    f"SELECT legacy_id, source_path FROM pipeline_queue "
+                    f"WHERE legacy_table='live_event_queue' "
+                    f"AND legacy_id IN ({placeholders})",
+                    chunk,
+                ).fetchall():
+                    if row[0] is not None:
+                        existing_ids.add(row[0])
+                    if row[1]:
+                        existing_paths.add(row[1])
+
+        if source_paths:
+            for start in range(0, len(source_paths), _LIVE_EVENT_BACKFILL_CHUNK):
+                chunk = source_paths[start:start + _LIVE_EVENT_BACKFILL_CHUNK]
+                placeholders = ','.join('?' * len(chunk))
+                for row in pipeline_conn.execute(
+                    f"SELECT legacy_id, source_path FROM pipeline_queue "
+                    f"WHERE legacy_table='live_event_queue' "
+                    f"AND source_path IN ({placeholders})",
+                    chunk,
+                ).fetchall():
+                    if row[0] is not None:
+                        existing_ids.add(row[0])
+                    if row[1]:
+                        existing_paths.add(row[1])
+
+        return existing_ids, existing_paths
+    finally:
+        try:
+            pipeline_conn.close()
+        except sqlite3.Error:
+            pass
+
+
+def _refresh_stale_mirrors_to_done(
+    pipeline_db: str,
+    stale_updates: List[int],
+) -> int:
+    """UPDATE existing pipeline_queue mirrors whose legacy status has
+    advanced to ``'uploaded'`` but whose mirror is still in
+    ``cloud_pending``. Without this, the cloud worker re-uploads
+    completed live-event clips after the v4 migration runs.
+
+    Single short-lived connection, single transaction. WHERE clause
+    matches on ``(legacy_table, legacy_id)`` and is gated on
+    ``stage <> 'cloud_done'`` so a re-running migration is a no-op for
+    rows that are already done.
+
+    Also clears ``claimed_by`` and ``claimed_at`` (re-review N4): if a
+    previous cloud-worker run had claimed the row (``status='in_progress'``)
+    and crashed before completing, the mirror would have stale claim
+    metadata that survives the migration. Clearing it matches the
+    pattern used by ``complete_pipeline_row``.
+
+    Returns the number of rows actually updated (re-review N2 — the
+    log line uses this rather than the input length so a partial
+    no-op retry doesn't inflate the count).
+    """
+    if not stale_updates:
+        return 0
+
+    pipeline_conn = sqlite3.connect(pipeline_db, timeout=10.0)
+    try:
+        total_changed = 0
+        for legacy_id in stale_updates:
+            cur = pipeline_conn.execute(
+                """
+                UPDATE pipeline_queue
+                SET stage='cloud_done',
+                    status='done',
+                    completed_at=?,
+                    claimed_by=NULL,
+                    claimed_at=NULL
+                WHERE legacy_table='live_event_queue'
+                  AND legacy_id=?
+                  AND stage <> 'cloud_done'
+                """,
+                (time.time(), legacy_id),
+            )
+            total_changed += cur.rowcount
+        pipeline_conn.commit()
+        logger.info(
+            "Cloud archive v4 migration: refreshed %d stale "
+            "live-event mirror(s) to cloud_done (%d candidate(s) "
+            "considered).",
+            total_changed, len(stale_updates),
+        )
+        return total_changed
+    finally:
+        try:
+            pipeline_conn.close()
+        except sqlite3.Error:
+            pass
+
+
+# Backward-compat alias. The function was renamed from
+# ``_reconcile_live_event_queue_into_pipeline`` to
+# ``_backfill_missing_live_event_mirrors`` per review-pr finding #5
+# (the original name implied a full reconcile but the function only
+# inserts missing mirrors; UPDATE-of-stale was added as part of the
+# rename). External callers (tests) reference the old name.
+_reconcile_live_event_queue_into_pipeline = (
+    _backfill_missing_live_event_mirrors
+)
 
 
 def _dual_write_pipeline_cloud_synced(file_path: str,
@@ -1648,6 +2111,30 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
                 )
             except sqlite3.OperationalError:
                 pass
+
+        # v4 (#202): drop the orphaned ``live_event_queue`` table left
+        # behind when the standalone Live Event Sync subsystem was
+        # deleted in Wave 4 PR-F4 (issue #184). Gated on
+        # ``migration_ok`` (review-pr finding #3): if v2 failed and
+        # rolled back, we must NOT do v4 work in a fresh implicit
+        # transaction that downstream commits would persist while the
+        # version bump is correctly skipped. The inner try/except
+        # below is the per-version retry envelope.
+        if current < 4 and migration_ok:
+            try:
+                _migrate_drop_live_event_queue_v4(conn, db_path)
+            except Exception as e:  # noqa: BLE001
+                migration_ok = False
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.error(
+                    "Cloud archive v4 migration failed (%s); rolled "
+                    "back partial work and leaving schema at v%d. "
+                    "Migration will retry on next service start.",
+                    e, current,
+                )
 
         if migration_ok:
             conn.execute(

@@ -7,10 +7,10 @@ producer / consumer / backfill API.
 
 **Phase I.1 only adds the dual-write side.** Legacy producers
 (``archive_queue.enqueue_for_archive``, ``indexing_queue_service.
-enqueue_for_indexing``, ``live_event_sync_service.enqueue_event_json``,
-and the cloud-synced-files insertion path) call into this module's
-:func:`dual_write_enqueue` after they write to their own legacy table.
-Reads remain on the legacy tables — no behaviour change yet.
+enqueue_for_indexing``, and the cloud-synced-files insertion path)
+call into this module's :func:`dual_write_enqueue` after they write
+to their own legacy table. Reads remain on the legacy tables — no
+behaviour change yet.
 
 Design rules:
 
@@ -23,13 +23,14 @@ Design rules:
   makes repeated dual-writes harmless. Producers that re-enqueue
   (e.g. inotify firing on the same path twice) write at most one
   pipeline_queue row.
-* **Cross-DB writes are short-lived connections.** The LES dual-write
-  is the only cross-DB case (LES is in ``cloud_sync.db``;
-  ``pipeline_queue`` is in ``geodata.db``). Each dual-write opens a
-  fresh ``geodata.db`` connection, writes one row, and closes. No
-  long-lived second connection is held alongside the legacy DB
-  connection — that would double the connection count and complicate
-  task_coordinator semantics.
+* **Cross-DB writes are short-lived connections.** The
+  ``cloud_synced_files`` dual-write is the only cross-DB case (cloud
+  state is in ``cloud_sync.db``; ``pipeline_queue`` is in
+  ``geodata.db``). Each dual-write opens a fresh ``geodata.db``
+  connection, writes one row, and closes. No long-lived second
+  connection is held alongside the legacy DB connection — that
+  would double the connection count and complicate task_coordinator
+  semantics.
 
 Public API:
 
@@ -88,24 +89,31 @@ logger = logging.getLogger(__name__)
 # Stage values. The unified worker (Phase I.2) selects on
 # ``WHERE stage = ? AND status = 'pending'``; producer hooks set the
 # initial stage when enqueuing.
+#
+# Note: there is no ``STAGE_LIVE_EVENT_*`` family. Issue #184 PR-F4
+# folded LES into the unified cloud worker; live-event uploads are
+# now ``stage='cloud_pending'`` rows distinguished only by
+# ``priority=PRIORITY_LIVE_EVENT`` (0) vs. bulk catch-up at
+# ``priority=PRIORITY_CLOUD_BULK`` (4).
 STAGE_ARCHIVE_PENDING = 'archive_pending'
 STAGE_ARCHIVE_DONE = 'archive_done'
 STAGE_INDEX_PENDING = 'index_pending'
 STAGE_INDEX_DONE = 'index_done'
 STAGE_CLOUD_PENDING = 'cloud_pending'
 STAGE_CLOUD_DONE = 'cloud_done'
-STAGE_LIVE_EVENT_PENDING = 'live_event_pending'
-STAGE_LIVE_EVENT_DONE = 'live_event_done'
 
 # Legacy table names — used by the dual-write hooks to tag which
 # legacy producer created each pipeline_queue row.
+#
+# Note: there is no ``LEGACY_TABLE_LIVE_EVENT``. The
+# ``live_event_queue`` table was dropped in cloud_sync.db v4
+# (issue #202) after Wave 4 PR-F4 deleted the LES subsystem.
 LEGACY_TABLE_ARCHIVE = 'archive_queue'
 LEGACY_TABLE_INDEXING = 'indexing_queue'
-LEGACY_TABLE_LIVE_EVENT = 'live_event_queue'
 LEGACY_TABLE_CLOUD_SYNCED = 'cloud_synced_files'
 
 # Priority mapping — lower is more urgent.
-PRIORITY_LIVE_EVENT = 0          # LES real-time event upload
+PRIORITY_LIVE_EVENT = 0          # live-event upload (Sentry/Saved event.json)
 PRIORITY_ARCHIVE_EVENT = 1       # Sentry / Saved clips
 PRIORITY_ARCHIVE_RECENT = 2      # RecentClips (age-bound)
 PRIORITY_ARCHIVE_OTHER = 3       # ArchivedClips back-fill / other
@@ -144,8 +152,8 @@ _recover_stale_claims_call_count = 0  # incl. zero-result calls
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_pipeline_db() -> Optional[str]:
-    """Return the geodata.db path, or None if config can't be loaded.
+def resolve_pipeline_db() -> Optional[str]:
+    """Public helper: return the geodata.db path, or None if config can't be loaded.
 
     Lazy import of ``config`` so unit tests that don't bootstrap the
     Flask app can still import this module without side effects.
@@ -161,6 +169,12 @@ def _resolve_pipeline_db() -> Optional[str]:
     except Exception as e:  # noqa: BLE001
         logger.debug("pipeline_queue config not loaded: %s", e)
         return None
+
+
+# Backward-compat private alias. Existing in-tree callers and tests
+# referenced ``_resolve_pipeline_db`` before it was promoted; keep the
+# name working so we don't have to touch every call site at once.
+_resolve_pipeline_db = resolve_pipeline_db
 
 
 def _open_pipeline_conn(db_path: str) -> sqlite3.Connection:
@@ -1400,7 +1414,7 @@ def backfill_legacy_queues(*,
 
     Two source DBs:
       * ``pipeline_db_path`` (geodata.db): archive_queue + indexing_queue
-      * ``cloud_db_path`` (cloud_sync.db): live_event_queue + cloud_synced_files
+      * ``cloud_db_path`` (cloud_sync.db): cloud_synced_files
 
     Both default to the configured paths via lazy ``config`` import.
     """
@@ -1416,7 +1430,6 @@ def backfill_legacy_queues(*,
     counts = {
         LEGACY_TABLE_ARCHIVE: 0,
         LEGACY_TABLE_INDEXING: 0,
-        LEGACY_TABLE_LIVE_EVENT: 0,
         LEGACY_TABLE_CLOUD_SYNCED: 0,
     }
 
@@ -1435,9 +1448,6 @@ def backfill_legacy_queues(*,
         counts[LEGACY_TABLE_ARCHIVE] = _backfill_archive_queue(pipeline_db_path)
         counts[LEGACY_TABLE_INDEXING] = _backfill_indexing_queue(pipeline_db_path)
     if cloud_db_path and os.path.isfile(cloud_db_path):
-        counts[LEGACY_TABLE_LIVE_EVENT] = _backfill_live_event_queue(
-            cloud_db_path, pipeline_db_path,
-        )
         counts[LEGACY_TABLE_CLOUD_SYNCED] = _backfill_cloud_synced_files(
             cloud_db_path, pipeline_db_path,
         )
@@ -1604,77 +1614,6 @@ def _backfill_indexing_queue(pipeline_db: str) -> int:
                 pass
 
 
-def _backfill_live_event_queue(cloud_db: str, pipeline_db: Optional[str]) -> int:
-    """Backfill from ``live_event_queue`` (cloud_sync.db) into
-    ``pipeline_queue`` (geodata.db). CROSS-DB — read from cloud_db,
-    write to pipeline_db one row at a time.
-    """
-    if not pipeline_db or not os.path.isfile(pipeline_db):
-        return 0
-    src_conn = None
-    try:
-        src_conn = sqlite3.connect(cloud_db, timeout=10.0)
-        src_conn.row_factory = sqlite3.Row
-        # Existence check — LES may not have ever been enabled on
-        # this device, in which case the table is absent.
-        if not _table_exists(src_conn, 'live_event_queue'):
-            return 0
-        rows = src_conn.execute(
-            "SELECT id, event_dir, event_json_path, event_timestamp, "
-            "event_reason, upload_scope, status, attempts, last_error, "
-            "next_retry_at, enqueued_at FROM live_event_queue"
-        ).fetchall()
-    except sqlite3.Error as e:
-        logger.warning("backfill live_event_queue read failed: %s", e)
-        return 0
-    finally:
-        if src_conn is not None:
-            try:
-                src_conn.close()
-            except sqlite3.Error:
-                pass
-
-    if not rows:
-        return 0
-
-    inserted = 0
-    for r in rows:
-        stage = (
-            STAGE_LIVE_EVENT_DONE if r['status'] == 'uploaded'
-            else STAGE_LIVE_EVENT_PENDING
-        )
-        # Translate the legacy status to the unified within-stage
-        # status. Without this mapping an already-uploaded LES row
-        # would land as ``stage='live_event_done', status='pending'``,
-        # causing the Phase I.2 worker to either skip it or
-        # re-process completed work.
-        status = {
-            'pending': 'pending',
-            'uploading': 'in_progress',
-            'uploaded': 'done',
-            'failed': 'failed',
-        }.get(r['status'], 'failed')
-        if dual_write_enqueue(
-            source_path=r['event_json_path'],
-            stage=stage,
-            legacy_table=LEGACY_TABLE_LIVE_EVENT,
-            legacy_id=r['id'],
-            priority=PRIORITY_LIVE_EVENT,
-            payload={
-                'event_dir': r['event_dir'],
-                'event_timestamp': r['event_timestamp'],
-                'event_reason': r['event_reason'],
-                'upload_scope': r['upload_scope'],
-            },
-            status=status,
-            db_path=pipeline_db,
-        ):
-            inserted += 1
-        # Even on dup-skip we DON'T mark this as a failure — it just
-        # means the row was already backfilled.
-    return inserted
-
-
 def _backfill_cloud_synced_files(cloud_db: str, pipeline_db: Optional[str]) -> int:
     """Backfill from ``cloud_synced_files`` (cloud_sync.db) into
     ``pipeline_queue`` (geodata.db). CROSS-DB.
@@ -1742,7 +1681,16 @@ def _backfill_cloud_synced_files(cloud_db: str, pipeline_db: Optional[str]) -> i
     return inserted
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+def table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """Public helper: True iff ``table`` exists in the connected DB.
+
+    Promoted from the private ``_table_exists`` to a public helper so
+    sibling service modules (e.g. cloud_archive_service v4 migration)
+    can call it without ``# noqa: SLF001`` (issue #202 review-pr
+    finding N1, mirroring how ``resolve_pipeline_db`` was promoted
+    for finding #7). The legacy private alias is preserved below for
+    backward compatibility.
+    """
     try:
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -1751,3 +1699,9 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         return row is not None
     except sqlite3.Error:
         return False
+
+
+# Backward-compat private alias. Existing in-tree callers and tests
+# referenced ``_table_exists`` before it was promoted; keep the name
+# working so we don't have to touch every call site at once.
+_table_exists = table_exists

@@ -740,15 +740,21 @@ class TestRemoveFromQueueCanonical:
 
 
 class TestSchemaVersionBump:
-    def test_schema_version_is_3(self):
-        assert svc._CLOUD_SCHEMA_VERSION == 3
+    def test_schema_version_is_at_least_3(self):
+        # v3 added previous_last_error; v4 (issue #202) drops the
+        # orphaned live_event_queue table. Test verifies the floor —
+        # later versions must still satisfy the canonicalization +
+        # previous_last_error contracts these tests cover.
+        assert svc._CLOUD_SCHEMA_VERSION >= 3
 
     def test_init_cloud_tables_runs_migration_on_v1_db(self, tmp_path):
         # Build a DB at v1 with mixed-form rows, then call
         # _init_cloud_tables and verify the rows are canonical and the
         # version is bumped to the current schema (v3 includes both the
         # v2 path canonicalization and the v3 previous_last_error
-        # column).
+        # column; v4 additionally drops the orphaned live_event_queue
+        # table — but this test's pre-state has no LES table so v4 is
+        # a no-op).
         db = tmp_path / "cloud.db"
         conn = _seed_cloud_db(db, [
             ("/home/pi/ArchivedClips/clip.mp4", "pending", 0),
@@ -772,7 +778,7 @@ class TestSchemaVersionBump:
             ver = new_conn.execute(
                 "SELECT version FROM module_versions WHERE module = 'cloud_archive'"
             ).fetchone()[0]
-            assert ver == 3
+            assert ver == svc._CLOUD_SCHEMA_VERSION
             paths = sorted(
                 r[0] for r in new_conn.execute(
                     "SELECT file_path FROM cloud_synced_files"
@@ -867,7 +873,7 @@ class TestMigrationAtomicity:
             ver = retry_conn.execute(
                 "SELECT version FROM module_versions WHERE module = 'cloud_archive'"
             ).fetchone()[0]
-            assert ver == 3
+            assert ver == svc._CLOUD_SCHEMA_VERSION
             paths = sorted(
                 r[0] for r in retry_conn.execute(
                     "SELECT file_path FROM cloud_synced_files"

@@ -134,7 +134,13 @@ captures the entire transient queue state.
 | `archive_queue`      | Files queued for copy from RO USB mount → `~/ArchivedClips/`          |
 | `cloud_synced_files` | Per-file cloud-upload state                                           |
 | `cloud_sync_sessions`| Audit log of sync runs                                                |
-| `live_event_queue`   | Per-event LES upload queue (only used when LES is enabled)            |
+
+(The `live_event_queue` table existed for the standalone Live Event
+Sync subsystem before Wave 4 PR-F4 / issue #184. PR-F4 deleted the
+LES code and folded live-event uploads into the unified cloud worker
+as `priority=PRIORITY_LIVE_EVENT` (0) rows in `geodata.db`'s
+`pipeline_queue`. The orphaned table was dropped in cloud_sync.db
+v4 / issue #202.)
 
 ### `archive_queue`
 
@@ -183,28 +189,6 @@ Audit-log table tracking each sync session: when it started, what
 triggered it, how many files moved, total bytes, errors. Used by
 the cloud sync UI to show "last sync" history.
 
-### `live_event_queue`
-
-LES-only. Populated by the file watcher's `event.json` callback
-firing `live_event_sync_service.enqueue_event_json()`.
-
-Approximate columns: `id, event_dir, event_json_path,
-event_timestamp, event_reason, upload_scope, status, enqueued_at,
-uploaded_at, next_retry_at, attempts, last_error,
-previous_last_error, bytes_uploaded`. **Unique on `event_dir`** —
-duplicate enqueues of the same event are no-ops.
-
-`status` enum: `pending`, `uploading`, `uploaded`, `failed`.
-`upload_scope` is one of `event_minute` (default — event.json plus
-the 6 cameras matching the timestamp's `YYYY-MM-DD_HH-MM` prefix)
-or `event_folder` (every `.mp4` in the event dir).
-
-Retry backoff is the constant
-`LIVE_EVENT_RETRY_BACKOFF_SECONDS = [30, 120, 300, 900, 3600]` —
-five attempts, growing from 30 seconds to 1 hour. After the last
-attempt, the row moves to `failed` and stays there until a manual
-retry via `/api/live_events/retry/<id>`.
-
 ---
 
 ## Module split
@@ -218,8 +202,8 @@ The schema and queue API are intentionally split across modules:
 | `services/mapping_service.py`                         | Indexing core (`index_single_file`, `IndexResult`, trip merge, …)     |
 | `services/mapping_queries.py`                         | Read-only query helpers for the map UI (route polylines, RDP, …)     |
 | `services/archive_queue.py`                           | Archive-queue API + status enum                                       |
-| `services/cloud_archive_service.py`                   | Cloud upload state mutations                                          |
-| `services/live_event_sync_service.py`                 | LES queue mutations                                                   |
+| `services/cloud_archive_service.py`                   | Cloud upload state mutations + live-event uploads (post-PR-F4)        |
+| `services/pipeline_queue_service.py`                  | Unified `pipeline_queue` API (post-Wave-4 PR-F4)                      |
 
 Backward compatibility: `mapping_service` re-exports many of the
 schema/migration symbols so existing imports keep working. **New
@@ -323,5 +307,5 @@ acknowledging completion to producers.
 - `scripts/web/services/mapping_queries.py` — read-only query helpers
   for the map UI
 - `scripts/web/services/archive_queue.py` — archive queue + status enum
-- `scripts/web/services/cloud_archive_service.py` — cloud upload state
-- `scripts/web/services/live_event_sync_service.py` — LES queue
+- `scripts/web/services/cloud_archive_service.py` — cloud upload state + live-event uploads (post-PR-F4)
+- `scripts/web/services/pipeline_queue_service.py` — unified `pipeline_queue` API (post-Wave-4)

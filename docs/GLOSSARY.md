@@ -170,18 +170,25 @@ typed via the `IndexOutcome` enum.
 events first, then geolocated, then non-event clips (opt-in).
 
 ### Live Event Sync (LES)
-`live_event_sync_service.py`. Opt-in real-time uploader that fires
-on `event.json` arrivals. Has its own queue (`live_event_queue` in
-`cloud_sync.db`), its own worker thread, and a strict 25 MB
-steady-state RSS budget. **Disabled by default.**
+**Removed (Wave 4 PR-F4 / issue #184).** LES used to be a separate
+opt-in subsystem (`live_event_sync_service.py`) with its own queue
+(`live_event_queue` in `cloud_sync.db`), its own worker thread, and
+a 25 MB RSS budget. PR-F4 deleted it; live-event uploads are now
+first-class rows in `pipeline_queue` (geodata.db) at
+`PRIORITY_LIVE_EVENT = 0` (vs. `PRIORITY_CLOUD_BULK = 4`). The
+unified cloud worker's natural priority ordering means a live event
+always leapfrogs bulk catch-up rows on the very next claim — no
+separate worker, no separate queue, no inter-file yield dance. The
+orphaned `live_event_queue` table itself was dropped in
+cloud_sync.db v4 / issue #202.
 
 ### Task coordinator
 `task_coordinator.py`. The single mutual-exclusion point for the
 heavy background workers (`indexer`, `archive`, `cloud_sync`,
-`live_event_sync`, `retention`). Provides fairness so a tight cyclic
-worker (the indexer) cannot starve a less-frequent priority task
-(archive). `WATCHDOG_NEAR_MISS_THRESHOLD_SECONDS = 60.0` seconds —
-any worker holding the lock longer logs a WARNING.
+`retention`). Provides fairness so a tight cyclic worker (the
+indexer) cannot starve a less-frequent priority task (archive).
+`WATCHDOG_NEAR_MISS_THRESHOLD_SECONDS = 60.0` seconds — any worker
+holding the lock longer logs a WARNING.
 
 ---
 
@@ -291,11 +298,11 @@ detection if the file is absent or stale.
 
 ### Failed jobs
 The `/jobs` page surfaces every queue row across `archive_queue`,
-`indexing_queue`, `cloud_synced_files` (with status `failed` or
-`dead_letter`), and `live_event_queue`. Each row is enriched with a
-**clip value** badge ("Event clip" / "Rolling buffer" / "Already on
-SD card" / etc.) and a **recommendation chip** ("Retry" / "Delete" /
-"Either is safe") classified from the error message.
+`indexing_queue`, and `cloud_synced_files` (with status `failed` or
+`dead_letter`). Each row is enriched with a **clip value** badge
+("Event clip" / "Rolling buffer" / "Already on SD card" / etc.) and
+a **recommendation chip** ("Retry" / "Delete" / "Either is safe")
+classified from the error message.
 
 ### System Health
 The `/api/system/health` endpoint and the matching UI card. Reports

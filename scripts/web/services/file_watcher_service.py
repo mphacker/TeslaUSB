@@ -47,6 +47,16 @@ _STOP_JOIN_TIMEOUT = 10.0
 # a directory again after a mount cycle.
 _RESTART_MOUNT_WAIT = 30.0
 
+# Issue #214: minimum wall-clock interval between VFS slab-cache
+# evictions triggered by the file_watcher's internal scans.
+# ``_refresh_ro_mount`` calls ``echo 2 > /proc/sys/vm/drop_caches`` which
+# is process-global; back-to-back invocations on every inotify event
+# burst would generate unnecessary SDIO traffic on the Pi Zero 2 W
+# (re-fetching dentries for ALL mounts, not just the gadget RO mount).
+# 60 s matches ``archive_producer``'s default rescan interval and is
+# well inside Tesla's ~60-min RecentClips rotation window.
+_RO_CACHE_MIN_REFRESH_INTERVAL_S = 60.0
+
 # ---------------------------------------------------------------------------
 # inotify constants (Linux). Defined here so the module imports cleanly on
 # non-Linux dev hosts where ``ctypes.util.find_library('c')`` is missing.
@@ -408,6 +418,68 @@ def _notify_event_json_callbacks(paths: List[str], my_generation: int):
             logger.error("Watcher event.json callback error: %s", e)
 
 
+def _maybe_refresh_ro_cache(
+    paths: List[str], last_refresh_monotonic: float,
+    min_interval: Optional[float] = None,
+) -> float:
+    """Issue #214: rate-limited VFS slab-cache invalidation.
+
+    Tesla writes to the gadget-backed disk image via the USB
+    ``g_mass_storage`` block layer, which bypasses Linux's VFS layer
+    entirely. The Pi's RO mount of the same image goes through VFS,
+    which caches FAT directory entries (dentries) and inodes in slab
+    caches. Without explicit invalidation, ``readdir`` on the RO
+    mount can return a frozen snapshot for tens of minutes when
+    nothing else triggers a refresh — long enough to exceed Tesla's
+    ~60-min RecentClips rotation window and lose footage.
+
+    :func:`mapping_service._refresh_ro_mount` evicts only the slab
+    cache (``echo 2 > /proc/sys/vm/drop_caches``) — sub-10 ms, no
+    mount/loop/image disruption, and internally non-fatal. Because
+    the eviction is process-global, callers that may invoke this on
+    a high-frequency code path (e.g. the inotify event loop, which
+    iterates per event burst) MUST rate-limit the call.
+
+    ``min_interval`` defaults to ``_RO_CACHE_MIN_REFRESH_INTERVAL_S``
+    looked up at call time (NOT bound at function-definition time)
+    so tests can monkeypatch the module-level constant.
+
+    Returns the wall-clock time (``time.monotonic()``) that should be
+    fed back as ``last_refresh_monotonic`` on the next call. Bumps
+    the timestamp even on failure so a broken sudoers entry can't
+    spam the logs every iteration.
+    """
+    if min_interval is None:
+        min_interval = _RO_CACHE_MIN_REFRESH_INTERVAL_S
+    now = time.monotonic()
+    if now - last_refresh_monotonic < min_interval:
+        return last_refresh_monotonic
+
+    try:
+        # Lazy import: keeps this module's start-up footprint cheap
+        # and avoids any chance of an import cycle through
+        # services.mapping_service.
+        from services.mapping_service import _refresh_ro_mount
+        if paths:
+            # ``drop_caches`` is process-global, so one call invalidates
+            # the slab cache for every mount. Pass the first watched
+            # path purely for caller-intent documentation in the
+            # underlying log line.
+            _refresh_ro_mount(paths[0])
+    except Exception as e:  # noqa: BLE001
+        # Defense in depth: ``_refresh_ro_mount`` already swallows its
+        # own subprocess failures, so this branch only fires for
+        # genuinely catastrophic failures (missing module). Either
+        # way, the watcher must keep running — losing 60 s of
+        # responsiveness is infinitely better than losing the entire
+        # discovery thread.
+        logger.warning(
+            "file_watcher_service: VFS cache refresh skipped "
+            "(non-fatal): %s", e,
+        )
+    return now
+
+
 def _scan_for_new_files(paths: List[str], known_files: Set[str]) -> List[str]:
     """Scan directories for new .mp4 files not in known_files set.
 
@@ -580,6 +652,16 @@ def _try_inotify(paths: List[str], known_files: Set[str],
         import select as sel
         buf_size = 4096
 
+        # Issue #214: rate-limited VFS slab-cache invalidation. Tesla's
+        # gadget-block-layer writes never fire inotify events, so the
+        # periodic scan below is the catch-all that surfaces them — but
+        # only if the dentry cache is fresh. Bootstrap at 0.0 so the
+        # first iteration always invalidates; subsequent iterations
+        # honour ``_RO_CACHE_MIN_REFRESH_INTERVAL_S`` (60 s) so an event
+        # burst that triggers many loop iterations per second doesn't
+        # generate a global slab evict on every one.
+        last_refresh_monotonic = 0.0
+
         try:
             while not _watcher_stop.is_set():
                 # Wait up to 30 seconds for events, then do a periodic scan
@@ -671,6 +753,14 @@ def _try_inotify(paths: List[str], known_files: Set[str],
                         event_json_arrivals, my_generation,
                     )
 
+                # Issue #214: refresh VFS dentry cache before the
+                # periodic scan so Tesla's gadget-block-layer writes
+                # become visible to ``readdir``. Rate-limited helper
+                # collapses to a no-op on event-burst iterations.
+                last_refresh_monotonic = _maybe_refresh_ro_cache(
+                    paths, last_refresh_monotonic,
+                )
+
                 # Periodic scan (catches files inotify missed and new subdirs)
                 new_files = _scan_for_new_files(paths, known_files)
                 if new_files:
@@ -734,6 +824,12 @@ def _watcher_loop(my_generation: int):
     _status["mode"] = "polling"
     logger.info("Falling back to polling mode (every %ds)", _POLL_INTERVAL_SECONDS)
 
+    # Issue #214: bootstrap the refresh timestamp at 0.0 so the first
+    # polling tick always invokes the refresh helper (now - 0.0 is well
+    # above _RO_CACHE_MIN_REFRESH_INTERVAL_S). Subsequent ticks honour
+    # the rate limit.
+    last_refresh_monotonic = 0.0
+
     while not _watcher_stop.is_set():
         _watcher_stop.wait(_POLL_INTERVAL_SECONDS)
         if _watcher_stop.is_set():
@@ -747,21 +843,13 @@ def _watcher_loop(my_generation: int):
         # absent memory pressure. Without this refresh, ``os.scandir``
         # below returns a frozen snapshot and clips are lost when
         # Tesla's RecentClips circular buffer (~60 min) rotates them
-        # out before we ever see them. ``_refresh_ro_mount`` evicts
-        # only the slab cache (``echo 2 > /proc/sys/vm/drop_caches``)
-        # — sub-10ms, no mount/loop/image disruption, internally
-        # non-fatal. Lazy import to keep this module's start-up cheap
-        # and avoid any chance of an import cycle.
-        try:
-            from services.mapping_service import _refresh_ro_mount
-            for path in paths:
-                _refresh_ro_mount(path)
-                break  # process-global slab evict; one call is enough
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "file_watcher_service: VFS cache refresh skipped "
-                "(non-fatal): %s", e,
-            )
+        # out before we ever see them. The 5-min polling cadence is
+        # well above the rate-limit floor so the gate always passes
+        # here, but routing through the shared helper keeps the
+        # behaviour symmetric with the inotify path.
+        last_refresh_monotonic = _maybe_refresh_ro_cache(
+            paths, last_refresh_monotonic,
+        )
 
         new_files = _scan_for_new_files(paths, known_files)
         if new_files:

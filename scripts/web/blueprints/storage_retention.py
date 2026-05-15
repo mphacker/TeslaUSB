@@ -76,7 +76,7 @@ ALLOWED_FOLDER_NAMES = (
 # accepts anything but the UI clamps to keep the system sane.
 RETENTION_DAYS_MIN = 1
 RETENTION_DAYS_MAX = 3650            # 10 years — a soft sanity cap
-FREE_SPACE_PCT_MIN = 5
+FREE_SPACE_PCT_MIN = 0               # 0 = disabled (no free-space-target enforcement)
 FREE_SPACE_PCT_MAX = 50
 MAX_ARCHIVE_GB_MIN = 0               # 0 = no cap
 MAX_ARCHIVE_GB_MAX = 10000           # 10 TB — absurdly high but bounded

@@ -468,34 +468,31 @@
                         </p>
                     </div>
                     <div class="form-group">
-                        <label style="font-size:0.85rem"><strong>Free-space target (% of SD card)</strong>
-                            <span style="font-weight:normal; color:var(--text-secondary)">
-                                — Phase 5 (preview)
-                            </span>
-                        </label>
+                        <label style="font-size:0.85rem"><strong>Free-space target (% of SD card)</strong></label>
                         <input type="number" name="free_space_target_pct" id="sr-free-space-target"
-                               min="5" max="50" value="10"
+                               min="0" max="50" value="10"
                                class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
-                            Saved now; not yet enforced by the prune. Phase 5 will use this to keep at
-                            least the requested free percentage.
+                            After the time-based pass, if SD-card free space drops below this
+                            percentage, the oldest archived clips are deleted (oldest first) until
+                            free space crosses back above the target. Cloud-pending clips are kept;
+                            disk image files are protected. Set to <strong>0</strong> to disable.
                         </p>
                     </div>
                 </div>
 
                 <div class="settings-form-grid">
                     <div class="form-group">
-                        <label style="font-size:0.85rem"><strong>Maximum archive size (GB)</strong>
-                            <span style="font-weight:normal; color:var(--text-secondary)">
-                                — Phase 5 (preview)
-                            </span>
-                        </label>
+                        <label style="font-size:0.85rem"><strong>Maximum archive size (GB)</strong></label>
                         <input type="number" name="max_archive_size_gb" id="sr-max-archive"
                                min="0" max="10000" value="0"
                                class="settings-form-input">
                         <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
-                            Saved now; not yet enforced by the prune. Phase 5 will treat this as a hard
-                            cap. Leave at <strong>0</strong> to use only time-based retention.
+                            Hard cap on total archive size. After the time-based pass, if total
+                            <code>.mp4</code> bytes under the archive root exceed this cap, oldest
+                            clips are deleted until total is at or below the cap. Cloud-pending
+                            clips are kept; disk image files are protected. Leave at
+                            <strong>0</strong> to use only time-based retention.
                         </p>
                     </div>
                     <div class="form-group">

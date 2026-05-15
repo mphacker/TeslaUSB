@@ -110,6 +110,36 @@ _BACKOFF_SLEEP_SECONDS = 0.5
 # importable (unit-test envs without the full app); the runtime value
 # is read by ``_stable_write_age_seconds()`` at call time.
 _STABLE_WRITE_AGE_SECONDS = 5.0
+# RecentClips-specific stable-write age. Tesla writes RecentClips in
+# ~60-second segments; the moov atom is appended at the END of the
+# segment, so a copy snapshot taken any time before Tesla closes the
+# file is missing moov and fails ``_verify_destination_complete``.
+# Wait at least this long after the last mtime change before attempting
+# the copy. Sentry/Saved event clips are written atomically when the
+# event ends (no "still being written" window) and keep the base
+# threshold above. Configurable via
+# ``archive_queue.recent_clips_stable_write_age_seconds``.
+_RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS = 90.0
+# Cap on how many times the worker will defer a row via the
+# ``_CopyMoovIncomplete`` (Tesla still-writing) handler before
+# escalating to the regular failure path (mark_failed → bump
+# ``attempts`` → eventual dead_letter at ``max_attempts``). Without
+# a cap, a genuinely-corrupted-but-stable RecentClips file (rare but
+# possible: bad SD block, Tesla crashed mid-segment then never
+# rotated the slot) would defer forever, re-running the full
+# source-read + partial-staging-write + delete cycle on every pick
+# (~30–360 MB SDIO per iteration). 10 defers × ~30 s backoff =
+# ~5 minutes — well past Tesla's 60 s segment-close window, so any
+# row still failing after that is genuinely broken, not still
+# being written. Reset on process restart (in-memory only — see
+# ``_moov_defer_counts`` below).
+_MOOV_DEFER_CAP = 10
+# Cap on the size of the per-source_path defer counter dict to prevent
+# unbounded memory growth across long-running drives. Tesla writes
+# ~hundreds of RecentClips per drive; over weeks the dict could
+# accumulate. When the LRU exceeds this size, the oldest entry is
+# evicted. 2048 × ~150 bytes/entry ≈ 300 KB — negligible on Pi Zero 2 W.
+_MOOV_DEFER_LRU_SIZE = 2048
 # task_coordinator wait when acquiring the archive slot. The archive
 # worker is a periodic priority task (per the task_coordinator
 # docstring) — it BLOCK-waits for a slot rather than yielding cyclically.
@@ -744,6 +774,66 @@ class _CopyTimeBudgetExceeded(OSError):
     """
 
 
+class _CopyMoovIncomplete(OSError):
+    """Raised by ``_atomic_copy`` when the destination MP4 verifier
+    fails because Tesla is still writing the source segment.
+
+    Distinct from ordinary ``OSError`` so the caller can defer (release
+    the claim, refresh expected_size/expected_mtime, return 'pending')
+    WITHOUT bumping ``attempts``. Tesla writes RecentClips in ~60-second
+    segments and appends the ``moov`` atom only when it closes the
+    file; any copy snapshotted before that close legitimately has
+    ftyp + partial mdat + no moov. Treating these as failed attempts
+    dead-letters perfectly recoverable rows after 3 retries even though
+    the file is fine — Tesla just hadn't finished yet.
+
+    A genuinely truncated file (Tesla crashed mid-write, bad SD block)
+    will continue to fail moov-verify forever, but the natural
+    backstop is the source-rotation path: Tesla overwrites RecentClips
+    slots when the circular buffer wraps, expected_size/expected_mtime
+    drifts, and the row eventually transitions through
+    ``mark_source_gone`` when the producer's stat() resolves None.
+
+    Backstop #2 (this is the safety net for the "stable+corrupt" case):
+    ``_process_one_file`` keeps a per-source_path defer count in
+    ``_moov_defer_counts``; after ``_MOOV_DEFER_CAP`` defers it falls
+    through to the regular ``mark_failed`` path so the row can
+    eventually dead_letter rather than re-amplifying SDIO IO forever.
+    """
+
+
+# Per-source_path counter for ``_CopyMoovIncomplete`` defers, used by
+# ``_process_one_file`` to enforce ``_MOOV_DEFER_CAP``. OrderedDict
+# acts as a simple LRU: when an entry is read, it's moved to the end;
+# when ``len`` exceeds ``_MOOV_DEFER_LRU_SIZE`` the oldest entry is
+# popped. In-memory only — restarts reset the counter, which is the
+# desired behavior (a process restart is itself a recovery event).
+# Module-level so the singleton archive worker thread can read/mutate
+# without lock contention; not safe for use from multiple threads.
+_moov_defer_counts: 'collections.OrderedDict[str, int]' = collections.OrderedDict()
+
+
+def _bump_moov_defer_count(source_path: str) -> int:
+    """Increment and return the moov-incomplete defer count for
+    ``source_path``. Maintains LRU eviction of ``_moov_defer_counts``
+    so the dict can't grow unbounded across long-running drives.
+    """
+    count = _moov_defer_counts.get(source_path, 0) + 1
+    _moov_defer_counts[source_path] = count
+    _moov_defer_counts.move_to_end(source_path)
+    while len(_moov_defer_counts) > _MOOV_DEFER_LRU_SIZE:
+        _moov_defer_counts.popitem(last=False)
+    return count
+
+
+def _reset_moov_defer_count(source_path: str) -> None:
+    """Drop the per-path moov-defer counter (called on a successful
+    copy or a transition to a terminal status). Best-effort — no-op
+    if the path isn't tracked.
+    """
+    _moov_defer_counts.pop(source_path, None)
+
+
 # ---------------------------------------------------------------------------
 # Phase 2.4 — moov-atom verification after copy
 # ---------------------------------------------------------------------------
@@ -1014,7 +1104,7 @@ def _atomic_copy(source_path: str, dest_path: str,
         # so .ts segments and other non-MP4 archives are unaffected.
         if dest_path.lower().endswith('.mp4'):
             if not _verify_destination_complete(partial):
-                raise OSError(
+                raise _CopyMoovIncomplete(
                     f"destination MP4 missing moov or mdat box — "
                     f"source may still be writing: {source_path}"
                 )
@@ -1589,6 +1679,45 @@ def _stable_write_age_seconds() -> float:
         return _STABLE_WRITE_AGE_SECONDS
 
 
+def _recent_clips_stable_write_age_seconds() -> float:
+    """Return RecentClips-specific stable-write threshold.
+
+    Tesla writes RecentClips in ~60-second segments and only appends
+    the ``moov`` atom when it closes the segment. The base 5-second
+    gate is far too short — a 5-second mtime-stable window mid-segment
+    is normal SDIO behavior and tricks the worker into copying a
+    half-written file. 90 seconds guarantees Tesla has finished any
+    in-progress segment before we copy.
+
+    Sentry/Saved event clips are written atomically when the event
+    completes (no mid-write window) and use the base threshold.
+
+    Configurable via ``archive_queue.recent_clips_stable_write_age_seconds``.
+    """
+    try:
+        from config import (
+            ARCHIVE_QUEUE_RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS,
+        )
+        return float(ARCHIVE_QUEUE_RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS)
+    except Exception:  # noqa: BLE001
+        return _RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS
+
+
+def _stable_write_age_seconds_for(row: Dict[str, Any]) -> float:
+    """Return the stable-write threshold for ``row``.
+
+    RecentClips need a much longer settle window than Sentry/Saved
+    because Tesla writes them in ~60-second segments with the moov
+    atom appended at the end. Returns ``max(base, recent_threshold)``
+    so a config override that pushes the base above the RecentClips
+    default still applies.
+    """
+    base = _stable_write_age_seconds()
+    if _is_recent_clips_priority(row):
+        return max(base, _recent_clips_stable_write_age_seconds())
+    return base
+
+
 # ---------------------------------------------------------------------------
 # Issue #167 sub-deliverable 2 — skip-at-source for stationary RecentClips
 # Issue #176 — fast-peek tuning
@@ -1835,7 +1964,13 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         or (expected_mtime is not None and expected_mtime != st.st_mtime)
     )
     needs_settling_check = metadata_drifted or metadata_unknown
-    if age < _stable_write_age_seconds() and needs_settling_check:
+    # Per-row stable-write threshold: RecentClips need ~90s (Tesla
+    # writes them in ~60s segments and appends the moov atom only at
+    # close); Sentry/Saved use the base 5s (they're written atomically
+    # when the event ends). Without this distinction, the worker
+    # copies half-written RecentClips, fails moov-verify, retries,
+    # and dead-letters perfectly recoverable rows after 3 attempts.
+    if age < _stable_write_age_seconds_for(row) and needs_settling_check:
         # Update the snapshot so the next pick uses fresh values.
         archive_queue.release_claim(
             row_id,
@@ -1958,6 +2093,76 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         )
         archive_queue.release_claim(row_id, db_path=db_path)
         return 'pending'
+    except _CopyMoovIncomplete as e:
+        # Tesla writes RecentClips in ~60-second segments and only
+        # appends the moov atom when it closes the file. A copy
+        # snapshotted before that close legitimately has ftyp +
+        # partial mdat + no moov; the file isn't broken, Tesla just
+        # hasn't finished. Release back to pending WITHOUT bumping
+        # attempts (so we never dead_letter a perfectly recoverable
+        # row) and refresh expected_size/expected_mtime so the next
+        # pick lands AFTER the per-row stable-write gate
+        # (``_stable_write_age_seconds_for``) has had a chance to fire.
+        # Genuinely truncated files still terminate naturally: Tesla
+        # rotates RecentClips slots, the producer's stat() resolves
+        # to a different size/mtime, and the row reaches
+        # ``mark_source_gone`` when the file finally vanishes.
+        defer_count = _bump_moov_defer_count(source_path)
+        if defer_count > _MOOV_DEFER_CAP:
+            # Backstop for the rare "stable + corrupt" case (bad SD
+            # block, Tesla crashed mid-segment then never rotated):
+            # release the moov-incomplete protection, fall through to
+            # mark_failed, bump attempts, and let the regular
+            # max_attempts → dead_letter path engage. Without this cap
+            # the worker would re-read + re-stage + re-delete the
+            # corrupt file forever (~30–360 MB SDIO per iteration).
+            logger.warning(
+                "archive_worker: moov-incomplete on %s deferred "
+                "%d times (cap=%d) — escalating to mark_failed; "
+                "file is likely genuinely truncated, not still "
+                "being written: %r",
+                source_path, defer_count, _MOOV_DEFER_CAP, e,
+            )
+            _reset_moov_defer_count(source_path)
+            new_status = archive_queue.mark_failed(
+                row_id,
+                f"copy: moov-incomplete after {defer_count} defers: {e!r}",
+                max_attempts=max_attempts, db_path=db_path,
+            )
+            if new_status == 'dead_letter':
+                row_for_sidecar = dict(row)
+                row_for_sidecar['dest_path'] = dest_path
+                row_for_sidecar['last_error'] = (
+                    f"copy: moov-incomplete after {defer_count} defers: {e!r}"
+                )
+                row_for_sidecar['attempts'] = int(
+                    row.get('attempts') or 0,
+                ) + 1
+                _write_dead_letter_sidecar(archive_root, row_for_sidecar)
+            return new_status
+        # Per project convention ("don't log per-tick events at INFO"):
+        # the defer can fire many times for the same source_path while
+        # Tesla finishes a segment. Keep these at DEBUG so journalctl
+        # at default verbosity stays useful; escalation to WARNING
+        # happens at the cap above.
+        logger.debug(
+            "archive_worker: moov-incomplete on %s "
+            "(source still being written, defer #%d/%d); "
+            "deferring without burning an attempt: %r",
+            source_path, defer_count, _MOOV_DEFER_CAP, e,
+        )
+        st = _safe_stat(source_path)
+        if st is None:
+            _reset_moov_defer_count(source_path)
+            archive_queue.mark_source_gone(row_id, db_path=db_path)
+            return 'source_gone'
+        archive_queue.release_claim(
+            row_id,
+            expected_size=st.st_size,
+            expected_mtime=st.st_mtime,
+            db_path=db_path,
+        )
+        return 'pending'
     except (OSError, shutil.Error) as e:
         new_status = archive_queue.mark_failed(
             row_id, f"copy: {e!r}",
@@ -1974,6 +2179,9 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         return new_status
 
     # Success — mark copied AND enqueue into the indexer queue.
+    # Drop any moov-defer counter for this source so a row that
+    # recovered after N < cap defers doesn't leave stale state behind.
+    _reset_moov_defer_count(source_path)
     archive_queue.mark_copied(row_id, dest_path, db_path=db_path)
     # Issue #197: while the just-copied file's pages are still hot
     # in the kernel page cache, parse SEI + mvhd inline and write

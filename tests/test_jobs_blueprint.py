@@ -305,9 +305,9 @@ def test_listers_apply_redaction(geo_db, tmp_path, monkeypatch):
 def app(monkeypatch, tmp_path, geo_db):
     """Build a minimal Flask app with just the jobs blueprint mounted.
 
-    Patches the four subsystem listers so each test controls what
+    Patches the three subsystem listers so each test controls what
     rows the blueprint sees, without needing real DBs for the
-    cloud_archive / live_event_sync subsystems.
+    cloud_archive subsystem.
     """
     from flask import Flask
     from blueprints.jobs import jobs_bp
@@ -317,15 +317,11 @@ def app(monkeypatch, tmp_path, geo_db):
     # Make sure config flags don't suppress subsystems.
     monkeypatch.setattr(config_module, 'CLOUD_ARCHIVE_ENABLED', True,
                         raising=False)
-    monkeypatch.setattr(config_module, 'LIVE_EVENT_SYNC_ENABLED', True,
-                        raising=False)
     monkeypatch.setattr(config_module, 'MAPPING_ENABLED', True,
                         raising=False)
     monkeypatch.setattr(config_module, 'MAPPING_DB_PATH', geo_db,
                         raising=False)
     monkeypatch.setattr(jobs_module, 'CLOUD_ARCHIVE_ENABLED', True,
-                        raising=False)
-    monkeypatch.setattr(jobs_module, 'LIVE_EVENT_SYNC_ENABLED', True,
                         raising=False)
     monkeypatch.setattr(jobs_module, 'MAPPING_ENABLED', True,
                         raising=False)
@@ -368,20 +364,19 @@ def _patch_counter(monkeypatch, name, value):
 
 
 def test_counts_all_zero(client, monkeypatch):
-    for name in ('archive', 'indexer', 'cloud_sync', 'live_event_sync'):
+    for name in ('archive', 'indexer', 'cloud_sync'):
         _patch_counter(monkeypatch, name, 0)
     rv = client.get('/api/jobs/counts')
     assert rv.status_code == 200
     body = rv.get_json()
     assert body == {'archive': 0, 'indexer': 0, 'cloud_sync': 0,
-                    'live_event_sync': 0, 'total': 0}
+                    'total': 0}
 
 
 def test_counts_with_rows(client, monkeypatch):
     _patch_counter(monkeypatch, 'archive', 1)
     _patch_counter(monkeypatch, 'indexer', 0)
     _patch_counter(monkeypatch, 'cloud_sync', 1)
-    _patch_counter(monkeypatch, 'live_event_sync', 0)
     rv = client.get('/api/jobs/counts')
     body = rv.get_json()
     assert body['archive'] == 1
@@ -397,7 +392,6 @@ def test_counts_one_subsystem_crashing(client, monkeypatch):
     monkeypatch.setitem(jobs_module._COUNTERS, 'archive', boom)
     _patch_counter(monkeypatch, 'indexer', 5)
     _patch_counter(monkeypatch, 'cloud_sync', 0)
-    _patch_counter(monkeypatch, 'live_event_sync', 0)
     rv = client.get('/api/jobs/counts')
     body = rv.get_json()
     assert body['archive'] == 0  # crashed → 0
@@ -414,7 +408,6 @@ def test_failed_all_subsystems(client, monkeypatch):
                      'attempts': 3, 'last_error': '', 'enqueued_at': None,
                      'extra': {}}],
         'cloud_sync': [],
-        'live_event_sync': [],
     }
     for name, r in rows.items():
         _patch_lister(monkeypatch, name, r)
@@ -435,7 +428,6 @@ def test_failed_per_subsystem(client, monkeypatch):
                                             'enqueued_at': None, 'extra': {}}])
     _patch_lister(monkeypatch, 'indexer', [])
     _patch_lister(monkeypatch, 'cloud_sync', [])
-    _patch_lister(monkeypatch, 'live_event_sync', [])
 
     rv = client.get('/api/jobs/failed?subsystem=archive')
     assert rv.status_code == 200
@@ -463,7 +455,6 @@ def test_failed_one_subsystem_crashing_does_not_break_others(client,
                                             'attempts': 5, 'last_error': '',
                                             'enqueued_at': None, 'extra': {}}])
     _patch_lister(monkeypatch, 'cloud_sync', [])
-    _patch_lister(monkeypatch, 'live_event_sync', [])
 
     rv = client.get('/api/jobs/failed')
     assert rv.status_code == 200
@@ -481,7 +472,6 @@ def test_failed_limit_param(client, monkeypatch):
     _patch_lister(monkeypatch, 'archive', rows)
     _patch_lister(monkeypatch, 'indexer', [])
     _patch_lister(monkeypatch, 'cloud_sync', [])
-    _patch_lister(monkeypatch, 'live_event_sync', [])
 
     rv = client.get('/api/jobs/failed?subsystem=archive&limit=3')
     body = rv.get_json()
@@ -489,7 +479,7 @@ def test_failed_limit_param(client, monkeypatch):
 
 
 @pytest.mark.parametrize('subsystem', ['archive', 'indexer',
-                                       'cloud_sync', 'live_event_sync'])
+                                       'cloud_sync'])
 def test_retry_dispatches_per_subsystem(client, monkeypatch, subsystem):
     calls = {'count': 0, 'last': None}
 
@@ -620,18 +610,6 @@ class TestClipValueClassifier:
         from blueprints.jobs import _classify_clip_value
         v = _classify_clip_value('cloud_sync', '/some/other/path.mp4')
         assert v['tier'] == 'cloud'
-
-    def test_live_event_sync_is_always_event_tier(self):
-        from blueprints.jobs import _classify_clip_value
-        # LES rows are always events by construction — the subsystem
-        # only triggers on Tesla event.json arrivals. The classifier
-        # MUST short-circuit on the subsystem name even when the
-        # event_dir path doesn't contain SentryClips/SavedClips.
-        v = _classify_clip_value(
-            'live_event_sync',
-            '/some/event/dir',
-        )
-        assert v['tier'] == 'live_event'
 
     def test_unknown_subsystem_and_path_returns_unknown_tier(self):
         from blueprints.jobs import _classify_clip_value
@@ -810,7 +788,7 @@ class TestRowEnrichment:
             assert 'recommendation' in r
             assert r['value']['tier'] in (
                 'event', 'recent', 'archived', 'index', 'cloud',
-                'live_event', 'unknown',
+                'unknown',
             )
             assert r['recommendation']['action'] in (
                 'retry', 'delete', 'either',
@@ -854,7 +832,6 @@ class TestFanOutAcrossAllSubsystems:
         _patch_retrier(monkeypatch, 'archive',         make('archive', 2))
         _patch_retrier(monkeypatch, 'indexer',         make('indexer', 3))
         _patch_retrier(monkeypatch, 'cloud_sync',      make('cloud_sync', 1))
-        _patch_retrier(monkeypatch, 'live_event_sync', make('live_event_sync', 4))
 
         rv = client.post('/api/jobs/retry',
                          data=json.dumps({'subsystem': 'all'}),
@@ -862,13 +839,13 @@ class TestFanOutAcrossAllSubsystems:
         assert rv.status_code == 200
         body = rv.get_json()
         assert body['subsystem'] == 'all'
-        assert body['rows_reset'] == 2 + 3 + 1 + 4
+        assert body['rows_reset'] == 2 + 3 + 1
         assert body['per_subsystem'] == {
-            'archive': 2, 'indexer': 3, 'cloud_sync': 1, 'live_event_sync': 4,
+            'archive': 2, 'indexer': 3, 'cloud_sync': 1,
         }
         # Every adapter was invoked with id=None (retry-all).
         assert set(calls.keys()) == {
-            'archive', 'indexer', 'cloud_sync', 'live_event_sync',
+            'archive', 'indexer', 'cloud_sync',
         }
         for name, row_id in calls.items():
             assert row_id is None, f"{name} was invoked with id={row_id!r}"
@@ -881,15 +858,15 @@ class TestFanOutAcrossAllSubsystems:
             captured.setdefault('args', []).append(row_id)
             return 1
 
-        for name in ('archive', 'indexer', 'cloud_sync', 'live_event_sync'):
+        for name in ('archive', 'indexer', 'cloud_sync'):
             _patch_retrier(monkeypatch, name, fake)
 
         rv = client.post('/api/jobs/retry',
                          data=json.dumps({'subsystem': 'all', 'id': 42}),
                          content_type='application/json')
         assert rv.status_code == 200
-        # All four adapter invocations got None, not 42.
-        assert captured['args'] == [None, None, None, None]
+        # All three adapter invocations got None, not 42.
+        assert captured['args'] == [None, None, None]
 
     def test_retry_all_one_subsystem_crashes(self, client, monkeypatch):
         """A crashing adapter must not block fan-out for the others."""
@@ -901,7 +878,6 @@ class TestFanOutAcrossAllSubsystems:
         monkeypatch.setitem(jobs_module._RETRIERS, 'archive', boom)
         _patch_retrier(monkeypatch, 'indexer',         lambda _r: 5)
         _patch_retrier(monkeypatch, 'cloud_sync',      lambda _r: 0)
-        _patch_retrier(monkeypatch, 'live_event_sync', lambda _r: 2)
 
         rv = client.post('/api/jobs/retry',
                          data=json.dumps({'subsystem': 'all'}),
@@ -912,7 +888,7 @@ class TestFanOutAcrossAllSubsystems:
         # other adapters still produce their counts.
         assert body['per_subsystem']['archive'] == 0
         assert body['per_subsystem']['indexer'] == 5
-        assert body['rows_reset'] == 5 + 0 + 2
+        assert body['rows_reset'] == 5 + 0
 
     def test_delete_all_fans_out(self, client, monkeypatch):
         calls = {}
@@ -925,7 +901,7 @@ class TestFanOutAcrossAllSubsystems:
 
         import blueprints.jobs as jobs_module
         for name, n in (('archive', 7), ('indexer', 1),
-                        ('cloud_sync', 0), ('live_event_sync', 3)):
+                        ('cloud_sync', 0)):
             monkeypatch.setitem(jobs_module._DELETERS, name, make(name, n))
 
         rv = client.post('/api/jobs/delete',
@@ -934,9 +910,9 @@ class TestFanOutAcrossAllSubsystems:
         assert rv.status_code == 200
         body = rv.get_json()
         assert body['subsystem'] == 'all'
-        assert body['rows_deleted'] == 7 + 1 + 0 + 3
+        assert body['rows_deleted'] == 7 + 1 + 0
         assert body['per_subsystem'] == {
-            'archive': 7, 'indexer': 1, 'cloud_sync': 0, 'live_event_sync': 3,
+            'archive': 7, 'indexer': 1, 'cloud_sync': 0,
         }
         assert all(v is None for v in calls.values())
 
@@ -951,8 +927,6 @@ class TestFanOutAcrossAllSubsystems:
                             lambda _r: 4)
         monkeypatch.setitem(jobs_module._DELETERS, 'indexer',
                             lambda _r: 0)
-        monkeypatch.setitem(jobs_module._DELETERS, 'live_event_sync',
-                            lambda _r: 2)
 
         rv = client.post('/api/jobs/delete',
                          data=json.dumps({'subsystem': 'all'}),
@@ -960,7 +934,7 @@ class TestFanOutAcrossAllSubsystems:
         assert rv.status_code == 200
         body = rv.get_json()
         assert body['per_subsystem']['cloud_sync'] == 0  # crash swallowed
-        assert body['rows_deleted'] == 4 + 0 + 0 + 2
+        assert body['rows_deleted'] == 4 + 0 + 0
 
     def test_unknown_subsystem_lists_all_in_allowed(self, client):
         rv = client.post('/api/jobs/retry',

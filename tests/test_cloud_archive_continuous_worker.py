@@ -13,13 +13,17 @@ These tests pin the contract:
 3. The worker drains exactly once per wake (no double-drain).
 4. Multiple wakes during a drain coalesce into a single follow-up drain.
 5. ``stop()`` cleanly terminates the worker and joins within timeout.
-6. The worker yields to LES when ``has_ready_live_event_work`` returns
-   ``True`` (priority contract preserved).
-7. The worker skips drains when WiFi is down.
-8. The worker skips drains when a single-file archive is in progress.
-9. ``start_sync()`` / ``trigger_auto_sync()`` are now thin wrappers that
+6. The worker skips drains when WiFi is down.
+7. The worker skips drains when a single-file archive is in progress.
+8. ``start_sync()`` / ``trigger_auto_sync()`` are now thin wrappers that
    lazy-start the worker and call ``wake()``.
-10. The worker stays alive across drain failures (containment).
+9. The worker stays alive across drain failures (containment).
+
+Wave 4 PR-F4 (issue #184) deleted the standalone LES subsystem; the
+LES-yield contract that was item 6 is gone. Live-event uploads are
+now first-class ``pipeline_queue`` rows the worker picks up
+naturally based on ``priority``. The ``_stub_no_les_pending``
+fixture is kept as a no-op so existing test wiring still works.
 """
 from __future__ import annotations
 
@@ -107,12 +111,14 @@ def _stub_wifi_up(monkeypatch):
 
 @pytest.fixture
 def _stub_no_les_pending(monkeypatch):
-    """Stub the LES helper to always return 'no ready events'."""
-    fake_module = type('mod', (), {
-        'has_ready_live_event_work': staticmethod(lambda _db=None: False),
-    })()
-    import sys
-    monkeypatch.setitem(sys.modules, 'services.live_event_sync_service', fake_module)
+    """Historical fixture name retained for test wiring.
+
+    Wave 4 PR-F4 (issue #184) deleted the LES subsystem; the LES yield
+    is gone, so there is nothing to stub. The fixture is now a no-op
+    placeholder so existing callsites do not need to be touched. New
+    tests should not depend on it.
+    """
+    return None
 
 
 @pytest.fixture
@@ -288,35 +294,14 @@ class TestStop:
 
 
 # ---------------------------------------------------------------------------
-# 5. Worker yields to LES (priority contract)
+# 5. Worker no longer yields to LES (Wave 4 PR-F4 removed LES entirely)
 # ---------------------------------------------------------------------------
-
-
-class TestLesPriority:
-    def test_drain_skipped_when_les_has_ready_work(
-        self, monkeypatch, _enable_cloud, _stub_recover,
-        _stub_wifi_up, _stub_no_archive_running,
-    ):
-        # LES says "I have ready events"
-        fake_les = type('mod', (), {
-            'has_ready_live_event_work': staticmethod(lambda _db=None: True),
-        })()
-        import sys
-        monkeypatch.setitem(
-            sys.modules, 'services.live_event_sync_service', fake_les,
-        )
-
-        drain_calls = []
-        monkeypatch.setattr(
-            svc, '_drain_once',
-            lambda *_a, **_k: (drain_calls.append(1), False)[1],
-        )
-
-        svc.start(teslacam_path="/x", db_path="/y")
-        time.sleep(0.5)  # give worker time to wake + check LES + skip
-
-        # No drain should have run because LES had work
-        assert drain_calls == []
+# The TestLesPriority class that lived here pinned the inter-file
+# yield against the legacy LES queue. Wave 4 PR-F4 deleted the LES
+# subsystem; live-event uploads are now first-class
+# ``pipeline_queue`` rows at ``PRIORITY_LIVE_EVENT`` that the
+# unified worker claims naturally. There is nothing left to test on
+# that path.
 
 
 # ---------------------------------------------------------------------------

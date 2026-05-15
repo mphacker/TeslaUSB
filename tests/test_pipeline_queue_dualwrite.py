@@ -1450,49 +1450,6 @@ class TestCloudMarkUploadFailureOrdering:
             conn.close()
 
 
-class TestRetryFailedSingleRowNoExtraSelect:
-    """Review #191 Info #4 fix: the single-row branch of
-    `retry_failed` no longer issues a redundant SELECT — the caller
-    already supplied the id.
-    """
-
-    def test_single_row_retry_resets_when_failed(self, tmp_path,
-                                                 monkeypatch):
-        # Point LES at an isolated DB.
-        from services import live_event_sync_service as les
-        db = str(tmp_path / 'cloud_sync3.db')
-        monkeypatch.setattr(les, 'CLOUD_ARCHIVE_DB_PATH', db)
-        conn = les._open_db()
-        try:
-            les._ensure_schema(conn)
-            cur = conn.execute(
-                "INSERT INTO live_event_queue "
-                "(event_dir, event_json_path, event_timestamp, "
-                "event_reason, upload_scope, status, attempts, "
-                "next_retry_at, enqueued_at) "
-                "VALUES (?,?,?,?,?,'failed',5,NULL,?)",
-                ('/some/dir', '/some/dir/event.json',
-                 '2025-01-01T00:00:00Z', 'sentry', 'event_minute',
-                 '2025-01-01T00:00:00Z'),
-            )
-            row_id = cur.lastrowid
-            conn.commit()
-        finally:
-            conn.close()
-        n = les.retry_failed(row_id)
-        assert n == 1
-        conn = les._open_db()
-        try:
-            row = conn.execute(
-                "SELECT status, attempts FROM live_event_queue WHERE id=?",
-                (row_id,),
-            ).fetchone()
-            assert row['status'] == 'pending'
-            assert row['attempts'] == 0
-        finally:
-            conn.close()
-
-
 class TestPipelineRowKwargGate:
     """Review #191 Info #8 fix: the `_UPDATE_COLUMNS` tuple drives
     both helpers' "no kwargs passed" gate AND the SET-clause builder.

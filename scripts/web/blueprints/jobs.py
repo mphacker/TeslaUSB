@@ -12,15 +12,19 @@ Subsystems aggregated:
                       ``attempts >= _PARSE_ERROR_MAX_ATTEMPTS``
 * **cloud_sync**    — ``cloud_archive.cloud_synced_files`` rows in
                       ``status='dead_letter'``
-* **live_event_sync** — ``live_event_sync.live_event_queue`` rows in
-                      ``status='failed'``
+
+Wave 4 PR-F4 (issue #184): the previous ``live_event_sync``
+subsystem has been deleted. Live-event uploads (Sentry/Saved) are now
+first-class ``cloud_sync`` rows enqueued at ``PRIORITY_LIVE_EVENT``;
+they show up under the **cloud_sync** subsystem here just like any
+other cloud upload failure.
 
 Routes:
 
 * ``GET  /jobs``                                — HTML page (templates/failed_jobs.html)
 * ``GET  /api/jobs/failed?subsystem=&limit=``   — JSON list (combined or per-subsystem)
 * ``GET  /api/jobs/counts``                     — JSON ``{archive, indexer, cloud_sync,
-                                                  live_event_sync, total}``
+                                                  total}``
 * ``POST /api/jobs/retry``                      — body ``{subsystem, id}`` (id is omitted
                                                   to retry every row); returns
                                                   ``{rows_reset}``
@@ -44,7 +48,7 @@ absolute local paths before they leave the process. Originals stay
 in the DB for journalctl / shell triage.
 
 Each row also carries ``previous_last_error`` (issue #132): the
-prior failure reason from before the most recent retry. The four
+prior failure reason from before the most recent retry. The three
 worker subsystems all rotate ``last_error → previous_last_error``
 each time they record a new failure, so the operator can see whether
 the same error keeps recurring or whether retries are uncovering new
@@ -60,7 +64,6 @@ from flask import Blueprint, jsonify, render_template, request
 
 from config import (
     CLOUD_ARCHIVE_ENABLED,
-    LIVE_EVENT_SYNC_ENABLED,
     MAPPING_DB_PATH,
     MAPPING_ENABLED,
 )
@@ -83,7 +86,6 @@ _SUBSYSTEMS = (
     'archive',
     'indexer',
     'cloud_sync',
-    'live_event_sync',
 )
 
 # ---------------------------------------------------------------------------
@@ -173,7 +175,7 @@ def _safe(fn, default):
 
 # Clip-value tiers ordered most-irreplaceable first. The UI renders
 # the badge color from the tier name (event=red, recent=amber,
-# index/cloud/live_event=blue, archived=neutral).
+# index/cloud=blue, archived=neutral).
 _VALUE_TIERS: Dict[str, Tuple[str, str]] = {
     'event': (
         'Event clip',
@@ -190,12 +192,6 @@ _VALUE_TIERS: Dict[str, Tuple[str, str]] = {
         'Already on SD card',
         'This clip is in ArchivedClips, so the source file is already '
         'preserved on the Pi even if the queue row is dropped.',
-    ),
-    'live_event': (
-        'Live event upload',
-        'Same value as an event clip — Tesla recorded this because '
-        'something happened. The Live Event Sync subsystem only ever '
-        'handles events.',
     ),
     'cloud': (
         'Cloud upload',
@@ -226,13 +222,13 @@ def _classify_clip_value(subsystem: str, identifier: str) -> Dict[str, str]:
     """
     ident = (identifier or '').lower()
 
-    # LES is always an event upload — its queue rows are populated by
-    # the inotify watcher firing on Tesla event.json arrivals only.
-    if subsystem == 'live_event_sync':
-        tier = 'live_event'
     # SentryClips / SavedClips identifiers are event clips regardless
     # of which subsystem holds the row (archive, indexer, cloud_sync).
-    elif '/sentryclips/' in ident or '/savedclips/' in ident:
+    # Wave 4 PR-F4 (issue #184) removed the standalone live_event_sync
+    # subsystem — live-event uploads are now cloud_sync rows that
+    # carry the same SentryClips/SavedClips identifier and so still
+    # tier-up to ``event``.
+    if '/sentryclips/' in ident or '/savedclips/' in ident:
         tier = 'event'
     elif '/recentclips/' in ident:
         tier = 'recent'
@@ -467,41 +463,10 @@ def _cloud_sync_rows(limit: int) -> List[Dict[str, Any]]:
     return out
 
 
-def _live_event_rows(limit: int) -> List[Dict[str, Any]]:
-    if not LIVE_EVENT_SYNC_ENABLED:
-        return []
-    from services import live_event_sync_service
-    # LES list_queue returns ALL recent rows; filter to failed only.
-    raw = live_event_sync_service.list_queue(limit=max(limit * 4, 50))
-    out: List[Dict[str, Any]] = []
-    for r in raw:
-        if r.get('status') != 'failed':
-            continue
-        if len(out) >= limit:
-            break
-        out.append(_enrich({
-            'subsystem': 'live_event_sync',
-            'id': r.get('id'),
-            'identifier': r.get('event_dir') or '',
-            'attempts': int(r.get('attempts') or 0),
-            'last_error': _redact_last_error(r.get('last_error')),
-            'previous_last_error': _redact_last_error(r.get('previous_last_error')),
-            'enqueued_at': r.get('enqueued_at'),
-            'extra': {
-                'event_timestamp': r.get('event_timestamp'),
-                'event_reason': r.get('event_reason'),
-                'upload_scope': r.get('upload_scope'),
-                'bytes_uploaded': r.get('bytes_uploaded'),
-            },
-        }))
-    return out
-
-
 _LISTERS = {
     'archive': _archive_rows,
     'indexer': _indexer_rows,
     'cloud_sync': _cloud_sync_rows,
-    'live_event_sync': _live_event_rows,
 }
 
 
@@ -528,18 +493,10 @@ def _cloud_sync_count() -> int:
     return int(cloud_archive_service.count_dead_letters())
 
 
-def _live_event_count() -> int:
-    if not LIVE_EVENT_SYNC_ENABLED:
-        return 0
-    from services import live_event_sync_service
-    return int(live_event_sync_service.count_failed())
-
-
 _COUNTERS = {
     'archive': _archive_count,
     'indexer': _indexer_count,
     'cloud_sync': _cloud_sync_count,
-    'live_event_sync': _live_event_count,
 }
 
 
@@ -575,24 +532,10 @@ def _retry_cloud_sync(row_id: Optional[Any]) -> int:
     return cloud_archive_service.retry_dead_letter(file_path=path)
 
 
-def _retry_live_event_sync(row_id: Optional[Any]) -> int:
-    if not LIVE_EVENT_SYNC_ENABLED:
-        return 0
-    from services import live_event_sync_service
-    if row_id is None:
-        return live_event_sync_service.retry_failed(None)
-    try:
-        rid = int(row_id)
-    except (TypeError, ValueError):
-        return 0
-    return live_event_sync_service.retry_failed(rid)
-
-
 _RETRIERS = {
     'archive': _retry_archive,
     'indexer': _retry_indexer,
     'cloud_sync': _retry_cloud_sync,
-    'live_event_sync': _retry_live_event_sync,
 }
 
 
@@ -632,24 +575,10 @@ def _delete_cloud_sync(row_id: Optional[Any]) -> int:
     return cloud_archive_service.delete_dead_letter(file_path=path)
 
 
-def _delete_live_event_sync(row_id: Optional[Any]) -> int:
-    if not LIVE_EVENT_SYNC_ENABLED:
-        return 0
-    from services import live_event_sync_service
-    if row_id is None:
-        return live_event_sync_service.delete_failed(None)
-    try:
-        rid = int(row_id)
-    except (TypeError, ValueError):
-        return 0
-    return live_event_sync_service.delete_failed(rid)
-
-
 _DELETERS = {
     'archive': _delete_archive,
     'indexer': _delete_indexer,
     'cloud_sync': _delete_cloud_sync,
-    'live_event_sync': _delete_live_event_sync,
 }
 
 
@@ -715,7 +644,7 @@ def api_failed():
 
     Query params:
       * ``subsystem`` — one of ``archive``, ``indexer``, ``cloud_sync``,
-        ``live_event_sync``, or omitted/``all`` for the union.
+        or omitted/``all`` for the union.
       * ``limit`` — per-subsystem cap (default 100, max 1000).
     """
     subsystem = (request.args.get('subsystem') or 'all').lower()
@@ -746,12 +675,12 @@ def api_retry():
     """Reset failed/dead-letter rows so the worker picks them up again.
 
     Request body (JSON):
-      * ``subsystem`` (required) — one of the four subsystem names, OR
+      * ``subsystem`` (required) — one of the three subsystem names, OR
         the literal string ``'all'`` (issue #180) to fan the retry-
         all out across every subsystem at once.
       * ``id`` (optional) — omit / pass ``null`` to retry **every**
         failed row in that subsystem; otherwise the natural id for
-        that subsystem (int row id for archive / live_event_sync,
+        that subsystem (int row id for archive,
         canonical_key string for indexer, file_path string for
         cloud_sync). Ignored when ``subsystem='all'``.
 
@@ -801,12 +730,12 @@ def api_delete():
     """Permanently delete failed/dead-letter rows.
 
     Request body (JSON):
-      * ``subsystem`` (required) — one of the four subsystem names, OR
+      * ``subsystem`` (required) — one of the three subsystem names, OR
         the literal string ``'all'`` (issue #180) to fan the delete-
         all out across every subsystem at once.
       * ``id`` (optional) — omit / pass ``null`` to delete **every**
         failed row in that subsystem; otherwise the natural id for
-        that subsystem (int row id for archive / live_event_sync,
+        that subsystem (int row id for archive,
         canonical_key string for indexer, file_path string for
         cloud_sync). Ignored when ``subsystem='all'``.
 

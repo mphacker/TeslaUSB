@@ -133,41 +133,38 @@ CLOUD_ARCHIVE_DISK_SPACE_PAUSE_SECONDS = float(_cloud.get(
 ))
 
 # Wave 4 PR-F2 (issue #184): unified ``pipeline_queue`` integration.
-# Three opt-in flags that lay the foundation for PR-F3's reader cutover.
-# See ``cloud_archive`` block in ``config.yaml`` for the full design notes.
+# Wave 4 (issue #184): unified ``pipeline_queue`` integration.
+# Three flags control the cutover. PR-F4 flipped the producer +
+# reader defaults to True; ``shadow_pipeline_queue`` flipped to False
+# (it was a cutover-window observability shim and is a tautology now
+# that the reader IS the pipeline_queue). See ``cloud_archive`` block
+# in ``config.yaml`` for the full design notes.
 #
 # ``CLOUD_ARCHIVE_ENQUEUE_TO_PIPELINE`` — PRODUCER hook. When True,
 # every event discovered by ``_discover_events`` is also enqueued
 # into ``pipeline_queue`` with ``stage='cloud_pending'`` (idempotent
-# via the existing UNIQUE index). The legacy disk-walk + dual-write
-# path continues to drive uploads; this flag only POPULATES the
-# unified queue so PR-F3 can switch the reader without an empty
-# queue. Default False so a fresh deploy is a no-op.
+# via the existing UNIQUE index). Default True (was False until
+# PR-F4) — operators who need to roll back to the legacy disk-walk
+# can flip this off.
 CLOUD_ARCHIVE_ENQUEUE_TO_PIPELINE = bool(
-    _cloud.get('enqueue_to_pipeline', False)
+    _cloud.get('enqueue_to_pipeline', True)
 )
-# ``CLOUD_ARCHIVE_SHADOW_PIPELINE_QUEUE`` — OBSERVABILITY. When True
-# (and the producer flag is also True), the cloud worker peeks at
-# the top-N ``cloud_pending`` rows in ``pipeline_queue`` immediately
-# before each ``_drain_once`` upload pass and logs a WARNING if the
-# legacy reader's first pick is absent from the pipeline's top-N.
-# Pure observability — no behavioural change. Default True so any
-# operator who flips ``enqueue_to_pipeline`` on automatically gets
-# validation telemetry. Skipped (cheap) when the producer flag is
-# off, since there are no rows to compare against.
+# ``CLOUD_ARCHIVE_SHADOW_PIPELINE_QUEUE`` — OBSERVABILITY shim used
+# during the cutover. Compares the legacy reader's first pick against
+# the ``pipeline_queue`` top-N and logs a WARNING on disagreement.
+# Default False (was True until PR-F4) — the reader is now the
+# unified queue itself, so the comparison is a tautology.
 CLOUD_ARCHIVE_SHADOW_PIPELINE_QUEUE = bool(
-    _cloud.get('shadow_pipeline_queue', True)
+    _cloud.get('shadow_pipeline_queue', False)
 )
-# ``CLOUD_ARCHIVE_USE_PIPELINE_READER`` — RESERVED for PR-F3. When
-# True, the cloud worker will claim its next upload from
+# ``CLOUD_ARCHIVE_USE_PIPELINE_READER`` — when True, the cloud worker
+# claims its next upload from
 # ``pipeline_queue.claim_next_for_stage(stage='cloud_pending')``
-# instead of disk-walking. Wired into config now so the constant
-# exists; PR-F2 only reads it for the shadow-skip predicate so
-# operators flipping ``use_pipeline_reader`` to True after PR-F3
-# ships don't get spurious shadow comparisons. Default False so
-# PR-F2 ships as a no-op.
+# instead of disk-walking. PR-F3 added the reader; PR-F4 flips the
+# default to True. The legacy reader path is preserved behind False
+# only as a one-release rollback safety net.
 CLOUD_ARCHIVE_USE_PIPELINE_READER = bool(
-    _cloud.get('use_pipeline_reader', False)
+    _cloud.get('use_pipeline_reader', True)
 )
 
 # Phase 2.6 — bulk cloud sync retry cap. After this many consecutive
@@ -212,17 +209,14 @@ CLOUD_ARCHIVE_DELETE_UNSYNCED = (
     None if _delete_unsynced_raw is None else bool(_delete_unsynced_raw)
 )
 
-# Live Event Sync Configuration
-# Separate first-class subsystem from cloud_archive — own queue, worker, and config.
-# Shares CLOUD_ARCHIVE_PROVIDER + CLOUD_PROVIDER_CREDS_PATH for credentials only.
-_les = config.get('live_event_sync', {})
-LIVE_EVENT_SYNC_ENABLED = bool(_les.get('enabled', False))
-LIVE_EVENT_WATCH_FOLDERS = list(_les.get('watch_folders', ['SentryClips', 'SavedClips']))
-LIVE_EVENT_UPLOAD_SCOPE = str(_les.get('upload_scope', 'event_minute'))
-LIVE_EVENT_RETRY_MAX_ATTEMPTS = int(_les.get('retry_max_attempts', 5))
-LIVE_EVENT_RETRY_BACKOFF_SECONDS = list(_les.get('retry_backoff_seconds', [30, 120, 300, 900, 3600]))
-LIVE_EVENT_DAILY_DATA_CAP_MB = int(_les.get('daily_data_cap_mb', 0))
-LIVE_EVENT_NOTIFY_WEBHOOK_URL = str(_les.get('notify_webhook_url', '') or '')
+# Wave 4 PR-F4 (issue #184): the standalone Live Event Sync subsystem
+# has been removed. Live-event uploads are now first-class
+# ``pipeline_queue`` rows enqueued by the file_watcher's event.json
+# callback at ``PRIORITY_LIVE_EVENT`` (= 0), so the unified
+# cloud_archive worker picks them up before any bulk catch-up rows
+# automatically. The ``live_event_sync`` config block was removed
+# from config.yaml; this comment marks where the LIVE_EVENT_*
+# constants used to live so future readers can find the migration.
 
 # RecentClips Archive Configuration
 _archive = config.get('archive', {})

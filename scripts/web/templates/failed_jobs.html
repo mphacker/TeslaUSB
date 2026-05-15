@@ -54,11 +54,6 @@
             <span class="pill-label">Cloud</span>
             <span class="pill-count" id="count-cloud_sync">0</span>
         </button>
-        <button type="button" class="failed-pill" data-subsystem="live_event_sync" aria-pressed="false">
-            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bell"></use></svg>
-            <span class="pill-label">Live Events</span>
-            <span class="pill-count" id="count-live_event_sync">0</span>
-        </button>
     </nav>
 
     <!-- "Retry all" / "Delete all" bar. Issue #180 — always visible.
@@ -157,8 +152,7 @@
     font-size: 0.75rem; font-weight: 600;
     border: 1px solid transparent;
 }
-.job-value-event,
-.job-value-live_event {
+.job-value-event {
     background: rgba(239, 68, 68, 0.10);
     color: var(--accent-danger, #EF4444);
     border-color: rgba(239, 68, 68, 0.30);
@@ -294,14 +288,13 @@
     const state = {
         subsystem: 'all',
         rows: [],
-        counts: { archive: 0, indexer: 0, cloud_sync: 0, live_event_sync: 0, total: 0 },
+        counts: { archive: 0, indexer: 0, cloud_sync: 0, total: 0 },
     };
 
     const SUBSYSTEM_META = {
         archive:        { label: 'Archive',      icon: 'icon-hard-drive' },
         indexer:        { label: 'Indexer',      icon: 'icon-map-pin' },
         cloud_sync:     { label: 'Cloud',        icon: 'icon-cloud-upload' },
-        live_event_sync:{ label: 'Live Events',  icon: 'icon-bell' },
     };
 
     const SPRITE_URL = {{ url_for('static', filename='icons/lucide-sprite.svg')|tojson }};
@@ -350,7 +343,7 @@
 
     function setCounts(counts) {
         state.counts = counts;
-        ['archive', 'indexer', 'cloud_sync', 'live_event_sync'].forEach(function (k) {
+        ['archive', 'indexer', 'cloud_sync'].forEach(function (k) {
             const el = $('count-' + k);
             if (el) el.textContent = counts[k] || 0;
         });

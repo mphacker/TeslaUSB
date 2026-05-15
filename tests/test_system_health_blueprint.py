@@ -3,7 +3,7 @@
 Verifies:
 
 * Per-subsystem snapshot helpers (``_indexer_block``, ``_archive_block``,
-  ``_cloud_block``, ``_les_block``, ``_disk_block``, ``_wifi_block``)
+  ``_cloud_block``, ``_disk_block``, ``_wifi_block``)
   produce stable severity + message under healthy, warning, error,
   disabled, and crashing conditions.
 * The aggregator (``_build_health``) isolates per-subsystem crashes —
@@ -43,11 +43,11 @@ if _WEB_DIR not in sys.path:
 def test_build_health_returns_all_subsystems():
     from blueprints.system_health import _build_health
     payload = _build_health()
-    for key in ('indexer', 'archive', 'cloud', 'live_event_sync',
+    for key in ('indexer', 'archive', 'cloud',
                 'disk', 'wifi', 'overall', 'generated_at'):
         assert key in payload, f"missing key: {key}"
     # Each block must declare a severity.
-    for key in ('indexer', 'archive', 'cloud', 'live_event_sync',
+    for key in ('indexer', 'archive', 'cloud',
                 'disk', 'wifi'):
         assert payload[key].get('severity') in (
             'ok', 'warn', 'error', 'unknown'
@@ -71,7 +71,7 @@ def test_build_health_isolates_crashing_block(monkeypatch):
     assert payload['indexer']['severity'] == 'unknown'
     assert payload['indexer'].get('_error', '').startswith('kaboom')
     # Other blocks still reported.
-    for key in ('archive', 'cloud', 'live_event_sync', 'disk', 'wifi'):
+    for key in ('archive', 'cloud', 'disk', 'wifi'):
         assert key in payload
 
 
@@ -1040,44 +1040,16 @@ def test_cloud_block_uploading(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# LES block
+# LES block — DELETED in Wave 4 PR-F4 (issue #184).
+#
+# The standalone LES subsystem is gone; live-event uploads are now
+# first-class ``pipeline_queue`` rows handled by the unified cloud
+# worker and reported under the ``cloud`` block above. The three
+# tests that lived here (``test_les_block_disabled``,
+# ``test_les_block_failed_rows``, ``test_les_block_worker_idle``)
+# were removed alongside the deletion of ``_les_block`` /
+# ``LIVE_EVENT_SYNC_ENABLED`` / ``services.live_event_sync_service``.
 # ---------------------------------------------------------------------------
-
-def test_les_block_disabled(monkeypatch):
-    import blueprints.system_health as sh
-    monkeypatch.setattr(sh, 'LIVE_EVENT_SYNC_ENABLED', False, raising=False)
-    block = sh._les_block()
-    assert block['severity'] == 'unknown'
-
-
-def test_les_block_failed_rows(monkeypatch):
-    import blueprints.system_health as sh
-    from services import live_event_sync_service as les
-    monkeypatch.setattr(sh, 'LIVE_EVENT_SYNC_ENABLED', True, raising=False)
-
-    monkeypatch.setattr(les, 'count_failed', lambda: 2)
-    monkeypatch.setattr(les, 'get_status', lambda: {
-        'worker_running': True,
-        'queue_counts': {'pending': 0, 'uploading': 0},
-    })
-    block = sh._les_block()
-    assert block['severity'] == 'warn'
-    assert 'failed' in block['message']
-
-
-def test_les_block_worker_idle(monkeypatch):
-    import blueprints.system_health as sh
-    from services import live_event_sync_service as les
-    monkeypatch.setattr(sh, 'LIVE_EVENT_SYNC_ENABLED', True, raising=False)
-
-    monkeypatch.setattr(les, 'count_failed', lambda: 0)
-    monkeypatch.setattr(les, 'get_status', lambda: {
-        'worker_running': False,
-        'queue_counts': {'pending': 0, 'uploading': 0},
-    })
-    block = sh._les_block()
-    assert block['severity'] == 'warn'
-    assert 'idle' in block['message'].lower()
 
 
 # ---------------------------------------------------------------------------

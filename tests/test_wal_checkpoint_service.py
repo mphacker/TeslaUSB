@@ -379,3 +379,75 @@ class TestConnectionCaching:
         return must skip cleanly."""
         wcs._trigger_for_test(str(tmp_path / "nonexistent.db"))
         assert str(tmp_path / "nonexistent.db") not in wcs._conn_cache
+
+    @pytest.mark.skipif(
+        os.name != "posix",
+        reason=(
+            "Real os.unlink-then-recreate inode lifecycle test "
+            "requires POSIX semantics (Windows blocks unlink while "
+            "the cached FD is open)."
+        ),
+    )
+    def test_connection_reopens_on_real_inode_change_linux(
+        self, tmp_path, caplog
+    ):
+        """End-to-end inode-change test using real ``os.unlink`` +
+        recreation (production target is Linux). Complements the
+        cross-platform ``test_connection_reopens_on_inode_change``
+        which only verifies the comparison logic via synthetic
+        ``ino`` mutation. This test verifies the OS-level
+        replace-the-file lifecycle works without leaking a FD on
+        the deleted inode (which would corrupt subsequent
+        checkpoints)."""
+        import logging
+
+        db = str(tmp_path / "test.db")
+        keep_alive = _make_wal_db(db, write_rows=20)
+        try:
+            wcs._trigger_for_test(db)
+            assert db in wcs._conn_cache
+            cached_first = wcs._conn_cache[db]
+            old_ino = cached_first.ino
+        finally:
+            # Release the only Python-side handle on the old inode
+            # before we unlink it; otherwise a busy WAL would block
+            # the subsequent recreation.
+            keep_alive.close()
+
+        # POSIX path: unlink the file, recreate with new inode.
+        # The cached FD now points at the deleted-but-not-yet-
+        # released inode (because we still hold a reference via
+        # _conn_cache).
+        os.unlink(db)
+        keep_alive_new = _make_wal_db(db, write_rows=10)
+        try:
+            new_st = os.stat(db)
+            assert new_st.st_ino != old_ino, (
+                "test setup invalid: tmpfs reused the same inode "
+                "for the recreated file; cannot verify invalidation."
+            )
+
+            with caplog.at_level(
+                logging.INFO, logger="services.wal_checkpoint_service"
+            ):
+                wcs._trigger_for_test(db)
+
+            cached_second = wcs._conn_cache[db]
+            assert cached_second.conn is not cached_first.conn, (
+                "Real os.unlink + recreate did NOT trigger a re-"
+                "open. The cached FD would silently be writing to "
+                "the deleted inode — production data loss risk."
+            )
+            assert cached_second.ino == new_st.st_ino, (
+                "Cache did not record the new on-disk inode after "
+                "real recreation."
+            )
+            invalidation_msgs = [
+                r for r in caplog.records
+                if "inode changed" in r.message
+            ]
+            assert invalidation_msgs, (
+                "No inode-change log emitted during real recreation."
+            )
+        finally:
+            keep_alive_new.close()

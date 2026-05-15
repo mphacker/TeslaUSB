@@ -5,6 +5,7 @@ byte stripping, protobuf decoding, and the public API — all using synthetic
 binary data (no real video files needed).
 """
 
+import os
 import struct
 import pytest
 
@@ -1042,6 +1043,78 @@ class TestSeiSidecar:
             f"Sidecar write left tempfile(s): {leftovers}"
         )
 
+    def test_atomic_write_cleans_tmp_when_replace_raises(
+        self, tmp_path, monkeypatch,
+    ):
+        """If ``os.replace`` itself raises (filesystem error,
+        permission flip, etc.) the tempfile must STILL be cleaned
+        up. Pre-fix the cleanup was gated on ``except OSError`` so a
+        non-OSError raised between the with-block close and the
+        replace would leak the tempfile."""
+        from services import sei_parser
+
+        mp4 = tmp_path / "replace-fail.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+
+        original_replace = os.replace
+        boom = OSError("simulated EROFS at replace")
+
+        def _angry_replace(src, dst):
+            # Verify the tempfile actually exists at this point —
+            # otherwise the test would pass vacuously.
+            assert os.path.exists(src), (
+                "tempfile gone before os.replace was called"
+            )
+            raise boom
+
+        monkeypatch.setattr(os, 'replace', _angry_replace)
+        result = sei_parser.write_sei_sidecar(
+            str(mp4), sample_rate=1,
+        )
+        # Restore for the leftover scan below — monkeypatch will
+        # roll back on test exit but glob runs while patched.
+        monkeypatch.setattr(os, 'replace', original_replace)
+
+        assert result is None, (
+            "write_sei_sidecar must report None when atomic "
+            "rename fails — sidecar was never published."
+        )
+        leftovers = list(tmp_path.glob("*.tmp"))
+        assert leftovers == [], (
+            f"Sidecar write left tempfile(s) after os.replace "
+            f"raised: {leftovers}"
+        )
+
+    def test_atomic_write_cleans_tmp_on_unexpected_exception(
+        self, tmp_path, monkeypatch,
+    ):
+        """Defense-in-depth: a NON-OSError raised inside the
+        with-block (e.g. from a future custom serializer) must STILL
+        leave no tempfile behind. This is the path the new
+        try/finally guards."""
+        from services import sei_parser
+
+        mp4 = tmp_path / "weird-error.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+
+        original_dump = sei_parser.json.dump
+
+        def _bad_dump(*args, **kwargs):
+            raise RuntimeError("simulated future serializer crash")
+
+        monkeypatch.setattr(sei_parser.json, 'dump', _bad_dump)
+        result = sei_parser.write_sei_sidecar(
+            str(mp4), sample_rate=1,
+        )
+        monkeypatch.setattr(sei_parser.json, 'dump', original_dump)
+
+        assert result is None
+        leftovers = list(tmp_path.glob("*.tmp"))
+        assert leftovers == [], (
+            f"Sidecar write left tempfile(s) after non-OSError: "
+            f"{leftovers}"
+        )
+
     def test_message_video_path_re_injected_on_load(self, tmp_path):
         """``video_path`` is intentionally NOT persisted; the loader
         re-injects the live path. Verify both halves of the contract."""
@@ -1068,7 +1141,3 @@ class TestSeiSidecar:
         assert loaded is not None
         for m in loaded.messages:
             assert m.video_path == str(mp4)
-
-
-import os  # noqa: E402  — used by TestSeiSidecar.test_delete_sei_sidecar_removes_file
-

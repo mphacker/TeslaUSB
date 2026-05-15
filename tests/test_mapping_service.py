@@ -2342,6 +2342,301 @@ class TestIndexSingleFileOutcomes:
             assert not result.terminal
 
 
+class TestIndexSingleFileSidecarConsumption:
+    """Issue #197: ``_index_video`` (via ``index_single_file``) must
+    prefer a sidecar JSON over a fresh mmap walk when one exists.
+    """
+
+    def _make_sidecar_with_messages(
+        self, video_path, sample_rate=30, messages=None, mvhd=None,
+    ):
+        """Hand-build a sidecar JSON the indexer should consume
+        without calling the real SEI parser. Lets us isolate the
+        indexer's sidecar branch from the rest of the parser stack."""
+        import json as _json
+        import os as _os
+        from services import sei_parser
+
+        if messages is None:
+            messages = [
+                {
+                    'frame_index': 0,
+                    'timestamp_ms': 0.0,
+                    'latitude_deg': 37.7749,
+                    'longitude_deg': -122.4194,
+                    'heading_deg': 90.0,
+                    'vehicle_speed_mps': 25.0,
+                    'linear_acceleration_x': 0.1,
+                    'linear_acceleration_y': 0.0,
+                    'linear_acceleration_z': -0.1,
+                    'steering_wheel_angle': 0.5,
+                    'accelerator_pedal_position': 0.2,
+                    'brake_applied': False,
+                    'gear_state': 'DRIVE',
+                    'autopilot_state': 'NONE',
+                    'blinker_on_left': False,
+                    'blinker_on_right': False,
+                    'frame_seq_no': 0,
+                },
+            ]
+        st = _os.stat(video_path)
+        payload = {
+            'schema_version': sei_parser.SIDECAR_SCHEMA_VERSION,
+            'sample_rate': sample_rate,
+            'sei_count': len(messages),
+            'no_gps_count': 0,
+            'mvhd_creation_time_utc': mvhd,
+            'video_size_bytes': st.st_size,
+            'video_mtime_unix': st.st_mtime,
+            'messages': messages,
+        }
+        with open(sei_parser.sidecar_path_for(video_path), 'w',
+                  encoding='utf-8') as f:
+            _json.dump(payload, f)
+
+    def test_index_consumes_sidecar_without_mmap_walk(
+        self, tmp_path, monkeypatch,
+    ):
+        """When a valid sidecar exists, ``_index_video`` must NOT
+        call ``parser.extract_sei_messages`` — proves the sidecar
+        path is short-circuiting the mmap walk."""
+        import os as _os
+        import time as _time
+        from services import sei_parser
+
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+        clip = tmp_path / "2025-11-08_08-15-44-front.mp4"
+        clip.write_bytes(b'\x00' * 64)
+        old = _time.time() - 600
+        _os.utime(str(clip), (old, old))
+
+        self._make_sidecar_with_messages(str(clip))
+
+        # Sentinel: explode if extract_sei_messages is touched.
+        called: list = []
+
+        def _exploder(*a, **kw):
+            called.append((a, kw))
+            raise AssertionError(
+                "extract_sei_messages was called even though a "
+                "valid sidecar exists — sidecar fast-path is broken."
+            )
+
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', _exploder,
+        )
+
+        result = index_single_file(
+            str(clip), db, str(tmp_path), sample_rate=30,
+        )
+        assert result.outcome == IndexOutcome.INDEXED
+        assert result.waypoints == 1
+        assert called == []
+
+    def test_index_falls_back_to_mmap_when_sidecar_missing(
+        self, tmp_path, monkeypatch,
+    ):
+        """Without a sidecar, the indexer must transparently fall
+        back to ``extract_sei_messages``. Pre-issue-#197 baseline
+        path — must continue to work for clips that pre-date the
+        sidecar feature or for clips whose sidecar was lost."""
+        import os as _os
+        import time as _time
+        from services import sei_parser
+
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+        clip = tmp_path / "2025-11-08_08-15-44-front.mp4"
+        clip.write_bytes(b'\x00' * 64)
+        old = _time.time() - 600
+        _os.utime(str(clip), (old, old))
+
+        # No sidecar created. Stub extract_sei_messages with a
+        # synthetic generator so the test doesn't need a real MP4.
+        called: list = []
+
+        def _gen(video_path, sample_rate):
+            called.append((video_path, sample_rate))
+            yield sei_parser.SeiMessage(
+                frame_index=0, timestamp_ms=0.0,
+                latitude_deg=37.7749, longitude_deg=-122.4194,
+                heading_deg=90.0, vehicle_speed_mps=25.0,
+                linear_acceleration_x=0.0, linear_acceleration_y=0.0,
+                linear_acceleration_z=0.0,
+                steering_wheel_angle=0.0, accelerator_pedal_position=0.0,
+                brake_applied=False,
+                gear_state='DRIVE', autopilot_state='NONE',
+                blinker_on_left=False, blinker_on_right=False,
+                frame_seq_no=0, video_path=video_path,
+            )
+
+        monkeypatch.setattr(sei_parser, 'extract_sei_messages', _gen)
+
+        result = index_single_file(
+            str(clip), db, str(tmp_path), sample_rate=30,
+        )
+        assert result.outcome == IndexOutcome.INDEXED
+        assert called and called[0][1] == 30, (
+            "extract_sei_messages was not called on the fallback "
+            "path — indexer would have produced no waypoints."
+        )
+
+    def test_index_falls_back_to_mmap_on_sidecar_size_drift(
+        self, tmp_path, monkeypatch,
+    ):
+        """Drift detection: sidecar's recorded size differs from
+        the live file's size → ``read_sei_sidecar`` returns None →
+        indexer mmap-parses."""
+        import os as _os
+        import time as _time
+        from services import sei_parser
+
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+        clip = tmp_path / "2025-11-08_08-15-44-front.mp4"
+        clip.write_bytes(b'\x00' * 64)
+        old = _time.time() - 600
+        _os.utime(str(clip), (old, old))
+
+        # Sidecar describes the file as it is now …
+        self._make_sidecar_with_messages(str(clip))
+        # … then we overwrite with a different size (post-sidecar
+        # write). Drift → invalidation → fallback.
+        with open(str(clip), 'ab') as f:
+            f.write(b'\x00' * 1024)
+        _os.utime(str(clip), (old, old))
+
+        called: list = []
+
+        def _gen(video_path, sample_rate):
+            called.append(True)
+            yield sei_parser.SeiMessage(
+                frame_index=0, timestamp_ms=0.0,
+                latitude_deg=37.0, longitude_deg=-122.0,
+                heading_deg=0.0, vehicle_speed_mps=10.0,
+                linear_acceleration_x=0.0, linear_acceleration_y=0.0,
+                linear_acceleration_z=0.0,
+                steering_wheel_angle=0.0, accelerator_pedal_position=0.0,
+                brake_applied=False, gear_state='DRIVE',
+                autopilot_state='NONE',
+                blinker_on_left=False, blinker_on_right=False,
+                frame_seq_no=0, video_path=video_path,
+            )
+
+        monkeypatch.setattr(sei_parser, 'extract_sei_messages', _gen)
+
+        result = index_single_file(
+            str(clip), db, str(tmp_path), sample_rate=30,
+        )
+        assert result.outcome == IndexOutcome.INDEXED
+        assert called == [True], (
+            "Indexer did not fall back to mmap parse despite "
+            "sidecar size-drift invalidation — would silently "
+            "use stale data."
+        )
+
+    def test_index_falls_back_when_sample_rate_mismatches(
+        self, tmp_path, monkeypatch,
+    ):
+        """If the cached sidecar was written at a different
+        sample_rate than the indexer is requesting, the
+        ``required_sample_rate`` guard invalidates the sidecar."""
+        import os as _os
+        import time as _time
+        from services import sei_parser
+
+        db = str(tmp_path / "geo.db")
+        _init_db(db)
+        clip = tmp_path / "2025-11-08_08-15-44-front.mp4"
+        clip.write_bytes(b'\x00' * 64)
+        old = _time.time() - 600
+        _os.utime(str(clip), (old, old))
+
+        # Sidecar at sample_rate=1; indexer asks for 30 → mismatch.
+        self._make_sidecar_with_messages(str(clip), sample_rate=1)
+
+        called: list = []
+
+        def _gen(video_path, sample_rate):
+            called.append(sample_rate)
+            yield sei_parser.SeiMessage(
+                frame_index=0, timestamp_ms=0.0,
+                latitude_deg=37.0, longitude_deg=-122.0,
+                heading_deg=0.0, vehicle_speed_mps=10.0,
+                linear_acceleration_x=0.0, linear_acceleration_y=0.0,
+                linear_acceleration_z=0.0,
+                steering_wheel_angle=0.0, accelerator_pedal_position=0.0,
+                brake_applied=False, gear_state='DRIVE',
+                autopilot_state='NONE',
+                blinker_on_left=False, blinker_on_right=False,
+                frame_seq_no=0, video_path=video_path,
+            )
+
+        monkeypatch.setattr(sei_parser, 'extract_sei_messages', _gen)
+
+        result = index_single_file(
+            str(clip), db, str(tmp_path), sample_rate=30,
+        )
+        assert result.outcome == IndexOutcome.INDEXED
+        assert called == [30]
+
+
+class TestPurgeDeletedVideosSidecar:
+    """Issue #197: ``purge_deleted_videos`` must delete the SEI
+    sidecar JSON alongside the indexed_files row, so a deleted
+    .mp4 doesn't leave dead sidecar weight in the directory."""
+
+    def test_purge_deletes_sidecar(self, tmp_path):
+        from services import sei_parser
+        from services.mapping_service import (
+            _init_db, purge_deleted_videos,
+        )
+
+        db = str(tmp_path / "geo.db")
+        _init_db(db).close()
+
+        clip = tmp_path / "2025-11-08_08-15-44-front.mp4"
+        clip.write_bytes(b'\x00' * 64)
+        sidecar_path = sei_parser.sidecar_path_for(str(clip))
+        # Hand-create a fake sidecar — content doesn't matter; we
+        # only assert it's gone after purge.
+        with open(sidecar_path, 'w', encoding='utf-8') as f:
+            f.write('{}')
+        assert os.path.isfile(sidecar_path)
+
+        # Pretend the .mp4 is gone (the watcher's normal fire path).
+        clip.unlink()
+
+        result = purge_deleted_videos(
+            db, deleted_paths=[str(clip)],
+        )
+        assert result['purged_files'] == 0  # no indexed_files row
+        assert not os.path.isfile(sidecar_path), (
+            "Sidecar was not deleted alongside the .mp4 — "
+            "would accumulate as dead weight in the directory."
+        )
+
+    def test_purge_handles_missing_sidecar(self, tmp_path):
+        """A clip whose sidecar never existed (pre-#197 file, or
+        sidecar write failed) must not break purge."""
+        from services.mapping_service import (
+            _init_db, purge_deleted_videos,
+        )
+
+        db = str(tmp_path / "geo.db")
+        _init_db(db).close()
+
+        clip = tmp_path / "2025-11-08_08-15-44-front.mp4"
+        clip.write_bytes(b'\x00')
+        clip.unlink()
+
+        result = purge_deleted_videos(
+            db, deleted_paths=[str(clip)],
+        )
+        assert result['purged_files'] == 0
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: Indexing queue
 # ---------------------------------------------------------------------------

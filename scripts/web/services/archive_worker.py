@@ -1104,6 +1104,17 @@ def _enqueue_indexed(dest_path: str, db_path: str) -> None:
 # back to a fresh mmap parse. If you change one, change the other.
 _INLINE_SEI_SAMPLE_RATE = 30
 
+# Wall-clock soft cap on the inline SEI walk + sidecar write.
+# Reaching or exceeding this elevates the success log to WARNING so
+# operators see "the page-cache hot-path assumption broke for this
+# clip" in journalctl at default verbosity. NOT a hard cap — the
+# walk completes either way; this is purely an observability signal.
+# Calibrated against the 90-second hardware watchdog timeout: 5s
+# leaves plenty of headroom for the rest of ``process_one_claim``
+# and the worker's outer guards (``per_file_time_budget_seconds``
+# defaults to 60s for the copy itself).
+_SIDECAR_WRITE_WARN_SECONDS = 5.0
+
 
 def _write_inline_sei_sidecar(dest_path: str) -> None:
     """Walk the just-copied file's SEI and persist a sidecar JSON.
@@ -1117,12 +1128,39 @@ def _write_inline_sei_sidecar(dest_path: str) -> None:
     walk, eliminating ~2x file reads per clip and the associated
     page-cache miss.
 
+    **Time-budget context (issue #104 + review of PR #205).** This
+    helper runs OUTSIDE the per-file ``chunk_pause_seconds`` /
+    ``per_file_time_budget_seconds`` guards that ``_atomic_copy``
+    enforces. That is intentional and safe because:
+
+    * The work here is CPU-bound (protobuf decode on small NAL
+      buffers), not I/O-bound — the SD card is not the bottleneck,
+      so the SDIO-bus-saturation failure mode the time-budget
+      guards exist for does not apply.
+    * The file's pages are already resident in the page cache from
+      the immediately-prior ``_atomic_copy``, so no fresh SD reads
+      occur during the walk.
+    * The walk samples every ``_INLINE_SEI_SAMPLE_RATE`` (30) SEI
+      NAL — total work is O(file_size / 30), which on a worst-case
+      80 MB Tesla clip is well under a second on the Pi Zero 2 W.
+    * The downstream `_enqueue_indexed` call is a single SQLite
+      INSERT — sub-millisecond.
+
+    To keep that contract observable in production, we measure the
+    wall-clock and emit a WARNING if the helper exceeds
+    ``_SIDECAR_WRITE_WARN_SECONDS``. That gives operators an early
+    signal if the assumption above breaks (e.g. a future change
+    drops the sample-rate, or a corrupt clip causes pathological
+    parser behaviour) without forcing a hard cap that would silently
+    drop the optimization on every slow clip.
+
     Best-effort: any failure is logged at WARNING and silently
     swallowed. The downstream indexer's existing fallback path
     (``read_sei_sidecar`` returning None → mmap parse) handles
     missing sidecars transparently, so a sidecar-write failure
     only loses the I/O optimization, never data.
     """
+    start = time.monotonic()
     try:
         from services import sei_parser
     except Exception as e:  # noqa: BLE001
@@ -1143,6 +1181,7 @@ def _write_inline_sei_sidecar(dest_path: str) -> None:
         )
         return
 
+    elapsed = time.monotonic() - start
     if sidecar is None:
         # write_sei_sidecar already logged the failure cause at
         # DEBUG/WARNING; no need to double-log here.
@@ -1153,12 +1192,27 @@ def _write_inline_sei_sidecar(dest_path: str) -> None:
         if sidecar.mvhd_creation_time_utc is not None
         else 'unknown'
     )
-    logger.info(
-        "inline-sei: parsed %d messages (%d GPS, %d no-GPS), "
-        "mvhd=%s for %s",
-        sidecar.sei_count, len(sidecar.messages),
-        sidecar.no_gps_count, mvhd_repr, os.path.basename(dest_path),
-    )
+    if elapsed >= _SIDECAR_WRITE_WARN_SECONDS:
+        # Near-miss against the watchdog timeout — the page-cache
+        # hot-path assumption above appears to no longer hold for
+        # this clip. Surface at WARNING so it shows up in journalctl
+        # at the default verbosity.
+        logger.warning(
+            "inline-sei: sidecar write took %.2fs (>= %.1fs warn "
+            "threshold) for %s — page-cache fast-path may have "
+            "missed; %d messages, mvhd=%s",
+            elapsed, _SIDECAR_WRITE_WARN_SECONDS,
+            os.path.basename(dest_path),
+            sidecar.sei_count, mvhd_repr,
+        )
+    else:
+        logger.info(
+            "inline-sei: parsed %d messages (%d GPS, %d no-GPS), "
+            "mvhd=%s, elapsed=%.2fs for %s",
+            sidecar.sei_count, len(sidecar.messages),
+            sidecar.no_gps_count, mvhd_repr, elapsed,
+            os.path.basename(dest_path),
+        )
 
 
 def _apply_low_priority() -> None:

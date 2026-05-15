@@ -672,7 +672,10 @@ def _timestamp_from_filename(filename: str) -> Optional[str]:
 _CLOCK_SKEW_WARN_SECONDS = 300
 
 
-def _resolve_recording_time(video_path: str) -> Optional[str]:
+def _resolve_recording_time(
+    video_path: str,
+    sidecar=None,
+) -> Optional[str]:
     """Return the authoritative ISO start-of-recording timestamp for a clip.
 
     Strategy (in priority order):
@@ -699,17 +702,28 @@ def _resolve_recording_time(video_path: str) -> Optional[str]:
     that pattern indicates a Tesla onboard-clock glitch worth knowing
     about. The indexer always uses the mvhd value regardless of gap
     size — mvhd is the truth.
+
+    ``sidecar`` is an optional pre-loaded ``SeiSidecar`` from
+    ``read_sei_sidecar``. When provided, we use its cached
+    ``mvhd_creation_time_utc`` and skip ALL parser I/O. Pass it from
+    callers (e.g. ``_index_video``) that are already going to read
+    the sidecar themselves — it eliminates the duplicate sidecar
+    JSON read that issue #197's review flagged. mvhd is
+    sample-rate-independent so the caller MAY pass a sidecar even if
+    its ``sample_rate`` doesn't match the indexer's request.
     """
     filename_ts = _timestamp_from_filename(video_path)
     parser = _get_sei_parser()
     mvhd_dt: Optional[datetime] = None
-    sidecar = None
     # Issue #197: prefer the sidecar's cached mvhd if present —
     # avoids one full mmap walk of the .mp4. The sidecar is
     # written by archive_worker right after _atomic_copy while
     # the file's pages are still hot in the page cache; reading
     # it back is a 5-50 KB JSON load instead of a 30-80 MB mmap.
-    if hasattr(parser, 'read_sei_sidecar'):
+    # Caller may have already loaded the sidecar (via
+    # ``read_sei_sidecar``) and passed it in to avoid a second
+    # JSON read on the same file.
+    if sidecar is None and hasattr(parser, 'read_sei_sidecar'):
         try:
             sidecar = parser.read_sei_sidecar(video_path)
         except Exception as e:  # noqa: BLE001
@@ -1213,7 +1227,33 @@ def _index_video(
             rel_path = os.path.relpath(video_path, teslacam_root)
     except ImportError:
         rel_path = os.path.relpath(video_path, teslacam_root)
-    file_timestamp = _resolve_recording_time(video_path)
+    # Issue #197: read the sidecar exactly once — first to extract
+    # the cached mvhd (sample-rate-independent) for
+    # ``_resolve_recording_time``, then to consume the cached
+    # messages if the sample_rate matches what we want. Doing this
+    # ONCE here (instead of letting both _resolve_recording_time and
+    # the message-extraction below each fire their own
+    # ``read_sei_sidecar`` call) saves one JSON read + one ``stat``
+    # per indexed clip — the duplicate read PR #205's review
+    # flagged.
+    sidecar = None
+    if hasattr(parser, 'read_sei_sidecar'):
+        try:
+            # Don't pin to required_sample_rate yet — the mvhd
+            # branch needs the sidecar even on a sample_rate
+            # mismatch. We re-check sample_rate at the
+            # message-consumption point below.
+            sidecar = parser.read_sei_sidecar(video_path)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "sidecar read failed for %s (%s); "
+                "falling back to mmap parse", video_path, e,
+            )
+            sidecar = None
+
+    file_timestamp = _resolve_recording_time(
+        video_path, sidecar=sidecar,
+    )
 
     # --- Cross-folder dedup (fast path) ---
     # Tesla videos can exist in both RecentClips and ArchivedClips with the
@@ -1317,36 +1357,47 @@ def _index_video(
     waypoint_dicts = []
     sei_count = 0
     no_gps_count = 0
-    sidecar = None
-    if hasattr(parser, 'read_sei_sidecar'):
-        try:
-            sidecar = parser.read_sei_sidecar(
-                video_path, required_sample_rate=sample_rate,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.debug(
-                "sidecar read failed for %s (%s); "
-                "falling back to mmap parse", rel_path, e,
-            )
-            sidecar = None
+    # We already loaded ``sidecar`` above for _resolve_recording_time.
+    # Apply the sample_rate check here: if the cached sidecar was
+    # written at a different sampling than the indexer wants, we
+    # cannot reuse its messages — fall back to a mmap walk at the
+    # requested rate. (mvhd was sample-rate-independent so the call
+    # above was still useful.)
+    if sidecar is not None and sidecar.sample_rate != sample_rate:
+        logger.debug(
+            "sidecar sample_rate mismatch for %s "
+            "(cached %d, requested %d); using sidecar mvhd but "
+            "mmap-parsing for messages",
+            rel_path, sidecar.sample_rate, sample_rate,
+        )
+        sidecar_for_messages = None
+    else:
+        sidecar_for_messages = sidecar
 
     try:
-        if sidecar is not None:
+        if sidecar_for_messages is not None:
             logger.info(
                 "loaded sidecar parse for %s "
-                "(%d GPS messages, sample_rate=%d, cached path)",
-                rel_path, len(sidecar.messages), sidecar.sample_rate,
+                "(%d GPS messages, sample_rate=%d)",
+                rel_path,
+                len(sidecar_for_messages.messages),
+                sidecar_for_messages.sample_rate,
             )
-            sei_count = sidecar.sei_count
-            no_gps_count = sidecar.no_gps_count
-            msg_iter = sidecar.messages
+            sei_count = sidecar_for_messages.sei_count
+            no_gps_count = sidecar_for_messages.no_gps_count
+            msg_iter = sidecar_for_messages.messages
         else:
+            logger.info(
+                "parsed SEI messages for %s via mmap "
+                "(no sidecar, sample_rate=%d)",
+                rel_path, sample_rate,
+            )
             msg_iter = parser.extract_sei_messages(
                 video_path, sample_rate=sample_rate,
             )
 
         for msg in msg_iter:
-            if sidecar is None:
+            if sidecar_for_messages is None:
                 # Sidecar path already accounted for sei_count /
                 # no_gps_count + filtered out no-GPS messages, so the
                 # tally is only meaningful on the mmap fallback path.
@@ -1354,9 +1405,10 @@ def _index_video(
                 if not msg.has_gps:
                     no_gps_count += 1
                     continue
-            # NOTE: sidecar.messages is pre-filtered to GPS-bearing
-            # only (see ``write_sei_sidecar``), so the ``has_gps``
-            # check above is redundant when ``sidecar is not None``.
+            # NOTE: sidecar_for_messages.messages is pre-filtered to
+            # GPS-bearing only (see ``write_sei_sidecar``), so the
+            # ``has_gps`` check above is redundant when
+            # ``sidecar_for_messages is not None``.
 
             # Compute absolute timestamp from file timestamp + frame offset
             if file_timestamp:

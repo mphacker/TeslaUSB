@@ -34,6 +34,7 @@ Usage:
     messages = parse_video_sei('/path/to/video.mp4')
 """
 
+import json
 import logging
 import mmap
 import os
@@ -717,6 +718,18 @@ def sidecar_path_for(video_path: str) -> str:
     """Return the canonical sidecar path for ``video_path``.
 
     Format: ``<video_path>.sei.json`` (sibling to the .mp4).
+
+    **Trusted-input contract:** ``video_path`` is always a path
+    that the archive worker just wrote (see
+    ``archive_worker._atomic_copy``) or that the indexer found via
+    a directory walk under ``ArchivedClips`` / the RO USB mount.
+    No user-supplied input ever reaches this function — the path
+    has already been normalized and validated by upstream code
+    (``video_archive_service`` for the producer side,
+    ``mapping_service`` for the consumer side). For that reason
+    this function performs NO independent traversal validation;
+    it is purely a string-suffix operation. Callers MUST NOT pass
+    untrusted external input directly to this function.
     """
     return video_path + SIDECAR_SUFFIX
 
@@ -857,11 +870,11 @@ def write_sei_sidecar(
         'messages': [_message_to_dict(m) for m in gps_messages],
     }
 
-    import json as _json
     tmp_path = sidecar_path + '.tmp'
+    wrote_replace = False
     try:
         with open(tmp_path, 'w', encoding='utf-8') as f:
-            _json.dump(payload, f, separators=(',', ':'))
+            json.dump(payload, f, separators=(',', ':'))
             f.flush()
             try:
                 os.fsync(f.fileno())
@@ -871,16 +884,30 @@ def write_sei_sidecar(
                 # atomicity guarantee.
                 pass
         os.replace(tmp_path, sidecar_path)
+        wrote_replace = True
     except OSError as e:
         logger.warning(
             "sei sidecar: write failed for %s (indexer will "
             "mmap-parse): %s", sidecar_path, e,
         )
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
         return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "sei sidecar: unexpected write failure for %s "
+            "(indexer will mmap-parse): %s", sidecar_path, e,
+        )
+        return None
+    finally:
+        # Belt-and-suspenders: any failure path that didn't reach
+        # ``os.replace`` (json serialization error, surprise
+        # exception type, abnormal exit from the with-block) leaves
+        # the .tmp behind. Sweep it up unconditionally; harmless
+        # when the replace succeeded (file already moved away).
+        if not wrote_replace:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     return SeiSidecar(
         schema_version=SIDECAR_SCHEMA_VERSION,
@@ -928,10 +955,9 @@ def read_sei_sidecar(
     if not os.path.isfile(sidecar_path):
         return None
 
-    import json as _json
     try:
         with open(sidecar_path, 'r', encoding='utf-8') as f:
-            payload = _json.load(f)
+            payload = json.load(f)
     except (OSError, ValueError) as e:
         logger.debug(
             "sei sidecar: read/parse failed for %s (%s); "

@@ -175,37 +175,51 @@ def test_probe_cache_caches_failure(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_disk_block_critical(monkeypatch):
+    """free_mb < critical_mb (default 100 MB) → ERROR.
+
+    Worker is actively refusing copies, so this is real. The percent
+    used is irrelevant — what matters is absolute free MB vs. the
+    same threshold the watchdog uses.
+    """
     import blueprints.system_health as sh
     from collections import namedtuple
     Usage = namedtuple('Usage', ['total', 'used', 'free'])
     monkeypatch.setattr(
         sh.shutil, 'disk_usage',
-        lambda path: Usage(total=100 * 1024**3,
-                           used=96 * 1024**3,
-                           free=4 * 1024**3),
+        lambda path: Usage(total=470 * 1024**3,
+                           used=470 * 1024**3 - 50 * 1024**2,
+                           free=50 * 1024**2),  # 50 MB free
     )
     block = sh._disk_block()
     assert block['severity'] == 'error'
-    assert 'Critical' in block['message']
-    assert block['used_pct'] == 96.0
+    assert 'critical' in block['message'].lower()
+    assert block['free_mb'] == 50
+    assert block['critical_mb'] == 100
 
 
 def test_disk_block_warn(monkeypatch):
+    """free_mb < warning_mb (default 500 MB) → WARN.
+
+    Within margin of the critical threshold; retention should already
+    be aggressively pruning.
+    """
     import blueprints.system_health as sh
     from collections import namedtuple
     Usage = namedtuple('Usage', ['total', 'used', 'free'])
     monkeypatch.setattr(
         sh.shutil, 'disk_usage',
-        lambda path: Usage(total=100 * 1024**3,
-                           used=88 * 1024**3,
-                           free=12 * 1024**3),
+        lambda path: Usage(total=470 * 1024**3,
+                           used=470 * 1024**3 - 250 * 1024**2,
+                           free=250 * 1024**2),  # 250 MB free
     )
     block = sh._disk_block()
     assert block['severity'] == 'warn'
-    assert block['used_pct'] == 88.0
+    assert 'low' in block['message'].lower()
+    assert block['free_mb'] == 250
 
 
 def test_disk_block_ok(monkeypatch):
+    """Plenty of free space → OK with GB-free message."""
     import blueprints.system_health as sh
     from collections import namedtuple
     Usage = namedtuple('Usage', ['total', 'used', 'free'])
@@ -219,6 +233,71 @@ def test_disk_block_ok(monkeypatch):
     assert block['severity'] == 'ok'
     assert block['free_gb'] == 120.0
     assert 'free' in block['message']
+
+
+def test_disk_block_high_pct_used_but_ok_per_retention_policy(monkeypatch):
+    """Regression: high used-% with plenty of absolute MB free → OK.
+
+    The user configures ``cleanup.free_space_target_pct: 10`` (default),
+    so the system actively prunes to maintain ~90% used. A 470 GB SD
+    card sitting at 90% used / 49 GB free is operating EXACTLY per the
+    configured retention policy — flagging it yellow contradicts the
+    user's settings and was the original complaint.
+    """
+    import blueprints.system_health as sh
+    from collections import namedtuple
+    Usage = namedtuple('Usage', ['total', 'used', 'free'])
+    monkeypatch.setattr(
+        sh.shutil, 'disk_usage',
+        lambda path: Usage(total=470 * 1024**3,
+                           used=int(470 * 0.90) * 1024**3,
+                           free=int(470 * 0.10) * 1024**3),
+    )
+    block = sh._disk_block()
+    assert block['severity'] == 'ok', (
+        f"90% used / ~10% free should be OK per the configured retention "
+        f"policy, got {block['severity']!r} ({block['message']!r})"
+    )
+    # Sanity: free is in the GB range, well above warning/critical thresholds.
+    assert block['free_gb'] > 40
+    assert block['free_mb'] > block['warning_mb']
+
+
+def test_disk_block_threshold_overrides(monkeypatch):
+    """Operator-tunable thresholds (config-aware) drive severity.
+
+    Verifies that overriding ``CLOUD_ARCHIVE_DISK_SPACE_WARNING_MB`` /
+    ``CLOUD_ARCHIVE_DISK_SPACE_CRITICAL_MB`` at the config layer is
+    honoured on the next call (no restart needed).
+    """
+    import blueprints.system_health as sh
+    from collections import namedtuple
+    Usage = namedtuple('Usage', ['total', 'used', 'free'])
+    monkeypatch.setattr(
+        sh.shutil, 'disk_usage',
+        lambda path: Usage(total=100 * 1024**3,
+                           used=99 * 1024**3,
+                           free=1024 * 1024**2),  # 1024 MB free
+    )
+    # Default thresholds (500/100 MB) → 1 GB free is OK.
+    block = sh._disk_block()
+    assert block['severity'] == 'ok'
+
+    # Operator raises the warning threshold to 2 GB → now 1 GB free is WARN.
+    monkeypatch.setattr(
+        sh, '_resolve_disk_thresholds_mb',
+        lambda: (2048, 100),
+    )
+    block = sh._disk_block()
+    assert block['severity'] == 'warn'
+
+    # Operator raises critical to 1.5 GB → now 1 GB free is ERROR.
+    monkeypatch.setattr(
+        sh, '_resolve_disk_thresholds_mb',
+        lambda: (2048, 1536),
+    )
+    block = sh._disk_block()
+    assert block['severity'] == 'error'
 
 
 def test_disk_block_oserror(monkeypatch):

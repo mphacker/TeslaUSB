@@ -87,6 +87,10 @@ def _reset_module_state():
     # exercises the short-circuit path doesn't leak the True flag
     # into the next test.
     archive_watchdog._retention_running = False
+    # PR #213 review finding 3 — reset the per-process "first capacity
+    # pass logged" flag so each test sees the one-time INFO landmark
+    # if it triggers an enforcement run.
+    archive_watchdog._capacity_thresholds_logged = False
     yield
     archive_watchdog.stop_watchdog(timeout=5.0)
     archive_worker.stop_worker(timeout=5.0)
@@ -96,6 +100,7 @@ def _reset_module_state():
         task_coordinator._task_started = 0.0
         task_coordinator._waiter_count = 0
     archive_watchdog._retention_running = False
+    archive_watchdog._capacity_thresholds_logged = False
 
 
 # ---------------------------------------------------------------------------
@@ -1843,3 +1848,668 @@ class TestRetentionRunningGuard:
         assert results['first']['deleted_count'] == 5
         # Flag must be cleared after the first finishes.
         assert archive_watchdog._retention_running is False
+
+
+# ---------------------------------------------------------------------------
+# TestCapacityPrune — free_space_target_pct + max_archive_size_gb enforcement
+# ---------------------------------------------------------------------------
+
+
+def _patch_capacity_config(monkeypatch, *, free_pct: int, max_gb: int):
+    """Helper: monkeypatch the two config resolvers used by capacity prune.
+
+    Patching ``_resolve_*`` (not the underlying ``config`` constants) so
+    each test gets exact, deterministic values regardless of the live
+    ``config.yaml`` on disk.
+    """
+    monkeypatch.setattr(
+        archive_watchdog, '_resolve_free_space_target_pct',
+        lambda: int(free_pct),
+    )
+    monkeypatch.setattr(
+        archive_watchdog, '_resolve_max_archive_size_gb',
+        lambda: int(max_gb),
+    )
+
+
+class TestCapacityPrune:
+    """``_run_capacity_prune`` enforces the two Settings → Storage knobs.
+
+    * ``free_space_target_pct`` (soft floor — delete oldest when free %
+      drops below the target)
+    * ``max_archive_size_gb`` (hard cap — delete oldest when total .mp4
+      bytes exceed the cap)
+
+    Both must honor:
+      - "trips are sacred" via ``purge_deleted_videos`` (only the
+        ``indexed_files`` row is dropped; trips/waypoints/events stay)
+      - cloud-pending preservation (skip files not yet synced when a
+        cloud provider is configured AND ``delete_unsynced=False``)
+      - the protected-file guard via ``safe_delete_archive_video``
+        (refuses ``*.img`` and any path outside ``archive_root``)
+    """
+
+    def test_no_op_when_both_knobs_disabled(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Both 0 → walk is skipped entirely; not even the pre-walk
+        # statvfs runs. Verifies the cheap-path on a default config.
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=0)
+        old = time.time() - (10 * 86400)
+        for i in range(3):
+            _make_archive_mp4(
+                archive_root, f"RecentClips/keep_{i}.mp4",
+                mtime=old + i, size=1024,
+            )
+        summary = archive_watchdog._run_capacity_prune(
+            archive_root, db,
+        )
+        assert summary['capacity_deleted_count'] == 0
+        assert summary['capacity_scanned'] == 0, (
+            "When both knobs are 0 the function MUST short-circuit "
+            "BEFORE the walk so a default-config tick is essentially "
+            "free."
+        )
+        assert summary['free_space_target_pct'] == 0
+        assert summary['max_archive_size_gb'] == 0
+
+    def test_no_op_when_under_cap_and_above_free_target(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Cap = 1 GB, archive holds ~3 KB. Free space comfortably
+        # above the target. Nothing should be deleted.
+        _patch_capacity_config(monkeypatch, free_pct=5, max_gb=1)
+        # Synthesize a mostly-empty disk (50% free).
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage',
+            lambda _p: _fake_usage(free_mb=16_000, total_mb=32_000),
+        )
+        old = time.time() - (10 * 86400)
+        for i in range(3):
+            _make_archive_mp4(
+                archive_root, f"RecentClips/keep_{i}.mp4",
+                mtime=old + i, size=1024,
+            )
+        summary = archive_watchdog._run_capacity_prune(
+            archive_root, db,
+        )
+        assert summary['capacity_deleted_count'] == 0
+        assert summary['capacity_scanned'] == 3, (
+            "Walk must run when at least one knob is enabled so the "
+            "summary can report current totals."
+        )
+
+    def test_max_size_cap_deletes_oldest_first(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Cap = 1 byte (so 4 × 1 KB clips → 4096 bytes is way over).
+        # Set the cap by patching the resolver directly to a fractional
+        # GB equivalent — but the resolver returns an int, so use a
+        # tiny cap_bytes by overriding the resolver to return 1 and
+        # intercepting the GB→bytes math via monkeypatch on the file
+        # itself. Simplest: write 4 clips totaling 4 GB worth of size
+        # via a fake size and use cap=2 GB.
+        # Actual approach: override _iter_archive_mp4_files so the size
+        # column is the synthetic "GB" we want, and set cap=2 GB.
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=2)
+        # 4 clips at 1 GB each → 4 GB total, cap 2 GB → must delete 2
+        # oldest.
+        gb = 1024 * 1024 * 1024
+        files = []
+        base_mtime = time.time() - (10 * 86400)
+        for i in range(4):
+            p = _make_archive_mp4(
+                archive_root, f"RecentClips/clip_{i}.mp4",
+                mtime=base_mtime + i, size=10,  # tiny on disk
+            )
+            # Synthesize size at the iterator layer instead.
+            files.append((p, base_mtime + i, gb))
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter(files),
+        )
+        # No disk_usage interference (None → free-space sub-pass off).
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        summary = archive_watchdog._run_capacity_prune(
+            archive_root, db,
+        )
+        # Cap is 2 GB; we have 4 GB; must delete 2 oldest to land
+        # at 2 GB (cap_bytes <= total).
+        assert summary['capacity_deleted_count'] == 2
+        # Oldest two (clip_0, clip_1) gone; newer two (clip_2, clip_3)
+        # kept.
+        assert not os.path.exists(files[0][0])
+        assert not os.path.exists(files[1][0])
+        assert os.path.exists(files[2][0])
+        assert os.path.exists(files[3][0])
+
+    def test_free_space_target_deletes_oldest_first(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Disk: 32 GB total, only 1 GB free → 3.1% < target 20%.
+        # 4 clips at 0.5 GB each. Each delete frees 0.5 GB.
+        # Need to bring free from 1 GB → 6.4 GB (20% of 32 GB) =
+        # +5.4 GB → 11 deletes ... but we only have 4 clips. The
+        # loop should stop after deleting all available files.
+        # Verify oldest-first ordering on what IS deleted.
+        _patch_capacity_config(monkeypatch, free_pct=20, max_gb=0)
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage',
+            lambda _p: _fake_usage(free_mb=1_000, total_mb=32_000),
+        )
+        half_gb = 512 * 1024 * 1024
+        files = []
+        base_mtime = time.time() - (10 * 86400)
+        for i in range(4):
+            p = _make_archive_mp4(
+                archive_root, f"RecentClips/clip_{i}.mp4",
+                mtime=base_mtime + i, size=10,
+            )
+            files.append((p, base_mtime + i, half_gb))
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter(files),
+        )
+        summary = archive_watchdog._run_capacity_prune(
+            archive_root, db,
+        )
+        # All 4 deleted, oldest-first.
+        assert summary['capacity_deleted_count'] == 4
+        for p, _m, _s in files:
+            assert not os.path.exists(p)
+
+    def test_protected_img_files_are_never_deleted(
+        self, db, archive_root, monkeypatch, tmp_path,
+    ):
+        # safe_delete_archive_video (file_safety) refuses .img by
+        # extension AND parent dir == GADGET_DIR. Verify the capacity
+        # prune routes through it: feed a .img through the iterator
+        # alongside an mp4, point GADGET_DIR at archive_root so the
+        # protection guard fires, and confirm the .img survives.
+        from services import file_safety
+        monkeypatch.setattr(
+            file_safety, '_get_gadget_dir', lambda: archive_root,
+        )
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=1)
+        gb = 1024 * 1024 * 1024
+        img_path = os.path.join(archive_root, "usb_cam.img")
+        with open(img_path, 'wb') as f:
+            f.write(b"X" * 100)
+        mp4_path = _make_archive_mp4(
+            archive_root, "RecentClips/old.mp4",
+            mtime=time.time() - 86400, size=100,
+        )
+        # Iterator yields .img first (oldest), then mp4.
+        files = [
+            (img_path, time.time() - (3 * 86400), 2 * gb),
+            (mp4_path, time.time() - 86400, 2 * gb),
+        ]
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter(files),
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        summary = archive_watchdog._run_capacity_prune(
+            archive_root, db,
+        )
+        # .img refused → counted as kept_protected; .mp4 deleted to
+        # bring total under cap.
+        assert os.path.exists(img_path), (
+            ".img files MUST never be deleted by the capacity prune "
+            "(safe_delete_archive_video.is_protected_file guard)"
+        )
+        assert summary['capacity_kept_protected_count'] >= 1
+
+    def test_trips_are_sacred_under_capacity_prune(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Insert a trip + waypoint + detected_event tied to the file
+        # we're about to capacity-prune. After the prune: the file
+        # is gone, but the trip / waypoint / event rows must still
+        # be present (only video_path NULL'd on the linked rows).
+        old_mtime = time.time() - (60 * 86400)
+        path = _make_archive_mp4(
+            archive_root, "RecentClips/sacred.mp4",
+            mtime=old_mtime, size=10,
+        )
+        # mapping_service.purge_deleted_videos matches via
+        # canonical_key, which compares basenames + parent dir name.
+        # Insert the indexed_files row with the same path so the
+        # purge finds it and reconciles waypoints/events.
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "INSERT INTO trips "
+                "(start_time, end_time, distance_km, duration_seconds) "
+                "VALUES (?, ?, ?, ?)",
+                ("2026-05-01T00:00:00", "2026-05-01T00:30:00",
+                 5.0, 1800),
+            )
+            trip_id = conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO waypoints "
+                "(trip_id, timestamp, lat, lon, video_path) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (trip_id, "2026-05-01T00:15:00", 40.0, -111.0, path),
+            )
+            conn.execute(
+                "INSERT INTO detected_events "
+                "(trip_id, timestamp, lat, lon, event_type, "
+                "video_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (trip_id, "2026-05-01T00:15:30", 40.0, -111.0,
+                 'hard_brake', path),
+            )
+            conn.execute(
+                "INSERT INTO indexed_files "
+                "(file_path, file_size, indexed_at) "
+                "VALUES (?, ?, ?)",
+                (path, 10, "2026-05-01T00:30:00"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=1)
+        gb = 1024 * 1024 * 1024
+        files = [(path, old_mtime, 2 * gb)]
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter(files),
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        summary = archive_watchdog._run_capacity_prune(
+            archive_root, db,
+        )
+        assert summary['capacity_deleted_count'] == 1
+        assert not os.path.exists(path)
+        # Trips + waypoints + events still present.
+        conn = sqlite3.connect(db)
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM trips"
+            ).fetchone()[0] == 1, "trips ROW must survive capacity prune"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM waypoints"
+            ).fetchone()[0] == 1, "waypoints ROW must survive capacity prune"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM detected_events"
+            ).fetchone()[0] == 1, "events ROW must survive capacity prune"
+            # indexed_files row dropped (its purpose was tracking the
+            # file that no longer exists).
+            assert conn.execute(
+                "SELECT COUNT(*) FROM indexed_files WHERE file_path=?",
+                (path,),
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_cloud_pending_files_are_kept(
+        self, db, archive_root, monkeypatch,
+    ):
+        # When a cloud provider is configured AND delete_unsynced=False,
+        # an unsynced file MUST be skipped past the capacity threshold
+        # and counted in capacity_kept_unsynced_count, not deleted.
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=1)
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_cloud_db_path',
+            lambda: '/tmp/fake_cloud.db',
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_synced_to_cloud',
+            lambda *a, **kw: False,  # nothing is synced
+        )
+        gb = 1024 * 1024 * 1024
+        path = _make_archive_mp4(
+            archive_root, "RecentClips/unsynced.mp4",
+            mtime=time.time() - 86400, size=10,
+        )
+        files = [(path, time.time() - 86400, 2 * gb)]
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter(files),
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        summary = archive_watchdog._run_capacity_prune(
+            archive_root, db,
+        )
+        assert summary['capacity_deleted_count'] == 0
+        assert summary['capacity_kept_unsynced_count'] == 1
+        assert os.path.exists(path), (
+            "Unsynced file MUST be kept past capacity threshold "
+            "when cloud is configured + delete_unsynced=False — "
+            "extended WiFi outage cannot cause silent footage loss"
+        )
+
+    def test_force_prune_now_runs_capacity_pass_after_time_pass(
+        self, db, archive_root, monkeypatch,
+    ):
+        # Wire up the watchdog so force_prune_now has paths set, then
+        # verify the returned summary has a 'capacity' key — proving
+        # _run_capacity_prune is invoked from force_prune_now.
+        archive_watchdog._archive_root = archive_root
+        archive_watchdog._db_path = db
+        try:
+            _patch_capacity_config(monkeypatch, free_pct=0, max_gb=0)
+            old = time.time() - (60 * 86400)
+            _make_archive_mp4(
+                archive_root, "RecentClips/old.mp4",
+                mtime=old, size=10,
+            )
+            summary = archive_watchdog.force_prune_now()
+            assert 'capacity' in summary, (
+                "force_prune_now must call _run_capacity_prune so the "
+                "Settings → Storage page knobs are actually enforced"
+            )
+            assert summary['capacity']['free_space_target_pct'] == 0
+            assert summary['capacity']['max_archive_size_gb'] == 0
+        finally:
+            archive_watchdog._archive_root = None
+            archive_watchdog._db_path = None
+
+    def test_resolve_free_space_target_pct_clamps_invalid(
+        self, monkeypatch,
+    ):
+        # Negative or > 50 → 0 (disabled). Defends against misconfig.
+        import config as cfg_mod
+        monkeypatch.setattr(
+            cfg_mod, 'CLEANUP_FREE_SPACE_TARGET_PCT', -5, raising=False,
+        )
+        assert archive_watchdog._resolve_free_space_target_pct() == 0
+        monkeypatch.setattr(
+            cfg_mod, 'CLEANUP_FREE_SPACE_TARGET_PCT', 999, raising=False,
+        )
+        assert archive_watchdog._resolve_free_space_target_pct() == 0
+        monkeypatch.setattr(
+            cfg_mod, 'CLEANUP_FREE_SPACE_TARGET_PCT', 25, raising=False,
+        )
+        assert archive_watchdog._resolve_free_space_target_pct() == 25
+
+    def test_resolve_max_archive_size_gb_clamps_negative(
+        self, monkeypatch,
+    ):
+        import config as cfg_mod
+        monkeypatch.setattr(
+            cfg_mod, 'CLEANUP_MAX_ARCHIVE_SIZE_GB', -1, raising=False,
+        )
+        assert archive_watchdog._resolve_max_archive_size_gb() == 0
+        monkeypatch.setattr(
+            cfg_mod, 'CLEANUP_MAX_ARCHIVE_SIZE_GB', 100, raising=False,
+        )
+        assert archive_watchdog._resolve_max_archive_size_gb() == 100
+
+    # --- PR #213 review fix coverage --------------------------------
+
+    def test_short_circuits_when_retention_running_flag_set(
+        self, db, archive_root, monkeypatch,
+    ):
+        # PR #213 review finding 1 — duplicate-trigger guard. When
+        # ``_retention_running`` is already True (e.g. the time-based
+        # pass is mid-flight, or another caller's capacity pass is
+        # running), this call must return ``status='already_running'``
+        # WITHOUT walking the tree or acquiring the coordinator slot.
+        _patch_capacity_config(monkeypatch, free_pct=10, max_gb=1)
+        archive_watchdog._retention_running = True
+        try:
+            walk_called = []
+            monkeypatch.setattr(
+                archive_watchdog, '_iter_archive_mp4_files',
+                lambda _root: walk_called.append(True) or iter([]),
+            )
+            summary = archive_watchdog._run_capacity_prune(
+                archive_root, db,
+            )
+            assert summary['status'] == 'already_running'
+            assert summary['capacity_deleted_count'] == 0
+            assert summary['capacity_scanned'] == 0
+            assert not walk_called, (
+                "Walk MUST NOT happen when the duplicate-trigger flag "
+                "is set — the whole point of the guard is to skip "
+                "the work, not just defer the deletes."
+            )
+        finally:
+            archive_watchdog._retention_running = False
+
+    def test_clears_retention_running_flag_on_normal_completion(
+        self, db, archive_root, monkeypatch,
+    ):
+        # PR #213 review finding 1 — flag must be cleared in the
+        # outer ``finally`` so a second caller (e.g. the next
+        # watchdog tick) can proceed.
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=0)
+        assert archive_watchdog._retention_running is False
+        archive_watchdog._run_capacity_prune(archive_root, db)
+        # Cheap path doesn't acquire the flag at all.
+        assert archive_watchdog._retention_running is False
+        # Now an enforcement run.
+        _patch_capacity_config(monkeypatch, free_pct=10, max_gb=1)
+        gb = 1024 * 1024 * 1024
+        path = _make_archive_mp4(
+            archive_root, "RecentClips/old.mp4",
+            mtime=time.time() - 86400, size=10,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter([(path, time.time() - 86400, 2 * gb)]),
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        archive_watchdog._run_capacity_prune(archive_root, db)
+        assert archive_watchdog._retention_running is False, (
+            "Flag MUST be cleared after a normal run so the next "
+            "watchdog tick / UI click can proceed."
+        )
+
+    def test_clears_retention_running_flag_on_exception(
+        self, db, archive_root, monkeypatch,
+    ):
+        # PR #213 review finding 1 — flag must be cleared even if
+        # the walk or delete loop raises.
+        _patch_capacity_config(monkeypatch, free_pct=10, max_gb=1)
+
+        def boom(*a, **kw):
+            raise RuntimeError("synthetic walk failure")
+
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files', boom,
+        )
+        with pytest.raises(RuntimeError, match="synthetic"):
+            archive_watchdog._run_capacity_prune(archive_root, db)
+        assert archive_watchdog._retention_running is False, (
+            "Flag MUST be released even when the walk raises — "
+            "otherwise a single failed capacity prune would lock "
+            "out every subsequent attempt forever."
+        )
+
+    def test_logs_warning_when_statvfs_fails_and_free_target_set(
+        self, db, archive_root, monkeypatch, caplog,
+    ):
+        # PR #213 review finding 4 — surface the silent degradation.
+        # When ``_safe_disk_usage`` returns None and the operator
+        # has a free-space target configured, we MUST log a warning
+        # so the failure is visible in journalctl.
+        import logging as _logging
+        _patch_capacity_config(monkeypatch, free_pct=15, max_gb=0)
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        # Empty iteration — we're testing the statvfs path, not deletes.
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter([]),
+        )
+        with caplog.at_level(_logging.WARNING, logger=archive_watchdog.logger.name):
+            archive_watchdog._run_capacity_prune(archive_root, db)
+        warned = [
+            r for r in caplog.records
+            if r.levelname == 'WARNING'
+            and 'statvfs' in r.getMessage()
+            and 'free-space' in r.getMessage()
+        ]
+        assert warned, (
+            "Operator MUST see a WARNING when statvfs returns None "
+            "and free_space_target_pct > 0 — silent degradation "
+            "(target ignored without explanation) is the bug."
+        )
+
+    def test_no_warning_when_statvfs_fails_and_free_target_disabled(
+        self, db, archive_root, monkeypatch, caplog,
+    ):
+        # Counterpart to the above: when free_target is disabled the
+        # statvfs result is unused, so we should NOT spam a warning.
+        import logging as _logging
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=1)
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter([]),
+        )
+        with caplog.at_level(_logging.WARNING, logger=archive_watchdog.logger.name):
+            archive_watchdog._run_capacity_prune(archive_root, db)
+        unexpected = [
+            r for r in caplog.records
+            if r.levelname == 'WARNING' and 'statvfs' in r.getMessage()
+        ]
+        assert not unexpected, (
+            "Free-space target is disabled — statvfs failure is "
+            "irrelevant and MUST NOT spam the journal."
+        )
+
+    def test_emits_one_time_landmark_on_first_enforcement_run(
+        self, db, archive_root, monkeypatch, caplog,
+    ):
+        # PR #213 review finding 3 — emit a single INFO landmark
+        # showing the resolved thresholds the first time enforcement
+        # actually runs, so an operator who upgraded from the
+        # saved-but-not-enforced era sees in journalctl exactly when
+        # auto-prune started and at what levels.
+        import logging as _logging
+        _patch_capacity_config(monkeypatch, free_pct=12, max_gb=42)
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter([]),
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        # Reset the flag (autouse fixture already did, but be explicit).
+        archive_watchdog._capacity_thresholds_logged = False
+        with caplog.at_level(_logging.INFO, logger=archive_watchdog.logger.name):
+            archive_watchdog._run_capacity_prune(archive_root, db)
+            archive_watchdog._run_capacity_prune(archive_root, db)
+            archive_watchdog._run_capacity_prune(archive_root, db)
+        landmarks = [
+            r for r in caplog.records
+            if r.levelname == 'INFO'
+            and 'enforcement active' in r.getMessage()
+            and '12%' in r.getMessage()
+            and '42 GiB' in r.getMessage()
+        ]
+        assert len(landmarks) == 1, (
+            "The threshold landmark MUST log exactly once per process, "
+            "not on every tick (would spam journalctl)."
+        )
+
+    def test_no_landmark_when_both_knobs_disabled(
+        self, db, archive_root, monkeypatch, caplog,
+    ):
+        # When the cheap path triggers (both knobs 0), no landmark
+        # should fire — there's no enforcement to announce.
+        import logging as _logging
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=0)
+        archive_watchdog._capacity_thresholds_logged = False
+        with caplog.at_level(_logging.INFO, logger=archive_watchdog.logger.name):
+            archive_watchdog._run_capacity_prune(archive_root, db)
+        landmarks = [
+            r for r in caplog.records
+            if 'enforcement active' in r.getMessage()
+        ]
+        assert not landmarks
+        # And the flag stays False so a later config change that
+        # enables a knob still produces a landmark on its first run.
+        assert archive_watchdog._capacity_thresholds_logged is False
+
+    def test_yield_counter_bumps_on_cloud_pending_skip(
+        self, db, archive_root, monkeypatch,
+    ):
+        # PR #213 review finding 2 — every iteration must count
+        # toward the yield budget. With a backlog of unsynced files
+        # (extended WiFi outage), the loop should still hit
+        # ``_yield_retention_lock`` rather than hold the lock for
+        # the entire scan.
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=1)
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_delete_unsynced', lambda: False,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_cloud_configured', lambda: True,
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_resolve_cloud_db_path',
+            lambda: '/tmp/fake_cloud.db',
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_is_synced_to_cloud',
+            lambda *a, **kw: False,  # everything is unsynced
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+        # Build a synthetic backlog larger than the yield interval so
+        # we know the counter has to fire at least once.
+        n = archive_watchdog._RETENTION_YIELD_EVERY_N_FILES * 2 + 5
+        gb = 1024 * 1024 * 1024
+        files = []
+        base_mtime = time.time() - (10 * 86400)
+        for i in range(n):
+            p = _make_archive_mp4(
+                archive_root, f"RecentClips/clip_{i:05d}.mp4",
+                mtime=base_mtime + i, size=1,
+            )
+            files.append((p, base_mtime + i, 2 * gb))
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter(files),
+        )
+        yield_calls = []
+        monkeypatch.setattr(
+            archive_watchdog, '_yield_retention_lock',
+            lambda: yield_calls.append(True) or True,
+        )
+        summary = archive_watchdog._run_capacity_prune(
+            archive_root, db,
+        )
+        # Every file kept-unsynced → no deletes.
+        assert summary['capacity_deleted_count'] == 0
+        assert summary['capacity_kept_unsynced_count'] >= n - 1, (
+            "All synthetic files were unsynced; nearly all should "
+            "have been counted as kept_unsynced before the loop "
+            "exited (the cap-done check breaks once total is below "
+            "cap, but with 0 deletes total stays above)."
+        )
+        # The yield must have fired at least once for an N*2+5
+        # backlog — that's the bug fix.
+        assert len(yield_calls) >= 2, (
+            "Yield MUST fire on cloud-pending skips so an unsynced "
+            "backlog (extended WiFi outage) cannot hold the "
+            "'retention' lock for the entire scan."
+        )
+

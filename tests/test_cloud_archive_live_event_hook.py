@@ -25,6 +25,15 @@ These tests pin the contract of the new helper:
    prefix matches (so we never crash on an unexpected path shape).
 10. The helper NEVER raises — even when ``_enqueue_event_to_pipeline``
     blows up for one entry, the rest of the batch still processes.
+11. Cross-producer dedup parity (the regression PR-F4 review caught):
+    ``_canonical_rel_path_from_local(event_dir)`` must equal
+    ``canonical_cloud_path(f"SentryClips/<basename>")`` so the bulk
+    discovery row collides with the live-hook row on the
+    ``idx_pipeline_source_unique`` UNIQUE index — never two uploads.
+12. The basename fallback in ``_canonical_rel_path_from_local`` emits
+    a WARNING so a misconfigured RO_MNT_DIR/ARCHIVE_DIR is visible in
+    journalctl (silent collapse would otherwise look like successful
+    enqueues that secretly all alias the same row).
 """
 from __future__ import annotations
 
@@ -351,3 +360,167 @@ class TestEnqueueLandsInPipelineQueue:
         assert stage == pqs.STAGE_CLOUD_PENDING
         assert priority == pqs.PRIORITY_LIVE_EVENT
         assert status == 'pending'
+
+
+# ---------------------------------------------------------------------------
+# Cross-producer dedup parity (the regression PR-F4 review caught)
+# ---------------------------------------------------------------------------
+
+class TestCrossProducerDedupParity:
+    """Pin the canonical-key contract that prevents double-uploads.
+
+    Two producers can enqueue the same Tesla event:
+
+    1. The file_watcher's ``register_event_json_callback`` →
+       :func:`enqueue_live_event_from_event_json` (LIVE priority).
+    2. The bulk discovery pass in :func:`_discover_events`
+       (BULK priority).
+
+    The ``pipeline_queue.idx_pipeline_source_unique`` UNIQUE index is
+    keyed on ``(stage, source_path)``. If the two producers compute
+    different canonical forms for the same event, both rows survive
+    and the worker uploads the event twice — once at LIVE, once at
+    BULK. The first PR-F4 implementation hit this exact bug because
+    the live hook canonicalised the event.json path while the bulk
+    producer canonicalised the event directory. These tests pin the
+    parity so a regression cannot silently double-upload.
+    """
+
+    def test_live_hook_canonical_form_equals_bulk_form(
+        self, fresh_pipeline_db, reset_wake, tmp_path, monkeypatch,
+    ):
+        # Set RO_MNT_DIR to a tmp path that mirrors the production
+        # layout so _canonical_rel_path_from_local follows its real
+        # prefix-strip code path (no mocks).
+        ro_mnt = str(tmp_path / 'mnt' / 'gadget')
+        teslacam = os.path.join(ro_mnt, 'part1-ro', 'TeslaCam')
+        sentry = os.path.join(teslacam, 'SentryClips')
+        os.makedirs(sentry, exist_ok=True)
+        import config as cfg
+        monkeypatch.setattr(cfg, 'RO_MNT_DIR', ro_mnt, raising=False)
+        monkeypatch.setattr(cfg, 'ARCHIVE_DIR',
+                            str(tmp_path / 'unrelated'), raising=False)
+
+        event_basename = '2026-05-12_11-00-00'
+        event_dir = _make_event_dir(sentry, event_basename)
+
+        # The live-hook canonical form (what enqueue_live_event_*
+        # writes to source_path) — derived from the event DIRECTORY,
+        # not the event.json file inside it.
+        live_form = svc._canonical_rel_path_from_local(event_dir)
+
+        # The bulk-discovery canonical form (what _discover_events
+        # writes to source_path).
+        bulk_form = svc.canonical_cloud_path(
+            f'SentryClips/{event_basename}'
+        )
+
+        assert live_form == bulk_form, (
+            f"Cross-producer canonical-key mismatch! "
+            f"live={live_form!r} bulk={bulk_form!r} — "
+            f"would cause double-upload via the UNIQUE-index miss."
+        )
+        assert live_form == f'SentryClips/{event_basename}'
+
+    def test_live_then_bulk_collide_on_unique_index(
+        self, fresh_pipeline_db, reset_wake, tmp_path, monkeypatch,
+    ):
+        """End-to-end: enqueue via live hook, then enqueue the SAME
+        event via the bulk producer's canonical form. The UNIQUE
+        index on ``(stage, source_path)`` must collapse them — only
+        ONE row exists in pipeline_queue.
+        """
+        ro_mnt = str(tmp_path / 'mnt' / 'gadget')
+        teslacam = os.path.join(ro_mnt, 'part1-ro', 'TeslaCam')
+        sentry = os.path.join(teslacam, 'SentryClips')
+        os.makedirs(sentry, exist_ok=True)
+        import config as cfg
+        monkeypatch.setattr(cfg, 'RO_MNT_DIR', ro_mnt, raising=False)
+        monkeypatch.setattr(cfg, 'ARCHIVE_DIR',
+                            str(tmp_path / 'unrelated'), raising=False)
+
+        event_basename = '2026-05-12_11-00-00'
+        event_dir = _make_event_dir(sentry, event_basename)
+
+        # Producer 1: live hook fires first.
+        n_live = svc.enqueue_live_event_from_event_json(
+            [os.path.join(event_dir, 'event.json')]
+        )
+        assert n_live == 1
+
+        # Producer 2: bulk discovery for the same event. We invoke
+        # the same internal helper _discover_events uses so the test
+        # exercises the real cross-producer collision path.
+        bulk_rel = svc.canonical_cloud_path(
+            f'SentryClips/{event_basename}'
+        )
+        try:
+            event_size = sum(
+                os.path.getsize(os.path.join(event_dir, n))
+                for n in os.listdir(event_dir)
+                if os.path.isfile(os.path.join(event_dir, n))
+            )
+        except OSError:
+            event_size = 0
+        from services import pipeline_queue_service as pqs
+        ok = svc._enqueue_event_to_pipeline(
+            bulk_rel,
+            event_dir=event_dir,
+            event_size=event_size,
+            score=None,
+            priority=pqs.PRIORITY_CLOUD_BULK,
+            producer='_discover_events',
+        )
+        # The UNIQUE index returns False from _enqueue_event_to_pipeline
+        # because the row already exists — that's the dedup signal.
+        assert ok is False, (
+            "Bulk producer's row was inserted as a SEPARATE row — "
+            "the UNIQUE index did NOT dedup, so the worker would "
+            "upload this event twice."
+        )
+
+        # Confirm exactly ONE row exists in pipeline_queue for this
+        # event (across both producers).
+        conn = sqlite3.connect(fresh_pipeline_db)
+        try:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM pipeline_queue "
+                "WHERE source_path = ? AND stage = ?",
+                (bulk_rel, pqs.STAGE_CLOUD_PENDING),
+            )
+            count = cur.fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 1, (
+            f"Expected exactly 1 row, got {count} — UNIQUE-index "
+            f"dedup failed across producers."
+        )
+
+    def test_basename_fallback_logs_warning(
+        self, monkeypatch, tmp_path, caplog,
+    ):
+        """Info #2: the basename fallback in
+        ``_canonical_rel_path_from_local`` must emit a WARNING so a
+        misconfigured deploy is visible in journalctl.
+        """
+        import logging
+        import config as cfg
+        monkeypatch.setattr(cfg, 'RO_MNT_DIR',
+                            str(tmp_path / 'nope1'), raising=False)
+        monkeypatch.setattr(cfg, 'ARCHIVE_DIR',
+                            str(tmp_path / 'nope2'), raising=False)
+
+        local = str(tmp_path / 'totally' / 'unrelated' / 'file.mp4')
+        with caplog.at_level(logging.WARNING,
+                             logger=svc.logger.name):
+            rel = svc._canonical_rel_path_from_local(local)
+        assert rel == 'file.mp4'
+        # Find the warning we emitted (other unrelated warnings may
+        # also be present).
+        matched = [r for r in caplog.records
+                   if r.levelno == logging.WARNING
+                   and 'is not under any known TeslaCam root' in r.message]
+        assert matched, (
+            "Expected a WARNING about the unknown TeslaCam root in "
+            f"caplog. Got records: {[r.message for r in caplog.records]}"
+        )

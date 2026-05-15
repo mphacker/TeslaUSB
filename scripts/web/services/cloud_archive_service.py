@@ -951,21 +951,35 @@ def enqueue_live_event_from_event_json(event_json_paths: List[str]) -> int:
     cycle (the next ``_discover_events`` pass will pick up the same
     event at the bulk priority).
 
+    Canonical key — IMPORTANT
+    -------------------------
+    The ``source_path`` we enqueue MUST exactly match the form
+    :func:`_discover_events` produces for the same event so the
+    ``pipeline_queue.idx_pipeline_source_unique`` UNIQUE index dedups
+    correctly. ``_discover_events`` enqueues the **event directory** as
+    ``canonical_cloud_path("SentryClips/<dir>")`` — NOT the event.json
+    path inside it. This helper therefore derives the directory from
+    the inotify event_json path and runs the SAME canonicalisation.
+    Mismatch = double-upload (one row at LIVE priority, one at BULK) —
+    the regression PR-F4's review caught and this docstring exists to
+    prevent recurrence.
+
     For each ``event.json`` path:
 
-    * Compute the event directory (``os.path.dirname``) and the
-      relative path that matches ``cloud_synced_files.file_path`` form
-      (the canonical key the producer hook + reader both use).
+    * Compute the event directory (``os.path.dirname``); skip if the
+      dir vanished between the inotify event and this call.
+    * Canonicalise the **event directory** (not the event.json path)
+      via :func:`_canonical_rel_path_from_local` so the resulting
+      ``source_path`` matches the bulk producer's form exactly.
     * Compute the event size by summing the file sizes in the event
-      directory; falls back to ``0`` if the dir vanished between the
-      inotify event and this call.
+      directory; falls back to ``0`` if the dir vanished mid-call.
     * Call :func:`_enqueue_event_to_pipeline` with
       ``priority=PRIORITY_LIVE_EVENT`` and a ``producer`` tag that
       identifies this code path in pipeline forensics.
 
     Returns the count of newly-inserted rows. Re-enqueues that hit
-    the UNIQUE index (the same event.json processed twice) count as
-    no-ops.
+    the UNIQUE index (the same event dir processed twice, OR a bulk
+    discovery beat us to it) count as no-ops.
 
     Resource budget: this helper does NOT spawn a thread, NOT touch
     rclone, NOT open any heavy library. The whole call is one fsync
@@ -995,16 +1009,22 @@ def enqueue_live_event_from_event_json(event_json_paths: List[str]) -> int:
             event_dir = os.path.dirname(event_json_path)
             if not event_dir or not os.path.isdir(event_dir):
                 continue
-            # Canonical relative path. Must match the form
-            # _discover_events uses so the UNIQUE index dedups
-            # correctly when the bulk producer also discovers the row.
+            # Canonical relative path of the event DIRECTORY (not the
+            # event.json file). MUST match _discover_events'
+            # canonical_cloud_path("SentryClips/<dir>") form exactly so
+            # the UNIQUE index dedups. See "Canonical key" docstring
+            # section above for why a mismatch causes double-upload.
             try:
-                rel_path = _canonical_rel_path_from_local(event_json_path)
+                rel_path = _canonical_rel_path_from_local(event_dir)
             except Exception:  # noqa: BLE001
-                # Fallback to a basename-relative path; the bulk
-                # producer's normalization will eventually merge if
-                # the canonical helper recovers later.
-                rel_path = os.path.basename(event_json_path)
+                # Fall back to bulk-pass: skip enqueue rather than
+                # risk a malformed key colliding with unrelated rows.
+                logger.warning(
+                    "PR-F4 live-event hook: canonical key derivation "
+                    "raised for %r — deferring to next bulk pass",
+                    event_dir,
+                )
+                continue
             if not rel_path:
                 continue
             try:
@@ -1055,7 +1075,7 @@ def enqueue_live_event_from_event_json(event_json_paths: List[str]) -> int:
 
 
 def _canonical_rel_path_from_local(local_path: str) -> str:
-    """Convert an absolute local file path to the canonical relative
+    """Convert an absolute local file/dir path to the canonical relative
     POSIX form used by ``cloud_synced_files.file_path`` and the
     ``pipeline_queue.source_path`` UNIQUE index.
 
@@ -1065,6 +1085,17 @@ def _canonical_rel_path_from_local(local_path: str) -> str:
     trigger source. Mirrors what :func:`_discover_events` does at
     discovery time so the producer hook's path collides on the UNIQUE
     index instead of producing two rows.
+
+    The basename-only fallback at the end exists so an unexpected path
+    shape never crashes the file_watcher thread, but it is **not** a
+    safe canonical key — every unrelated unknown path would collapse
+    onto the same row (the basename of every event dir is just the
+    timestamp prefix, so all events from the same minute across all
+    sources would alias). The fallback therefore logs at WARNING so a
+    misconfigured deploy (RO_MNT_DIR / ARCHIVE_DIR pointing somewhere
+    the watcher isn't actually reading from) is visible in
+    ``journalctl -u gadget_web``; the row is still enqueued so the
+    bulk pass can correct the canonical form on the next discovery.
     """
     candidates: List[str] = []
     try:
@@ -1094,9 +1125,17 @@ def _canonical_rel_path_from_local(local_path: str) -> str:
             # Force POSIX separators so Linux paths match canonical
             # form even on Windows test runs.
             return rel.replace(os.sep, '/')
-    # Last resort: just return the basename so we don't crash. The
-    # bulk producer will still discover the file via _discover_events
-    # and enqueue the canonical row.
+    # Last resort: return the basename so we don't crash the watcher
+    # thread. NOT a safe canonical key — see docstring above. Logged
+    # at WARNING because silent collapse would otherwise look like
+    # successful enqueues that secretly all alias the same row.
+    logger.warning(
+        "PR-F4 live-event hook: %r is not under any known TeslaCam "
+        "root (checked %r). Falling back to basename %r — UNIQUE-index "
+        "collisions are likely. Verify RO_MNT_DIR and ARCHIVE_DIR "
+        "config values match where the file_watcher is observing.",
+        abs_path, candidates, os.path.basename(abs_path),
+    )
     return os.path.basename(abs_path)
 
 
@@ -1292,12 +1331,17 @@ def _peek_pipeline_cloud_pending(limit: int = _CLOUD_SHADOW_PEEK_CANDIDATE_COUNT
 # ``cloud_synced_files`` UPDATE on success) without any new wiring.
 #
 # Cloud rows are mirrored from ``cloud_synced_files`` LAZILY: the
-# producer in ``_discover_events`` enqueues with ``source_path = <rel
-# event.json path>`` but does NOT set ``legacy_id`` because the
-# corresponding ``cloud_synced_files`` row is not created until upload
-# starts. That's why the release-claim helper uses the cloud-specific
-# :func:`pqs.release_pipeline_claim_by_source_path` (added by PR-F3)
-# instead of the legacy_id-keyed PR-F1 helper.
+# producer in ``_discover_events`` enqueues with
+# ``source_path = canonical_cloud_path("SentryClips/<event_dir>")`` (the
+# event DIRECTORY, NOT the event.json file inside it) but does NOT set
+# ``legacy_id`` because the corresponding ``cloud_synced_files`` row is
+# not created until upload starts. The PR-F4 live-event hook
+# (:func:`enqueue_live_event_from_event_json`) MUST canonicalise the
+# event directory the same way so the ``idx_pipeline_source_unique``
+# index dedups across producers — see that helper's "Canonical key"
+# docstring section. That's also why the release-claim helper uses the
+# cloud-specific :func:`pqs.release_pipeline_claim_by_source_path`
+# (added by PR-F3) instead of the legacy_id-keyed PR-F1 helper.
 # ---------------------------------------------------------------------------
 
 # Default upper bound on the number of rows claimed in a single drain

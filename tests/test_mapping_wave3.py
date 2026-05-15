@@ -390,6 +390,283 @@ class TestV14ToV15Migration:
         }
         assert set(_COLD_COLUMNS) == expected
 
+    def test_migration_uses_single_table_rewrite_path(self, tmp_path,
+                                                       caplog):
+        """Issue #188: the v14→v15 migration MUST drop the cold columns
+        via a single table-rewrite, not 8x ``ALTER TABLE DROP COLUMN``.
+
+        We assert the new path by checking the dedicated log message
+        the rewrite helper emits. The legacy fallback path also runs
+        through ``_drop_cold_cols_via_per_column_alter`` but emits a
+        different message — so a future regression that ditches the
+        rewrite for the legacy path will fail this test.
+        """
+        import logging
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=3, cold_data=True)
+
+        with caplog.at_level(logging.INFO,
+                             logger='services.mapping_migrations'):
+            _init_db(db_path).close()
+
+        rewrite_msgs = [r for r in caplog.records
+                        if 'single-table-rewrite complete' in r.message]
+        fallback_msgs = [r for r in caplog.records
+                         if 'falling back to per-column DROP COLUMN' in r.message]
+        assert rewrite_msgs, (
+            "Expected the single-rewrite path to fire and emit its "
+            "completion log line. Got records: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        assert not fallback_msgs, (
+            "Fallback path should not fire on a clean v14 DB. Records: "
+            f"{[r.message for r in caplog.records]}"
+        )
+
+    def test_migration_preserves_waypoints_cold_fk(self, tmp_path):
+        """Issue #188: the single-rewrite must preserve the
+        ``waypoints_cold.id REFERENCES waypoints(id) ON DELETE CASCADE``
+        foreign key. Verify via ``PRAGMA foreign_key_check`` (no rows
+        means clean) AND by checking ``PRAGMA foreign_key_list`` on
+        ``waypoints_cold`` after the migration.
+        """
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=3, cold_data=True)
+
+        conn = _init_db(db_path)
+        try:
+            # FK enforcement is on at connection-open in _init_db.
+            # Any violation would manifest here.
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            assert violations == [], (
+                f"Migration left FK violations: "
+                f"{[tuple(v) for v in violations]}"
+            )
+
+            # Verify the FK is still defined on waypoints_cold
+            # pointing at waypoints(id) with CASCADE.
+            fk_list = conn.execute(
+                "PRAGMA foreign_key_list(waypoints_cold)"
+            ).fetchall()
+            assert len(fk_list) == 1, (
+                f"waypoints_cold should have exactly one FK; got: "
+                f"{[dict(r) for r in fk_list]}"
+            )
+            fk = dict(fk_list[0])
+            assert fk['table'] == 'waypoints'
+            assert fk['from'] == 'id'
+            assert fk['to'] == 'id'
+            assert fk['on_delete'] == 'CASCADE'
+        finally:
+            conn.close()
+
+    def test_migration_preserves_waypoints_data_after_rewrite(self,
+                                                               tmp_path):
+        """Issue #188: the single-rewrite MUST preserve every
+        ``waypoints`` row's hot data — id, trip_id, timestamp, lat,
+        lon, heading, speed_mps, autopilot_state, video_path,
+        frame_offset. A bug in the INSERT INTO ... SELECT column
+        list would silently drop or rearrange data.
+        """
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        # Seed 5 waypoints so we get coverage of multiple ids /
+        # offsets.
+        _seed_waypoints(db_path, trip_id=1, count=5, cold_data=True)
+
+        # Snapshot hot-column values BEFORE the migration.
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        try:
+            before = {r['id']: dict(r) for r in c.execute(
+                "SELECT id, trip_id, timestamp, lat, lon, heading, "
+                "speed_mps, autopilot_state, video_path, frame_offset "
+                "FROM waypoints ORDER BY id"
+            )}
+        finally:
+            c.close()
+        assert len(before) == 5
+
+        # Migrate.
+        _init_db(db_path).close()
+
+        # Snapshot hot-column values AFTER the migration.
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        try:
+            after = {r['id']: dict(r) for r in c.execute(
+                "SELECT id, trip_id, timestamp, lat, lon, heading, "
+                "speed_mps, autopilot_state, video_path, frame_offset "
+                "FROM waypoints ORDER BY id"
+            )}
+        finally:
+            c.close()
+
+        assert before == after, (
+            f"Single-rewrite changed hot-column values. "
+            f"Before: {before}\nAfter: {after}"
+        )
+
+    def test_migration_cascade_delete_still_fires_after_rewrite(
+        self, tmp_path,
+    ):
+        """Issue #188: the FK ``waypoints_cold.id REFERENCES
+        waypoints(id) ON DELETE CASCADE`` must still trigger a
+        cascade after the rewrite. If the rewrite somehow lost the
+        ``ON DELETE CASCADE`` clause, deleting a waypoint would
+        leave an orphan in waypoints_cold (silent data corruption).
+        """
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=3, cold_data=True)
+
+        conn = _init_db(db_path)
+        try:
+            # All 3 cold rows backfilled from the seed.
+            assert conn.execute(
+                "SELECT COUNT(*) AS c FROM waypoints_cold"
+            ).fetchone()['c'] == 3
+
+            # Delete waypoint id=2 — cascade should remove the
+            # matching cold row.
+            conn.execute("DELETE FROM waypoints WHERE id = 2")
+            conn.commit()
+
+            remaining = conn.execute(
+                "SELECT id FROM waypoints_cold ORDER BY id"
+            ).fetchall()
+            ids = [r['id'] for r in remaining]
+            assert 2 not in ids, (
+                f"Expected ON DELETE CASCADE to remove waypoints_cold "
+                f"row for id=2; ids remaining: {ids}"
+            )
+            assert ids == [1, 3]
+        finally:
+            conn.close()
+
+    def test_migration_recreates_all_waypoints_indexes(self, tmp_path):
+        """Issue #188: the rewrite drops the table (and its indexes);
+        the caller MUST recreate every index. Verify all 5 indexes
+        the v15 schema declares are present after the migration.
+        """
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=2, cold_data=True)
+
+        conn = _init_db(db_path)
+        try:
+            indexes = {
+                r['name'] for r in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='index' AND tbl_name='waypoints' "
+                    "AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+            expected = {
+                'idx_waypoints_trip',
+                'idx_waypoints_coords',
+                'idx_waypoints_timestamp',
+                'idx_waypoints_video_path',
+                'idx_waypoints_trip_video',
+            }
+            missing = expected - indexes
+            assert not missing, (
+                f"Missing indexes after rewrite: {missing}. "
+                f"Present: {indexes}"
+            )
+        finally:
+            conn.close()
+
+    def test_migration_preserves_autoincrement_state(self, tmp_path):
+        """Issue #188: the rewrite preserves ``INTEGER PRIMARY KEY
+        AUTOINCREMENT`` semantics, including ``sqlite_sequence``
+        state. A new INSERT after the migration must allocate an id
+        strictly greater than the highest pre-migration id (not
+        recycle a deleted-row id, which AUTOINCREMENT explicitly
+        prevents).
+        """
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=5, cold_data=True)
+
+        # Delete the last waypoint pre-migration so the id is gone.
+        c = sqlite3.connect(db_path)
+        try:
+            c.execute("DELETE FROM waypoints WHERE id = 5")
+            c.commit()
+        finally:
+            c.close()
+
+        # Run the migration.
+        conn = _init_db(db_path)
+        try:
+            # AUTOINCREMENT must NOT recycle id=5; the next insert
+            # gets id=6 (if sqlite_sequence is preserved across the
+            # rewrite).
+            conn.execute(
+                "INSERT INTO waypoints (trip_id, timestamp, lat, lon) "
+                "VALUES (1, '2026-05-04T08:00:99', 37.0, -122.0)"
+            )
+            new_id = conn.execute(
+                "SELECT last_insert_rowid() AS i"
+            ).fetchone()['i']
+            assert new_id >= 6, (
+                f"AUTOINCREMENT recycled an id (got {new_id}, "
+                f"expected >= 6) — sqlite_sequence was lost across "
+                f"the rewrite."
+            )
+        finally:
+            conn.close()
+
+    def test_migration_fallback_path_runs_when_rewrite_raises(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """Issue #188: the defensive try/except around the rewrite
+        must fall back to the legacy 8x DROP COLUMN path when the
+        rewrite raises. Patch the rewrite helper to raise an
+        ``OperationalError`` and verify the legacy path runs.
+        """
+        import logging
+        from services import mapping_migrations as mm
+
+        db_path = str(tmp_path / "geodata.db")
+        _build_v14_db(db_path)
+        _seed_waypoints(db_path, trip_id=1, count=2, cold_data=True)
+
+        def boom(_conn):
+            raise sqlite3.OperationalError(
+                "synthetic rewrite failure for fallback test"
+            )
+
+        monkeypatch.setattr(mm, '_drop_cold_cols_via_rewrite', boom)
+
+        with caplog.at_level(logging.WARNING,
+                             logger='services.mapping_migrations'):
+            _init_db(db_path).close()
+
+        fallback_msgs = [r for r in caplog.records
+                         if 'falling back to per-column DROP COLUMN'
+                         in r.message]
+        assert fallback_msgs, (
+            "Fallback path did not run despite the rewrite raising. "
+            f"Records: {[r.message for r in caplog.records]}"
+        )
+
+        # Schema must have ended up at v15 (the fallback path
+        # successfully dropped the cold cols, so no rollback).
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        try:
+            assert _waypoints_has_cold_columns(c) is False
+            ver = c.execute(
+                "SELECT MAX(version) AS v FROM schema_version"
+            ).fetchone()['v']
+            assert ver == _SCHEMA_VERSION
+        finally:
+            c.close()
+
 
 # ---------------------------------------------------------------------------
 # query_trip_route — must return ONLY hot columns (and ``id`` for

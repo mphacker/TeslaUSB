@@ -1095,6 +1095,72 @@ def _enqueue_indexed(dest_path: str, db_path: str) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #197 — inline SEI parse + sidecar write (Wave 4 PR-E2 / Phase I.3)
+# ---------------------------------------------------------------------------
+# Default indexer sample_rate. Must match
+# ``mapping_service.index_single_file``'s default so the sidecar the
+# archive worker writes is consumable by the indexer without falling
+# back to a fresh mmap parse. If you change one, change the other.
+_INLINE_SEI_SAMPLE_RATE = 30
+
+
+def _write_inline_sei_sidecar(dest_path: str) -> None:
+    """Walk the just-copied file's SEI and persist a sidecar JSON.
+
+    Called once per successful ``_atomic_copy``, BEFORE
+    ``_enqueue_indexed`` adds the file to the indexer queue. The
+    file's pages are still hot in the kernel page cache (we just
+    wrote them), so the SEI walk costs only the protobuf decode
+    work — no extra SD reads. The sidecar lets the indexer's later
+    pass skip both the ``mvhd`` walk and the ``extract_sei_messages``
+    walk, eliminating ~2x file reads per clip and the associated
+    page-cache miss.
+
+    Best-effort: any failure is logged at WARNING and silently
+    swallowed. The downstream indexer's existing fallback path
+    (``read_sei_sidecar`` returning None → mmap parse) handles
+    missing sidecars transparently, so a sidecar-write failure
+    only loses the I/O optimization, never data.
+    """
+    try:
+        from services import sei_parser
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "inline-sei: sei_parser unavailable for %s (%s); "
+            "skipping sidecar write", dest_path, e,
+        )
+        return
+
+    try:
+        sidecar = sei_parser.write_sei_sidecar(
+            dest_path, sample_rate=_INLINE_SEI_SAMPLE_RATE,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "inline-sei: sidecar write threw on %s "
+            "(indexer will mmap-parse): %s", dest_path, e,
+        )
+        return
+
+    if sidecar is None:
+        # write_sei_sidecar already logged the failure cause at
+        # DEBUG/WARNING; no need to double-log here.
+        return
+
+    mvhd_repr = (
+        sidecar.mvhd_creation_time_utc.isoformat()
+        if sidecar.mvhd_creation_time_utc is not None
+        else 'unknown'
+    )
+    logger.info(
+        "inline-sei: parsed %d messages (%d GPS, %d no-GPS), "
+        "mvhd=%s for %s",
+        sidecar.sei_count, len(sidecar.messages),
+        sidecar.no_gps_count, mvhd_repr, os.path.basename(dest_path),
+    )
+
+
 def _apply_low_priority() -> None:
     """Drop the calling thread to lowest CPU + I/O priority (Linux only).
 
@@ -1855,6 +1921,25 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
 
     # Success — mark copied AND enqueue into the indexer queue.
     archive_queue.mark_copied(row_id, dest_path, db_path=db_path)
+    # Issue #197: while the just-copied file's pages are still hot
+    # in the kernel page cache, parse SEI + mvhd inline and write
+    # a sidecar JSON. The indexer's later pass reads the sidecar
+    # instead of mmap-parsing the .mp4 a second time.
+    #
+    # Best-effort by contract — wrap in defense-in-depth try/except
+    # so a sidecar bug or unexpected exception never marks the
+    # archive failed. The helper has its own internal try/except,
+    # but a future refactor (or a monkeypatched stub in tests)
+    # could let an exception escape; this outer guard preserves
+    # the "sidecar is an optimization, never a correctness gate"
+    # contract regardless.
+    try:
+        _write_inline_sei_sidecar(dest_path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "inline-sei: sidecar write escaped helper for %s "
+            "(indexer will mmap-parse): %s", dest_path, e,
+        )
     _enqueue_indexed(dest_path, db_path)
     return 'copied'
 

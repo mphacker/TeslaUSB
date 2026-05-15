@@ -815,3 +815,260 @@ class TestStreamingMmapParser:
         # by the finally block even though mmap failed.
         video_file.unlink()
         assert not video_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue #197 — SEI sidecar JSON cache
+# ---------------------------------------------------------------------------
+# Validates that the inline-SEI sidecar:
+#   * round-trips correctly (write then read returns the same data)
+#   * is invalidated by schema-version mismatch
+#   * is invalidated by .mp4 size or mtime drift (the integrity guards)
+#   * is invalidated by malformed JSON / missing keys
+#   * gracefully returns None on any failure (never raises)
+#   * the indexer's _index_video happily consumes a sidecar
+#   * delete_sei_sidecar removes the sidecar file
+# ---------------------------------------------------------------------------
+
+class TestSeiSidecar:
+    """Issue #197 — inline-SEI sidecar JSON cache."""
+
+    def _make_test_mp4(self, n_frames=5):
+        payloads = [
+            _make_sei_protobuf(
+                lat=37.7749 + i * 0.0001,
+                lon=-122.4194 + i * 0.0001,
+                speed=20.0 + i,
+            )
+            for i in range(n_frames)
+        ]
+        return TestExtractSeiMessages()._make_synthetic_mp4(payloads)
+
+    def test_sidecar_path_for_returns_sibling_path(self):
+        from services import sei_parser
+        assert sei_parser.sidecar_path_for(
+            "/foo/bar/clip.mp4"
+        ) == "/foo/bar/clip.mp4.sei.json"
+
+    def test_write_then_read_roundtrip(self, tmp_path):
+        """Writing a sidecar then reading it back must return the
+        exact same parsed messages — the round-trip is lossless."""
+        from services import sei_parser
+
+        mp4 = tmp_path / "rt.mp4"
+        mp4.write_bytes(self._make_test_mp4(5))
+
+        wrote = sei_parser.write_sei_sidecar(
+            str(mp4), sample_rate=1,
+        )
+        assert wrote is not None, "write_sei_sidecar returned None"
+        assert wrote.sei_count == 5
+        assert wrote.no_gps_count == 0
+        assert len(wrote.messages) == 5
+
+        loaded = sei_parser.read_sei_sidecar(str(mp4))
+        assert loaded is not None
+        assert loaded.schema_version == sei_parser.SIDECAR_SCHEMA_VERSION
+        assert loaded.sample_rate == 1
+        assert loaded.sei_count == 5
+        assert loaded.no_gps_count == 0
+        assert len(loaded.messages) == 5
+        for orig, got in zip(wrote.messages, loaded.messages):
+            assert abs(orig.latitude_deg - got.latitude_deg) < 1e-6
+            assert abs(orig.longitude_deg - got.longitude_deg) < 1e-6
+            assert abs(
+                orig.vehicle_speed_mps - got.vehicle_speed_mps
+            ) < 1e-6
+            assert orig.frame_index == got.frame_index
+            assert orig.gear_state == got.gear_state
+
+    def test_sidecar_lives_at_canonical_path(self, tmp_path):
+        from services import sei_parser
+
+        mp4 = tmp_path / "loc.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+
+        sei_parser.write_sei_sidecar(str(mp4), sample_rate=1)
+        assert (tmp_path / "loc.mp4.sei.json").is_file()
+
+    def test_read_missing_sidecar_returns_none(self, tmp_path):
+        from services import sei_parser
+
+        mp4 = tmp_path / "missing.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+        # Note: no write_sei_sidecar call; sidecar doesn't exist.
+        assert sei_parser.read_sei_sidecar(str(mp4)) is None
+
+    def test_read_malformed_json_returns_none(self, tmp_path):
+        """Garbage in the sidecar must NOT crash the reader; the
+        caller's fallback path takes over."""
+        from services import sei_parser
+
+        mp4 = tmp_path / "malformed.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+        sidecar_path = sei_parser.sidecar_path_for(str(mp4))
+        with open(sidecar_path, 'w', encoding='utf-8') as f:
+            f.write("{not valid json")
+
+        assert sei_parser.read_sei_sidecar(str(mp4)) is None
+
+    def test_read_missing_required_key_returns_none(self, tmp_path):
+        """A sidecar missing a required key (e.g. ``messages``) is
+        unusable; reader returns None."""
+        import json
+        from services import sei_parser
+
+        mp4 = tmp_path / "no_key.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+        sidecar_path = sei_parser.sidecar_path_for(str(mp4))
+        with open(sidecar_path, 'w', encoding='utf-8') as f:
+            json.dump({"schema_version": 1}, f)  # everything else missing
+
+        assert sei_parser.read_sei_sidecar(str(mp4)) is None
+
+    def test_schema_version_mismatch_returns_none(self, tmp_path):
+        """A sidecar from an older schema must NOT be accepted by
+        the current reader — fallback to mmap parse instead."""
+        import json
+        from services import sei_parser
+
+        mp4 = tmp_path / "old.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+        sei_parser.write_sei_sidecar(str(mp4), sample_rate=1)
+
+        sidecar_path = sei_parser.sidecar_path_for(str(mp4))
+        with open(sidecar_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        # Bump schema_version to a value the current code doesn't
+        # know about. ``SIDECAR_SCHEMA_VERSION`` is the live constant.
+        payload['schema_version'] = sei_parser.SIDECAR_SCHEMA_VERSION + 99
+        with open(sidecar_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+
+        assert sei_parser.read_sei_sidecar(str(mp4)) is None
+
+    def test_size_drift_invalidates_sidecar(self, tmp_path):
+        """If the .mp4 was overwritten with a different size, the
+        sidecar's cached parse is stale — reader returns None."""
+        from services import sei_parser
+
+        mp4 = tmp_path / "drift.mp4"
+        mp4.write_bytes(self._make_test_mp4(3))
+        sei_parser.write_sei_sidecar(str(mp4), sample_rate=1)
+
+        # Append bytes — size now differs from cached.
+        with open(str(mp4), 'ab') as f:
+            f.write(b'\x00' * 1024)
+
+        assert sei_parser.read_sei_sidecar(str(mp4)) is None
+
+    def test_mtime_drift_invalidates_sidecar(self, tmp_path):
+        """If the .mp4's mtime changed (e.g. user re-encoded the
+        clip in place keeping the same size), invalidate."""
+        import json
+        from services import sei_parser
+
+        mp4 = tmp_path / "mtime.mp4"
+        mp4.write_bytes(self._make_test_mp4(3))
+        sei_parser.write_sei_sidecar(str(mp4), sample_rate=1)
+
+        sidecar_path = sei_parser.sidecar_path_for(str(mp4))
+        with open(sidecar_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        # Force the recorded mtime to a fake value far from the
+        # real one. Simulates the .mp4 having been overwritten
+        # AFTER the sidecar was written but with the same size.
+        payload['video_mtime_unix'] = payload['video_mtime_unix'] + 999.0
+        with open(sidecar_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+
+        assert sei_parser.read_sei_sidecar(str(mp4)) is None
+
+    def test_required_sample_rate_mismatch_returns_none(self, tmp_path):
+        """When a consumer needs a finer/different rate than what
+        was cached, reader returns None and caller falls back."""
+        from services import sei_parser
+
+        mp4 = tmp_path / "rate.mp4"
+        mp4.write_bytes(self._make_test_mp4(5))
+        sei_parser.write_sei_sidecar(str(mp4), sample_rate=30)
+
+        # Cache holds rate=30; consumer demands rate=1.
+        assert sei_parser.read_sei_sidecar(
+            str(mp4), required_sample_rate=1,
+        ) is None
+        # Matching rate does work.
+        loaded = sei_parser.read_sei_sidecar(
+            str(mp4), required_sample_rate=30,
+        )
+        assert loaded is not None
+        assert loaded.sample_rate == 30
+
+    def test_write_returns_none_on_missing_video(self, tmp_path):
+        from services import sei_parser
+        assert sei_parser.write_sei_sidecar(
+            str(tmp_path / "does_not_exist.mp4"),
+        ) is None
+
+    def test_delete_sei_sidecar_removes_file(self, tmp_path):
+        from services import sei_parser
+
+        mp4 = tmp_path / "del.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+        sei_parser.write_sei_sidecar(str(mp4), sample_rate=1)
+        sidecar_path = sei_parser.sidecar_path_for(str(mp4))
+        assert os.path.isfile(sidecar_path)
+
+        removed = sei_parser.delete_sei_sidecar(str(mp4))
+        assert removed is True
+        assert not os.path.isfile(sidecar_path)
+
+        # Idempotent — second call is a no-op (no exception).
+        again = sei_parser.delete_sei_sidecar(str(mp4))
+        assert again is False
+
+    def test_atomic_write_no_tmp_file_left(self, tmp_path):
+        """Sidecar write must clean up its tempfile, regardless of
+        success or failure of os.fsync."""
+        from services import sei_parser
+
+        mp4 = tmp_path / "atomic.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+        sei_parser.write_sei_sidecar(str(mp4), sample_rate=1)
+
+        # No leftover .tmp anywhere in the directory.
+        leftovers = list(tmp_path.glob("*.tmp"))
+        assert leftovers == [], (
+            f"Sidecar write left tempfile(s): {leftovers}"
+        )
+
+    def test_message_video_path_re_injected_on_load(self, tmp_path):
+        """``video_path`` is intentionally NOT persisted; the loader
+        re-injects the live path. Verify both halves of the contract."""
+        import json
+        from services import sei_parser
+
+        mp4 = tmp_path / "vp.mp4"
+        mp4.write_bytes(self._make_test_mp4(2))
+        sei_parser.write_sei_sidecar(str(mp4), sample_rate=1)
+
+        # The persisted messages must NOT carry video_path.
+        sidecar_path = sei_parser.sidecar_path_for(str(mp4))
+        with open(sidecar_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        for m in payload['messages']:
+            assert 'video_path' not in m, (
+                "video_path leaked into the persisted sidecar — "
+                "would pin sidecar to the original path and break "
+                "if the file is renamed."
+            )
+
+        # The loader must re-inject the live path on every message.
+        loaded = sei_parser.read_sei_sidecar(str(mp4))
+        assert loaded is not None
+        for m in loaded.messages:
+            assert m.video_path == str(mp4)
+
+
+import os  # noqa: E402  — used by TestSeiSidecar.test_delete_sei_sidecar_removes_file
+

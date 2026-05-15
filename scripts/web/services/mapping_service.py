@@ -701,11 +701,32 @@ def _resolve_recording_time(video_path: str) -> Optional[str]:
     size — mvhd is the truth.
     """
     filename_ts = _timestamp_from_filename(video_path)
-    try:
-        mvhd_dt = _get_sei_parser().extract_mvhd_creation_time(video_path)
-    except Exception as e:  # defensive: mvhd reader is best-effort
-        logger.debug("mvhd read failed for %s: %s", video_path, e)
-        mvhd_dt = None
+    parser = _get_sei_parser()
+    mvhd_dt: Optional[datetime] = None
+    sidecar = None
+    # Issue #197: prefer the sidecar's cached mvhd if present —
+    # avoids one full mmap walk of the .mp4. The sidecar is
+    # written by archive_worker right after _atomic_copy while
+    # the file's pages are still hot in the page cache; reading
+    # it back is a 5-50 KB JSON load instead of a 30-80 MB mmap.
+    if hasattr(parser, 'read_sei_sidecar'):
+        try:
+            sidecar = parser.read_sei_sidecar(video_path)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "sidecar read failed for %s (%s); "
+                "falling back to mmap mvhd parse",
+                video_path, e,
+            )
+            sidecar = None
+    if sidecar is not None and sidecar.mvhd_creation_time_utc is not None:
+        mvhd_dt = sidecar.mvhd_creation_time_utc
+    else:
+        try:
+            mvhd_dt = parser.extract_mvhd_creation_time(video_path)
+        except Exception as e:  # defensive: mvhd reader is best-effort
+            logger.debug("mvhd read failed for %s: %s", video_path, e)
+            mvhd_dt = None
 
     if mvhd_dt is None:
         return filename_ts
@@ -1287,16 +1308,55 @@ def _index_video(
             )
             return IndexResult(IndexOutcome.ALREADY_INDEXED)
 
-    # Extract SEI messages
+    # Extract SEI messages — prefer the issue #197 sidecar JSON cache
+    # over a fresh mmap walk when available. The sidecar is written by
+    # archive_worker right after _atomic_copy while the file's pages
+    # are still hot in the page cache; reading it back is a 5-50 KB
+    # JSON load instead of a 30-80 MB mmap (the .mp4 has likely been
+    # evicted from cache by the time the indexer runs minutes later).
     waypoint_dicts = []
     sei_count = 0
     no_gps_count = 0
+    sidecar = None
+    if hasattr(parser, 'read_sei_sidecar'):
+        try:
+            sidecar = parser.read_sei_sidecar(
+                video_path, required_sample_rate=sample_rate,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "sidecar read failed for %s (%s); "
+                "falling back to mmap parse", rel_path, e,
+            )
+            sidecar = None
+
     try:
-        for msg in parser.extract_sei_messages(video_path, sample_rate=sample_rate):
-            sei_count += 1
-            if not msg.has_gps:
-                no_gps_count += 1
-                continue
+        if sidecar is not None:
+            logger.info(
+                "loaded sidecar parse for %s "
+                "(%d GPS messages, sample_rate=%d, cached path)",
+                rel_path, len(sidecar.messages), sidecar.sample_rate,
+            )
+            sei_count = sidecar.sei_count
+            no_gps_count = sidecar.no_gps_count
+            msg_iter = sidecar.messages
+        else:
+            msg_iter = parser.extract_sei_messages(
+                video_path, sample_rate=sample_rate,
+            )
+
+        for msg in msg_iter:
+            if sidecar is None:
+                # Sidecar path already accounted for sei_count /
+                # no_gps_count + filtered out no-GPS messages, so the
+                # tally is only meaningful on the mmap fallback path.
+                sei_count += 1
+                if not msg.has_gps:
+                    no_gps_count += 1
+                    continue
+            # NOTE: sidecar.messages is pre-filtered to GPS-bearing
+            # only (see ``write_sei_sidecar``), so the ``has_gps``
+            # check above is redundant when ``sidecar is not None``.
 
             # Compute absolute timestamp from file timestamp + frame offset
             if file_timestamp:
@@ -1843,6 +1903,21 @@ def purge_deleted_videos(db_path: str, teslacam_path: Optional[str] = None,
                     (path,),
                 )
                 purged_files += cur.rowcount
+
+                # 1a) Issue #197: delete the SEI sidecar JSON if any.
+                #     The sidecar is no longer useful (the .mp4 it
+                #     describes is gone) and would otherwise become
+                #     dead weight in the directory listing. Best-
+                #     effort; failure is logged at DEBUG inside the
+                #     helper.
+                try:
+                    from services import sei_parser as _sei
+                    _sei.delete_sei_sidecar(path)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(
+                        "purge: sidecar delete failed for %s: %s",
+                        path, e,
+                    )
 
                 # 2) waypoints / detected_events: NULL out video_path
                 #    instead of deleting the row. The GPS coordinates,

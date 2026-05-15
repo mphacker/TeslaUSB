@@ -165,6 +165,15 @@ _retention_state: Dict[str, Any] = {
 # Always read/written under ``_state_lock``.
 _retention_running: bool = False
 
+# PR #213 review finding 3 — behavior-change visibility. Set True on
+# the first ``_run_capacity_prune`` call where at least one knob is
+# enabled, so we emit a single INFO landmark per process showing the
+# active thresholds. Existing installs whose ``config.yaml`` carries
+# ``free_space_target_pct: 10`` (the previous "saved-but-not-enforced"
+# default) will see this line in ``journalctl`` the first time the
+# capacity pass actually runs, rather than silently start auto-pruning.
+_capacity_thresholds_logged: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Public lifecycle API
@@ -953,6 +962,14 @@ def _run_retention_prune(archive_root: str, db_path: str,
                 if mtime > cutoff:
                     continue
                 age_days = (time.time() - mtime) / 86400.0
+                # PR #213 review finding 2 — every iteration past the
+                # cutoff (whether deleted, kept, or skipped) must
+                # count toward the yield budget so an unsynced
+                # backlog (extended WiFi outage where every old file
+                # is kept-pending-cloud) can't hold the 'retention'
+                # lock for the entire scan. Bumped BEFORE the
+                # cloud-pending ``continue``.
+                files_since_yield += 1
                 if enforce_cloud_check:
                     if not _is_synced_to_cloud(path, archive_root, cloud_db_path):
                         summary['kept_unsynced_count'] += 1
@@ -961,6 +978,25 @@ def _run_retention_prune(archive_root: str, db_path: str,
                             "(age=%.1f days) — not yet synced to cloud",
                             path, age_days,
                         )
+                        if files_since_yield >= (
+                            _RETENTION_YIELD_EVERY_N_FILES
+                        ):
+                            files_since_yield = 0
+                            if not _yield_retention_lock():
+                                lock_held = False
+                                summary['status'] = 'yielded_lost_lock'
+                                logger.info(
+                                    "archive_retention: yielded "
+                                    "'retention' lock after %d "
+                                    "scanned/%d deleted and could not "
+                                    "reacquire within %.1fs — bailing "
+                                    "with partial summary; next tick "
+                                    "will resume",
+                                    summary['scanned'],
+                                    summary['deleted_count'],
+                                    _RETENTION_COORDINATOR_WAIT_SECONDS,
+                                )
+                                break
                         continue
                 freed = _delete_one_mp4(path, db_path)
                 if freed > 0 or not os.path.exists(path):
@@ -974,7 +1010,6 @@ def _run_retention_prune(archive_root: str, db_path: str,
                 # Issue #208: yield the lock every N files so a 5904-clip
                 # sweep doesn't block the indexer / archive worker for
                 # 5+ minutes (max_hold = 311 s observed pre-fix).
-                files_since_yield += 1
                 if files_since_yield >= _RETENTION_YIELD_EVERY_N_FILES:
                     files_since_yield = 0
                     if not _yield_retention_lock():
@@ -1056,9 +1091,20 @@ def _run_capacity_prune(archive_root: str, db_path: str) -> Dict[str, Any]:
 
     Acquires its own ``task_coordinator`` 'retention' slot — the
     time-based pass has already released its slot by the time this
-    runs. Caller MUST still hold the ``_retention_running`` flag for
-    the lifetime of this call (the duplicate-trigger guard).
+    runs.
+
+    Issue #91 / PR #213 review: each prune function (this one and
+    :func:`_run_retention_prune`) self-manages the
+    ``_retention_running`` duplicate-trigger guard. The flag is set
+    BEFORE ``acquire_task`` and cleared in the outer ``finally``.
+    Worst-case race: a second caller arriving during the microsecond
+    gap between the time-based pass releasing the flag and this
+    pass acquiring it would run a second time-based pass; this
+    capacity pass would then short-circuit with ``status=
+    'already_running'``. The next watchdog tick re-runs the capacity
+    pass — system state stays consistent, no enforcement is lost.
     """
+    global _retention_running
     started = time.time()
     summary: Dict[str, Any] = {
         'free_space_target_pct': 0,
@@ -1070,6 +1116,15 @@ def _run_capacity_prune(archive_root: str, db_path: str) -> Dict[str, Any]:
         'capacity_deleted_count': 0,
         'capacity_freed_bytes': 0,
         'capacity_kept_unsynced_count': 0,
+        # PR #213 review finding 5: this bucket counts BOTH
+        # ``DeleteOutcome.PROTECTED`` (e.g. ``*.img`` guard hit) AND
+        # ``DeleteOutcome.ERROR`` (transient OSError on stat/remove).
+        # The shared bucket comes from routing through
+        # ``_delete_one_mp4``, which collapses both outcomes to
+        # ``freed=0``. ``_delete_one_mp4`` already logs each at
+        # WARNING with the outcome enum, so an admin can distinguish
+        # the two in the journal even though the summary collapses
+        # them.
         'capacity_kept_protected_count': 0,
         'capacity_scanned': 0,
         'duration_seconds': 0.0,
@@ -1086,148 +1141,258 @@ def _run_capacity_prune(archive_root: str, db_path: str) -> Dict[str, Any]:
     if free_target == 0 and max_size_gb == 0:
         # Both knobs disabled — nothing to do. Skip the walk + lock
         # acquire entirely so a watchdog tick on a disabled config is
-        # essentially free.
+        # essentially free. Skip the duplicate-trigger guard too —
+        # there's no work to short-circuit.
         summary['duration_seconds'] = round(time.time() - started, 3)
         return summary
 
-    delete_unsynced = _resolve_delete_unsynced()
-    cloud_configured = _is_cloud_configured()
-    cloud_db_path = _resolve_cloud_db_path() if cloud_configured else None
-    enforce_cloud_check = (not delete_unsynced) and cloud_configured
-
-    # Snapshot before. Walk the tree once so a 5000-clip archive doesn't
-    # statvfs+walk twice.
-    du_before = _safe_disk_usage(archive_root)
-    if du_before is not None and du_before.total > 0:
-        summary['free_space_pct_before'] = round(
-            (du_before.free / du_before.total) * 100.0, 2,
+    # PR #213 review finding 3 — emit a one-time landmark showing the
+    # resolved thresholds so an operator who upgraded from the
+    # saved-but-not-enforced era sees in ``journalctl`` exactly when
+    # auto-prune started and at what levels. Only logged when at
+    # least one knob is enabled; cheap path above never reaches this.
+    global _capacity_thresholds_logged
+    with _state_lock:
+        first_run = not _capacity_thresholds_logged
+        if first_run:
+            _capacity_thresholds_logged = True
+    if first_run:
+        free_desc = (
+            f"{free_target}%" if free_target > 0 else "disabled"
         )
-    files: list = []
-    total_bytes = 0
-    for path, mtime, size in _iter_archive_mp4_files(archive_root):
-        files.append((path, mtime, size))
-        total_bytes += size
-        summary['capacity_scanned'] += 1
-    summary['archive_size_bytes_before'] = total_bytes
-
-    cap_bytes = max_size_gb * 1024 * 1024 * 1024 if max_size_gb > 0 else 0
-    over_cap = cap_bytes > 0 and total_bytes > cap_bytes
-    under_target = False
-    if free_target > 0 and du_before is not None and du_before.total > 0:
-        free_pct = (du_before.free / du_before.total) * 100.0
-        under_target = free_pct < float(free_target)
-
-    if not over_cap and not under_target:
-        # Both thresholds satisfied — leave free_space_pct_after /
-        # archive_size_bytes_after equal to the before values so the
-        # summary always reflects the current state.
-        summary['free_space_pct_after'] = summary['free_space_pct_before']
-        summary['archive_size_bytes_after'] = total_bytes
-        summary['duration_seconds'] = round(time.time() - started, 3)
-        return summary
-
-    # Sort oldest-first so we delete the least-valuable footage first.
-    files.sort(key=lambda t: t[1])
-
-    # Acquire our own coordinator slot. The time-based pass released
-    # its slot before returning; we have to take it back to delete.
-    acquired = task_coordinator.acquire_task(
-        _RETENTION_COORDINATOR_TASK,
-        wait_seconds=_RETENTION_COORDINATOR_WAIT_SECONDS,
-    )
-    if not acquired:
+        cap_desc = (
+            f"{max_size_gb} GiB" if max_size_gb > 0 else "disabled"
+        )
         logger.info(
-            "archive_capacity: skipped — could not acquire 'retention' "
-            "task slot within %.1fs",
-            _RETENTION_COORDINATOR_WAIT_SECONDS,
+            "archive_capacity: enforcement active — "
+            "free_space_target=%s, max_archive_size=%s "
+            "(first capacity-pass run since process start; "
+            "cloud-pending clips are preserved; *.img files are "
+            "protected; trips/waypoints/events ROWS survive any "
+            "deletion via purge_deleted_videos)",
+            free_desc, cap_desc,
         )
-        summary['status'] = 'lock_unavailable'
-        summary['free_space_pct_after'] = summary['free_space_pct_before']
-        summary['archive_size_bytes_after'] = total_bytes
+
+    # PR #213 review finding 1 — duplicate-trigger guard. Mirror the
+    # pattern in :func:`_run_retention_prune` so a Settings UI
+    # double-click that arrives in the microsecond gap between the
+    # two passes can't spawn a second concurrent capacity walk.
+    # Set BEFORE ``acquire_task`` so the second caller short-circuits
+    # without waiting on the lock.
+    with _state_lock:
+        if _retention_running:
+            summary['status'] = 'already_running'
+            summary['duration_seconds'] = round(time.time() - started, 3)
+            logger.info(
+                "archive_capacity: skipped — another prune is already "
+                "in flight (returning status='already_running')"
+            )
+            return summary
+        _retention_running = True
+
+    try:
+        delete_unsynced = _resolve_delete_unsynced()
+        cloud_configured = _is_cloud_configured()
+        cloud_db_path = (
+            _resolve_cloud_db_path() if cloud_configured else None
+        )
+        enforce_cloud_check = (not delete_unsynced) and cloud_configured
+
+        # Snapshot before. Walk the tree once so a 5000-clip archive
+        # doesn't statvfs+walk twice.
+        du_before = _safe_disk_usage(archive_root)
+        if du_before is not None and du_before.total > 0:
+            summary['free_space_pct_before'] = round(
+                (du_before.free / du_before.total) * 100.0, 2,
+            )
+        elif free_target > 0:
+            # PR #213 review finding 4 — surface the silent
+            # degradation. Without statvfs we can't compute
+            # target_free_bytes, so the free-space sub-pass is
+            # effectively disabled this tick. Operator deserves a
+            # journal landmark.
+            logger.warning(
+                "archive_capacity: free-space target %d%% configured "
+                "but statvfs(%s) returned None — free-space sub-pass "
+                "is being skipped this tick",
+                free_target, archive_root,
+            )
+
+        files: list = []
+        total_bytes = 0
+        for path, mtime, size in _iter_archive_mp4_files(archive_root):
+            files.append((path, mtime, size))
+            total_bytes += size
+            summary['capacity_scanned'] += 1
+        summary['archive_size_bytes_before'] = total_bytes
+
+        cap_bytes = (
+            max_size_gb * 1024 * 1024 * 1024 if max_size_gb > 0 else 0
+        )
+        over_cap = cap_bytes > 0 and total_bytes > cap_bytes
+        under_target = False
+        if free_target > 0 and du_before is not None and du_before.total > 0:
+            free_pct = (du_before.free / du_before.total) * 100.0
+            under_target = free_pct < float(free_target)
+
+        if not over_cap and not under_target:
+            # Both thresholds satisfied — leave free_space_pct_after /
+            # archive_size_bytes_after equal to the before values so
+            # the summary always reflects the current state.
+            summary['free_space_pct_after'] = (
+                summary['free_space_pct_before']
+            )
+            summary['archive_size_bytes_after'] = total_bytes
+            summary['duration_seconds'] = round(time.time() - started, 3)
+            return summary
+
+        # Sort oldest-first so we delete the least-valuable footage
+        # first.
+        files.sort(key=lambda t: t[1])
+
+        # Acquire our own coordinator slot. The time-based pass
+        # released its slot before returning; we have to take it back
+        # to delete.
+        acquired = task_coordinator.acquire_task(
+            _RETENTION_COORDINATOR_TASK,
+            wait_seconds=_RETENTION_COORDINATOR_WAIT_SECONDS,
+        )
+        if not acquired:
+            logger.info(
+                "archive_capacity: skipped — could not acquire "
+                "'retention' task slot within %.1fs",
+                _RETENTION_COORDINATOR_WAIT_SECONDS,
+            )
+            summary['status'] = 'lock_unavailable'
+            summary['free_space_pct_after'] = (
+                summary['free_space_pct_before']
+            )
+            summary['archive_size_bytes_after'] = total_bytes
+            summary['duration_seconds'] = round(time.time() - started, 3)
+            return summary
+
+        current_total = total_bytes
+        current_free = du_before.free if du_before is not None else 0
+        disk_total = du_before.total if du_before is not None else 0
+        target_free_bytes = (
+            int((float(free_target) / 100.0) * disk_total)
+            if free_target > 0 and disk_total > 0
+            else 0
+        )
+
+        lock_held = True
+        files_since_yield = 0
+        try:
+            for path, _mtime, size in files:
+                cap_done = cap_bytes == 0 or current_total <= cap_bytes
+                free_done = (
+                    target_free_bytes == 0
+                    or current_free >= target_free_bytes
+                )
+                if cap_done and free_done:
+                    break
+
+                # PR #213 review finding 2 — every iteration must
+                # count toward the yield budget, regardless of which
+                # branch handles the file. Bumping the counter BEFORE
+                # the cloud-pending ``continue`` ensures an unsynced
+                # backlog (extended WiFi outage) can't hold the
+                # 'retention' lock for thousands of skipped files.
+                files_since_yield += 1
+
+                if enforce_cloud_check:
+                    if not _is_synced_to_cloud(
+                        path, archive_root, cloud_db_path,
+                    ):
+                        summary['capacity_kept_unsynced_count'] += 1
+                        logger.warning(
+                            "archive_capacity: KEPT %s past capacity "
+                            "threshold — not yet synced to cloud",
+                            path,
+                        )
+                        if files_since_yield >= (
+                            _RETENTION_YIELD_EVERY_N_FILES
+                        ):
+                            files_since_yield = 0
+                            if not _yield_retention_lock():
+                                lock_held = False
+                                summary['status'] = 'yielded_lost_lock'
+                                logger.info(
+                                    "archive_capacity: yielded "
+                                    "'retention' lock after %d "
+                                    "deleted and could not reacquire "
+                                    "within %.1fs — bailing with "
+                                    "partial summary; next tick will "
+                                    "resume",
+                                    summary['capacity_deleted_count'],
+                                    _RETENTION_COORDINATOR_WAIT_SECONDS,
+                                )
+                                break
+                        continue
+
+                freed = _delete_one_mp4(path, db_path)
+                if freed > 0 or not os.path.exists(path):
+                    summary['capacity_deleted_count'] += 1
+                    summary['capacity_freed_bytes'] += freed
+                    current_total -= size
+                    current_free += freed
+                    logger.info(
+                        "archive_capacity: removed %s (freed=%d "
+                        "bytes, size_after=%d, free_after=%d)",
+                        path, freed, current_total, current_free,
+                    )
+                else:
+                    # safe_delete_archive_video refused (PROTECTED:
+                    # ``*.img`` guard / path-outside-root) OR raised
+                    # an OSError (ERROR). Both collapse to ``freed=0
+                    # AND file still exists`` here. ``_delete_one_mp4``
+                    # already logged each at WARNING with the outcome
+                    # enum — see comment on
+                    # ``capacity_kept_protected_count`` initialiser
+                    # above.
+                    summary['capacity_kept_protected_count'] += 1
+
+                if files_since_yield >= _RETENTION_YIELD_EVERY_N_FILES:
+                    files_since_yield = 0
+                    if not _yield_retention_lock():
+                        lock_held = False
+                        summary['status'] = 'yielded_lost_lock'
+                        logger.info(
+                            "archive_capacity: yielded 'retention' "
+                            "lock after %d deleted and could not "
+                            "reacquire within %.1fs — bailing with "
+                            "partial summary; next tick will resume",
+                            summary['capacity_deleted_count'],
+                            _RETENTION_COORDINATOR_WAIT_SECONDS,
+                        )
+                        break
+        finally:
+            if lock_held:
+                task_coordinator.release_task(
+                    _RETENTION_COORDINATOR_TASK,
+                )
+
+        if summary['capacity_deleted_count'] > 0:
+            du_after = _safe_disk_usage(archive_root)
+            if du_after is not None and du_after.total > 0:
+                summary['free_space_pct_after'] = round(
+                    (du_after.free / du_after.total) * 100.0, 2,
+                )
+            summary['archive_size_bytes_after'] = current_total
+        else:
+            summary['free_space_pct_after'] = (
+                summary['free_space_pct_before']
+            )
+            summary['archive_size_bytes_after'] = total_bytes
+
         summary['duration_seconds'] = round(time.time() - started, 3)
         return summary
-
-    current_total = total_bytes
-    current_free = du_before.free if du_before is not None else 0
-    disk_total = du_before.total if du_before is not None else 0
-    target_free_bytes = (
-        int((float(free_target) / 100.0) * disk_total)
-        if free_target > 0 and disk_total > 0
-        else 0
-    )
-
-    lock_held = True
-    files_since_yield = 0
-    try:
-        for path, _mtime, size in files:
-            cap_done = cap_bytes == 0 or current_total <= cap_bytes
-            free_done = (
-                target_free_bytes == 0 or current_free >= target_free_bytes
-            )
-            if cap_done and free_done:
-                break
-
-            if enforce_cloud_check:
-                if not _is_synced_to_cloud(
-                    path, archive_root, cloud_db_path,
-                ):
-                    summary['capacity_kept_unsynced_count'] += 1
-                    logger.warning(
-                        "archive_capacity: KEPT %s past capacity "
-                        "threshold — not yet synced to cloud",
-                        path,
-                    )
-                    continue
-
-            freed = _delete_one_mp4(path, db_path)
-            if freed > 0 or not os.path.exists(path):
-                summary['capacity_deleted_count'] += 1
-                summary['capacity_freed_bytes'] += freed
-                current_total -= size
-                current_free += freed
-                logger.info(
-                    "archive_capacity: removed %s (freed=%d bytes, "
-                    "size_after=%d, free_after=%d)",
-                    path, freed, current_total, current_free,
-                )
-            else:
-                # safe_delete_archive_video refused (e.g. .img guard,
-                # path-outside-root, or stat failure). Count it so an
-                # admin can see we tried but were correctly blocked.
-                summary['capacity_kept_protected_count'] += 1
-
-            files_since_yield += 1
-            if files_since_yield >= _RETENTION_YIELD_EVERY_N_FILES:
-                files_since_yield = 0
-                if not _yield_retention_lock():
-                    lock_held = False
-                    summary['status'] = 'yielded_lost_lock'
-                    logger.info(
-                        "archive_capacity: yielded 'retention' lock "
-                        "after %d deleted and could not reacquire "
-                        "within %.1fs — bailing with partial summary; "
-                        "next tick will resume",
-                        summary['capacity_deleted_count'],
-                        _RETENTION_COORDINATOR_WAIT_SECONDS,
-                    )
-                    break
     finally:
-        if lock_held:
-            task_coordinator.release_task(_RETENTION_COORDINATOR_TASK)
-
-    if summary['capacity_deleted_count'] > 0:
-        du_after = _safe_disk_usage(archive_root)
-        if du_after is not None and du_after.total > 0:
-            summary['free_space_pct_after'] = round(
-                (du_after.free / du_after.total) * 100.0, 2,
-            )
-        summary['archive_size_bytes_after'] = current_total
-    else:
-        summary['free_space_pct_after'] = summary['free_space_pct_before']
-        summary['archive_size_bytes_after'] = total_bytes
-
-    summary['duration_seconds'] = round(time.time() - started, 3)
-    return summary
+        # Always clear the duplicate-trigger guard, even on exception
+        # or short-circuited acquire_task. Otherwise a single failed
+        # capacity prune would lock out every subsequent attempt.
+        with _state_lock:
+            _retention_running = False
 
 
 def force_prune_now() -> Dict[str, Any]:

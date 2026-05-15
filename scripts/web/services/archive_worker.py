@@ -110,6 +110,16 @@ _BACKOFF_SLEEP_SECONDS = 0.5
 # importable (unit-test envs without the full app); the runtime value
 # is read by ``_stable_write_age_seconds()`` at call time.
 _STABLE_WRITE_AGE_SECONDS = 5.0
+# RecentClips-specific stable-write age. Tesla writes RecentClips in
+# ~60-second segments; the moov atom is appended at the END of the
+# segment, so a copy snapshot taken any time before Tesla closes the
+# file is missing moov and fails ``_verify_destination_complete``.
+# Wait at least this long after the last mtime change before attempting
+# the copy. Sentry/Saved event clips are written atomically when the
+# event ends (no "still being written" window) and keep the base
+# threshold above. Configurable via
+# ``archive_queue.recent_clips_stable_write_age_seconds``.
+_RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS = 90.0
 # task_coordinator wait when acquiring the archive slot. The archive
 # worker is a periodic priority task (per the task_coordinator
 # docstring) — it BLOCK-waits for a slot rather than yielding cyclically.
@@ -744,6 +754,28 @@ class _CopyTimeBudgetExceeded(OSError):
     """
 
 
+class _CopyMoovIncomplete(OSError):
+    """Raised by ``_atomic_copy`` when the destination MP4 verifier
+    fails because Tesla is still writing the source segment.
+
+    Distinct from ordinary ``OSError`` so the caller can defer (release
+    the claim, refresh expected_size/expected_mtime, return 'pending')
+    WITHOUT bumping ``attempts``. Tesla writes RecentClips in ~60-second
+    segments and appends the ``moov`` atom only when it closes the
+    file; any copy snapshotted before that close legitimately has
+    ftyp + partial mdat + no moov. Treating these as failed attempts
+    dead-letters perfectly recoverable rows after 3 retries even though
+    the file is fine — Tesla just hadn't finished yet.
+
+    A genuinely truncated file (Tesla crashed mid-write, bad SD block)
+    will continue to fail moov-verify forever, but the natural
+    backstop is the source-rotation path: Tesla overwrites RecentClips
+    slots when the circular buffer wraps, expected_size/expected_mtime
+    drifts, and the row eventually transitions through
+    ``mark_source_gone`` when the producer's stat() resolves None.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Phase 2.4 — moov-atom verification after copy
 # ---------------------------------------------------------------------------
@@ -1014,7 +1046,7 @@ def _atomic_copy(source_path: str, dest_path: str,
         # so .ts segments and other non-MP4 archives are unaffected.
         if dest_path.lower().endswith('.mp4'):
             if not _verify_destination_complete(partial):
-                raise OSError(
+                raise _CopyMoovIncomplete(
                     f"destination MP4 missing moov or mdat box — "
                     f"source may still be writing: {source_path}"
                 )
@@ -1589,6 +1621,45 @@ def _stable_write_age_seconds() -> float:
         return _STABLE_WRITE_AGE_SECONDS
 
 
+def _recent_clips_stable_write_age_seconds() -> float:
+    """Return RecentClips-specific stable-write threshold.
+
+    Tesla writes RecentClips in ~60-second segments and only appends
+    the ``moov`` atom when it closes the segment. The base 5-second
+    gate is far too short — a 5-second mtime-stable window mid-segment
+    is normal SDIO behavior and tricks the worker into copying a
+    half-written file. 90 seconds guarantees Tesla has finished any
+    in-progress segment before we copy.
+
+    Sentry/Saved event clips are written atomically when the event
+    completes (no mid-write window) and use the base threshold.
+
+    Configurable via ``archive_queue.recent_clips_stable_write_age_seconds``.
+    """
+    try:
+        from config import (
+            ARCHIVE_QUEUE_RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS,
+        )
+        return float(ARCHIVE_QUEUE_RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS)
+    except Exception:  # noqa: BLE001
+        return _RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS
+
+
+def _stable_write_age_seconds_for(row: Dict[str, Any]) -> float:
+    """Return the stable-write threshold for ``row``.
+
+    RecentClips need a much longer settle window than Sentry/Saved
+    because Tesla writes them in ~60-second segments with the moov
+    atom appended at the end. Returns ``max(base, recent_threshold)``
+    so a config override that pushes the base above the RecentClips
+    default still applies.
+    """
+    base = _stable_write_age_seconds()
+    if _is_recent_clips_priority(row):
+        return max(base, _recent_clips_stable_write_age_seconds())
+    return base
+
+
 # ---------------------------------------------------------------------------
 # Issue #167 sub-deliverable 2 — skip-at-source for stationary RecentClips
 # Issue #176 — fast-peek tuning
@@ -1835,7 +1906,13 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
         or (expected_mtime is not None and expected_mtime != st.st_mtime)
     )
     needs_settling_check = metadata_drifted or metadata_unknown
-    if age < _stable_write_age_seconds() and needs_settling_check:
+    # Per-row stable-write threshold: RecentClips need ~90s (Tesla
+    # writes them in ~60s segments and appends the moov atom only at
+    # close); Sentry/Saved use the base 5s (they're written atomically
+    # when the event ends). Without this distinction, the worker
+    # copies half-written RecentClips, fails moov-verify, retries,
+    # and dead-letters perfectly recoverable rows after 3 attempts.
+    if age < _stable_write_age_seconds_for(row) and needs_settling_check:
         # Update the snapshot so the next pick uses fresh values.
         archive_queue.release_claim(
             row_id,
@@ -1957,6 +2034,36 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
             source_path, e,
         )
         archive_queue.release_claim(row_id, db_path=db_path)
+        return 'pending'
+    except _CopyMoovIncomplete as e:
+        # Tesla writes RecentClips in ~60-second segments and only
+        # appends the moov atom when it closes the file. A copy
+        # snapshotted before that close legitimately has ftyp +
+        # partial mdat + no moov; the file isn't broken, Tesla just
+        # hasn't finished. Release back to pending WITHOUT bumping
+        # attempts (so we never dead_letter a perfectly recoverable
+        # row) and refresh expected_size/expected_mtime so the next
+        # pick lands AFTER the per-row stable-write gate
+        # (``_stable_write_age_seconds_for``) has had a chance to fire.
+        # Genuinely truncated files still terminate naturally: Tesla
+        # rotates RecentClips slots, the producer's stat() resolves
+        # to a different size/mtime, and the row reaches
+        # ``mark_source_gone`` when the file finally vanishes.
+        logger.info(
+            "archive_worker: moov-incomplete on %s "
+            "(source still being written); deferring without "
+            "burning an attempt", source_path,
+        )
+        st = _safe_stat(source_path)
+        if st is None:
+            archive_queue.mark_source_gone(row_id, db_path=db_path)
+            return 'source_gone'
+        archive_queue.release_claim(
+            row_id,
+            expected_size=st.st_size,
+            expected_mtime=st.st_mtime,
+            db_path=db_path,
+        )
         return 'pending'
     except (OSError, shutil.Error) as e:
         new_status = archive_queue.mark_failed(

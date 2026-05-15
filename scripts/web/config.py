@@ -286,6 +286,9 @@ ARCHIVE_QUEUE_PER_FILE_TIME_BUDGET_SECONDS = float(
 ARCHIVE_QUEUE_STABLE_WRITE_AGE_SECONDS = float(
     _archive_queue.get('stable_write_age_seconds', 5.0)
 )
+ARCHIVE_QUEUE_RECENT_CLIPS_STABLE_WRITE_AGE_SECONDS = float(
+    _archive_queue.get('recent_clips_stable_write_age_seconds', 90.0)
+)
 ARCHIVE_QUEUE_STALE_CLAIM_MAX_AGE_SECONDS = float(
     _archive_queue.get('stale_claim_max_age_seconds', 600.0)
 )

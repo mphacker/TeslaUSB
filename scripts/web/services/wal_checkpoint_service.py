@@ -27,6 +27,18 @@ fairness signals.
 Configuration is via constants below; no user-facing knobs. The
 30-second cadence and TRUNCATE mode are calibrated to land < 50 ms
 checkpoints on a Pi Zero 2 W when the WAL is small.
+
+Connection caching (issue #189): the per-DB SQLite connection is
+opened once and reused across ticks. Each tick re-stats the DB file
+and re-opens the connection if the inode/device changed (i.e. the
+DB was recreated by a corruption-recovery import or test fixture),
+so we never hold a stale FD pointing at a deleted/replaced file.
+``check_same_thread=False`` + a per-connection lock lets the daemon
+thread and the synchronous test-only ``_trigger_for_test`` share
+the cached handle safely. Any sqlite error during a checkpoint
+evicts the cached connection so the next tick re-opens a fresh one
+— defensive against transient I/O failures leaving a dead handle
+in the cache forever.
 """
 
 from __future__ import annotations
@@ -36,7 +48,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +64,123 @@ _stop_event = threading.Event()
 _state_lock = threading.Lock()
 _db_paths: List[str] = []
 _started = False
+
+
+# ---------------------------------------------------------------------------
+# Cached SQLite connections (issue #189).
+# ---------------------------------------------------------------------------
+
+
+class _CachedConn(NamedTuple):
+    """Cache entry for one DB. ``ino``/``dev`` are the file-identity
+    snapshot taken when the connection was opened; the next tick
+    invalidates the cache if either changes (i.e. the DB file was
+    recreated under us). ``lock`` serialises concurrent access from
+    the daemon thread and the test-only ``_trigger_for_test``."""
+
+    conn: sqlite3.Connection
+    ino: int
+    dev: int
+    lock: threading.Lock
+
+
+_conn_cache: Dict[str, _CachedConn] = {}
+_conn_cache_lock = threading.Lock()
+
+
+def _get_or_open_cached_conn(db_path: str) -> Optional[_CachedConn]:
+    """Return a cached connection for ``db_path``, opening or
+    re-opening it if the file's inode/device changed since the last
+    open (DB recreated by rebuild/recovery/test fixture).
+
+    Returns ``None`` if the path is missing or the open fails — the
+    caller treats it as a skip, identical to the pre-#189 behaviour.
+
+    On Linux (production target) ``st_ino`` is the canonical file
+    identity; on Windows NTFS (developer machines / CI) ``st_ino``
+    is the file index, which is also stable across renames. We
+    capture ``st_dev`` too so a same-inode collision across
+    different mounts/devices doesn't fool the invalidation check.
+    """
+    try:
+        st = os.stat(db_path)
+    except OSError:
+        return None
+    cur_ino, cur_dev = st.st_ino, st.st_dev
+    with _conn_cache_lock:
+        cached = _conn_cache.get(db_path)
+        if cached is not None:
+            if cached.ino == cur_ino and cached.dev == cur_dev:
+                return cached
+            # Inode/device change → DB file was replaced under us.
+            # Close the stale handle (which may still point at the
+            # deleted-but-not-yet-unlinked old inode) and re-open
+            # against the new file. INFO-level so a rebuild_index
+            # operator can see the cache turnover in the journal.
+            logger.info(
+                "wal_checkpoint: %s inode changed "
+                "(was ino=%s dev=%s, now ino=%s dev=%s); "
+                "re-opening cached connection",
+                os.path.basename(db_path),
+                cached.ino, cached.dev, cur_ino, cur_dev,
+            )
+            try:
+                cached.conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _conn_cache.pop(db_path, None)
+        # Open a fresh connection. Same conservative pragmas as the
+        # pre-#189 per-tick path so we don't grow the page cache or
+        # mmap the file (the checkpoint is a streaming read of the
+        # WAL, not a random-access query).
+        try:
+            conn = sqlite3.connect(
+                db_path, timeout=2.0, check_same_thread=False,
+            )
+            conn.execute("PRAGMA mmap_size=0")
+            conn.execute("PRAGMA cache_size=-256")
+        except sqlite3.Error as e:
+            logger.warning(
+                "wal_checkpoint: could not open cached connection "
+                "to %s: %s",
+                os.path.basename(db_path), e,
+            )
+            return None
+        new_cached = _CachedConn(
+            conn=conn, ino=cur_ino, dev=cur_dev,
+            lock=threading.Lock(),
+        )
+        _conn_cache[db_path] = new_cached
+        return new_cached
+
+
+def _evict_cached_conn(db_path: str) -> None:
+    """Drop the cached connection for ``db_path`` and close it.
+
+    Called from :func:`_checkpoint_one`'s error handler so a
+    transient sqlite failure (locked, IO error, etc.) doesn't leave
+    a wedged connection in the cache. The next tick will re-open
+    fresh.
+    """
+    with _conn_cache_lock:
+        cached = _conn_cache.pop(db_path, None)
+    if cached is not None:
+        try:
+            cached.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _close_all_cached_conns() -> None:
+    """Close every cached connection. Called from :func:`stop`."""
+    with _conn_cache_lock:
+        entries = list(_conn_cache.items())
+        _conn_cache.clear()
+    for _db_path, cached in entries:
+        try:
+            cached.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _is_coordinator_idle() -> bool:
@@ -87,26 +216,23 @@ def _checkpoint_one(db_path: str) -> None:
     :func:`services.mapping_migrations._init_db` so we don't re-mmap
     or grow the page cache.
 
-    Design note (PR #187 Info #8): we deliberately open a fresh
-    ``sqlite3.connect()`` per tick per DB rather than caching a
-    module-level connection. Per-tick cost on a Pi Zero 2 W is ~5 ms
-    × 2 DBs × every 30 s ≈ 0.05 % CPU — negligible. The benefit of
-    fresh connections is that we carry no long-lived state across
-    DB-file lifecycle events: a future feature that swaps
-    ``geodata.db`` after a corruption-recovery import (or the v15
-    migration's table-rebuild path) cannot leave us holding a stale
-    file descriptor. If profiling ever shows this loop as hot, see
-    follow-up issue #189 for the cached-connection design with
-    proper inode-invalidation hook.
+    Issue #189: the SQLite connection is now cached across ticks
+    via :func:`_get_or_open_cached_conn`. Inode-change invalidation
+    handles the corruption-recovery / rebuild-index lifecycle
+    (where the DB file is replaced under us) without leaving a
+    stale FD. Any sqlite error during the checkpoint evicts the
+    cached entry so the next tick re-opens fresh.
     """
     if not db_path or not os.path.isfile(db_path):
         return
-    conn = None
+    cached = _get_or_open_cached_conn(db_path)
+    if cached is None:
+        return
     try:
-        conn = sqlite3.connect(db_path, timeout=2.0)
-        conn.execute("PRAGMA mmap_size=0")
-        conn.execute("PRAGMA cache_size=-256")  # 256 KB — checkpoint reads are streaming
-        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        with cached.lock:
+            row = cached.conn.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
         if row is not None:
             busy, log_pages, checkpointed = row[0], row[1], row[2]
             if checkpointed and checkpointed >= _LOG_NONZERO_THRESHOLD_PAGES:
@@ -120,23 +246,20 @@ def _checkpoint_one(db_path: str) -> None:
                     os.path.basename(db_path), busy,
                 )
     except sqlite3.Error as e:
-        # Don't escalate — the next tick will retry. This is a
-        # bookkeeping optimization; errors here never affect
-        # correctness.
+        # Evict the cached connection so the next tick re-opens a
+        # fresh one — defensive against the connection being left
+        # in a wedged state by a transient I/O error.
+        _evict_cached_conn(db_path)
         logger.debug(
-            "wal_checkpoint: %s sqlite error: %s",
+            "wal_checkpoint: %s sqlite error (cached conn evicted): %s",
             os.path.basename(db_path), e,
         )
     except Exception as e:  # noqa: BLE001
+        _evict_cached_conn(db_path)
         logger.warning(
-            "wal_checkpoint: unexpected failure on %s: %s", db_path, e,
+            "wal_checkpoint: unexpected failure on %s "
+            "(cached conn evicted): %s", db_path, e,
         )
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def _run_loop() -> None:
@@ -206,13 +329,15 @@ def stop(timeout: float = 5.0) -> None:
     """Signal the loop to exit and join up to ``timeout`` seconds.
 
     Used by tests; in production the daemon thread dies with the
-    process.
+    process. Always closes every cached SQLite connection so a
+    test-driven start/stop cycle leaks no FDs.
     """
     global _started
     _stop_event.set()
     if _thread is not None:
         _thread.join(timeout=timeout)
     _started = False
+    _close_all_cached_conns()
 
 
 def is_running() -> bool:
@@ -223,3 +348,4 @@ def is_running() -> bool:
 def _trigger_for_test(db_path: str) -> None:
     """Synchronous checkpoint of one DB. Test-only entry point."""
     _checkpoint_one(db_path)
+

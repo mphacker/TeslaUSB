@@ -245,6 +245,7 @@
                     <option value="s3"{% if provider == 's3' %} selected{% endif %}>Amazon S3</option>
                     <option value="b2"{% if provider == 'b2' %} selected{% endif %}>Backblaze B2</option>
                     <option value="wasabi"{% if provider == 'wasabi' %} selected{% endif %}>Wasabi</option>
+                    <option value="generic"{% if provider == 'generic' %} selected{% endif %}>NAS / Custom rclone (SFTP, WebDAV, SMB, FTP, ...)</option>
                 </select>
             </div>
 
@@ -319,6 +320,94 @@
                     </button>
                     <button type="button" class="action-btn" onclick="testConnection()" id="testConnBtnSetup">Test Connection</button>
                     <span id="testConnResultSetup" style="font-size: var(--text-sm); color: var(--text-secondary); align-self: center;"></span>
+                </div>
+            </div>
+
+            {# ---------------------------------------------------------- #}
+            {# Generic rclone remote (issue #165) — NAS / SFTP / WebDAV   #}
+            {# / SMB / FTP / S3 / B2 / Wasabi / Azure Blob / Swift.       #}
+            {# Two input modes: Form (guided fields) or Paste             #}
+            {# (an entire ``rclone.conf`` block).                         #}
+            {# ---------------------------------------------------------- #}
+            <div id="genericSetup" style="display: none;">
+                <div class="info-box" style="margin-bottom: var(--space-3);">
+                    <strong>Custom rclone backend</strong>
+                    <p style="margin: 6px 0 0; font-size: var(--text-sm); line-height: 1.5; color: var(--text-secondary);">
+                        Connect to a NAS or any rclone-supported storage backend. Use the
+                        <strong>Form</strong> tab for guided setup, or the <strong>Paste</strong> tab if you
+                        already have an <code>rclone.conf</code> block from
+                        <code>rclone config</code>.
+                    </p>
+                </div>
+
+                <div class="tab-bar" role="tablist" style="display: flex; gap: 4px; border-bottom: 1px solid var(--border-soft); margin-bottom: var(--space-3);">
+                    <button type="button" class="tab-btn active" id="genericFormTab"
+                            role="tab" aria-selected="true" aria-controls="genericFormPane"
+                            onclick="switchGenericTab('form')"
+                            style="padding: 8px 16px; background: none; border: none; border-bottom: 2px solid var(--accent-primary); color: var(--text-primary); cursor: pointer; font-size: 14px; font-weight: 500;">Form</button>
+                    <button type="button" class="tab-btn" id="genericPasteTab"
+                            role="tab" aria-selected="false" aria-controls="genericPastePane"
+                            onclick="switchGenericTab('paste')"
+                            style="padding: 8px 16px; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-secondary); cursor: pointer; font-size: 14px; font-weight: 500;">Paste rclone.conf</button>
+                </div>
+
+                {# ---- Form pane ---- #}
+                <div id="genericFormPane" role="tabpanel" aria-labelledby="genericFormTab">
+                    <div style="margin-bottom: var(--space-3);">
+                        <label for="genericTypeSelect" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Backend type:</label>
+                        <select id="genericTypeSelect" onchange="onGenericTypeChange()"
+                                style="width: 100%; max-width: 360px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 15px;">
+                            <option value="">-- Select backend --</option>
+                            <option value="sftp">SFTP (most NAS units, including Synology / QNAP)</option>
+                            <option value="webdav">WebDAV (Nextcloud, Synology, generic WebDAV)</option>
+                            <option value="smb">SMB / CIFS (Windows share)</option>
+                            <option value="ftp">FTP</option>
+                            <option value="s3">S3-compatible (custom endpoint, MinIO, ...)</option>
+                            <option value="b2">Backblaze B2 (advanced — keys-based)</option>
+                            <option value="wasabi">Wasabi (advanced — keys-based)</option>
+                            <option value="azureblob">Azure Blob Storage</option>
+                            <option value="swift">OpenStack Swift</option>
+                        </select>
+                    </div>
+
+                    <div id="genericFormFields" style="display: none;">
+                        <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0 0 var(--space-2);">
+                            Required fields are marked with <span style="color: var(--error-text);">*</span>.
+                            See the <a href="https://rclone.org/" target="_blank" rel="noopener" style="color: var(--link-color);">rclone docs</a> for what each field means.
+                        </p>
+                        <div id="genericFieldsContainer" style="display: flex; flex-direction: column; gap: var(--space-2); max-width: 480px;"></div>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: var(--space-3);">
+                        <button type="button" class="edit-btn" id="genericFormConnectBtn"
+                                onclick="connectGenericProvider('form')"
+                                style="padding: 10px 20px; font-size: 14px;" disabled>
+                            Save &amp; Connect
+                        </button>
+                        <span id="genericFormResult" style="font-size: var(--text-sm);"></span>
+                    </div>
+                </div>
+
+                {# ---- Paste pane ---- #}
+                <div id="genericPastePane" role="tabpanel" aria-labelledby="genericPasteTab"
+                     style="display: none;">
+                    <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0 0 var(--space-2);">
+                        Paste a complete <code>[remote]</code> block from your existing
+                        <code>~/.config/rclone/rclone.conf</code>. The remote name (in
+                        brackets) is ignored — TeslaUSB always stores it as
+                        <code>teslausb</code>.
+                    </p>
+                    <textarea id="genericPasteInput" rows="8"
+                              placeholder='[my-nas]&#10;type = sftp&#10;host = nas.local&#10;user = pi&#10;pass = AlreadyObscuredBlob...&#10;'
+                              style="width: 100%; max-width: 560px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: var(--space-3);">
+                        <button type="button" class="edit-btn"
+                                onclick="connectGenericProvider('paste')"
+                                style="padding: 10px 20px; font-size: 14px;">
+                            Save &amp; Connect
+                        </button>
+                        <span id="genericPasteResult" style="font-size: var(--text-sm);"></span>
+                    </div>
                 </div>
             </div>
             {% endif %}
@@ -1003,6 +1092,7 @@
 
     var rcloneProviders = ['google-drive', 'onedrive', 'dropbox'];
     var keyProviders = ['s3', 'b2', 'wasabi'];
+    var genericProviders = ['generic'];
     var rcloneCmds = {
         'google-drive': 'rclone authorize "drive"',
         'onedrive':     'rclone authorize "onedrive"',
@@ -1014,15 +1104,116 @@
         'dropbox':      'Dropbox',
     };
 
+    /* Issue #165: per-rclone-backend field schema for the generic
+     * provider's Form tab. Each entry is the displayed label,
+     * placeholder, type (text|password|url|number), required flag,
+     * and the rclone config key it maps to. The flow MUST mirror
+     * services.cloud_rclone_service._GENERIC_RCLONE_TYPES; if a
+     * type is added there, add a schema here. ``obscure`` is the
+     * default obscure-keys list passed to the backend (the route
+     * still applies its own per-backend default if omitted, but
+     * shipping it explicitly keeps the JSON self-describing). */
+    var genericSchemas = {
+        'sftp': {
+            obscure: ['pass'],
+            fields: [
+                {key: 'host',     label: 'Host',         placeholder: 'nas.local',          type: 'text',     required: true},
+                {key: 'port',     label: 'Port',         placeholder: '22',                 type: 'number',   required: false},
+                {key: 'user',     label: 'Username',     placeholder: 'pi',                 type: 'text',     required: true},
+                {key: 'pass',     label: 'Password',     placeholder: '',                   type: 'password', required: false,
+                 hint: 'Leave blank if using a key file. Stored using rclone\u2019s standard obfuscation.'},
+                {key: 'key_file', label: 'Key file path', placeholder: '/home/pi/.ssh/id_ed25519', type: 'text', required: false},
+            ],
+        },
+        'webdav': {
+            obscure: ['pass'],
+            fields: [
+                {key: 'url',    label: 'URL',      placeholder: 'https://nextcloud.example.com/remote.php/dav/files/USER/', type: 'url', required: true},
+                {key: 'vendor', label: 'Vendor',   placeholder: 'nextcloud, owncloud, sharepoint, other', type: 'text', required: false,
+                 hint: 'Optional. Common values: nextcloud, owncloud, sharepoint, other.'},
+                {key: 'user',   label: 'Username', placeholder: 'alice', type: 'text', required: false},
+                {key: 'pass',   label: 'Password', placeholder: '',      type: 'password', required: false},
+            ],
+        },
+        'smb': {
+            obscure: ['pass'],
+            fields: [
+                {key: 'host', label: 'Host',        placeholder: 'nas.local', type: 'text',     required: true},
+                {key: 'user', label: 'Username',    placeholder: 'pi',        type: 'text',     required: true},
+                {key: 'pass', label: 'Password',    placeholder: '',          type: 'password', required: false},
+                {key: 'domain', label: 'Domain',    placeholder: 'WORKGROUP', type: 'text',     required: false},
+            ],
+        },
+        'ftp': {
+            obscure: ['pass'],
+            fields: [
+                {key: 'host', label: 'Host',     placeholder: 'ftp.example.com', type: 'text',     required: true},
+                {key: 'port', label: 'Port',     placeholder: '21',              type: 'number',   required: false},
+                {key: 'user', label: 'Username', placeholder: 'user',            type: 'text',     required: true},
+                {key: 'pass', label: 'Password', placeholder: '',                type: 'password', required: false},
+            ],
+        },
+        's3': {
+            obscure: [],
+            fields: [
+                {key: 'provider',          label: 'S3 provider',     placeholder: 'AWS, Wasabi, Minio, Other, ...', type: 'text', required: true,
+                 hint: 'See rclone S3 docs. Use "Other" for self-hosted MinIO and most generic S3-compatible services.'},
+                {key: 'access_key_id',     label: 'Access key ID',   placeholder: 'AKIA...',                  type: 'text',     required: true},
+                {key: 'secret_access_key', label: 'Secret access key', placeholder: '',                       type: 'password', required: true},
+                {key: 'region',            label: 'Region',          placeholder: 'us-east-1',                type: 'text',     required: false},
+                {key: 'endpoint',          label: 'Endpoint URL',    placeholder: 'https://s3.example.com',   type: 'url',      required: false,
+                 hint: 'Required for non-AWS providers; leave blank for AWS S3.'},
+            ],
+        },
+        'b2': {
+            obscure: [],
+            fields: [
+                {key: 'account', label: 'Account ID', placeholder: '...', type: 'text',     required: true},
+                {key: 'key',     label: 'Application key', placeholder: '...', type: 'password', required: true},
+            ],
+        },
+        'wasabi': {
+            obscure: [],
+            fields: [
+                {key: 'provider',          label: 'S3 provider',     placeholder: 'Wasabi',                       type: 'text',     required: true},
+                {key: 'access_key_id',     label: 'Access key ID',   placeholder: '',                             type: 'text',     required: true},
+                {key: 'secret_access_key', label: 'Secret access key', placeholder: '',                           type: 'password', required: true},
+                {key: 'region',            label: 'Region',          placeholder: 'us-east-1',                    type: 'text',     required: false},
+                {key: 'endpoint',          label: 'Endpoint URL',    placeholder: 'https://s3.us-east-1.wasabisys.com', type: 'url', required: true},
+            ],
+        },
+        'azureblob': {
+            obscure: [],
+            fields: [
+                {key: 'account', label: 'Storage account', placeholder: '',  type: 'text',     required: true},
+                {key: 'key',     label: 'Account key',     placeholder: '',  type: 'password', required: false,
+                 hint: 'Either Account key or SAS URL is required.'},
+                {key: 'sas_url', label: 'SAS URL',         placeholder: 'https://...?sv=...', type: 'url', required: false},
+            ],
+        },
+        'swift': {
+            obscure: [],
+            fields: [
+                {key: 'user',     label: 'User',          placeholder: '',           type: 'text',     required: true},
+                {key: 'key',      label: 'API key',       placeholder: '',           type: 'password', required: true},
+                {key: 'auth',     label: 'Auth URL',      placeholder: 'https://...', type: 'url',     required: true},
+                {key: 'tenant',   label: 'Tenant',        placeholder: '',           type: 'text',     required: false},
+                {key: 'region',   label: 'Region',        placeholder: '',           type: 'text',     required: false},
+            ],
+        },
+    };
+
     window.onProviderChange = function() {
         var sel = document.getElementById('providerSelect');
         var val = sel ? sel.value : '';
         var rcloneDiv = document.getElementById('rcloneSetup');
         var keyDiv = document.getElementById('keySetup');
+        var genericDiv = document.getElementById('genericSetup');
         var endpointGroup = document.getElementById('endpointGroup');
 
         if (rcloneDiv) rcloneDiv.style.display = rcloneProviders.indexOf(val) !== -1 ? 'block' : 'none';
         if (keyDiv) keyDiv.style.display = keyProviders.indexOf(val) !== -1 ? 'block' : 'none';
+        if (genericDiv) genericDiv.style.display = genericProviders.indexOf(val) !== -1 ? 'block' : 'none';
 
         /* Update rclone command and provider name */
         if (rcloneProviders.indexOf(val) !== -1) {
@@ -1117,35 +1308,81 @@
         }
     };
 
+    /* Issue #165 fix: S3 / B2 / Wasabi previously POSTed to
+     * ``/api/provider`` which only persisted the provider name and
+     * silently dropped ``credentials``. They now route through the
+     * generic ``/api/connect`` path so the keys actually reach
+     * rclone.conf. ``credBucket`` is collected for the user's
+     * benefit but stored as a private metadata note (``_bucket``) —
+     * rclone S3 backends don't take a bucket in the conf file
+     * itself; the bucket is the first path segment of the remote
+     * (and TeslaUSB sets that via the existing remote-path setting). */
     window.saveProvider = async function() {
         var sel = document.getElementById('providerSelect');
         var provider = sel ? sel.value : '';
         if (!provider) { showToast('Please select a provider.', 'warning'); return; }
 
-        var credentials = {};
-        if (keyProviders.indexOf(provider) !== -1) {
-            credentials.access_key = (document.getElementById('credAccessKey') || {}).value || '';
-            credentials.secret = (document.getElementById('credSecret') || {}).value || '';
-            credentials.region = (document.getElementById('credRegion') || {}).value || '';
-            credentials.bucket = (document.getElementById('credBucket') || {}).value || '';
-            credentials.endpoint = (document.getElementById('credEndpoint') || {}).value || '';
-            if (!credentials.access_key || !credentials.secret || !credentials.bucket) {
-                showToast('Access Key, Secret, and Bucket are required.', 'warning');
-                return;
-            }
+        if (keyProviders.indexOf(provider) === -1) {
+            /* Should not happen — keySetup div is hidden — but be defensive. */
+            showToast('Unsupported provider for this form.', 'warning');
+            return;
+        }
+
+        var accessKey = (document.getElementById('credAccessKey') || {}).value || '';
+        var secret    = (document.getElementById('credSecret')    || {}).value || '';
+        var region    = (document.getElementById('credRegion')    || {}).value || '';
+        var bucket    = (document.getElementById('credBucket')    || {}).value || '';
+        var endpoint  = (document.getElementById('credEndpoint')  || {}).value || '';
+        if (!accessKey || !secret || !bucket) {
+            showToast('Access Key, Secret, and Bucket are required.', 'warning');
+            return;
+        }
+
+        var fields;
+        if (provider === 's3') {
+            fields = {
+                provider: 'Other', access_key_id: accessKey,
+                secret_access_key: secret,
+            };
+            if (region)   fields.region = region;
+            if (endpoint) fields.endpoint = endpoint;
+        } else if (provider === 'wasabi') {
+            fields = {
+                provider: 'Wasabi', access_key_id: accessKey,
+                secret_access_key: secret, endpoint: endpoint || 'https://s3.us-east-1.wasabisys.com',
+            };
+            if (region) fields.region = region;
+        } else { /* b2 */
+            fields = {account: accessKey, key: secret};
         }
 
         try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_save_provider") }}', {
+            var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-Requested-With': 'XMLHttpRequest'
                 },
-                body: JSON.stringify({ provider: provider, credentials: credentials })
+                body: JSON.stringify({
+                    provider: 'generic',
+                    rclone_type: provider,
+                    fields: fields,
+                })
             });
             var data = await resp.json();
             if (data.success) {
+                /* Persist the user's chosen bucket so the existing
+                 * remote-path UI starts at the right place. */
+                if (bucket) {
+                    try {
+                        await fetch('{{ url_for("cloud_archive.api_set_remote_path") }}', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json',
+                                      'X-Requested-With': 'XMLHttpRequest'},
+                            body: JSON.stringify({path: bucket}),
+                        });
+                    } catch (_) { /* non-fatal */ }
+                }
                 showToast('Provider saved. Reloading\u2026', 'success');
                 setTimeout(function() { window.location.reload(); }, 1000);
             } else {
@@ -1153,6 +1390,164 @@
             }
         } catch (e) {
             showToast('Network error.', 'error');
+        }
+    };
+
+    /* ===================================================================
+       Generic rclone remote (issue #165) — Form + Paste tabs
+       =================================================================== */
+
+    window.switchGenericTab = function(which) {
+        var formTab = document.getElementById('genericFormTab');
+        var pasteTab = document.getElementById('genericPasteTab');
+        var formPane = document.getElementById('genericFormPane');
+        var pastePane = document.getElementById('genericPastePane');
+        var isForm = (which === 'form');
+        if (formTab) {
+            formTab.setAttribute('aria-selected', isForm ? 'true' : 'false');
+            formTab.style.borderBottomColor = isForm ? 'var(--accent-primary)' : 'transparent';
+            formTab.style.color = isForm ? 'var(--text-primary)' : 'var(--text-secondary)';
+        }
+        if (pasteTab) {
+            pasteTab.setAttribute('aria-selected', !isForm ? 'true' : 'false');
+            pasteTab.style.borderBottomColor = !isForm ? 'var(--accent-primary)' : 'transparent';
+            pasteTab.style.color = !isForm ? 'var(--text-primary)' : 'var(--text-secondary)';
+        }
+        if (formPane) formPane.style.display = isForm ? 'block' : 'none';
+        if (pastePane) pastePane.style.display = !isForm ? 'block' : 'none';
+    };
+
+    window.onGenericTypeChange = function() {
+        var sel = document.getElementById('genericTypeSelect');
+        var rt = sel ? sel.value : '';
+        var wrap = document.getElementById('genericFormFields');
+        var container = document.getElementById('genericFieldsContainer');
+        var connectBtn = document.getElementById('genericFormConnectBtn');
+        if (!container || !wrap || !connectBtn) return;
+        container.innerHTML = '';
+        if (!rt || !genericSchemas[rt]) {
+            wrap.style.display = 'none';
+            connectBtn.disabled = true;
+            return;
+        }
+        var schema = genericSchemas[rt];
+        schema.fields.forEach(function(f) {
+            var group = document.createElement('div');
+            group.style.display = 'flex';
+            group.style.flexDirection = 'column';
+            group.style.gap = '4px';
+            var label = document.createElement('label');
+            label.htmlFor = 'genericField_' + f.key;
+            label.style.fontWeight = '500';
+            label.style.color = 'var(--text-primary)';
+            label.textContent = f.label;
+            if (f.required) {
+                var star = document.createElement('span');
+                star.textContent = ' *';
+                star.style.color = 'var(--error-text)';
+                label.appendChild(star);
+            }
+            var input = document.createElement('input');
+            input.type = f.type || 'text';
+            input.id = 'genericField_' + f.key;
+            input.dataset.fieldKey = f.key;
+            input.placeholder = f.placeholder || '';
+            input.autocomplete = 'off';
+            input.style.padding = '8px';
+            input.style.borderRadius = '6px';
+            input.style.border = '1px solid var(--border-input)';
+            input.style.backgroundColor = 'var(--form-input-bg)';
+            input.style.color = 'var(--text-primary)';
+            input.style.fontSize = '14px';
+            group.appendChild(label);
+            group.appendChild(input);
+            if (f.hint) {
+                var hint = document.createElement('p');
+                hint.style.margin = '0';
+                hint.style.fontSize = 'var(--text-sm)';
+                hint.style.color = 'var(--text-secondary)';
+                hint.textContent = f.hint;
+                group.appendChild(hint);
+            }
+            container.appendChild(group);
+        });
+        wrap.style.display = 'block';
+        connectBtn.disabled = false;
+    };
+
+    window.connectGenericProvider = async function(mode) {
+        var btn, resultEl, payload;
+
+        if (mode === 'paste') {
+            var paste = (document.getElementById('genericPasteInput') || {}).value || '';
+            if (!paste.trim()) {
+                showToast('Please paste an rclone.conf block.', 'warning');
+                return;
+            }
+            payload = {provider: 'generic', config_block: paste};
+            resultEl = document.getElementById('genericPasteResult');
+            btn = document.querySelector('#genericPastePane button.edit-btn');
+        } else {
+            var sel = document.getElementById('genericTypeSelect');
+            var rt = sel ? sel.value : '';
+            if (!rt || !genericSchemas[rt]) {
+                showToast('Please select a backend type.', 'warning');
+                return;
+            }
+            var schema = genericSchemas[rt];
+            var fields = {};
+            var missing = [];
+            schema.fields.forEach(function(f) {
+                var el = document.getElementById('genericField_' + f.key);
+                var v = el ? el.value.trim() : '';
+                if (v) fields[f.key] = v;
+                else if (f.required) missing.push(f.label);
+            });
+            if (missing.length) {
+                showToast('Missing required field(s): ' + missing.join(', '), 'warning');
+                return;
+            }
+            payload = {
+                provider: 'generic',
+                rclone_type: rt,
+                fields: fields,
+                obscure_keys: schema.obscure || [],
+            };
+            resultEl = document.getElementById('genericFormResult');
+            btn = document.getElementById('genericFormConnectBtn');
+        }
+
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
+        if (resultEl) resultEl.textContent = '';
+        _showBusy('Connecting to cloud provider\u2026');
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify(payload)
+            });
+            var data = await resp.json();
+            if (data.success) {
+                _hideBusy();
+                showToast('Connected! Reloading\u2026', 'success');
+                setTimeout(function() { window.location.reload(); }, 1500);
+            } else {
+                _hideBusy();
+                showToast(data.message || 'Failed to connect.', 'error');
+                if (resultEl) {
+                    resultEl.textContent = data.message || 'Failed';
+                    resultEl.style.color = 'var(--error-text)';
+                }
+                if (btn) { btn.disabled = false; btn.textContent = 'Save & Connect'; }
+            }
+        } catch (e) {
+            _hideBusy();
+            showToast('Network error.', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Save & Connect'; }
         }
     };
 

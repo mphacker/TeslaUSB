@@ -14,7 +14,7 @@ import logging
 import os
 import re
 import subprocess
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import (
     GADGET_DIR,
@@ -68,7 +68,57 @@ PROVIDERS = {
         "rclone_type": "dropbox",
         "authorize_cmd": 'rclone authorize "dropbox"',
     },
+    # Issue #165: generic rclone remote (NAS / S3-style / FTP / WebDAV
+    # / SMB). The actual rclone backend type comes from the stored
+    # creds dict ("type" key) at conf-write time, NOT from this static
+    # mapping. ``rclone_type=None`` is the sentinel that tells callers
+    # "look at creds['type'] instead of guessing from the provider key".
+    # ``authorize_cmd=None`` because there is no OAuth flow — generic
+    # backends use either an inline form or a pasted ``rclone.conf``
+    # block; both flows live in :func:`save_credentials_generic`.
+    "generic": {
+        "label": "NAS / Custom rclone",
+        "rclone_type": None,
+        "authorize_cmd": None,
+    },
 }
+
+# ---------------------------------------------------------------------------
+# Generic rclone remote support (issue #165)
+# ---------------------------------------------------------------------------
+#
+# Allow-list of rclone backend types we expose through the generic
+# provider flow. Anything outside this set is rejected at parse time.
+#
+# Why an allow-list?
+#   * ``crypt`` / ``union`` / ``chunker`` wrap ANOTHER remote inside
+#     themselves; their credentials reference a second remote name
+#     that we don't store, so they can't function in our single-remote
+#     ``[teslausb]`` model without a much larger refactor.
+#   * ``local`` would let an attacker who gains web-UI access ask
+#     rclone to copy archived clips to an arbitrary local path
+#     (privilege escalation via the rclone subprocess).
+#   * ``http`` is read-only — useless for an upload destination.
+#
+# Adding a backend here is intentionally a code change so the choice
+# gets reviewed against those constraints.
+_GENERIC_RCLONE_TYPES = frozenset({
+    "sftp",
+    "webdav",
+    "smb",
+    "ftp",
+    "s3",
+    "b2",
+    "wasabi",      # alias / config preset for s3 with Wasabi endpoint
+    "azureblob",
+    "swift",
+})
+
+# Storage metadata keys we attach to a generic creds dict. Prefixed
+# with ``_`` so :func:`cloud_archive_service._write_rclone_conf` can
+# safely skip them when iterating creds (Phase 3 of #165 enforces
+# this rule for ALL writers).
+_CREDS_META_KEYS = ("_obscure_keys", "_source", "_rclone_type_hint")
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +168,40 @@ def parse_rclone_token(raw_input: str) -> Dict:
 # Credential storage (encrypted, hardware-bound)
 # ---------------------------------------------------------------------------
 
+def _persist_creds(creds: dict, *, provider_label: str) -> None:
+    """Encrypt the creds dict with the hardware-bound Fernet key and
+    atomically write it to ``CLOUD_PROVIDER_CREDS_PATH``.
+
+    Shared by :func:`save_credentials` (OAuth flow) and
+    :func:`save_credentials_generic` (issue #165 NAS / generic flow).
+    Both paths use the same key derivation, atomic-write recipe, and
+    on-disk format so the loader (:func:`_load_creds`) does not need
+    to know which flow produced the file.
+
+    Args:
+        creds: Plaintext credential dict; will be JSON-serialised
+            then Fernet-encrypted. Caller is responsible for shape.
+        provider_label: Human-readable provider name for the success
+            log line — never persisted to disk.
+    """
+    from services.crypto_utils import derive_encryption_key
+    from cryptography.fernet import Fernet
+
+    key = derive_encryption_key()
+    fernet = Fernet(key)
+    encrypted = fernet.encrypt(json.dumps(creds).encode())
+
+    os.makedirs(os.path.dirname(CLOUD_PROVIDER_CREDS_PATH) or '.', exist_ok=True)
+    tmp = CLOUD_PROVIDER_CREDS_PATH + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(encrypted)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CLOUD_PROVIDER_CREDS_PATH)
+
+    logger.info("Cloud credentials saved for provider: %s", provider_label)
+
+
 def save_credentials(provider: str, token: dict) -> None:
     """Encrypt and persist rclone credentials.
 
@@ -125,9 +209,6 @@ def save_credentials(provider: str, token: dict) -> None:
         provider: Provider key (e.g. 'onedrive').
         token: Parsed token dict from rclone authorize output.
     """
-    from services.crypto_utils import derive_encryption_key
-    from cryptography.fernet import Fernet
-
     rclone_type = PROVIDERS.get(provider, {}).get("rclone_type", provider)
 
     # Build rclone-compatible credential dict
@@ -143,19 +224,187 @@ def save_credentials(provider: str, token: dict) -> None:
         if drive_id:
             creds["drive_id"] = drive_id
 
-    key = derive_encryption_key()
-    fernet = Fernet(key)
-    encrypted = fernet.encrypt(json.dumps(creds).encode())
+    _persist_creds(creds, provider_label=provider)
 
-    os.makedirs(os.path.dirname(CLOUD_PROVIDER_CREDS_PATH) or '.', exist_ok=True)
-    tmp = CLOUD_PROVIDER_CREDS_PATH + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(encrypted)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, CLOUD_PROVIDER_CREDS_PATH)
 
-    logger.info("Cloud credentials saved for provider: %s", provider)
+def _rclone_obscure(plaintext: str) -> str:
+    """Return ``rclone obscure <plaintext>`` for use in the conf file.
+
+    rclone expects passwords for sftp/webdav/smb/ftp to be stored in
+    its mildly-obfuscated AES form (this is not security — it's
+    "don't print the cleartext if someone catches a glimpse of the
+    config"). We delegate to the rclone binary so we never have to
+    re-implement its KDF.
+
+    Raises:
+        RuntimeError: if rclone is missing, returns non-zero, or
+            produces empty output. Never silently returns the
+            cleartext — that would leave a real password in
+            ``rclone.conf``.
+    """
+    if not isinstance(plaintext, str):
+        raise RuntimeError("rclone obscure: value must be a string")
+    if plaintext == "":
+        # Nothing to obscure; rclone obscure of empty string returns
+        # an empty string anyway, but skip the subprocess.
+        return ""
+    try:
+        result = subprocess.run(
+            ["rclone", "obscure", plaintext],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("rclone binary not found") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("rclone obscure timed out") from e
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"rclone obscure failed (rc={result.returncode}): "
+            f"{(result.stderr or '').strip()[:200]}"
+        )
+    obscured = (result.stdout or "").strip()
+    if not obscured:
+        raise RuntimeError("rclone obscure returned empty output")
+    return obscured
+
+
+def parse_rclone_config_block(text: str) -> Dict[str, str]:
+    """Parse a pasted ``rclone.conf`` block into a flat dict.
+
+    Accepts EITHER the section-header form::
+
+        [my-nas]
+        type = sftp
+        host = nas.local
+        user = pi
+        pass = obscured-blob
+
+    OR a bare key=value list (no section header — useful for users
+    who paste the body of an ``[remote]`` block).
+
+    Behaviour:
+        * The section name is discarded — the caller decides the
+          ultimate ``RCLONE_REMOTE_NAME``.
+        * Keys are lower-cased; values are stripped of trailing
+          whitespace; comment lines (``#`` or ``;``) are ignored.
+        * The ``type`` key is required and MUST be in
+          :data:`_GENERIC_RCLONE_TYPES` (allow-list).
+        * Multiple sections in the input are rejected — accepting
+          them would invite ``crypt``-wrap-style smuggling where a
+          second section references the first one.
+
+    Returns:
+        Dict with at least ``"type"``; values are kept as strings
+        (rclone parses everything from strings anyway).
+
+    Raises:
+        ValueError: on missing ``type``, unknown ``type``, multiple
+            sections, or syntactically invalid lines.
+    """
+    if not isinstance(text, str):
+        raise ValueError("rclone config block must be a string")
+    section_count = 0
+    out: Dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section_count += 1
+            if section_count > 1:
+                raise ValueError(
+                    "rclone config block must contain at most one [section]; "
+                    "wrap remotes (crypt/union/chunker) are not supported"
+                )
+            continue
+        if "=" not in line:
+            raise ValueError(f"invalid rclone config line: {line!r}")
+        key, _, value = line.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"invalid rclone config line: {line!r}")
+        out[key] = value
+    if "type" not in out:
+        raise ValueError("rclone config block missing required 'type' key")
+    if out["type"] not in _GENERIC_RCLONE_TYPES:
+        raise ValueError(
+            f"rclone backend type {out['type']!r} is not in the supported "
+            f"set: {sorted(_GENERIC_RCLONE_TYPES)}"
+        )
+    return out
+
+
+def save_credentials_generic(
+    rclone_type: str,
+    fields: Dict[str, str],
+    obscure_keys: Optional[List[str]] = None,
+    source: str = "form",
+) -> None:
+    """Persist credentials for a generic rclone backend (issue #165).
+
+    This is the NAS / S3 / WebDAV / SMB / FTP / azureblob entry point.
+    It mirrors :func:`save_credentials` (same encryption, same atomic
+    write, same on-disk file) but accepts an arbitrary ``fields`` dict
+    instead of an OAuth token blob.
+
+    Args:
+        rclone_type: rclone backend identifier (must be in
+            :data:`_GENERIC_RCLONE_TYPES`).
+        fields: rclone config keys (``host``, ``user``, ``pass``,
+            ``url``, ``access_key_id``, ``secret_access_key``, ...).
+            Keys MUST NOT begin with ``_`` (those are reserved for
+            internal metadata) and MUST NOT be ``type`` (use the
+            ``rclone_type`` arg).
+        obscure_keys: Field names whose values should be passed
+            through ``rclone obscure`` before storage. Typically
+            ``["pass"]`` for sftp/webdav/smb/ftp. S3-style backends
+            store ``secret_access_key`` in cleartext — rclone does
+            not obscure them — so the caller passes ``[]``.
+        source: Free-text label of where the creds came from
+            (``"form"`` or ``"paste"``); recorded as ``_source`` on
+            the creds dict for diagnostics. Never affects behaviour.
+
+    Raises:
+        ValueError: on bad ``rclone_type``, reserved key, or empty
+            required field.
+        RuntimeError: if ``rclone obscure`` fails.
+    """
+    if rclone_type not in _GENERIC_RCLONE_TYPES:
+        raise ValueError(
+            f"rclone backend type {rclone_type!r} is not in the supported "
+            f"set: {sorted(_GENERIC_RCLONE_TYPES)}"
+        )
+    if not isinstance(fields, dict):
+        raise ValueError("fields must be a dict")
+    obscure_keys = list(obscure_keys or [])
+
+    creds: Dict[str, str] = {"type": rclone_type}
+    for raw_key, raw_value in fields.items():
+        if not isinstance(raw_key, str):
+            raise ValueError("field keys must be strings")
+        key = raw_key.strip().lower()
+        if not key:
+            raise ValueError("field keys must be non-empty")
+        if key.startswith("_"):
+            raise ValueError(
+                f"field key {raw_key!r} is reserved (leading underscore)"
+            )
+        if key == "type":
+            # Already pinned by ``rclone_type`` arg — reject silent
+            # override attempts from a paste payload.
+            raise ValueError(
+                "'type' is set from rclone_type; remove it from fields"
+            )
+        # rclone tolerates int/bool but everything is str on the wire.
+        value = "" if raw_value is None else str(raw_value)
+        if key in obscure_keys:
+            value = _rclone_obscure(value)
+        creds[key] = value
+
+    creds["_obscure_keys"] = ",".join(sorted(set(obscure_keys)))
+    creds["_source"] = source
+    _persist_creds(creds, provider_label=f"generic:{rclone_type}")
 
 
 def _discover_onedrive_id(token: dict) -> Optional[str]:
@@ -231,11 +480,22 @@ def get_connection_status() -> Dict:
 # ---------------------------------------------------------------------------
 
 def _write_temp_conf(creds: dict) -> str:
-    """Write a temporary rclone.conf to tmpfs and return its path."""
+    """Write a temporary rclone.conf to tmpfs and return its path.
+
+    Issue #165: keys beginning with ``_`` are private metadata
+    (``_obscure_keys``, ``_source``) and never reach the conf file —
+    rclone would treat them as unknown options and emit a warning.
+    The ``type`` key (set by both OAuth and generic flows) is written
+    inline and skipped in the loop.
+    """
     os.makedirs(_RCLONE_TMPFS_DIR, exist_ok=True)
 
     lines = [f"[{RCLONE_REMOTE_NAME}]"]
     for key, value in creds.items():
+        if not isinstance(key, str):
+            continue
+        if key.startswith("_"):
+            continue
         lines.append(f"{key} = {value}")
 
     fd = os.open(_RCLONE_CONF_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

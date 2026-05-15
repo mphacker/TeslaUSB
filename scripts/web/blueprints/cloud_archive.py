@@ -124,18 +124,29 @@ def index():
         sync_history = []
 
     # Re-read dynamic settings from config.yaml (cached for 30s to reduce I/O)
+    # Normalise sync_folders / priority_order via the same allow-list +
+    # legacy-RecentClips rewrite that config.py uses at boot — that way
+    # the Settings UI never shows a stale ``RecentClips`` checkbox even
+    # if the user's config.yaml predates the rename. The normalised
+    # values flow through both the template render and the form-submit
+    # handler so the next "Save" call also writes back the canonical form.
+    from config import _normalize_cloud_folder_list, _CLOUD_DEFAULT_FOLDERS
     import yaml
     _provider = CLOUD_ARCHIVE_PROVIDER
-    _sync_folders = CLOUD_ARCHIVE_SYNC_FOLDERS
-    _priority_order = CLOUD_ARCHIVE_PRIORITY_ORDER
+    _sync_folders = list(CLOUD_ARCHIVE_SYNC_FOLDERS)
+    _priority_order = list(CLOUD_ARCHIVE_PRIORITY_ORDER)
     _max_upload_mbps = CLOUD_ARCHIVE_MAX_UPLOAD_MBPS
     _remote_path = CLOUD_ARCHIVE_REMOTE_PATH
     _sync_enabled = True
     try:
         _cloud = _get_cloud_config_cached()
         _provider = _cloud.get('provider', '') or _provider
-        _sync_folders = _cloud.get('sync_folders', _sync_folders)
-        _priority_order = _cloud.get('priority_order', _priority_order)
+        _sync_folders = _normalize_cloud_folder_list(
+            _cloud.get('sync_folders', _sync_folders), _sync_folders,
+        )
+        _priority_order = _normalize_cloud_folder_list(
+            _cloud.get('priority_order', _priority_order), _sync_folders,
+        )
         _max_upload_mbps = int(_cloud.get('max_upload_mbps', _max_upload_mbps))
         _remote_path = _cloud.get('remote_path', _remote_path)
         _sync_enabled = bool(_cloud.get('sync_enabled', True))
@@ -197,9 +208,19 @@ def index():
 def save_settings():
     """Save cloud sync settings from form submission."""
     try:
-        sync_folders = request.form.getlist('sync_folders')
+        from config import _normalize_cloud_folder_list, _CLOUD_DEFAULT_FOLDERS
+        # Form posts the raw checkbox values; run them through the same
+        # allow-list + RecentClips-rewrite as the boot-time loader so a
+        # stale browser cache (or a hand-crafted POST) can never persist
+        # an unsupported folder name to config.yaml.
+        sync_folders = _normalize_cloud_folder_list(
+            request.form.getlist('sync_folders'), _CLOUD_DEFAULT_FOLDERS,
+        )
         priority_raw = request.form.get('priority_order', '')
-        priority_order = [p.strip() for p in priority_raw.split(',') if p.strip()]
+        priority_order = _normalize_cloud_folder_list(
+            [p.strip() for p in priority_raw.split(',') if p.strip()],
+            sync_folders,
+        )
         max_upload_mbps = int(request.form.get('max_upload_mbps', 5))
         cloud_reserve_gb = max(0, float(request.form.get('cloud_reserve_gb', 1)))
         sync_non_event = 'sync_non_event_videos' in request.form
@@ -386,6 +407,42 @@ def api_history():
     except Exception as exc:
         logger.exception("Failed to fetch sync history")
         return jsonify({"error": str(exc)}), 500
+
+
+@cloud_archive_bp.route('/api/reset_stats', methods=['POST'])
+def api_reset_stats():
+    """Reset the dashboard counter baseline.
+
+    Non-destructive: the underlying ``cloud_synced_files`` rows are
+    preserved so already-uploaded clips stay deduped and are NEVER
+    re-uploaded on the next sync pass. Only the displayed cumulative
+    counters (``total_synced`` count and ``total_bytes`` sum) start
+    over from zero. ``total_pending`` and ``total_failed`` are
+    unaffected because they reflect current work / failures, not
+    cumulative history.
+
+    Invalidates the 10-second ``api_status`` cache so the UI sees the
+    reset reflected on the next poll instead of waiting up to 10 s.
+    """
+    from services.cloud_archive_service import reset_stats_baseline
+
+    try:
+        ok, payload = reset_stats_baseline(CLOUD_ARCHIVE_DB_PATH)
+        if not ok:
+            return jsonify({"success": False, "message": payload}), 500
+
+        # Drop the cached stats so the next poll reflects the reset
+        if hasattr(api_status, '_cache'):
+            try:
+                del api_status._cache
+            except AttributeError:
+                pass
+
+        logger.info("Cloud sync stats counters reset by user (baseline=%s)", payload)
+        return jsonify({"success": True, "stats_baseline_at": payload})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to reset cloud sync stats counters")
+        return jsonify({"success": False, "message": str(exc)}), 500
 
 
 

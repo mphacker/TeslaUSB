@@ -810,20 +810,24 @@ class TestInitCloudDbV4:
         conn = cas._init_cloud_tables(cloud_db_v3_with_les)
         conn.close()
 
-        assert _module_version(cloud_db_v3_with_les, 'cloud_archive') == 4
+        # Migration cascades to current target schema; the v3→v4
+        # contract (LES table dropped, version no longer < 4) is the
+        # invariant we care about — track ``_CLOUD_SCHEMA_VERSION``
+        # so future schema bumps don't break this assertion.
+        assert _module_version(cloud_db_v3_with_les, 'cloud_archive') == cas._CLOUD_SCHEMA_VERSION
         assert not _table_exists(cloud_db_v3_with_les, 'live_event_queue')
 
     def test_idempotent_on_v4(self, cloud_db_v3_with_les):
-        # First call lifts to v4.
+        # First call lifts to the current schema target.
         conn = cas._init_cloud_tables(cloud_db_v3_with_les)
         conn.close()
-        assert _module_version(cloud_db_v3_with_les, 'cloud_archive') == 4
+        assert _module_version(cloud_db_v3_with_les, 'cloud_archive') == cas._CLOUD_SCHEMA_VERSION
 
         # Second call must be a no-op (the ``if current < ...`` guard
         # short-circuits the migration block entirely).
         conn = cas._init_cloud_tables(cloud_db_v3_with_les)
         conn.close()
-        assert _module_version(cloud_db_v3_with_les, 'cloud_archive') == 4
+        assert _module_version(cloud_db_v3_with_les, 'cloud_archive') == cas._CLOUD_SCHEMA_VERSION
         assert not _table_exists(cloud_db_v3_with_les, 'live_event_queue')
 
     def test_failure_holds_version_at_3_for_retry(

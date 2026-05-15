@@ -320,6 +320,62 @@ class TestArchiveWorkerCopy:
         )
         assert indexer_db == db
 
+    def test_copy_calls_inline_sei_sidecar_write(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        """Issue #197: every successful copy must invoke the inline-
+        SEI sidecar writer on the destination path. The sidecar
+        write itself is best-effort and may produce zero messages
+        on a non-Tesla MP4 — what matters is that the call happens."""
+        clip = make_clip("SentryClips/evt1/2025-01-01_10-00-00-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        called_with: List[str] = []
+        monkeypatch.setattr(
+            archive_worker, '_write_inline_sei_sidecar',
+            lambda dest: called_with.append(dest),
+        )
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        assert outcome == 'copied'
+        assert len(called_with) == 1, (
+            "_write_inline_sei_sidecar was not called exactly once on "
+            "the success path (issue #197 hot-path optimization)."
+        )
+        assert called_with[0].endswith(
+            os.path.join(
+                "SentryClips", "evt1", "2025-01-01_10-00-00-front.mp4",
+            ),
+        )
+
+    def test_copy_succeeds_when_sidecar_write_raises(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        """Sidecar write is BEST-EFFORT — a thrown exception inside
+        the sidecar path must NOT mark the archive failed. The
+        downstream indexer's mmap fallback handles the missing
+        sidecar transparently."""
+        clip = make_clip("SentryClips/evt1/2025-01-01_10-00-00-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+        row = claim_next_for_worker('w', db_path=db)
+
+        def _bad_sidecar(dest):
+            raise RuntimeError("simulated sidecar disk-full")
+        monkeypatch.setattr(
+            archive_worker, '_write_inline_sei_sidecar', _bad_sidecar,
+        )
+        outcome = archive_worker.process_one_claim(
+            row, db, archive_root, teslacam_root,
+            chunk_size=4096, max_attempts=3,
+        )
+        # Archive STILL succeeds despite sidecar exception. This is
+        # the contract: sidecar is an optimization, never a
+        # correctness gate.
+        assert outcome == 'copied'
+
     def test_copy_creates_intermediate_dirs(
         self, db, archive_root, teslacam_root, make_clip,
     ):

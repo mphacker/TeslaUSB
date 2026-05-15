@@ -34,6 +34,7 @@ Usage:
     messages = parse_video_sei('/path/to/video.mp4')
 """
 
+import json
 import logging
 import mmap
 import os
@@ -645,6 +646,446 @@ def parse_video_sei(
         List of SeiMessage objects.
     """
     return list(extract_sei_messages(video_path, sample_rate))
+
+
+# ---------------------------------------------------------------------------
+# Issue #197 — inline-SEI sidecar JSON cache (Wave 4 PR-E2 / Phase I.3)
+# ---------------------------------------------------------------------------
+# When ``archive_worker._atomic_copy`` finishes copying a clip, the file's
+# pages are still hot in the kernel page cache. Walking the SEI parser
+# right then is a near-zero-I/O operation. We persist the result as a
+# small sidecar JSON next to the ``.mp4`` so the indexer (which runs
+# minutes later, after the page cache has likely evicted the clip) can
+# consume the parsed result with a single 5-50 KB read instead of a
+# second full mmap walk of the 30-80 MB file.
+#
+# Net effect: the indexer's per-clip SD I/O drops by roughly 2x — one
+# walk for ``mvhd``, one walk for ``extract_sei_messages``, both
+# eliminated when a sidecar is present. See issue #197 for the full
+# motivation and acceptance criteria.
+#
+# Schema versioning lets us evolve the format without breaking the
+# fallback path: any reader sees a mismatched ``schema_version`` and
+# returns None, the caller falls back to mmap parse, and the next
+# archive run rewrites the sidecar in the new format. The schema
+# version is bumped any time field semantics change in a way the old
+# reader can't safely interpret.
+#
+# Only GPS-bearing messages are stored (the indexer drops no-GPS
+# messages anyway). For diagnostic visibility we ALSO store
+# ``sei_count`` (total messages walked) and ``no_gps_count`` (how many
+# were dropped) so the indexer's per-clip log lines are unchanged.
+#
+# Sample-rate is recorded explicitly so a reader that wants a finer
+# rate than what's cached can detect the mismatch and fall back to
+# mmap parse. The archive worker writes at the indexer's default
+# (``sample_rate=30``) — finer-grained tools (the diagnostic
+# ``sample_rate=1`` walk) fall back transparently.
+SIDECAR_SUFFIX = '.sei.json'
+SIDECAR_SCHEMA_VERSION = 1
+
+
+@dataclass
+class SeiSidecar:
+    """Cached SEI parse result loaded from a sidecar JSON.
+
+    ``messages`` contains only GPS-bearing messages (the same filter
+    the indexer applies inline). ``sei_count`` and ``no_gps_count``
+    preserve diagnostic visibility for the stationary-clip case.
+
+    ``mvhd_creation_time_utc`` is the timezone-aware UTC datetime
+    parsed from the MP4's ``mvhd`` atom (or None if the atom was
+    missing / unparseable). Same semantics as
+    ``extract_mvhd_creation_time``.
+
+    ``video_size_bytes`` and ``video_mtime_unix`` are integrity
+    guards — the reader compares them to the live file's stat() and
+    invalidates the sidecar (returns None) on drift. This catches
+    the case where the .mp4 was overwritten but the sidecar was
+    not.
+    """
+    schema_version: int
+    sample_rate: int
+    sei_count: int
+    no_gps_count: int
+    mvhd_creation_time_utc: Optional[datetime]
+    messages: List[SeiMessage]
+    video_size_bytes: int
+    video_mtime_unix: float
+
+
+def sidecar_path_for(video_path: str) -> str:
+    """Return the canonical sidecar path for ``video_path``.
+
+    Format: ``<video_path>.sei.json`` (sibling to the .mp4).
+
+    **Trusted-input contract:** ``video_path`` is always a path
+    that the archive worker just wrote (see
+    ``archive_worker._atomic_copy``) or that the indexer found via
+    a directory walk under ``ArchivedClips`` / the RO USB mount.
+    No user-supplied input ever reaches this function — the path
+    has already been normalized and validated by upstream code
+    (``video_archive_service`` for the producer side,
+    ``mapping_service`` for the consumer side). For that reason
+    this function performs NO independent traversal validation;
+    it is purely a string-suffix operation. Callers MUST NOT pass
+    untrusted external input directly to this function.
+    """
+    return video_path + SIDECAR_SUFFIX
+
+
+def _message_to_dict(msg: SeiMessage) -> dict:
+    """Serialize a ``SeiMessage`` for the sidecar JSON.
+
+    Field names match the dataclass attributes for readability.
+    The ``video_path`` field is intentionally OMITTED — it would
+    otherwise pin the sidecar to a specific filesystem location
+    and break if the .mp4 is renamed (e.g. moved between
+    RecentClips and ArchivedClips). The reader re-injects the
+    current ``video_path`` from the load call.
+    """
+    return {
+        'frame_index': msg.frame_index,
+        'timestamp_ms': msg.timestamp_ms,
+        'latitude_deg': msg.latitude_deg,
+        'longitude_deg': msg.longitude_deg,
+        'heading_deg': msg.heading_deg,
+        'vehicle_speed_mps': msg.vehicle_speed_mps,
+        'linear_acceleration_x': msg.linear_acceleration_x,
+        'linear_acceleration_y': msg.linear_acceleration_y,
+        'linear_acceleration_z': msg.linear_acceleration_z,
+        'steering_wheel_angle': msg.steering_wheel_angle,
+        'accelerator_pedal_position': msg.accelerator_pedal_position,
+        'brake_applied': msg.brake_applied,
+        'gear_state': msg.gear_state,
+        'autopilot_state': msg.autopilot_state,
+        'blinker_on_left': msg.blinker_on_left,
+        'blinker_on_right': msg.blinker_on_right,
+        'frame_seq_no': msg.frame_seq_no,
+    }
+
+
+def _dict_to_message(d: dict, video_path: str) -> SeiMessage:
+    """Reconstruct a ``SeiMessage`` from its sidecar-dict form."""
+    return SeiMessage(
+        frame_index=int(d['frame_index']),
+        timestamp_ms=float(d['timestamp_ms']),
+        latitude_deg=float(d['latitude_deg']),
+        longitude_deg=float(d['longitude_deg']),
+        heading_deg=float(d['heading_deg']),
+        vehicle_speed_mps=float(d['vehicle_speed_mps']),
+        linear_acceleration_x=float(d['linear_acceleration_x']),
+        linear_acceleration_y=float(d['linear_acceleration_y']),
+        linear_acceleration_z=float(d['linear_acceleration_z']),
+        steering_wheel_angle=float(d['steering_wheel_angle']),
+        accelerator_pedal_position=float(d['accelerator_pedal_position']),
+        brake_applied=bool(d['brake_applied']),
+        gear_state=str(d['gear_state']),
+        autopilot_state=str(d['autopilot_state']),
+        blinker_on_left=bool(d['blinker_on_left']),
+        blinker_on_right=bool(d['blinker_on_right']),
+        frame_seq_no=int(d['frame_seq_no']),
+        video_path=video_path,
+    )
+
+
+def write_sei_sidecar(
+    video_path: str,
+    sample_rate: int = 30,
+    sidecar_path: Optional[str] = None,
+) -> Optional[SeiSidecar]:
+    """Walk ``video_path`` once (mvhd + SEI) and persist the result
+    as a sidecar JSON next to the .mp4.
+
+    Best-effort: returns ``None`` on any failure (file missing,
+    parse error, write error). Callers MUST treat ``None`` as "no
+    sidecar; downstream consumers will mmap-parse the file
+    themselves". This is the issue #197 hot-path call: the file's
+    pages are hot in the kernel page cache (we just wrote them),
+    so the SEI walk costs only the protobuf decode work.
+
+    Atomic write: tempfile + ``os.fsync`` + ``os.rename`` so a
+    crash mid-write never leaves a half-written sidecar that the
+    reader would then accept as authoritative.
+
+    The default ``sample_rate=30`` matches the indexer's default
+    (``mapping_service._index_video``). A reader that requests a
+    finer rate must fall back to mmap parse — see
+    ``read_sei_sidecar``.
+    """
+    if sidecar_path is None:
+        sidecar_path = sidecar_path_for(video_path)
+
+    try:
+        st = os.stat(video_path)
+    except OSError as e:
+        logger.debug(
+            "sei sidecar: cannot stat %s for sidecar write: %s",
+            video_path, e,
+        )
+        return None
+
+    try:
+        mvhd_dt = extract_mvhd_creation_time(video_path)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "sei sidecar: mvhd parse failed for %s: %s", video_path, e,
+        )
+        mvhd_dt = None
+
+    sei_count = 0
+    no_gps_count = 0
+    gps_messages: List[SeiMessage] = []
+    try:
+        for msg in extract_sei_messages(
+                video_path, sample_rate=sample_rate):
+            sei_count += 1
+            if not msg.has_gps:
+                no_gps_count += 1
+                continue
+            gps_messages.append(msg)
+    except (FileNotFoundError, ValueError) as e:
+        logger.debug(
+            "sei sidecar: SEI walk failed for %s: %s", video_path, e,
+        )
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "sei sidecar: unexpected SEI walk failure on %s "
+            "(no sidecar written, indexer will mmap-parse): %s",
+            video_path, e,
+        )
+        return None
+
+    payload = {
+        'schema_version': SIDECAR_SCHEMA_VERSION,
+        'sample_rate': sample_rate,
+        'sei_count': sei_count,
+        'no_gps_count': no_gps_count,
+        'mvhd_creation_time_utc': (
+            mvhd_dt.isoformat() if mvhd_dt is not None else None
+        ),
+        'video_size_bytes': st.st_size,
+        'video_mtime_unix': st.st_mtime,
+        'messages': [_message_to_dict(m) for m in gps_messages],
+    }
+
+    tmp_path = sidecar_path + '.tmp'
+    wrote_replace = False
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, separators=(',', ':'))
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                # Some filesystems (tmpfs in tests) don't support
+                # fsync — non-fatal; the rename below is the
+                # atomicity guarantee.
+                pass
+        os.replace(tmp_path, sidecar_path)
+        wrote_replace = True
+    except OSError as e:
+        logger.warning(
+            "sei sidecar: write failed for %s (indexer will "
+            "mmap-parse): %s", sidecar_path, e,
+        )
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "sei sidecar: unexpected write failure for %s "
+            "(indexer will mmap-parse): %s", sidecar_path, e,
+        )
+        return None
+    finally:
+        # Belt-and-suspenders: any failure path that didn't reach
+        # ``os.replace`` (json serialization error, surprise
+        # exception type, abnormal exit from the with-block) leaves
+        # the .tmp behind. Sweep it up unconditionally; harmless
+        # when the replace succeeded (file already moved away).
+        if not wrote_replace:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    return SeiSidecar(
+        schema_version=SIDECAR_SCHEMA_VERSION,
+        sample_rate=sample_rate,
+        sei_count=sei_count,
+        no_gps_count=no_gps_count,
+        mvhd_creation_time_utc=mvhd_dt,
+        messages=gps_messages,
+        video_size_bytes=st.st_size,
+        video_mtime_unix=st.st_mtime,
+    )
+
+
+def read_sei_sidecar(
+    video_path: str,
+    sidecar_path: Optional[str] = None,
+    *,
+    required_sample_rate: Optional[int] = None,
+) -> Optional[SeiSidecar]:
+    """Load and validate the sidecar JSON for ``video_path``.
+
+    Returns ``None`` (and the caller falls back to mmap parse) when
+    ANY of the following holds:
+
+    * The sidecar file does not exist.
+    * The sidecar JSON is malformed or missing required keys.
+    * ``schema_version`` does not match ``SIDECAR_SCHEMA_VERSION``.
+    * The recorded ``video_size_bytes`` / ``video_mtime_unix`` do
+      not match the live file's stat — the .mp4 was overwritten or
+      replaced after the sidecar was written, so the cached parse
+      is no longer authoritative.
+    * ``required_sample_rate`` is set and does not match the
+      recorded ``sample_rate`` (the consumer needs a finer or
+      different sampling than was cached).
+
+    The integrity guards (size, mtime) are intentionally
+    permissive — they catch obvious overwrites without requiring a
+    cryptographic checksum. A user who manually re-encodes a clip
+    will produce a different mtime and the sidecar will correctly
+    invalidate.
+    """
+    if sidecar_path is None:
+        sidecar_path = sidecar_path_for(video_path)
+
+    if not os.path.isfile(sidecar_path):
+        return None
+
+    try:
+        with open(sidecar_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.debug(
+            "sei sidecar: read/parse failed for %s (%s); "
+            "falling back to mmap parse",
+            sidecar_path, e,
+        )
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    try:
+        schema_v = int(payload['schema_version'])
+        sample_rate = int(payload['sample_rate'])
+        sei_count = int(payload['sei_count'])
+        no_gps_count = int(payload['no_gps_count'])
+        size_bytes = int(payload['video_size_bytes'])
+        mtime_unix = float(payload['video_mtime_unix'])
+        msgs_payload = payload['messages']
+        mvhd_iso = payload.get('mvhd_creation_time_utc')
+    except (KeyError, TypeError, ValueError) as e:
+        logger.debug(
+            "sei sidecar: required key missing or bad type in %s "
+            "(%s); falling back to mmap parse", sidecar_path, e,
+        )
+        return None
+
+    if schema_v != SIDECAR_SCHEMA_VERSION:
+        logger.debug(
+            "sei sidecar: schema mismatch for %s (have v%d, "
+            "expected v%d); falling back to mmap parse",
+            sidecar_path, schema_v, SIDECAR_SCHEMA_VERSION,
+        )
+        return None
+
+    if (required_sample_rate is not None
+            and required_sample_rate != sample_rate):
+        logger.debug(
+            "sei sidecar: sample_rate mismatch for %s "
+            "(cached %d, requested %d); falling back to mmap parse",
+            sidecar_path, sample_rate, required_sample_rate,
+        )
+        return None
+
+    # Integrity guard: the .mp4 must still match what we cached.
+    try:
+        st = os.stat(video_path)
+    except OSError as e:
+        logger.debug(
+            "sei sidecar: video missing for %s (%s); cannot "
+            "validate; falling back to mmap parse",
+            video_path, e,
+        )
+        return None
+    if st.st_size != size_bytes:
+        logger.info(
+            "sei sidecar: video size drift for %s "
+            "(cached %d, now %d); invalidating sidecar",
+            os.path.basename(video_path), size_bytes, st.st_size,
+        )
+        return None
+    # mtime is float; tolerate sub-millisecond rounding from JSON
+    # round-trip but reject any meaningful drift.
+    if abs(st.st_mtime - mtime_unix) > 0.001:
+        logger.info(
+            "sei sidecar: video mtime drift for %s "
+            "(cached %s, now %s); invalidating sidecar",
+            os.path.basename(video_path), mtime_unix, st.st_mtime,
+        )
+        return None
+
+    mvhd_dt: Optional[datetime] = None
+    if mvhd_iso is not None:
+        try:
+            mvhd_dt = datetime.fromisoformat(mvhd_iso)
+        except (ValueError, TypeError):
+            logger.debug(
+                "sei sidecar: malformed mvhd timestamp %r in %s; "
+                "treating as None",
+                mvhd_iso, sidecar_path,
+            )
+            mvhd_dt = None
+
+    if not isinstance(msgs_payload, list):
+        return None
+    try:
+        messages = [_dict_to_message(m, video_path) for m in msgs_payload]
+    except (KeyError, TypeError, ValueError) as e:
+        logger.debug(
+            "sei sidecar: malformed message in %s (%s); "
+            "falling back to mmap parse", sidecar_path, e,
+        )
+        return None
+
+    return SeiSidecar(
+        schema_version=schema_v,
+        sample_rate=sample_rate,
+        sei_count=sei_count,
+        no_gps_count=no_gps_count,
+        mvhd_creation_time_utc=mvhd_dt,
+        messages=messages,
+        video_size_bytes=size_bytes,
+        video_mtime_unix=mtime_unix,
+    )
+
+
+def delete_sei_sidecar(video_path: str) -> bool:
+    """Delete the sidecar for ``video_path`` if it exists.
+
+    Returns ``True`` if a file was removed, ``False`` if there was
+    no sidecar to delete (or the unlink failed). Best-effort —
+    failure is logged at DEBUG and never propagated, since a
+    leftover sidecar pointing at a deleted .mp4 just becomes dead
+    weight that the next sweep will skip (the integrity guard in
+    ``read_sei_sidecar`` correctly invalidates a sidecar whose
+    .mp4 is missing).
+    """
+    sidecar_path = sidecar_path_for(video_path)
+    try:
+        os.unlink(sidecar_path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        logger.debug(
+            "sei sidecar: delete failed for %s: %s", sidecar_path, e,
+        )
+        return False
 
 
 def get_video_gps_summary(video_path: str) -> Optional[dict]:

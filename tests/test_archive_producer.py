@@ -663,3 +663,122 @@ class TestPeekCache:
         s1['size'] = 99999
         s2 = archive_producer.get_peek_cache_stats()
         assert s2['size'] == 0, "stats dict mutation must not leak"
+
+
+# ---------------------------------------------------------------------------
+# Issue #214 — VFS cache invalidation before periodic scan
+# ---------------------------------------------------------------------------
+
+class TestRefreshRoMountBeforeScan:
+    """Pin issue #214 fix: every ``_scan_once`` MUST invalidate the
+    kernel's dentry/inode cache for the RO USB mount BEFORE walking
+    the directory tree, otherwise Tesla's gadget-block-layer writes
+    are invisible to ``readdir`` and clips are lost when Tesla's
+    RecentClips circular buffer rotates them out before we ever see
+    them. See issue #214 for the forensic incident report.
+    """
+
+    def test_refresh_called_before_iter_archive_candidates(
+        self, db, teslacam, monkeypatch,
+    ):
+        """The cache refresh MUST run before we read the directory.
+        If we read first and refresh after, the readdir gets a stale
+        snapshot.
+        """
+        call_order: list[str] = []
+
+        def fake_refresh(path):
+            call_order.append(f'refresh:{path}')
+
+        real_iter = archive_producer._iter_archive_candidates
+
+        def tracked_iter(path):
+            call_order.append(f'iter:{path}')
+            return real_iter(path)
+
+        # Patch the symbol that _scan_once will look up via lazy import.
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', fake_refresh)
+        monkeypatch.setattr(
+            archive_producer, '_iter_archive_candidates', tracked_iter,
+        )
+
+        archive_producer._scan_once(teslacam, db)
+
+        assert call_order, "_scan_once must call something"
+        assert call_order[0] == f'refresh:{teslacam}', (
+            f"refresh must be the first call, got order={call_order}"
+        )
+        assert any(c.startswith('iter:') for c in call_order), (
+            f"iter must run after refresh, got order={call_order}"
+        )
+
+    def test_refresh_failure_is_non_fatal(
+        self, db, teslacam, monkeypatch,
+    ):
+        """A broken refresh (e.g. broken sudoers, missing module)
+        must NEVER freeze the producer. The scan must continue
+        against whatever the kernel cache shows — losing 60 s of
+        responsiveness is infinitely better than losing the whole
+        producer thread.
+        """
+        def boom(_path):
+            raise RuntimeError("simulated broken sudoers")
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', boom)
+
+        # Must complete without raising; result should match the
+        # baseline 5-clip teslacam fixture (3 SentryClips/SavedClips
+        # events + 2 RecentClips at age-0 → all 5 enqueued).
+        result = archive_producer._scan_once(teslacam, db)
+        assert result['seen'] == 5
+        assert result['enqueued'] == 5
+
+    def test_refresh_is_called_on_every_scan(
+        self, db, teslacam, monkeypatch,
+    ):
+        """The producer's whole reason to exist is the periodic
+        rescan. The cache refresh must fire on EVERY call, not just
+        once at startup — otherwise long-running processes drift
+        back into the stale-cache failure mode after the first scan.
+        """
+        call_count = {'n': 0}
+
+        def counter(_path):
+            call_count['n'] += 1
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', counter)
+
+        for _ in range(5):
+            archive_producer._scan_once(teslacam, db)
+
+        assert call_count['n'] == 5, (
+            f"refresh must fire on every scan, got {call_count['n']} "
+            "calls for 5 scans"
+        )
+
+    def test_refresh_receives_teslacam_root_argument(
+        self, db, teslacam, monkeypatch,
+    ):
+        """The scan passes ``teslacam_root`` to the refresh helper
+        for caller-intent documentation. ``_refresh_ro_mount`` itself
+        ignores the argument (drop_caches is process-global) but the
+        contract is that the caller documents which mount it cares
+        about — pin the wiring so a future refactor doesn't drop the
+        argument and silently break the per-mount log line.
+        """
+        captured: list[str] = []
+
+        def capture(path):
+            captured.append(path)
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', capture)
+
+        archive_producer._scan_once(teslacam, db)
+
+        assert captured == [teslacam], (
+            f"refresh must receive teslacam_root, got {captured}"
+        )

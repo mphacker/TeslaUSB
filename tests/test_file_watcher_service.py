@@ -381,3 +381,231 @@ class TestPathClassification:
         assert archive == []
         assert indexing == [path]
         assert dropped == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #214 — VFS cache invalidation in polling fallback
+# ---------------------------------------------------------------------------
+
+class TestPollingRefreshesRoMount:
+    """Pin issue #214 fix on the polling-fallback side: when inotify
+    is unavailable the polling loop is the ONLY mechanism that can
+    detect Tesla's gadget-block-layer writes on the RO USB mount,
+    and inotify itself doesn't fire for those writes (they bypass
+    VFS). Without ``_refresh_ro_mount`` the loop reads a frozen
+    dentry cache and misses Tesla's clips before Tesla's RecentClips
+    circular buffer rotates them out.
+    """
+
+    def test_polling_loop_calls_refresh_ro_mount_each_tick(
+        self, tmp_path, monkeypatch,
+    ):
+        # Force polling mode and make the loop tick fast.
+        monkeypatch.setattr(fws, '_try_inotify', lambda *a, **k: False)
+        monkeypatch.setattr(fws, '_POLL_INTERVAL_SECONDS', 0.2)
+        monkeypatch.setattr(fws, '_MIN_FILE_AGE_SECONDS', 0)
+        # Drop the rate-limit floor below the polling cadence so each
+        # tick can refresh in this fast-loop test (production keeps
+        # the 60s floor).
+        monkeypatch.setattr(fws, '_RO_CACHE_MIN_REFRESH_INTERVAL_S', 0.0)
+
+        call_count = {'n': 0}
+        captured: list[str] = []
+
+        def counter(path):
+            call_count['n'] += 1
+            captured.append(path)
+
+        # Patch the symbol that the lazy import inside the helper
+        # resolves to.
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', counter)
+
+        assert fws.start_watcher([str(tmp_path)]) is True
+        try:
+            # Wait long enough for ~3 polling ticks at 0.2s each.
+            time.sleep(0.9)
+        finally:
+            fws.stop_watcher(timeout=3.0)
+
+        assert call_count['n'] >= 2, (
+            f"polling loop must call _refresh_ro_mount on each tick, "
+            f"got {call_count['n']} calls in ~0.9s with 0.2s interval"
+        )
+        # Cache evict is process-global, so we only call once per
+        # tick even with multiple watch paths — pin that exactly one
+        # path was passed (the first one we registered).
+        assert all(p == str(tmp_path) for p in captured), (
+            f"polling loop must pass a registered watch path, "
+            f"got {captured}"
+        )
+
+    def test_polling_loop_survives_refresh_failure(
+        self, tmp_path, monkeypatch,
+    ):
+        """Broken refresh must NOT kill the polling thread — without
+        this guard, a misconfigured sudoers entry would silently
+        disable Tesla's last-resort discovery path on Pis where
+        inotify is unavailable.
+        """
+        monkeypatch.setattr(fws, '_try_inotify', lambda *a, **k: False)
+        monkeypatch.setattr(fws, '_POLL_INTERVAL_SECONDS', 0.2)
+        monkeypatch.setattr(fws, '_MIN_FILE_AGE_SECONDS', 0)
+        monkeypatch.setattr(fws, '_RO_CACHE_MIN_REFRESH_INTERVAL_S', 0.0)
+
+        # Use a call counter — checking _status['last_scan'] would be
+        # ambiguous because that field is also set during the initial
+        # scan BEFORE the polling loop runs (file_watcher_service.py
+        # ~L723), so a crash on the first polling iteration would
+        # still leave last_scan != None and falsely pass.
+        call_count = {'n': 0}
+
+        def boom(_path):
+            call_count['n'] += 1
+            raise RuntimeError("simulated broken sudoers")
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', boom)
+
+        assert fws.start_watcher([str(tmp_path)]) is True
+        try:
+            # Wait long enough for ~3 polling ticks at 0.2s each.
+            time.sleep(0.9)
+        finally:
+            fws.stop_watcher(timeout=3.0)
+
+        # >= 2 calls proves the polling loop survived the first raise
+        # and iterated again — the actual contract we want to pin.
+        assert call_count['n'] >= 2, (
+            f"polling loop crashed on refresh failure — got "
+            f"{call_count['n']} refresh attempts in ~0.9s with 0.2s "
+            "interval (expected >= 2)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue #214 — _maybe_refresh_ro_cache rate-limited helper
+# ---------------------------------------------------------------------------
+
+class TestMaybeRefreshRoCache:
+    """Pin the rate-limit semantics so the inotify event-loop's
+    high-frequency periodic-scan path doesn't generate a global slab
+    evict on every event burst (which would saturate SDIO on the
+    Pi Zero 2 W).
+    """
+
+    def test_first_call_always_refreshes(self, monkeypatch):
+        """Bootstrapping with last_refresh_monotonic=0.0 must always
+        cross the rate-limit threshold so the very first scan after
+        startup gets a fresh cache.
+        """
+        calls = {'n': 0}
+
+        def counter(_path):
+            calls['n'] += 1
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', counter)
+
+        result = fws._maybe_refresh_ro_cache(
+            ['/some/path'], last_refresh_monotonic=0.0,
+            min_interval=60.0,
+        )
+
+        assert calls['n'] == 1, "first call must always refresh"
+        assert result > 0.0, "must return a non-zero monotonic time"
+
+    def test_rate_limited_within_interval(self, monkeypatch):
+        """Two calls within the rate-limit interval must produce
+        only one refresh — the second is gated.
+        """
+        calls = {'n': 0}
+
+        def counter(_path):
+            calls['n'] += 1
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', counter)
+
+        # Use a real recent timestamp so the second call is gated.
+        now = time.monotonic()
+        result = fws._maybe_refresh_ro_cache(
+            ['/some/path'], last_refresh_monotonic=now,
+            min_interval=60.0,
+        )
+
+        assert calls['n'] == 0, "call within rate-limit must NOT refresh"
+        assert result == now, (
+            "rate-limited call must return the original timestamp "
+            "unchanged so subsequent gating math stays accurate"
+        )
+
+    def test_call_after_interval_refreshes(self, monkeypatch):
+        """Once the rate-limit interval has elapsed, the next call
+        must refresh.
+        """
+        calls = {'n': 0}
+
+        def counter(_path):
+            calls['n'] += 1
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', counter)
+
+        # Force "interval has passed" by passing a stale timestamp.
+        stale = time.monotonic() - 120.0
+        result = fws._maybe_refresh_ro_cache(
+            ['/some/path'], last_refresh_monotonic=stale,
+            min_interval=60.0,
+        )
+
+        assert calls['n'] == 1, "call after rate-limit must refresh"
+        assert result > stale, "must update the timestamp"
+
+    def test_failure_still_bumps_timestamp(self, monkeypatch):
+        """If the refresh raises, we MUST still bump the timestamp —
+        otherwise a broken sudoers entry would attempt the failing
+        refresh on every iteration of the inotify event loop and
+        spam logs every few milliseconds.
+        """
+        def boom(_path):
+            raise RuntimeError("simulated broken sudoers")
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', boom)
+
+        before = time.monotonic()
+        result = fws._maybe_refresh_ro_cache(
+            ['/some/path'], last_refresh_monotonic=0.0,
+            min_interval=60.0,
+        )
+
+        assert result >= before, (
+            f"failure must still bump timestamp to avoid log spam; "
+            f"got {result} expected >= {before}"
+        )
+
+    def test_empty_paths_is_a_noop(self, monkeypatch):
+        """An empty paths list should not call _refresh_ro_mount at
+        all — there is nothing to log about and skipping the call
+        avoids triggering it before any watch paths are registered.
+        """
+        calls = {'n': 0}
+
+        def counter(_path):
+            calls['n'] += 1
+
+        import services.mapping_service as ms
+        monkeypatch.setattr(ms, '_refresh_ro_mount', counter)
+
+        result = fws._maybe_refresh_ro_cache(
+            [], last_refresh_monotonic=0.0, min_interval=60.0,
+        )
+
+        assert calls['n'] == 0, (
+            "empty paths must not trigger _refresh_ro_mount"
+        )
+        assert result > 0.0, (
+            "must still bump timestamp so an empty-paths cycle doesn't "
+            "wedge subsequent calls into perpetual gate-checking"
+        )

@@ -525,7 +525,35 @@ def _scan_once(teslacam_root: str, db_path: str) -> Dict[str, int]:
     Issue #184 Wave 2 — Phase B: routes the batch through
     :func:`enqueue_with_peek` so RecentClips clips with no GPS-bearing
     SEI never become a queue row.
+
+    Issue #214 — VFS cache invalidation: Tesla writes via the gadget
+    block layer, which bypasses the Pi's VFS dentry/inode cache. The
+    kernel's cache for the FAT-on-loop-on-image RO mount can stay
+    stale for tens of minutes when nothing else triggers a refresh
+    (no WiFi reconnect, no cloud sync). When that happens, ``readdir``
+    on the RO mount returns a frozen snapshot and the producer goes
+    blind to Tesla's new clips — long enough to exceed the 60-min
+    RecentClips rotation window and lose footage.
+    :func:`_refresh_ro_mount` evicts only the slab cache (``echo 2 >
+    /proc/sys/vm/drop_caches``); it does NOT touch the mount, loop
+    device, image file, or gadget binding. Cost is sub-10ms and the
+    function is internally non-fatal (logs and returns on any error).
     """
+    # Refresh the kernel's dentry/inode cache for the RO USB mount
+    # BEFORE the readdir, so we see Tesla's most recent writes. Lazy
+    # import to keep this module lightweight at start-up and to avoid
+    # any chance of an import cycle through services.mapping_service.
+    try:
+        from services.mapping_service import _refresh_ro_mount
+        _refresh_ro_mount(teslacam_root)
+    except Exception as e:  # noqa: BLE001
+        # Defense in depth — _refresh_ro_mount already swallows its own
+        # subprocess failures, but a missing services.mapping_service
+        # module (broken install) must never freeze the producer.
+        logger.warning(
+            "archive_producer: VFS cache refresh skipped (non-fatal): %s", e,
+        )
+
     seen = _iter_archive_candidates(teslacam_root)
     if not seen:
         return {'seen': 0, 'enqueued': 0, 'skipped_stationary': 0}

@@ -980,6 +980,44 @@ _COLD_COLUMNS = (
     'blinker_on_right',
 )
 
+# Hot waypoint columns retained on the main ``waypoints`` table at
+# v15. Single source of truth for the v14->v15 single-table-rewrite
+# helper — its CREATE TABLE / INSERT / SELECT statements are all
+# generated from this tuple so a future column add cannot silently
+# get dropped during migration. Order MUST match the ``waypoints``
+# CREATE TABLE in ``_SCHEMA_SQL`` (the live v15 schema). Verified by
+# ``test_v15_hot_columns_match_schema_sql`` in
+# ``tests/test_mapping_wave3.py``.
+_V15_HOT_COLUMNS = (
+    'id',
+    'trip_id',
+    'timestamp',
+    'lat',
+    'lon',
+    'heading',
+    'speed_mps',
+    'autopilot_state',
+    'video_path',
+    'frame_offset',
+)
+
+# Per-column DDL fragments for the rewrite helper's CREATE TABLE.
+# Lifted verbatim from the ``waypoints`` CREATE TABLE in
+# ``_SCHEMA_SQL`` so the rewritten table is byte-identical to a
+# fresh-install v15 schema (PK, FK, NOT NULL, REFERENCES — all of it).
+_V15_HOT_COLUMN_DDL = {
+    'id': 'INTEGER PRIMARY KEY AUTOINCREMENT',
+    'trip_id': 'INTEGER REFERENCES trips(id) ON DELETE CASCADE',
+    'timestamp': 'TEXT NOT NULL',
+    'lat': 'REAL NOT NULL',
+    'lon': 'REAL NOT NULL',
+    'heading': 'REAL',
+    'speed_mps': 'REAL',
+    'autopilot_state': 'TEXT',
+    'video_path': 'TEXT',
+    'frame_offset': 'INTEGER',
+}
+
 # Migration batch size. 500 trips × ~500 waypoints/trip = 250 000
 # rows per transaction, well within SQLite's per-tx working set on
 # a Pi Zero 2 W. Bigger batches are a SAVEPOINT WAL-bloat risk.
@@ -1008,16 +1046,29 @@ def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
 
     Steps (run inside the v15 SAVEPOINT in :func:`_init_db`):
 
-    1. If ``waypoints`` still has the cold columns, copy each row
-       with at least one non-default cold field into
-       ``waypoints_cold`` (the table itself is created idempotently
-       by the executescript). Insert is one batched ``INSERT ... SELECT``
-       — fastest and exhibits a single WAL frame.
-    2. Drop the cold columns from ``waypoints`` via repeated
-       ``ALTER TABLE waypoints DROP COLUMN`` (SQLite ≥ 3.35, present
-       on Bookworm). Each drop is idempotent — duplicate-column
-       ``OperationalError`` is caught and ignored, so re-runs after
-       a partial migration are safe.
+    1. **Capture cold data in a TEMP TABLE first** — required because
+       step 2's table rewrite would otherwise lose any rows the
+       backfill INSERT'd. ``DROP TABLE waypoints`` cascades through
+       the ``waypoints_cold.id REFERENCES waypoints(id) ON DELETE
+       CASCADE`` foreign key and empties ``waypoints_cold`` (verified
+       experimentally), so we MUST take a snapshot before the
+       rewrite, do the rewrite while ``waypoints_cold`` is empty
+       (cascade is a no-op), then re-insert from the snapshot.
+    2. Drop the cold columns from ``waypoints`` via a SINGLE
+       table-rewrite (CREATE waypoints_new + INSERT + DROP +
+       RENAME), bounded by ``PRAGMA defer_foreign_keys=ON``.
+       Issue #188: replaces 8x ``ALTER TABLE DROP COLUMN`` (each of
+       which rewrote the entire table) with one CREATE+INSERT+DROP+
+       RENAME pass. On a 1M-row waypoints table this drops WAL
+       spike from ~800 MB to ~100 MB and slashes SDIO contention
+       with the archive worker during boot.
+    3. Backfill ``waypoints_cold`` from the snapshot. The WHERE
+       clause filters out rows whose cold telemetry is entirely at
+       sensor noise / no-signal defaults — thresholds mirror
+       ``mapping_service._index_video`` exactly so a v14→v15
+       upgrade and a fresh v15 install populate ``waypoints_cold``
+       with the same row set.
+    4. Drop the temp snapshot table.
 
     After completion, the runtime INSERT path (in
     ``mapping_service._insert_waypoints``) writes hot columns to
@@ -1026,97 +1077,375 @@ def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
     payload they did before. Hot-only readers (``query_trip_route``,
     ``query_day_routes``) skip the join and pay only for the hot
     pages.
+
+    Idempotent: a re-run after a partial completion (cold cols
+    already dropped) is a no-op via the ``_waypoints_has_cold_columns``
+    guard. The single-rewrite is itself wrapped in a try/except that
+    falls back to the legacy 8x DROP COLUMN if the rewrite path
+    fails for any reason — defensive belt-and-suspenders so a
+    pathological row payload can't strand the schema mid-rewrite.
     """
-    # 1. Backfill waypoints_cold from any remaining inline cold data
-    if _waypoints_has_cold_columns(conn):
-        col_list = ", ".join(_COLD_COLUMNS)
-        # ``INSERT OR IGNORE`` so a partially-completed prior run
-        # (where ``waypoints_cold`` already has some rows) doesn't
-        # collide on PRIMARY KEY ``id``.
-        #
-        # The WHERE clause filters out rows whose cold telemetry is
-        # entirely at sensor noise / no-signal defaults. The thresholds
-        # mirror ``mapping_service._index_video`` exactly so a v14→v15
-        # upgrade and a fresh v15 install populate ``waypoints_cold``
-        # with the same row set. Without absolute-tolerance thresholds
-        # the cold table would get one row per waypoint (Tesla's IMU
-        # noise floor of ±0.001–±0.05 m/s² makes ``acceleration_x != 0``
-        # true on virtually every parked-car waypoint), defeating the
-        # split's purpose.
-        from services.mapping_service import (
-            _COLD_ACCEL_THRESHOLD_MPS2,
-            _COLD_STEERING_THRESHOLD_DEG,
-            _COLD_GEAR_NO_SIGNAL,
-        )
-        accel_thresh = float(_COLD_ACCEL_THRESHOLD_MPS2)
-        steering_thresh = float(_COLD_STEERING_THRESHOLD_DEG)
-        gear_no_signal_csv = ", ".join(
-            f"'{g}'" for g in sorted(_COLD_GEAR_NO_SIGNAL)
-        )
-        conn.execute(
-            f"INSERT OR IGNORE INTO waypoints_cold (id, {col_list}) "
-            f"SELECT id, {col_list} FROM waypoints "
-            f"WHERE (acceleration_x IS NOT NULL AND ABS(acceleration_x) > {accel_thresh}) "
-            f"   OR (acceleration_y IS NOT NULL AND ABS(acceleration_y) > {accel_thresh}) "
-            f"   OR (acceleration_z IS NOT NULL AND ABS(acceleration_z) > {accel_thresh}) "
-            f"   OR (gear IS NOT NULL AND gear NOT IN ({gear_no_signal_csv})) "
-            f"   OR (steering_angle IS NOT NULL AND ABS(steering_angle) > {steering_thresh}) "
-            "   OR brake_applied != 0 "
-            "   OR blinker_on_left != 0 "
-            "   OR blinker_on_right != 0"
-        )
-        backfilled = conn.execute(
-            "SELECT COUNT(*) AS n FROM waypoints_cold"
-        ).fetchone()['n']
-        logger.info(
-            "v14->v15: backfilled %d row(s) into waypoints_cold",
-            backfilled,
-        )
-
-        # 2. Drop the cold columns from waypoints. Each ALTER is its
-        #    own statement so a duplicate-column failure on retry is
-        #    isolated to one column. SQLite rebuilds the table once
-        #    per drop, but an empty rewrite on a table with hot
-        #    columns only is fast. Total cost: ~50 ms on a 100k-row
-        #    waypoints table.
-        for col in _COLD_COLUMNS:
-            try:
-                conn.execute(f"ALTER TABLE waypoints DROP COLUMN {col}")
-            except sqlite3.OperationalError as e:
-                # Already dropped (idempotent retry) or older SQLite —
-                # log once at WARNING; the runtime INSERT path handles
-                # the cold half via waypoints_cold either way.
-                logger.warning(
-                    "v14->v15: could not drop %s from waypoints: %s "
-                    "(continuing)", col, e,
-                )
-
-        # Re-create the small waypoints indexes; SQLite preserves
-        # them across DROP COLUMN, but a defensive idempotent CREATE
-        # IF NOT EXISTS covers the corner case where ALTER's table
-        # rebuild lost them.
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_waypoints_trip "
-            "ON waypoints(trip_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_waypoints_coords "
-            "ON waypoints(lat, lon)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_waypoints_timestamp "
-            "ON waypoints(timestamp)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_waypoints_video_path "
-            "ON waypoints(video_path)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_waypoints_trip_video "
-            "ON waypoints(trip_id, video_path)"
-        )
-    else:
+    if not _waypoints_has_cold_columns(conn):
         logger.info(
             "v14->v15: waypoints already lacks cold columns — "
             "no migration work needed",
+        )
+        return
+
+    col_list = ", ".join(_COLD_COLUMNS)
+
+    # The thresholds & no-signal set are owned by mapping_service
+    # so the runtime path and the migration backfill stay in sync.
+    from services.mapping_service import (
+        _COLD_ACCEL_THRESHOLD_MPS2,
+        _COLD_STEERING_THRESHOLD_DEG,
+        _COLD_GEAR_NO_SIGNAL,
+    )
+    accel_thresh = float(_COLD_ACCEL_THRESHOLD_MPS2)
+    steering_thresh = float(_COLD_STEERING_THRESHOLD_DEG)
+    gear_no_signal_csv = ", ".join(
+        f"'{g}'" for g in sorted(_COLD_GEAR_NO_SIGNAL)
+    )
+    cold_filter_where = (
+        f"(acceleration_x IS NOT NULL AND ABS(acceleration_x) > {accel_thresh}) "
+        f"OR (acceleration_y IS NOT NULL AND ABS(acceleration_y) > {accel_thresh}) "
+        f"OR (acceleration_z IS NOT NULL AND ABS(acceleration_z) > {accel_thresh}) "
+        f"OR (gear IS NOT NULL AND gear NOT IN ({gear_no_signal_csv})) "
+        f"OR (steering_angle IS NOT NULL AND ABS(steering_angle) > {steering_thresh}) "
+        "OR brake_applied != 0 "
+        "OR blinker_on_left != 0 "
+        "OR blinker_on_right != 0"
+    )
+
+    # 1. Capture cold-eligible rows BEFORE the rewrite. The temp
+    #    table sits in TEMPDB so it doesn't pollute the WAL of the
+    #    main DB (TEMPDB uses MEMORY journal mode under our
+    #    PRAGMA temp_store=MEMORY config). It survives DROP TABLE
+    #    waypoints because temp tables aren't subject to the main
+    #    DB's FK enforcement.
+    conn.execute("DROP TABLE IF EXISTS temp._migrate_v15_cold_snap")
+    conn.execute(
+        f"CREATE TEMP TABLE _migrate_v15_cold_snap AS "
+        f"SELECT id, {col_list} FROM waypoints "
+        f"WHERE {cold_filter_where}"
+    )
+    snap_rows = conn.execute(
+        "SELECT COUNT(*) AS n FROM temp._migrate_v15_cold_snap"
+    ).fetchone()['n']
+    logger.info(
+        "v14->v15: snapshotted %d cold-eligible row(s) before rewrite",
+        snap_rows,
+    )
+
+    # 2. Rewrite waypoints to drop cold cols. Safe to do now because
+    #    waypoints_cold is empty (just created by executescript) so
+    #    the DROP TABLE waypoints cascade is a no-op.
+    try:
+        _drop_cold_cols_via_rewrite(conn)
+    except sqlite3.Error as e:
+        # Defensive fallback: if the single-rewrite fails for any
+        # reason, fall back to the legacy 8x DROP COLUMN path.
+        # ALTER TABLE DROP COLUMN does NOT cascade through FKs
+        # (verified experimentally — only DROP TABLE does), so the
+        # fallback path is also safe to run after the snapshot.
+        logger.warning(
+            "v14->v15: single-table-rewrite failed (%s); "
+            "falling back to per-column DROP COLUMN", e,
+        )
+        _drop_cold_cols_via_per_column_alter(conn)
+
+    # 3. Backfill waypoints_cold from the snapshot. INSERT OR IGNORE
+    #    so a re-run after a partial completion (where some rows
+    #    already exist) doesn't collide on PRIMARY KEY.
+    conn.execute(
+        f"INSERT OR IGNORE INTO waypoints_cold (id, {col_list}) "
+        f"SELECT id, {col_list} FROM temp._migrate_v15_cold_snap"
+    )
+    backfilled = conn.execute(
+        "SELECT COUNT(*) AS n FROM waypoints_cold"
+    ).fetchone()['n']
+    logger.info(
+        "v14->v15: backfilled %d row(s) into waypoints_cold",
+        backfilled,
+    )
+
+    # 4. Clean up the snapshot. Temp tables vanish at connection
+    #    close anyway, but explicit drop keeps the connection's
+    #    TEMPDB footprint small for the rest of the session.
+    conn.execute("DROP TABLE temp._migrate_v15_cold_snap")
+
+    # Re-create the small waypoints indexes; the table-rewrite
+    # path drops them (DROP TABLE removes attached indexes), and
+    # the per-column-ALTER fallback path may have lost them too
+    # under some SQLite builds. Idempotent CREATE IF NOT EXISTS
+    # keeps both code paths uniform.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_waypoints_trip "
+        "ON waypoints(trip_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_waypoints_coords "
+        "ON waypoints(lat, lon)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_waypoints_timestamp "
+        "ON waypoints(timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_waypoints_video_path "
+        "ON waypoints(video_path)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_waypoints_trip_video "
+        "ON waypoints(trip_id, video_path)"
+    )
+
+    # FK integrity check — defensive verification that the
+    # rewrite preserved waypoints_cold.id -> waypoints(id).
+    # PRAGMA foreign_key_check returns one row per violation.
+    # Empty result = clean. Raise inside the v15 SAVEPOINT on
+    # violation so the SAVEPOINT rolls back deterministically
+    # to v14 (the outer ``except sqlite3.Error`` in ``_init_db``
+    # catches this and ROLLBACKs cleanly). Letting it slide here
+    # would defer the failure to ``conn.commit()`` at the
+    # outermost transaction, which propagates a bare
+    # ``sqlite3.IntegrityError`` and crashes ``gadget_web`` at
+    # boot — bypassing the SAVEPOINT-rollback path entirely on a
+    # power-loss-prone device.
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        violation_summary = [tuple(v) for v in violations]
+        logger.error(
+            "v14->v15: PRAGMA foreign_key_check returned %d "
+            "violations after rewrite; raising IntegrityError "
+            "to force SAVEPOINT rollback to v14. Rows: %r",
+            len(violations), violation_summary,
+        )
+        raise sqlite3.IntegrityError(
+            f"v14->v15: foreign_key_check returned "
+            f"{len(violations)} violations after rewrite: "
+            f"{violation_summary!r}"
+        )
+    logger.info(
+        "v14->v15: foreign_key_check clean (waypoints_cold "
+        "FK preserved across single-rewrite)",
+    )
+
+
+def _drop_cold_cols_via_rewrite(conn: sqlite3.Connection) -> None:
+    """Drop the cold telemetry columns from ``waypoints`` in ONE
+    table rewrite using the standard SQLite "12-step ALTER TABLE"
+    pattern, adapted to run inside an existing SAVEPOINT.
+
+    Issue #188 (PR #187 review finding #5): the prior implementation
+    issued eight ``ALTER TABLE waypoints DROP COLUMN`` statements
+    inside the v15 SAVEPOINT. SQLite ≥ 3.35 implements DROP COLUMN
+    as an in-place table rewrite, so 8 drops = 8 rewrites = 8x
+    read+write of the entire ``waypoints`` table into the WAL. On a
+    Pi Zero 2 W with a 1M-row waypoints table (~100 MB), that's
+    ~800 MB of WAL I/O competing with the archive worker on the
+    same SDIO bus — a documented contributor to boot-time bus
+    saturation.
+
+    This helper replaces the eight rewrites with one:
+
+    1. ``DROP TABLE IF EXISTS waypoints_new`` — clears any zombie
+       table from a previous-boot crash that landed between
+       ``CREATE TABLE waypoints_new`` (step 4) and
+       ``DROP TABLE waypoints`` (step 6). Without this clear, the
+       rewrite would fail forever ("table waypoints_new already
+       exists") and force the fallback path on every subsequent
+       boot.
+    2. ``PRAGMA defer_foreign_keys = ON`` — settable inside a tx
+       (unlike ``PRAGMA foreign_keys`` which is a no-op inside a
+       tx). With deferred FKs, the FK checks fire only at the
+       outermost-transaction commit.
+    3. Capture the current ``sqlite_sequence`` value for
+       ``waypoints`` so AUTOINCREMENT semantics survive the rewrite.
+       Without this, deleting the highest-id row pre-migration
+       would let the next INSERT recycle that id (a real
+       AUTOINCREMENT correctness bug — AUTOINCREMENT explicitly
+       guarantees no recycling).
+    4. ``CREATE TABLE waypoints_new`` with hot columns only — the
+       schema is generated from ``_V15_HOT_COLUMNS`` +
+       ``_V15_HOT_COLUMN_DDL`` so it tracks ``_SCHEMA_SQL`` (the
+       live v15 ``waypoints`` definition) automatically. A future
+       column add in ``_SCHEMA_SQL`` that's forgotten here would
+       blow up an assertion test
+       (``test_v15_hot_columns_match_schema_sql``) before it could
+       silently drop the column from every install during migration.
+    5. ``INSERT INTO waypoints_new SELECT <hot_cols> FROM waypoints``
+       — one read pass, one write pass.
+    6. ``DROP TABLE waypoints`` — also removes its
+       ``sqlite_sequence`` entry. **Caller MUST ensure
+       ``waypoints_cold`` is empty at this point** (DROP TABLE
+       cascades through ``ON DELETE CASCADE`` even with
+       ``defer_foreign_keys=ON``). The v14→v15 caller satisfies
+       this by snapshotting cold-eligible rows into a TEMP TABLE
+       BEFORE this helper runs and backfilling AFTER.
+    7. ``ALTER TABLE waypoints_new RENAME TO waypoints`` — SQLite
+       evaluates FKs by name at check time; the renamed table
+       satisfies ``waypoints_cold.id REFERENCES waypoints(id)`` for
+       the post-backfill rows the caller will insert.
+    8. Restore the captured ``sqlite_sequence`` value so
+       AUTOINCREMENT picks up where it left off.
+
+    Raises ``sqlite3.Error`` on any failure; the caller falls back
+    to the per-column ALTER path.
+    """
+    # 1. Clear any zombie waypoints_new from a previous-boot crash
+    #    between steps 4 and 6 (CREATE TABLE waypoints_new
+    #    succeeded; DROP TABLE waypoints did not). Idempotent.
+    conn.execute("DROP TABLE IF EXISTS waypoints_new")
+
+    # 2. Defer FK enforcement. Settable inside the surrounding
+    #    savepoint; auto-resets at outermost-tx commit.
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+
+    # 3. Capture sqlite_sequence high-water for waypoints. The
+    #    table is created on first AUTOINCREMENT INSERT, so it may
+    #    or may not exist on a fresh-ish DB. ``MAX(seq, MAX(id))``
+    #    handles two corner cases:
+    #      * sqlite_sequence row exists but the highest id was
+    #        deleted post-INSERT — sqlite_sequence.seq is the right
+    #        value (already higher than current MAX(id)).
+    #      * sqlite_sequence row missing entirely (no AUTOINCREMENT
+    #        INSERT ever happened on this DB) — fall back to
+    #        MAX(id) which is the highest explicit id used.
+    seq_row = conn.execute(
+        "SELECT COALESCE("
+        "  (SELECT seq FROM sqlite_sequence WHERE name='waypoints'), "
+        "  0) AS seq"
+    ).fetchone()
+    max_id_row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS m FROM waypoints"
+    ).fetchone()
+    seq_high_water = max(seq_row['seq'], max_id_row['m'])
+
+    # 4. CREATE TABLE waypoints_new with HOT columns only. Schema
+    #    is built from the single-source-of-truth tuple +
+    #    DDL-fragment map so any future column add in
+    #    ``_SCHEMA_SQL``'s ``waypoints`` definition that's missed
+    #    here is caught by ``test_v15_hot_columns_match_schema_sql``
+    #    rather than silently dropped during migration.
+    create_cols_sql = ",\n    ".join(
+        f"{col} {_V15_HOT_COLUMN_DDL[col]}"
+        for col in _V15_HOT_COLUMNS
+    )
+    conn.execute(
+        f"CREATE TABLE waypoints_new (\n    {create_cols_sql}\n)"
+    )
+
+    # 5. Single-pass copy. Explicit column list on both sides so
+    #    the SELECT order survives a future column-add.
+    hot_cols_csv = ", ".join(_V15_HOT_COLUMNS)
+    conn.execute(
+        f"INSERT INTO waypoints_new ({hot_cols_csv}) "
+        f"SELECT {hot_cols_csv} FROM waypoints"
+    )
+
+    # 6. Drop the old table. Caller has snapshotted cold rows into
+    #    a TEMP TABLE so the cascade-emptying of waypoints_cold is
+    #    a no-op (it's already empty).
+    conn.execute("DROP TABLE waypoints")
+
+    # 7. Atomic rename — at this point queries against ``waypoints``
+    #    return the new (hot-cols-only) table. SQLite preserves
+    #    the per-table sqlite_sequence row across rename, but the
+    #    DROP+RENAME sequence loses the high-water mark from the
+    #    deleted-rows-above-MAX(id) case (e.g., insert ids 1..5,
+    #    delete id=5 → sqlite_sequence.seq=5 but MAX(id)=4 →
+    #    after rewrite seq=4 → next AUTOINCREMENT recycles id=5).
+    #    Step 8 restores it.
+    conn.execute("ALTER TABLE waypoints_new RENAME TO waypoints")
+
+    # 8. Restore the captured high-water so AUTOINCREMENT
+    #    semantics are preserved (no id recycling).
+    #
+    #    Critical correctness note: ``sqlite_sequence`` has NO
+    #    UNIQUE constraint on ``name``. That means BOTH
+    #    ``INSERT OR REPLACE`` (no row to replace → silently
+    #    appends a duplicate) AND ``INSERT OR IGNORE`` (no
+    #    constraint to violate → silently appends a duplicate)
+    #    leave the table with two rows for ``'waypoints'``.
+    #    The safe pattern is **UPDATE first, INSERT only on
+    #    rowcount == 0** — UPDATE on a non-existent row is a no-op
+    #    (rowcount=0), then we INSERT exactly once. Use
+    #    ``MAX(seq, ?)`` in the UPDATE so we never DECREASE the
+    #    value (which would itself recycle ids). The post-condition
+    #    ``COUNT(*) FROM sqlite_sequence WHERE name='waypoints'
+    #    <= 1`` is asserted by the
+    #    ``test_migration_sqlite_sequence_is_single_row`` test.
+    if seq_high_water > 0:
+        cur = conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?) "
+            "WHERE name = 'waypoints'",
+            (seq_high_water,),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) "
+                "VALUES ('waypoints', ?)",
+                (seq_high_water,),
+            )
+
+    logger.info(
+        "v14->v15: single-table-rewrite complete (1 read+write "
+        "pass instead of 8x DROP COLUMN); AUTOINCREMENT high-water "
+        "restored to %d", seq_high_water,
+    )
+
+
+def _drop_cold_cols_via_per_column_alter(conn: sqlite3.Connection) -> None:
+    """Legacy fallback: drop cold columns via 8x ALTER TABLE DROP COLUMN.
+
+    Used only when :func:`_drop_cold_cols_via_rewrite` raises a
+    ``sqlite3.Error`` (corrupt row, FK weirdness, disk pressure
+    mid-rewrite). Each ALTER is its own statement so a
+    duplicate-column failure on retry is isolated to one column.
+
+    SQLite ≥ 3.35 implements DROP COLUMN as a table rewrite, so
+    this path costs 8 rewrites — the exact behaviour issue #188 was
+    filed to eliminate. Keeping it as a fallback is intentional:
+    "8 slow rewrites" is strictly better than "schema stuck at
+    v14 with cold columns still present."
+    """
+    # Clear any partial-rewrite leftover from this same migration
+    # call (rewrite raised AFTER ``CREATE TABLE waypoints_new``).
+    # Idempotent — DROP TABLE IF EXISTS is a no-op when the table
+    # isn't there.
+    conn.execute("DROP TABLE IF EXISTS waypoints_new")
+
+    dropped = 0
+    failures: list[tuple[str, str]] = []
+    for col in _COLD_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE waypoints DROP COLUMN {col}")
+            dropped += 1
+        except sqlite3.OperationalError as e:
+            # Already dropped (idempotent retry) or older SQLite —
+            # log once at WARNING; the runtime INSERT path handles
+            # the cold half via waypoints_cold either way.
+            logger.warning(
+                "v14->v15 fallback: could not drop %s from "
+                "waypoints: %s (continuing)", col, e,
+            )
+            failures.append((col, str(e)))
+
+    # Aggregate summary so a single ``journalctl`` line tells the
+    # operator whether the fallback succeeded. Without this they
+    # have to count 8 lines and cross-reference against
+    # ``_COLD_COLUMNS`` themselves.
+    if not failures:
+        logger.info(
+            "v14->v15 fallback complete: dropped %d of %d cold "
+            "columns via per-column ALTER",
+            dropped, len(_COLD_COLUMNS),
+        )
+    else:
+        logger.error(
+            "v14->v15 fallback partial: dropped %d of %d cold "
+            "columns; %d failure(s) — remaining: %r",
+            dropped, len(_COLD_COLUMNS), len(failures),
+            [c for c, _ in failures],
         )

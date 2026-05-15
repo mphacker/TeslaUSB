@@ -434,10 +434,11 @@ def api_connect_provider():
            }
 
     For shape (3), ``obscure_keys`` is optional; if omitted the
-    backend's documented defaults are applied (``["pass"]`` for
-    ``sftp``/``webdav``/``smb``/``ftp``; ``[]`` for ``s3``/``b2``/
-    ``wasabi``/``azureblob``/``swift`` since rclone does not obscure
-    their secret keys).
+    backend's documented defaults from
+    :data:`services.cloud_rclone_service._DEFAULT_OBSCURE_KEYS` are
+    applied (``["pass"]`` for ``sftp``/``webdav``/``smb``/``ftp``;
+    ``[]`` for ``s3``/``b2``/``wasabi``/``azureblob``/``swift`` since
+    rclone does not obscure their secret keys).
 
     Behaviour notes:
         * On success the chosen provider is persisted to
@@ -451,6 +452,7 @@ def api_connect_provider():
     from services.cloud_rclone_service import (
         parse_rclone_token, parse_rclone_config_block,
         save_credentials, save_credentials_generic, PROVIDERS,
+        _DEFAULT_OBSCURE_KEYS,
     )
 
     data = request.get_json(silent=True) or {}
@@ -469,23 +471,16 @@ def api_connect_provider():
         rclone_type = data.get('rclone_type')
         fields = data.get('fields')
 
-        # Default obscure keys per rclone backend convention.
-        # sftp/webdav/smb/ftp store an obfuscated password; the S3-style
-        # backends store secret keys in cleartext (rclone never
-        # obscures them). Callers can override with an explicit list.
-        _DEFAULT_OBSCURE = {
-            'sftp': ['pass'], 'webdav': ['pass'],
-            'smb': ['pass'], 'ftp': ['pass'],
-            's3': [], 'b2': [], 'wasabi': [],
-            'azureblob': [], 'swift': [],
-        }
-
         try:
             if config_block:
                 parsed = parse_rclone_config_block(config_block)
                 rt = parsed.pop('type')
+                # Default obscure keys come from the single source of
+                # truth in cloud_rclone_service so a future backend
+                # added to _GENERIC_RCLONE_TYPES can never silently
+                # default to no-obscure here (PR #218 review I-3).
                 obscure_keys = data.get(
-                    'obscure_keys', _DEFAULT_OBSCURE.get(rt, []),
+                    'obscure_keys', _DEFAULT_OBSCURE_KEYS.get(rt, []),
                 )
                 save_credentials_generic(
                     rt, parsed,
@@ -493,7 +488,8 @@ def api_connect_provider():
                 )
             elif rclone_type and isinstance(fields, dict):
                 obscure_keys = data.get(
-                    'obscure_keys', _DEFAULT_OBSCURE.get(rclone_type, []),
+                    'obscure_keys',
+                    _DEFAULT_OBSCURE_KEYS.get(rclone_type, []),
                 )
                 save_credentials_generic(
                     rclone_type, fields,

@@ -12,7 +12,7 @@ types and how to set them up from the web UI.
 | **S3-style** | Amazon S3, Backblaze B2, Wasabi | Inline form (Access Key / Secret Key / Region / Bucket / Endpoint) | API keys (cleartext per rclone convention) |
 | **NAS / custom rclone** *(issue #165)* | SFTP, WebDAV, SMB/CIFS, FTP, S3-compatible (custom endpoint), Azure Blob, OpenStack Swift | Either a guided form or an `rclone.conf` paste | Hardware-bound Fernet-encrypted blob in `cloud_provider_creds.bin` |
 
-All three flows ultimately produce the same encrypted `cloud_provider_creds.bin` and the same `[teslausb]` rclone section at sync time, so the cloud archive worker, Live Event Sync, and the connection-test button all work identically regardless of provider type.
+All three flows ultimately produce the same encrypted `cloud_provider_creds.bin` and the same `[teslausb]` rclone section at sync time, so the cloud archive worker, the live-event upload path (`PRIORITY_LIVE_EVENT` rows in `pipeline_queue`), and the connection-test button all work identically regardless of provider type.
 
 ## NAS / Custom rclone (issue #165)
 
@@ -83,4 +83,4 @@ For SFTP / WebDAV / SMB / FTP, the remote folder is a path on the server, e.g. `
 
 1. After **Save & Connect**, the **Test Connection** button runs `rclone lsd teslausb:` and reports success or the rclone error verbatim.
 2. The **Cloud Archive** queue starts draining the moment WiFi connects. The map page's clip overlay shows the sync icon for archived clips.
-3. The **Live Event Sync** subsystem (if enabled) inherits NAS support automatically — no separate setup.
+3. Sentry / Saved-event clips are uploaded with priority over the bulk catch-up backlog (they enter `pipeline_queue` at `PRIORITY_LIVE_EVENT`); no separate setup is required for the new provider types.

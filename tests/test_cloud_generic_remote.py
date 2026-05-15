@@ -230,6 +230,179 @@ class TestSaveCredentialsGeneric:
         # Recorded as a sorted, deduped CSV so audit logs stay stable.
         assert svc._load_creds()["_obscure_keys"] == "pass"
 
+    # ---- PR #218 review: control-character injection coverage ----------
+    #
+    # The reviewer reproduced an injection: a value of
+    # ``"x\ntype = local\nremote = /"`` produced a malicious multi-line
+    # ``[teslausb]`` block that overrode the backend type. Form mode
+    # JSON bypassed the splitlines() check that paste mode used. These
+    # tests pin the new ``_reject_control_chars`` guard at every
+    # entry point.
+
+    def test_rejects_newline_in_field_value(self, tmp_creds):
+        with pytest.raises(ValueError, match="forbidden control character"):
+            svc.save_credentials_generic(
+                "sftp",
+                {"host": "x\ntype = local\nremote = /", "user": "u"},
+                obscure_keys=[],
+            )
+
+    def test_rejects_carriage_return_in_field_value(self, tmp_creds):
+        with pytest.raises(ValueError, match="forbidden control character"):
+            svc.save_credentials_generic(
+                "sftp", {"host": "good\rinjected", "user": "u"},
+                obscure_keys=[],
+            )
+
+    def test_rejects_null_byte_in_field_value(self, tmp_creds):
+        with pytest.raises(ValueError, match="forbidden control character"):
+            svc.save_credentials_generic(
+                "sftp", {"host": "good\x00injected", "user": "u"},
+                obscure_keys=[],
+            )
+
+    def test_rejects_newline_in_field_key(self, tmp_creds):
+        """A key like ``"host\\ntype"`` would smuggle a second
+        ``type =`` line into the conf file regardless of value
+        sanitisation."""
+        with pytest.raises(ValueError, match="forbidden control character"):
+            svc.save_credentials_generic(
+                "sftp", {"host\ntype": "x"}, obscure_keys=[],
+            )
+
+    def test_rejects_newline_in_source(self, tmp_creds):
+        with pytest.raises(ValueError, match="forbidden control character"):
+            svc.save_credentials_generic(
+                "sftp", {"host": "X"}, obscure_keys=[],
+                source="form\nbogus",
+            )
+
+    def test_rejects_string_obscure_keys(self, tmp_creds):
+        """``"pass"`` would iterate as ``['p','a','s','s']`` and silently
+        fail to obscure the password — the exact failure mode the
+        whole obscure path exists to prevent."""
+        with pytest.raises(ValueError, match="must be a list"):
+            svc.save_credentials_generic(
+                "sftp", {"host": "X", "pass": "p"},
+                obscure_keys="pass",  # type: ignore[arg-type]
+            )
+
+    def test_rejects_non_string_in_obscure_keys(self, tmp_creds):
+        with pytest.raises(ValueError, match="must be strings"):
+            svc.save_credentials_generic(
+                "sftp", {"host": "X", "pass": "p"},
+                obscure_keys=["pass", 42],  # type: ignore[list-item]
+            )
+
+    def test_obscure_keys_normalised_lowercase(self, tmp_creds, monkeypatch):
+        """Form callers may send ``"Pass"`` (case mismatch with the
+        rclone field key); we normalise so the obscure step still
+        matches the actual field name."""
+        called = []
+        monkeypatch.setattr(
+            svc, "_rclone_obscure",
+            lambda v: called.append(v) or f"O({v})",
+        )
+        svc.save_credentials_generic(
+            "sftp", {"host": "X", "pass": "p"}, obscure_keys=["Pass"],
+        )
+        assert svc._load_creds()["pass"] == "O(p)"
+        assert called == ["p"]
+
+
+# ---------------------------------------------------------------------------
+# Defense in depth at the conf-writers — corrupted-on-disk creds
+# ---------------------------------------------------------------------------
+
+class TestConfWriterControlCharGuard:
+    """Even if a corrupted creds file slips past
+    ``save_credentials_generic`` (e.g. via filesystem access outside
+    this code path), the rclone-conf writers MUST refuse to emit a
+    line containing a control character. PR #218 review."""
+
+    @pytest.fixture
+    def tmpfs(self, tmp_path, monkeypatch):
+        from services import cloud_archive_service as cas
+        d = str(tmp_path / "rclone-tmp")
+        monkeypatch.setattr(cas, "_RCLONE_TMPFS_DIR", d)
+        monkeypatch.setattr(
+            cas, "_RCLONE_CONF_PATH", os.path.join(d, "rclone.conf"),
+        )
+        yield d
+
+    def _read(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def test_archive_writer_skips_value_with_newline(self, tmpfs):
+        from services import cloud_archive_service as cas
+
+        path = cas._write_rclone_conf(
+            "generic",
+            {"type": "sftp", "host": "good\ntype = local", "user": "u"},
+        )
+        contents = self._read(path)
+        assert "type = local" not in contents
+        assert "host = good" not in contents  # whole line skipped
+        # The legitimate remainder still made it through.
+        assert "type = sftp" in contents
+        assert "user = u" in contents
+
+    def test_archive_writer_skips_key_with_newline(self, tmpfs):
+        from services import cloud_archive_service as cas
+
+        path = cas._write_rclone_conf(
+            "generic",
+            {"type": "sftp", "host\ntype": "x", "user": "u"},
+        )
+        contents = self._read(path)
+        assert "host\ntype" not in contents
+        # No second "type = " smuggled in.
+        lines = contents.splitlines()
+        assert sum(1 for ln in lines if ln.startswith("type = ")) == 1
+
+    def test_temp_writer_skips_value_with_newline(self, tmp_path, monkeypatch):
+        d = str(tmp_path / "rclone-tmp")
+        monkeypatch.setattr(svc, "_RCLONE_TMPFS_DIR", d)
+        monkeypatch.setattr(
+            svc, "_RCLONE_CONF_PATH", os.path.join(d, "rclone.conf"),
+        )
+        path = svc._write_temp_conf(
+            {"type": "sftp", "host": "good\ntype = local", "user": "u"},
+        )
+        with open(path, "r", encoding="utf-8") as f:
+            contents = f.read()
+        assert "type = local" not in contents
+        assert "type = sftp" in contents
+        assert "user = u" in contents
+
+
+# ---------------------------------------------------------------------------
+# _DEFAULT_OBSCURE_KEYS — single source of truth for the route handler
+# ---------------------------------------------------------------------------
+
+class TestDefaultObscureKeys:
+    """Pin the contract: every supported backend has an entry, and
+    sftp/webdav/smb/ftp obscure ``pass``."""
+
+    def test_covers_every_supported_backend(self):
+        assert set(svc._DEFAULT_OBSCURE_KEYS.keys()) == set(
+            svc._GENERIC_RCLONE_TYPES,
+        )
+
+    def test_password_backends_obscure_pass(self):
+        for rt in ("sftp", "webdav", "smb", "ftp"):
+            assert "pass" in svc._DEFAULT_OBSCURE_KEYS[rt], (
+                f"{rt} must default to obscuring 'pass'"
+            )
+
+    def test_keybased_backends_do_not_obscure(self):
+        """rclone does not obscure S3-style secret keys."""
+        for rt in ("s3", "b2", "wasabi", "azureblob", "swift"):
+            assert svc._DEFAULT_OBSCURE_KEYS[rt] == [], (
+                f"{rt} must not obscure (rclone won't parse it)"
+            )
+
 
 # ---------------------------------------------------------------------------
 # _rclone_obscure helper

@@ -120,6 +120,64 @@ _GENERIC_RCLONE_TYPES = frozenset({
 # this rule for ALL writers).
 _CREDS_META_KEYS = ("_obscure_keys", "_source", "_rclone_type_hint")
 
+# Default ``obscure_keys`` per supported rclone backend.
+#
+# rclone stores passwords for sftp/webdav/smb/ftp in its
+# mildly-obfuscated AES form ("rclone obscure"); the S3-style backends
+# store secret keys in cleartext (rclone never obscures them and won't
+# parse an obscured form). API callers can override these defaults
+# explicitly, but anything that doesn't override picks the right
+# behaviour for the chosen backend.
+#
+# This table MUST stay in lock-step with :data:`_GENERIC_RCLONE_TYPES`
+# — the assertion below catches drift at import time. Adding a backend
+# without an entry here would default to no-obscure (silent
+# cleartext storage of an sftp password) which is the failure mode
+# the assertion exists to prevent.
+_DEFAULT_OBSCURE_KEYS: Dict[str, List[str]] = {
+    "sftp":      ["pass"],
+    "webdav":    ["pass"],
+    "smb":       ["pass"],
+    "ftp":       ["pass"],
+    "s3":        [],
+    "b2":        [],
+    "wasabi":    [],
+    "azureblob": [],
+    "swift":     [],
+}
+assert set(_DEFAULT_OBSCURE_KEYS.keys()) == set(_GENERIC_RCLONE_TYPES), (
+    "_DEFAULT_OBSCURE_KEYS must cover every rclone backend in "
+    "_GENERIC_RCLONE_TYPES; missing or extra keys make the no-obscure "
+    "default a silent foot-gun. Update both together."
+)
+
+# Characters that cannot appear in a generic rclone field (key OR
+# value). Newlines / carriage-returns / NULs would let an attacker
+# inject extra config lines into the ``[teslausb]`` block at conf-
+# write time (e.g. an ``ssh`` directive on sftp → command execution
+# as the rclone subprocess user, or an ``endpoint`` override on s3
+# → silent upload redirection). Tabs are allowed by rclone's config
+# parser and are legitimate in some values (e.g. multi-word smb
+# domains), so they're not rejected here.
+_FORBIDDEN_FIELD_CHARS = ("\n", "\r", "\x00")
+
+
+def _reject_control_chars(label: str, value: str) -> None:
+    """Raise ``ValueError`` if ``value`` contains a control character
+    that would let an attacker inject extra rclone.conf lines.
+
+    See :data:`_FORBIDDEN_FIELD_CHARS` for the rationale. Used by
+    :func:`save_credentials_generic`, :func:`parse_rclone_config_block`,
+    and the conf-writers as a defense-in-depth backstop.
+    """
+    for ch in _FORBIDDEN_FIELD_CHARS:
+        if ch in value:
+            raise ValueError(
+                f"{label} contains a forbidden control character "
+                f"(0x{ord(ch):02x}); rclone config injection is "
+                f"blocked here."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Token parsing
@@ -377,7 +435,20 @@ def save_credentials_generic(
         )
     if not isinstance(fields, dict):
         raise ValueError("fields must be a dict")
-    obscure_keys = list(obscure_keys or [])
+    # Reject string ``obscure_keys`` explicitly. ``list("pass")`` would
+    # silently iterate as ``['p','a','s','s']`` and then no field would
+    # match, so the password would land in the conf file as cleartext —
+    # the exact failure mode this whole function exists to prevent.
+    if obscure_keys is not None and not isinstance(obscure_keys, (list, tuple)):
+        raise ValueError(
+            "obscure_keys must be a list of strings, not "
+            f"{type(obscure_keys).__name__}"
+        )
+    obscure_keys_list: List[str] = []
+    for ok in (obscure_keys or []):
+        if not isinstance(ok, str):
+            raise ValueError("obscure_keys entries must be strings")
+        obscure_keys_list.append(ok.strip().lower())
 
     creds: Dict[str, str] = {"type": rclone_type}
     for raw_key, raw_value in fields.items():
@@ -396,13 +467,33 @@ def save_credentials_generic(
             raise ValueError(
                 "'type' is set from rclone_type; remove it from fields"
             )
+        # Reject control characters in the KEY before we try to use it
+        # — a key like "host\ntype" would smuggle a second "type =" line
+        # into the conf file regardless of what we do with the value.
+        _reject_control_chars(f"field key {raw_key!r}", key)
         # rclone tolerates int/bool but everything is str on the wire.
         value = "" if raw_value is None else str(raw_value)
-        if key in obscure_keys:
+        # Reject control characters in the VALUE — this is the rclone-
+        # config-injection vector found in the PR #218 review (a value
+        # of "x\ntype = local\nremote = /" would produce a malicious
+        # multi-line conf entry that lets the attacker override the
+        # backend type, redirect uploads, or — on sftp — execute
+        # arbitrary commands as root via the "ssh" directive).
+        _reject_control_chars(f"value for {key!r}", value)
+        if key in obscure_keys_list:
             value = _rclone_obscure(value)
+            # Defense in depth: rclone obscure should never produce a
+            # control char (its output is base64-ish), but verify so a
+            # future rclone change can't bypass the guard above.
+            _reject_control_chars(f"obscured value for {key!r}", value)
         creds[key] = value
 
-    creds["_obscure_keys"] = ",".join(sorted(set(obscure_keys)))
+    # Reject control characters in the source label too — it lands in
+    # creds["_source"] which is filtered out by the conf-writers, but
+    # the loader returns it via the API and a future caller might log
+    # it; defense in depth.
+    _reject_control_chars("source", source)
+    creds["_obscure_keys"] = ",".join(sorted(set(obscure_keys_list)))
     creds["_source"] = source
     _persist_creds(creds, provider_label=f"generic:{rclone_type}")
 
@@ -487,6 +578,13 @@ def _write_temp_conf(creds: dict) -> str:
     rclone would treat them as unknown options and emit a warning.
     The ``type`` key (set by both OAuth and generic flows) is written
     inline and skipped in the loop.
+
+    PR #218 review (defense in depth): any key or value that contains
+    a forbidden control character (``\\n`` / ``\\r`` / ``\\x00``) is
+    skipped with a warning. ``save_credentials_generic`` already
+    rejects these at save time, but a corrupted-on-disk creds file
+    (e.g. through filesystem access outside this code path) MUST
+    NOT be allowed to inject extra rclone.conf lines.
     """
     os.makedirs(_RCLONE_TMPFS_DIR, exist_ok=True)
 
@@ -495,6 +593,17 @@ def _write_temp_conf(creds: dict) -> str:
         if not isinstance(key, str):
             continue
         if key.startswith("_"):
+            continue
+        try:
+            _reject_control_chars(f"creds key {key!r}", key)
+            _reject_control_chars(
+                f"creds value for {key!r}",
+                "" if value is None else str(value),
+            )
+        except ValueError as e:
+            logger.error(
+                "Refusing to write creds entry to rclone.conf: %s", e,
+            )
             continue
         lines.append(f"{key} = {value}")
 

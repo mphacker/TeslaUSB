@@ -2777,11 +2777,29 @@ def _write_rclone_conf(provider: str, creds: dict,
 
     # Build minimal rclone remote config. Skip "type" in the loop
     # (we just emitted it) and skip private metadata keys.
+    #
+    # Defense in depth (PR #218 review): keys/values that contain a
+    # forbidden control character would let an attacker inject extra
+    # config lines (e.g. an sftp ``ssh`` directive → command exec as
+    # root, an s3 ``endpoint`` override → upload redirection).
+    # ``save_credentials_generic`` already rejects these at save time;
+    # this is the last guard before rclone reads the file. We use a
+    # local helper instead of importing from cloud_rclone_service
+    # because cloud_rclone_service imports from THIS module and a
+    # circular import would break startup.
+    _BAD_CHARS = ("\n", "\r", "\x00")
     lines = ["[teslausb]", f"type = {rclone_type}"]
     for key, value in creds.items():
         if not isinstance(key, str):
             continue
         if key == "type" or key.startswith("_"):
+            continue
+        s_value = "" if value is None else str(value)
+        if any(c in key for c in _BAD_CHARS) or any(c in s_value for c in _BAD_CHARS):
+            logger.error(
+                "Refusing to write creds entry to rclone.conf "
+                "(control character in key=%r or value)", key,
+            )
             continue
         lines.append(f"{key} = {value}")
 

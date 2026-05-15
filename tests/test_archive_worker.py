@@ -1027,9 +1027,73 @@ class TestClipHasGpsSignal:
         monkeypatch.setattr(
             sei_parser, 'extract_sei_messages', fake_extract,
         )
-        # Parse error → ambiguous → caller must fall through to copy.
-        # NEVER return False on a parse error (that would silently
-        # drop a potentially-valid clip on a parser bug).
+        # Parse error on a FRESH file (mtime=now) → ambiguous → caller
+        # must fall through to copy. NEVER return False on a parse
+        # error for a recently-written file (Tesla may still be in
+        # the middle of a segment write — the next peek may succeed).
+        # See test_returns_false_on_parse_error_when_file_is_stale
+        # below for the May 2026 stale-file mitigation.
+        assert archive_worker._clip_has_gps_signal(str(clip)) is None
+
+    def test_returns_false_on_parse_error_when_file_is_stale(
+        self, monkeypatch, tmp_path,
+    ):
+        # May 2026 — when the SEI peek fails AND the file's mtime is
+        # older than _PEEK_GIVE_UP_AGE_SECONDS, treat as stationary
+        # (False) so the worker marks the row skipped_stationary
+        # instead of falling through to copy → moov-incomplete →
+        # repeated defers blocking the queue. Production cause: the
+        # Pi's VFS page cache holds a stale view of files Tesla wrote
+        # via the gadget block layer; reads return "no mdat" / "no
+        # moov" indefinitely. Treating these as stationary unblocks
+        # the queue. Trade-off: a corrupted-but-has-GPS file would
+        # be skipped, but it would also fail the copy path, so it's
+        # lost either way — this just makes the loss happen quickly.
+        clip = tmp_path / "stale.mp4"
+        clip.write_bytes(b"x" * 100)
+        # Backdate well past the give-up threshold (default 300s).
+        old_mtime = time.time() - (
+            archive_worker._peek_give_up_age_seconds() + 60
+        )
+        os.utime(str(clip), (old_mtime, old_mtime))
+
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
+            raise ValueError("No mdat box found in " + path)
+            yield  # unreachable
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
+        result = archive_worker._clip_has_gps_signal(str(clip))
+        assert result is False, (
+            f"stale unparseable file should return False (treat as "
+            f"stationary so the worker can mark it skipped_stationary "
+            f"and stop cycling on it), got {result!r}"
+        )
+
+    def test_returns_none_on_parse_error_when_file_is_fresh(
+        self, monkeypatch, tmp_path,
+    ):
+        # Symmetric guard: a parse error on a file whose mtime is
+        # WITHIN the give-up threshold MUST still return None (not
+        # False), because Tesla may still be writing — a future peek
+        # may succeed. Returning False here would silently drop
+        # legitimate moving-clip data.
+        clip = tmp_path / "fresh.mp4"
+        clip.write_bytes(b"x" * 100)
+        # Use a very recent mtime — well below the give-up threshold.
+        recent_mtime = time.time() - 10
+        os.utime(str(clip), (recent_mtime, recent_mtime))
+
+        def fake_extract(path, sample_rate, max_walk_bytes=None):
+            raise ValueError("No mdat box found")
+            yield
+
+        from services import sei_parser
+        monkeypatch.setattr(
+            sei_parser, 'extract_sei_messages', fake_extract,
+        )
         assert archive_worker._clip_has_gps_signal(str(clip)) is None
 
     def test_returns_none_on_file_not_found(

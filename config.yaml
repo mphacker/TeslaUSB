@@ -297,6 +297,7 @@ archive_queue:
   # editing this file by SSH.
   stable_write_age_seconds: 5.0          # Re-queue clips whose mtime is fresher than this many seconds (avoids copying mid-write)
   recent_clips_stable_write_age_seconds: 90.0  # Higher threshold for RecentClips (Tesla writes ~60s segments; moov atom appended at close — see archive_worker._CopyMoovIncomplete)
+  peek_give_up_age_seconds: 300.0        # If SEI peek raises a parser error AND file mtime is older than this, treat as stationary (skip) instead of falling through to copy — prevents queue cascade when VFS page cache holds a stale view of files Tesla wrote via the gadget block layer
   stale_claim_max_age_seconds: 600.0     # Reset 'claimed' rows older than this back to 'pending' on worker startup (recovers crashed/OOMed claims)
   # Wave 4 PR-E (issue #184): shadow-mode validation of the unified
   # ``pipeline_queue``. When enabled, the archive worker peeks at

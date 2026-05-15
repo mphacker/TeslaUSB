@@ -1679,6 +1679,23 @@ def _stable_write_age_seconds() -> float:
         return _STABLE_WRITE_AGE_SECONDS
 
 
+def _peek_give_up_age_seconds() -> float:
+    """Return the SEI-peek give-up age threshold from config, falling
+    back to the module-level ``_PEEK_GIVE_UP_AGE_SECONDS``.
+
+    See ``_clip_has_gps_signal`` for the rationale: when the SEI peek
+    raises a parser error on a stale file (mtime older than this
+    threshold), the file is permanently unreadable from VFS and we
+    treat it as stationary so the worker can mark it
+    ``skipped_stationary`` and stop cycling on it.
+    """
+    try:
+        from config import ARCHIVE_QUEUE_PEEK_GIVE_UP_AGE_SECONDS
+        return float(ARCHIVE_QUEUE_PEEK_GIVE_UP_AGE_SECONDS)
+    except Exception:  # noqa: BLE001
+        return _PEEK_GIVE_UP_AGE_SECONDS
+
+
 def _recent_clips_stable_write_age_seconds() -> float:
     """Return RecentClips-specific stable-write threshold.
 
@@ -1751,6 +1768,21 @@ _SKIP_GPS_PEEK_SAMPLE_RATE = 30
 # misclassified as stationary, but the user already opted in to skipping
 # stationary clips and that edge case is far rarer than the stall it cures.
 _SKIP_GPS_PEEK_MAX_WALK_BYTES = 2 * 1024 * 1024
+# May 2026 — when ``_clip_has_gps_signal`` raises a parser exception
+# (commonly: the ``mdat`` or ``moov`` box is unreadable from VFS
+# because the Pi's page cache holds a stale view of a file Tesla
+# wrote via the gadget block layer), retrying is pointless once the
+# file's mtime is older than this threshold. Tesla writes RecentClips
+# in ~60-second segments; if the file hasn't changed in 5 minutes,
+# Tesla isn't writing to it anymore and our view is whatever it is.
+# Treating these as stationary (False, → ``mark_skipped_stationary``)
+# instead of ambiguous (None, → fall through to copy → repeated
+# ``_CopyMoovIncomplete`` defers blocking the queue) is the correct
+# trade: a clip we can't peek won't be useful to copy either, and the
+# ``skipped_stationary`` row acts as a permanent memo so the producer
+# never re-enqueues the same path. Configurable via
+# ``archive_queue.peek_give_up_age_seconds``.
+_PEEK_GIVE_UP_AGE_SECONDS = 300.0
 
 
 def _clip_has_gps_signal(source_path: str) -> Optional[bool]:
@@ -1825,8 +1857,47 @@ def _clip_has_gps_signal(source_path: str) -> Optional[bool]:
         return None
     except Exception as e:  # noqa: BLE001
         # Any parse error (corrupt MP4, mmap failure, protobuf decode
-        # blow-up) — fall through to the existing copy path so we
-        # never lose data on a parser bug.
+        # blow-up, "No mdat box found", "MP4 box 'moov' not found")
+        # — the original behavior was "fall through to the existing
+        # copy path so we never lose data on a parser bug" (None).
+        #
+        # May 2026 update: that fail-open behavior caused a queue
+        # cascade in production. Tesla writes RecentClips via the
+        # USB gadget block layer; the Pi's page cache holds a STALE
+        # view of those files (cached inode reports old i_size,
+        # reads stop short of Tesla's appended bytes). For those
+        # files the SEI peek raises "No mdat" / "no moov", we return
+        # None, the worker falls through to ``_atomic_copy``, which
+        # also can't see the appended boxes and raises
+        # ``_CopyMoovIncomplete``, the row defers, the cap escalates
+        # via ``mark_failed`` to status='pending', the worker re-
+        # claims the SAME row, and the queue blocks.
+        #
+        # Mitigation: if the file's mtime is stale (>= threshold),
+        # the file has been quiescent for far longer than Tesla's
+        # 60 s segment cycle. It's not going to suddenly become
+        # parseable. Treat it as stationary (False) — the worker
+        # marks it ``skipped_stationary`` and the producer's dedup
+        # gate prevents re-enqueue. We're trading a tiny risk
+        # (unreadable file *might* contain GPS) for queue health
+        # (worker can drain). The unreadable file would also have
+        # failed the copy path, so the data is lost either way —
+        # this just makes the loss happen fast and stop blocking
+        # other work.
+        try:
+            age = time.time() - os.stat(source_path).st_mtime
+        except OSError:
+            age = 0.0
+        give_up_age = _peek_give_up_age_seconds()
+        if age >= give_up_age:
+            logger.warning(
+                "_clip_has_gps_signal: peek failed for %s (%s); "
+                "file mtime is %.0fs old (>= %.0fs threshold); "
+                "treating as stationary so the worker can mark it "
+                "skipped_stationary instead of cycling on it",
+                source_path, e, age, give_up_age,
+            )
+            return False
         logger.warning(
             "_clip_has_gps_signal: peek failed for %s (%s); "
             "deferring to copy", source_path, e,

@@ -154,6 +154,30 @@ class TestSchema:
         finally:
             conn.close()
 
+    def test_priority_live_event_constant_kept(self):
+        """Issue #202: ``PRIORITY_LIVE_EVENT`` MUST remain a public
+        constant. The standalone Live Event Sync subsystem was deleted
+        in Wave 4 PR-F4 (#184) but the cloud worker still uses
+        ``PRIORITY_LIVE_EVENT = 0`` as the priority of live-event
+        rows in the unified ``pipeline_queue``. Without this constant
+        live events would lose their fast-path over bulk catch-up
+        rows. Moved here from ``test_cloud_archive_v4_migration.py``
+        per review-pr finding #10 (the constant is owned by this
+        module, so its assertion belongs here)."""
+        assert pqs.PRIORITY_LIVE_EVENT == 0
+
+    def test_resolve_pipeline_db_is_public(self):
+        """Issue #202 / review-pr finding #7: ``resolve_pipeline_db``
+        was promoted from a private helper to a public function so
+        sibling service modules (cloud_archive_service v4 migration)
+        can call it without ``# noqa: SLF001``. The legacy private
+        alias ``_resolve_pipeline_db`` is preserved for backward
+        compatibility."""
+        assert hasattr(pqs, 'resolve_pipeline_db')
+        assert callable(pqs.resolve_pipeline_db)
+        # Backward-compat alias still works.
+        assert pqs._resolve_pipeline_db is pqs.resolve_pipeline_db
+
 
 # ---------------------------------------------------------------------------
 # Dual-write helpers (direct calls)

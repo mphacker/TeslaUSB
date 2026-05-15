@@ -152,8 +152,8 @@ _recover_stale_claims_call_count = 0  # incl. zero-result calls
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_pipeline_db() -> Optional[str]:
-    """Return the geodata.db path, or None if config can't be loaded.
+def resolve_pipeline_db() -> Optional[str]:
+    """Public helper: return the geodata.db path, or None if config can't be loaded.
 
     Lazy import of ``config`` so unit tests that don't bootstrap the
     Flask app can still import this module without side effects.
@@ -169,6 +169,12 @@ def _resolve_pipeline_db() -> Optional[str]:
     except Exception as e:  # noqa: BLE001
         logger.debug("pipeline_queue config not loaded: %s", e)
         return None
+
+
+# Backward-compat private alias. Existing in-tree callers and tests
+# referenced ``_resolve_pipeline_db`` before it was promoted; keep the
+# name working so we don't have to touch every call site at once.
+_resolve_pipeline_db = resolve_pipeline_db
 
 
 def _open_pipeline_conn(db_path: str) -> sqlite3.Connection:

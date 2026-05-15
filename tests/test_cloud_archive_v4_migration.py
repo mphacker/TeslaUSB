@@ -141,10 +141,14 @@ def geodata_db(tmp_path):
 
 @pytest.fixture(autouse=True)
 def isolate_pipeline_db(monkeypatch, geodata_db):
-    """Force ``pipeline_queue_service._resolve_pipeline_db`` to return
+    """Force ``pipeline_queue_service.resolve_pipeline_db`` to return
     the test geodata.db so the cross-DB reconciliation path uses the
-    isolated test DB, not whatever the host has configured.
+    isolated test DB, not whatever the host has configured. Patches
+    both the public ``resolve_pipeline_db`` and the legacy private
+    ``_resolve_pipeline_db`` alias so any caller (current or legacy)
+    is rerouted.
     """
+    monkeypatch.setattr(pqs, 'resolve_pipeline_db', lambda: geodata_db)
     monkeypatch.setattr(pqs, '_resolve_pipeline_db', lambda: geodata_db)
     return geodata_db
 
@@ -368,7 +372,10 @@ class TestDropMigrationDirect:
              'event_minute', 'pending',
              '2026-05-14T10:00:00'),
         ])
-        # Force pipeline DB to a non-existent path.
+        # Force pipeline DB to a non-existent path. Patches both names
+        # to defeat the autouse fixture (which patches them too).
+        monkeypatch.setattr(pqs, 'resolve_pipeline_db',
+                            lambda: '/nonexistent/path/geodata.db')
         monkeypatch.setattr(pqs, '_resolve_pipeline_db',
                             lambda: '/nonexistent/path/geodata.db')
 
@@ -384,6 +391,239 @@ class TestDropMigrationDirect:
 
         # Table must still exist — DROP did not run.
         assert _table_exists(cloud_db_v3_with_les, 'live_event_queue')
+
+    def test_backfill_maps_all_four_legacy_statuses(
+        self, cloud_db_v3_with_les, geodata_db,
+    ):
+        """Review-pr finding #8: exercise every entry in ``status_map``
+        (`pending` → `pending`, `uploading` → `in_progress`,
+        `uploaded` → `done`, `failed` → `failed`). Without coverage,
+        a future refactor could silently change the mapping for the
+        non-canonical statuses (`uploading` and `failed` were missed
+        in the initial PR)."""
+        _seed_les_rows(cloud_db_v3_with_les, [
+            ('/Sentry/event_a', '/Sentry/event_a/event.json',
+             '2026-05-14T10:00:00', 'reason_a', 'event_minute',
+             'pending', '2026-05-14T10:00:00'),
+            ('/Sentry/event_b', '/Sentry/event_b/event.json',
+             '2026-05-14T11:00:00', 'reason_b', 'event_minute',
+             'uploading', '2026-05-14T11:00:00'),
+            ('/Sentry/event_c', '/Sentry/event_c/event.json',
+             '2026-05-14T12:00:00', 'reason_c', 'event_minute',
+             'uploaded', '2026-05-14T12:00:00'),
+            ('/Sentry/event_d', '/Sentry/event_d/event.json',
+             '2026-05-14T13:00:00', 'reason_d', 'event_minute',
+             'failed', '2026-05-14T13:00:00'),
+        ])
+
+        conn = sqlite3.connect(cloud_db_v3_with_les)
+        try:
+            cas._migrate_drop_live_event_queue_v4(
+                conn, cloud_db_v3_with_les,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            gconn.row_factory = sqlite3.Row
+            rows = {
+                r['legacy_id']: r for r in gconn.execute(
+                    "SELECT legacy_id, stage, status "
+                    "FROM pipeline_queue "
+                    "WHERE legacy_table='live_event_queue'"
+                ).fetchall()
+            }
+        finally:
+            gconn.close()
+
+        assert len(rows) == 4
+        assert rows[1]['stage'] == pqs.STAGE_CLOUD_PENDING
+        assert rows[1]['status'] == 'pending'
+        assert rows[2]['stage'] == pqs.STAGE_CLOUD_PENDING
+        assert rows[2]['status'] == 'in_progress'
+        assert rows[3]['stage'] == pqs.STAGE_CLOUD_DONE
+        assert rows[3]['status'] == 'done'
+        assert rows[4]['stage'] == pqs.STAGE_CLOUD_PENDING
+        assert rows[4]['status'] == 'failed'
+
+    def test_unknown_legacy_status_defaults_to_failed(
+        self, cloud_db_v3_with_les, geodata_db,
+    ):
+        """Review-pr finding #4: an unrecognized legacy status MUST
+        default to ``'failed'`` (conservative). The deleted
+        ``_backfill_live_event_queue`` had this same behavior — a
+        ``'pending'`` default could let the unified worker re-upload a
+        row whose true state we don't know."""
+        _seed_les_rows(cloud_db_v3_with_les, [
+            ('/Sentry/weird', '/Sentry/weird/event.json',
+             '2026-05-14T10:00:00', 'r', 'event_minute',
+             'unrecognized_status', '2026-05-14T10:00:00'),
+        ])
+
+        conn = sqlite3.connect(cloud_db_v3_with_les)
+        try:
+            cas._migrate_drop_live_event_queue_v4(
+                conn, cloud_db_v3_with_les,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            gconn.row_factory = sqlite3.Row
+            row = gconn.execute(
+                "SELECT status FROM pipeline_queue "
+                "WHERE legacy_table='live_event_queue'"
+            ).fetchone()
+        finally:
+            gconn.close()
+
+        assert row is not None
+        assert row['status'] == 'failed'
+
+    def test_dual_write_failure_aborts_drop(
+        self, cloud_db_v3_with_les, geodata_db, monkeypatch, caplog,
+    ):
+        """Review-pr finding #9: if ``dual_write_enqueue`` returns
+        ``False`` (which can mean either UNIQUE-conflict idempotency
+        OR a swallowed ``sqlite3.Error``), the post-loop verification
+        must distinguish them. A genuine DB-error case leaves the row
+        unmirrored, so the migration must abort and preserve the
+        live_event_queue rows for retry."""
+        _seed_les_rows(cloud_db_v3_with_les, [
+            ('/Sentry/never_mirrored', '/Sentry/never_mirrored/event.json',
+             '2026-05-14T10:00:00', 'r', 'event_minute',
+             'pending', '2026-05-14T10:00:00'),
+        ])
+
+        # Patch dual_write_enqueue to return False without writing —
+        # simulating the sqlite3.Error → return False branch in pqs.
+        monkeypatch.setattr(
+            pqs, 'dual_write_enqueue', lambda **kwargs: False,
+        )
+
+        conn = sqlite3.connect(cloud_db_v3_with_les)
+        try:
+            with caplog.at_level(logging.ERROR):
+                with pytest.raises(RuntimeError, match='backfill incomplete'):
+                    cas._migrate_drop_live_event_queue_v4(
+                        conn, cloud_db_v3_with_les,
+                    )
+            conn.rollback()
+        finally:
+            conn.close()
+
+        # DROP did NOT run — the row is preserved for the next attempt.
+        assert _table_exists(cloud_db_v3_with_les, 'live_event_queue')
+        # ERROR log was emitted listing the abandoned IDs.
+        err_msgs = [
+            r.getMessage() for r in caplog.records
+            if r.levelno >= logging.ERROR
+        ]
+        assert any('backfill failed' in m for m in err_msgs), err_msgs
+
+    def test_stale_mirror_at_pending_is_refreshed_to_done(
+        self, cloud_db_v3_with_les, geodata_db,
+    ):
+        """Review-pr finding #5: if a non-canonical install mirrored a
+        row at LES ``status='pending'`` time and LES later finished
+        the upload (legacy ``status='uploaded'``), the mirror is stale.
+        The migration must UPDATE the mirror to ``cloud_done`` so the
+        worker doesn't re-upload completed work."""
+        _seed_les_rows(cloud_db_v3_with_les, [
+            ('/Sentry/stale', '/Sentry/stale/event.json',
+             '2026-05-14T10:00:00', 'r', 'event_minute',
+             'uploaded',  # legacy says: done
+             '2026-05-14T10:00:00'),
+        ])
+        # Mirror exists but at the OLDER stage='cloud_pending' — i.e.
+        # the worker would re-upload this row on its next claim.
+        _seed_pipeline_mirror(geodata_db, 1,
+                              '/Sentry/stale/event.json',
+                              stage='cloud_pending')
+
+        conn = sqlite3.connect(cloud_db_v3_with_les)
+        try:
+            cas._migrate_drop_live_event_queue_v4(
+                conn, cloud_db_v3_with_les,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Table dropped (no unmirrored rows).
+        assert not _table_exists(cloud_db_v3_with_les, 'live_event_queue')
+
+        # Mirror was UPDATED to cloud_done/done.
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            gconn.row_factory = sqlite3.Row
+            row = gconn.execute(
+                "SELECT stage, status FROM pipeline_queue "
+                "WHERE legacy_table='live_event_queue' "
+                "AND legacy_id=1"
+            ).fetchone()
+        finally:
+            gconn.close()
+        assert row is not None
+        assert row['stage'] == pqs.STAGE_CLOUD_DONE
+        assert row['status'] == 'done'
+
+    def test_chunked_existence_query_handles_large_input(
+        self, cloud_db_v3_with_les, geodata_db,
+    ):
+        """Review-pr finding #2: ``WHERE legacy_id IN (?,?,...)`` is
+        chunked at ``_LIVE_EVENT_BACKFILL_CHUNK`` to stay under
+        SQLite's variable-count ceiling (999 on pre-3.32 builds).
+        Seed ~1.5x the chunk size to exercise multi-chunk traversal
+        in :func:`_query_existing_mirrors`."""
+        chunk_sz = cas._LIVE_EVENT_BACKFILL_CHUNK
+        n = chunk_sz + chunk_sz // 2  # 750 by default
+
+        rows = [
+            (f'/dir/{i}', f'/dir/{i}/event.json',
+             '2026-05-14T10:00:00', 'r', 'event_minute',
+             'pending', '2026-05-14T10:00:00')
+            for i in range(n)
+        ]
+        _seed_les_rows(cloud_db_v3_with_les, rows)
+
+        conn = sqlite3.connect(cloud_db_v3_with_les)
+        try:
+            cas._migrate_drop_live_event_queue_v4(
+                conn, cloud_db_v3_with_les,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # All rows backfilled.
+        gconn = sqlite3.connect(geodata_db)
+        try:
+            cnt = gconn.execute(
+                "SELECT COUNT(*) FROM pipeline_queue "
+                "WHERE legacy_table='live_event_queue'"
+            ).fetchone()[0]
+        finally:
+            gconn.close()
+        assert cnt == n
+        assert not _table_exists(cloud_db_v3_with_les, 'live_event_queue')
+
+    def test_legacy_function_alias_still_works(
+        self, cloud_db_v3_with_les, geodata_db,
+    ):
+        """Review-pr finding #5 (continued): the function was renamed
+        from ``_reconcile_live_event_queue_into_pipeline`` to
+        ``_backfill_missing_live_event_mirrors``. The old name is
+        kept as a backward-compat alias so any external test or
+        helper that imported the old symbol keeps working."""
+        assert (
+            cas._reconcile_live_event_queue_into_pipeline
+            is cas._backfill_missing_live_event_mirrors
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -444,11 +684,6 @@ class TestInitCloudDbV4:
 class TestSchemaVersionConstant:
     def test_cloud_schema_version_is_v4_or_later(self):
         assert cas._CLOUD_SCHEMA_VERSION >= 4
-
-    def test_priority_live_event_is_kept(self):
-        # The issue body explicitly requires PRIORITY_LIVE_EVENT to
-        # remain a public constant — the cloud worker still uses it.
-        assert pqs.PRIORITY_LIVE_EVENT == 0
 
     def test_legacy_table_live_event_is_removed(self):
         assert not hasattr(pqs, 'LEGACY_TABLE_LIVE_EVENT')

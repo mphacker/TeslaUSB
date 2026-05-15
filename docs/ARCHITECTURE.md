@@ -67,7 +67,7 @@ flowchart TB
 
     subgraph FlaskApp["Flask application (gadget_web)"]
         BLUEPRINTS[Blueprints<br/>HTTP routes]
-        WORKERS[Background workers<br/>archive / indexer / cloud / LES]
+        WORKERS[Background workers<br/>archive / indexer / cloud]
         WATCHER[file_watcher_service<br/>inotify]
         COORDINATOR[task_coordinator<br/>fairness lock]
     end
@@ -169,9 +169,9 @@ The Pi-side services that drive everything:
 | `teslausb-safe-mode.service`         | Detects 3+ reboots in 10 minutes; skips TeslaUSB services if so    |
 
 Notice that **`gadget_web.service` owns every background worker**.
-The archive worker, indexing worker, cloud-archive worker, LES
-worker, file watcher, and chime scheduler ticker are all threads
-inside the Flask process. There is no separate worker daemon.
+The archive worker, indexing worker, cloud-archive worker, file
+watcher, and chime scheduler ticker are all threads inside the
+Flask process. There is no separate worker daemon.
 
 ### The Flask application (`gadget_web`)
 
@@ -237,21 +237,27 @@ detection. Writes `indexed_files`, `waypoints`, `detected_events`
 rows. Updates / merges `trips`. Returns a typed `IndexResult` with
 an `IndexOutcome` enum value.
 
-### 4. Cloud upload (two cooperating workers)
+### 4. Cloud upload (single unified worker)
 
-- **`cloud_archive_service.py`** — bulk catch-up uploader. Drains
-  `cloud_synced_files` (status `pending`). Priority order: events
-  first → geolocated → non-event (opt-in). One rclone subprocess
-  at a time.
-- **`live_event_sync_service.py`** (LES) — opt-in real-time
-  uploader. Triggered by `event.json` arrival. Drains
-  `live_event_queue`. Has its own thread, idle on
-  `threading.Event.wait()`. **Disabled by default.**
+- **`cloud_archive_service.py`** — the only cloud worker. Drains
+  `cloud_synced_files` (status `pending`) and reads from
+  `pipeline_queue` (priority-ordered: live events at
+  `PRIORITY_LIVE_EVENT = 0`, geolocated event clips at
+  `PRIORITY_ARCHIVE_EVENT = 1`, RecentClips at
+  `PRIORITY_ARCHIVE_RECENT = 2`, etc.). One rclone subprocess
+  at a time, `nice -n 19` + `ionice -c 3`.
 
-The two cloud subsystems coordinate via `task_coordinator`. When
-LES has work, `cloud_archive` yields between files. The NM WiFi
-dispatcher (`refresh_cloud_token.py`) wakes LES first, waits up
-to 10 minutes for it to drain, then triggers `cloud_archive`.
+The standalone Live Event Sync subsystem
+(`live_event_sync_service.py`) was deleted in Wave 4 PR-F4 / issue
+#184. Live-event uploads are now first-class rows in
+`pipeline_queue` distinguished by `priority` — the unified worker's
+natural priority ordering means a live event always leapfrogs bulk
+catch-up rows on the next claim. The orphaned `live_event_queue`
+table itself was dropped in cloud_sync.db v4 / issue #202.
+
+The NM WiFi dispatcher (`refresh_cloud_token.py`) refreshes the RO
+mount → waits for the archive timer → waits for the indexing queue
+→ triggers `cloud_archive`.
 
 ---
 
@@ -262,7 +268,7 @@ flowchart LR
     Tesla -->|writes mp4 + event.json| GadgetIMG[usb_cam.img]
     GadgetIMG -->|inotify on RO mount| Watcher
     Watcher -->|new mp4| ArchiveProducer
-    Watcher -->|event.json| LES
+    Watcher -->|event.json| CloudArchive
     ArchiveProducer --> ArchiveQueue[(archive_queue)]
     ArchiveQueue --> ArchiveWorker
     ArchiveWorker -->|copy| ArchivedClips[(~/ArchivedClips)]
@@ -273,13 +279,11 @@ flowchart LR
     ArchivedClips --> CloudArchive
     CloudArchive --> CloudDB[(cloud_synced_files)]
     CloudArchive -->|rclone| CloudProvider[Cloud provider]
-    LES --> LESQueue[(live_event_queue)]
-    LES -->|rclone| CloudProvider
 ```
 
-That diagram is the **video lifecycle** in 14 nodes. Every node has
-its own dedicated subsystem doc. The full narrative — including
-every branch, decision point, retry, and failure mode — is in
+That diagram is the **video lifecycle**. Every node has its own
+dedicated subsystem doc. The full narrative — including every
+branch, decision point, retry, and failure mode — is in
 [`VIDEO_LIFECYCLE.md`](VIDEO_LIFECYCLE.md).
 
 ---
@@ -308,8 +312,8 @@ delete code path.
 
 | File             | Owns                                                                          |
 |------------------|-------------------------------------------------------------------------------|
-| `geodata.db`     | Trips, waypoints, detected events, indexed file records, the indexing queue   |
-| `cloud_sync.db`  | Cloud-upload state, the archive queue, the LES queue, sync sessions           |
+| `geodata.db`     | Trips, waypoints, detected events, indexed file records, the indexing queue, the unified `pipeline_queue` |
+| `cloud_sync.db`  | Cloud-upload state, sync sessions                                              |
 
 Schemas are documented in
 [`contributor/core/DATABASES.md`](contributor/core/DATABASES.md).
@@ -371,7 +375,7 @@ trashes throughput and can starve the watchdog. The
 `task_coordinator` is the single mutex point.
 
 Tasks are named: `'indexer'`, `'archive'`, `'cloud_sync'`,
-`'live_event_sync'`, `'retention'`. Workers call
+`'retention'`. Workers call
 `acquire_task('<name>', wait_seconds=N, yield_to_waiters=True)` to
 get exclusive access. The fairness model lets a tight cyclic
 worker (the indexer) yield to a less-frequent priority task
@@ -445,8 +449,8 @@ behavior, update this doc.
 - `scripts/web/services/file_watcher_service.py` — inotify + polling
 - `scripts/web/services/archive_*.py` — archive subsystem
 - `scripts/web/services/indexing_*.py`, `mapping_*.py` — indexing
-- `scripts/web/services/cloud_archive_service.py` — bulk cloud sync
-- `scripts/web/services/live_event_sync_service.py` — LES
+- `scripts/web/services/cloud_archive_service.py` — bulk cloud sync + live-event uploads (post-PR-F4)
+- `scripts/web/services/pipeline_queue_service.py` — unified queue API (post-Wave-4)
 - `scripts/web/services/task_coordinator.py` — fairness lock
 - `scripts/web/services/partition_*.py`, `mode_service.py` — modes/mounts
 - `scripts/web/helpers/refresh_cloud_token.py` — NM dispatcher entry point

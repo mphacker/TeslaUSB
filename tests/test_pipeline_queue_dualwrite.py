@@ -4,8 +4,8 @@ Phase I.1 is the additive half of the queue unification:
 
   * The new ``pipeline_queue`` table exists in ``geodata.db`` (schema v16).
   * Every legacy enqueue (archive_queue, indexing_queue,
-    live_event_queue, cloud_synced_files) ALSO writes a row to
-    ``pipeline_queue`` tagged with ``legacy_table`` + ``legacy_id``.
+    cloud_synced_files) ALSO writes a row to ``pipeline_queue``
+    tagged with ``legacy_table`` + ``legacy_id``.
   * Reads still come from the legacy tables — no behaviour change.
   * A one-time backfill helper picks up rows that existed BEFORE
     dual-write was wired in (the upgrade backlog).
@@ -61,28 +61,16 @@ def geodata_db(tmp_path):
 
 @pytest.fixture
 def cloud_sync_db(tmp_path):
-    """A fresh ``cloud_sync.db`` with the LES + cloud_synced_files schemas."""
+    """A fresh ``cloud_sync.db`` with the cloud_synced_files schema.
+
+    Note: the ``live_event_queue`` table was dropped in cloud_sync.db
+    v4 (issue #202) after Wave 4 PR-F4 deleted the LES subsystem, so
+    this fixture no longer creates it.
+    """
     db_path = str(tmp_path / 'cloud_sync.db')
     conn = sqlite3.connect(db_path)
     conn.executescript(
         """
-        CREATE TABLE live_event_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_dir TEXT NOT NULL,
-            event_json_path TEXT NOT NULL,
-            event_timestamp TEXT,
-            event_reason TEXT,
-            upload_scope TEXT DEFAULT 'event_minute',
-            status TEXT DEFAULT 'pending',
-            enqueued_at TEXT NOT NULL,
-            uploaded_at TEXT,
-            next_retry_at REAL,
-            attempts INTEGER DEFAULT 0,
-            last_error TEXT,
-            previous_last_error TEXT,
-            bytes_uploaded INTEGER DEFAULT 0,
-            UNIQUE(event_dir)
-        );
         CREATE TABLE cloud_synced_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_path TEXT NOT NULL UNIQUE,
@@ -350,66 +338,6 @@ class TestBackfill:
         )
         assert counts[pqs.LEGACY_TABLE_INDEXING] == 2
 
-    def test_backfill_live_event_queue_cross_db(
-        self, geodata_db, cloud_sync_db,
-    ):
-        conn = sqlite3.connect(cloud_sync_db)
-        conn.executemany(
-            "INSERT INTO live_event_queue "
-            "(event_dir, event_json_path, event_timestamp, "
-            " event_reason, upload_scope, status, enqueued_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                ('/Sentry/2026-05-14_10-00-00',
-                 '/Sentry/2026-05-14_10-00-00/event.json',
-                 '2026-05-14T10:00:00', 'sentry_aware_object_detection',
-                 'event_minute', 'pending',
-                 '2026-05-14T10:00:00'),
-                ('/Sentry/2026-05-14_11-00-00',
-                 '/Sentry/2026-05-14_11-00-00/event.json',
-                 '2026-05-14T11:00:00', 'user_interaction_horn',
-                 'event_minute', 'uploaded',
-                 '2026-05-14T11:00:00'),
-            ],
-        )
-        conn.commit()
-        conn.close()
-
-        counts = pqs.backfill_legacy_queues(
-            pipeline_db_path=geodata_db,
-            cloud_db_path=cloud_sync_db,
-        )
-        assert counts[pqs.LEGACY_TABLE_LIVE_EVENT] == 2
-
-        conn = sqlite3.connect(geodata_db)
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                "SELECT * FROM pipeline_queue "
-                "WHERE legacy_table = ? ORDER BY source_path",
-                (pqs.LEGACY_TABLE_LIVE_EVENT,),
-            ).fetchall()
-            assert len(rows) == 2
-            stages = {r['stage'] for r in rows}
-            assert stages == {pqs.STAGE_LIVE_EVENT_PENDING,
-                              pqs.STAGE_LIVE_EVENT_DONE}
-            # Pair assertion would have caught W1 in PR #190 review:
-            # cross-DB backfill computed the translated status but
-            # discarded it, so 'uploaded' rows landed as
-            # ``stage='live_event_done'`` with ``status='pending'``.
-            stage_status_pairs = {(r['stage'], r['status']) for r in rows}
-            assert stage_status_pairs == {
-                (pqs.STAGE_LIVE_EVENT_PENDING, 'pending'),
-                (pqs.STAGE_LIVE_EVENT_DONE, 'done'),
-            }
-            for r in rows:
-                payload = json.loads(r['payload_json'])
-                assert 'event_dir' in payload
-                assert 'event_reason' in payload
-                assert payload['upload_scope'] == 'event_minute'
-        finally:
-            conn.close()
-
     def test_backfill_cloud_synced_files_cross_db(
         self, geodata_db, cloud_sync_db,
     ):
@@ -546,7 +474,6 @@ class TestBackfill:
         assert counts == {
             pqs.LEGACY_TABLE_ARCHIVE: 0,
             pqs.LEGACY_TABLE_INDEXING: 0,
-            pqs.LEGACY_TABLE_LIVE_EVENT: 0,
             pqs.LEGACY_TABLE_CLOUD_SYNCED: 0,
         }
 

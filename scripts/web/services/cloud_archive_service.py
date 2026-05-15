@@ -158,7 +158,7 @@ def canonical_cloud_path(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 _CLOUD_MODULE = "cloud_archive"
-_CLOUD_SCHEMA_VERSION = 3
+_CLOUD_SCHEMA_VERSION = 4
 
 _CLOUD_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS module_versions (
@@ -523,6 +523,215 @@ def _migrate_canonicalize_paths_v2(
             rewrites, merges,
         )
     return (rewrites, merges)
+
+
+def _migrate_drop_live_event_queue_v4(
+    conn: sqlite3.Connection, db_path: str,
+) -> None:
+    """Drop the orphaned ``live_event_queue`` table from cloud_sync.db.
+
+    Issue #202 — Wave 4 PR-F4 (issue #184 / PR #201) deleted the
+    standalone Live Event Sync subsystem (the service, blueprints,
+    routes, and config block). The ``live_event_queue`` table created
+    by that subsystem was deliberately left behind so any rows still
+    pending at deploy time could survive a rollback. After at least
+    one stable release post-PR-F4, the table is now safe to drop:
+    every install has had time to either (a) drain the table to zero
+    via the cloud worker (which now reads from ``pipeline_queue``
+    priority-0 rows), or (b) leave it untouched at zero rows because
+    LES was never enabled on that install.
+
+    Defensive cross-DB check (the issue body explicitly asks for this):
+    if the table contains any rows, verify each row is mirrored into
+    ``pipeline_queue.legacy_table='live_event_queue'`` in geodata.db.
+    For any unmirrored rows, log a WARNING with the row IDs and
+    backfill them via :func:`pipeline_queue_service.dual_write_enqueue`
+    BEFORE the DROP, so no live-event upload work is lost. This is a
+    safety net — the canonical install verified pre-merge had 0 rows
+    on both sides — but it remains the correct shape because some
+    third-party install may have captured rows between PR-F4 deploy
+    and this PR's deploy.
+
+    Order:
+      1. Existence check (no-op if table already absent).
+      2. Defensive zero-row check + cross-DB mirror reconciliation.
+      3. Drop secondary indexes (``idx_les_status``,
+         ``idx_les_next_retry``).
+      4. Drop the table itself (autoindex from UNIQUE drops with it).
+
+    All work runs in a single transaction (the caller owns the
+    connection and gates the version bump on this function returning
+    cleanly). On any exception the caller calls ``conn.rollback()``
+    and leaves the schema at v3 for retry on next start.
+    """
+    if not _table_exists_local(conn, 'live_event_queue'):
+        return
+
+    row_count = conn.execute(
+        "SELECT COUNT(*) FROM live_event_queue"
+    ).fetchone()[0]
+
+    if row_count > 0:
+        logger.warning(
+            "Cloud archive v4 migration: live_event_queue contains "
+            "%d row(s); reconciling against pipeline_queue before DROP.",
+            row_count,
+        )
+        _reconcile_live_event_queue_into_pipeline(conn, db_path)
+
+    # Drop secondary indexes first. The autoindex from the UNIQUE
+    # constraint drops automatically with the table itself.
+    conn.execute("DROP INDEX IF EXISTS idx_les_status")
+    conn.execute("DROP INDEX IF EXISTS idx_les_next_retry")
+    conn.execute("DROP TABLE IF EXISTS live_event_queue")
+    logger.info(
+        "Cloud archive v4 migration: dropped live_event_queue table "
+        "and indexes from %s",
+        db_path,
+    )
+
+
+def _table_exists_local(conn: sqlite3.Connection, table: str) -> bool:
+    """Return True if ``table`` exists in the connected DB.
+
+    Local copy (cloud_archive_service is not allowed to import from
+    pipeline_queue_service at module load — pipeline_queue_service
+    is a leaf module that lives in the same package). Tiny helper,
+    no need to share.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _reconcile_live_event_queue_into_pipeline(
+    conn: sqlite3.Connection, db_path: str,
+) -> None:
+    """Cross-DB reconciliation: ensure every ``live_event_queue`` row
+    has a matching ``pipeline_queue`` row before the DROP.
+
+    Reads the LES rows from the connected cloud_sync.db, opens a
+    short-lived geodata.db connection via
+    :func:`pipeline_queue_service.dual_write_enqueue`, and writes any
+    missing mirrors at ``priority=PRIORITY_LIVE_EVENT, stage='cloud_pending'``
+    so the unified cloud worker picks them up on its next claim.
+
+    Status mapping mirrors the deleted ``_backfill_live_event_queue``:
+    legacy ``uploaded`` → unified ``done`` at ``stage='cloud_done'``;
+    legacy ``uploading`` → unified ``in_progress``; legacy ``failed``
+    → unified ``failed``; everything else → ``pending``.
+
+    A failure here re-raises so the caller can rollback and leave
+    the schema at v3 for retry.
+    """
+    rows = conn.execute(
+        "SELECT id, event_dir, event_json_path, event_timestamp, "
+        "event_reason, upload_scope, status FROM live_event_queue"
+    ).fetchall()
+    if not rows:
+        return
+
+    # Lazy import to avoid a load-time dependency cycle and to keep
+    # cloud_archive importable even if pipeline_queue_service is
+    # somehow unavailable (a corrupt install or deferred package
+    # initialisation during early gadget_web boot).
+    from services import pipeline_queue_service as pqs
+
+    pipeline_db = pqs._resolve_pipeline_db()  # noqa: SLF001
+    if not pipeline_db or not os.path.exists(pipeline_db):
+        logger.warning(
+            "Cloud archive v4 migration: pipeline_queue DB not "
+            "available (%s); cannot mirror %d live_event_queue row(s) "
+            "before DROP. The DROP is aborted to preserve the rows.",
+            pipeline_db, len(rows),
+        )
+        raise RuntimeError(
+            "pipeline_queue DB unavailable; cannot mirror "
+            "live_event_queue rows before DROP"
+        )
+
+    # Open a single short-lived geodata.db connection to look up
+    # existing mirrors in one query, instead of one per legacy row.
+    pipeline_conn = sqlite3.connect(pipeline_db, timeout=10.0)
+    try:
+        legacy_ids = tuple(r[0] for r in rows)  # row[0] = id
+        placeholders = ','.join('?' * len(legacy_ids))
+        existing = {
+            r[0] for r in pipeline_conn.execute(
+                f"SELECT legacy_id FROM pipeline_queue "
+                f"WHERE legacy_table='live_event_queue' "
+                f"AND legacy_id IN ({placeholders})",
+                legacy_ids,
+            ).fetchall()
+        }
+    finally:
+        try:
+            pipeline_conn.close()
+        except sqlite3.Error:
+            pass
+
+    unmirrored = [r for r in rows if r[0] not in existing]
+    if not unmirrored:
+        logger.info(
+            "Cloud archive v4 migration: all %d live_event_queue "
+            "row(s) already mirrored into pipeline_queue; safe to DROP.",
+            len(rows),
+        )
+        return
+
+    logger.warning(
+        "Cloud archive v4 migration: %d unmirrored live_event_queue "
+        "row(s) found (ids=%s); backfilling into pipeline_queue at "
+        "PRIORITY_LIVE_EVENT before DROP.",
+        len(unmirrored), [r[0] for r in unmirrored],
+    )
+
+    status_map = {
+        'pending': 'pending',
+        'uploading': 'in_progress',
+        'uploaded': 'done',
+        'failed': 'failed',
+    }
+    for r in unmirrored:
+        legacy_id, event_dir, event_json_path, event_timestamp, \
+            event_reason, upload_scope, legacy_status = r
+        unified_status = status_map.get(legacy_status, 'pending')
+        # Mirror as a cloud_pending/cloud_done row at PRIORITY_LIVE_EVENT
+        # so the unified cloud worker picks it up on its next claim.
+        # The ``stage='cloud_done'`` mapping for already-uploaded rows
+        # ensures we don't re-upload completed work.
+        stage = (
+            pqs.STAGE_CLOUD_DONE if legacy_status == 'uploaded'
+            else pqs.STAGE_CLOUD_PENDING
+        )
+        ok = pqs.dual_write_enqueue(
+            source_path=event_json_path,
+            stage=stage,
+            legacy_table='live_event_queue',
+            legacy_id=legacy_id,
+            priority=pqs.PRIORITY_LIVE_EVENT,
+            payload={
+                'event_dir': event_dir,
+                'event_timestamp': event_timestamp,
+                'event_reason': event_reason,
+                'upload_scope': upload_scope,
+            },
+            status=unified_status,
+            db_path=pipeline_db,
+        )
+        if not ok:
+            # Idempotency note: a False return from dual_write_enqueue
+            # typically means the (source_path, stage, legacy_table)
+            # composite already exists — i.e. there IS a mirror, just
+            # under a different legacy_id. Don't treat as fatal.
+            logger.info(
+                "Cloud archive v4 migration: mirror skipped for "
+                "live_event_queue.id=%d (%r) — likely a pre-existing "
+                "pipeline_queue row with the same source_path.",
+                legacy_id, event_json_path,
+            )
 
 
 def _dual_write_pipeline_cloud_synced(file_path: str,
@@ -1648,6 +1857,28 @@ def _init_cloud_tables(db_path: str) -> sqlite3.Connection:
                 )
             except sqlite3.OperationalError:
                 pass
+
+        # v4 (#202): drop the orphaned ``live_event_queue`` table left
+        # behind when the standalone Live Event Sync subsystem was
+        # deleted in Wave 4 PR-F4 (issue #184). The DROP is gated on
+        # the same ``migration_ok`` flag as v2; if the cross-DB
+        # mirroring sanity check raises, we leave the table in place
+        # and retry on the next service start.
+        if current < 4:
+            try:
+                _migrate_drop_live_event_queue_v4(conn, db_path)
+            except Exception as e:  # noqa: BLE001
+                migration_ok = False
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.error(
+                    "Cloud archive v4 migration failed (%s); rolled "
+                    "back partial work and leaving schema at v%d. "
+                    "Migration will retry on next service start.",
+                    e, current,
+                )
 
         if migration_ok:
             conn.execute(

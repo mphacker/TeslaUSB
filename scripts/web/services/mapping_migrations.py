@@ -273,10 +273,13 @@ CREATE TABLE IF NOT EXISTS kv_meta (
 );
 
 -- v16 (issue #184 Wave 4 — Phase I.1): unified ``pipeline_queue``.
--- Replaces (over the course of Wave 4) the four legacy queue tables
--- ``archive_queue``, ``indexing_queue``, ``live_event_queue``,
--- ``cloud_synced_files`` — each of which today has its own worker
--- thread, retry policy, and status enum. Wave 4 ships in sub-PRs:
+-- Replaces (over the course of Wave 4) the legacy queue tables
+-- ``archive_queue``, ``indexing_queue``, and ``cloud_synced_files``
+-- — each of which today has its own worker thread, retry policy,
+-- and status enum. (The fourth legacy table ``live_event_queue``
+-- was deleted in cloud_sync.db v4 / issue #202 after PR-F4 folded
+-- LES into the unified cloud worker as priority-0 rows.) Wave 4
+-- ships in sub-PRs:
 --
 --   I.1 — add this table; legacy producers dual-write to BOTH old +
 --         pipeline_queue. Reads still come from old tables (no

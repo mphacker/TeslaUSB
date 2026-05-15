@@ -1289,8 +1289,7 @@ class TestSystemMetricsEndpoint:
         assert isinstance(body['cpu_count'], int)
         assert isinstance(body['memory'], dict)
         assert isinstance(body['queues'], dict)
-        for key in ('archive_pending', 'index_pending', 'cpu_pending'
-                    if False else 'cloud_pending'):
+        for key in ('archive_pending', 'index_pending', 'cloud_pending'):
             assert key in body['queues']
         for dev in ('mmcblk0', 'loop0'):
             assert dev in body['io']

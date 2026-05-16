@@ -189,6 +189,31 @@ Audit-log table tracking each sync session: when it started, what
 triggered it, how many files moved, total bytes, errors. Used by
 the cloud sync UI to show "last sync" history.
 
+### `cloud_archive_meta` *(added in cloud_sync.db v5, PR #219)*
+
+Small key/value table used for dashboard metadata that does **not**
+belong on individual `cloud_synced_files` rows.
+
+Approximate columns: `key TEXT PRIMARY KEY, value TEXT`.
+
+Currently the only key is `stats_baseline_at` — an ISO-8601 UTC
+timestamp written when the operator clicks the **Reset counters**
+button on the Cloud Sync page. `get_sync_stats` filters
+`cloud_synced_files.synced_at > baseline` when computing
+`total_synced` and `total_bytes` so the dashboard counters can be
+zeroed without losing the dedup history (the `cloud_synced_files`
+rows themselves are preserved so already-uploaded clips are still
+recognised and skipped on the next sync).
+
+`total_pending` and `total_failed` are **not** filtered by the
+baseline — they reflect current queue state, and zeroing them would
+lie about what work is actually pending or failing.
+
+A companion `idx_cloud_synced_synced_at` index on
+`cloud_synced_files(synced_at)` keeps the baseline-filtered
+`COUNT(*)` and `SUM(file_size)` queries fast even on long sync
+histories.
+
 ---
 
 ## Module split

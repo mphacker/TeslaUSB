@@ -124,10 +124,13 @@ TeslaUSB creates a multi-drive USB gadget that appears as **two or three separat
 ### Cloud Archive
 - **Queue-based continuous sync**: Automatically uploads dashcam events to cloud storage via rclone
 - **Wide provider support**: OAuth providers (Google Drive, OneDrive, Dropbox); S3-compatible (Amazon S3, Backblaze B2, Wasabi, MinIO); and **NAS / custom rclone** backends (SFTP, WebDAV, SMB/CIFS, FTP, Azure Blob, OpenStack Swift) — issue #165
-- **Priority ordering**: Events with Tesla event.json uploaded first, then geolocated trips, then remaining clips
+- **Configurable folder selection**: Toggle which TeslaCam subfolders to back up — `SentryClips` (Sentry-triggered events), `SavedClips` (manually saved clips), and `ArchivedClips` (the SD-card-resident snapshot of `RecentClips`). `RecentClips` itself is intentionally **not** offered as a sync target because Tesla rotates it on a 1-hour ring; the archive subsystem copies survivors to `ArchivedClips` before they age out, so syncing `ArchivedClips` is what actually preserves driving footage long-term
+- **User-configurable priority order**: The order of the folder list in Settings is the sync order — drag `SavedClips` above `SentryClips` (for example) and saved clips drain first
+- **Reset counters button**: Zero the dashboard "Events Synced" and "Transferred" totals without losing the dedup history — files already uploaded to the cloud are **never** re-uploaded after a reset. "Pending" and "Failed" counters reflect current queue state and are unaffected by the reset
+- **Priority ordering within a folder**: Events with Tesla event.json uploaded first, then geolocated trips, then remaining clips
 - **Power-loss safe**: Files marked as synced only after rclone confirms upload; partial uploads detected and re-queued on restart
 - **Low impact**: Runs with `nice`/`ionice` throttling, configurable bandwidth limits, one file at a time — web UI stays responsive
-- **Web UI**: Configure cloud provider, browse remote folders, monitor sync queue and history, trigger manual uploads, bandwidth testing
+- **Web UI**: Configure cloud provider, browse remote folders, monitor sync queue and history, trigger manual uploads, reset dashboard counters, bandwidth testing
 
 ## Requirements
 

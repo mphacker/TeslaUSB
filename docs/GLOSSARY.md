@@ -135,7 +135,13 @@ The Pi-managed archive on the SD card, not the USB gadget. The
 archive subsystem copies `RecentClips` (and event clips) here before
 Tesla rotates them out. Path: `~/ArchivedClips/<YYYY-MM-DD>/…`.
 Source of truth for the indexer and cloud sync — they never index
-or upload directly from the live RO mount.
+or upload directly from the live RO mount. Since PR #219 it is also
+a user-toggleable cloud sync target in its own right (one of the
+three choices in the Cloud Sync **Folders to sync** checklist —
+`SentryClips`, `SavedClips`, `ArchivedClips`). `RecentClips` is
+deliberately **not** a cloud sync target because it rotates
+hourly; `ArchivedClips` is the long-term archive that the cloud
+worker actually uploads.
 
 ---
 

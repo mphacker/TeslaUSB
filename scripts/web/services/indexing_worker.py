@@ -57,7 +57,15 @@ logger = logging.getLogger(__name__)
 # parse begins.
 _INTER_FILE_SLEEP_SECONDS = 0.25
 # Sleep when the queue is empty (or contention forces us to back off).
+# The empty-queue sleep starts at this value and grows exponentially
+# (×2 per consecutive empty claim) up to ``_IDLE_SLEEP_CAP_SECONDS`` so
+# an idle indexer doesn't churn the SD card with ~60 DB queries/min
+# (the May 18 incident: the indexer's tight cycle starved the archive
+# worker for the task_coordinator lock during a deep RecentClips
+# backlog drain, and the per-cycle DB query added measurable SDIO
+# contention). The first non-empty claim resets the streak to zero.
 _IDLE_SLEEP_SECONDS = 1.0
+_IDLE_SLEEP_CAP_SECONDS = 60.0
 # Sleep on a transient claim error or when task_coordinator is busy.
 _BACKOFF_SLEEP_SECONDS = 0.5
 # How long pause_worker waits for the in-flight file to complete before
@@ -553,6 +561,11 @@ def _run_worker_loop(db_path: str, teslacam_root: str, worker_id: str) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("recover_stale_claims failed at startup: %s", e)
 
+    # Consecutive empty-claim count. Drives the exponential backoff
+    # on the empty-queue branch below; resets to 0 on any successful
+    # claim. Module-local — never read elsewhere.
+    empty_streak = 0
+
     while not _stop_event.is_set():
         # Honor pause requests. The worker is idle here (between files),
         # so simply not advancing is sufficient — no claim is held.
@@ -598,10 +611,12 @@ def _run_worker_loop(db_path: str, teslacam_root: str, worker_id: str) -> None:
 
             if row is not None:
                 _process_one(row, db_path, teslacam_root)
+                empty_streak = 0
             elif not claim_failed:
                 # Queue genuinely empty — record drain timestamp so the
                 # status API can show "last drained N seconds ago".
                 _set_worker_state(last_drained_at=time.time())
+                empty_streak += 1
         finally:
             task_coordinator.release_task(_COORDINATOR_TASK)
             _record_idle()
@@ -612,8 +627,22 @@ def _run_worker_loop(db_path: str, teslacam_root: str, worker_id: str) -> None:
             if _stop_event.wait(timeout=_BACKOFF_SLEEP_SECONDS):
                 break
         elif row is None:
-            # Queue empty — sleep longer; nothing useful to do.
-            if _stop_event.wait(timeout=_IDLE_SLEEP_SECONDS):
+            # Queue empty — sleep with exponential backoff so an idle
+            # indexer doesn't churn the SD card / task_coordinator.
+            # Exponent caps at 6 (2**6 = 64 ×) which is then clamped to
+            # ``_IDLE_SLEEP_CAP_SECONDS`` so we never exceed the cap
+            # even if the streak runs long. A producer that knows a
+            # file just arrived can call ``wake_worker`` to short-circuit
+            # this sleep (currently no in-tree producer does, so worst
+            # case the first file after a long idle waits up to the cap
+            # — fine for a parked vehicle; during recording the queue
+            # is never idle long enough to grow the streak).
+            backoff_factor = 2 ** min(empty_streak - 1, 6)
+            sleep_seconds = min(
+                _IDLE_SLEEP_CAP_SECONDS,
+                _IDLE_SLEEP_SECONDS * backoff_factor,
+            )
+            if _stop_event.wait(timeout=sleep_seconds):
                 break
         else:
             # Inter-file pause — keep the gadget responsive.

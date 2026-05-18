@@ -1953,6 +1953,76 @@ class TestArchiveWorkerLoadPauseUX:
         finally:
             archive_worker.stop_worker(timeout=5)
 
+    def test_load_pause_resumes_when_load_drops(
+        self, db, archive_root, teslacam_root, make_clip, monkeypatch,
+    ):
+        # Issue #220 reactive-pause contract: when loadavg drops below
+        # ``threshold * _LOAD_PAUSE_RESUME_RATIO`` mid-pause, the
+        # worker MUST resume before the full ``load_pause_seconds``
+        # ceiling. The pre-#220 fixed-sleep design waited the full
+        # 30s regardless, wasting ~25s/cycle of archive throughput
+        # and capping the worker at ~1–2 files/min vs. Tesla's
+        # 4 files/min (= guaranteed video loss).
+        #
+        # Test setup: report high load initially (worker enters
+        # pause), then flip to low load after a short delay. The
+        # worker's poll loop (5s interval) MUST notice the drop and
+        # exit early.
+        load_state = {'value': 99.0}
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (load_state['value'], 0.0, 0.0), raising=False,
+        )
+        # Long pause window (10s) + tight poll interval (0.1s) so the
+        # test can prove the early-exit without waiting 30s.
+        monkeypatch.setattr(
+            archive_worker, '_LOAD_PAUSE_POLL_SECONDS', 0.1,
+        )
+
+        def fake_config(*a, **kw):
+            # threshold=0.5, load_pause_seconds=10.0 (long ceiling).
+            return (4096, 3, 0.05, 0.05, 0.5, 10.0, 0.0, 0.0)
+        monkeypatch.setattr(archive_worker, '_read_config_or_defaults', fake_config)
+
+        clip = make_clip("RecentClips/reactive-front.mp4")
+        enqueue_for_archive(clip, db_path=db)
+
+        archive_worker.start_worker(
+            db, archive_root, teslacam_root=teslacam_root,
+        )
+        try:
+            # Wait for the worker to enter the pause branch.
+            time.sleep(0.2)
+            assert archive_worker.get_load_pause_state()['is_paused_now'], (
+                "Worker did not enter load-pause within 200ms despite "
+                "loadavg=99.0 > threshold 0.5"
+            )
+            # Drop the load — resume threshold is 0.5 * 0.85 = 0.425
+            load_state['value'] = 0.1
+            # Within ~3 poll intervals (≤ 0.3s) the worker should
+            # observe the drop and exit the pause loop. Give a
+            # generous timeout to absorb scheduler jitter.
+            t0 = time.time()
+            for _ in range(40):  # up to 4 seconds
+                time.sleep(0.1)
+                if not archive_worker.get_load_pause_state()['is_paused_now']:
+                    break
+            elapsed = time.time() - t0
+            state = archive_worker.get_load_pause_state()
+            assert not state['is_paused_now'], (
+                "Worker stayed in load-pause after load dropped to 0.1 "
+                "(threshold 0.5, resume 0.425). Reactive pause MUST "
+                "re-sample loadavg and exit early — issue #220 "
+                "regression: the fixed 30s wait is what caused us to "
+                "lose 100+ RecentClips in May."
+            )
+            assert elapsed < 5.0, (
+                "Pause took %.2fs to react to dropped load — the "
+                "polling cadence is broken." % elapsed
+            )
+        finally:
+            archive_worker.stop_worker(timeout=5)
+
     def test_last_pause_at_pinned_within_window(
         self, db, archive_root, teslacam_root, make_clip, monkeypatch,
     ):
@@ -3150,6 +3220,77 @@ class TestAdaptiveLoadThreshold:
 
     def test_unknown_fullness_returns_base_unchanged(self):
         assert archive_worker._adaptive_load_threshold(3.5, None) == 3.5
+
+
+class TestBacklogAdjustedThreshold:
+    """Issue #220 mitigation — load_pause_threshold scales UP as the
+    archive queue backlog grows so we keep draining through transient
+    load spikes when video loss is the bigger risk."""
+
+    def test_below_moderate_returns_base(self):
+        # Healthy queue depth → no change.
+        assert archive_worker._backlog_adjusted_threshold(3.5, 0) == 3.5
+        assert archive_worker._backlog_adjusted_threshold(3.5, 49) == 3.5
+
+    def test_moderate_scales_by_one_point_three(self):
+        # 50 ≤ pending < 200 → ×1.3
+        assert archive_worker._backlog_adjusted_threshold(3.5, 50) == 3.5 * 1.3
+        assert archive_worker._backlog_adjusted_threshold(3.5, 199) == 3.5 * 1.3
+
+    def test_high_scales_by_one_point_six(self):
+        # 200 ≤ pending < 500 → ×1.6
+        assert archive_worker._backlog_adjusted_threshold(3.5, 200) == 3.5 * 1.6
+        assert archive_worker._backlog_adjusted_threshold(3.5, 499) == 3.5 * 1.6
+
+    def test_critical_scales_by_two(self):
+        # pending ≥ 500 → ×2.0
+        assert archive_worker._backlog_adjusted_threshold(3.5, 500) == 3.5 * 2.0
+        assert archive_worker._backlog_adjusted_threshold(3.5, 5000) == 3.5 * 2.0
+
+    def test_zero_base_disables(self):
+        # base=0 means the guard is fully disabled; backlog must not
+        # accidentally enable it.
+        assert archive_worker._backlog_adjusted_threshold(0.0, 5000) == 0.0
+
+    def test_negative_base_returns_unchanged(self):
+        # Caller treats <=0 as "disabled" — helper must not mangle it.
+        assert archive_worker._backlog_adjusted_threshold(-1.0, 1000) == -1.0
+
+
+class TestGetPendingBacklog:
+    """``_get_pending_backlog`` must be cheap and tolerant of all
+    failure modes (called once per load-pause-check iteration in the
+    hot path)."""
+
+    def test_none_db_path_returns_zero(self):
+        assert archive_worker._get_pending_backlog(None) == 0
+
+    def test_empty_db_path_returns_zero(self):
+        assert archive_worker._get_pending_backlog("") == 0
+
+    def test_get_queue_status_error_returns_zero(self, monkeypatch):
+        # A DB error during status read must NOT raise — the worker
+        # loop continues with backlog=0 (i.e. no backlog scaling).
+        def boom(_db):
+            raise RuntimeError("simulated")
+        monkeypatch.setattr(
+            archive_worker.archive_queue, 'get_queue_status', boom,
+        )
+        assert archive_worker._get_pending_backlog("/tmp/db") == 0
+
+    def test_returns_pending_count(self, monkeypatch):
+        monkeypatch.setattr(
+            archive_worker.archive_queue, 'get_queue_status',
+            lambda _db: {'pending': 173, 'copied': 99, 'error': 0},
+        )
+        assert archive_worker._get_pending_backlog("/tmp/db") == 173
+
+    def test_missing_pending_key_returns_zero(self, monkeypatch):
+        monkeypatch.setattr(
+            archive_worker.archive_queue, 'get_queue_status',
+            lambda _db: {'copied': 99},
+        )
+        assert archive_worker._get_pending_backlog("/tmp/db") == 0
 
 
 class TestAdaptiveChunkPause:

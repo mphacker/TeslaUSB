@@ -101,6 +101,12 @@ _RETENTION_YIELD_EVERY_N_FILES = 100
 # lock before we re-acquire. Long enough to let a waiter through, short
 # enough that a 5904-file sweep adds < 4 s of yield overhead total.
 _RETENTION_YIELD_SLEEP_SECONDS = 0.05
+# Emit a coarse INFO progress line every Nth deletion during a large
+# capacity prune; per-file removals stay at DEBUG so the journal isn't
+# spammed with hundreds of lines (the May 18 incident logged ~985
+# files in a single prune — every line was an SD write that competed
+# with the archive worker for the same SDIO controller).
+_RETENTION_PROGRESS_LOG_EVERY_N = 50
 
 # Diagnostic subdirectory inside ``archive_root`` that the prune must
 # never touch. Mirrors the worker's dead-letter sidecar location.
@@ -1336,11 +1342,29 @@ def _run_capacity_prune(archive_root: str, db_path: str) -> Dict[str, Any]:
                     summary['capacity_freed_bytes'] += freed
                     current_total -= size
                     current_free += freed
-                    logger.info(
+                    # Per-file removals at DEBUG only. Issue #220:
+                    # logging at INFO meant one journal line per file,
+                    # so a 985-file prune wrote ~985 lines (each one
+                    # an SD write competing with the archive worker
+                    # for the SDIO controller). The aggregate summary
+                    # line below + the periodic progress checkpoint
+                    # are enough for operator visibility.
+                    logger.debug(
                         "archive_capacity: removed %s (freed=%d "
                         "bytes, size_after=%d, free_after=%d)",
                         path, freed, current_total, current_free,
                     )
+                    deleted = summary['capacity_deleted_count']
+                    if (
+                        deleted > 0
+                        and deleted % _RETENTION_PROGRESS_LOG_EVERY_N == 0
+                    ):
+                        logger.info(
+                            "archive_capacity: progress — removed %d "
+                            "file(s) so far, freed %d bytes",
+                            deleted,
+                            summary['capacity_freed_bytes'],
+                        )
                 else:
                     # safe_delete_archive_video refused (PROTECTED:
                     # ``*.img`` guard / path-outside-root) OR raised

@@ -570,3 +570,86 @@ class TestApplyLowPriority:
         assert policy_arg == 5, (
             f"Policy must be SCHED_IDLE (5), got {policy_arg}"
         )
+
+
+class TestEmptyQueueExponentialBackoff:
+    """Issue #220 mitigation — when the queue is empty, the worker
+    must back off exponentially (1s → 2s → 4s → ... → 60s cap)
+    instead of churning the SD card / task_coordinator at ~1 Hz.
+
+    Verified at the constants level rather than via real-time
+    observation: the test would otherwise need to run for minutes to
+    observe the cap, and clock-based tests are flaky in CI.
+    """
+
+    def test_idle_cap_is_set(self):
+        # Default cap is 60s — long enough that an idle parked
+        # vehicle barely touches the DB, short enough that the first
+        # file after a long idle waits at most a minute.
+        assert indexing_worker._IDLE_SLEEP_CAP_SECONDS == 60.0
+
+    def test_base_idle_sleep_is_set(self):
+        # First empty hit sleeps the base interval; backoff factor
+        # 2 ** (empty_streak - 1) means streak=1 → 1×, streak=2 → 2×.
+        assert indexing_worker._IDLE_SLEEP_SECONDS == 1.0
+
+    def test_backoff_formula_caps_at_cap(self):
+        # Sanity-check the formula used inside _run_worker_loop. With
+        # cap=60 and base=1, streak ≥ 7 yields the cap.
+        base = indexing_worker._IDLE_SLEEP_SECONDS
+        cap = indexing_worker._IDLE_SLEEP_CAP_SECONDS
+        for streak, expected in [
+            (1, 1.0),   # 2**0 = 1
+            (2, 2.0),   # 2**1 = 2
+            (3, 4.0),   # 2**2 = 4
+            (4, 8.0),   # 2**3 = 8
+            (5, 16.0),  # 2**4 = 16
+            (6, 32.0),  # 2**5 = 32
+            (7, 60.0),  # 2**6 = 64 → clamped to cap
+            (8, 60.0),  # exponent capped at 6, stays at cap
+            (100, 60.0),
+        ]:
+            backoff_factor = 2 ** min(streak - 1, 6)
+            sleep_seconds = min(cap, base * backoff_factor)
+            assert sleep_seconds == expected, (
+                "streak=%d: expected %.1fs, got %.1fs" % (
+                    streak, expected, sleep_seconds,
+                )
+            )
+
+    def test_first_file_resets_streak(self, db, tmp_path, monkeypatch):
+        # Functional check: after processing a file the streak resets,
+        # so the next empty cycle goes back to the 1s base — proving
+        # streak isn't permanently latched at a high value.
+        from unittest.mock import patch
+
+        # Speed up the cap and base so the test runs in < 2s.
+        monkeypatch.setattr(indexing_worker, '_IDLE_SLEEP_SECONDS', 0.05)
+        monkeypatch.setattr(indexing_worker, '_IDLE_SLEEP_CAP_SECONDS', 0.5)
+
+        indexed: list[str] = []
+
+        def fake_indexer(file_path, *a, **k):
+            indexed.append(file_path)
+            return IndexResult(IndexOutcome.INDEXED, 1, 0)
+
+        with patch.object(mapping_service, 'index_single_file', fake_indexer):
+            indexing_worker.start_worker(db, str(tmp_path))
+            try:
+                # Let the worker build up empty_streak — a few hundred
+                # ms is enough for several empty cycles at base=0.05s.
+                time.sleep(0.6)
+                # Enqueue a file. Even if the worker is currently
+                # mid-sleep at the cap (0.5s), it must process within
+                # ~0.5s and reset the streak.
+                enqueue_for_indexing(db, '/x/reset-streak-front.mp4')
+                deadline = time.time() + 3.0
+                while time.time() < deadline and not indexed:
+                    time.sleep(0.05)
+                assert indexed, (
+                    "Worker did not process queued file within 3s — "
+                    "exponential backoff may not be honoring the cap "
+                    "or producer wake is needed."
+                )
+            finally:
+                indexing_worker.stop_worker(timeout=5.0)

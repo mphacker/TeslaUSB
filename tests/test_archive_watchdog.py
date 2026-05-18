@@ -2020,6 +2020,110 @@ class TestCapacityPrune:
         for p, _m, _s in files:
             assert not os.path.exists(p)
 
+    def test_per_file_log_is_debug_not_info(
+        self, db, archive_root, monkeypatch, caplog,
+    ):
+        # Issue #220 — the per-file ``removed %s`` log used to be
+        # INFO, so a 985-file prune (which happens during a real
+        # capacity event) wrote ~985 journal lines, each one a SD
+        # write that competed with the archive worker for the same
+        # SDIO controller. Demote per-file to DEBUG and emit a
+        # coarse progress checkpoint every Nth deletion instead.
+        import logging
+
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=2)
+        gb = 1024 * 1024 * 1024
+        files = []
+        base_mtime = time.time() - (10 * 86400)
+        # Need to trigger several deletes — 4 × 1 GB with cap=2 GB
+        # forces 2 oldest deleted (matches the existing
+        # test_cap_deletes_oldest_first pattern).
+        for i in range(4):
+            p = _make_archive_mp4(
+                archive_root, f"RecentClips/quietlog_{i}.mp4",
+                mtime=base_mtime + i, size=10,
+            )
+            files.append((p, base_mtime + i, gb))
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter(files),
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+
+        with caplog.at_level(logging.INFO, logger='services.archive_watchdog'):
+            summary = archive_watchdog._run_capacity_prune(
+                archive_root, db,
+            )
+
+        assert summary['capacity_deleted_count'] == 2, (
+            "Test prerequisite — need ≥1 deletion to verify log "
+            "behavior."
+        )
+        # The per-file "removed %s" line must NOT appear at INFO.
+        # Either no INFO log mentions a specific .mp4 path AT ALL,
+        # or only the summary line does. Match on "removed " + ".mp4"
+        # so we catch the regression precisely.
+        per_file_info_lines = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO
+            and 'archive_capacity: removed ' in r.getMessage()
+            and '.mp4' in r.getMessage()
+        ]
+        assert per_file_info_lines == [], (
+            "Per-file capacity-prune log MUST be DEBUG, not INFO — "
+            "issue #220: a 985-file prune at INFO buried the "
+            "journal and added SD writes that contended with the "
+            "archive worker. Got %d offending INFO lines: %s"
+            % (
+                len(per_file_info_lines),
+                [r.getMessage() for r in per_file_info_lines],
+            )
+        )
+
+    def test_per_file_log_visible_at_debug_level(
+        self, db, archive_root, monkeypatch, caplog,
+    ):
+        # Companion to the previous test: the per-file detail must
+        # still be capturable at DEBUG so a deep-debug session can
+        # see every removal. Demoting is about routine verbosity,
+        # not about hiding diagnostic data.
+        import logging
+
+        _patch_capacity_config(monkeypatch, free_pct=0, max_gb=2)
+        gb = 1024 * 1024 * 1024
+        files = []
+        base_mtime = time.time() - (10 * 86400)
+        for i in range(4):
+            p = _make_archive_mp4(
+                archive_root, f"RecentClips/debuglog_{i}.mp4",
+                mtime=base_mtime + i, size=10,
+            )
+            files.append((p, base_mtime + i, gb))
+        monkeypatch.setattr(
+            archive_watchdog, '_iter_archive_mp4_files',
+            lambda _root: iter(files),
+        )
+        monkeypatch.setattr(
+            archive_watchdog, '_safe_disk_usage', lambda _p: None,
+        )
+
+        with caplog.at_level(logging.DEBUG, logger='services.archive_watchdog'):
+            archive_watchdog._run_capacity_prune(archive_root, db)
+
+        per_file_debug_lines = [
+            r for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and 'archive_capacity: removed ' in r.getMessage()
+            and '.mp4' in r.getMessage()
+        ]
+        assert len(per_file_debug_lines) >= 1, (
+            "Per-file detail must still be available at DEBUG so "
+            "operators investigating a specific incident can see "
+            "every removal."
+        )
+
     def test_protected_img_files_are_never_deleted(
         self, db, archive_root, monkeypatch, tmp_path,
     ):

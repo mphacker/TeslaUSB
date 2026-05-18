@@ -97,8 +97,47 @@ _INTER_FILE_SLEEP_SECONDS = 1.0
 # via ``archive_queue.load_pause_threshold``.
 _LOAD_PAUSE_THRESHOLD = 3.5
 # How long to sleep when the load threshold is exceeded. Configurable
-# via ``archive_queue.load_pause_seconds``.
+# via ``archive_queue.load_pause_seconds``. The actual pause is now
+# REACTIVE — see ``_LOAD_PAUSE_POLL_SECONDS`` and
+# ``_LOAD_PAUSE_RESUME_RATIO`` below — so this value is the *maximum*
+# wait, not a fixed sleep. A pause that satisfies its resume condition
+# early (load drops below ``threshold * _LOAD_PAUSE_RESUME_RATIO``) ends
+# immediately and the worker resumes draining.
 _LOAD_PAUSE_SECONDS = 30.0
+# Re-sample loadavg every this many seconds while inside a load-pause
+# window. The previous design (PR #93/#104) waited the full
+# ``_LOAD_PAUSE_SECONDS`` regardless — a 30 s nap even when load dropped
+# back to baseline 2 s into the pause. On a busy drive that wasted
+# ~25 s/cycle and capped archive at ~1–2 files/min while Tesla wrote
+# 4 files/min, causing the RecentClips ring buffer to overwrite footage
+# before we could copy it (the May 16 / May 18 incidents). 5 s is a
+# reasonable middle: fast enough that we reclaim most of the lost
+# duty cycle, slow enough that ``getloadavg`` (an O(1) syscall) cost is
+# negligible. The pause is bounded above at ``_LOAD_PAUSE_SECONDS`` so
+# the long-term guarantee of "give SDIO bus and watchdog daemon a
+# clear runway" still holds when load is genuinely sustained.
+_LOAD_PAUSE_POLL_SECONDS = 5.0
+# Resume the moment load drops below ``threshold * this``. Hysteresis
+# prevents the pause from flapping when load oscillates right at the
+# threshold. 0.85 → at threshold 3.5, resume when load ≤ 2.975; at
+# threshold 5.25 (backlog-scaled), resume when load ≤ 4.46.
+_LOAD_PAUSE_RESUME_RATIO = 0.85
+# Backlog-aware threshold scaling. The fixed-throttle design pre-#220
+# treated "queue depth 5" and "queue depth 800" identically — pause
+# the same 30 s in both. That's wrong: a deep queue is evidence we're
+# falling behind faster than Tesla can rotate clips out, which directly
+# translates to lost footage. When backlog grows past these
+# watermarks, scale the trigger threshold UP so the worker keeps
+# draining through transient load spikes. The per-file time budget
+# (60 s), mid-copy chunk pauses, hardware watchdog (90 s), and the
+# ``watchdog.service`` ``Nice=-5`` drop-in are the real safety net —
+# the between-file pause is belt-and-suspenders.
+_BACKLOG_MODERATE_THRESHOLD = 50      # row count
+_BACKLOG_MODERATE_FACTOR = 1.3
+_BACKLOG_HIGH_THRESHOLD = 200
+_BACKLOG_HIGH_FACTOR = 1.6
+_BACKLOG_CRITICAL_THRESHOLD = 500
+_BACKLOG_CRITICAL_FACTOR = 2.0
 # Sleep when the queue is empty. Wake() can shorten this on a producer hit.
 _IDLE_SLEEP_SECONDS = 5.0
 # Sleep on a transient claim error or task_coordinator timeout.
@@ -1418,6 +1457,54 @@ def _adaptive_load_threshold(base: float, fullness_pct: Optional[float]) -> floa
     if fullness_pct >= 80.0:
         return max(base - 0.5, 1.0)
     return base
+
+
+def _backlog_adjusted_threshold(base: float, pending: int) -> float:
+    """Issue #220 mitigation — scale ``load_pause_threshold`` UP when the
+    archive queue backlog is growing.
+
+    The fixed-throttle design (pre-#220) treated "queue depth 5" and
+    "queue depth 800" identically: pause the same 30 s in both. That's
+    wrong. A deep queue is direct evidence we're falling behind Tesla's
+    rotation rate, which translates 1:1 to lost RecentClips footage
+    (the May 16 / May 18 incidents — 100+ files overwritten by Tesla
+    before the worker could copy them). When the backlog crosses the
+    moderate / high / critical watermarks, raise the trigger threshold
+    so the worker keeps draining through transient load spikes. The
+    per-file time budget (60 s), mid-copy chunk pauses, hardware
+    watchdog (90 s), and the ``watchdog.service`` ``Nice=-5`` drop-in
+    are the real safety net — the between-file pause is
+    belt-and-suspenders that becomes harmful when backlog is growing
+    faster than we're draining.
+
+    Returns ``base`` unchanged when:
+      * ``base <= 0`` (guard disabled by config),
+      * ``pending`` is below the moderate watermark (healthy regime).
+    """
+    if base <= 0 or pending < _BACKLOG_MODERATE_THRESHOLD:
+        return base
+    if pending >= _BACKLOG_CRITICAL_THRESHOLD:
+        return base * _BACKLOG_CRITICAL_FACTOR
+    if pending >= _BACKLOG_HIGH_THRESHOLD:
+        return base * _BACKLOG_HIGH_FACTOR
+    return base * _BACKLOG_MODERATE_FACTOR
+
+
+def _get_pending_backlog(db_path: Optional[str]) -> int:
+    """Return the pending row count in ``archive_queue`` or 0 on any
+    error. Cheap (one indexed COUNT) and tolerant of all failure modes
+    so the load-pause guard can never crash the worker loop.
+    """
+    if not db_path:
+        return 0
+    try:
+        counts = archive_queue.get_queue_status(db_path)
+    except Exception:  # noqa: BLE001 — backlog read must never raise
+        return 0
+    try:
+        return int(counts.get('pending', 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _adaptive_chunk_pause(
@@ -2772,7 +2859,7 @@ def _run_worker_loop(db_path: str, archive_root: str,
         # back off so other tasks can drain. Threshold and pause length
         # are configurable; ``getloadavg`` is a cheap O(1) syscall.
         #
-        # Two UX rules apply here:
+        # Three UX rules apply here:
         #
         #   1. Log INFO once on entering the pause and once on resume,
         #      NOT on every iteration. Producers calling ``wake()``
@@ -2783,6 +2870,13 @@ def _run_worker_loop(db_path: str, archive_root: str,
         #      whole point of the pause is to give the SDIO bus and
         #      watchdog daemon a clear runway. Producers will get
         #      their files drained on the next iteration anyway.
+        #   3. (Issue #220) The pause is REACTIVE — we re-sample
+        #      loadavg every ``_LOAD_PAUSE_POLL_SECONDS`` and resume
+        #      the moment load drops below
+        #      ``threshold * _LOAD_PAUSE_RESUME_RATIO``. The fixed
+        #      30 s nap (pre-#220) wasted ~25 s/cycle when load
+        #      cleared quickly, capping throughput at ~1–2 files/min
+        #      vs. Tesla's 4 files/min and causing video loss.
         if load_pause_threshold > 0:
             try:
                 load1 = os.getloadavg()[0]
@@ -2794,7 +2888,15 @@ def _run_worker_loop(db_path: str, archive_root: str,
             _adaptive_threshold = _adaptive_load_threshold(
                 load_pause_threshold, _disk_fullness_pct(archive_root),
             )
-            if load1 > _adaptive_threshold:
+            # Issue #220 — scale the threshold UP when backlog is
+            # growing. A deep queue == falling behind == video loss
+            # risk that strictly dominates the watchdog-near-miss risk
+            # (which has its own mid-copy safety net).
+            _pending_backlog = _get_pending_backlog(db_path)
+            _effective_threshold = _backlog_adjusted_threshold(
+                _adaptive_threshold, _pending_backlog,
+            )
+            if load1 > _effective_threshold:
                 # Only log INFO on the leading edge of the pause
                 # window so back-to-back high-load iterations don't
                 # spam the journal. ``_load_pause_until`` is the
@@ -2802,7 +2904,8 @@ def _run_worker_loop(db_path: str, archive_root: str,
                 # already in the future we're still inside the same
                 # window and stay quiet.
                 already_paused = _load_pause_until > time.time()
-                _load_pause_until = time.time() + load_pause_seconds
+                pause_start = time.time()
+                _load_pause_until = pause_start + load_pause_seconds
                 if not already_paused:
                     # Pin ``last_pause_at`` to the moment the pause
                     # actually started — within a sustained pause
@@ -2810,29 +2913,71 @@ def _run_worker_loop(db_path: str, archive_root: str,
                     # every iteration (parity with disk-pause, which
                     # arms ``last_disk_pause_at`` only on first hit).
                     with _state_lock:
-                        _state['last_load_pause_at'] = time.time()
+                        _state['last_load_pause_at'] = pause_start
                         _state['last_load_pause_loadavg'] = float(load1)
                     logger.info(
                         "archive_worker: 1-min loadavg %.2f > %.2f "
-                        "(adaptive; base=%.2f) — pausing %.0fs to "
-                        "relieve SDIO/CPU contention",
-                        load1, _adaptive_threshold, load_pause_threshold,
+                        "(adaptive base=%.2f, backlog=%d → effective=%.2f) "
+                        "— pausing up to %.0fs to relieve SDIO/CPU "
+                        "contention",
+                        load1, _effective_threshold, load_pause_threshold,
+                        _pending_backlog, _effective_threshold,
                         load_pause_seconds,
                     )
                 _idle_event.set()
-                # Stop-only wait. Producers' wake() must NOT cut this
-                # short — we are deliberately giving the SDIO bus
-                # and the watchdog daemon a clear runway.
-                if _stop_event.wait(timeout=load_pause_seconds):
+                # Reactive poll loop. Re-sample loadavg every
+                # ``_LOAD_PAUSE_POLL_SECONDS`` and exit early once
+                # load drops below the resume threshold (hysteresis
+                # at ``_LOAD_PAUSE_RESUME_RATIO`` prevents flapping).
+                # Bounded above at ``load_pause_seconds`` so a
+                # genuinely sustained spike still yields the SDIO
+                # bus for the full back-off window.
+                resume_threshold = (
+                    _effective_threshold * _LOAD_PAUSE_RESUME_RATIO
+                )
+                stop_requested = False
+                load_now = load1
+                while time.time() < _load_pause_until:
+                    remaining = _load_pause_until - time.time()
+                    poll_wait = min(
+                        _LOAD_PAUSE_POLL_SECONDS, max(0.05, remaining),
+                    )
+                    # Stop-only wait. Producers' wake() must NOT cut
+                    # this short — we are deliberately giving the
+                    # SDIO bus and the watchdog daemon a runway.
+                    if _stop_event.wait(timeout=poll_wait):
+                        stop_requested = True
+                        break
+                    try:
+                        load_now = os.getloadavg()[0]
+                    except (AttributeError, OSError):
+                        # ``getloadavg`` lost — fall through to the
+                        # bounded wait so we don't busy-loop.
+                        load_now = 0.0
+                        break
+                    if load_now <= resume_threshold:
+                        break
+                if stop_requested:
                     break
+                actual_pause = time.time() - pause_start
+                logger.info(
+                    "archive_worker: resumed after %.1fs "
+                    "(loadavg now %.2f, threshold %.2f, backlog=%d) — "
+                    "draining queue",
+                    actual_pause, load_now, _effective_threshold,
+                    _pending_backlog,
+                )
+                _load_pause_until = 0.0
                 continue
             elif _load_pause_until > 0 and _load_pause_until <= time.time():
                 # Trailing edge: log once when we leave the pause
                 # window so the user can see "back to normal".
                 logger.info(
                     "archive_worker: 1-min loadavg %.2f back below %.2f "
-                    "(adaptive; base=%.2f) — resuming archive drain",
-                    load1, _adaptive_threshold, load_pause_threshold,
+                    "(adaptive base=%.2f, backlog=%d) — resuming archive "
+                    "drain",
+                    load1, _effective_threshold, load_pause_threshold,
+                    _pending_backlog,
                 )
                 _load_pause_until = 0.0
 

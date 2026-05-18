@@ -10,6 +10,7 @@ This wrapper provides Python variables from YAML for the web application.
 
 import os
 import secrets
+import sys
 import yaml
 
 # Determine config.yaml location (two levels up from web/)
@@ -20,9 +21,80 @@ CONFIG_YAML = os.path.join(os.path.dirname(os.path.dirname(SCRIPT_DIR)), 'config
 if not os.path.exists(CONFIG_YAML):
     raise FileNotFoundError(f"Configuration file not found at {CONFIG_YAML}")
 
-# Load configuration from YAML
-with open(CONFIG_YAML, 'r') as f:
-    config = yaml.safe_load(f)
+
+class _DuplicateKeyError(yaml.constructor.ConstructorError):
+    """Raised when ``config.yaml`` contains a duplicate top-level or
+    nested mapping key.
+
+    PyYAML's default ``safe_load`` silently keeps the LAST value when a
+    key appears twice — which on May 18 2026 caused
+    ``shadow_pipeline_queue`` and ``use_pipeline_reader`` to be flipped
+    from the operator's intended values to their opposites for weeks
+    before the contradiction was spotted by hand. A typo'd duplicate
+    key is almost never intentional and the silent-last-wins behavior
+    has caused real production damage (issue #220). Refuse to start
+    when we see one, with line numbers in the error so the fix is
+    obvious.
+    """
+
+
+class _DuplicateKeyDetectingLoader(yaml.SafeLoader):
+    """``yaml.SafeLoader`` subclass that raises on duplicate mapping
+    keys. See ``_DuplicateKeyError`` for rationale.
+    """
+
+
+def _construct_mapping_no_duplicates(loader, node, deep=False):
+    if not isinstance(node, yaml.MappingNode):
+        raise yaml.constructor.ConstructorError(
+            None, None,
+            "expected a mapping node, but found %s" % node.id,
+            node.start_mark,
+        )
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise _DuplicateKeyError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found duplicate key %r — config.yaml at line %d "
+                "duplicates the earlier definition; remove or rename "
+                "one of the two" % (
+                    key, key_node.start_mark.line + 1,
+                ),
+                key_node.start_mark,
+            )
+        value = loader.construct_object(value_node, deep=deep)
+        mapping[key] = value
+    return mapping
+
+
+_DuplicateKeyDetectingLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping_no_duplicates,
+)
+
+
+# Load configuration from YAML. Use the duplicate-key-detecting loader
+# so a config typo can never silently overwrite an earlier value
+# (issue #220 root cause).
+try:
+    with open(CONFIG_YAML, 'r') as f:
+        config = yaml.load(f, Loader=_DuplicateKeyDetectingLoader)
+except _DuplicateKeyError as e:
+    # Boot-time failure must be loud — print to stderr in addition to
+    # the exception traceback so journalctl and the operator's shell
+    # both see it. Re-raise so the import fails fast and systemd
+    # records the unit failure (rather than half-loading a corrupt
+    # config and crashing later in a confusing way).
+    print(
+        "FATAL: %s contains a duplicate key — refusing to load.\n%s\n"
+        "Fix: open the file, delete the redundant entry, and restart "
+        "the gadget_web service." % (CONFIG_YAML, e),
+        file=sys.stderr,
+    )
+    raise
 
 # ============================================================================
 # Extract configuration values from YAML

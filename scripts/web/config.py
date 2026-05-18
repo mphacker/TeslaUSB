@@ -409,8 +409,16 @@ ARCHIVE_QUEUE_STALE_CLAIM_MAX_AGE_SECONDS = float(
 # When True, the archive worker peeks at pipeline_queue before each
 # archive_queue claim and logs WARNING on disagreement. Pure
 # observability — no behavioural change.
+#
+# Issue #220 follow-up — default flipped to False. The shadow
+# comparison was an aid during the Wave 4 PR-E rollout; with PR-F1
+# in tree it's no longer the default expectation. Under a deep
+# catch-up backlog the multi-KB WARNING-per-mismatch log lines
+# themselves added to SD pressure and contributed to the
+# crash-loop. Operators who still want shadow telemetry can opt
+# in via ``archive_queue.shadow_pipeline_queue: true``.
 ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE = bool(
-    _archive_queue.get('shadow_pipeline_queue', True)
+    _archive_queue.get('shadow_pipeline_queue', False)
 )
 
 # Wave 4 PR-F1 (issue #184): unified-queue reader cutover. When True,
@@ -419,6 +427,18 @@ ARCHIVE_QUEUE_SHADOW_PIPELINE_QUEUE = bool(
 # fresh deploy is a no-op; flip on after shadow telemetry agrees.
 ARCHIVE_QUEUE_USE_PIPELINE_READER = bool(
     _archive_queue.get('use_pipeline_reader', False)
+)
+
+# Issue #220 follow-up — load-aware skip for the inline SEI sidecar
+# helper in ``archive_worker._write_inline_sei_sidecar``. When the
+# 1-min loadavg is at or above this threshold, the helper bails out
+# before doing any work and the indexer's mmap fallback handles the
+# missing sidecar later. Set to 0.0 to disable the skip entirely
+# (NOT recommended on Pi Zero 2 W — a 187 s sidecar write was
+# observed on 2026-05-18 holding the task_coordinator lock past the
+# 90 s hardware watchdog).
+ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD = float(
+    _archive_queue.get('sidecar_skip_loadavg_threshold', 4.0)
 )
 
 # ============================================================================

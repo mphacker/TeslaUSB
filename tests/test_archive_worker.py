@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import threading
 import time
 from typing import List
@@ -426,6 +427,180 @@ class TestArchiveWorkerCopy:
     def test_compute_dest_path_rejects_empty_source(self, archive_root):
         with pytest.raises(ValueError):
             archive_worker.compute_dest_path("", archive_root, None)
+
+
+# ---------------------------------------------------------------------------
+# TestInlineSeiSidecarLoadSkip — issue #220 follow-up
+# ---------------------------------------------------------------------------
+# Under sustained SDIO saturation the docstring's "pages are still
+# in page cache" assumption breaks and the sidecar walk becomes
+# I/O-bound. A 187s sidecar write was observed on 2026-05-18
+# holding the task_coordinator lock past the 90s watchdog. The
+# load-aware skip bails out before doing any work when 1-min
+# loadavg is at or above the configured threshold.
+# ---------------------------------------------------------------------------
+
+
+class TestInlineSeiSidecarLoadSkip:
+    def test_sidecar_skips_when_load_above_threshold(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        dest = tmp_path / "video.mp4"
+        dest.write_bytes(b"fake-mp4-bytes")
+        sei_calls: List[str] = []
+
+        class _FakeSeiParser:
+            @staticmethod
+            def write_sei_sidecar(path, sample_rate):
+                sei_calls.append(path)
+                return None
+
+        import services as _services
+        monkeypatch.setattr(_services, 'sei_parser', _FakeSeiParser)
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (10.0, 10.0, 10.0), raising=False,
+        )
+        monkeypatch.setattr(
+            archive_worker, '_SIDECAR_SKIP_LOADAVG_THRESHOLD', 4.0,
+        )
+        import config as _conf
+        monkeypatch.setattr(
+            _conf, 'ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD', 4.0,
+            raising=False,
+        )
+
+        import logging as _log
+        caplog.set_level(_log.INFO)
+        archive_worker._write_inline_sei_sidecar(str(dest))
+
+        assert sei_calls == [], (
+            "sidecar should NOT have been written when loadavg "
+            "exceeded the skip threshold"
+        )
+        skip_logs = [r for r in caplog.records
+                     if 'skipping sidecar write' in r.getMessage()]
+        assert len(skip_logs) == 1, (
+            f"expected 1 skip log, got {len(skip_logs)}: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_sidecar_runs_when_load_below_threshold(
+        self, tmp_path, monkeypatch,
+    ):
+        dest = tmp_path / "video.mp4"
+        dest.write_bytes(b"fake-mp4-bytes")
+        sei_calls: List[str] = []
+
+        class _FakeSidecar:
+            sei_count = 0
+            messages: List = []
+            no_gps_count = 0
+            mvhd_creation_time_utc = None
+
+        class _FakeSeiParser:
+            @staticmethod
+            def write_sei_sidecar(path, sample_rate):
+                sei_calls.append(path)
+                return _FakeSidecar()
+
+        import services as _services
+        monkeypatch.setattr(_services, 'sei_parser', _FakeSeiParser)
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (1.0, 1.0, 1.0), raising=False,
+        )
+        monkeypatch.setattr(
+            archive_worker, '_SIDECAR_SKIP_LOADAVG_THRESHOLD', 4.0,
+        )
+        import config as _conf
+        monkeypatch.setattr(
+            _conf, 'ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD', 4.0,
+            raising=False,
+        )
+
+        archive_worker._write_inline_sei_sidecar(str(dest))
+
+        assert sei_calls == [str(dest)], (
+            "sidecar should have been written when loadavg was "
+            "below the skip threshold"
+        )
+
+    def test_sidecar_skip_disabled_when_threshold_zero(
+        self, tmp_path, monkeypatch,
+    ):
+        dest = tmp_path / "video.mp4"
+        dest.write_bytes(b"fake-mp4-bytes")
+        sei_calls: List[str] = []
+
+        class _FakeSidecar:
+            sei_count = 0
+            messages: List = []
+            no_gps_count = 0
+            mvhd_creation_time_utc = None
+
+        class _FakeSeiParser:
+            @staticmethod
+            def write_sei_sidecar(path, sample_rate):
+                sei_calls.append(path)
+                return _FakeSidecar()
+
+        import services as _services
+        monkeypatch.setattr(_services, 'sei_parser', _FakeSeiParser)
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg',
+            lambda: (50.0, 50.0, 50.0), raising=False,
+        )
+        import config as _conf
+        monkeypatch.setattr(
+            _conf, 'ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD', 0.0,
+            raising=False,
+        )
+
+        archive_worker._write_inline_sei_sidecar(str(dest))
+
+        assert sei_calls == [str(dest)], (
+            "skip threshold=0 should disable the load-skip entirely"
+        )
+
+    def test_sidecar_skip_tolerates_getloadavg_failure(
+        self, tmp_path, monkeypatch,
+    ):
+        dest = tmp_path / "video.mp4"
+        dest.write_bytes(b"fake-mp4-bytes")
+        sei_calls: List[str] = []
+
+        class _FakeSidecar:
+            sei_count = 0
+            messages: List = []
+            no_gps_count = 0
+            mvhd_creation_time_utc = None
+
+        class _FakeSeiParser:
+            @staticmethod
+            def write_sei_sidecar(path, sample_rate):
+                sei_calls.append(path)
+                return _FakeSidecar()
+
+        def _raise(*a, **kw):
+            raise OSError("simulated /proc/loadavg unavailable")
+
+        import services as _services
+        monkeypatch.setattr(_services, 'sei_parser', _FakeSeiParser)
+        monkeypatch.setattr(
+            archive_worker.os, 'getloadavg', _raise, raising=False,
+        )
+        import config as _conf
+        monkeypatch.setattr(
+            _conf, 'ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD', 4.0,
+            raising=False,
+        )
+
+        archive_worker._write_inline_sei_sidecar(str(dest))
+
+        assert sei_calls == [str(dest)], (
+            "getloadavg failure should not block the sidecar write"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3623,10 +3798,19 @@ class TestShadowComparisonHelpers:
                     and 'shadow' in r.getMessage().lower()]
         assert len(warnings) == 1
         msg = warnings[0].getMessage()
-        # Verbatim WARNING includes the legacy pick AND the window.
+        # Issue #220 — log was shrunk to first candidate + count so
+        # multi-KB WARNING lines don't pile journal pressure on the
+        # SD card during catch-up. We assert the legacy pick AND
+        # first candidate are present, and the "1 more not shown"
+        # suffix appears.
         assert '/x/foo.mp4' in msg
         assert '/x/a.mp4' in msg
-        assert '/x/b.mp4' in msg
+        assert 'pipeline_top1' in msg
+        # Second candidate is intentionally NOT logged anymore.
+        assert '/x/b.mp4' not in msg
+        # And the trailing "and N more not shown" must surface the
+        # truncated count (2 candidates - 1 shown = 1).
+        assert '1 more not shown' in msg
 
     def test_legacy_present_pipeline_empty_is_disagreement(self):
         # Legacy picked something, pipeline_queue has nothing ready

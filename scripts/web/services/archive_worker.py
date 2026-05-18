@@ -1244,6 +1244,28 @@ _INLINE_SEI_SAMPLE_RATE = 30
 # defaults to 60s for the copy itself).
 _SIDECAR_WRITE_WARN_SECONDS = 5.0
 
+# Issue #220 follow-up — load-aware skip for the inline sidecar.
+# The function docstring promises sub-second work because "the file's
+# pages are already resident in the page cache from the immediately-
+# prior _atomic_copy". Under sustained SDIO saturation that promise
+# breaks: the kernel evicts the just-written pages to make room for
+# the next clip's writes, so the SEI walk has to read them back from
+# the SD card. We've observed this dragging the sidecar write to
+# 187 s in production (May 18 2026), which holds the task_coordinator
+# lock past the 90-s hardware watchdog timeout and crashes the Pi.
+#
+# Skip the sidecar walk entirely when 1-min loadavg is at or above
+# this threshold — the file is still copied, just the SEI sidecar
+# optimization is deferred. The downstream indexer's existing
+# fallback path (``read_sei_sidecar`` returning None → mmap parse)
+# picks it up later when load is lower. Tunable via
+# ``archive_queue.sidecar_skip_loadavg_threshold`` (default 4.0 —
+# slightly above the baseline pause threshold of 3.5 so the sidecar
+# still runs during the brief window between "load-pause resumed"
+# and "load-pause re-fires", but is skipped on the much higher
+# sustained-load levels that actually cause the page-cache miss).
+_SIDECAR_SKIP_LOADAVG_THRESHOLD = 4.0
+
 
 def _write_inline_sei_sidecar(dest_path: str) -> None:
     """Walk the just-copied file's SEI and persist a sidecar JSON.
@@ -1290,6 +1312,42 @@ def _write_inline_sei_sidecar(dest_path: str) -> None:
     only loses the I/O optimization, never data.
     """
     start = time.monotonic()
+
+    # Issue #220 follow-up — bail out before doing any work if the
+    # system is under sustained load. The docstring above promises
+    # this helper is page-cache-hot and CPU-bound; under SDIO
+    # saturation that promise breaks and the SEI walk becomes
+    # I/O-bound (the kernel evicted our just-written pages to fit
+    # incoming writes). A 187 s sidecar write was observed in
+    # production on 2026-05-18, holding the task_coordinator lock
+    # past the 90 s hardware watchdog and crashing the Pi. The
+    # downstream indexer's mmap fallback handles the missing
+    # sidecar transparently when load is lower.
+    try:
+        from config import ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD
+        skip_threshold = float(
+            ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD)
+    except Exception:  # noqa: BLE001 — config may be absent in tests
+        skip_threshold = _SIDECAR_SKIP_LOADAVG_THRESHOLD
+    try:
+        current_load = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        # OSError: /proc/loadavg unreadable.
+        # AttributeError: getloadavg not available on this platform
+        # (e.g. Windows test runners). Treat as load=0 so the
+        # sidecar still runs — the safety net is for production Pi
+        # only, never break the happy path on dev machines.
+        current_load = 0.0
+    if skip_threshold > 0 and current_load >= skip_threshold:
+        logger.info(
+            "inline-sei: skipping sidecar write for %s "
+            "(1-min loadavg %.2f >= %.2f skip threshold; "
+            "indexer will mmap-parse later)",
+            os.path.basename(dest_path), current_load,
+            skip_threshold,
+        )
+        return
+
     try:
         from services import sei_parser
     except Exception as e:  # noqa: BLE001
@@ -2387,7 +2445,7 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
 # ``_SHADOW_DISAGREEMENT_LOG_EVERY`` mismatches with the running
 # count so journal hygiene is preserved.
 _SHADOW_AGREEMENT_LOG_EVERY = 500
-_SHADOW_DISAGREEMENT_LOG_VERBATIM = 10
+_SHADOW_DISAGREEMENT_LOG_VERBATIM = 3
 _SHADOW_DISAGREEMENT_LOG_EVERY = 100
 # Number of pipeline_queue candidates we peek at when comparing
 # against the legacy reader's pick. The legacy reader orders by
@@ -2492,19 +2550,30 @@ def _shadow_compare_picks(
         _shadow_disagreement_count += 1
         d_count = _shadow_disagreement_count
     if d_count <= _SHADOW_DISAGREEMENT_LOG_VERBATIM:
+        # Issue #220 follow-up — shrink the log line. Logging the
+        # full top-N path tuple was producing multi-KB WARNINGs per
+        # disagreement during catch-up; under SDIO pressure those
+        # journal writes themselves made the symptom worse. The
+        # *fact* of a disagreement plus the legacy pick is the
+        # actionable signal — the candidate set is recoverable from
+        # the DB if we need it for forensics.
+        first_candidate = (
+            tuple(pipeline_candidates)[0]
+            if pipeline_candidates else None
+        )
         logger.warning(
             "Wave 4 PR-E shadow: archive_queue picked %r but it is "
             "absent from the top-%d pipeline_queue candidates "
-            "(disagreement #%d). pipeline top-%d=%r. The legacy "
-            "and pipeline readers use different secondary sort "
-            "keys (expected_mtime vs. enqueued_at) so small "
-            "reorderings within a priority band are expected — a "
-            "miss from the top-N window indicates a real "
-            "dual-write gap. Investigate before PR-F cuts over "
-            "the reader.",
+            "(disagreement #%d). pipeline_top1=%r (and %d more not "
+            "shown). The legacy and pipeline readers use different "
+            "secondary sort keys (expected_mtime vs. enqueued_at) "
+            "so small reorderings within a priority band are "
+            "expected — a miss from the top-N window indicates a "
+            "real dual-write gap. Investigate before PR-F cuts "
+            "over the reader.",
             legacy_path, _SHADOW_PEEK_CANDIDATE_COUNT, d_count,
-            _SHADOW_PEEK_CANDIDATE_COUNT,
-            tuple(pipeline_candidates),
+            first_candidate,
+            max(0, len(pipeline_candidates) - 1),
         )
     elif d_count % _SHADOW_DISAGREEMENT_LOG_EVERY == 0:
         logger.warning(
@@ -3091,8 +3160,16 @@ def _run_worker_loop(db_path: str, archive_root: str,
                 # in the candidate set (or both empty). Disagreement =
                 # legacy picked a path absent from the top-N — a real
                 # dual-write gap.
-                if shadow_candidates or row is not None or \
-                        _shadow_pipeline_queue_enabled():
+                #
+                # Issue #220 follow-up — gate STRICTLY on the
+                # shadow flag. The original ``or row is not None``
+                # made this fire on every successful claim regardless
+                # of whether shadow mode was on, which produced spam
+                # disagreement WARNINGs (shadow_candidates is always
+                # empty when the flag is off, so the legacy pick is
+                # always "absent"). When shadow is off there is no
+                # comparison to perform.
+                if _shadow_pipeline_queue_enabled():
                     _shadow_compare_picks(
                         legacy_path=row.get('source_path') if row else None,
                         pipeline_candidates=shadow_candidates,

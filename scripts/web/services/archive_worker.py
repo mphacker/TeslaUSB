@@ -1259,12 +1259,27 @@ _SIDECAR_WRITE_WARN_SECONDS = 5.0
 # optimization is deferred. The downstream indexer's existing
 # fallback path (``read_sei_sidecar`` returning None → mmap parse)
 # picks it up later when load is lower. Tunable via
-# ``archive_queue.sidecar_skip_loadavg_threshold`` (default 4.0 —
-# slightly above the baseline pause threshold of 3.5 so the sidecar
-# still runs during the brief window between "load-pause resumed"
-# and "load-pause re-fires", but is skipped on the much higher
-# sustained-load levels that actually cause the page-cache miss).
-_SIDECAR_SKIP_LOADAVG_THRESHOLD = 4.0
+# ``archive_queue.sidecar_skip_loadavg_threshold`` (default 1.5).
+#
+# Threshold history:
+# - Initial value 4.0 (2026-05-18 morning) — set just above the
+#   load-pause threshold of 3.5 so the sidecar still ran whenever
+#   the worker wasn't actively pausing. In theory this preserved
+#   the optimization for the common case.
+# - Lowered to 1.5 (2026-05-18 afternoon) after on-device
+#   measurement showed the page-cache assumption is broken even at
+#   loadavg ~2.0 on the Pi Zero 2 W: 7+ second sidecar writes were
+#   firing in roughly 1 of every 4 calls under a calm system
+#   (loadavg 1.7-2.0), holding the task_coordinator lock for
+#   20-35 s per file and starving the indexer. Drain rate was
+#   stuck at 3-5 files/min vs. Tesla's 4-6 files/min write rate.
+#   At 1.5 the sidecar only fires when the Pi is genuinely idle
+#   (no other I/O competing for the gadget block layer's memory
+#   footprint), which is the only condition the "pages are still
+#   hot" promise actually holds on this 512 MB device. Drain rate
+#   target post-change: 10+ files/min so the queue genuinely
+#   drains during normal Sentry+drive cycles.
+_SIDECAR_SKIP_LOADAVG_THRESHOLD = 1.5
 
 
 def _write_inline_sei_sidecar(dest_path: str) -> None:

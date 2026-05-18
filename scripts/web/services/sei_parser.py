@@ -789,6 +789,30 @@ def _dict_to_message(d: dict, video_path: str) -> SeiMessage:
     )
 
 
+# NOTE: The inline sidecar write that lived inside the archive
+# worker (issue #197) was removed 2026-05-18. The page-cache "hot
+# pages" promise it relied on did not hold on the Pi Zero 2 W
+# (issue #220) and the walk routinely held the task_coordinator
+# lock for tens of seconds. The indexer now mmap-walks the .mp4
+# directly on its own task_coordinator slot.
+#
+# ``write_sei_sidecar`` below is kept as a utility for:
+#   * tests that need to create a sidecar fixture on disk
+#   * external/diagnostic tools that pre-populate sidecars in bulk
+#   * future re-introduction in a background queue (outside the
+#     archive worker's critical section)
+# It is NOT called from production code paths.
+#
+# ``read_sei_sidecar`` is still called from
+# ``mapping_service._resolve_recording_time`` /
+# ``mapping_service._index_video`` so any sidecars that exist on
+# disk (from prior installs or bulk-population tools) still save
+# the indexer one mmap walk per file. New files no longer get a
+# sidecar written, so the indexer mmap-walks them — that work
+# happens on the indexer's own task_coordinator slot, where it
+# can't block archive's data-preservation critical path.
+
+
 def write_sei_sidecar(
     video_path: str,
     sample_rate: int = 30,
@@ -798,20 +822,20 @@ def write_sei_sidecar(
     as a sidecar JSON next to the .mp4.
 
     Best-effort: returns ``None`` on any failure (file missing,
-    parse error, write error). Callers MUST treat ``None`` as "no
-    sidecar; downstream consumers will mmap-parse the file
-    themselves". This is the issue #197 hot-path call: the file's
-    pages are hot in the kernel page cache (we just wrote them),
-    so the SEI walk costs only the protobuf decode work.
-
-    Atomic write: tempfile + ``os.fsync`` + ``os.rename`` so a
-    crash mid-write never leaves a half-written sidecar that the
-    reader would then accept as authoritative.
+    parse error, write error). Atomic write: tempfile + ``os.fsync``
+    + ``os.replace`` so a crash mid-write never leaves a
+    half-written sidecar that the reader would then accept as
+    authoritative.
 
     The default ``sample_rate=30`` matches the indexer's default
     (``mapping_service._index_video``). A reader that requests a
     finer rate must fall back to mmap parse — see
     ``read_sei_sidecar``.
+
+    **Not called from production code paths** as of 2026-05-18 —
+    see the module-level note above for the rationale. Kept as a
+    utility for tests, bulk-prepopulation tools, and any future
+    out-of-critical-section sidecar producer.
     """
     if sidecar_path is None:
         sidecar_path = sidecar_path_for(video_path)
@@ -898,11 +922,6 @@ def write_sei_sidecar(
         )
         return None
     finally:
-        # Belt-and-suspenders: any failure path that didn't reach
-        # ``os.replace`` (json serialization error, surprise
-        # exception type, abnormal exit from the with-block) leaves
-        # the .tmp behind. Sweep it up unconditionally; harmless
-        # when the replace succeeded (file already moved away).
         if not wrote_replace:
             try:
                 os.unlink(tmp_path)

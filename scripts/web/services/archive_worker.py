@@ -1225,196 +1225,47 @@ def _enqueue_indexed(dest_path: str, db_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Issue #197 — inline SEI parse + sidecar write (Wave 4 PR-E2 / Phase I.3)
+# Inline SEI sidecar write — REMOVED 2026-05-18
 # ---------------------------------------------------------------------------
-# Default indexer sample_rate. Must match
-# ``mapping_service.index_single_file``'s default so the sidecar the
-# archive worker writes is consumable by the indexer without falling
-# back to a fresh mmap parse. If you change one, change the other.
-_INLINE_SEI_SAMPLE_RATE = 30
-
-# Wall-clock soft cap on the inline SEI walk + sidecar write.
-# Reaching or exceeding this elevates the success log to WARNING so
-# operators see "the page-cache hot-path assumption broke for this
-# clip" in journalctl at default verbosity. NOT a hard cap — the
-# walk completes either way; this is purely an observability signal.
-# Calibrated against the 90-second hardware watchdog timeout: 5s
-# leaves plenty of headroom for the rest of ``process_one_claim``
-# and the worker's outer guards (``per_file_time_budget_seconds``
-# defaults to 60s for the copy itself).
-_SIDECAR_WRITE_WARN_SECONDS = 5.0
-
-# Issue #220 follow-up — load-aware skip for the inline sidecar.
-# The function docstring promises sub-second work because "the file's
-# pages are already resident in the page cache from the immediately-
-# prior _atomic_copy". Under sustained SDIO saturation that promise
-# breaks: the kernel evicts the just-written pages to make room for
-# the next clip's writes, so the SEI walk has to read them back from
-# the SD card. We've observed this dragging the sidecar write to
-# 187 s in production (May 18 2026), which holds the task_coordinator
-# lock past the 90-s hardware watchdog timeout and crashes the Pi.
+# Issue #197 introduced an "inline SEI sidecar" optimization: after
+# every successful _atomic_copy, walk the just-written file's SEI
+# NAL units and persist the parsed telemetry as a tiny <file>.sei.json
+# sidecar. The premise was "the file's pages are still hot in the
+# kernel page cache, so the walk is sub-second free work; the
+# indexer can then skip its mmap-parse and read the JSON instead."
 #
-# Skip the sidecar walk entirely when 1-min loadavg is at or above
-# this threshold — the file is still copied, just the SEI sidecar
-# optimization is deferred. The downstream indexer's existing
-# fallback path (``read_sei_sidecar`` returning None → mmap parse)
-# picks it up later when load is lower. Tunable via
-# ``archive_queue.sidecar_skip_loadavg_threshold`` (default 1.5).
+# On the Pi Zero 2 W (512 MB RAM, gadget block layer holding part
+# of the just-written file in its own buffers, SDIO bus shared with
+# WiFi) the page-cache promise broke immediately. The kernel
+# evicted the just-written pages to make room for the next clip's
+# writes, so the walk became I/O-bound and routinely took 7+
+# seconds — and a 187 s outlier was observed on 2026-05-18 which
+# held the task_coordinator lock past the 90 s hardware watchdog
+# threshold and crashed the device.
 #
-# Threshold history:
-# - Initial value 4.0 (2026-05-18 morning) — set just above the
-#   load-pause threshold of 3.5 so the sidecar still ran whenever
-#   the worker wasn't actively pausing. In theory this preserved
-#   the optimization for the common case.
-# - Lowered to 1.5 (2026-05-18 afternoon) after on-device
-#   measurement showed the page-cache assumption is broken even at
-#   loadavg ~2.0 on the Pi Zero 2 W: 7+ second sidecar writes were
-#   firing in roughly 1 of every 4 calls under a calm system
-#   (loadavg 1.7-2.0), holding the task_coordinator lock for
-#   20-35 s per file and starving the indexer. Drain rate was
-#   stuck at 3-5 files/min vs. Tesla's 4-6 files/min write rate.
-#   At 1.5 the sidecar only fires when the Pi is genuinely idle
-#   (no other I/O competing for the gadget block layer's memory
-#   footprint), which is the only condition the "pages are still
-#   hot" promise actually holds on this 512 MB device. Drain rate
-#   target post-change: 10+ files/min so the queue genuinely
-#   drains during normal Sentry+drive cycles.
-_SIDECAR_SKIP_LOADAVG_THRESHOLD = 1.5
-
-
-def _write_inline_sei_sidecar(dest_path: str) -> None:
-    """Walk the just-copied file's SEI and persist a sidecar JSON.
-
-    Called once per successful ``_atomic_copy``, BEFORE
-    ``_enqueue_indexed`` adds the file to the indexer queue. The
-    file's pages are still hot in the kernel page cache (we just
-    wrote them), so the SEI walk costs only the protobuf decode
-    work — no extra SD reads. The sidecar lets the indexer's later
-    pass skip both the ``mvhd`` walk and the ``extract_sei_messages``
-    walk, eliminating ~2x file reads per clip and the associated
-    page-cache miss.
-
-    **Time-budget context (issue #104 + review of PR #205).** This
-    helper runs OUTSIDE the per-file ``chunk_pause_seconds`` /
-    ``per_file_time_budget_seconds`` guards that ``_atomic_copy``
-    enforces. That is intentional and safe because:
-
-    * The work here is CPU-bound (protobuf decode on small NAL
-      buffers), not I/O-bound — the SD card is not the bottleneck,
-      so the SDIO-bus-saturation failure mode the time-budget
-      guards exist for does not apply.
-    * The file's pages are already resident in the page cache from
-      the immediately-prior ``_atomic_copy``, so no fresh SD reads
-      occur during the walk.
-    * The walk samples every ``_INLINE_SEI_SAMPLE_RATE`` (30) SEI
-      NAL — total work is O(file_size / 30), which on a worst-case
-      80 MB Tesla clip is well under a second on the Pi Zero 2 W.
-    * The downstream `_enqueue_indexed` call is a single SQLite
-      INSERT — sub-millisecond.
-
-    To keep that contract observable in production, we measure the
-    wall-clock and emit a WARNING if the helper exceeds
-    ``_SIDECAR_WRITE_WARN_SECONDS``. That gives operators an early
-    signal if the assumption above breaks (e.g. a future change
-    drops the sample-rate, or a corrupt clip causes pathological
-    parser behaviour) without forcing a hard cap that would silently
-    drop the optimization on every slow clip.
-
-    Best-effort: any failure is logged at WARNING and silently
-    swallowed. The downstream indexer's existing fallback path
-    (``read_sei_sidecar`` returning None → mmap parse) handles
-    missing sidecars transparently, so a sidecar-write failure
-    only loses the I/O optimization, never data.
-    """
-    start = time.monotonic()
-
-    # Issue #220 follow-up — bail out before doing any work if the
-    # system is under sustained load. The docstring above promises
-    # this helper is page-cache-hot and CPU-bound; under SDIO
-    # saturation that promise breaks and the SEI walk becomes
-    # I/O-bound (the kernel evicted our just-written pages to fit
-    # incoming writes). A 187 s sidecar write was observed in
-    # production on 2026-05-18, holding the task_coordinator lock
-    # past the 90 s hardware watchdog and crashing the Pi. The
-    # downstream indexer's mmap fallback handles the missing
-    # sidecar transparently when load is lower.
-    try:
-        from config import ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD
-        skip_threshold = float(
-            ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD)
-    except Exception:  # noqa: BLE001 — config may be absent in tests
-        skip_threshold = _SIDECAR_SKIP_LOADAVG_THRESHOLD
-    try:
-        current_load = os.getloadavg()[0]
-    except (OSError, AttributeError):
-        # OSError: /proc/loadavg unreadable.
-        # AttributeError: getloadavg not available on this platform
-        # (e.g. Windows test runners). Treat as load=0 so the
-        # sidecar still runs — the safety net is for production Pi
-        # only, never break the happy path on dev machines.
-        current_load = 0.0
-    if skip_threshold > 0 and current_load >= skip_threshold:
-        logger.info(
-            "inline-sei: skipping sidecar write for %s "
-            "(1-min loadavg %.2f >= %.2f skip threshold; "
-            "indexer will mmap-parse later)",
-            os.path.basename(dest_path), current_load,
-            skip_threshold,
-        )
-        return
-
-    try:
-        from services import sei_parser
-    except Exception as e:  # noqa: BLE001
-        logger.debug(
-            "inline-sei: sei_parser unavailable for %s (%s); "
-            "skipping sidecar write", dest_path, e,
-        )
-        return
-
-    try:
-        sidecar = sei_parser.write_sei_sidecar(
-            dest_path, sample_rate=_INLINE_SEI_SAMPLE_RATE,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "inline-sei: sidecar write threw on %s "
-            "(indexer will mmap-parse): %s", dest_path, e,
-        )
-        return
-
-    elapsed = time.monotonic() - start
-    if sidecar is None:
-        # write_sei_sidecar already logged the failure cause at
-        # DEBUG/WARNING; no need to double-log here.
-        return
-
-    mvhd_repr = (
-        sidecar.mvhd_creation_time_utc.isoformat()
-        if sidecar.mvhd_creation_time_utc is not None
-        else 'unknown'
-    )
-    if elapsed >= _SIDECAR_WRITE_WARN_SECONDS:
-        # Near-miss against the watchdog timeout — the page-cache
-        # hot-path assumption above appears to no longer hold for
-        # this clip. Surface at WARNING so it shows up in journalctl
-        # at the default verbosity.
-        logger.warning(
-            "inline-sei: sidecar write took %.2fs (>= %.1fs warn "
-            "threshold) for %s — page-cache fast-path may have "
-            "missed; %d messages, mvhd=%s",
-            elapsed, _SIDECAR_WRITE_WARN_SECONDS,
-            os.path.basename(dest_path),
-            sidecar.sei_count, mvhd_repr,
-        )
-    else:
-        logger.info(
-            "inline-sei: parsed %d messages (%d GPS, %d no-GPS), "
-            "mvhd=%s, elapsed=%.2fs for %s",
-            sidecar.sei_count, len(sidecar.messages),
-            sidecar.no_gps_count, mvhd_repr, elapsed,
-            os.path.basename(dest_path),
-        )
+# We tried two threshold-gated load-skip mitigations (4.0 then 1.5)
+# but the skip ended up firing on almost every call anyway — the
+# "optimization" was disabled in practice, and the sidecar code
+# was still a source of complexity and risk inside the critical
+# task_coordinator section. The cleaner answer is to delete it.
+#
+# The indexer's "fallback" path (mmap-walk the .mp4 directly) is
+# now the only path: indexer claims from indexing_queue, mmap-walks
+# the file on its OWN task_coordinator slot (yield_to_waiters=True
+# so it cooperates with archive), and writes waypoints to geodata.db.
+# That puts the walk on the side of the pipeline that can absorb
+# slow work without blocking Tesla data preservation.
+#
+# Existing .sei.json files on disk from prior installs are still
+# read by mapping_service via sei_parser.read_sei_sidecar (and
+# cleaned up via sei_parser.delete_sei_sidecar when the .mp4 is
+# pruned). That's the only remaining sidecar code path; this
+# module no longer writes them.
+#
+# Do not reintroduce an inline SEI parse step inside process_one_claim.
+# Any "save the indexer one I/O pass" idea must happen OUTSIDE the
+# task_coordinator lock (e.g. as a separate background queue) so
+# the archive critical section stays bounded by copy + DB ops.
 
 
 def _apply_low_priority() -> None:
@@ -2414,25 +2265,11 @@ def process_one_claim(row: Dict[str, Any], db_path: str,
     # recovered after N < cap defers doesn't leave stale state behind.
     _reset_moov_defer_count(source_path)
     archive_queue.mark_copied(row_id, dest_path, db_path=db_path)
-    # Issue #197: while the just-copied file's pages are still hot
-    # in the kernel page cache, parse SEI + mvhd inline and write
-    # a sidecar JSON. The indexer's later pass reads the sidecar
-    # instead of mmap-parsing the .mp4 a second time.
-    #
-    # Best-effort by contract — wrap in defense-in-depth try/except
-    # so a sidecar bug or unexpected exception never marks the
-    # archive failed. The helper has its own internal try/except,
-    # but a future refactor (or a monkeypatched stub in tests)
-    # could let an exception escape; this outer guard preserves
-    # the "sidecar is an optimization, never a correctness gate"
-    # contract regardless.
-    try:
-        _write_inline_sei_sidecar(dest_path)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "inline-sei: sidecar write escaped helper for %s "
-            "(indexer will mmap-parse): %s", dest_path, e,
-        )
+    # The inline SEI sidecar write (issue #197) was removed 2026-05-18.
+    # See the long comment block above _write_inline_sei_sidecar's
+    # former definition for the rationale. The indexer's mmap-walk
+    # of the .mp4 is now the only SEI parse path; it runs on the
+    # indexer's own task_coordinator slot so it can't block archive.
     _enqueue_indexed(dest_path, db_path)
     return 'copied'
 

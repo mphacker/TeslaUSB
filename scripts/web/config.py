@@ -429,28 +429,13 @@ ARCHIVE_QUEUE_USE_PIPELINE_READER = bool(
     _archive_queue.get('use_pipeline_reader', False)
 )
 
-# Issue #220 follow-up — load-aware skip for the inline SEI sidecar
-# helper in ``archive_worker._write_inline_sei_sidecar``. When the
-# 1-min loadavg is at or above this threshold, the helper bails out
-# before doing any work and the indexer's mmap fallback handles the
-# missing sidecar later. Set to 0.0 to disable the skip entirely
-# (NOT recommended on Pi Zero 2 W — at 4.0 a 187 s sidecar write
-# was observed on 2026-05-18 morning, holding the task_coordinator
-# lock past the 90 s hardware watchdog).
-#
-# Default 1.5 (lowered from 4.0 on 2026-05-18 afternoon). The
-# higher value preserved the "fast sidecar when idle" optimization
-# in theory, but on-device measurement showed the page-cache
-# assumption breaks even at loadavg ~2.0 on the 512 MB Pi Zero 2 W:
-# 7+ second sidecar writes were happening on ~25 % of calls under
-# a calm system, dragging archive drain rate down to 3-5 files/min.
-# At 1.5 the sidecar only runs when the Pi is genuinely idle
-# (sustained loadavg < 1.5), where the page-cache promise actually
-# holds. See ``_SIDECAR_SKIP_LOADAVG_THRESHOLD`` in
-# ``archive_worker.py`` for the full rationale.
-ARCHIVE_QUEUE_SIDECAR_SKIP_LOADAVG_THRESHOLD = float(
-    _archive_queue.get('sidecar_skip_loadavg_threshold', 1.5)
-)
+# The inline SEI sidecar write (issue #197) and its load-aware skip
+# (issue #220 follow-up) were removed 2026-05-18. The indexer now
+# mmap-walks .mp4 files directly on its own task_coordinator slot.
+# Any ``archive_queue.sidecar_skip_loadavg_threshold`` value in
+# config.yaml is silently ignored. See the long comment block in
+# scripts/web/services/archive_worker.py (where
+# _write_inline_sei_sidecar used to live) for the full rationale.
 
 # ============================================================================
 # ADVANCED SETTINGS - Computed values (don't modify these)

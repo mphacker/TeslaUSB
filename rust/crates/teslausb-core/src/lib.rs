@@ -9,14 +9,16 @@
 //! Practices" — domain core. Pure logic only; no `tokio`, no
 //! `std::fs`, no syscalls. Trivially unit-testable without I/O.
 //!
-//! ## Phase 0.2 state
+//! ## Current contents
 //!
-//! Empty crate skeleton — compiles clean, ships nothing. Real
-//! contents land in:
+//! * [`ipc`] — versioned envelope + `STATUS` / `RETENTION_UPDATE` /
+//!   `INVALIDATE_CACHE` request/response types (Phase 1.2).
 //!
-//! * Phase 1.2 — `ipc::messages` (versioned envelope, `STATUS` /
-//!   `RETENTION_UPDATE` / `INVALIDATE_CACHE`).
+//! ## Planned additions
+//!
 //! * Phase 1.4 — `backend::BlockBackend` trait (size / read /
 //!   write(flags) / flush, with FUA contract documented).
 //! * Phase 2.1+ — `fs::geometry` trait shared by FAT32 and `exFAT`
 //!   geometry implementations.
+
+pub mod ipc;

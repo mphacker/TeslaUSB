@@ -15,7 +15,7 @@ directory shrinks to nothing by the end of Phase 1.
 | ~~`src/main.rs`~~ (deleted)     | Phase 1.1  | Ported in commit landing inc-1.1; stripped to bootstrap (CLI + tracing + TOML config + sentinel). NBD/IPC wiring deferred to 1.3/1.5. |
 | ~~`src/config.rs`~~ (deleted)   | Phase 1.1  | Ported in commit landing inc-1.1; schema preserved, YAML → TOML, validation reused. |
 | `src/nbd/mod.rs`                | Phase 1.5  | Per-connection serve loop + dispatch                 |
-| `src/nbd/handshake.rs`          | Phase 1.3  | NBD newstyle handshake (1:1 port, add round-trip test) |
+| ~~`src/nbd/handshake.rs`~~ (deleted) | Phase 1.3 | Ported in commit landing inc-1.3; decomposed into pure encode/decode helpers + generic async `run` shell. Crate split into lib + bin so the protocol is reachable from unit tests without a real socket. |
 | `Cargo.toml`                    | n/a        | Superseded by `rust/crates/teslafat/Cargo.toml`      |
 
 > **Do not edit these drafts.** If a design change is needed,

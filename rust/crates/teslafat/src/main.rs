@@ -19,8 +19,6 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-mod config;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -29,7 +27,7 @@ use clap::Parser;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::config::Config;
+use teslafat::config::Config;
 
 /// `teslafat` (FAT/exFAT synthesizer + NBD server) CLI.
 #[derive(Debug, Parser)]

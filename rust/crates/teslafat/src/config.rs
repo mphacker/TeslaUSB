@@ -1,11 +1,11 @@
 //! TOML config file loader for the `teslafat` daemon.
 //!
 //! Schema is enforced at parse time via `#[serde(deny_unknown_fields)]`
-//! and re-validated after parse via [`Config::validate`] for the
-//! semantic constraints `serde` alone cannot express (FAT32 label
-//! length, volume-size range, power-of-two cluster size). Both paths
-//! surface their failure as `anyhow::Error` so the binary boundary
-//! can attach the config path with `with_context`.
+//! and re-validated after parse by an internal `validate` helper for
+//! the semantic constraints `serde` alone cannot express (FAT32
+//! label length, volume-size range, power-of-two cluster size).
+//! Both paths surface their failure as `anyhow::Error` so the
+//! binary boundary can attach the config path with `with_context`.
 //!
 //! The `setup.sh` installer (Phase 6.4) writes
 //! `/etc/teslausb/teslafat.toml` against this schema. Adding,

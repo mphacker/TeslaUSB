@@ -15,7 +15,7 @@ on empty crates + `pytest` returning 0 tests OK).
 | Inc | Deliverable | Status | Review | Test |
 |---|---|---|---|---|
 | 0.1 | Branch rename `b1-userspace-fat32` → `b1-userspace-rust`; first commit (v1 wipe + planning docs + skills) — commit `b5aeeee` | ✅ | ✅ APPROVED (doc-only, FHS path drift fixed in-place pre-merge) | ✅ git working tree clean post-commit |
-| 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ⏳ | ⏳ | ⏳ |
+| 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ⏳ | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
 | 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ⏳ | ⏳ | ⏳ |
 | 0.4 | `.github/workflows/ci.yml` mirroring charter §"CI Gates" | ⏳ | ⏳ | ⏳ |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ⏳ | ⏳ | ⏳ |
@@ -455,3 +455,52 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   to origin). Next session resumes the deferred Phase 0.2 – 0.8
   scaffolding (Cargo workspace, Python skeleton, CI, pre-commit,
   setup-dev.sh, CODEOWNERS, ADRs).
+
+### 2026-05-19 (resumed, again) — Phase 0.2 Cargo workspace skeleton
+
+- **Increment 0.2 implemented and gate-verified.** Workspace
+  scaffolded at `rust/` with three empty crates per charter:
+  * `teslausb-core` (lib) — IPC envelope + `BlockBackend` trait
+    + `Filesystem` trait will land here in Phase 1.2 onward.
+  * `teslafat` (bin) — NBD server + FAT/exFAT synthesizer. Phase
+    1.1 replaces the placeholder `main`.
+  * `teslausb-worker` (bin) — background retention/cloud-sync/
+    indexer. Populated in Phase 14.
+- **All five Rust CI gates green** on the dev box with the
+  pinned toolchain (`rustup` installed via `winget`, then
+  `rust-toolchain.toml` auto-fetched stable `1.85.0` + `rustfmt`
+  + `clippy`):
+  * `cargo build --workspace --all-targets` — 0
+  * `cargo clippy --workspace --all-targets -- -D warnings` — 0
+  * `cargo fmt --all -- --check` — 0
+  * `cargo test --workspace --all-targets` — 0 (0 tests, 0 fails)
+  * `cargo doc --no-deps --document-private-items --workspace` — 0
+- **Charter discrepancy caught and fixed in the same commit.**
+  Clippy's `lint_groups_priority` rejected the charter's literal
+  lint block: lint *groups* (`unused`, `nonstandard_style`,
+  `future_incompatible`) need `priority = -1` so individual
+  lints (`missing_docs`) can override them. Updated
+  `docs/03-CODE-QUALITY-CHARTER.md` §"Lints" and the workspace
+  `Cargo.toml` simultaneously so the charter stays the source
+  of truth and cargo accepts the syntax.
+- **Pedantic docs enforced from day one.** `clippy::pedantic`
+  promoted to deny via `-D warnings` flagged un-backticked
+  identifiers (`TeslaUSB`, `RETENTION_UPDATE`, `INVALIDATE_CACHE`,
+  `exFAT`) in the placeholder crate-level doc comments.
+  Backticked all of them — establishes the bar for every
+  future doc comment in the workspace.
+- **Existing `teslafat/` at repo root** classified as Phase 1
+  design drafts (`teslafat/README.md`) rather than dead code.
+  Drafts get ported into `rust/crates/teslafat/src/` increment
+  by increment through Phase 1.1 – 1.7; the root `teslafat/`
+  directory is `git rm`'d at the end of Phase 1.7.
+- **Stats:** 14 files added, ~378 lines (~150 of code + lints,
+  ~228 of explanatory docs/README/charter delta). `rust/target/`
+  added to `.gitignore`; `rust/Cargo.lock` committed per Rust
+  best practice for workspaces containing binary crates.
+- **Next:** Increment 0.2 review gate (formal `charter-review`
+  skill invocation now that this is the first code-bearing
+  increment), then 0.3 (Python skeleton + `pyproject.toml`).
+  Branch `b1-userspace-rust` will be 4 commits ahead of `main`
+  after this commit lands; still local-only, not pushed to
+  origin per operator preference.

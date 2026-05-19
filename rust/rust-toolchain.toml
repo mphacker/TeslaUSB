@@ -1,0 +1,16 @@
+# Charter §"Toolchain": pinned to a specific stable Rust version.
+# Bumped deliberately, never auto-rolled. Bump procedure:
+#   1. Update `channel` here.
+#   2. Update `rust-version` in `Cargo.toml` workspace.package.
+#   3. Run `cargo build --workspace --all-targets`
+#      and `cargo clippy --workspace --all-targets -- -D warnings`
+#      on the dev box.
+#   4. Update the CI matrix if pinned there.
+#   5. Land in a dedicated PR (no functional changes mixed in).
+#
+# 1.85.0 is the first stable release with edition 2024 (released
+# 2025-02-20). Required so every crate can declare `edition = "2024"`.
+[toolchain]
+channel = "1.85.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

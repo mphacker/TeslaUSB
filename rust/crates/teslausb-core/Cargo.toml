@@ -1,0 +1,12 @@
+[package]
+name = "teslausb-core"
+description = "Shared domain types for the TeslaUSB B-1 daemon (BlockBackend trait, IPC envelope, Filesystem trait). No I/O dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "teslausb-worker"
+description = "Background retention + cloud-sync + indexer worker for TeslaUSB B-1. Talks to teslafat via the teslausb-core IPC envelope."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "teslausb-worker"
+path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,78 @@
+# TeslaUSB B-1 Rust workspace.
+#
+# Three crates live here:
+#   * teslausb-core   — shared domain types (BlockBackend trait, IPC envelope,
+#                       Filesystem trait). Pure logic; no I/O dependencies.
+#                       Phase 1.2 onwards.
+#   * teslafat        — userspace FAT/exFAT synthesizer + NBD server. Speaks
+#                       the NBD newstyle protocol to a kernel nbd-client
+#                       which in turn backs the g_mass_storage USB gadget.
+#                       Phase 1 onwards.
+#   * teslausb-worker — background retention + cloud-sync + indexer worker.
+#                       Talks to teslafat via the IPC envelope in
+#                       teslausb-core. Phase 14 onwards.
+#
+# Phase 0.2 establishes empty crate skeletons; all three build clean against
+# `cargo build` with no source code beyond placeholder entry points.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/teslausb-core",
+    "crates/teslafat",
+    "crates/teslausb-worker",
+]
+
+# Shared package metadata. Each crate inherits via `field.workspace = true`
+# so version bumps and license updates land in one place.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["TeslaUSB B-1 authors"]
+license = "MIT"
+repository = "https://github.com/mphacker/TeslaUSB"
+
+# Charter-mandated lint configuration. Every crate inherits via
+# `[lints] workspace = true`. Source of truth is
+# docs/03-CODE-QUALITY-CHARTER.md §"Lints"; this block must match it.
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+# Lint *groups* need `priority = -1` so individual lints (e.g.
+# `missing_docs`) can still override their level; cargo rejects equal-
+# priority group/lint pairs (clippy::lint_groups_priority).
+unused = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cognitive_complexity = "deny"
+todo = "deny"
+unimplemented = "deny"
+expect_used = "warn"
+unwrap_used = "deny"
+panic = "warn"
+indexing_slicing = "warn"
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+
+# Release profile tuned for the Pi Zero 2 W: prioritise binary size and
+# steady-state perf over compile time. `panic = "abort"` shrinks the binary
+# and removes unwinding tables (the daemon has no panic-recovery path
+# anyway; systemd restarts on crash).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+# Dev profile keeps some optimisation so the test suite finishes in
+# reasonable time on the dev box without sacrificing line-number-accurate
+# debug info.
+[profile.dev]
+opt-level = 1

@@ -62,3 +62,8 @@ config.yaml.bak.*
 
 # Generated protobuf (compiled on-device by setup_usb.sh)
 scripts/web/services/dashcam_pb2.py
+
+# Rust build artifacts (target/ is per-workspace, never committed).
+# Cargo.lock IS committed (workspace contains binary crates).
+rust/target/
+**/target/

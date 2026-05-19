@@ -180,9 +180,12 @@ It bloats binaries. It confuses contributors. We delete it.
 [lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"           # docs for public items
+# Lint *groups* need `priority = -1` so individual lints (e.g.
+# `missing_docs`) can still override their level; cargo rejects equal-
+# priority group/lint pairs (clippy::lint_groups_priority).
 unused = { level = "deny", priority = -1 }
-nonstandard_style = "deny"
-future_incompatible = "deny"
+nonstandard_style = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

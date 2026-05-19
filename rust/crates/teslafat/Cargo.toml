@@ -1,0 +1,16 @@
+[package]
+name = "teslafat"
+description = "Userspace FAT/exFAT synthesizer + NBD server for the TeslaUSB B-1 USB gadget endpoint."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "teslafat"
+path = "src/main.rs"
+
+[lints]
+workspace = true

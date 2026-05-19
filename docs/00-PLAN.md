@@ -550,14 +550,14 @@ GATE:** `cargo test -p teslafat` green; new clippy lints pass.
 
 | # | Step |
 |---|---|
-| H1.1 | `cargo build --release --target=armv7-unknown-linux-gnueabihf` cross-build on dev box (or build on-device — slower but simpler for skeleton) |
-| H1.2 | `scp target/.../teslafat pi@cybertruckusb.local:/home/pi/teslausb-b1/bin/teslafat` |
-| H1.3 | Install systemd unit as `teslafat-test@.service` (NOT the production name yet) |
-| H1.4 | `systemctl start teslafat-test@0` |
-| H1.5 | `nbd-client -u /run/teslafat-test-0.sock /dev/nbd1` — confirm handshake completes |
-| H1.6 | `blockdev --getsize64 /dev/nbd1` — non-zero |
-| H1.7 | `nbd-client -d /dev/nbd1`, `systemctl stop teslafat-test@0`, `systemctl disable teslafat-test@0`, remove the unit file |
-| H1.8 | SSH still alive, WiFi still up |
+| H1.1 | `cargo build --release --target=aarch64-unknown-linux-gnu` cross-build on dev box via the podman cross-build image at `tools/xbuild/` (see `tools/xbuild/README.md`). Confirmed Pi arch via `dpkg --print-architecture` = `arm64`, `uname -m` = `aarch64` (Pi Zero 2 W, kernel 6.12.47+rpt-rpi-v8). The earlier `armv7-unknown-linux-gnueabihf` value pre-dated the hardware probe and was wrong. **Building on-device is FORBIDDEN** (see ADR-0008 — two H1 attempts to `cargo build` on the Pi both wedged the device, one requiring a hard power cycle and one requiring a sysrq+b kernel reboot; cross-compile only). |
+| H1.2 | `scp $env:TEMP/teslausb-h1/teslafat pi@cybertruckusb.local:/tmp/teslafat` then `sudo install -m 0755 /tmp/teslafat /usr/local/bin/teslafat` |
+| H1.3 | Install systemd unit as `teslafat-test@.service` (NOT the production name yet); test-variant rewrite of `units/teslafat@.service` (test only — `RuntimeDirectory=teslausb-test`, `/etc/teslausb-test/`, `/var/teslacam-test`) |
+| H1.4 | Validate: `sudo -u teslausb /usr/local/bin/teslafat --config /etc/teslausb-test/teslafat-0.toml --check-config` (must emit started-sentinel JSON + exit 0); then `sudo systemctl daemon-reload && sudo systemctl start teslafat-test@0` |
+| H1.5 | `sudo nbd-client -unix /run/teslausb-test/teslafat-0.sock /dev/nbd1` — confirm newstyle negotiation completes (note: `nbd-client` 3.x deprecated `-u`; use `-unix`) |
+| H1.6 | `sudo blockdev --getsize64 /dev/nbd1` — exactly 4294967296 (4 GiB); `dd if=/dev/nbd1 bs=64 count=1 \| od -An -tx1` returns all zeros (ZeroBackend by design — FAT BPB lands in Phase 2) |
+| H1.7 | `sudo nbd-client -d /dev/nbd1`, `sudo systemctl stop teslafat-test@0`. Leave the unit file + binary + config installed for downstream H-increments; mark inactive. Cleanup of `/run/teslausb-test/` happens automatically via `RuntimeDirectory=`. |
+| H1.8 | SSH still alive (`ssh pi@cybertruckusb.local 'uptime'`), load < 1.0, no OOM in `dmesg`, no NEAR-MISS, swap usage 0 |
 
 **🔍 REVIEW GATE** on the smoke script. **✅ TEST GATE:** all
 H1.x steps green, journal captured to session files for charter-review.
@@ -985,18 +985,42 @@ mode-removal deltas in the documented allow-list.
 
 ### Phase 6 — setup.sh + uninstall.sh
 
+> *Operator directive (2026-05-19):* **"We need to make sure our
+> solution has a script or an installer that can be run to fully
+> configure the Raspberry PI device to run the solution. This is
+> for installing any services, making sure we have the right
+> virtual memory config, shutting down unnecessary components on
+> the device, etc. Similar to how the past version of this
+> solution used setup_usb.sh."**
+
+The installer is a **load-bearing deliverable** — B-1 is not
+production-ready until a fresh Raspberry Pi OS Lite SD card can be
+turned into a fully-configured TeslaUSB device by running ONE script.
+"Manually `apt install`, manually create users, manually load kernel
+modules" (as we are doing for H1) is acceptable ONLY for
+hardware-smoke phases (H1–H4) and MUST be replaced by `setup.sh`
+before Phase 7 soak.
+
 | # | Deliverable | LOC ceiling |
 |---|---|---|
-| 6.1 | `setup.sh` package install + idempotency check + `--dry-run` flag | ~200 |
+| 6.1 | `setup.sh` package install (`nbd-client`, `btrfs-progs`, `nginx`, `python3-venv`, `network-manager`, `watchdog`, `dnsmasq-base`, `hostapd`, kernel headers if needed) + idempotency check + `--dry-run` flag. **DO NOT install `rustup` / `cargo` / `gcc` / `build-essential`** — building Rust on a Pi Zero 2 W is forbidden by ADR-0008; the device runs cross-compiled binaries only. | ~200 |
 | 6.2 | `setup.sh` user/group creation (`teslausb` system user, sudoers fragment install) | ~100 |
 | 6.3 | `setup.sh` btrfs subvolume creation at `/srv/teslausb/teslacam/` + `/srv/teslausb/media/`, idempotent (skip if already a subvolume) | ~150 |
 | 6.4 | `setup.sh` systemd unit install (teslafat@0, teslafat@1, teslausb-worker, teslausb-web, nginx, watchdog) | ~150 |
 | 6.5 | `setup.sh` NetworkManager + AP config — IDEMPOTENT, never overwrites without `.b1-backup` siblings | ~250 |
 | 6.6 | `setup.sh` boot cmdline + config.txt edits — IDEMPOTENT, always with backup siblings, dry-run shows diff before apply | ~200 |
 | 6.7 | `setup.sh` watchdog priority drop-in + sshd-protect drop-in (mirror v1's safeguards) | ~80 |
-| 6.8 | `setup.sh` final enable + start + post-start health check | ~150 |
-| 6.9 | `uninstall.sh` — exact inverse, restore from `.b1-backup` siblings; `--purge` flag for data wipe | ~400 |
-| 6.10 | Both scripts pass `shellcheck -S warning` and have a `--help` output that documents every flag | n/a |
+| 6.8 | `setup.sh` **memory & VM tuning** — 1 GB persistent swap file at `/var/swap/b1.swap`, `/etc/fstab` entry, `vm.swappiness=10`, `vm.min_free_kbytes=8192`, kernel.panic=10 sysctls dropped in at `/etc/sysctl.d/90-teslausb-b1.conf`. (Mirrors v1's `optimize_memory_for_setup` minus the lightdm-disable, which is covered below.) | ~120 |
+| 6.9 | `setup.sh` **disable unnecessary components** — `systemctl mask` for `lightdm.service`, `pipewire.service`, `pipewire.socket`, `wireplumber.service`, `colord.service`, `cups.service`, `cups.socket`, `cups-browsed.service`, `triggerhappy.service`, `triggerhappy.socket`, `avahi-daemon.service` if not needed for `.local` resolution (decide at impl time), `ModemManager.service`. Each mask is conditional on the unit existing; idempotent. Reclaims ~30–50 MB RAM on a Pi Zero 2 W. (Mirrors v1's desktop-services-disable in `setup_usb.sh`.) | ~80 |
+| 6.10 | `setup.sh` final enable + start + post-start health check | ~150 |
+| 6.11 | `uninstall.sh` — exact inverse, restore from `.b1-backup` siblings; `--purge` flag for data wipe. Re-enables / un-masks every unit row 6.9 masked. Removes the swap file row 6.8 created. | ~450 |
+| 6.12 | Both scripts pass `shellcheck -S warning` and have a `--help` output that documents every flag | n/a |
+
+**Idempotency contract:** every row 6.1–6.10 MUST be safe to re-run
+on an already-configured device — no duplicated fstab lines, no
+double-masked units, no overwritten config without backup. The
+charter-review for each increment will verify this with a `setup.sh
+&& setup.sh` smoke test (second run is a no-op).
 
 **🔍 REVIEW GATE per increment.** Each setup increment is
 also separately exercised by Phase H6.
@@ -1011,12 +1035,13 @@ the v1 SD card preserved. Operator confirms which.
 | # | Step |
 |---|---|
 | H6.1 | Flash Raspberry Pi OS Lite Bookworm to a SD card. SSH-enable. WiFi pre-configured. |
-| H6.2 | Boot, confirm SSH alive. Capture pristine baseline (`journalctl -b`, `dpkg -l`, `systemctl list-units`). |
+| H6.2 | Boot, confirm SSH alive. Capture pristine baseline (`journalctl -b`, `dpkg -l`, `systemctl list-units`, `free -m`, `cat /proc/swaps`). |
 | H6.3 | Run `setup.sh --dry-run`. Review every proposed change. |
-| H6.4 | Run `setup.sh`. Observe boot to all-green services within target (~60 s). |
-| H6.5 | Reboot. Confirm services start automatically, SSH still works, WiFi still works. |
-| H6.6 | Run `uninstall.sh --purge`. Confirm device returns to pristine baseline (diff `dpkg -l` and `systemctl list-units` — only B-1-installed packages remain in "not removed" list, all B-1 units gone). |
-| H6.7 | Reboot once more. Confirm pristine boot. |
+| H6.4 | Run `setup.sh`. Observe boot to all-green services within target (~60 s). Verify `free -m` shows the 1 GB swap and the masked units no longer show in `systemctl list-units --state=running`. |
+| H6.5 | Reboot. Confirm services start automatically, SSH still works, WiFi still works. Re-verify swap + masked units survived reboot. |
+| H6.6 | **Re-run `setup.sh`** — confirm it is a true no-op (zero changes reported; exit 0). This is the idempotency gate. |
+| H6.7 | Run `uninstall.sh --purge`. Confirm device returns to pristine baseline (diff `dpkg -l` and `systemctl list-units` — only B-1-installed packages remain in "not removed" list, all B-1 units gone, swap file removed, sysctls reverted). |
+| H6.8 | Reboot once more. Confirm pristine boot. |
 
 **🔍 REVIEW GATE on the script + transcripts.**
 **✅ TEST GATE:** all H6.x green; pristine restore verified.

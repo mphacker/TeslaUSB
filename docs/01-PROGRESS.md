@@ -94,17 +94,19 @@ home dir clean, ssh/watchdog/NM/logind/dbus all `active`).
 
 | Inc | Step | Status |
 |---|---|---|
-| H1.1 | Cross-build teslafat for armv7 | ⏳ |
-| H1.2 | scp to /home/pi/teslausb-b1/bin/ | ⏳ |
-| H1.3 | Install teslafat-test@.service (NOT production name) | ⏳ |
-| H1.4 | systemctl start teslafat-test@0 | ⏳ |
-| H1.5 | nbd-client connects + handshake completes | ⏳ |
-| H1.6 | blockdev --getsize64 returns non-zero | ⏳ |
-| H1.7 | Teardown | ⏳ |
-| H1.8 | SSH + WiFi liveness final check | ⏳ |
+| H1.1 | Cross-build teslafat for aarch64 via `tools/xbuild/` podman image (Pi build forbidden — ADR-0008) | ✅ |
+| H1.2 | scp to /tmp + install -m 0755 to /usr/local/bin/teslafat | ✅ |
+| H1.3 | Install teslafat-test@.service (NOT production name) + teslafat-0.toml | ✅ |
+| H1.4 | --check-config as teslausb user (sentinel JSON, exit 0); systemctl start teslafat-test@0 | ✅ |
+| H1.5 | nbd-client connects + newstyle handshake completes (negotiated 4096 MB) | ✅ |
+| H1.6 | blockdev --getsize64 returns 4294967296 (exact 4 GiB); read returns zeros (ZeroBackend by design — FAT in Phase 2) | ✅ |
+| H1.7 | nbd-client -d, systemctl stop; runtime dir auto-cleaned; binary + unit + config left installed for downstream H-increments | ✅ |
+| H1.8 | SSH alive, uptime steady (load 0.27 post-test), swap 0, no OOM, no NEAR-MISS | ✅ |
 
-**🔍 REVIEW GATE on the H1 script + journal.**
-**✅ TEST GATE:** all H1.x green via `hardware-test`.
+**🔍 REVIEW GATE:** charter-review-h1.md (session-state),
+covering the two crash artifacts that yielded ADR-0008.
+**✅ TEST GATE:** all H1.x green; journal captured to
+session-state as `h1-journal.log`.
 
 ## Phase 2 — FS read-side synthesis (FAT32 + exFAT)
 

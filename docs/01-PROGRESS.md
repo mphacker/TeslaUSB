@@ -19,7 +19,7 @@ on empty crates + `pytest` returning 0 tests OK).
 | 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ✅ APPROVED (6 charter coherence fixes applied in-place: 4 `web/` → `web/teslausb_web/` path drifts in CI gate + dead-code-detection blocks, `--cov=web` → `--cov=teslausb_web` module-name, `mypy web/` → bare `mypy` from `web/` cwd; plus added `from __future__ import annotations` to 5 docstring-only Python modules per charter Python deep-dive rule) | ✅ `ruff check / ruff format --check / mypy --strict / pytest --cov=teslausb_web --cov-fail-under=80 (100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
 | 0.4 | `scripts/check.sh` local gate runner with every gate from charter §"CI Gates" (operator-driven, NOT GitHub Actions — cloud CI deferred indefinitely per operator preference 2026-05-19; full hardware testing is H-phase territory anyway) | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"CI Gates" reframed from "hosted CI / PR" enforcement model to venue-neutral with explicit pointer to `scripts/check.sh`; hygiene wording updated `git diff` → `git ls-files` to match script behavior; 1 Nit accepted: magic `1048576` for 1 MiB is documented inline with charter line citation) | ✅ 12 PASS / 0 FAIL / 4 SKIP (cargo-llvm-cov, cargo-deny, cargo-machete, lychee — optional, install in Phase 0.6) on Windows dev box via Git Bash; exit 0 |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally via single-source delegation to `scripts/check.sh` (per operator preference 2026-05-19); upstream `pre-commit/pre-commit-hooks@v6.0.0` retained ONLY for cheap whitespace/EOF/yaml/TOML fixes | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"Pre-commit Hooks" L593-637 rewritten from the OLD mixed model — per-tool ruff/mypy/cargo upstream + local hooks — to the actual single-source design; upstream rev bumped `v4.6.0` → `v6.0.0` to silence deprecated-stage-names warnings; operator setup commands added) | ✅ `pre-commit run --all-files` 11 PASS / 0 FAIL / 0 SKIP exit 0; `./scripts/check.sh --all` 12 PASS / 0 FAIL / 4 SKIP exit 0; defensive re-run after charter fix also clean |
-| 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ⏳ | ⏳ | ⏳ |
+| 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ✅ | ⏳ | ✅ `bash -n` syntax exit 0; `--dry-run` exit 0 on Windows dev box (correctly reports 4 cargo tools as "would install" + venv already present + hook would install); `--check` exit 1 with structured diagnostics (rustup ✓, toolchain ✓, cargo-deny/machete/llvm-cov/lychee ✗, venv ✓ with all 7 expected dev tools, hook ✗); skip-flag matrix (`SETUP_SKIP_RUST=1` / `_PY=1` / `_HOOK=1`) honored; mutex `--dry-run --check` rejected with exit 2; unknown arg exit 2; both gate runners green after stage (`pre-commit run --all-files` 11/0/0 exit 0, `./scripts/check.sh --all` 12/0/4 exit 0) |
 | 0.7 | `CODEOWNERS` + PR template referencing the charter checklist | ⏳ | ⏳ | ⏳ |
 | 0.8 | ADRs 0001 – 0011 written (`docs/adr/`) | ⏳ | ⏳ | ⏳ |
 
@@ -872,3 +872,81 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   `docs/adr/NNNN-single-source-gate-runner.md` capturing the
   single-source design decision (pairs with the deferred
   `defer-cloud-ci.md` ADR from inc-0.4 review).
+
+
+### 2026-05-19 (resumed, fifth time) -- Phase 0.6 implementation
+
+- Created `scripts/setup-dev.sh` (372 LOC bash, exec bit 100755). Per
+  operator preference (2026-05-19, choice "script only, no execution"),
+  did NOT run the installer; verified the script logic via three
+  non-mutating modes: `--dry-run`, `--check`, and the
+  `SETUP_SKIP_*` env-override matrix.
+- **Three-step install** (matches the four optional-tool gates that
+  `scripts/check.sh` currently SKIPs):
+  - [1/3] Rust: rustup (curl one-liner if absent) -> `(cd rust &&
+    rustup show)` to install the toolchain pinned by
+    `rust-toolchain.toml` -> `cargo install --locked` cargo-deny,
+    cargo-machete, cargo-llvm-cov, lychee.
+  - [2/3] Python: `python3 -m venv ../.teslausb-tools-venv` (out-of-
+    tree per AI workspace rule) -> `pip install --upgrade pip` ->
+    `pip install -e web/[dev]` (brings ruff, mypy, pytest, pytest-
+    cov, vulture, bandit, pre-commit).
+  - [3/3] `pre-commit install` to register `.git/hooks/pre-commit`.
+- **Three modes per Pillar 3 (No Shortcuts) -- explicit, non-mutating
+  audit paths:**
+  - `--dry-run`: prints every action that would be taken; exit 0;
+    makes zero filesystem / shell changes.
+  - `--check`: verifies the env IS set up; exit 1 with per-tool
+    diagnostics if anything is missing. Used today to confirm the
+    Windows dev box has the venv + all 7 dev tools but is missing the
+    4 cargo subcommands and the git hook.
+  - default (no flag): full idempotent install.
+- **Skip-flag matrix:** `SETUP_SKIP_RUST=1` / `SETUP_SKIP_PY=1` /
+  `SETUP_SKIP_HOOK=1` each excise their step. Useful for re-running
+  just one section after a partial failure.
+- **Prerequisites checked, not auto-installed:** `git`, `curl`,
+  Python >=3.11. Script aborts with exit 2 and a hint if missing.
+  Rationale: telling people how to install Python on their platform is
+  out of scope; Pi has it pre-installed via apt; Windows users use
+  python.org / Microsoft Store.
+- **Mutex enforcement:** `--dry-run --check` rejected with exit 2.
+- **Mojibake fix (Pillar 4 -- Fix Bugs Immediately):** my first draft
+  used em-dash characters (`--`) in comments + heredoc. When `--
+  help` was invoked on Windows the output showed `ΓÇö` mojibake.
+  Replaced every em-dash with ASCII `--` via a PowerShell byte-
+  replace, matching the same fix applied to `scripts/check.sh` in
+  inc-0.4.
+- **Logging refinement:** `log_action` originally printed
+  `[RUN] cargo install ...` even in `--check` mode, which was
+  misleading (nothing was being run). Refined to print
+  `[CHECK]   verifying: cargo install ...` in check mode so the
+  intent matches the output. Caught by my own `--check` dry-test
+  before commit.
+- **Anticipated inc-0.6 review-gate finds:**
+  1. Charter doesn't yet mention `setup-dev.sh` as the canonical
+     dev-env bootstrap. The CI Gates section (inc-0.4 reframe) just
+     says "scripts/check.sh"; the Pre-commit Hooks section
+     (inc-0.5 reframe) mentions `pip install -e web/[dev]` + `pre-
+     commit install` manually but doesn't point at the wrapper.
+     Likely cross-reference cleanup needed.
+  2. `setup-dev.sh` LOC (372) is over the ~250 budget I floated in
+     the prior session summary. Justification: 3 modes (dry-run /
+     check / default) + 3 skip flags + venv-python-path autodetect
+     for Linux vs Windows + structured per-tool verify in check
+     mode. Pillar 1 function-length cap (50 SLOC) is comfortably
+     met (longest function `install_pip_deps` ~25 SLOC). Expect
+     the LOC overage to be acknowledged + accepted at review.
+- **Verification at HEAD-1 (before commit):**
+  - `bash -n scripts/setup-dev.sh` exit 0
+  - `./scripts/setup-dev.sh --dry-run` exit 0
+  - `./scripts/setup-dev.sh --check` exit 1 (correct -- env not yet
+    fully set up: 4 cargo subcommands + git hook missing)
+  - `./scripts/setup-dev.sh --help` exit 0
+  - `./scripts/setup-dev.sh --bogus` exit 2
+  - `./scripts/setup-dev.sh --dry-run --check` exit 2 (mutex)
+  - `SETUP_SKIP_RUST=1 SETUP_SKIP_PY=1 SETUP_SKIP_HOOK=1
+     ./scripts/setup-dev.sh --dry-run` exit 0
+  - `pre-commit run --all-files` -> 11 PASS / 0 FAIL / 0 SKIP exit 0
+  - `./scripts/check.sh --all` -> 12 PASS / 0 FAIL / 4 SKIP exit 0
+    (same SKIPs as inc-0.4 -- they'll go to 0 once an operator runs
+    the new installer for real).

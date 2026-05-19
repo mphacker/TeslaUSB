@@ -12,14 +12,14 @@
 //!
 //! * [`geometry`] — `Geometry` trait, `Region`, `RegionKind`,
 //!   `GeometryError`. Pure data; no I/O.
-//! * [`fat32`] — Microsoft FAT32 implementation. Phase 2.1 ships
-//!   `fat32::geometry::Fat32Geometry`; later increments add the
-//!   boot sector, `FsInfo`, FAT table, directory, and dispatcher
-//!   modules.
+//! * [`fat32`] — Microsoft FAT32 implementation. Ships
+//!   `fat32::geometry::Fat32Geometry` (Phase 2.1) and
+//!   `fat32::boot_sector::synthesize` (Phase 2.2). Later
+//!   increments add `FsInfo`, FAT table, directory, and
+//!   dispatcher modules.
 //!
 //! ## Planned additions
 //!
-//! * Phase 2.2 — `fat32::boot_sector::synthesize`.
 //! * Phase 2.3 — `fat32::fsinfo::synthesize`.
 //! * Phase 2.4 — `fat32::fat_table::synthesize`.
 //! * Phase 2.5 — `fat32::directory::synthesize` (8.3 + LFN).

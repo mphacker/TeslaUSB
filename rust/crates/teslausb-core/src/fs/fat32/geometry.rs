@@ -37,8 +37,8 @@
 //! | 256 MiB ..   8 GiB     |   4 KiB (8 sec)    |
 //! |   8 GiB ..  16 GiB     |   8 KiB (16 sec)   |
 //! |  16 GiB ..  32 GiB     |  16 KiB (32 sec)   |
-//! |  32 GiB ..   2 TiB     |  32 KiB (64 sec)   |
-//! | >   2 TiB              | error (too large)  |
+//! |  32 GiB .. ≈2 TiB      |  32 KiB (64 sec)   |
+//! | > ≈2 TiB                | error (too large)  |
 //!
 //! Boundaries are half-open (`min ≤ size < max`); a 64 MiB volume
 //! falls in the 1 KiB row, not the 512 B row.
@@ -107,11 +107,18 @@ pub const MAX_FAT32_DATA_CLUSTERS: u32 = 0x0FFF_FFF4;
 
 /// Maximum volume size FAT32 can describe at 512-byte sectors.
 ///
-/// `MAX_FAT32_DATA_CLUSTERS × 32 KiB` plus the reserved + FAT
-/// overhead bumps up against 2 TiB; Microsoft caps FAT32 volume
-/// creation at 2 TiB (Windows refuses larger) so the constructor
-/// rejects beyond that.
-pub const MAX_FAT32_VOLUME_BYTES: u64 = 2 * 1024 * 1024 * 1024 * 1024;
+/// Equal to [`u32::MAX`] × [`SECTOR_SIZE_BYTES`] = 4 294 967 295 ×
+/// 512 = 2 199 023 255 040 bytes (exactly 2 TiB − 512 bytes).
+///
+/// The on-disk `BPB_TotSec32` field is a 32-bit count of sectors,
+/// so a FAT32 volume cannot describe more sectors than `u32::MAX`
+/// regardless of the cluster size. Microsoft separately caps
+/// FAT32 volume *creation* at the same effective ceiling
+/// (Windows `format.com` refuses larger). Above this, the
+/// constructor returns [`GeometryError::VolumeTooLarge`] — there
+/// is no representation for it in the on-disk format the
+/// [`crate::fs::fat32::boot_sector`] module synthesizes.
+pub const MAX_FAT32_VOLUME_BYTES: u64 = (u32::MAX as u64) * (SECTOR_SIZE_BYTES as u64);
 
 /// FAT32 geometry computed from a target volume size.
 ///
@@ -260,7 +267,7 @@ fn sectors_per_cluster_for(volume_size_bytes: u64) -> Option<u32> {
         (256 * MIB, 8), // 256 MiB .. 8 GiB   -> 4 KiB   (8 sectors)
         (8 * GIB, 16),  //   8 GiB .. 16 GiB  -> 8 KiB   (16 sectors)
         (16 * GIB, 32), //  16 GiB .. 32 GiB  -> 16 KiB  (32 sectors)
-        (32 * GIB, 64), //  32 GiB .. 2 TiB   -> 32 KiB  (64 sectors)
+        (32 * GIB, 64), //  32 GiB .. u32::MAX  -> 32 KiB  (64 sectors)
     ];
     if volume_size_bytes < MIN_VOLUME_SIZE_BYTES {
         return None;
@@ -597,19 +604,6 @@ mod tests {
     }
 
     #[test]
-    fn geometry_rejects_volume_above_2tib_ceiling() {
-        let err = Fat32Geometry::for_volume_size(MAX_FAT32_VOLUME_BYTES + 512)
-            .expect_err("> 2 TiB must be rejected");
-        match err {
-            GeometryError::VolumeTooLarge { bytes, maximum } => {
-                assert_eq!(bytes, MAX_FAT32_VOLUME_BYTES + 512);
-                assert_eq!(maximum, MAX_FAT32_VOLUME_BYTES);
-            }
-            other => panic!("expected VolumeTooLarge, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn geometry_rejects_volume_below_32mib() {
         let err = Fat32Geometry::for_volume_size(MIN_VOLUME_SIZE_BYTES - 512)
             .expect_err("< 32 MiB must be rejected");
@@ -623,12 +617,24 @@ mod tests {
     }
 
     #[test]
-    fn geometry_for_2tib_ceiling_is_accepted() {
-        // Right at the published 2 TiB ceiling — accept.
+    fn geometry_at_max_u32_sectors_is_accepted() {
+        // The published ceiling is u32::MAX sectors (2 TiB - 512 B,
+        // = the largest volume the on-disk BPB_TotSec32 field can
+        // describe). Must accept.
         let geo = Fat32Geometry::for_volume_size(MAX_FAT32_VOLUME_BYTES)
-            .expect("exactly 2 TiB must be accepted");
+            .expect("u32::MAX sectors must be accepted");
         assert_eq!(geo.sectors_per_cluster(), 64);
         assert!(geo.data_cluster_count() <= MAX_FAT32_DATA_CLUSTERS);
+        assert_eq!(geo.total_sectors(), u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn geometry_rejects_total_sectors_above_u32_max() {
+        // One sector past u32::MAX cannot be represented in
+        // BPB_TotSec32 — must reject.
+        let err = Fat32Geometry::for_volume_size(MAX_FAT32_VOLUME_BYTES + 512)
+            .expect_err("> u32::MAX sectors must be rejected");
+        assert!(matches!(err, GeometryError::VolumeTooLarge { .. }));
     }
 
     // --- Region map invariants -----------------------------------------

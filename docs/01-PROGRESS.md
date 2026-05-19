@@ -113,7 +113,7 @@ session-state as `h1-journal.log`.
 | Inc | Deliverable | Status | Review | Test |
 |---|---|---|---|---|
 | 2.1 | `fs::geometry` + `fs::fat32::geometry` | ✅ | ✅ | ✅ |
-| 2.2 | `fs::fat32::boot_sector::synthesize` | ⏳ | ⏳ | ⏳ |
+| 2.2 | `fs::fat32::boot_sector::synthesize` | ✅ | ✅ | ✅ |
 | 2.3 | `fs::fat32::fsinfo::synthesize` | ⏳ | ⏳ | ⏳ |
 | 2.4 | `fs::fat32::fat_table::synthesize` | ⏳ | ⏳ | ⏳ |
 | 2.5 | `fs::fat32::directory::synthesize` (8.3 + LFN) | ⏳ | ⏳ | ⏳ |

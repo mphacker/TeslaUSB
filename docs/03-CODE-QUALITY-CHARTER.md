@@ -550,6 +550,19 @@ for now", and full integration testing requires real hardware
 definitions below are venue-neutral: same commands, same exit-on-
 red rule, wherever they run.
 
+**Installation:** the toolchain (rustup, cargo-deny, cargo-machete,
+cargo-llvm-cov, lychee, plus the out-of-tree Python venv with
+ruff / mypy / pytest / pytest-cov / vulture / bandit / pre-commit)
+is bootstrapped by `scripts/setup-dev.sh` (Phase 0.6) on a clean
+dev box. Run `./scripts/setup-dev.sh --check` to audit which
+tools are missing without modifying anything, or
+`./scripts/setup-dev.sh --dry-run` to see what would happen,
+or `./scripts/setup-dev.sh` to install. Optional tools
+(cargo-deny, cargo-machete, cargo-llvm-cov, lychee) absent from
+the dev box cause `scripts/check.sh` to emit `[SKIP]` lines with
+a WARNing rather than failing — install via `setup-dev.sh` to
+move them from SKIP to PASS.
+
 For Rust changes (script section `--rust`):
 ```yaml
 - cargo fmt --all -- --check

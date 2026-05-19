@@ -19,7 +19,7 @@ on empty crates + `pytest` returning 0 tests OK).
 | 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ✅ APPROVED (6 charter coherence fixes applied in-place: 4 `web/` → `web/teslausb_web/` path drifts in CI gate + dead-code-detection blocks, `--cov=web` → `--cov=teslausb_web` module-name, `mypy web/` → bare `mypy` from `web/` cwd; plus added `from __future__ import annotations` to 5 docstring-only Python modules per charter Python deep-dive rule) | ✅ `ruff check / ruff format --check / mypy --strict / pytest --cov=teslausb_web --cov-fail-under=80 (100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
 | 0.4 | `scripts/check.sh` local gate runner with every gate from charter §"CI Gates" (operator-driven, NOT GitHub Actions — cloud CI deferred indefinitely per operator preference 2026-05-19; full hardware testing is H-phase territory anyway) | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"CI Gates" reframed from "hosted CI / PR" enforcement model to venue-neutral with explicit pointer to `scripts/check.sh`; hygiene wording updated `git diff` → `git ls-files` to match script behavior; 1 Nit accepted: magic `1048576` for 1 MiB is documented inline with charter line citation) | ✅ 12 PASS / 0 FAIL / 4 SKIP (cargo-llvm-cov, cargo-deny, cargo-machete, lychee — optional, install in Phase 0.6) on Windows dev box via Git Bash; exit 0 |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally via single-source delegation to `scripts/check.sh` (per operator preference 2026-05-19); upstream `pre-commit/pre-commit-hooks@v6.0.0` retained ONLY for cheap whitespace/EOF/yaml/TOML fixes | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"Pre-commit Hooks" L593-637 rewritten from the OLD mixed model — per-tool ruff/mypy/cargo upstream + local hooks — to the actual single-source design; upstream rev bumped `v4.6.0` → `v6.0.0` to silence deprecated-stage-names warnings; operator setup commands added) | ✅ `pre-commit run --all-files` 11 PASS / 0 FAIL / 0 SKIP exit 0; `./scripts/check.sh --all` 12 PASS / 0 FAIL / 4 SKIP exit 0; defensive re-run after charter fix also clean |
-| 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ✅ | ⏳ | ✅ `bash -n` syntax exit 0; `--dry-run` exit 0 on Windows dev box (correctly reports 4 cargo tools as "would install" + venv already present + hook would install); `--check` exit 1 with structured diagnostics (rustup ✓, toolchain ✓, cargo-deny/machete/llvm-cov/lychee ✗, venv ✓ with all 7 expected dev tools, hook ✗); skip-flag matrix (`SETUP_SKIP_RUST=1` / `_PY=1` / `_HOOK=1`) honored; mutex `--dry-run --check` rejected with exit 2; unknown arg exit 2; both gate runners green after stage (`pre-commit run --all-files` 11/0/0 exit 0, `./scripts/check.sh --all` 12/0/4 exit 0) |
+| 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"CI Gates" now has an "Installation:" paragraph cross-referencing `scripts/setup-dev.sh` with the three modes `--check` / `--dry-run` / default; 1 Minor accepted: 372 LOC over the floated 250 budget, justified by 3 modes + 3 skip flags + cross-platform venv autodetect + 50% header/usage comments; hard cap Pillar 1 function-length 50 SLOC comfortably met — longest function `install_pip_deps` ~25 SLOC) | ✅ `bash -n` syntax exit 0; `--dry-run` exit 0 on Windows dev box (correctly reports 4 cargo tools as "would install" + venv already present + hook would install); `--check` exit 1 with structured diagnostics (rustup ✓, toolchain ✓, cargo-deny/machete/llvm-cov/lychee ✗, venv ✓ with all 7 expected dev tools, hook ✗); skip-flag matrix (`SETUP_SKIP_RUST=1` / `_PY=1` / `_HOOK=1`) honored; mutex `--dry-run --check` rejected with exit 2; unknown arg exit 2; both gate runners green after stage (`pre-commit run --all-files` 11/0/0 exit 0, `./scripts/check.sh --all` 12/0/4 exit 0) |
 | 0.7 | `CODEOWNERS` + PR template referencing the charter checklist | ⏳ | ⏳ | ⏳ |
 | 0.8 | ADRs 0001 – 0011 written (`docs/adr/`) | ⏳ | ⏳ | ⏳ |
 
@@ -950,3 +950,49 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   - `./scripts/check.sh --all` -> 12 PASS / 0 FAIL / 4 SKIP exit 0
     (same SKIPs as inc-0.4 -- they'll go to 0 once an operator runs
     the new installer for real).
+
+
+### 2026-05-19 (resumed, sixth time) -- Phase 0.6 review gate
+
+- Followed `.github/skills/charter-review/SKILL.md` against commit
+  `07147a3`. Report at
+  `~/.copilot/session-state/3583f429-4245-4837-9c1c-5c1583cbb31d/files/charter-review-inc-0.6.md`.
+- **Pre-flight gates:** `pre-commit run --all-files` 11/0/0 exit 0;
+  `./scripts/check.sh --all` 12/0/4 exit 0. Bash syntax check
+  `bash -n` exit 0. All 6 mode checks green (--dry-run exit 0,
+  --check exit 1 correctly, --help exit 0, --bogus exit 2, mutex
+  exit 2, SETUP_SKIP_* matrix exit 0).
+- **Pillar walk:** all 5 pillars clean on the 372-LOC script. Functions
+  <= 25 SLOC (longest install_pip_deps), comments WHY throughout,
+  prerequisites CHECKED not auto-installed, --dry-run / --check are
+  first-class modes (not bolt-ons), three skip-flag env overrides
+  fully wired and documented.
+- **Findings: 0 Blocker, 1 Major (fixed in-place), 1 Minor (accepted
+  with rationale), 0 Nit.**
+  - **Major:** Charter section CI Gates didn't cross-reference
+    setup-dev.sh as the canonical install path. Inc-0.4's reframe
+    named scripts/check.sh as the gate runner; inc-0.5's reframe
+    pointed at pip install for the Python venv. Neither said WHERE
+    to get the tools from. Fixed in-place by adding a 13-line
+    "Installation:" paragraph after the "Enforcement venue:" para
+    in section CI Gates, naming setup-dev.sh, summarizing the three
+    modes (--check, --dry-run, default install), and noting the
+    [SKIP] -> [PASS] transition operators expect after running it.
+  - **Minor:** Script LOC 372 over the prior-session floated 250
+    budget. Justified by 3 modes + 3 skip flags + Linux-vs-Windows
+    venv-python-path autodetect + ~50% header-and-usage comments.
+    Pillar 1 hard cap (function length 50 SLOC) is comfortably met
+    -- longest function install_pip_deps ~25 SLOC. ACCEPTED.
+- **Defensive re-run** after the charter fix: pre-commit run
+  --all-files 11/0/0 exit 0 again. The only other diff was a 1-line
+  end-of-file-fixer add (trailing newline) on PROGRESS.md from the
+  earlier [System.IO.File]::AppendAllText pattern; folded into this
+  review commit. PowerShell-append rule: always include a final `\n`
+  in the appended text OR rely on end-of-file-fixer to handle it.
+- Commit `<TBD>` "docs(b1): inc-0.6 review fixes - charter CI Gates
+  cross-references setup-dev.sh" -- 2 files changed (+~22/-~5).
+  Branch `b1-userspace-rust` will be 12 commits ahead of main.
+- **Deferred to Phase 0.8:** formal ADR
+  `docs/adr/NNNN-setup-dev-modes.md` capturing the three-mode
+  design decision (--check audit, --dry-run preview, default install)
+  + the "prereqs-checked-not-installed" boundary.

@@ -45,7 +45,7 @@ in a 🔍 REVIEW GATE + ✅ TEST GATE.
 | 1.1 | `teslafat::main` CLI + tracing + TOML loader | ✅ | ✅ APPROVED (impl `994fd65`; review-fix commit added ADR-0001 for YAML→TOML decision per charter §"ADRs" trigger criteria + removed preemptive `module_name_repetitions` allow after verifying lint doesn't fire on exact-match `config::Config`; 0 Major, 0 Minor post-fix — see session log) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 14 unit + 4 integration = 18 passed, 0 failed; `scripts/check.sh --all` 12/0/4; `pre-commit run` 9/0/2 (yaml+python: no files in changeset) |
 | 1.2 | `teslausb-core::ipc::messages` types + serde tests | ✅ | ✅ APPROVED (impl `aa3f18c`; review-fix commit added ADR-0002 for the IPC vocabulary design — versioned envelope + internally-tagged enums + no `deny_unknown_fields` for forward-compat + `thiserror` at lib boundary — per charter §"ADRs" trigger criteria; 0 Major, 0 Minor post-fix — see session log) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 34 workspace tests passed, 0 failed (14 teslafat unit + 4 teslafat integration + 16 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4; `pre-commit run` 10/0/1 (yaml: no files in changeset) |
 | 1.3 | NBD newstyle handshake (port from existing draft) | ✅ | ✅ APPROVED (impl `2c1a56f`; review-fix commit added ADR-0003 covering both async runtime choice — tokio current-thread, minimal features — and `teslafat` lib+bin crate-shape change forced by `dead_code` discipline on the new `nbd::handshake` public surface; the draft's 3 `try_into().unwrap()` calls were replaced with bounds-checked fallible conversions, the 2 `as usize`/`as u32` casts were replaced with `try_from + Context`, all encode/parse helpers got `///` + `# Errors` docs, and the protocol was decomposed into pure encode/decode helpers + a generic-over-`AsyncRead + AsyncWrite + Unpin` async orchestrator so the wire format is unit-testable via `tokio::io::duplex`; LOC budget overrun acknowledged in plan row 1.3 — "~50 (mostly path move)" → ~600 actual due to charter-compliance work the draft predated; Phase 1.6 `tokio::time::timeout` follow-up TODO added in `nbd/mod.rs`; preemptive `teslausb-core` dep removed (will land in Phase 1.4 with the BlockBackend trait); 0 Major, 4 Minor (all actioned), 2 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.3.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 53 workspace tests passed, 0 failed (33 teslafat unit incl. 19 new `nbd::handshake` tests + 4 teslafat integration + 16 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 same skip baseline; `pre-commit run` all hooks pass after one auto-fix round for `end-of-file-fixer` + `mixed-line-ending` on the three new files |
-| 1.4 | `BlockBackend` trait + null impl + FUA contract test | ⏳ | ⏳ | ⏳ |
+| 1.4 | `BlockBackend` trait + null impl + FUA contract test | ✅ | ✅ APPROVED (impl `8f98f43`; review-fix commit added ADR-0004 covering both the native `async fn in trait` decision — no `async-trait` crate dep, no `dyn BlockBackend`, generic-over-`<B: BlockBackend>` callers — and the `WriteFlags(u32)` newtype-vs-`bitflags!`-macro decision; the trait lives in `teslausb-core::backend` with `BackendError` (thiserror at lib boundary), `check_bounds` shared overflow-safe helper, and reference impls `NullBackend` + `MockBackend` in `pub mod mock`; FUA contract is captured by three named `fua_contract_*` tests using `MockBackend::observed_any_durability()` as the durability oracle; production code uses zero `unwrap`/`expect`/`panic` (mock module recovers poisoned mutexes via `lock().unwrap_or_else(PoisonError::into_inner)`); `pollster` 0.3 dev-dep added to drive `async fn` test bodies without pulling tokio into the domain-core crate; LOC budget overrun recorded — "~100" plan estimate vs ~620 actual due to charter compliance (`# Errors` docs, mock impls, FUA tests, `check_bounds` extraction); `teslafat → teslausb-core` dep still deferred to Phase 1.5 (correct per inc-1.3 review M4); 0 Major, 1 Minor (actioned), 3 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.4.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 77 workspace tests passed, 0 failed (33 teslafat unit + 4 teslafat integration + 40 teslausb-core unit incl. 24 new `backend` tests + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass on first attempt (no auto-fix round needed) |
 | 1.5 | NBD transmission loop + FUA fdatasync test | ⏳ | ⏳ | ⏳ |
 | 1.6 | `teslafat@.service` systemd unit | ⏳ | ⏳ | ⏳ |
 | 1.7 | Dev-box smoke test harness | ⏳ | ⏳ | ⏳ |
@@ -1269,3 +1269,100 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   (Phase 1.5 transmission loop will impl `BlockBackend` for a
   real backing file). Likely no ADR needed unless the trait
   shape has a non-obvious forward-compat constraint.
+
+### 2026-05-19 (resumed, tenth time) -- Phase 1.4 implementation + review gate
+
+- **Phase 1.4 implementation** (commit `8f98f43`): added
+  `rust/crates/teslausb-core/src/backend.rs` exposing the
+  `BlockBackend` trait and supporting types. Surface:
+  `WriteFlags(u32)` newtype with `NONE`/`FUA` constants matching
+  the NBD wire bit pattern (`NBD_CMD_FLAG_FUA = 1 << 0`),
+  `BackendError` thiserror enum (`Io(#[from] std::io::Error)` /
+  `OutOfBounds { offset, len, size }` / `InvalidArgument(&'static str)`),
+  `BackendResult<T>` alias, `BlockBackend` trait with native
+  `async fn in trait` (no `async-trait` crate dep), `check_bounds`
+  shared overflow-safe helper, and `pub mod mock` containing
+  `NullBackend` / `MockBackend` / `MockOp` reference impls. 4
+  files changed, +766/-2. pollster 0.3 dev-dep added to drive
+  async test bodies without pulling tokio into the domain-core
+  crate.
+- **Trait shape (load-bearing):** native AFIT picked over the
+  `async-trait` crate macro. Consequence: no `dyn BlockBackend`
+  ever; the transmission loop (Phase 1.5) will be generic
+  `<B: BlockBackend>` exactly mirroring how `nbd::handshake::run<S>`
+  is generic over `AsyncRead + AsyncWrite + Unpin`. Trade-off
+  written up in ADR-0004 §A. `async_fn_in_trait` clippy warn
+  silenced at the trait declaration with a doc-justified allow.
+- **Production hygiene:** zero `unwrap` / `expect` / `panic` in
+  the production surface. `pub mod mock` recovers poisoned
+  mutexes via `lock().unwrap_or_else(PoisonError::into_inner)`
+  so neither lint fires. Slice accesses go through
+  `slice::get(...)?` returning `BackendError::InvalidArgument`.
+  No `unsafe` block anywhere — the hand-rolled noop-waker the
+  first draft used was rejected in favour of `pollster`
+  precisely so the deny-unsafe rule would hold.
+- **FUA contract** (load-bearing for Phase 1.5): a write tagged
+  `WriteFlags::FUA` must be durable on the medium before the
+  future resolves; plain writes may rely on subsequent
+  `flush()`. Three named tests (`fua_contract_*`) capture the
+  contract; future backend impls copy-paste those names to
+  self-verify compliance. `MockBackend::observed_any_durability`
+  is the test oracle.
+- **Test discipline:** 24 new tests in `backend::tests` (8
+  WriteFlags, 3 check_bounds, 4 NullBackend, 4 MockBackend, 3
+  FUA contract, 2 BackendError). Workspace test count
+  53/0/0 -> 77/0/0. `pollster::block_on` drives async bodies
+  in sync test fns — keeps `teslausb-core`'s "no tokio dep"
+  invariant intact. Mod-level `#[allow(clippy::unwrap_used)]`
+  on the `mod tests` block (matching `ipc::messages::tests`
+  pattern — narrower coverage than the crate-root pattern
+  `teslafat` uses).
+- **Iteration:** seven clippy errors caught and fixed before
+  commit: doc-markdown (`ORed`), doc-lazy-continuation x2
+  (CommonMark treating `+ length` as a list bullet), `panic` x2
+  in test match arms (replaced with `assert!(matches!(...))`),
+  `indexing_slicing` on a test slice (used `slice::get`), and
+  `single_char_pattern` (`"4"` -> `'4'`). After fixes: zero
+  warnings, zero suppressions on production code.
+- **Charter review** (`~/.copilot/.../files/charter-review-inc-1.4.md`,
+  ~16 KB): Pillar walk found 0 Major, 1 Minor, 3 Nits.
+  - **Minor 1:** ADR-0004 needed. Native AFIT meets >= 3 of the
+    5 charter ADR trigger criteria (>1 module affected via
+    teslafat impl + teslausb-core reference impls; forward-
+    compat constraint via "no dyn dispatch ever without source
+    break"; non-obvious vs. the established `async-trait`
+    idiom). `WriteFlags(u32)` newtype meets criterion 5
+    (non-obvious vs `bitflags!` macro). Co-located in one ADR
+    per the ADR-0003 template of grouping tightly coupled API-
+    shape decisions. Written as
+    `docs/adr/0004-backend-trait-shape.md` (~10 KB) with five
+    alternatives considered for §A (async-trait, RPITIT,
+    spawn_blocking, embassy, all-sync) and five for §B
+    (bitflags, `bool fua`, separate trait methods, bare u32,
+    enum-with-no-combine).
+  - **Nit 1:** workspace has two test-allow patterns
+    (`teslausb-core` mod-level vs `teslafat` crate-root). Both
+    charter-blessed, mild context-switch friction; defer
+    unification — if a future review wants to unify, the
+    crate-root pattern is the broader-coverage choice.
+  - **Nit 2:** `MockBackend` could explicitly doc-warn against
+    concurrent use within a single instance (two independent
+    `Mutex`es could let `bytes` and `ops` snapshots disagree
+    under hypothetical concurrent calls). Not actionable in
+    current code path (`async fn` resolves atomically before
+    yield); defer to first multi-task harness.
+  - **Nit 3:** `BackendError::OutOfBounds.len` field doc could
+    note the `u64::try_from(buf.len())` provenance.
+- Review-fix commit (this entry): "docs(b1): inc-1.4 review
+  fixes - add ADR-0004 + PROGRESS APPROVED + plan LOC note".
+  Branch `b1-userspace-rust` reaches 20 commits ahead of main.
+- **Next:** Phase 1.5 -- NBD transmission loop. Reads NBD
+  commands (`READ` / `WRITE` / `FLUSH` / `TRIM` / `DISC`) from
+  the stream `nbd::handshake::run` hands off, dispatches them
+  against a generic `<B: BlockBackend>` using the trait from
+  inc-1.4. This is the increment where `teslausb-core` is
+  finally added as a dep of `teslafat` (the dep removed in
+  inc-1.3 review M4 and deliberately deferred in inc-1.4).
+  Plan estimate ~150 LOC; expect ~700 LOC after charter
+  compliance + FUA pass-through tests using `MockBackend` as
+  the in-memory backend fixture.

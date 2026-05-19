@@ -673,7 +673,7 @@ fixtures.
 contents — directory listings, and the contents of files it
 reads frequently like `LockChime.wav` and `LightShow.fseq`. A
 fresh upload via the web UI lands at
-`/var/teslacam/TeslaCam/LockChime.wav` instantly, but Tesla
+`/srv/teslausb/media/LockChime.wav` instantly, but Tesla
 will continue playing the OLD cached chime until something
 tells the SCSI layer that the medium has changed. In v1 this
 was solved by `partition_mount_service.rebind_usb_gadget()`
@@ -842,11 +842,11 @@ explicit list of mode-removal changes below.
    periodic fsck of FAT/exFAT images is needed because
    there are no images. Replace with a btrfs health
    indicator (output of `btrfs scrub status` on
-   `/var/teslacam`).
+   `/srv/teslausb/teslacam` and `/srv/teslausb/media`).
 3. **Lock chime / light show / music / wraps upload flows:**
    no longer go through quick_edit. They become simple
    `POST /api/lock_chimes/upload` → write file to
-   `/var/teslalightshow/LockChime.wav.partial` → fsync →
+   `/srv/teslausb/media/LockChime.wav.partial` → fsync →
    `os.replace` to final name → call
    `cache_invalidation.schedule_invalidation()`. Same JSON
    shape, same UX, same toast message; the mechanism behind
@@ -867,7 +867,7 @@ explicit list of mode-removal changes below.
    - Settings → Network Sharing page with a single on/off
      toggle (default off)
    - When ON: `smbd` + `nmbd` services start, sharing
-     `/var/teslacam/TeslaCam/` and `/var/teslalightshow/`
+     `/srv/teslausb/teslacam/TeslaCam/` and `/srv/teslausb/media/`
      RW continuously. The web UI status dot turns amber
      and shows the share path the user can connect to
      (e.g., `\\teslausb.local\TeslaCam`).
@@ -876,8 +876,8 @@ explicit list of mode-removal changes below.
      only when Samba is enabled; on any file change via
      SMB it calls `cache_invalidation.schedule_invalidation()`
      so Tesla sees the change.
-   - Persisted in `config.yaml` under `samba.enabled` so
-     state survives reboots.
+   - Persisted in `/etc/teslausb/teslausb.toml` under
+     `[samba] enabled = true` so state survives reboots.
 6. **Feature availability:** v1 gated nav items by IMG file
    existence (e.g., Lock Chimes hidden if `usb_lightshow.img`
    missing). In B-1, all features are always available
@@ -896,10 +896,10 @@ explicit list of mode-removal changes below.
 
 **Port-with-simplification (internal services, UI unchanged):**
 - `services/indexer.py` — no loop devices, no quick_edit,
-  just `inotify(/var/teslacam/)` → SEI parse → DB write
+  just `inotify(/srv/teslausb/teslacam/)` → SEI parse → DB write
 - `services/cloud_archive.py` — same rclone invocations,
   same priority semantics, reads native files
-- `services/file_watcher.py` — inotify on /var/teslacam
+- `services/file_watcher.py` — inotify on /srv/teslausb/teslacam
   (replaces the v1 inotify on /mnt/gadget/part1-ro)
 - `services/lock_chime_service.py` — drop `quick_edit_part2`
   calls; write file + fsync + cache invalidate
@@ -1235,7 +1235,7 @@ These come from the v1 codebase's lessons (see
 7. **All daemon state is reconstructible from disk alone.** No
    in-memory caches that, if lost in a power cut, corrupt the
    user's view of their data. The cluster_map is rebuilt from
-   scratch on every startup by walking `/var/teslacam/`.
+   scratch on every startup by walking `/srv/teslausb/teslacam/`.
 8. **No partial writes survive as real files.** New files land
    at `<name>.partial`; only the final directory-entry-finalize
    from Tesla triggers `rename(2)` to the visible name. A power
@@ -1535,7 +1535,7 @@ can be marked complete.
 
 16. **User-content backup strategy**: with btrfs snapshots ruled
     out (Decision #11), is there an explicit backup path for
-    `/var/teslalightshow/`? The user content there (custom chimes,
+    `/srv/teslausb/media/`? The user content there (custom chimes,
     wraps, music) is not on Tesla and not in the cloud sync target.
     *Default:* explicit "Export ZIP" button per directory in the
     web UI; operator pulls a backup before risky changes. No
@@ -1553,7 +1553,7 @@ can be marked complete.
     *Resolved in:* Phase 4 / Phase 4b.
 
 18. **Cleanup worker pause on first boot**: brand-new Pi with
-    empty `/var/teslacam/` — cleanup must not run before retention
+    empty `/srv/teslausb/teslacam/` — cleanup must not run before retention
     has anything to retain. Risk: aggressive cleanup on first boot
     deletes operator's test data.
     *Default:* skip cleanup until both LUNs have been mounted by
@@ -1563,8 +1563,8 @@ can be marked complete.
 
 19. **First-boot setup flow**: brand-new Pi from `setup.sh` — is
     there a web wizard, a CLI prompter, or config-file-only?
-    *Default:* `setup.sh` writes a minimal `config.yaml` from
-    template; web UI exposes the rest. No interactive wizard
+    *Default:* `setup.sh` writes a minimal `/etc/teslausb/teslausb.toml`
+    from template; web UI exposes the rest. No interactive wizard
     needed (setup script + Settings page covers everything).
     *Resolved in:* Phase 6.
 

@@ -7,45 +7,33 @@ Legend: ✅ done · 🔄 in progress · ⏳ pending · ❌ blocked · ⏭ skippe
 ---
 
 ## Phase 0 — Scaffolding
-- ✅ Branch `b1-userspace-fat32` created off `main @ 75bfca0`
-      (to be renamed to `b1-userspace-rust` at first commit —
-      scope is now broader than just FAT32 synth)
-- ✅ Old TeslaUSB tree wiped (253 files staged for deletion,
-      not yet committed)
-- 🔄 Initial directory layout — partially scaffolded. `docs/`
-      and `teslafat/` exist on disk, but the post-anti-anchoring
-      layout (Cargo workspace at `rust/`, multi-crate split,
-      `web/teslausb_web/`, `config/`, `systemd/`, `scripts/`,
-      `config-fragments/`, `.github/workflows/`) is not yet
-      created. To rework: see "Repository layout" in `00-PLAN.md`.
-- ✅ `docs/00-PLAN.md` (this directory) — REWRITTEN
-      2026-05-19 for Rust-first architecture per operator
-      directive ("if faster in Rust, do it in Rust")
-- ✅ `docs/01-PROGRESS.md` (this file)
-- ✅ `docs/02-LEARNINGS.md`
-- ✅ `docs/03-CODE-QUALITY-CHARTER.md`
-- ⏳ `docs/adr/0001-rust-for-daemon.md`
-- ⏳ `docs/adr/0002-nbd-newstyle-over-unix-socket.md`
-- ⏳ `docs/adr/0003-two-luns-mirror-v1.md`
-- ⏳ `docs/adr/0004-extent-based-cluster-map.md`
-- ⏳ `docs/adr/0005-crash-and-restart-on-backend-error.md`
-- ⏳ `docs/adr/0006-rust-for-sei-and-indexer.md` (NEW)
-- ⏳ `docs/adr/0007-toml-config-format.md` (NEW)
-- ⏳ `docs/adr/0008-nginx-reverse-proxy.md` (NEW)
-- ⏳ `docs/adr/0009-single-consolidated-sqlite-db.md` (NEW)
-- ⏳ `docs/adr/0010-fhs-standard-paths.md` (NEW)
-- ⏳ `docs/adr/0011-flock-for-sdio-arbitration.md` (NEW)
-- ⏳ `.github/workflows/ci.yml`
-- ⏳ `.pre-commit-config.yaml`
-- ⏳ `setup-dev.sh`
-- ⏳ `web/pyproject.toml` (ruff + mypy config per charter)
-- ⏳ `rust/Cargo.toml` (workspace root)
-- ⏳ `rust/crates/{teslausb-core,teslafat,teslausb-worker}/Cargo.toml`
-      (each with `[lints]` per charter)
-- ⏳ `rust/rust-toolchain.toml`
-- ⏳ `rust/deny.toml`
-- ⏳ CODEOWNERS file
-- ⏳ PR template referencing the Code Review Checklist
+
+Each Phase 0 increment ends with `🔍 REVIEW GATE` (`charter-review`
+skill) + `✅ TEST GATE` (`pre-commit run --all-files` + `cargo build`
+on empty crates + `pytest` returning 0 tests OK).
+
+| Inc | Deliverable | Status | Review | Test |
+|---|---|---|---|---|
+| 0.1 | Branch rename `b1-userspace-fat32` → `b1-userspace-rust`; first commit (v1 wipe + planning docs + skills) — commit `b5aeeee` | ✅ | ✅ APPROVED (doc-only, FHS path drift fixed in-place pre-merge) | ✅ git working tree clean post-commit |
+| 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ⏳ | ⏳ | ⏳ |
+| 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ⏳ | ⏳ | ⏳ |
+| 0.4 | `.github/workflows/ci.yml` mirroring charter §"CI Gates" | ⏳ | ⏳ | ⏳ |
+| 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ⏳ | ⏳ | ⏳ |
+| 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ⏳ | ⏳ | ⏳ |
+| 0.7 | `CODEOWNERS` + PR template referencing the charter checklist | ⏳ | ⏳ | ⏳ |
+| 0.8 | ADRs 0001 – 0011 written (`docs/adr/`) | ⏳ | ⏳ | ⏳ |
+
+**Resequencing note (2026-05-19, operator-authorized):**
+H0 (decommission v1 from `cybertruckusb.local`) is now scheduled
+**immediately after 0.1**, ahead of 0.2 – 0.8. Operator green-lit
+the v1 wipe ("you can decommission the v1 code on the cybertruckusb.local
+at any time… I have the tesla files I need from it backed up"). The
+Pi has been running v1 with the failing archive worker that started
+this whole investigation; getting it to a clean baseline now means
+B-1 increments can be deployed and tested as soon as a binary is
+ready, rather than waiting for full Phase 0 scaffolding. Phase 0.2 –
+0.8 resume on the dev machine in parallel with the hardware
+baseline.
 
 ## Phase 1 — Rust daemon skeleton
 
@@ -377,6 +365,38 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   of numbered increments with Status / Review / Test columns.
   Single source of truth for "what's done, what's next, what
   passed its gate".
-- Phase 0 Phase-1 historical-scaffolding files marked
-  accurately: only `nbd/handshake.rs` is ✅; the rest are 🔄.
+### 2026-05-19 (resumed, again) — 0.1 baseline commit + review + H0 unblocked
 
+- **Increment 0.1 landed as commit `b5aeeee`** ("chore(b1): wipe v1
+  + establish B-1 greenfield baseline"). 264 files changed,
+  4 975 insertions, 140 099 deletions. Branch renamed
+  `b1-userspace-fat32` → `b1-userspace-rust`. Not pushed to
+  origin yet (awaiting operator direction; default is hold for
+  local review first).
+- **Increment 0.1 charter review — APPROVED with in-place fixes.**
+  Doc-only scope; verified internal consistency, no orphan TODOs,
+  no stale references to the old monolithic phase structure.
+  **MAJOR findings (all fixed pre-merge of next increment):**
+  every B-1 body-text reference to v1 paths (`/var/teslacam/`,
+  `/var/teslalightshow/`) replaced with FHS paths
+  (`/srv/teslausb/teslacam/`, `/srv/teslausb/media/`) per
+  Decision #26; one B-1 `config.yaml` reference (Samba persistence)
+  replaced with `/etc/teslausb/teslausb.toml` per Decision #23;
+  one CHARTER `config.yaml.example` reference replaced with
+  `teslausb.toml.example`. v1 source citations
+  (`config.yaml: web.lock_chime_filename` etc.) and
+  `.pre-commit-config.yaml` (which IS yaml — industry convention)
+  left as-is. Net 19 path/format substitutions across PLAN,
+  LEARNINGS, CHARTER. No structural changes.
+- **Operator green-lit hardware decommission** ("you can decommission
+  the v1 code on the cybertruckusb.local at any time and use that
+  hardware for testing. I have the tesla files I need from it
+  backed up. The Tesla is in sentry mode so it will keep writing
+  to the USB drives as soon as they are made available.").
+  Sequencing updated: H0 now runs immediately after 0.1, ahead of
+  Phase 0.2 – 0.8 dev-machine scaffolding. Rationale and the
+  parallel-dev plan are recorded in the Phase 0 "Resequencing note"
+  above. Sentry-mode write reality captured for later phases (any
+  B-1 USB binding will see Tesla writes start within seconds — H1
+  + H2 hardware tests will need to account for live writes if
+  Sentry is still on during the test window).

@@ -159,7 +159,7 @@ It bloats binaries. It confuses contributors. We delete it.
 - **Feature flags that have been "on" for > 30 days:**
   the flag and the disabled branch are deleted.
 - **Vestigial config keys** (e.g., from v1 that B-1 no
-  longer reads): deleted from `config.yaml.example`,
+  longer reads): deleted from `teslausb.toml.example`,
   config loader, and docs.
 - **"Backup" files** (`foo.py.bak`, `foo.rs.old`):
   deleted; never commit them.

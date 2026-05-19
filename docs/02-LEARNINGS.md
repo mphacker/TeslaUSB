@@ -95,12 +95,12 @@ underlying truths apply to any TeslaUSB design:
   privileged port — keep that.
 - **Samba is an optional feature in B-1, off by default.** v1
   used Samba only in "edit mode" because the IMG was only
-  RW-mounted then. In B-1 the backing tree at `/var/teslacam/`
+  RW-mounted then. In B-1 the backing tree at `/srv/teslausb/teslacam/`
   is always RW, so Samba can run continuously when enabled.
   The user toggles it from Settings → Network Sharing in the
   web UI. When on, Samba shares
-  `/var/teslacam/TeslaCam/` and
-  `/var/teslalightshow/` read-write. A file watcher
+  `/srv/teslausb/teslacam/TeslaCam/` and
+  `/srv/teslausb/media/` read-write. A file watcher
   (inotify on the Samba paths) triggers
   `cache_invalidation.schedule_invalidation()` when a file
   is modified via SMB so Tesla picks up the change. Off by
@@ -316,7 +316,7 @@ shutdown signal. Normal events that cut power without warning:
    → NBD → teslafat → POSIX. We honor it.
 
 2. **No daemon state lives only in RAM.** The cluster_map is
-   pure derivation: scan `/var/teslacam/`, build the map. On
+   pure derivation: scan `/srv/teslausb/teslacam/`, build the map. On
    crash, the map is gone but the data is on disk; on next
    start, we rebuild from disk. No persistent metadata DB
    that could itself be corrupted.
@@ -381,7 +381,7 @@ RecentClips files marked DEAD in one overnight outage.
 
 **In B-1, the race does not exist:**
 - Tesla writes a clip → it lands as a native file at
-  `/var/teslacam/TeslaCam/RecentClips/clip.mp4` immediately
+  `/srv/teslausb/teslacam/TeslaCam/RecentClips/clip.mp4` immediately
 - 60 min later, Tesla decides to "rotate" the clip — it issues
   SCSI writes to clear the directory entry (mark 0xE5 in FAT32
   or clear InUse bit in exFAT) and free the clusters
@@ -390,7 +390,7 @@ RecentClips files marked DEAD in one overnight outage.
 - The retention shim hides the file from Tesla's next
   directory enumeration. To Tesla, the slot is free for new
   writes.
-- The backing Linux file at `/var/teslacam/...` is **untouched**.
+- The backing Linux file at `/srv/teslausb/teslacam/...` is **untouched**.
 - A separate cleanup worker (in the Python web app, async,
   not in the SCSI hot path) decides when to actually delete
   the backing file. Policy: preserve indefinitely if the clip
@@ -467,8 +467,8 @@ From v1's history, things we will deliberately avoid in B-1:
 
 1. **Don't introduce a copy pipeline.** B-1's whole purpose is
    to make archive copies unnecessary. If a future contributor
-   adds a worker that copies files from `/var/teslacam` to
-   another path, that's a regression.
+   adds a worker that copies files from `/srv/teslausb/teslacam`
+   to another path, that's a regression.
 2. **Don't add quick-edit-style mount-cycling.** Files are
    native; just edit them.
 3. **Don't add mode switching.** There is no "present mode" vs

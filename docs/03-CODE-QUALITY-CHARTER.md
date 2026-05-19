@@ -327,8 +327,9 @@ select = [
     "PERF",         # perf antipatterns
 ]
 ignore = [
-    "ANN101",       # `self` doesn't need annotation
-    "ANN102",       # `cls` doesn't need annotation
+    # ANN101 (self) and ANN102 (cls) were removed in ruff 0.5+ and
+    # are no-ops now. Empty `ignore` documents the intent: no
+    # charter-mandated rule suppressions.
 ]
 
 [tool.ruff.lint.per-file-ignores]

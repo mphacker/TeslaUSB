@@ -67,3 +67,16 @@ scripts/web/services/dashcam_pb2.py
 # Cargo.lock IS committed (workspace contains binary crates).
 rust/target/
 **/target/
+
+# Python tooling caches and build artifacts (under web/, never committed)
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+.venv/
+.tox/

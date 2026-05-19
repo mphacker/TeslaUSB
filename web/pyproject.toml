@@ -1,0 +1,149 @@
+# TeslaUSB B-1 web UI — Python project metadata + tool config.
+#
+# Single source of truth per charter §"Python Standards / Toolchain":
+# no setup.cfg, no per-tool dotfiles, no requirements.txt. Every
+# linter, type-checker, and test runner reads its config from here.
+
+[project]
+name = "teslausb-web"
+version = "0.1.0"
+description = "TeslaUSB B-1 web UI (Flask). UI only — daemon logic lives in the Rust crates under rust/crates/."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "TeslaUSB B-1 authors" }]
+keywords = ["teslausb", "tesla", "raspberry-pi", "usb-gadget"]
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Framework :: Flask",
+]
+
+# Runtime dependencies land in Phase 5 when the Flask code is ported.
+# Empty list until then; the test smoke import only needs stdlib.
+dependencies = []
+
+[project.optional-dependencies]
+# Installed by `setup-dev.sh` (Phase 0.6) into the developer's venv.
+# Pinned to floor versions; CI uses `pip install -e .[dev]`.
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "vulture>=2.11",
+    "bandit>=1.7",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["teslausb_web*"]
+exclude = ["tests*"]
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter. Mirrors docs/03-CODE-QUALITY-CHARTER.md §"Lints"
+# verbatim. Source of truth is the charter; this block must match it.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["teslausb_web", "tests"]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",       # pycodestyle
+    "F",            # pyflakes (unused imports/vars)
+    "I",            # isort
+    "B",            # bugbear (likely bugs)
+    "C4",           # comprehensions
+    "PIE",          # misc good ideas
+    "RET",          # return statement issues
+    "SIM",          # simplifications
+    "TID",          # tidy imports
+    "TCH",          # type-checking-only imports
+    "ARG",          # unused arguments
+    "PTH",          # use pathlib
+    "ERA",          # eradicate commented code
+    "PL",           # pylint subset
+    "RUF",          # ruff-specific
+    "UP",           # pyupgrade
+    "ANN",          # missing type annotations
+    "S",            # bandit (security)
+    "T20",          # no print()
+    "BLE",          # no blind except
+    "FBT",          # boolean trap (positional bool args)
+    "DTZ",          # datetime timezone awareness
+    "PT",           # pytest style
+    "Q",            # quotes
+    "ICN",          # import conventions
+    "G",            # logging format
+    "LOG",          # logging usage
+    "PERF",         # perf antipatterns
+]
+ignore = [
+    # ANN101 / ANN102 (self / cls annotations) were removed in
+    # ruff 0.5+; they're no-ops now. The charter once listed them
+    # explicitly but the rules no longer exist — see
+    # docs/03-CODE-QUALITY-CHARTER.md §"Lints". Empty `ignore`
+    # documents the intent: no charter-mandated rule suppressions.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "PLR2004"]     # asserts + magic nums OK in tests
+
+# ---------------------------------------------------------------------------
+# mypy — strict type checking. Mirrors charter §"Lints" + §"Type discipline".
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_unreachable = true
+disallow_untyped_defs = true
+disallow_any_explicit = true        # ban explicit `Any` typing
+no_implicit_optional = true
+check_untyped_defs = true
+files = ["teslausb_web", "tests"]
+
+# ---------------------------------------------------------------------------
+# pytest — strict markers + strict config. Coverage gate is a CI flag,
+# not a default addopt, because empty packages report 0% and would
+# block work-in-progress increments.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# ---------------------------------------------------------------------------
+# Coverage — used when CI / pre-commit pass `--cov=teslausb_web`.
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["teslausb_web"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

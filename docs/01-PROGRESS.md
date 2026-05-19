@@ -16,7 +16,7 @@ on empty crates + `pytest` returning 0 tests OK).
 |---|---|---|---|---|
 | 0.1 | Branch rename `b1-userspace-fat32` → `b1-userspace-rust`; first commit (v1 wipe + planning docs + skills) — commit `b5aeeee` | ✅ | ✅ APPROVED (doc-only, FHS path drift fixed in-place pre-merge) | ✅ git working tree clean post-commit |
 | 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ✅ APPROVED (charter coherence fixes applied in-place: 1.84→1.85 example, `teslafat/src/...` → `rust/crates/teslafat/src/...`, pre-commit `cd teslafat` → `cd rust`) | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
-| 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ⏳ | ⏳ | ⏳ |
+| 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ⏳ | ✅ `ruff check / ruff format --check / mypy --strict / pytest (3 passed, 100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
 | 0.4 | `.github/workflows/ci.yml` mirroring charter §"CI Gates" | ⏳ | ⏳ | ⏳ |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ⏳ | ⏳ | ⏳ |
 | 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ⏳ | ⏳ | ⏳ |
@@ -551,3 +551,52 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
 - **Branch state after review commit:** 5 commits ahead of
   `main`, still local-only. Next session resumes inc-0.3
   (Python skeleton + `pyproject.toml`).
+
+### 2026-05-19 (resumed, again) — Phase 0.3 Python skeleton
+
+- Created `web/` Python skeleton matching plan §272-294 canonical
+  layout: `web/teslausb_web/{__init__.py,blueprints/__init__.py,services/__init__.py}`,
+  `web/tests/{__init__.py,conftest.py,test_smoke.py}`, `web/pyproject.toml`,
+  `web/README.md`. All package `__init__.py` files carry docstrings only
+  — no logic yet. `test_smoke.py` asserts the three packages import +
+  `__version__ == "0.1.0"` so pytest exits 0 (not 5 "no tests collected")
+  on the empty skeleton.
+- `pyproject.toml` mirrors charter §"Python Standards" verbatim:
+  `[project]` (Python ≥ 3.11 target, deps=[], dev extra with
+  `ruff>=0.6 mypy>=1.11 pytest>=8.0 pytest-cov>=5.0 vulture>=2.11 bandit>=1.7`),
+  setuptools build backend with `packages.find`, ruff with 30+ rule families
+  enabled and `target-version = "py311"`, mypy strict + `python_version = "3.11"`,
+  pytest `--strict-markers --strict-config` (coverage threshold lives on the
+  CI command line per charter, not in `addopts`), full `[tool.coverage.*]`.
+- Tool venv created at `C:\Users\mhack\source\repos\Tesla\.teslausb-tools-venv`
+  (OUTSIDE the repo per the AI workspace rule "never install dependencies
+  inside the git repo"). `pip install -e ".[dev]"` succeeded with
+  ruff 0.15.13, mypy 2.1.0, pytest 9.0.3, pytest-cov 7.1.0, vulture 2.16,
+  bandit 1.9.4.
+- **All 6 Python gates run green on the skeleton:**
+  * `ruff check .` — 0
+  * `ruff format --check .` — 0 (6 files formatted in-place to match style)
+  * `mypy --strict teslausb_web tests` — 0 (6 source files, no issues)
+  * `pytest --cov=teslausb_web` — 3 passed, 100% line coverage
+  * `vulture teslausb_web --min-confidence 80` — 0 (no dead code;
+    `__version__` exported via package `__init__`)
+  * `bandit -r teslausb_web -ll` — 0 (49 LOC scanned, zero findings)
+- **Charter coherence fix in lockstep (same pattern as 0.2):** ruff 0.5+
+  removed lints `ANN101` and `ANN102`; ruff emitted a startup warning
+  on every run. Charter §"Lints" still listed both rules in `ignore`;
+  removed them from both `web/pyproject.toml` AND
+  `docs/03-CODE-QUALITY-CHARTER.md` so the two stay in sync. Comment
+  documents the intent (empty `ignore` = no charter-mandated
+  suppressions).
+- **`.gitignore` hardened for Python tooling:** added `.mypy_cache/`,
+  `.pytest_cache/`, `.ruff_cache/`, `.coverage`, `.coverage.*`,
+  `htmlcov/`, `*.egg-info/`, `build/`, `dist/`, `.venv/`,
+  `.tox/`. Verified `git diff --cached --name-only` for inc-0.3
+  shows ZERO build-artifact paths.
+- Commit `<TBD>` "chore(b1): inc-0.3 Python skeleton + pyproject.toml at web/"
+  — 10 files (+354/-2). Branch `b1-userspace-rust` now 6 commits ahead of
+  `main`.
+- Next step: formal charter-review gate per `.github/skills/charter-review/SKILL.md`.
+  Expected coherence finds in charter (same class as 0.2):
+  * L387 "≥ 80% line coverage on `web/services/`" → `web/teslausb_web/services/`
+  * L551 `pytest --cov=web` → `pytest --cov=teslausb_web`

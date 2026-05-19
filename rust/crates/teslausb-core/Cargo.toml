@@ -32,6 +32,12 @@ serde_test = "1.0"
 # round-trips guard against accidental breakage of the JSON
 # representation even though no production code depends on it yet.
 serde_json = "1.0"
+# Drive `async fn` test bodies without pulling in a tokio runtime
+# at the domain-core boundary (charter §"Best Architecture
+# Practices" — teslausb-core is pure logic, no runtime). pollster
+# is ~30 LOC of safe `block_on` and is the canonical pick when
+# you want exactly one future driven to completion.
+pollster = "0.3"
 
 [lints]
 workspace = true

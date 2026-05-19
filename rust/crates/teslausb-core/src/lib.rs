@@ -13,12 +13,15 @@
 //!
 //! * [`ipc`] — versioned envelope + `STATUS` / `RETENTION_UPDATE` /
 //!   `INVALIDATE_CACHE` request/response types (Phase 1.2).
+//! * [`backend`] — `BlockBackend` trait + `WriteFlags` + reference
+//!   `NullBackend` / `MockBackend` impls (Phase 1.4). Used by the
+//!   `teslafat` NBD transmission loop in Phase 1.5+ and by the
+//!   real file-backed backend that follows.
 //!
 //! ## Planned additions
 //!
-//! * Phase 1.4 — `backend::BlockBackend` trait (size / read /
-//!   write(flags) / flush, with FUA contract documented).
 //! * Phase 2.1+ — `fs::geometry` trait shared by FAT32 and `exFAT`
 //!   geometry implementations.
 
+pub mod backend;
 pub mod ipc;

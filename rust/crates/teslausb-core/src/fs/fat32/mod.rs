@@ -9,7 +9,8 @@
 //! incoming byte-offset to the correct synthesizer module.
 //!
 //! Phase 2.1 shipped [`geometry`]; Phase 2.2 added
-//! [`boot_sector::synthesize`]. Subsequent increments fill in the
+//! [`boot_sector::synthesize`]; Phase 2.3 added
+//! [`fsinfo::synthesize`]. Subsequent increments fill in the
 //! remaining modules listed in `docs/00-PLAN.md` §Phase 2.
 //!
 //! ## Spec reference
@@ -19,4 +20,5 @@
 //! version 1.03, December 6, 2000. Sections are quoted inline.
 
 pub mod boot_sector;
+pub mod fsinfo;
 pub mod geometry;

@@ -48,7 +48,7 @@ in a 🔍 REVIEW GATE + ✅ TEST GATE.
 | 1.4 | `BlockBackend` trait + null impl + FUA contract test | ✅ | ✅ APPROVED (impl `8f98f43`; review-fix commit added ADR-0004 covering both the native `async fn in trait` decision — no `async-trait` crate dep, no `dyn BlockBackend`, generic-over-`<B: BlockBackend>` callers — and the `WriteFlags(u32)` newtype-vs-`bitflags!`-macro decision; the trait lives in `teslausb-core::backend` with `BackendError` (thiserror at lib boundary), `check_bounds` shared overflow-safe helper, and reference impls `NullBackend` + `MockBackend` in `pub mod mock`; FUA contract is captured by three named `fua_contract_*` tests using `MockBackend::observed_any_durability()` as the durability oracle; production code uses zero `unwrap`/`expect`/`panic` (mock module recovers poisoned mutexes via `lock().unwrap_or_else(PoisonError::into_inner)`); `pollster` 0.3 dev-dep added to drive `async fn` test bodies without pulling tokio into the domain-core crate; LOC budget overrun recorded — "~100" plan estimate vs ~620 actual due to charter compliance (`# Errors` docs, mock impls, FUA tests, `check_bounds` extraction); `teslafat → teslausb-core` dep still deferred to Phase 1.5 (correct per inc-1.3 review M4); 0 Major, 1 Minor (actioned), 3 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.4.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 77 workspace tests passed, 0 failed (33 teslafat unit + 4 teslafat integration + 40 teslausb-core unit incl. 24 new `backend` tests + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass on first attempt (no auto-fix round needed) |
 | 1.5 | NBD transmission loop + FUA fdatasync test | ✅ | ✅ APPROVED (impl `f36e913`; review-fix commit added ADR-0005 covering both transmission wire policies — oversized requests terminate the connection (no payload drain), and out-of-bounds WRITEs drain the payload before replying EINVAL so the stream stays aligned for subsequent requests; the transmission module exposes one `pub async fn run<B: BlockBackend, S>` orchestrator that dispatches READ/WRITE/FLUSH/TRIM/DISC plus an ENOTSUP fall-through, with the wire format split into a pure-helpers `nbd::wire` submodule (28-byte request header + 16-byte simple-reply header, all encode/decode round-trippable in `[u8; N]` arrays with hand-asserted spec byte offsets); FUA pass-through is verified end-to-end via `MockBackend::observed_any_durability()` — the same FUA contract oracle introduced in inc-1.4 — proving the NBD `NBD_CMD_FLAG_FUA` wire bit reaches the backend as `WriteFlags::FUA`; production code uses zero `unwrap`/`expect`/`panic` and zero `indexing_slicing` (the request-header read loop was refactored to use `split_at_mut` + `read_exact`); tests use `tokio::join!` on a single task rather than `tokio::spawn` because native AFIT futures from `BlockBackend` are not `Send` (the consequence ADR-0004 §A predicted); 1 test design bug caught and fixed during development — the original FUA-extraction test asserted `NBD_CMD_WRITE != NBD_CMD_FLAG_FUA` but both constants are numerically `1`, rewritten as two independent encode/decode tests using hand-rolled spec byte layouts and `NBD_CMD_TRIM = 4` as the unambiguous `kind` value to eliminate the false-pass risk for a symmetric encoder/decoder field-swap; `teslafat → teslausb-core` runtime dep finally lands (closing the inc-1.3 M4 deferral); LOC budget overrun recorded — "~200" plan estimate vs ~1453 actual due to charter-compliance work (spec-citation docstrings, wire-vs-orchestrator split, byte-layout assertions, full command-coverage tests, mutation-test mental model on every assertion); 0 Major, 1 Minor (actioned), 3 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.5.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 107 workspace tests passed, 0 failed (63 teslafat unit incl. 30 new in `nbd::transmission` + `nbd::wire` + 4 teslafat integration + 40 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass after one mixed-line-ending auto-fix on `nbd/wire.rs` |
 | 1.6 | `teslafat@.service` systemd unit | ✅ | ✅ APPROVED (impl `1228f41`; review-fix commit added ADR-0006 covering three coupled connection-lifecycle decisions — §A single connection at a time per process (no `tokio::spawn`, `serve` awaits `serve_one_connection` to completion before the next `accept()`); §B per-connection errors never propagate to the accept loop (`serve_one_connection -> ()` not `Result`, every per-client failure is `warn!`-logged so a misbehaving client cannot trigger `Restart=on-failure` daemon-exit cycles and defeat the systemd hardening); §C handshake timeout (`tokio::time::timeout` wrap, default 10 s, range [1, 600] s) is the only liveness check in the daemon — the kernel `nbd-client` polices request liveness via `/sys/block/nbdN/queue/io_timeout`, and a duplicate userspace per-request timeout would kill legitimate large WRITEs on the Pi Zero 2 W under SD pressure; new `crate::backend::ZeroBackend` (~230 LOC, 12 tests) is a sparse `BlockBackend` impl that synthesises zeros and stores only its `u64` size (no `Vec` allocation — kept in `teslafat::backend` rather than `teslausb-core::backend::mock` to avoid expanding the inc-1.4 surface and to avoid the `NullBackend::new(size: usize) -> Vec<u8>` allocation hazard for daemon-scale `volume_size_gb`); new `crate::server` (~526 LOC, 10 tests = 5 cross-platform `serve_one_connection_*` + 5 Unix-only `accept_loop::*` gated `#[cfg(unix)]` since `UnixListener` is Unix-only); new `crate::config::NbdConfig` (socket_path + handshake_timeout_seconds, validated [1, 600] s); `--check-config` flag preserves the Phase 1.1 sentinel contract (validate + emit + exit) for both `tests/sentinel.rs` and the unit's `ExecStartPre=` fast-fail gate; `units/teslafat@.service` (~104 LOC instanced template) ships full systemd hardening (`CapabilityBoundingSet=`, `ProtectSystem=strict`, `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, `MemoryDenyWriteExecute=yes`, `SystemCallFilter=@system-service`); main.rs rewritten so the default mode builds a current-thread tokio runtime, prepares the socket (mkdir parent + unlink stale file), installs SIGTERM/SIGINT handlers, and runs `server::serve` until signal; the inc-1.3 follow-up TODO in `nbd/mod.rs` is now closed (handshake timeout wired in §C); `teslafat -> teslausb-core` dep extended to cover the `BlockBackend` impl in `ZeroBackend`; LOC budget overrun recorded — "~50" plan estimate vs ~1227 actual due to charter compliance (two new public modules with full doc + test coverage, `NbdConfig` schema delta + validation, systemd hardening profile, `--check-config` flag, SIGTERM/SIGINT plumbing with graceful fallback); 0 Major, 1 Minor (actioned), 4 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.6.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 129 workspace tests passed, 0 failed (85 teslafat unit incl. 22 new across `backend` + `server` + `config::NbdConfig` + 4 teslafat integration + 40 teslausb-core unit + 0 teslausb-worker; the 5 `accept_loop::*` server tests are `#[cfg(unix)]`-gated so they compile-clean but don't run on the Windows dev box — Linux/Pi will exercise them); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass after one mixed-line-ending auto-fix on `units/teslafat@.service` |
-| 1.7 | Dev-box smoke test harness | ⏳ | ⏳ | ⏳ |
+| 1.7 | Dev-box smoke test harness | ✅ | ✅ APPROVED (impl `37fb2fb`; review-fix commit added ADR-0007 covering the integration-test scope policy — the smoke test speaks the NBD wire protocol *directly* from the test process over `tokio::net::UnixStream` instead of through the kernel `nbd-client` tool, because `nbd-client` requires `CAP_SYS_ADMIN` + a loaded `nbd` kernel module + `/dev/nbdN` device nodes that are unavailable on any non-Pi dev box or contributor laptop; ADR-0007 §B promotes that decision to a general policy for every future Phase 2+ integration test: `cargo test` exercises wire-level / binary-level / signal-level / observability contracts on any Linux or macOS dev box with zero ceremony, while hardware-coupled assertions (kernel client behaviour, real FAT formatter on `/dev/nbdN`, USB gadget binding, power-cut recovery) live in the H1 hardware checklist; new `rust/crates/teslafat/tests/smoke.rs` (~766 LOC, 6 tests, file-level `#![cfg(unix)]`) covers happy-path handshake + READ + DISC + SIGTERM exit, no-clients SIGTERM exit + socket cleanup, ADR-0006 §B end-to-end (bad client followed by clean client), `cfg.volume_size_gb` -> wire-advertised export size with a non-default 17 GiB pin, "started" sentinel emission in live-serve mode (not just `--check-config` which `tests/sentinel.rs` covered), and `nbd.handshake_timeout_seconds` -> sentinel JSON's `nbd_handshake_timeout_s` field; `DaemonHandle` RAII guard owns `Child` + `TempDir` + `Arc<Mutex<Vec<String>>>` stderr capture pumped by a vanilla OS thread, with `Drop` that SIGTERM-then-SIGKILLs and dumps captured stderr on test panic via `thread::panicking()` guard; `send_sigterm` shells out to `kill(1)` for zero new deps + zero `unsafe` + POSIX portability across Linux + macOS dev hosts; wire helpers re-use the daemon's own public `nbd::handshake` + `nbd::wire` constants (`CF_FIXED_NEWSTYLE`, `CF_NO_ZEROES`, `IHAVEOPT`, `NBD_OPT_EXPORT_NAME`, `RequestHeader`, `encode_request_header`, `NBD_SIMPLE_REPLY_MAGIC`, `NBD_EOK`) so the test directly pins the public protocol surface; on Windows the file compiles to an empty test binary (`#[cfg(unix)]` gates it) — Linux + Pi run all 6 tests at H1 first hardware deploy; zero new dependencies (tempfile + tokio + the teslafat lib were already in dev-deps); LOC budget overrun recorded — "~80" plan estimate vs ~766 actual (~9.5x; consistent with inc-1.3 through inc-1.6 helper-heavy pattern); 0 Major, 1 Minor (actioned by this review-fix), 4 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.7.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 129 workspace tests passed, 0 failed (85 teslafat unit + 4 teslafat integration sentinel + 0 teslafat integration smoke (cfg-gated on Windows; +6 on Linux/Pi) + 40 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass first try (no autofix rounds) |
 
 **Pre-existing scaffolding from earlier sessions:**
 
@@ -1659,3 +1659,175 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   prerequisite: once inc-1.5 + 1.6 + 1.7 are all approved,
   H1 deploys the binary to `cybertruckusb.local` for the
   first hardware-on-Pi smoke run.
+
+
+### 2026-05-19 (resumed, twelfth time, continued) -- Phase 1.7 implementation + review gate
+
+- **Phase 1.7 implementation** (commit `37fb2fb`): added
+  `rust/crates/teslafat/tests/smoke.rs` (~766 LOC, 6 tests,
+  file-level `#![cfg(unix)]`). The deliverable end-to-end
+  validates the compiled `teslafat` binary against the NBD
+  wire protocol, signal-handling, sentinel emission, and
+  the full `Config` -> wire plumbing for both `volume_size_gb`
+  and `nbd.handshake_timeout_seconds`. 1 file changed,
+  +766/-0.
+- **Scope deviation from PLAN row 1.7 (intentional, ADR-0007):**
+  the plan literally said "`nbd-client` connects to
+  `/run/teslafat-0.sock`". The shipped smoke test instead
+  speaks the NBD wire protocol *directly* from the test
+  process over `tokio::net::UnixStream`, re-using the daemon's
+  own `nbd::handshake` + `nbd::wire` public constants and
+  encoders. Rationale: `nbd-client` requires `CAP_SYS_ADMIN`
+  + a loaded `nbd` kernel module + `/dev/nbdN` device nodes,
+  none of which are available on a normal user-account dev
+  box (Windows or Linux). Driving the wire directly tests
+  exactly what we ship (server conformance) and runs as any
+  user with zero ceremony; the kernel-client integration is
+  properly an H1 hardware test. The decision and the broader
+  testing-scope policy it implies are now ADR-0007.
+- **6 tests covered:**
+  - (1) `daemon_serves_all_zero_via_nbd_handshake_and_read`
+    -- happy path: spawn -> handshake -> READ 4 KiB at offset
+    0 -> assert all-zero payload -> DISC -> SIGTERM ->
+    `ExitCode::SUCCESS`. Pins `ZeroBackend` -> `server::serve`
+    -> handshake -> wire end-to-end.
+  - (2) `daemon_exits_cleanly_on_sigterm_with_no_clients`
+    -- proves the signal handler is wired into the accept
+    loop before any client has connected, and that
+    `prepare_listener`'s best-effort socket cleanup fires
+    on the clean-shutdown path (socket file is gone after
+    the daemon exits).
+  - (3) `daemon_recovers_from_bad_handshake_and_accepts_next_client`
+    -- ADR-0006 §B "per-connection errors never propagate
+    to the accept loop" end-to-end at the binary level, not
+    just inside `serve_one_connection`'s unit tests. A bad
+    client (missing `CF_FIXED_NEWSTYLE`) is rejected, the
+    second well-formed client completes a full handshake +
+    READ + DISC, and the daemon SIGTERMs clean.
+  - (4) `daemon_advertises_configured_volume_size_in_handshake`
+    -- pins `cfg.volume_size_gb` (17 GiB, non-default) ->
+    `ZeroBackend` -> handshake reply advertised size, ruling
+    out "the daemon ignored config and used a constant".
+  - (5) `daemon_emits_started_sentinel_in_serve_mode` --
+    the "started" sentinel that operators grep for is also
+    emitted in the live-serve path, not just in
+    `--check-config` mode (which `tests/sentinel.rs` already
+    covered).
+  - (6) `daemon_handshake_timeout_config_value_reaches_sentinel`
+    -- pins `nbd.handshake_timeout_seconds = 47` end-to-end
+    into the JSON sentinel's `nbd_handshake_timeout_s`
+    structured field, so a future refactor that drops the
+    config -> sentinel plumbing surfaces immediately at
+    test time.
+- **Test infrastructure:**
+  - `DaemonHandle` RAII guard owns the spawned `Child`, the
+    `TempDir` hosting the config + socket, and an
+    `Arc<Mutex<Vec<String>>>` of captured stderr lines pumped
+    by a vanilla OS thread. Drop SIGTERMs (then SIGKILLs on
+    timeout) and dumps all captured stderr on test panic via
+    a `thread::panicking()` guard. Diagnosability investment:
+    the difference between "smoke test 3 failed for some
+    reason" and "smoke test 3 failed; daemon log shows
+    `bind: EACCES`".
+  - `start_daemon` / `start_daemon_with_handshake_timeout`
+    write the fixture TOML to a tempdir, spawn
+    `env!("CARGO_BIN_EXE_teslafat")`, poll for socket-file
+    existence with 50 ms cadence + 10 s deadline.
+  - `client_handshake_export_name` / `client_read` /
+    `client_disc` re-use the daemon's public NBD constants
+    and helpers. `CF_NO_ZEROES` is set so the server replies
+    with the compact 10-byte export-name reply (eliminates
+    the 124-byte legacy zero pad arithmetic).
+  - `send_sigterm` shells out to `kill -TERM <pid>` -- zero
+    new dependencies, zero `unsafe`, POSIX-portable across
+    Linux + macOS dev hosts.
+- **Cross-platform discipline:** file is `#![cfg(unix)]`
+  because `tokio::net::UnixListener` (and therefore
+  `server::serve`) is Unix-only. On Windows the smoke binary
+  compiles to an empty test binary (0 tests run); on Linux +
+  Pi all 6 tests execute. The Windows gate proves the file
+  parses and lints clean; runtime validation is deferred to
+  the first Pi run (H1 hardware deploy).
+- **Test discipline:** 0 tests gained on the Windows dev box
+  (smoke binary is cfg-gated empty); +6 on Linux/Pi. Total
+  workspace 129 -> 129 on Windows, 129 -> 135 on Linux.
+  Mutation-test mental model held across all 6 tests:
+  swapping `NBD_CMD_READ` for `NBD_CMD_WRITE` would fail
+  test #1's all-zero assertion; dropping the signal handler
+  would hang test #2 at the SIGTERM-wait deadline; removing
+  the per-connection error catch would hang test #3 at the
+  second `connect_with_retry`; hardcoding the export size
+  would fail test #4's 17 GiB pin; removing the sentinel
+  would fail test #5's `contains("started")` check;
+  removing the structured field would fail test #6's exact
+  JSON-key match.
+- **Zero new dependencies.** `tempfile`, `tokio` (with
+  `signal` + `time` + `net` features already from inc-1.6),
+  and the `teslafat` library re-export are all in dev-deps
+  from prior increments. The `kill(1)` subprocess approach
+  was deliberately chosen over `nix` / `libc` to keep the
+  dev-dep surface minimal.
+- **Gates:** `cargo build / clippy -D warnings / fmt --check
+  / doc -D warnings / test workspace --all-targets` all
+  green; 129 tests pass on Windows (smoke runs 0; Linux/Pi
+  will run +6 for 135 total). `scripts/check.sh --all`
+  12/0/4 baseline maintained. `pre-commit run --files
+  smoke.rs` clean first try (no autofix rounds needed).
+- **Iteration count: 1.** First draft included an unused
+  `use std::io::Write` import propped up by a contrived
+  `_used_imports_pin` shim; caught on self-review before
+  running gates, removed both. `cargo fmt --check` surfaced
+  a single trailing-blank-line at EOF, auto-corrected by
+  `cargo fmt --all`. No clippy iterations.
+- **Charter review** (`~/.copilot/.../files/charter-review-inc-1.7.md`):
+  0 Major, 1 Minor, 4 Nits.
+  - **Minor 1:** ADR-0007 -- smoke-test scope policy +
+    PLAN row 1.7 amendment. Decision A (drive the wire
+    directly instead of through `nbd-client`) qualified on
+    ADR triggers 4 (forward-compat -- future contributors
+    need to know the rule), 5 (non-obvious -- the PLAN
+    literally said `nbd-client`), and 6 (project-wide
+    policy -- applies to every future Phase 2+ integration
+    test). The ADR documents (a) the smoke wire-only
+    decision with rejected alternatives, (b) the broader
+    dev-box / H1 split policy, (c) the H1-deferred
+    kernel-client validation. PLAN row 1.7 was amended to
+    reflect the userspace-wire reality. Both actioned in
+    this review-fix commit.
+  - **Nit 1:** LOC overrun ~80 -> 766 (~9.5x), same
+    overrun-pattern direction as inc-1.3 through inc-1.6.
+    Driven by `DaemonHandle` + stderr pump (~80 LOC),
+    3 wire helpers with `tokio::time::timeout` wrappers
+    (~150 LOC), 6 tests with comprehensive assertions +
+    dump-on-failure (~300 LOC), inline rationale comments
+    (~200 LOC), file-level lint allows + cfg gating
+    (~30 LOC). Recorded in PLAN row 1.7 with breakdown.
+  - **Nit 2:** Socket-readiness via file-existence polling
+    (50 ms cadence, 10 s deadline) rather than rendezvous
+    on an explicit `ready` sentinel line. Works fine
+    today; worth revisiting if the harness grows. Not
+    actionable.
+  - **Nit 3:** `_tempdir` field on `DaemonHandle` has an
+    underscore prefix (idiomatic Rust would prefer a doc
+    comment over the underscore). Marginal. Not actionable.
+  - **Nit 4:** Bad-handshake test #3 relies on the server
+    dropping the connection (EOF on the bad client's
+    `read`). If a future refactor changed rejection to
+    "send an error reply then close", the test would still
+    pass (it asserts only that the second client succeeds).
+    Strengthening would require asserting on a specific
+    captured-stderr line. Marginal. Not actionable.
+- Review-fix commit (this entry): "docs(b1): inc-1.7 review
+  fixes - add ADR-0007 + PROGRESS APPROVED + plan amendments".
+  Branch `b1-userspace-rust` reaches 27 commits ahead of
+  `main` after the review-fix commit. **Phase 1 closes
+  here.**
+- **Next:** H1 -- hardware deploy + first kernel-client
+  smoke on the Pi (`cybertruckusb.local`). Build the
+  `teslafat` binary for the Pi target, deploy with the
+  `teslafat@.service` systemd unit + minimal config, run
+  `nbd-client` against `/run/teslausb/teslafat.sock` for
+  the first time, and walk the H1 hardware checklist (to
+  be authored as a separate H1-prep step). Phase 2 (B-1
+  `FileBackend` for real image-file storage) starts only
+  after H1 passes.

@@ -618,6 +618,7 @@ dependencies = [
  "predicates",
  "serde",
  "tempfile",
+ "teslausb-core",
  "tokio",
  "toml",
  "tracing",

@@ -12,11 +12,12 @@
 //!   surface is what consumers can call; the binary's surface is
 //!   the CLI.
 //!
-//! ## Module layout (Phase 1.3 state)
+//! ## Module layout (Phase 1.5 state)
 //!
 //! * [`config`] — TOML config loader (Phase 1.1).
-//! * [`nbd`] — NBD newstyle handshake (Phase 1.3); per-connection
-//!   transmission loop lands in Phase 1.5.
+//! * [`nbd`] — NBD newstyle handshake (Phase 1.3) +
+//!   transmission-phase dispatch loop (Phase 1.5) backed by
+//!   [`teslausb_core::backend::BlockBackend`].
 
 // Charter Pillar 1 carve-out: `unwrap` + bounds-indexing in tests
 // are fine since the desired failure mode is a loud panic. Both

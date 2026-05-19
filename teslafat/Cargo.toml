@@ -1,0 +1,77 @@
+[package]
+name = "teslafat"
+version = "0.1.0"
+edition = "2021"
+description = "Userspace FAT32 synthesizer + NBD server for TeslaUSB B-1"
+authors = ["TeslaUSB B-1"]
+license = "MIT"
+
+[[bin]]
+name = "teslafat"
+path = "src/main.rs"
+
+[profile.release]
+# Pi Zero 2 W: optimize for size + perf, no debug bloat.
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[dependencies]
+# Async runtime — single-threaded flavor to keep RSS down on the
+# Pi Zero 2 W. We don't need worker threads; NBD requests serialize
+# per-connection and Tesla is the only client.
+tokio = { version = "1.36", default-features = false, features = [
+    "rt",
+    "net",
+    "io-util",
+    "macros",
+    "fs",
+    "sync",
+    "signal",
+    "time",
+] }
+
+# Byte buffer manipulation
+bytes = "1.5"
+byteorder = "1.5"
+
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Structured logging — outputs to journald via stderr
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Config file (YAML)
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Unix-specific syscalls (fsync, ftruncate, etc.)
+nix = { version = "0.27", default-features = false, features = [
+    "fs",
+    "signal",
+    "socket",
+    "uio",
+] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Time
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "serde",
+] }
+
+# Hashing for stable inode synthesis
+twox-hash = { version = "1.6", default-features = false }
+
+[dev-dependencies]
+tempfile = "3.10"
+proptest = "1.4"

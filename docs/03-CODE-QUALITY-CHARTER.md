@@ -385,9 +385,9 @@ check_untyped_defs = true
 ### Test discipline
 
 - `pytest` with `--strict-markers` and `--strict-config`.
-- Coverage gate: ≥ 80% line coverage on `web/services/`
-  (the logic layer); blueprints can be lower but tested
-  via Flask test client.
+- Coverage gate: ≥ 80% line coverage on
+  `web/teslausb_web/services/` (the logic layer); blueprints can
+  be lower but tested via Flask test client.
 - Tests live in `tests/` mirroring source tree
   (`tests/services/test_cache_invalidation.py`).
 - Fixtures share via `conftest.py`.
@@ -399,7 +399,10 @@ check_untyped_defs = true
 
 ### Dead code detection
 
-- `vulture web/ --min-confidence 80` in CI.
+- `vulture web/teslausb_web/ --min-confidence 80` in CI
+  (scoped to source, not tests — pytest fixtures look unused
+  to vulture's static analysis but are called by pytest's
+  collector).
 - Manually triaged when it flags false positives (rare
   with web frameworks).
 
@@ -548,15 +551,17 @@ For Rust changes:
 - cargo doc --no-deps --document-private-items
 ```
 
-For Python changes:
+For Python changes (run from `web/` so tool configs in
+`web/pyproject.toml` resolve correctly):
 ```yaml
+- cd web
 - ruff check .
 - ruff format --check .
-- mypy web/
+- mypy          # `files = ["teslausb_web", "tests"]` in pyproject.toml
 - pytest --strict-markers --strict-config \
-         --cov=web --cov-fail-under=80
-- vulture web/ --min-confidence 80
-- bandit -r web/ -ll      # security linter, low+ severity
+         --cov=teslausb_web --cov-fail-under=80
+- vulture teslausb_web --min-confidence 80
+- bandit -r teslausb_web -ll   # security linter, low+ severity
 ```
 
 For any changes:

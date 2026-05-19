@@ -15,3 +15,5 @@ Phase 0.3 establishes the empty subpackage; service modules arrive
 incrementally in Phase 5 (one per feature area, with charter-review
 per file).
 """
+
+from __future__ import annotations

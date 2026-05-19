@@ -20,4 +20,6 @@ Phase 0.3 establishes the package skeleton (this file plus empty
 per `docs/00-PLAN.md`.
 """
 
+from __future__ import annotations
+
 __version__ = "0.1.0"

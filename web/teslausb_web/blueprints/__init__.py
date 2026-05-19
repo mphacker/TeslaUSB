@@ -18,3 +18,5 @@ own module so route ownership is clear in `git blame`. Per
 Phase 0.3 establishes the empty subpackage; module files arrive in
 Phase 5 (one per increment, with charter-review per file).
 """
+
+from __future__ import annotations

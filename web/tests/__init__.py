@@ -12,3 +12,5 @@ Per `docs/03-CODE-QUALITY-CHARTER.md` §"Test discipline":
 * No real network — Flask test client only.
 * `tmp_path` fixture for filesystem isolation, never `/tmp` directly.
 """
+
+from __future__ import annotations

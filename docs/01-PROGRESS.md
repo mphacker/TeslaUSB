@@ -16,7 +16,7 @@ on empty crates + `pytest` returning 0 tests OK).
 |---|---|---|---|---|
 | 0.1 | Branch rename `b1-userspace-fat32` → `b1-userspace-rust`; first commit (v1 wipe + planning docs + skills) — commit `b5aeeee` | ✅ | ✅ APPROVED (doc-only, FHS path drift fixed in-place pre-merge) | ✅ git working tree clean post-commit |
 | 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ✅ APPROVED (charter coherence fixes applied in-place: 1.84→1.85 example, `teslafat/src/...` → `rust/crates/teslafat/src/...`, pre-commit `cd teslafat` → `cd rust`) | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
-| 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ⏳ | ✅ `ruff check / ruff format --check / mypy --strict / pytest (3 passed, 100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
+| 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ✅ APPROVED (6 charter coherence fixes applied in-place: 4 `web/` → `web/teslausb_web/` path drifts in CI gate + dead-code-detection blocks, `--cov=web` → `--cov=teslausb_web` module-name, `mypy web/` → bare `mypy` from `web/` cwd; plus added `from __future__ import annotations` to 5 docstring-only Python modules per charter Python deep-dive rule) | ✅ `ruff check / ruff format --check / mypy --strict / pytest --cov=teslausb_web --cov-fail-under=80 (100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
 | 0.4 | `.github/workflows/ci.yml` mirroring charter §"CI Gates" | ⏳ | ⏳ | ⏳ |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ⏳ | ⏳ | ⏳ |
 | 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ⏳ | ⏳ | ⏳ |
@@ -600,3 +600,61 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   Expected coherence finds in charter (same class as 0.2):
   * L387 "≥ 80% line coverage on `web/services/`" → `web/teslausb_web/services/`
   * L551 `pytest --cov=web` → `pytest --cov=teslausb_web`
+
+
+### 2026-05-19 (resumed, again) — Phase 0.3 review gate
+
+- Followed `.github/skills/charter-review/SKILL.md` against commit
+  `b8f9d5f`. Report at
+  `~/.copilot/session-state/3583f429-4245-4837-9c1c-5c1583cbb31d/files/charter-review-inc-0.3.md`.
+- **Pre-flight gates:** all 6 Python gates green at HEAD prior to
+  review (ruff check, ruff format --check, mypy strict, pytest with
+  charter-prescribed `--cov=teslausb_web --cov-fail-under=80`
+  achieving 100.00%, vulture, bandit). Pre-commit hooks not yet
+  installed — Phase 0.5 deliverable, noted as expected gap.
+- **Pillar walk:** all 5 pillars clean on the 6 new Python files +
+  `pyproject.toml` + `README.md`. Files are 7-30 LOC each, pure
+  scaffolding. Zero shortcuts, zero dead code, zero anti-patterns.
+- **Findings: 0 Blocker, 6 Major, 0 Minor, 0 Nit.** All 6 Majors
+  fixed in-place during review:
+  1. Charter L388 (Test discipline): `web/services/` →
+     `web/teslausb_web/services/` (path drift, same class as the
+     0.2 `teslafat/src/` → `rust/crates/teslafat/src/` drift).
+  2. Charter L402 (Dead code detection): `vulture web/` →
+     `vulture web/teslausb_web/` with comment explaining that
+     pytest fixtures look unused to vulture's static analysis.
+  3. Charter L555 (CI Gates): `mypy web/` → bare `mypy` from
+     `web/` cwd (uses `files = ["teslausb_web", "tests"]` from
+     pyproject). Restructured entire Python CI block to make `cd web`
+     explicit, paralleling how the Rust block implicitly runs from `rust/`.
+  4. Charter L557 (CI Gates): `--cov=web` → `--cov=teslausb_web`
+     (pytest-cov takes a module name, not a path).
+  5. Charter L558-559 (CI Gates): `vulture web/ / bandit -r web/` →
+     `vulture teslausb_web / bandit -r teslausb_web` (avoid
+     recursing into `tests/` where vulture/bandit produce noise).
+  6. Missing `from __future__ import annotations` in 5 of 6
+     Python files (charter Python deep-dive L397 `Major if missing`).
+     Added to `teslausb_web/__init__.py`,
+     `teslausb_web/blueprints/__init__.py`,
+     `teslausb_web/services/__init__.py`, `tests/__init__.py`,
+     `tests/conftest.py`. `tests/test_smoke.py` already had it.
+- **One deliberately-not-a-finding:** charter says "New deps in
+  `pyproject.toml` always trigger an ADR." The `[project.optional-dependencies] dev`
+  list (ruff, mypy, pytest, pytest-cov, vulture, bandit) does add 6
+  deps — but those are the **charter-mandated** tools named in the
+  charter itself. Plan schedules ADRs 0001-0011 as the Phase 0.8
+  deliverable; documenting tool choices the charter already mandates
+  does not require a Phase 0.3 ADR. Captured this reasoning in the
+  review report so future contributors don't re-litigate.
+- **Re-ran all 6 Python gates** after fixes: ALL GREEN at HEAD with
+  identical 100.00% coverage. The added `from __future__ import
+  annotations` lines actually IMPROVED the coverage count
+  (2/1/1 statements vs. 1/0/0 — they count as executable statements).
+- Commit `<TBD>` "docs(b1): inc-0.3 review fixes - charter
+  coherence + future annotations" — 6 files (+24/-9). Branch
+  `b1-userspace-rust` now 7 commits ahead of `main`.
+- **Branch state after review commit:** 7 commits ahead of `main`,
+  still local-only. Next session resumes inc-0.4 (GitHub Actions CI
+  workflow mirroring charter §"CI Gates"). Charter coherence
+  pattern continues: any deltas surfaced by 0.4 will be fixed in
+  lockstep, exactly as 0.2 and 0.3 have been.

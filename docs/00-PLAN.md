@@ -537,7 +537,7 @@ disk space reclaimed, no v1 processes in `ps -ef`.
 |---|---|---|
 | 1.1 | `teslafat` `main.rs`: `clap` CLI, `tracing-subscriber` init (JSON to stderr, level via `RUST_LOG`), TOML config loader, sentinel "started" log line | ~120 |
 | 1.2 | `teslausb-core::ipc::messages` types (versioned envelope, `STATUS`, `RETENTION_UPDATE`, `INVALIDATE_CACHE` request/response) with `serde_test` round-trip tests | ~150 |
-| 1.3 | NBD newstyle handshake — port the existing `teslafat/src/nbd/handshake.rs` into `rust/crates/teslafat/src/nbd/handshake.rs`, add round-trip test against a `nbd-client --check` invocation in CI | ~50 (mostly path move) |
+| 1.3 | NBD newstyle handshake — port the existing `teslafat/src/nbd/handshake.rs` into `rust/crates/teslafat/src/nbd/handshake.rs`, add round-trip test against a `nbd-client --check` invocation in CI | ~50 (mostly path move) — **actual: ~600 LOC** (port + decomposition into pure encode/decode helpers + 19 unit tests via `tokio::io::duplex` + lib+bin split for `dead_code` discipline; the draft predated the charter, so charter compliance added ~5× the estimate; "path move" estimates for pre-charter drafts should add 3–5× headroom going forward) |
 | 1.4 | `BlockBackend` trait in `teslausb-core::backend` with `size`, `read`, `write(flags)`, `flush`; null impl for tests; FUA contract enforced by trait doc + test | ~100 |
 | 1.5 | NBD transmission loop (`teslafat::nbd::transmission`) that dispatches READ / WRITE / FLUSH / TRIM to a `BlockBackend`, with FUA fdatasync test | ~200 |
 | 1.6 | systemd unit `teslafat@.service` (instanced for LUN 0 / LUN 1), `EnvironmentFile=/etc/teslausb/teslafat.toml`, `User=teslausb`, capability bounding | ~50 |

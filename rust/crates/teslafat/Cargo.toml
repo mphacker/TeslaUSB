@@ -27,11 +27,6 @@ anyhow = "1.0"
 # one declarative place.
 clap = { version = "4.5", features = ["derive"] }
 
-# Domain types (IPC envelope, message vocabulary). Phase 1.2 lands
-# the schema there; this crate consumes it in Phase 1.5 transport
-# wiring and tomorrow's BlockBackend trait in Phase 1.4.
-teslausb-core = { path = "../teslausb-core" }
-
 # Config file format. The pre-B-1 draft at `teslafat/` used YAML; the
 # rewrite standardises on TOML so config and `Cargo.toml` share one
 # syntax and the validator can rely on TOML's typed integer/string
@@ -61,11 +56,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.10"
-
-# Tokio test macros + an in-memory duplex stream for the NBD
-# handshake unit tests so the protocol can be exercised end-to-end
-# without binding a real UnixStream. The `io-util` feature on the
-# main dep already gives us the read/write extension traits;
-# `macros` re-enables `#[tokio::test]` (the prod dep keeps `macros`
-# off by default — only the test target needs it).
-tokio = { version = "1.40", default-features = false, features = ["rt", "io-util", "macros", "test-util"] }

@@ -44,7 +44,7 @@ in a 🔍 REVIEW GATE + ✅ TEST GATE.
 |---|---|---|---|---|
 | 1.1 | `teslafat::main` CLI + tracing + TOML loader | ✅ | ✅ APPROVED (impl `994fd65`; review-fix commit added ADR-0001 for YAML→TOML decision per charter §"ADRs" trigger criteria + removed preemptive `module_name_repetitions` allow after verifying lint doesn't fire on exact-match `config::Config`; 0 Major, 0 Minor post-fix — see session log) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 14 unit + 4 integration = 18 passed, 0 failed; `scripts/check.sh --all` 12/0/4; `pre-commit run` 9/0/2 (yaml+python: no files in changeset) |
 | 1.2 | `teslausb-core::ipc::messages` types + serde tests | ✅ | ✅ APPROVED (impl `aa3f18c`; review-fix commit added ADR-0002 for the IPC vocabulary design — versioned envelope + internally-tagged enums + no `deny_unknown_fields` for forward-compat + `thiserror` at lib boundary — per charter §"ADRs" trigger criteria; 0 Major, 0 Minor post-fix — see session log) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 34 workspace tests passed, 0 failed (14 teslafat unit + 4 teslafat integration + 16 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4; `pre-commit run` 10/0/1 (yaml: no files in changeset) |
-| 1.3 | NBD newstyle handshake (port from existing draft) | ⏳ | ⏳ | ⏳ |
+| 1.3 | NBD newstyle handshake (port from existing draft) | ✅ | ✅ APPROVED (impl `2c1a56f`; review-fix commit added ADR-0003 covering both async runtime choice — tokio current-thread, minimal features — and `teslafat` lib+bin crate-shape change forced by `dead_code` discipline on the new `nbd::handshake` public surface; the draft's 3 `try_into().unwrap()` calls were replaced with bounds-checked fallible conversions, the 2 `as usize`/`as u32` casts were replaced with `try_from + Context`, all encode/parse helpers got `///` + `# Errors` docs, and the protocol was decomposed into pure encode/decode helpers + a generic-over-`AsyncRead + AsyncWrite + Unpin` async orchestrator so the wire format is unit-testable via `tokio::io::duplex`; LOC budget overrun acknowledged in plan row 1.3 — "~50 (mostly path move)" → ~600 actual due to charter-compliance work the draft predated; Phase 1.6 `tokio::time::timeout` follow-up TODO added in `nbd/mod.rs`; preemptive `teslausb-core` dep removed (will land in Phase 1.4 with the BlockBackend trait); 0 Major, 4 Minor (all actioned), 2 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.3.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 53 workspace tests passed, 0 failed (33 teslafat unit incl. 19 new `nbd::handshake` tests + 4 teslafat integration + 16 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 same skip baseline; `pre-commit run` all hooks pass after one auto-fix round for `end-of-file-fixer` + `mixed-line-ending` on the three new files |
 | 1.4 | `BlockBackend` trait + null impl + FUA contract test | ⏳ | ⏳ | ⏳ |
 | 1.5 | NBD transmission loop + FUA fdatasync test | ⏳ | ⏳ | ⏳ |
 | 1.6 | `teslafat@.service` systemd unit | ⏳ | ⏳ | ⏳ |
@@ -1159,3 +1159,113 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   hardware-test path opens. ~50 LOC ceiling -- mostly a path move
   + lint compliance. The handshake draft is the largest preserved
   asset from the deleted `teslafat/` planning tree.
+
+### 2026-05-19 (resumed, ninth time) -- Phase 1.3 implementation + review gate
+
+- **Phase 1.3 implementation** (commit `2c1a56f`): ported the
+  preserved Phase 1 draft `teslafat/src/nbd/handshake.rs` (211 LOC)
+  into the active workspace at `rust/crates/teslafat/src/nbd/handshake.rs`.
+  Decomposed into pure encode/decode helpers (`encode_greeting`,
+  `encode_option_reply`, `encode_info_export`,
+  `encode_info_block_size`, `encode_export_name_reply`,
+  `parse_info_or_go_request`) plus a generic-over-
+  `AsyncRead + AsyncWrite + Unpin` async orchestrator (`run`,
+  `read_option_request`, `dispatch_option`, `handle_info_or_go`,
+  `write_option_reply`). Every function under 50 SLOC.
+  Draft's 3 `try_into().unwrap()` calls replaced with bounds-
+  checked `slice::get + try_into`; 2 `as usize`/`as u32` casts
+  replaced with `try_from + Context`. Every `pub` item gained
+  `///` + `# Errors` docs. No `#[allow]` on production code.
+  9 files changed, +826/-220.
+- **Crate shape change (load-bearing):** `teslafat` became lib +
+  bin via a new `src/lib.rs` exposing `pub mod config; pub mod nbd;`.
+  Forced by `dead_code` (warn-as-deny under workspace `-D warnings`)
+  -- every `pub` item in `nbd::handshake` was correctly flagged
+  as unused from the binary's perspective until Phase 1.5 wires
+  the transmission loop. Alternatives considered (preemptive
+  `#[allow(dead_code)]`, fake call site in main) rejected as
+  charter-violating / dishonest; lib+bin is the idiomatic Rust
+  answer and was made the precedent for Phase 2+ via ADR-0003 §B.
+  `tests/sentinel.rs` integration tests unaffected (binary-
+  spawning, lib split invisible).
+- **Dep additions:** `tokio = "1.40"` with
+  `default-features = false` and only `rt + net + io-util + macros`
+  (single-threaded runtime; ~3 concurrent tasks on Pi Zero 2 W
+  is plenty). 61-line `Cargo.lock` delta for `bytes`, `mio`,
+  `pin-project-lite`, `signal-hook-registry`, `socket2`. No
+  `time` (Phase 1.6), no `signal` (Phase 1.6), no `process`
+  (never).
+- **Test discipline:** 19 new tests in `nbd::handshake::tests` --
+  7 pure encode tests (byte-for-byte wire-format assertions),
+  5 pure parse tests (happy + both info-id ordinals + too-short
+  buffer + `name_len = u32::MAX` overflow), 1 invariant test
+  (`NBD_REP_ERR_BIT` semantics), 6 async tests via
+  `tokio::io::duplex` (OPT_GO with/without block-size request,
+  OPT_EXPORT_NAME legacy path, missing CF_FIXED_NEWSTYLE, bad
+  option magic, OPT_ABORT). Real `nbd-client --check`
+  integration test deferred to Phase H1 hardware smoke per
+  operator directive (no CI, Windows dev host has no
+  `nbd-client`). Test count 34/0/0 -> 53/0/0.
+- **Gates iterated through several rounds:** dead_code x 13
+  (resolved by lib+bin split), `clippy::indexing_slicing` x 13
+  in test bodies (resolved by extending the `unwrap_used`
+  test-mod carve-out at the new `lib.rs` crate root to also
+  cover `indexing_slicing` -- charter-blessed pattern for tests),
+  `clippy::uninlined_format_args` x 1 (`bail!` arg inlined),
+  `rustdoc::private_intra_doc_links` x 1 (pre-existing link to
+  private `Config::validate` in `config.rs` module doc became
+  reachable after lib split; rewrote to plain prose),
+  `cargo fmt` x ~8 trivia (line breaks around `try_from(...).context(...)?`,
+  multi-line array literals -- all auto-fixed). After all six
+  rounds: zero warnings, zero suppressions on production code.
+- **Charter review** (`~/.copilot/.../files/charter-review-inc-1.3.md`,
+  ~20 KB): Pillar walk found 0 Major, 4 Minor, 2 Nits.
+  - **Minor 1:** LOC budget overrun. Plan estimated "~50 (mostly
+    path move)"; actual ~600 LOC. Cause: the draft predated the
+    charter (3 unwraps, no docs, no `# Errors`, 3 fns over 50
+    SLOC); charter compliance + new tests added ~5x the
+    estimate. Plan row 1.3 updated to record actual + note that
+    pre-charter "path move" estimates should add 3-5x headroom.
+  - **Minor 2:** ADR-0003 needed. Tokio adoption met >= 4 of
+    the 5 charter trigger criteria (locks 3rd-party framework,
+    affects >1 module, perf/correctness tradeoff in runtime
+    flavor, non-obvious at design time). Lib+bin split met
+    >= 3 (affects >1 module via the crate-shape precedent,
+    sets forward-compat constraint via the lib's public
+    surface, non-obvious vs. the rejected alternatives).
+    Both decisions documented in
+    `docs/adr/0003-async-runtime-and-crate-shape.md` (~10 KB)
+    with 5 alternatives considered per decision.
+  - **Minor 3:** `run()` has no per-handshake timeout. A
+    misbehaving client could block the single-thread runtime
+    indefinitely. Threat model in Phase 1.3 is low (Unix
+    socket, kernel-only peer) so not a regression. Added
+    `// TODO(phase-1.6): wrap run() in tokio::time::timeout`
+    in `nbd/mod.rs` for the listener-task increment to pick up.
+  - **Minor 4:** preemptive `teslausb-core` dep added to
+    `teslafat/Cargo.toml` with "transitive prep" comment.
+    By the same standard inc-1.1 review removed a preemptive
+    `#[allow]`, this scaffold should come out -- Phase 1.4
+    will add it when the `BlockBackend` trait actually needs
+    it. Removed.
+  - **Nit 1:** 61-line `Cargo.lock` churn is unavoidable
+    transitive cost of tokio. Recorded.
+  - **Nit 2:** `nbd/mod.rs` references `BlockBackend` in inline
+    backticks instead of an intra-doc link since the trait
+    doesn't exist yet. Phase 1.4 review should reinstate the
+    proper intra-doc link.
+- Review-fix commit (this entry): "docs(b1): inc-1.3 review fixes
+  - add ADR-0003 + remove preemptive teslausb-core dep + plan LOC
+  note + Phase 1.6 timeout TODO + PROGRESS row 1.3 marked
+  APPROVED". 5 files changed. Branch `b1-userspace-rust` reaches
+  18 commits ahead of main. (Hash reference omitted from session
+  log per `git commit --amend` chase-the-hash anti-pattern; see
+  `git log --grep "inc-1.3 review fixes"` for the current SHA.)
+- **Next:** Phase 1.4 -- `BlockBackend` trait in
+  `teslausb-core::backend` with `size`, `read`, `write(flags)`,
+  `flush`; null impl for tests; FUA contract enforced by trait
+  doc + test. ~100 LOC ceiling. This is the increment that
+  legitimately introduces the `teslausb-core` dep on `teslafat`
+  (Phase 1.5 transmission loop will impl `BlockBackend` for a
+  real backing file). Likely no ADR needed unless the trait
+  shape has a non-obvious forward-compat constraint.

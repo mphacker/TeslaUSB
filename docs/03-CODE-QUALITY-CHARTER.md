@@ -536,9 +536,21 @@ without going through the list is not a review.
 
 ---
 
-## CI Gates (must pass before merge)
+## CI Gates (must pass before each commit / merge)
 
-For Rust changes:
+**Enforcement venue:** Currently the local gate runner
+`scripts/check.sh` (Phase 0.4). The operator runs it before each
+commit; the pre-commit framework (Phase 0.5) wires the same
+gates into the git hook so they run automatically. A future
+GitHub Actions workflow may re-enable cloud enforcement, but it
+is intentionally NOT a Phase 0 deliverable — the operator
+preference (2026-05-19) is "prefer to not rely on github actions
+for now", and full integration testing requires real hardware
+(H-phases) which cloud CI can't provide anyway. The gate
+definitions below are venue-neutral: same commands, same exit-on-
+red rule, wherever they run.
+
+For Rust changes (script section `--rust`):
 ```yaml
 - cargo fmt --all -- --check
 - cargo clippy --all-targets --all-features -- -D warnings
@@ -551,8 +563,8 @@ For Rust changes:
 - cargo doc --no-deps --document-private-items
 ```
 
-For Python changes (run from `web/` so tool configs in
-`web/pyproject.toml` resolve correctly):
+For Python changes (script section `--python`; run from `web/` so
+tool configs in `web/pyproject.toml` resolve correctly):
 ```yaml
 - cd web
 - ruff check .
@@ -564,14 +576,17 @@ For Python changes (run from `web/` so tool configs in
 - bandit -r teslausb_web -ll   # security linter, low+ severity
 ```
 
-For any changes:
-- All markdown links resolve (lychee or markdown-link-check)
-- No new files > 1 MB without LFS approval
-- `git diff` shows no `.bak`, `__pycache__`, `target/`,
-  `node_modules/`, IDE files
+For any changes (script section `--hygiene`):
+- All markdown links resolve (lychee — `git ls-files '*.md'`).
+- No new tracked files > 1 MiB without LFS approval.
+- `git ls-files` contains no `.bak`, `__pycache__`, `target/`,
+  `node_modules/`, `.idea/`, `.vscode/` paths. (Local on-disk
+  caches are fine — only COMMITTED artifacts are blocked.)
 
-**A red CI is a blocked PR. Period.** No "I'll fix it after
-merge." No "the test is flaky." Fix it first.
+**A red gate run is a blocked commit. Period.** No "I'll fix it
+after merge." No "the test is flaky." Fix it first. To run every
+gate locally: `./scripts/check.sh --all` (continues past failures
+and prints a summary) or `./scripts/check.sh` (fail-fast).
 
 ---
 

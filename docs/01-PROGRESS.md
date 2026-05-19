@@ -17,7 +17,7 @@ on empty crates + `pytest` returning 0 tests OK).
 | 0.1 | Branch rename `b1-userspace-fat32` → `b1-userspace-rust`; first commit (v1 wipe + planning docs + skills) — commit `b5aeeee` | ✅ | ✅ APPROVED (doc-only, FHS path drift fixed in-place pre-merge) | ✅ git working tree clean post-commit |
 | 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ✅ APPROVED (charter coherence fixes applied in-place: 1.84→1.85 example, `teslafat/src/...` → `rust/crates/teslafat/src/...`, pre-commit `cd teslafat` → `cd rust`) | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
 | 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ✅ APPROVED (6 charter coherence fixes applied in-place: 4 `web/` → `web/teslausb_web/` path drifts in CI gate + dead-code-detection blocks, `--cov=web` → `--cov=teslausb_web` module-name, `mypy web/` → bare `mypy` from `web/` cwd; plus added `from __future__ import annotations` to 5 docstring-only Python modules per charter Python deep-dive rule) | ✅ `ruff check / ruff format --check / mypy --strict / pytest --cov=teslausb_web --cov-fail-under=80 (100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
-| 0.4 | `scripts/check.sh` local gate runner with every gate from charter §"CI Gates" (operator-driven, NOT GitHub Actions — cloud CI deferred indefinitely per operator preference 2026-05-19; full hardware testing is H-phase territory anyway) | ✅ | ⏳ | ✅ 12 PASS / 0 FAIL / 4 SKIP (cargo-llvm-cov, cargo-deny, cargo-machete, lychee — optional, install in Phase 0.6) on Windows dev box via Git Bash; exit 0 |
+| 0.4 | `scripts/check.sh` local gate runner with every gate from charter §"CI Gates" (operator-driven, NOT GitHub Actions — cloud CI deferred indefinitely per operator preference 2026-05-19; full hardware testing is H-phase territory anyway) | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"CI Gates" reframed from "hosted CI / PR" enforcement model to venue-neutral with explicit pointer to `scripts/check.sh`; hygiene wording updated `git diff` → `git ls-files` to match script behavior; 1 Nit accepted: magic `1048576` for 1 MiB is documented inline with charter line citation) | ✅ 12 PASS / 0 FAIL / 4 SKIP (cargo-llvm-cov, cargo-deny, cargo-machete, lychee — optional, install in Phase 0.6) on Windows dev box via Git Bash; exit 0 |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ⏳ | ⏳ | ⏳ |
 | 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ⏳ | ⏳ | ⏳ |
 | 0.7 | `CODEOWNERS` + PR template referencing the charter checklist | ⏳ | ⏳ | ⏳ |
@@ -725,3 +725,52 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
     'red blocks' rule, different enforcement venue".
   * Charter §"Pre-commit Hooks" (L573-617) still references
     pre-commit framework — that's correct for inc-0.5; no change.
+
+
+### 2026-05-19 (resumed, again) — Phase 0.4 review gate
+
+- Followed `.github/skills/charter-review/SKILL.md` against commit
+  `922930a`. Report at
+  `~/.copilot/session-state/3583f429-4245-4837-9c1c-5c1583cbb31d/files/charter-review-inc-0.4.md`.
+- **Pre-flight gates:** `./scripts/check.sh --all` reports
+  12 PASS / 0 FAIL / 4 SKIP, exit 0 on Windows dev box. The 4 SKIPs
+  are optional tools (cargo-llvm-cov, cargo-deny, cargo-machete,
+  lychee) installed by Phase 0.6. Bash syntax check (`bash -n`)
+  exit 0.
+- **Pillar walk:** all 5 pillars clean on the 282-LOC script.
+  Functions ≤ 32 SLOC, nesting depth ≤ 2, all comments are WHY, all
+  variables quoted, `local` everywhere, `set -uo pipefail` at top
+  with `set -e` deliberately omitted (each gate needs individual
+  exit-status tracking).
+- **Findings: 0 Blocker, 1 Major, 0 Minor, 1 Nit.**
+  - **Major:** Charter §"CI Gates" still assumed a hosted-CI / PR
+    enforcement model ("CI Gates / must pass before merge",
+    "A red CI is a blocked PR. Period."). After the operator's
+    pivot to a local runner, that framing was misleading. Fixed
+    in-place by:
+    1. Adding an opening paragraph to §"CI Gates" naming
+       `scripts/check.sh` as the current enforcement venue,
+       recording the 2026-05-19 operator preference, and stating
+       that the gate definitions below are venue-neutral.
+    2. Reframing "A red CI is a blocked PR" → "A red gate run is
+       a blocked commit. Period."
+    3. Adding a "How to run locally" line pointing at the script.
+    4. Updating the "any changes" hygiene block from `git diff`
+       scope to `git ls-files` scope (matching what the script
+       actually does — committed artifacts only, not on-disk noise).
+  - **Nit:** Magic value `1048576` (1 MiB) in
+    `check_large_files`. ACCEPTED with inline comment citing
+    charter L564; a named const would add indirection without
+    clarity at the single use site.
+- **Re-ran `./scripts/check.sh --all`** after the charter fix:
+  still 12 PASS / 0 FAIL / 4 SKIP, exit 0. The script doesn't read
+  the charter at runtime — the fix is documentation coherence only.
+- Commit `<TBD>` "docs(b1): inc-0.4 review fixes - charter §"CI
+  Gates" reframed for local runner" — 1 file (+~30/-~20). Branch
+  `b1-userspace-rust` now 8 commits ahead of `main`.
+- **Deferred to Phase 0.8:** a formal ADR
+  `docs/adr/NNNN-defer-cloud-ci.md` capturing the cloud-CI
+  pivot decision. Rationale is currently recorded in three places
+  (inc-0.4 commit message + PROGRESS entry + charter §"CI Gates"
+  preamble) so the decision is discoverable until the ADR batch
+  arrives.

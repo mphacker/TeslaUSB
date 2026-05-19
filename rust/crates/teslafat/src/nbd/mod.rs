@@ -6,14 +6,11 @@
 //! against a [`teslausb_core::backend::BlockBackend`] using wire
 //! constants and helpers in [`wire`].
 //!
-//! # Phase 1.6 follow-up
-//!
-//! TODO(phase-1.6): wrap the [`handshake::run`] call in a
-//! `tokio::time::timeout` (30 s is a reasonable starting point) so
-//! a misbehaving client that opens a connection and then sends no
-//! bytes cannot tie up a slot on the single-threaded runtime. The
-//! threat model in Phase 1.3 is low (Unix socket, kernel-only
-//! peer) so this is defence-in-depth, not a regression.
+//! The handshake-timeout safety net (the inc-1.3 follow-up) lands
+//! in Phase 1.6 in [`crate::server::serve_one_connection`], which
+//! wraps [`handshake::run`] in a [`tokio::time::timeout`]. The
+//! timeout duration is operator-controlled via the
+//! `nbd.handshake_timeout_seconds` config key.
 
 pub mod handshake;
 pub mod transmission;

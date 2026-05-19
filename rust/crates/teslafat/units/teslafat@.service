@@ -1,0 +1,104 @@
+# systemd unit template for the `teslafat` NBD daemon.
+#
+# Instanced so one daemon process serves one LUN. systemd's `%i`
+# substitution expands to the instance name (the bit after `@` and
+# before `.service`), letting setup.sh enable one instance per
+# image:
+#
+#   systemctl enable --now teslafat@cam.service
+#   systemctl enable --now teslafat@lightshow.service
+#
+# Each instance reads `/etc/teslausb/teslafat-<instance>.toml`,
+# which binds its own Unix-domain socket (`nbd.socket_path`) so the
+# host's `nbd-client` can attach the right `/dev/nbdN` to the right
+# image.
+#
+# Hardening rationale (matches docs/03-CODE-QUALITY-CHARTER.md
+# §"Best Architecture Practices" — minimum viable privilege):
+#   - The daemon never opens network sockets, files outside
+#     `/etc/teslausb`, `/run/teslausb`, and the configured
+#     `backing_root`. Anything beyond that is locked down.
+#   - `nbd-client` (the peer) lives in the same network namespace
+#     because it talks to the daemon over `AF_UNIX`, not `AF_INET`.
+#     `PrivateNetwork=yes` is therefore safe and explicitly
+#     blocks the daemon from being abused as an egress proxy if a
+#     bug ever let an attacker reach `connect()`.
+
+[Unit]
+Description=TeslaUSB userspace FAT/exFAT + NBD daemon (instance %i)
+Documentation=https://github.com/mphacker/TeslaUSB
+# The kernel `nbd-client` attach happens after this service is up,
+# so we declare the inverse "we MUST be up before any consumer of
+# our socket runs" through a dedicated nbd-attach service in Phase
+# 6.x. For Phase 1.6 the daemon is standalone and can start any
+# time after the local filesystem is mounted.
+After=local-fs.target
+Requires=local-fs.target
+
+[Service]
+# Validate the config first as a fast-fail gate, then exec into
+# serve mode. If the config is malformed the daemon never reaches
+# `bind`, and systemd surfaces the validation error in `journalctl`
+# at `error` level instead of as a binding failure.
+ExecStartPre=/usr/local/bin/teslafat --config /etc/teslausb/teslafat-%i.toml --check-config
+ExecStart=/usr/local/bin/teslafat --config /etc/teslausb/teslafat-%i.toml
+
+# Run as the unprivileged `teslausb` user that setup.sh creates.
+# The daemon needs no capabilities — `AF_UNIX` bind, file I/O under
+# `backing_root`, and signal handling are all unprivileged.
+User=teslausb
+Group=teslausb
+
+# Drop every capability — the empty `CapabilityBoundingSet` is the
+# kernel-enforced upper bound; `AmbientCapabilities=` (empty) makes
+# sure no inherited cap leaks through.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# Filesystem isolation. `ProtectSystem=strict` makes `/usr`, `/boot`,
+# `/etc` read-only. `ProtectHome=yes` hides every other user's home
+# dir. `ReadWritePaths=` opens just `/run/teslausb` (socket file)
+# and `/var/teslacam` (default `backing_root`); a non-default
+# `backing_root` requires editing this line.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run/teslausb /var/teslacam
+
+# Network isolation — the daemon is `AF_UNIX`-only.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+
+# Kernel-attack-surface reduction.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Restart policy. The daemon's accept loop is supposed to outlast
+# any single client; the only way out is `SIGTERM` (clean) or a
+# crash. `on-failure` restarts a crash, leaves a clean exit alone.
+Restart=on-failure
+RestartSec=5s
+
+# Log level via `RUST_LOG` so the operator can crank up the
+# verbosity per-instance without editing the unit. The default
+# `info` matches the `tracing_subscriber::EnvFilter` fallback in
+# `main.rs`.
+Environment=RUST_LOG=info
+
+# Watchdog: the Pi Zero 2 W's hardware watchdog runs separately
+# (see `wifi-monitor.sh` notes in the main repo); the daemon does
+# not currently feed a software watchdog. If the accept loop wedges
+# the per-connection handshake timeout (`nbd.handshake_timeout_seconds`)
+# is the user-visible failure mode, not a daemon-wide hang.
+
+[Install]
+WantedBy=multi-user.target

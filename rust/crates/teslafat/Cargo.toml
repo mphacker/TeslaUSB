@@ -38,10 +38,17 @@ toml = "0.8"
 # Async runtime. The daemon serves 1–2 NBD connections (one per LUN)
 # plus 1 IPC control socket, so the current-thread runtime is
 # enough; `rt-multi-thread` would just burn RAM on the Pi Zero 2 W.
-# Features kept minimal: only what the NBD handshake (`net` for
-# UnixStream + `io-util` for AsyncReadExt/AsyncWriteExt) and the
-# Phase 1.5 transport actually use. See pending ADR-0003.
-tokio = { version = "1.40", default-features = false, features = ["rt", "net", "io-util", "macros"] }
+# Features:
+# - `rt` + `net` + `io-util` + `macros`: handshake + transmission
+#   (Phases 1.3 + 1.5).
+# - `time`: handshake-timeout safety net + accept-loop pacing
+#   (Phase 1.6 — closes the inc-1.3 follow-up TODO).
+# - `signal`: SIGTERM / SIGINT handling for clean systemd stop
+#   (Phase 1.6).
+# - `sync`: `oneshot` channel that plumbs the signal handler into
+#   the server's `tokio::select!` shutdown branch (Phase 1.6).
+# See ADR-0003.
+tokio = { version = "1.40", default-features = false, features = ["rt", "net", "io-util", "macros", "time", "signal", "sync"] }
 
 # Structured logging — JSON to stderr so journald captures every
 # field as a structured key. Level via `RUST_LOG` per charter

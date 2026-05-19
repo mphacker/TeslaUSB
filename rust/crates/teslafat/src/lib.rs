@@ -12,17 +12,29 @@
 //!   surface is what consumers can call; the binary's surface is
 //!   the CLI.
 //!
-//! ## Module layout (Phase 1.5 state)
+//! ## Module layout (Phase 1.6 state)
 //!
-//! * [`config`] — TOML config loader (Phase 1.1).
+//! * [`config`] — TOML config loader (Phase 1.1) extended with
+//!   the `[nbd]` listen-socket schema (Phase 1.6).
 //! * [`nbd`] — NBD newstyle handshake (Phase 1.3) +
 //!   transmission-phase dispatch loop (Phase 1.5) backed by
 //!   [`teslausb_core::backend::BlockBackend`].
+//! * [`backend`] — `teslafat`-local [`BlockBackend`] impls; the
+//!   Phase 1.6 placeholder is [`backend::ZeroBackend`].
+//! * [`server`] — accept loop that wraps [`nbd::handshake::run`]
+//!   in a configurable timeout and hands the established
+//!   connection to [`nbd::transmission::run`] (Phase 1.6). The
+//!   accept-loop entry point itself is `#[cfg(unix)]`-only since
+//!   it binds a Unix-domain socket.
+//!
+//! [`BlockBackend`]: teslausb_core::backend::BlockBackend
 
 // Charter Pillar 1 carve-out: `unwrap` + bounds-indexing in tests
 // are fine since the desired failure mode is a loud panic. Both
 // lints stay `deny` in production code.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::indexing_slicing))]
 
+pub mod backend;
 pub mod config;
 pub mod nbd;
+pub mod server;

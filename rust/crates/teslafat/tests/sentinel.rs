@@ -53,6 +53,12 @@ fn emits_started_sentinel_on_stderr_and_exits_clean() {
         .unwrap()
         .arg("--config")
         .arg(fixture.path())
+        // `--check-config` is the Phase 1.1 "validate and exit"
+        // mode: load config, emit sentinel, return 0 without
+        // binding the NBD socket. The Phase 1.6 default behaviour
+        // is to bind the socket and block until SIGTERM, which
+        // would hang `assert_cmd` indefinitely.
+        .arg("--check-config")
         // Be explicit so a developer's exported RUST_LOG doesn't
         // silently suppress the line the test is asserting on.
         .env("RUST_LOG", "info")

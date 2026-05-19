@@ -13,6 +13,7 @@
 //! header here and update `setup.sh` in the same change set.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -24,6 +25,9 @@ const CLUSTER_SIZE_MAX: u32 = 131_072;
 const VOLUME_LABEL_MAX: usize = 11;
 const DEFAULT_LABEL: &str = "TESLACAM";
 const DEFAULT_HIDE_AFTER_S: u64 = 3600;
+const DEFAULT_SOCKET_PATH: &str = "/run/teslausb/teslafat.sock";
+const DEFAULT_HANDSHAKE_TIMEOUT_S: u64 = 30;
+const HANDSHAKE_TIMEOUT_MAX_S: u64 = 600;
 
 /// Top-level config struct deserialised from the TOML file.
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +59,58 @@ pub struct Config {
     /// Retention policy applied to the synthesised view (Phase 4).
     #[serde(default)]
     pub retention: RetentionConfig,
+
+    /// NBD listen-socket configuration (Phase 1.6+).
+    #[serde(default)]
+    pub nbd: NbdConfig,
+}
+
+/// NBD daemon listen-socket configuration.
+///
+/// The daemon binds one Unix socket and accepts NBD newstyle
+/// connections from a kernel `nbd-client` (which in turn backs the
+/// `g_mass_storage` USB gadget). The path is per-instance because
+/// the systemd unit is templated (`teslafat@0.service` for LUN 0,
+/// `teslafat@1.service` for LUN 1) and each instance ships its own
+/// config file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NbdConfig {
+    /// Filesystem path to bind the listen socket at. Defaults to
+    /// `DEFAULT_SOCKET_PATH` (`/run/teslausb/teslafat.sock`). The
+    /// parent directory must exist and be writable by the daemon
+    /// user — `setup.sh` (Phase 6.4) creates `/run/teslausb` via a
+    /// systemd-tmpfiles entry.
+    #[serde(default = "default_socket_path")]
+    pub socket_path: PathBuf,
+
+    /// Maximum seconds a client may spend in the newstyle handshake
+    /// before the daemon drops the connection. Defaults to
+    /// `DEFAULT_HANDSHAKE_TIMEOUT_S` (30 s). Capped at
+    /// `HANDSHAKE_TIMEOUT_MAX_S` (10 min) to prevent a config typo
+    /// from disabling the protection. The daemon's transmission
+    /// loop has no per-request timeout — that's the kernel
+    /// nbd-client's responsibility (`/sys/block/nbdN/queue/io_timeout`).
+    #[serde(default = "default_handshake_timeout_s")]
+    pub handshake_timeout_seconds: u64,
+}
+
+impl Default for NbdConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
+            handshake_timeout_seconds: DEFAULT_HANDSHAKE_TIMEOUT_S,
+        }
+    }
+}
+
+impl NbdConfig {
+    /// Convert the handshake-timeout seconds value into a
+    /// `std::time::Duration` ready for `tokio::time::timeout`.
+    #[must_use]
+    pub fn handshake_timeout(&self) -> Duration {
+        Duration::from_secs(self.handshake_timeout_seconds)
+    }
 }
 
 /// Hide-from-view policy. The synthesiser omits aged `RecentClips`
@@ -84,6 +140,14 @@ fn default_label() -> String {
 
 const fn default_hide_after_s() -> u64 {
     DEFAULT_HIDE_AFTER_S
+}
+
+fn default_socket_path() -> PathBuf {
+    PathBuf::from(DEFAULT_SOCKET_PATH)
+}
+
+const fn default_handshake_timeout_s() -> u64 {
+    DEFAULT_HANDSHAKE_TIMEOUT_S
 }
 
 impl Config {
@@ -121,6 +185,15 @@ impl Config {
             "volume_label must be <= {VOLUME_LABEL_MAX} chars (FAT32 limit): {:?}",
             self.volume_label,
         );
+        ensure!(
+            (1..=HANDSHAKE_TIMEOUT_MAX_S).contains(&self.nbd.handshake_timeout_seconds),
+            "nbd.handshake_timeout_seconds must be in [1, {HANDSHAKE_TIMEOUT_MAX_S}] (got {})",
+            self.nbd.handshake_timeout_seconds,
+        );
+        ensure!(
+            !self.nbd.socket_path.as_os_str().is_empty(),
+            "nbd.socket_path must not be empty",
+        );
         Ok(())
     }
 }
@@ -141,6 +214,7 @@ volume_size_gb = 64
             volume_label: DEFAULT_LABEL.to_string(),
             cluster_size: None,
             retention: RetentionConfig::default(),
+            nbd: NbdConfig::default(),
         }
     }
 
@@ -156,6 +230,11 @@ volume_size_gb = 64
             cfg.retention.recentclips_hide_after_seconds,
             DEFAULT_HIDE_AFTER_S
         );
+        assert_eq!(cfg.nbd.socket_path, PathBuf::from(DEFAULT_SOCKET_PATH));
+        assert_eq!(
+            cfg.nbd.handshake_timeout_seconds,
+            DEFAULT_HANDSHAKE_TIMEOUT_S
+        );
     }
 
     #[test]
@@ -168,6 +247,10 @@ cluster_size = 32768
 
 [retention]
 recentclips_hide_after_seconds = 7200
+
+[nbd]
+socket_path = \"/run/teslausb/teslafat-0.sock\"
+handshake_timeout_seconds = 45
 ";
         let cfg: Config = toml::from_str(raw).unwrap();
         cfg.validate().unwrap();
@@ -176,6 +259,11 @@ recentclips_hide_after_seconds = 7200
         assert_eq!(cfg.volume_label, "DASHCAM");
         assert_eq!(cfg.cluster_size, Some(32_768));
         assert_eq!(cfg.retention.recentclips_hide_after_seconds, 7200);
+        assert_eq!(
+            cfg.nbd.socket_path,
+            PathBuf::from("/run/teslausb/teslafat-0.sock")
+        );
+        assert_eq!(cfg.nbd.handshake_timeout_seconds, 45);
     }
 
     #[test]
@@ -291,5 +379,66 @@ bogus_subfield = true
             chain.iter().any(|s| s.contains("bad.toml")),
             "path missing from error chain: {chain:?}"
         );
+    }
+
+    // ---- NbdConfig --------------------------------------------------
+
+    #[test]
+    fn rejects_zero_handshake_timeout() {
+        let mut cfg = sample_config();
+        cfg.nbd.handshake_timeout_seconds = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("handshake_timeout_seconds"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_oversize_handshake_timeout() {
+        let mut cfg = sample_config();
+        cfg.nbd.handshake_timeout_seconds = HANDSHAKE_TIMEOUT_MAX_S + 1;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("handshake_timeout_seconds"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_min_and_max_handshake_timeout() {
+        let mut cfg = sample_config();
+        cfg.nbd.handshake_timeout_seconds = 1;
+        cfg.validate().unwrap();
+        cfg.nbd.handshake_timeout_seconds = HANDSHAKE_TIMEOUT_MAX_S;
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_socket_path() {
+        let mut cfg = sample_config();
+        cfg.nbd.socket_path = PathBuf::new();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("socket_path"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_unknown_nbd_field() {
+        let raw = "\
+backing_root = \"/var/teslacam\"
+volume_size_gb = 64
+
+[nbd]
+bogus_subfield = true
+";
+        let err = toml::from_str::<Config>(raw).unwrap_err();
+        assert!(err.to_string().contains("bogus_subfield"), "got: {err}");
+    }
+
+    #[test]
+    fn handshake_timeout_returns_seconds_as_duration() {
+        let mut cfg = sample_config();
+        cfg.nbd.handshake_timeout_seconds = 45;
+        assert_eq!(cfg.nbd.handshake_timeout(), Duration::from_secs(45));
     }
 }

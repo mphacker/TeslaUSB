@@ -12,14 +12,6 @@
 //! renaming, or removing a field is a schema break; bump the doc
 //! header here and update `setup.sh` in the same change set.
 
-// Avoid stuttering `config::Config` at call sites by re-exporting via
-// the binary's `crate::config` path. The lint fires because the type
-// name equals the module name; the alternative (renaming the type to
-// `Settings`) loses the established `Config` vocabulary the plan and
-// draft both use. Allowed at the type, not the module, so adding new
-// types here later still gets the warning.
-#![allow(clippy::module_name_repetitions)]
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};

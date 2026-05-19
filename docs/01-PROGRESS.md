@@ -42,7 +42,7 @@ in a 🔍 REVIEW GATE + ✅ TEST GATE.
 
 | Inc | Deliverable | Status | Review | Test |
 |---|---|---|---|---|
-| 1.1 | `teslafat::main` CLI + tracing + TOML loader | ⏳ | ⏳ | ⏳ |
+| 1.1 | `teslafat::main` CLI + tracing + TOML loader | ✅ | ✅ APPROVED (impl `994fd65`; review-fix commit added ADR-0001 for YAML→TOML decision per charter §"ADRs" trigger criteria + removed preemptive `module_name_repetitions` allow after verifying lint doesn't fire on exact-match `config::Config`; 0 Major, 0 Minor post-fix — see session log) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 14 unit + 4 integration = 18 passed, 0 failed; `scripts/check.sh --all` 12/0/4; `pre-commit run` 9/0/2 (yaml+python: no files in changeset) |
 | 1.2 | `teslausb-core::ipc::messages` types + serde tests | ⏳ | ⏳ | ⏳ |
 | 1.3 | NBD newstyle handshake (port from existing draft) | ⏳ | ⏳ | ⏳ |
 | 1.4 | `BlockBackend` trait + null impl + FUA contract test | ⏳ | ⏳ | ⏳ |
@@ -996,3 +996,77 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   `docs/adr/NNNN-setup-dev-modes.md` capturing the three-mode
   design decision (--check audit, --dry-run preview, default install)
   + the "prereqs-checked-not-installed" boundary.
+
+### 2026-05-19 (resumed, seventh time) -- Phase 1.1 implementation + review gate
+
+- **Phase 1.1 implementation** (commit `994fd65`): ported draft
+  `teslafat/src/{main.rs,config.rs}` (190 + 131 LOC YAML) into
+  `rust/crates/teslafat/src/{main.rs,config.rs}` as the first
+  code-bearing increment: `clap` CLI, `tracing-subscriber` JSON
+  to stderr with `EnvFilter` (level via `RUST_LOG`), TOML config
+  loader with `#[serde(deny_unknown_fields)]` + semantic `validate`,
+  literal `info!(..., "started")` sentinel, anyhow error chain
+  logging on exit failure. 8 files changed, +1439/-340 (Cargo.lock
+  surge is the one-shot transitive-dep registration). 14 unit tests
+  in `config.rs` + 4 integration tests in `tests/sentinel.rs` =
+  18 passed, 0 failed.
+- **Scope deliberately stripped:** NBD listen, IPC sockets, signal
+  handlers all deferred to Phase 1.3 / 1.5. `ipc: IpcConfig` field
+  from the draft was REMOVED (not allowed-as-dead-code) because no
+  Phase 1.1 code reads it; reintroduce alongside the actual IPC
+  envelope types in Phase 1.2.
+- **YAML -> TOML decision:** committed to TOML for the on-disk
+  config (matches `Cargo.toml` syntax, proper typed scalars, no
+  `serde_yaml` unmaintained-dep liability). Documented inline in
+  `Cargo.toml` + `config.rs` module doc + commit message +
+  `teslafat/README.md` strikethrough update.
+- **Phase 1.1 review gate** (this commit): followed
+  `.github/skills/charter-review/SKILL.md` against `994fd65`.
+  Report at
+  `~/.copilot/session-state/3583f429-4245-4837-9c1c-5c1583cbb31d/files/charter-review-inc-1.1.md`.
+- **Pre-flight gates (re-verified post-fix):** `cargo build` ok,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  ok, `cargo test` 18/0/0, `cargo fmt --check` ok,
+  `RUSTDOCFLAGS=-D warnings cargo doc` ok, `pre-commit run` 9/0/2,
+  `scripts/check.sh --all` 12/0/4 (same SKIPs as baseline).
+- **Pillar walk:** all 5 pillars clean. Longest production fn 13 SLOC;
+  no nested control flow; zero `unwrap`/`expect`/`panic` in
+  production; magic numbers extracted to six named `const`
+  declarations with documented intent; all `pub` items have
+  `///` docs.
+- **Findings: 0 Blocker, 0 Major, 1 Minor (fixed in-place), 3 Nit
+  (this commit).**
+  - **Minor:** Per charter section ADRs (lines 477-485), the YAML to
+    TOML decision triggers >=1 of the five mandatory-ADR criteria:
+    affects >1 module, locks in a third-party dep (`toml = "0.8"`),
+    changes a schema. Fixed in-place by writing
+    `docs/adr/0001-config-format-toml.md` (~150 lines: context,
+    decision, consequences positive/negative/neutral, alternatives
+    considered, charter compliance, implementation references,
+    follow-ups). This is the first ADR landing; the deferred
+    inc-0.8 ADR batch now plans ~10 slots instead of 11.
+  - **Nit 1:** PROGRESS row 1.1 was still ⏳; updated to ✅ ✅
+    APPROVED ✅ with gate evidence (this entry).
+  - **Nit 2:** Review report not yet on disk; created this session.
+  - **Nit 3:** PLAN row 1.1 has no status column; left as-is
+    (PROGRESS is the canonical status tracker per inc-0.4/5/6
+    precedent).
+- **Verification of preemptive `#[allow]`:** initial draft of
+  `config.rs` carried `#![allow(clippy::module_name_repetitions)]`
+  defensively. During pillar-3 walk, removed the allow and re-ran
+  clippy at `-D warnings` -- still green. The lint does not fire
+  on exact-match (`config::Config`), only on suffixed types
+  (`ConfigBuilder`, etc.). The allow was a non-silencing shortcut
+  and is now gone. Re-ran fmt + test + doc post-removal: all green.
+- Review-fix commit (this entry) "docs(b1): inc-1.1 review fixes -
+  add ADR-0001 + remove unused module_name_repetitions allow +
+  PROGRESS row 1.1 marked APPROVED" -- 3 files changed. Branch
+  `b1-userspace-rust` reaches 14 commits ahead of main. (Hash
+  reference omitted from session log per `git commit --amend`
+  chase-the-hash anti-pattern; see `git log --grep "inc-1.1 review
+  fixes"` for the current SHA.)
+- **Next:** Phase 1.2 -- `teslausb-core::ipc::messages` types
+  (versioned envelope, `STATUS` / `RETENTION_UPDATE` /
+  `INVALIDATE_CACHE` request+response) with `serde_test`
+  round-trip tests. ~150 LOC ceiling. `IpcConfig` returns to
+  `teslafat/src/config.rs` in that increment.

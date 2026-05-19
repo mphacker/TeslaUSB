@@ -15,7 +15,7 @@ on empty crates + `pytest` returning 0 tests OK).
 | Inc | Deliverable | Status | Review | Test |
 |---|---|---|---|---|
 | 0.1 | Branch rename `b1-userspace-fat32` → `b1-userspace-rust`; first commit (v1 wipe + planning docs + skills) — commit `b5aeeee` | ✅ | ✅ APPROVED (doc-only, FHS path drift fixed in-place pre-merge) | ✅ git working tree clean post-commit |
-| 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ⏳ | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
+| 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ✅ APPROVED (charter coherence fixes applied in-place: 1.84→1.85 example, `teslafat/src/...` → `rust/crates/teslafat/src/...`, pre-commit `cd teslafat` → `cd rust`) | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
 | 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ⏳ | ⏳ | ⏳ |
 | 0.4 | `.github/workflows/ci.yml` mirroring charter §"CI Gates" | ⏳ | ⏳ | ⏳ |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ⏳ | ⏳ | ⏳ |
@@ -504,3 +504,50 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   Branch `b1-userspace-rust` will be 4 commits ahead of `main`
   after this commit lands; still local-only, not pushed to
   origin per operator preference.
+
+### 2026-05-19 (resumed, again) — Phase 0.2 review gate
+
+- **Increment 0.2 charter review — APPROVED with in-place fixes.**
+  First code-bearing increment, so the `charter-review` skill
+  applied formally. Pre-flight automated gates already green
+  from the implementation commit (`cargo build / clippy -D
+  warnings / fmt --check / test / doc` all 0). Manual pillar
+  walk found nothing blocking on the new code itself:
+  * Pillar 1 (code smells) — all 10 new source files ≤ 72
+    lines; only function is the placeholder `fn main()` whose
+    body is empty. No magic values, no nesting, no duplication,
+    no primitive obsession.
+  * Pillar 2 (architecture) — `teslausb-core/src/lib.rs` is
+    doc-only with zero imports; layering rule trivially holds.
+    Binary `main`s are entry points (Layer 4) so domain-core
+    rule does not bind.
+  * Pillar 3 (no shortcuts) — placeholder `fn main()` is
+    explicitly sanctioned by the plan note ("may need ...
+    placeholder main.rs so cargo build succeeds"); `cargo-deny`
+    permissive-license allow-list and `multiple-versions = warn`
+    each documented in `deny.toml` comments.
+  * Pillar 4 (fix bugs immediately) — see charter delta below.
+  * Pillar 5 (no dead code) — root `teslafat/` reclassified as
+    Phase 1 drafts via `teslafat/README.md` and slated for
+    `git rm` at end of Phase 1.7.
+- **Review surfaced four pre-existing charter inconsistencies**
+  (not introduced by 0.2, but made visible by the work). Fixed
+  in-place per the inc-0.1 review pattern, in a dedicated
+  `docs(b1): inc-0.2 review fixes — charter coherence` commit:
+  * Line 174 — toolchain example `1.84.0` → `1.85.0` (edition
+    2024 needs ≥ 1.85; 1.84.0 would fail to build).
+  * Lines 275-277 — coverage gate paths
+    `teslafat/src/{fs,nbd}/` → `rust/crates/teslafat/src/{fs,nbd}/`
+    (workspace moved in 0.2).
+  * Lines 543-544 — CI llvm-cov include patterns same path
+    update.
+  * Lines 595, 601 — pre-commit `cd teslafat` → `cd rust`
+    (workspace root for cargo commands moved).
+- **Tooling gaps noted for inc-0.6** (`setup-dev.sh`): `cargo
+  machete`, `cargo llvm-cov`, `cargo deny` not yet installed on
+  the dev box. Pre-flight skipped those gates with a "tool not
+  installed" note. Implementation deferred to 0.6 per plan;
+  charter rules already document the install in §"CI Gates".
+- **Branch state after review commit:** 5 commits ahead of
+  `main`, still local-only. Next session resumes inc-0.3
+  (Python skeleton + `pyproject.toml`).

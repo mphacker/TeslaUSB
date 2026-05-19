@@ -171,7 +171,8 @@ It bloats binaries. It confuses contributors. We delete it.
 ### Toolchain
 
 - Pinned in `rust-toolchain.toml` at a specific stable version
-  (e.g., `1.84.0`). Update deliberately, never auto-roll.
+  (e.g., `1.85.0` — first stable with edition 2024). Update
+  deliberately, never auto-roll.
 - `edition = "2024"` in Cargo.toml.
 
 ### Lints — `Cargo.toml` `[lints.rust]` and `[lints.clippy]`
@@ -271,8 +272,9 @@ Notes:
 - Every bug fix has a regression test.
 - Property-based tests (`proptest`) for parsers and
   serialisers (NBD framing, FAT/exFAT directory entries).
-- Coverage gate: ≥ 80% line coverage on `teslafat/src/fs/`
-  and `teslafat/src/nbd/` (the protocol-critical paths).
+- Coverage gate: ≥ 80% line coverage on
+  `rust/crates/teslafat/src/fs/` and
+  `rust/crates/teslafat/src/nbd/` (the protocol-critical paths).
   Reported by `cargo llvm-cov`.
 - Tests must be deterministic. No sleep-based timing.
 
@@ -538,8 +540,8 @@ For Rust changes:
 - cargo clippy --all-targets --all-features -- -D warnings
 - cargo test --all-targets --all-features
 - cargo llvm-cov --fail-under-lines 80 \
-      --include-files 'teslafat/src/fs/**' \
-      --include-files 'teslafat/src/nbd/**'
+      --include-files 'rust/crates/teslafat/src/fs/**' \
+      --include-files 'rust/crates/teslafat/src/nbd/**'
 - cargo deny check
 - cargo machete    # unused dependencies
 - cargo doc --no-deps --document-private-items
@@ -590,13 +592,13 @@ repos:
     hooks:
       - id: cargo-fmt
         name: cargo fmt
-        entry: bash -c 'cd teslafat && cargo fmt --check'
+        entry: bash -c 'cd rust && cargo fmt --check'
         language: system
         types: [rust]
         pass_filenames: false
       - id: cargo-clippy
         name: cargo clippy
-        entry: bash -c 'cd teslafat && cargo clippy --all-targets -- -D warnings'
+        entry: bash -c 'cd rust && cargo clippy --all-targets -- -D warnings'
         language: system
         types: [rust]
         pass_filenames: false

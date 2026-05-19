@@ -46,7 +46,7 @@ in a 🔍 REVIEW GATE + ✅ TEST GATE.
 | 1.2 | `teslausb-core::ipc::messages` types + serde tests | ✅ | ✅ APPROVED (impl `aa3f18c`; review-fix commit added ADR-0002 for the IPC vocabulary design — versioned envelope + internally-tagged enums + no `deny_unknown_fields` for forward-compat + `thiserror` at lib boundary — per charter §"ADRs" trigger criteria; 0 Major, 0 Minor post-fix — see session log) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 34 workspace tests passed, 0 failed (14 teslafat unit + 4 teslafat integration + 16 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4; `pre-commit run` 10/0/1 (yaml: no files in changeset) |
 | 1.3 | NBD newstyle handshake (port from existing draft) | ✅ | ✅ APPROVED (impl `2c1a56f`; review-fix commit added ADR-0003 covering both async runtime choice — tokio current-thread, minimal features — and `teslafat` lib+bin crate-shape change forced by `dead_code` discipline on the new `nbd::handshake` public surface; the draft's 3 `try_into().unwrap()` calls were replaced with bounds-checked fallible conversions, the 2 `as usize`/`as u32` casts were replaced with `try_from + Context`, all encode/parse helpers got `///` + `# Errors` docs, and the protocol was decomposed into pure encode/decode helpers + a generic-over-`AsyncRead + AsyncWrite + Unpin` async orchestrator so the wire format is unit-testable via `tokio::io::duplex`; LOC budget overrun acknowledged in plan row 1.3 — "~50 (mostly path move)" → ~600 actual due to charter-compliance work the draft predated; Phase 1.6 `tokio::time::timeout` follow-up TODO added in `nbd/mod.rs`; preemptive `teslausb-core` dep removed (will land in Phase 1.4 with the BlockBackend trait); 0 Major, 4 Minor (all actioned), 2 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.3.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 53 workspace tests passed, 0 failed (33 teslafat unit incl. 19 new `nbd::handshake` tests + 4 teslafat integration + 16 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 same skip baseline; `pre-commit run` all hooks pass after one auto-fix round for `end-of-file-fixer` + `mixed-line-ending` on the three new files |
 | 1.4 | `BlockBackend` trait + null impl + FUA contract test | ✅ | ✅ APPROVED (impl `8f98f43`; review-fix commit added ADR-0004 covering both the native `async fn in trait` decision — no `async-trait` crate dep, no `dyn BlockBackend`, generic-over-`<B: BlockBackend>` callers — and the `WriteFlags(u32)` newtype-vs-`bitflags!`-macro decision; the trait lives in `teslausb-core::backend` with `BackendError` (thiserror at lib boundary), `check_bounds` shared overflow-safe helper, and reference impls `NullBackend` + `MockBackend` in `pub mod mock`; FUA contract is captured by three named `fua_contract_*` tests using `MockBackend::observed_any_durability()` as the durability oracle; production code uses zero `unwrap`/`expect`/`panic` (mock module recovers poisoned mutexes via `lock().unwrap_or_else(PoisonError::into_inner)`); `pollster` 0.3 dev-dep added to drive `async fn` test bodies without pulling tokio into the domain-core crate; LOC budget overrun recorded — "~100" plan estimate vs ~620 actual due to charter compliance (`# Errors` docs, mock impls, FUA tests, `check_bounds` extraction); `teslafat → teslausb-core` dep still deferred to Phase 1.5 (correct per inc-1.3 review M4); 0 Major, 1 Minor (actioned), 3 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.4.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 77 workspace tests passed, 0 failed (33 teslafat unit + 4 teslafat integration + 40 teslausb-core unit incl. 24 new `backend` tests + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass on first attempt (no auto-fix round needed) |
-| 1.5 | NBD transmission loop + FUA fdatasync test | ⏳ | ⏳ | ⏳ |
+| 1.5 | NBD transmission loop + FUA fdatasync test | ✅ | ✅ APPROVED (impl `f36e913`; review-fix commit added ADR-0005 covering both transmission wire policies — oversized requests terminate the connection (no payload drain), and out-of-bounds WRITEs drain the payload before replying EINVAL so the stream stays aligned for subsequent requests; the transmission module exposes one `pub async fn run<B: BlockBackend, S>` orchestrator that dispatches READ/WRITE/FLUSH/TRIM/DISC plus an ENOTSUP fall-through, with the wire format split into a pure-helpers `nbd::wire` submodule (28-byte request header + 16-byte simple-reply header, all encode/decode round-trippable in `[u8; N]` arrays with hand-asserted spec byte offsets); FUA pass-through is verified end-to-end via `MockBackend::observed_any_durability()` — the same FUA contract oracle introduced in inc-1.4 — proving the NBD `NBD_CMD_FLAG_FUA` wire bit reaches the backend as `WriteFlags::FUA`; production code uses zero `unwrap`/`expect`/`panic` and zero `indexing_slicing` (the request-header read loop was refactored to use `split_at_mut` + `read_exact`); tests use `tokio::join!` on a single task rather than `tokio::spawn` because native AFIT futures from `BlockBackend` are not `Send` (the consequence ADR-0004 §A predicted); 1 test design bug caught and fixed during development — the original FUA-extraction test asserted `NBD_CMD_WRITE != NBD_CMD_FLAG_FUA` but both constants are numerically `1`, rewritten as two independent encode/decode tests using hand-rolled spec byte layouts and `NBD_CMD_TRIM = 4` as the unambiguous `kind` value to eliminate the false-pass risk for a symmetric encoder/decoder field-swap; `teslafat → teslausb-core` runtime dep finally lands (closing the inc-1.3 M4 deferral); LOC budget overrun recorded — "~200" plan estimate vs ~1453 actual due to charter-compliance work (spec-citation docstrings, wire-vs-orchestrator split, byte-layout assertions, full command-coverage tests, mutation-test mental model on every assertion); 0 Major, 1 Minor (actioned), 3 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.5.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 107 workspace tests passed, 0 failed (63 teslafat unit incl. 30 new in `nbd::transmission` + `nbd::wire` + 4 teslafat integration + 40 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass after one mixed-line-ending auto-fix on `nbd/wire.rs` |
 | 1.6 | `teslafat@.service` systemd unit | ⏳ | ⏳ | ⏳ |
 | 1.7 | Dev-box smoke test harness | ⏳ | ⏳ | ⏳ |
 
@@ -1366,3 +1366,129 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   Plan estimate ~150 LOC; expect ~700 LOC after charter
   compliance + FUA pass-through tests using `MockBackend` as
   the in-memory backend fixture.
+
+
+### 2026-05-19 (resumed, eleventh time) -- Phase 1.5 implementation + review gate
+
+- **Phase 1.5 implementation** (commit `f36e913`): added
+  `rust/crates/teslafat/src/nbd/wire.rs` (395 LOC + 11 tests)
+  and `rust/crates/teslafat/src/nbd/transmission.rs` (1040 LOC
+  + 19 tests). Wire module: pure constants and encode/decode
+  for the 28-byte NBD request header and 16-byte simple-reply
+  header, with the `NBD_CMD_FLAG_FUA = 1 << 0` bit pattern
+  pinned to `WriteFlags::FUA` via a load-bearing equality test
+  (a wrong value here would break FUA pass-through silently).
+  Transmission module: `pub async fn run<B: BlockBackend, S>`
+  dispatching READ / WRITE / FLUSH / TRIM, with `NBD_ENOTSUP`
+  for unknown commands, `NBD_EOVERFLOW` + bail for oversized
+  requests, `NBD_EINVAL` for OOB writes (after draining the
+  WRITE payload so the wire stays aligned), and silent
+  termination on DISC per NBD spec. `teslafat -> teslausb-core`
+  runtime dep wired (closing the inc-1.3 M4 deferral and the
+  inc-1.4 carry-forward). 6 files changed, +1453/-13.
+- **Test architecture:** native AFIT futures returned from
+  `BlockBackend` methods are not `Send` (as ADR-0004 sec A
+  predicted) so tests drive the server and client futures on
+  a single task via `tokio::join!` rather than `tokio::spawn`.
+  A small `drive()` helper centralises the pattern; all 19
+  transmission tests inherit the same single-task driver,
+  matching the production current-thread runtime architecture.
+  The first attempt used `read_to_end` to verify "DISC
+  produces no reply bytes" and deadlocked against join!'s
+  held futures (the completed server future cannot drop its
+  half of the `DuplexStream` until the join completes); the
+  rewrite uses a FLUSH-then-DISC sequence with a precise
+  16-byte `read_exact` to verify the silence property without
+  depending on EOF.
+- **Test defect caught and fixed:** the original FUA-field-
+  extraction test asserted `assert_ne!(decoded.kind,
+  NBD_CMD_FLAG_FUA)` to prove `kind` was not placed in the
+  flags slot — but `NBD_CMD_WRITE = 1` numerically equals
+  `NBD_CMD_FLAG_FUA = 1 << 0 = 1`, so the assertion fired
+  during the workspace test run (with the round-trip test
+  feeding `kind = NBD_CMD_WRITE`). Rewrote as two
+  independent tests using hand-rolled spec byte layouts: one
+  hand-constructs the 28-byte buffer with `FUA` at bytes
+  `[4..6]` and `NBD_CMD_TRIM = 4` at bytes `[6..8]`, then
+  decodes and asserts both fields land where the spec says;
+  the other encodes a known header and hand-asserts the
+  encoded bytes at the spec offsets. Picking `NBD_CMD_TRIM`
+  (numerically `4`, distinct from any flag bit) eliminates
+  the false-pass risk for a symmetric encoder/decoder
+  field-swap bug. This was exactly the "tests that always
+  pass are not useful" failure mode the user flagged earlier
+  in the session — caught by gates not by inspection.
+- **Test discipline:** 30 new tests, total workspace 77 -> 107
+  (+30). 19 transmission tests cover every command path
+  (READ / WRITE / FLUSH / TRIM / DISC / unknown), every wire
+  error (oversized, OOB, bad magic, short read, clean EOF
+  between commands), the FUA pass-through into `WriteFlags`,
+  the handle-echo invariant, pipelining order, and zero-length
+  edge cases for READ and WRITE. 11 wire tests verify byte
+  layouts including hand-asserted spec offsets for FUA, magic
+  values, round-trip, and handle-only-affects-handle-slot
+  isolation. Mutation-test mental model held: for each named
+  test at least one of (`+` -> `-`, swap struct fields,
+  off-by-one a length, swap enum arms) would flip the
+  assertion.
+- **Iteration:** seven clippy errors and one rustdoc error
+  caught and fixed before commit: `expect_used` x 3 (added
+  test mod allow list `#[allow(clippy::unwrap_used,
+  clippy::expect_used, clippy::indexing_slicing)]`),
+  `doc_markdown` x 1 (`ORed` -> `` `ORed` ``),
+  `single_match_else` x 1 (rewrote `match Some/None` as
+  `let Some(...) = ... else { ... }`), `indexing_slicing`
+  x 1 (refactored the request-header read loop in
+  `read_request_header` to use `buf.split_at_mut(1)` +
+  `read_exact` for the remaining bytes -- also simplifies
+  the EOF discrimination between "between-commands clean
+  close" and "mid-header torn read"), `match_same_arms` x 1
+  (collapsed the two `NBD_EINVAL` arms in `map_backend_err`
+  into a single `|`-pattern arm), and
+  `private_intra_doc_links` x 1 (a module-level doc
+  reference to a private fn `map_backend_err` rewritten as
+  prose). After fixes: zero clippy warnings, zero rustdoc
+  warnings, zero suppressions in production code, mod-level
+  allows on the test mods only (consistent with
+  `nbd::handshake::tests`).
+- **Charter review** (`~/.copilot/.../files/charter-review-inc-1.5.md`):
+  0 Major, 1 Minor, 3 Nits.
+  - **Minor 1:** ADR-0005 needed. Two non-obvious wire policies
+    each meet >= 1 charter ADR trigger criterion: §A oversized
+    requests terminate the connection (criteria 4 forward-compat
+    + 5 non-obvious vs the "polite drain" alternative), §B OOB
+    WRITE drains payload before rejecting (criterion 4 — the
+    wire alignment invariant is load-bearing for connection
+    correctness, and a future contributor "optimising" by
+    rejecting before draining would silently desync every
+    subsequent request). Co-located in one ADR per the
+    ADR-0003 / 0004 template of grouping related wire/protocol
+    choices.
+  - **Nit 1:** ADR-0004 sec A "Consequences" could append a
+    paragraph cross-referencing the `drive()` helper as the
+    canonical "AFIT futures aren't Send, use `tokio::join!`
+    not `tokio::spawn`" pattern for Phase 1.6+ backend impl
+    tests to copy.
+  - **Nit 2:** `refuse_oversized` could explicit `flush().await`
+    before `bail!` to future-proof against a buffered wrapper
+    (e.g. `tokio::io::BufWriter`); observable behaviour today
+    is correct on `DuplexStream` and `UnixStream`, but the
+    intent is worth documenting.
+  - **Nit 3:** `handle_write` allocates a fresh `Vec<u8>` per
+    request (up to 32 MiB). Candidate for a per-connection
+    scratch buffer in Phase 1.6+ once we have a Pi Zero 2 W
+    RSS budget; NBD is sequential-per-connection by spec so
+    reuse is safe.
+- Review-fix commit (this entry): "docs(b1): inc-1.5 review
+  fixes - add ADR-0005 + PROGRESS APPROVED + plan LOC note".
+  Branch `b1-userspace-rust` reaches 21 commits ahead of
+  `main` after the review-fix commit.
+- **Next:** Phase 1.6 -- systemd unit `teslafat@.service`
+  (instanced for LUN 0 / LUN 1), `EnvironmentFile=/etc/teslausb/teslafat.toml`,
+  `User=teslausb`, capability bounding. Plan estimate ~50 LOC;
+  expect ~150-300 LOC after charter compliance. This is also
+  where the deferred handshake timeout (`tokio::time::timeout`
+  from the inc-1.3 `nbd/mod.rs` TODO) lands, which means
+  adding the `time` feature to tokio in `teslafat/Cargo.toml`
+  -- which incidentally would give future tests a hard-cap
+  safety net for the AFIT/join! pattern.

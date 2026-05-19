@@ -17,7 +17,7 @@ on empty crates + `pytest` returning 0 tests OK).
 | 0.1 | Branch rename `b1-userspace-fat32` → `b1-userspace-rust`; first commit (v1 wipe + planning docs + skills) — commit `b5aeeee` | ✅ | ✅ APPROVED (doc-only, FHS path drift fixed in-place pre-merge) | ✅ git working tree clean post-commit |
 | 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ✅ APPROVED (charter coherence fixes applied in-place: 1.84→1.85 example, `teslafat/src/...` → `rust/crates/teslafat/src/...`, pre-commit `cd teslafat` → `cd rust`) | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
 | 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ✅ APPROVED (6 charter coherence fixes applied in-place: 4 `web/` → `web/teslausb_web/` path drifts in CI gate + dead-code-detection blocks, `--cov=web` → `--cov=teslausb_web` module-name, `mypy web/` → bare `mypy` from `web/` cwd; plus added `from __future__ import annotations` to 5 docstring-only Python modules per charter Python deep-dive rule) | ✅ `ruff check / ruff format --check / mypy --strict / pytest --cov=teslausb_web --cov-fail-under=80 (100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
-| 0.4 | `.github/workflows/ci.yml` mirroring charter §"CI Gates" | ⏳ | ⏳ | ⏳ |
+| 0.4 | `scripts/check.sh` local gate runner with every gate from charter §"CI Gates" (operator-driven, NOT GitHub Actions — cloud CI deferred indefinitely per operator preference 2026-05-19; full hardware testing is H-phase territory anyway) | ✅ | ⏳ | ✅ 12 PASS / 0 FAIL / 4 SKIP (cargo-llvm-cov, cargo-deny, cargo-machete, lychee — optional, install in Phase 0.6) on Windows dev box via Git Bash; exit 0 |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ⏳ | ⏳ | ⏳ |
 | 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ⏳ | ⏳ | ⏳ |
 | 0.7 | `CODEOWNERS` + PR template referencing the charter checklist | ⏳ | ⏳ | ⏳ |
@@ -658,3 +658,70 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   workflow mirroring charter §"CI Gates"). Charter coherence
   pattern continues: any deltas surfaced by 0.4 will be fixed in
   lockstep, exactly as 0.2 and 0.3 have been.
+
+
+### 2026-05-19 (resumed, again) — Phase 0.4 local gate runner
+
+- **Operator pivot mid-flight:** original inc-0.4 spec was
+  `.github/workflows/ci.yml` (GitHub Actions). User instructed
+  *"prefer to not rely on github actions for now"*. Combined with
+  the broader rule *"there is limited testing that can be done on
+  PCs or cloud devices. We can only really do full testing on the
+  PI"* — captured as a durable memory.
+- Pivoted inc-0.4 to `scripts/check.sh` — a single local gate
+  runner that mirrors charter §"CI Gates" verbatim. Operator runs
+  `./scripts/check.sh` before each commit; same enforcement model
+  as the would-be GitHub Actions workflow but without the cloud
+  dependency.
+- Updated `docs/00-PLAN.md` row 0.4 + the Phase 0 test-gate
+  paragraph to reflect the pivot. Cloud CI is now intentionally NOT
+  a Phase 0 deliverable; the row carries the rationale so future
+  contributors don't re-litigate.
+- `scripts/check.sh` design (282 LOC, exec bit set):
+  * One script, three gate suites: `--rust`, `--python`,
+    `--hygiene` (default: all three, fail-fast on first red).
+  * `--all` runs every gate and reports at end (continue-on-error).
+  * Required tools (script aborts if missing): `cargo`,
+    `rustup`, `python`. Optional tools (cleanly skipped with
+    WARN): `cargo-llvm-cov`, `cargo-deny`, `cargo-machete`,
+    `lychee`.
+  * Python venv auto-discovery: `\` env var override →
+    out-of-tree `../.teslausb-tools-venv/` (Linux/Windows layout) →
+    bare `python3`/`python`. Per the AI workspace rule the venv
+    NEVER lives inside the repo.
+  * ASCII output throughout (no Unicode box-drawing chars) so
+    Windows `cmd.exe` / Git Bash consoles render cleanly without
+    mojibake. Color via `tput` only when stdout is a TTY.
+  * Hygiene checks use `git ls-files` (NOT `find`) so local
+    untracked build artifacts (`rust/target/`, `web/.ruff_cache/`,
+    `web/teslausb_web/__pycache__/` from a fresh pytest run) don't
+    falsely trigger the "no forbidden artifacts" gate. Charter rule
+    is about COMMITTED artifacts, not on-disk noise.
+  * Gates that must pass: 13 — 7 Rust (fmt, clippy, test, llvm-cov,
+    deny, machete, doc), 6 Python (ruff check, ruff format, mypy,
+    pytest+cov, vulture, bandit). Hygiene adds 3 (large files,
+    forbidden artifacts, markdown links).
+- **Two bugs found and fixed by my own first dry-run before commit:**
+  1. Hygiene initially used `find` and found `__pycache__`
+     directories that pytest had just created — fixed by switching
+     to `git ls-files`.
+  2. Initial output used Unicode chars (━, ✓, ✗, ⊘) that mojibake
+     on Windows cmd.exe — switched to ASCII (`=====`, `[PASS]`,
+     `[FAIL]`, `[SKIP]`).
+- **Verified end-to-end on Windows dev box via Git Bash:**
+  `./scripts/check.sh --all` reports **12 PASS / 0 FAIL / 4
+  SKIP** (optional tools), exit code **0**. The 4 skipped tools
+  install via `scripts/setup-dev.sh` (Phase 0.6); the Pi will
+  have them all post-H0/H1 deploy.
+- Commit `<TBD>` "chore(b1): inc-0.4 local gate runner at
+  scripts/check.sh (cloud CI deferred)" — 2 files (+291/-4).
+  Branch `b1-userspace-rust` now 7 commits ahead of `main`.
+- Next step: formal charter-review per
+  `.github/skills/charter-review/SKILL.md`. Expected charter
+  coherence finds (same pattern as 0.2 / 0.3):
+  * Charter §"CI Gates" still uses YAML / PR / "merge" language
+    that assumes a hosted CI system. Need to reframe as "every
+    gate runs locally via `scripts/check.sh` before commit; same
+    'red blocks' rule, different enforcement venue".
+  * Charter §"Pre-commit Hooks" (L573-617) still references
+    pre-commit framework — that's correct for inc-0.5; no change.

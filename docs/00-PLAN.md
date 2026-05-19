@@ -471,15 +471,20 @@ test gate. No hardware work yet.
 | 0.1 | Branch rename `b1-userspace-fat32` → `b1-userspace-rust`; first commit (wipe + docs) | n/a |
 | 0.2 | Cargo workspace skeleton at `rust/` with `[lints]` blocks per charter; empty crates `teslausb-core`, `teslafat`, `teslausb-worker`; `rust-toolchain.toml`; `deny.toml` | ~150 |
 | 0.3 | Python skeleton at `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest config per charter); empty `__init__.py` per module | ~200 |
-| 0.4 | `.github/workflows/ci.yml` with the gates from charter §"CI Gates" | ~200 |
+| 0.4 | `scripts/check.sh` local gate runner with every gate from charter §"CI Gates" (Rust + Python + hygiene + markdown links). NOT a GitHub Actions workflow — operator-driven, runs on demand pre-commit. Cloud CI deferred indefinitely; hardware testing is H-phase territory anyway. | ~250 |
 | 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ~80 |
 | 0.6 | `setup-dev.sh` (installs Rust + Python + tools on a dev box; idempotent) | ~150 |
 | 0.7 | `CODEOWNERS` + PR template referencing the charter checklist | ~50 |
 | 0.8 | ADRs 0001 – 0011 written | ~50 LOC each |
 
-**🔍 REVIEW GATE after each increment.** **✅ TEST GATE:** CI
-yellow→green; `pre-commit run --all-files` green; `cargo build`
-green (empty crates compile); `pytest` green (0 tests OK).
+**🔍 REVIEW GATE after each increment.** **✅ TEST GATE:**
+`scripts/check.sh` green (every charter gate passes locally);
+`pre-commit run --all-files` green; `cargo build` green (empty
+crates compile); `pytest` green (0 tests OK). Cloud CI is
+intentionally NOT a Phase 0 deliverable — the operator runs
+`scripts/check.sh` before each commit. Cloud / GitHub-Actions
+enforcement is deferred indefinitely; full integration testing
+requires real hardware and is owned by the H-phases.
 
 ### Phase H0 — Decommission v1 from `cybertruckusb.local`
 

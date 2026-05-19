@@ -18,7 +18,7 @@ on empty crates + `pytest` returning 0 tests OK).
 | 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ✅ APPROVED (charter coherence fixes applied in-place: 1.84→1.85 example, `teslafat/src/...` → `rust/crates/teslafat/src/...`, pre-commit `cd teslafat` → `cd rust`) | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
 | 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ✅ APPROVED (6 charter coherence fixes applied in-place: 4 `web/` → `web/teslausb_web/` path drifts in CI gate + dead-code-detection blocks, `--cov=web` → `--cov=teslausb_web` module-name, `mypy web/` → bare `mypy` from `web/` cwd; plus added `from __future__ import annotations` to 5 docstring-only Python modules per charter Python deep-dive rule) | ✅ `ruff check / ruff format --check / mypy --strict / pytest --cov=teslausb_web --cov-fail-under=80 (100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
 | 0.4 | `scripts/check.sh` local gate runner with every gate from charter §"CI Gates" (operator-driven, NOT GitHub Actions — cloud CI deferred indefinitely per operator preference 2026-05-19; full hardware testing is H-phase territory anyway) | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"CI Gates" reframed from "hosted CI / PR" enforcement model to venue-neutral with explicit pointer to `scripts/check.sh`; hygiene wording updated `git diff` → `git ls-files` to match script behavior; 1 Nit accepted: magic `1048576` for 1 MiB is documented inline with charter line citation) | ✅ 12 PASS / 0 FAIL / 4 SKIP (cargo-llvm-cov, cargo-deny, cargo-machete, lychee — optional, install in Phase 0.6) on Windows dev box via Git Bash; exit 0 |
-| 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally via single-source delegation to `scripts/check.sh` (per operator preference 2026-05-19); upstream `pre-commit/pre-commit-hooks@v6.0.0` retained ONLY for cheap whitespace/EOF/yaml/TOML fixes | ✅ | ⏳ | ✅ `pre-commit run --all-files` 11 PASS / 0 FAIL / 1 SKIP (yaml — only file is the config itself), exit 0 on Windows dev box; `scripts/check.sh --all` still 12 PASS / 0 FAIL / 4 SKIP exit 0; defensive re-run after `.gitattributes` extension also clean |
+| 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally via single-source delegation to `scripts/check.sh` (per operator preference 2026-05-19); upstream `pre-commit/pre-commit-hooks@v6.0.0` retained ONLY for cheap whitespace/EOF/yaml/TOML fixes | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"Pre-commit Hooks" L593-637 rewritten from the OLD mixed model — per-tool ruff/mypy/cargo upstream + local hooks — to the actual single-source design; upstream rev bumped `v4.6.0` → `v6.0.0` to silence deprecated-stage-names warnings; operator setup commands added) | ✅ `pre-commit run --all-files` 11 PASS / 0 FAIL / 0 SKIP exit 0; `./scripts/check.sh --all` 12 PASS / 0 FAIL / 4 SKIP exit 0; defensive re-run after charter fix also clean |
 | 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ⏳ | ⏳ | ⏳ |
 | 0.7 | `CODEOWNERS` + PR template referencing the charter checklist | ⏳ | ⏳ | ⏳ |
 | 0.8 | ADRs 0001 – 0011 written (`docs/adr/`) | ⏳ | ⏳ | ⏳ |
@@ -822,3 +822,53 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
      commit Hooks" in the inc-0.5 review fix-up commit to match.
   2. `.pre-commit-config.yaml` ~60 LOC — well under any reasonable
      budget; no expected pillar finds.
+
+
+### 2026-05-19 (resumed, fourth time) — Phase 0.5 review gate
+
+- Followed `.github/skills/charter-review/SKILL.md` against commit
+  `bde82e3`. Report at
+  `~/.copilot/session-state/3583f429-4245-4837-9c1c-5c1583cbb31d/files/charter-review-inc-0.5.md`.
+- **Pre-flight gates:** `pre-commit run --all-files` 11 PASS / 0 FAIL
+  / 0 SKIP exit 0; `./scripts/check.sh --all` 12 PASS / 0 FAIL /
+  4 SKIP exit 0. YAML syntax + `pre-commit validate-config` both
+  exit 0.
+- **Pillar walk:** all 5 pillars clean on the 61-LOC YAML config +
+  `.gitattributes` extension + `web/pyproject.toml` one-liner.
+  Declarative config, DRY satisfied via delegation, every hook is
+  wired and documented.
+- **Findings: 0 Blocker, 1 Major (anticipated in the inc-0.5 commit
+  message), 0 Minor, 0 Nit.**
+  - **Major:** Charter §"Pre-commit Hooks" L593-637 prescribed the
+    OLD mixed model -- per-tool `astral-sh/ruff-pre-commit@v0.6.0` +
+    `pre-commit/mirrors-mypy@v1.11.0` + local cargo fmt/clippy +
+    `pre-commit/pre-commit-hooks@v4.6.0`. Five duplicated gate
+    definitions; charter changes would need two updates. Now
+    incoherent with the single-source design. Fixed in-place by:
+    1. Rewriting the example block to show the 3-local-hook
+       delegation pattern with `files:` regexes.
+    2. Bumping upstream pin `v4.6.0` -> `v6.0.0` (silences the
+       deprecated-stage-names warning).
+    3. Stating explicitly that per-tool upstream hooks are
+       DELIBERATELY not used (would duplicate gate definitions;
+       conflicts with the 2026-05-19 operator preference).
+    4. Adding operator install commands
+       (`pip install -e web/[dev]` + `pre-commit install` +
+       `pre-commit run --all-files`).
+    5. Noting `pre-commit>=3.7` is now in
+       `web/pyproject.toml` dev extras.
+- **Defensive re-run** after the charter fix: `pre-commit run
+  --all-files` 11/0/0 exit 0 again. Only the charter diff is
+  staged (86 lines). One transient mixed-line-ending hit on
+  `docs/01-PROGRESS.md` from a PowerShell `Add-Content` (writes
+  CRLF by default) — auto-fixed on the next run; future progress
+  appends should use `[System.IO.File]::AppendAllText` with
+  explicit LF or rely on git's stage-time normalization.
+- Commit `<TBD>` "docs(b1): inc-0.5 review fixes - charter
+  Pre-commit Hooks rewritten for single-source delegation" — 1 file
+  changed (+54/-32). Branch `b1-userspace-rust` will be 10
+  commits ahead of `main`.
+- **Deferred to Phase 0.8:** formal ADR
+  `docs/adr/NNNN-single-source-gate-runner.md` capturing the
+  single-source design decision (pairs with the deferred
+  `defer-cloud-ci.md` ADR from inc-0.4 review).

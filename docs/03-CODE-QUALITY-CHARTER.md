@@ -592,51 +592,73 @@ and prints a summary) or `./scripts/check.sh` (fail-fast).
 
 ## Pre-commit Hooks (`.pre-commit-config.yaml`)
 
-Local enforcement so issues are caught before push:
+Local enforcement so issues are caught before commit. Phase 0.5
+delegates all Rust / Python / hygiene gates to `scripts/check.sh`
+so there is a SINGLE source of truth for the gate definitions
+(the script). The canonical config lives at the repo root in
+`.pre-commit-config.yaml`. Shape:
 
 ```yaml
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.0
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [types-PyYAML, types-requests]
-
-  - repo: local
-    hooks:
-      - id: cargo-fmt
-        name: cargo fmt
-        entry: bash -c 'cd rust && cargo fmt --check'
-        language: system
-        types: [rust]
-        pass_filenames: false
-      - id: cargo-clippy
-        name: cargo clippy
-        entry: bash -c 'cd rust && cargo clippy --all-targets -- -D warnings'
-        language: system
-        types: [rust]
-        pass_filenames: false
-
+  # Cheap formatting / safety fixes that have no equivalent in
+  # scripts/check.sh. One-time clone; cached thereafter.
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: '\.md$'  # markdown trailing spaces are intentional line breaks
       - id: end-of-file-fixer
       - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
       - id: check-added-large-files
-        args: [--maxkb=1024]
+        args: [--maxkb=1024]  # 1 MiB cap, same as CI Gates hygiene rule
       - id: detect-private-key
       - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # Heavy gates: delegate to scripts/check.sh so the gate definitions
+  # are NOT duplicated between YAML and the script.
+  - repo: local
+    hooks:
+      - id: scripts-check-hygiene
+        name: scripts/check.sh --hygiene
+        entry: ./scripts/check.sh --hygiene
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: scripts-check-rust
+        name: scripts/check.sh --rust
+        entry: ./scripts/check.sh --rust
+        language: system
+        pass_filenames: false
+        files: '\.rs$|^rust/.*Cargo\.(toml|lock)$|^rust/rust-toolchain\.toml$'
+      - id: scripts-check-python
+        name: scripts/check.sh --python
+        entry: ./scripts/check.sh --python
+        language: system
+        pass_filenames: false
+        files: '\.py$|^web/pyproject\.toml$'
 ```
 
-Installed by `setup-dev.sh` (see Phase 0).
+Per-tool upstream hooks (`astral-sh/ruff-pre-commit`,
+`pre-commit/mirrors-mypy`) are deliberately NOT used — they would
+duplicate the gate definitions already in `scripts/check.sh`, and
+the local-hook delegation matches the 2026-05-19 operator
+preference against cloud-CI / external-clone dependencies.
+`pre-commit/pre-commit-hooks` is the only upstream repo, retained
+for cheap whitespace/EOF/yaml/TOML fixes that have no equivalent
+in the script.
+
+Installed by `setup-dev.sh` (see Phase 0); `pre-commit>=3.7` is
+declared as a dev dep in `web/pyproject.toml` so
+`pip install -e web/[dev]` brings it in. Operator setup:
+
+```bash
+pip install -e web/[dev]   # or just: pip install pre-commit
+pre-commit install         # registers .git/hooks/pre-commit
+pre-commit run --all-files # verify all hooks pass on the tree
+```
 
 ---
 

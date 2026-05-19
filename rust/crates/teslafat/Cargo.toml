@@ -14,3 +14,36 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+# Error handling at the binary boundary. `anyhow::Context` lets us
+# attach the offending config path to I/O / parse errors so the
+# tracing `error!` line names the file the operator should look at.
+# Library types in `teslausb-core` (Phase 1.2+) will use `thiserror`
+# so callers see typed errors; `anyhow` stays scoped to the binary.
+anyhow = "1.0"
+
+# CLI argument parsing. `derive` feature keeps the `Args` struct in
+# one declarative place.
+clap = { version = "4.5", features = ["derive"] }
+
+# Config file format. The pre-B-1 draft at `teslafat/` used YAML; the
+# rewrite standardises on TOML so config and `Cargo.toml` share one
+# syntax and the validator can rely on TOML's typed integer/string
+# distinctions (no YAML stringly-typed scalar guesswork).
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# Structured logging — JSON to stderr so journald captures every
+# field as a structured key. Level via `RUST_LOG` per charter
+# `tracing` discipline; default is `info` when unset.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+[dev-dependencies]
+# Integration test runs the compiled binary against a fixture TOML
+# and greps stderr for the "started" sentinel line that Phase 1.1
+# promises.
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile = "3.10"

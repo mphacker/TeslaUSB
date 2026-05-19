@@ -12,8 +12,8 @@ directory shrinks to nothing by the end of Phase 1.
 
 | Draft file                      | Ported by  | Notes                                                |
 |---------------------------------|------------|------------------------------------------------------|
-| `src/main.rs`                   | Phase 1.1  | Clap CLI, tracing init, config loader, NBD bootstrap |
-| `src/config.rs`                 | Phase 1.1  | TOML config loader (drafts use YAML; will switch)    |
+| ~~`src/main.rs`~~ (deleted)     | Phase 1.1  | Ported in commit landing inc-1.1; stripped to bootstrap (CLI + tracing + TOML config + sentinel). NBD/IPC wiring deferred to 1.3/1.5. |
+| ~~`src/config.rs`~~ (deleted)   | Phase 1.1  | Ported in commit landing inc-1.1; schema preserved, YAML → TOML, validation reused. |
 | `src/nbd/mod.rs`                | Phase 1.5  | Per-connection serve loop + dispatch                 |
 | `src/nbd/handshake.rs`          | Phase 1.3  | NBD newstyle handshake (1:1 port, add round-trip test) |
 | `Cargo.toml`                    | n/a        | Superseded by `rust/crates/teslafat/Cargo.toml`      |

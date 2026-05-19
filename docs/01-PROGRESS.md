@@ -117,7 +117,7 @@ session-state as `h1-journal.log`.
 | 2.3 | `fs::fat32::fsinfo::synthesize` | ✅ | ✅ | ✅ |
 | 2.4 | `fs::fat32::fat_table::synthesize` | ✅ | ✅ | ✅ |
 | 2.5 | `fs::fat32::directory::synthesize` (8.3 + LFN) | ✅ | ✅ | ✅ |
-| 2.6 | `fs::fat32::synth::read` dispatcher | ⏳ | ⏳ | ⏳ |
+| 2.6 | `fs::fat32::synth::read` dispatcher | ✅ | ✅ | ✅ |
 | 2.7 | `fs::fat32` integration test (synth+mount+cmp) | ⏳ | ⏳ | ⏳ |
 | 2.8 | `fs::exfat::geometry` + boot region | ⏳ | ⏳ | ⏳ |
 | 2.9 | `fs::exfat::allocation_bitmap` + `upcase_table` | ⏳ | ⏳ | ⏳ |

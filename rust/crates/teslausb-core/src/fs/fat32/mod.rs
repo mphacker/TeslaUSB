@@ -13,9 +13,10 @@
 //! [`fsinfo::synthesize`]; Phase 2.4 added
 //! [`fat_table::FatTable`]; Phase 2.5 added
 //! [`directory::synthesize_sfn_entry`] +
-//! [`directory::synthesize_lfn_sequence`]. Subsequent increments
-//! fill in the remaining modules listed in `docs/00-PLAN.md`
-//! §Phase 2.
+//! [`directory::synthesize_lfn_sequence`]; Phase 2.6 added
+//! [`synth::Fat32Synth`] which dispatches byte-offset reads
+//! across all the above. Subsequent increments add directory-tree
+//! layout (Phase 2.7+).
 //!
 //! ## Spec reference
 //!
@@ -28,3 +29,4 @@ pub mod directory;
 pub mod fat_table;
 pub mod fsinfo;
 pub mod geometry;
+pub mod synth;

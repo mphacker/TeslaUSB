@@ -14,13 +14,13 @@
 //!   `GeometryError`. Pure data; no I/O.
 //! * [`fat32`] — Microsoft FAT32 implementation. Ships
 //!   `fat32::geometry::Fat32Geometry` (Phase 2.1),
-//!   `fat32::boot_sector::synthesize` (Phase 2.2), and
-//!   `fat32::fsinfo::synthesize` (Phase 2.3). Later increments
-//!   add the FAT table, directory, and dispatcher modules.
+//!   `fat32::boot_sector::synthesize` (Phase 2.2),
+//!   `fat32::fsinfo::synthesize` (Phase 2.3), and
+//!   `fat32::fat_table::FatTable` (Phase 2.4). Later increments
+//!   add the directory and dispatcher modules.
 //!
 //! ## Planned additions
 //!
-//! * Phase 2.4 — `fat32::fat_table::synthesize`.
 //! * Phase 2.5 — `fat32::directory::synthesize` (8.3 + LFN).
 //! * Phase 2.6 — `fat32::synth::read` dispatcher.
 //! * Phase 2.8+ — `exfat::*` parallel modules.

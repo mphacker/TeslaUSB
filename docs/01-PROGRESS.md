@@ -43,7 +43,7 @@ in a 🔍 REVIEW GATE + ✅ TEST GATE.
 | Inc | Deliverable | Status | Review | Test |
 |---|---|---|---|---|
 | 1.1 | `teslafat::main` CLI + tracing + TOML loader | ✅ | ✅ APPROVED (impl `994fd65`; review-fix commit added ADR-0001 for YAML→TOML decision per charter §"ADRs" trigger criteria + removed preemptive `module_name_repetitions` allow after verifying lint doesn't fire on exact-match `config::Config`; 0 Major, 0 Minor post-fix — see session log) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 14 unit + 4 integration = 18 passed, 0 failed; `scripts/check.sh --all` 12/0/4; `pre-commit run` 9/0/2 (yaml+python: no files in changeset) |
-| 1.2 | `teslausb-core::ipc::messages` types + serde tests | ⏳ | ⏳ | ⏳ |
+| 1.2 | `teslausb-core::ipc::messages` types + serde tests | ✅ | ✅ APPROVED (impl `aa3f18c`; review-fix commit added ADR-0002 for the IPC vocabulary design — versioned envelope + internally-tagged enums + no `deny_unknown_fields` for forward-compat + `thiserror` at lib boundary — per charter §"ADRs" trigger criteria; 0 Major, 0 Minor post-fix — see session log) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 34 workspace tests passed, 0 failed (14 teslafat unit + 4 teslafat integration + 16 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4; `pre-commit run` 10/0/1 (yaml: no files in changeset) |
 | 1.3 | NBD newstyle handshake (port from existing draft) | ⏳ | ⏳ | ⏳ |
 | 1.4 | `BlockBackend` trait + null impl + FUA contract test | ⏳ | ⏳ | ⏳ |
 | 1.5 | NBD transmission loop + FUA fdatasync test | ⏳ | ⏳ | ⏳ |
@@ -1070,3 +1070,92 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   `INVALIDATE_CACHE` request+response) with `serde_test`
   round-trip tests. ~150 LOC ceiling. `IpcConfig` returns to
   `teslafat/src/config.rs` in that increment.
+
+### 2026-05-19 (resumed, eighth time) -- Phase 1.2 implementation + review gate
+
+- **Phase 1.2 implementation** (commit `aa3f18c`): added the IPC
+  vocabulary in `rust/crates/teslausb-core/src/ipc/messages.rs`:
+  versioned `Envelope<T>` with `const fn new` + `validate`
+  returning `IpcError::UnsupportedVersion` (thiserror at lib
+  boundary per charter §"Rust standards"); `Request` enum
+  (`Status`, `RetentionUpdate { updates }`, `InvalidateCache`);
+  `Response` enum (`Status(StatusBody)`, `RetentionAck { applied,
+  failed }`, `InvalidateAck`, `Error(ErrorBody)`); `DaemonState`
+  / `RetentionAction` / `ErrorCode` enums; `StatusBody` /
+  `RetentionUpdate` / `RetentionFailure` / `ErrorBody` leaf
+  structs. Internally tagged via `#[serde(tag = "type", rename_all =
+  "SCREAMING_SNAKE_CASE")]`. Deliberately NO `deny_unknown_fields`
+  on wire types (forward-compat; opposite choice from inc-1.1's
+  config which IS strict). 5 files changed, +591/-5.
+- **Scope deliberately stripped:** wire format (JSON vs MessagePack
+  vs length-prefixed) deferred to Phase 1.5+ transport layer; no
+  encoder dep (`serde_json` is dev-only). `IpcConfig` deliberately
+  NOT reintroduced into `teslafat/src/config.rs` -- still no
+  consumer in this increment; bringing it back would recreate the
+  same dead-code lint that triggered its removal in inc-1.1.
+  Returns when the socket-binding code lands (Phase 1.5+).
+- **Test discipline:** 16 unit tests in `messages.rs` covering
+  `serde_test::assert_tokens` round-trips for `StatusBody` and
+  `RetentionUpdate`; `serde_json` end-to-end round-trips for
+  every `Response` variant; full `Envelope<Request>` E2E via
+  JSON; forward-compat (unknown future field silently ignored);
+  defensive (unknown enum variant tag rejected). Workspace total
+  now 34/0/0 (14 teslafat unit + 4 teslafat integration + 16
+  teslausb-core unit + 0 teslausb-worker).
+- **Phase 1.2 review gate** (this commit): followed
+  `.github/skills/charter-review/SKILL.md` against `aa3f18c`.
+  Report at
+  `~/.copilot/session-state/3583f429-4245-4837-9c1c-5c1583cbb31d/files/charter-review-inc-1.2.md`.
+- **Pre-flight gates (re-verified post-fix):** `cargo build` ok,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  ok, `cargo test` 34/0/0, `cargo fmt --check` ok,
+  `RUSTDOCFLAGS=-D warnings cargo doc` ok, `pre-commit run` 10/0/1
+  (yaml skipped: no files in changeset), `scripts/check.sh --all`
+  12/0/4 (same SKIPs as inc-1.1 baseline).
+- **Pillar walk:** all 5 pillars clean. Longest production fn
+  `Envelope::validate` 8 SLOC; longest test fn 22 SLOC; no nested
+  control flow; zero `unwrap`/`expect`/`panic` in production;
+  `thiserror` at lib boundary; pure-data crate (no I/O deps).
+- **Lint fixes during implementation (none deferred, none allowed):**
+  3x `clippy::doc_markdown` (`MessagePack`, `TeslaCam`,
+  `LightShow` needed backticks); 1x `clippy::panic` in a test
+  rewritten to `assert!(matches!(...))`; 2x `serde_test` token-
+  shape failures (internally-tagged enums serialise as `Struct`
+  not `Map` / `StructVariant` -- known footgun documented
+  inline); 2x trivial fmt.
+- **Findings: 0 Blocker, 0 Major, 1 Minor (fixed in-place), 3 Nit
+  (this commit).**
+  - **Minor:** Per charter section ADRs (lines 477-485), the IPC
+    vocabulary decision triggers >=3 of the five mandatory-ADR
+    criteria: affects >1 module, locks in a third-party dep
+    (`thiserror = "1.0"`), changes a protocol/schema (explicitly,
+    per charter §"The Boundaries Are Real" line 446 -- "Their
+    contract is the IPC schema (versioned)"). Fixed in-place by
+    writing `docs/adr/0002-ipc-message-vocabulary.md` (~190 lines:
+    context with four design questions, decision laid out in six
+    points, consequences positive/negative/neutral, five
+    alternatives considered with rationale, charter compliance
+    section citing trigger lines, implementation references, four
+    follow-up items). This is the second ADR landing; deferred
+    inc-0.8 batch now plans ~9 slots instead of 11.
+  - **Nit 1:** PROGRESS row 1.2 was still pending; updated to
+    APPROVED with gate evidence.
+  - **Nit 2:** Review report not yet on disk; created this session.
+  - **Nit 3 (accepted, deferred):** Charter §"The Boundaries Are
+    Real" could cross-reference `teslausb-core::ipc` by path.
+    Discoverable but not explicit. Defer -- ADR-0002 + this report
+    make the location obvious; not worth a charter rewrite.
+- Review-fix commit (this entry): "docs(b1): inc-1.2 review fixes -
+  add ADR-0002 + PROGRESS row 1.2 marked APPROVED". 3 files
+  changed. Branch `b1-userspace-rust` reaches 16 commits ahead of
+  main. (Hash reference omitted from session log per
+  `git commit --amend` chase-the-hash anti-pattern documented in
+  the inc-1.1 entry; see `git log --grep "inc-1.2 review fixes"`
+  for the current SHA.)
+- **Next:** Phase 1.3 -- port the existing NBD newstyle handshake
+  from `teslafat/src/nbd/handshake.rs` (preserved draft) into
+  `rust/crates/teslafat/src/nbd/handshake.rs`, add a round-trip
+  test against a real `nbd-client --check` invocation when a
+  hardware-test path opens. ~50 LOC ceiling -- mostly a path move
+  + lint compliance. The handshake draft is the largest preserved
+  asset from the deleted `teslafat/` planning tree.

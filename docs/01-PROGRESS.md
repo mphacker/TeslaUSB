@@ -47,7 +47,7 @@ in a 🔍 REVIEW GATE + ✅ TEST GATE.
 | 1.3 | NBD newstyle handshake (port from existing draft) | ✅ | ✅ APPROVED (impl `2c1a56f`; review-fix commit added ADR-0003 covering both async runtime choice — tokio current-thread, minimal features — and `teslafat` lib+bin crate-shape change forced by `dead_code` discipline on the new `nbd::handshake` public surface; the draft's 3 `try_into().unwrap()` calls were replaced with bounds-checked fallible conversions, the 2 `as usize`/`as u32` casts were replaced with `try_from + Context`, all encode/parse helpers got `///` + `# Errors` docs, and the protocol was decomposed into pure encode/decode helpers + a generic-over-`AsyncRead + AsyncWrite + Unpin` async orchestrator so the wire format is unit-testable via `tokio::io::duplex`; LOC budget overrun acknowledged in plan row 1.3 — "~50 (mostly path move)" → ~600 actual due to charter-compliance work the draft predated; Phase 1.6 `tokio::time::timeout` follow-up TODO added in `nbd/mod.rs`; preemptive `teslausb-core` dep removed (will land in Phase 1.4 with the BlockBackend trait); 0 Major, 4 Minor (all actioned), 2 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.3.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 53 workspace tests passed, 0 failed (33 teslafat unit incl. 19 new `nbd::handshake` tests + 4 teslafat integration + 16 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 same skip baseline; `pre-commit run` all hooks pass after one auto-fix round for `end-of-file-fixer` + `mixed-line-ending` on the three new files |
 | 1.4 | `BlockBackend` trait + null impl + FUA contract test | ✅ | ✅ APPROVED (impl `8f98f43`; review-fix commit added ADR-0004 covering both the native `async fn in trait` decision — no `async-trait` crate dep, no `dyn BlockBackend`, generic-over-`<B: BlockBackend>` callers — and the `WriteFlags(u32)` newtype-vs-`bitflags!`-macro decision; the trait lives in `teslausb-core::backend` with `BackendError` (thiserror at lib boundary), `check_bounds` shared overflow-safe helper, and reference impls `NullBackend` + `MockBackend` in `pub mod mock`; FUA contract is captured by three named `fua_contract_*` tests using `MockBackend::observed_any_durability()` as the durability oracle; production code uses zero `unwrap`/`expect`/`panic` (mock module recovers poisoned mutexes via `lock().unwrap_or_else(PoisonError::into_inner)`); `pollster` 0.3 dev-dep added to drive `async fn` test bodies without pulling tokio into the domain-core crate; LOC budget overrun recorded — "~100" plan estimate vs ~620 actual due to charter compliance (`# Errors` docs, mock impls, FUA tests, `check_bounds` extraction); `teslafat → teslausb-core` dep still deferred to Phase 1.5 (correct per inc-1.3 review M4); 0 Major, 1 Minor (actioned), 3 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.4.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 77 workspace tests passed, 0 failed (33 teslafat unit + 4 teslafat integration + 40 teslausb-core unit incl. 24 new `backend` tests + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass on first attempt (no auto-fix round needed) |
 | 1.5 | NBD transmission loop + FUA fdatasync test | ✅ | ✅ APPROVED (impl `f36e913`; review-fix commit added ADR-0005 covering both transmission wire policies — oversized requests terminate the connection (no payload drain), and out-of-bounds WRITEs drain the payload before replying EINVAL so the stream stays aligned for subsequent requests; the transmission module exposes one `pub async fn run<B: BlockBackend, S>` orchestrator that dispatches READ/WRITE/FLUSH/TRIM/DISC plus an ENOTSUP fall-through, with the wire format split into a pure-helpers `nbd::wire` submodule (28-byte request header + 16-byte simple-reply header, all encode/decode round-trippable in `[u8; N]` arrays with hand-asserted spec byte offsets); FUA pass-through is verified end-to-end via `MockBackend::observed_any_durability()` — the same FUA contract oracle introduced in inc-1.4 — proving the NBD `NBD_CMD_FLAG_FUA` wire bit reaches the backend as `WriteFlags::FUA`; production code uses zero `unwrap`/`expect`/`panic` and zero `indexing_slicing` (the request-header read loop was refactored to use `split_at_mut` + `read_exact`); tests use `tokio::join!` on a single task rather than `tokio::spawn` because native AFIT futures from `BlockBackend` are not `Send` (the consequence ADR-0004 §A predicted); 1 test design bug caught and fixed during development — the original FUA-extraction test asserted `NBD_CMD_WRITE != NBD_CMD_FLAG_FUA` but both constants are numerically `1`, rewritten as two independent encode/decode tests using hand-rolled spec byte layouts and `NBD_CMD_TRIM = 4` as the unambiguous `kind` value to eliminate the false-pass risk for a symmetric encoder/decoder field-swap; `teslafat → teslausb-core` runtime dep finally lands (closing the inc-1.3 M4 deferral); LOC budget overrun recorded — "~200" plan estimate vs ~1453 actual due to charter-compliance work (spec-citation docstrings, wire-vs-orchestrator split, byte-layout assertions, full command-coverage tests, mutation-test mental model on every assertion); 0 Major, 1 Minor (actioned), 3 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.5.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 107 workspace tests passed, 0 failed (63 teslafat unit incl. 30 new in `nbd::transmission` + `nbd::wire` + 4 teslafat integration + 40 teslausb-core unit + 0 teslausb-worker); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass after one mixed-line-ending auto-fix on `nbd/wire.rs` |
-| 1.6 | `teslafat@.service` systemd unit | ⏳ | ⏳ | ⏳ |
+| 1.6 | `teslafat@.service` systemd unit | ✅ | ✅ APPROVED (impl `1228f41`; review-fix commit added ADR-0006 covering three coupled connection-lifecycle decisions — §A single connection at a time per process (no `tokio::spawn`, `serve` awaits `serve_one_connection` to completion before the next `accept()`); §B per-connection errors never propagate to the accept loop (`serve_one_connection -> ()` not `Result`, every per-client failure is `warn!`-logged so a misbehaving client cannot trigger `Restart=on-failure` daemon-exit cycles and defeat the systemd hardening); §C handshake timeout (`tokio::time::timeout` wrap, default 10 s, range [1, 600] s) is the only liveness check in the daemon — the kernel `nbd-client` polices request liveness via `/sys/block/nbdN/queue/io_timeout`, and a duplicate userspace per-request timeout would kill legitimate large WRITEs on the Pi Zero 2 W under SD pressure; new `crate::backend::ZeroBackend` (~230 LOC, 12 tests) is a sparse `BlockBackend` impl that synthesises zeros and stores only its `u64` size (no `Vec` allocation — kept in `teslafat::backend` rather than `teslausb-core::backend::mock` to avoid expanding the inc-1.4 surface and to avoid the `NullBackend::new(size: usize) -> Vec<u8>` allocation hazard for daemon-scale `volume_size_gb`); new `crate::server` (~526 LOC, 10 tests = 5 cross-platform `serve_one_connection_*` + 5 Unix-only `accept_loop::*` gated `#[cfg(unix)]` since `UnixListener` is Unix-only); new `crate::config::NbdConfig` (socket_path + handshake_timeout_seconds, validated [1, 600] s); `--check-config` flag preserves the Phase 1.1 sentinel contract (validate + emit + exit) for both `tests/sentinel.rs` and the unit's `ExecStartPre=` fast-fail gate; `units/teslafat@.service` (~104 LOC instanced template) ships full systemd hardening (`CapabilityBoundingSet=`, `ProtectSystem=strict`, `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, `MemoryDenyWriteExecute=yes`, `SystemCallFilter=@system-service`); main.rs rewritten so the default mode builds a current-thread tokio runtime, prepares the socket (mkdir parent + unlink stale file), installs SIGTERM/SIGINT handlers, and runs `server::serve` until signal; the inc-1.3 follow-up TODO in `nbd/mod.rs` is now closed (handshake timeout wired in §C); `teslafat -> teslausb-core` dep extended to cover the `BlockBackend` impl in `ZeroBackend`; LOC budget overrun recorded — "~50" plan estimate vs ~1227 actual due to charter compliance (two new public modules with full doc + test coverage, `NbdConfig` schema delta + validation, systemd hardening profile, `--check-config` flag, SIGTERM/SIGINT plumbing with graceful fallback); 0 Major, 1 Minor (actioned), 4 Nits — see session log + `~/.copilot/.../files/charter-review-inc-1.6.md`) | ✅ `cargo build / clippy -D warnings / fmt --check / doc -D warnings / test` all green; 129 workspace tests passed, 0 failed (85 teslafat unit incl. 22 new across `backend` + `server` + `config::NbdConfig` + 4 teslafat integration + 40 teslausb-core unit + 0 teslausb-worker; the 5 `accept_loop::*` server tests are `#[cfg(unix)]`-gated so they compile-clean but don't run on the Windows dev box — Linux/Pi will exercise them); `scripts/check.sh --all` 12/0/4 baseline maintained; `pre-commit run` all hooks pass after one mixed-line-ending auto-fix on `units/teslafat@.service` |
 | 1.7 | Dev-box smoke test harness | ⏳ | ⏳ | ⏳ |
 
 **Pre-existing scaffolding from earlier sessions:**
@@ -1492,3 +1492,170 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   adding the `time` feature to tokio in `teslafat/Cargo.toml`
   -- which incidentally would give future tests a hard-cap
   safety net for the AFIT/join! pattern.
+
+
+### 2026-05-19 (resumed, twelfth time) -- Phase 1.6 implementation + review gate
+
+- **Phase 1.6 implementation** (commit `1228f41`): added
+  `rust/crates/teslafat/src/backend.rs` (233 LOC + 12
+  ZeroBackend tests), `rust/crates/teslafat/src/server.rs`
+  (526 LOC + 10 server tests across cross-platform
+  `serve_one_connection_*` + Unix-only `accept_loop::*`
+  submodule), and `rust/crates/teslafat/units/teslafat@.service`
+  (104 LOC systemd template unit with full hardening:
+  `CapabilityBoundingSet=`, `ProtectSystem=strict`,
+  `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`,
+  `MemoryDenyWriteExecute=yes`, `SystemCallFilter=@system-service`).
+  Config: `NbdConfig { socket_path, handshake_timeout_seconds }`
+  with range validation [1, 600] s and non-empty path check
+  (+6 new config tests). Main rewrite: `--check-config` flag
+  preserves the Phase 1.1 sentinel contract; default Unix
+  mode builds a current-thread tokio runtime, prepares the
+  socket (mkdir parent + unlink stale file), binds the
+  listener, installs SIGTERM + SIGINT handlers, runs
+  `server::serve` until either signal. `nbd/mod.rs` drops
+  the inc-1.3 follow-up TODO (closed by the `tokio::time::timeout`
+  wrap in `server::serve_one_connection`). Cargo: tokio
+  `time` + `signal` + `sync` features added with a documented
+  rationale block. 10 files changed, +1227/-28.
+- **Architecture choice — `ZeroBackend` lives in
+  `teslafat::backend`, not `teslausb-core::backend::mock`:**
+  keeps the inc-1.4 `teslausb-core` surface frozen, avoids
+  the `NullBackend::new(size: usize) -> Vec<u8>` allocation
+  that would OOM the Pi at boot for a 64 GiB `volume_size_gb`
+  (the `NullBackend` API is sized for unit-test fixtures,
+  not for daemon-scale exports), and the `placeholder` module
+  path makes accidental production use impossible. The trait
+  is the cross-crate contract; impls are per-consumer
+  specialisations.
+- **Cross-platform test coverage:** `serve_one_connection`
+  is generic over `AsyncRead + AsyncWrite + Unpin` so its
+  tests (handshake-timeout, handshake-failure, transmission-
+  error, backend-size-advertisement, happy-path) run on the
+  Windows dev box via `tokio::io::duplex`. The 5
+  `accept_loop::*` tests are `#[cfg(unix)]`-only
+  (`tokio::net::UnixListener` is Unix-only) and will run on
+  Linux + the Pi. Compile-clean on Windows (no warnings).
+- **Test discipline:** 22 new tests, total workspace 107 ->
+  129 (+22). 12 ZeroBackend tests cover constructor
+  fidelity, read fills zeros, read at non-zero offset,
+  zero-length read, OOB read + write with correct error
+  fields, overflowing arithmetic, write-does-not-persist
+  (read-back assertion), FUA write, flush, and a
+  load-bearing `std::mem::size_of::<ZeroBackend>() == 8`
+  pin that catches any future field addition (would change
+  the daemon's per-LUN memory footprint silently otherwise).
+  10 server tests cover the per-connection lifecycle (timeout
+  fires, handshake error, transmission error, backend size
+  advertised correctly, happy-path drives one full request)
+  and the accept loop's shutdown + recovery behaviour
+  (immediate shutdown, idle-then-shutdown,
+  one-connection-then-shutdown, two sequential connections,
+  recovery from a bad client + accept next). 6 NbdConfig
+  validation tests cover defaults, non-empty socket path,
+  range bounds at both extremes, and TOML
+  deserialisation round-trip. Mutation-test mental model
+  held: for each named test at least one trivial mutation
+  (drop the timeout, return Err instead of (), change a
+  magic-corruption byte, off-by-one a range bound) would
+  flip the assertion.
+- **Iteration:** two iterations preceded green gates:
+  (1) `backend.rs` first draft used `pollster` (not a
+  `teslafat` dev-dep — it lives in `teslausb-core`'s
+  dev-deps) and passed `len: u64` to `check_bounds` (which
+  expects `usize`); rewrote tests as `#[tokio::test] async fn`
+  matching `nbd::transmission::tests` convention and dropped
+  the unnecessary `u64`-cast (`buf.len()` is already
+  `usize`); also missed `pub mod backend;` in `lib.rs` so
+  the new file didn't compile into the lib on the first
+  attempt (caught by `cargo test --lib backend` returning
+  fewer tests than expected).
+  (2) Gate sweep surfaced `used_underscore_binding` on
+  `Err(_elapsed) => let _: Elapsed = _elapsed` (renamed to
+  `elapsed` while keeping the marker-type pin),
+  `clippy::panic` on two `panic!("expected OutOfBounds, got
+  {other:?}")` arms in backend tests (added `clippy::panic`
+  to the test-mod allow list consistent with the existing
+  `unwrap_used` / `expect_used` / `indexing_slicing`
+  allow set), and three `rustdoc::broken_intra_doc_links`
+  errors on `[`serve`]`, `[`crate::server::serve`]`, and
+  `[`nbd::handshake::run`]` references (the `serve`
+  function is `#[cfg(unix)]` and rustdoc runs on Windows in
+  the dev box, so the item is genuinely not in scope;
+  rewrote as plain backticks ``serve`` and absolute paths
+  `[`crate::nbd::handshake::run`]` respectively). After
+  fixes: zero clippy warnings, zero rustdoc warnings, zero
+  suppressions in production code.
+- **Charter review** (`~/.copilot/.../files/charter-review-inc-1.6.md`,
+  ~27 KB): Pillar walk found 0 Major, 1 Minor, 4 Nits.
+  - **Minor 1:** ADR-0006 needed. Three coupled
+    connection-lifecycle decisions each meet >= 1 charter
+    ADR trigger criterion: §A single connection at a time
+    per process (criteria 4 forward-compat + 5 non-obvious
+    vs the established "spawn a task per connection" idiom
+    in every HTTP-server tutorial — the case for serial
+    rests on the kernel `nbd-client` being the only intended
+    peer + owning exclusive `/dev/nbdN` + Phase 2's
+    `FileBackend` needing exclusive write access + AFIT
+    futures not being `Send` per ADR-0004 §A consequence,
+    none of which a reader who doesn't know NBD would
+    derive); §B per-connection errors never propagate to
+    the accept loop (criteria 2 security-mild + 4
+    forward-compat — `serve_one_connection -> ()` not
+    `Result` because a `Result`-returning version exposes a
+    client-DoS path through `systemd Restart=on-failure`
+    cycles that count against `StartLimitBurst`); §C
+    handshake timeout is the only liveness check (criteria
+    4 forward-compat + 5 non-obvious — the kernel
+    `nbd-client` polices request liveness via
+    `/sys/block/nbdN/queue/io_timeout`, and adding a
+    duplicate userspace per-request timeout would kill
+    legitimate large WRITEs on the Pi Zero 2 W under SD-card
+    pressure precisely when the device is most loaded).
+    Co-located in one ADR per the ADR-0005 template of
+    grouping tightly-coupled wire/lifecycle policy choices.
+  - **Nit 1:** `serve`'s recoverable-vs-fatal accept-error
+    policy could be tightened — current: every error is
+    `warn!`-then-retry; on a genuinely broken listener
+    (e.g. the socket file was unlinked out from under us)
+    this becomes an infinite log-spam loop. Future
+    hardening: track consecutive identical errors and bail
+    after N >= 100 of the same kind so `Restart=on-failure`
+    kicks in. Not blocking; defer until we observe the
+    failure mode.
+  - **Nit 2:** Socket cleanup on shutdown is best-effort
+    (`unix_serve` calls `fs::remove_file` after `serve`
+    returns and logs `warn!` on failure). On a crash the
+    socket file persists; `prepare_listener` handles it via
+    unlink-before-bind on the next start. Alternative
+    (Drop wrapper that always unlinks) is pure ergonomics.
+    Defer.
+  - **Nit 3:** Phase 1.6 LOC overrun 24× (50 -> 1227); same
+    pattern direction as inc-1.3 / 1.4 / 1.5. Recorded in
+    PLAN row 1.6 with breakdown (two new public modules
+    with full doc + test coverage, `NbdConfig` schema
+    delta, systemd hardening profile, `--check-config`
+    flag, SIGTERM/SIGINT plumbing).
+  - **Nit 4:** The `let _: Elapsed = elapsed;` marker-type
+    pin in `serve_one_connection` is non-obvious to future
+    readers; the comment explains the intent (load-bearing
+    import pin so a future tokio rename breaks this site
+    loudly) but the pattern itself is unusual. Acceptable;
+    consistent with the inc-1.5 N1 deferral pattern (cross-
+    reference test idioms when we have two examples).
+- Review-fix commit (this entry): "docs(b1): inc-1.6 review
+  fixes - add ADR-0006 + PROGRESS APPROVED + plan LOC note".
+  Branch `b1-userspace-rust` reaches 25 commits ahead of
+  `main` after the review-fix commit.
+- **Next:** Phase 1.7 -- dev-box smoke test harness. Run
+  `teslafat` binary against a fixture config, have `nbd-client`
+  connect to the configured Unix socket, issue a `dd
+  if=/dev/nbdN bs=4096 count=1` and verify it returns
+  all-zero bytes (the `ZeroBackend` synthesised content),
+  then `nbd-client -d /dev/nbdN` and SIGTERM the daemon.
+  Plan estimate ~80 LOC (test harness); expect ~300-500
+  LOC after charter compliance based on the inc-1.3 through
+  inc-1.6 overrun pattern. Phase 1.7 is the H1 hardware-gate
+  prerequisite: once inc-1.5 + 1.6 + 1.7 are all approved,
+  H1 deploys the binary to `cybertruckusb.local` for the
+  first hardware-on-Pi smoke run.

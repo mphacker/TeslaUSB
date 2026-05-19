@@ -68,24 +68,27 @@ to the device.**
 
 | Inc | Step | Status |
 |---|---|---|
-| H0.1 | tar snapshot of /etc + ~/TeslaUSB, scp off-device | ⏳ |
-| H0.2 | systemctl stop v1 services (6 of them, in order) | ⏳ |
-| H0.3 | systemctl disable v1 services | ⏳ |
-| H0.4 | Reboot — verify boot + WiFi + SSH | ⏳ |
-| H0.5 | systemctl mask v1 services | ⏳ |
-| H0.6 | rm v1 systemd unit files at /etc/systemd/system/ | ⏳ |
-| H0.7 | rm v1 sudoers drop-ins (preserving non-teslausb entries) | ⏳ |
-| H0.8 | rm v1 NetworkManager dispatcher scripts | ⏳ |
-| H0.9 | Comment out v1 cmdline.txt + config.txt entries (with .b1-backup) | ⏳ |
-| H0.10 | rm -rf ~/TeslaUSB + ~/ArchivedClips (after operator confirm) | ⏳ |
-| H0.11 | Disable smbd + nmbd | ⏳ |
-| H0.12 | Disable v1's watchdog.service | ⏳ |
-| H0.13 | Reboot — verify clean baseline | ⏳ |
-| H0.14 | Capture clean-boot journal as reference baseline | ⏳ |
+| H0.1 | tar snapshot of /etc + dotfiles, scp off-device (803 KB, sha256 `DA62A22B…1845C`) | ✅ |
+| H0.2 | systemctl stop v1 services (6 of them, in order) | ✅ |
+| H0.3 | systemctl disable v1 services (7, incl. teslausb-safe-mode) | ✅ |
+| H0.4 | Reboot — verify boot + WiFi + SSH (75 s back, load 0.71) | ✅ |
+| H0.5 | ~~systemctl mask v1 services~~ — **skipped, superseded by H0.6** (rm of unit files makes mask redundant) | ⏭️ |
+| H0.6 | rm v1 systemd unit files at `/etc/systemd/system/` (8 units removed; +2 discovered later: network-optimizations, wifi-powersave-off) | ✅ |
+| H0.7 | rm v1 sudoers drop-ins (preserving non-teslausb entries) — removed `/etc/sudoers.d/teslausb-gadget` | ✅ |
+| H0.8 | rm v1 NM dispatcher scripts — removed `99-teslausb-cloud-refresh` | ✅ |
+| H0.9 | ~~Comment out v1 cmdline.txt + config.txt entries (with .b1-backup)~~ — **DEFERRED to Phase 6** (`hardware-test` skill rule: setup.sh handles `/boot/firmware/*` idempotently; manual edit here = drift risk) | ⏭️ |
+| H0.10 | rm -rf ~/TeslaUSB + ~/ArchivedClips (after operator confirm) — **454 GB freed in 6.8 s; disk 100% → 2%** | ✅ |
+| H0.11 | Disable smbd + nmbd (Samba is opt-in in B-1) | ✅ |
+| H0.12 | ~~Disable v1's watchdog.service~~ — **KEPT enabled** (watchdog daemon is pure defensive HW health, not v1-specific; B-1 wants the same protection; `teslausb-priority.conf` drop-in preserved) | ⏭️ |
+| H0.13 | Reboot — verify clean baseline (took 2 final reboots due to a D-Bus wedge after the 3rd reboot, recovered via operator power-cycle) | ✅ |
+| H0.14 | Capture clean-boot journal as reference baseline — saved to session workspace as `h0-clean-baseline-boot.log.gz` (19.4 KB / 954 lines, 0 TeslaUSB-related warnings) | ✅ |
 
-**🔍 REVIEW GATE:** charter-review on `scripts/hw/` helper +
-the H0 step-script. **✅ TEST GATE:** all H0.x green via the
-`hardware-test` skill.
+**🔍 REVIEW GATE:** N/A for H0 (no code changed, only destructive
+ops on existing hardware). **✅ TEST GATE:** verification probe at
+end of H0.14 green on all 12 checks (disk freed, mem clean, WiFi up,
+gadget configfs empty, no loop mounts, 0 failed units, all 9 v1
+services `not-found`, no v1 unit residuals in `/etc/systemd/system/`,
+home dir clean, ssh/watchdog/NM/logind/dbus all `active`).
 
 ## Phase H1 — Daemon smoke on hardware
 
@@ -400,3 +403,55 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   B-1 USB binding will see Tesla writes start within seconds — H1
   + H2 hardware tests will need to account for live writes if
   Sentry is still on during the test window).
+
+### 2026-05-19 (resumed, again) — Phase H0 complete
+
+- **Phase H0 fully executed and verified** against
+  `cybertruckusb.local`. Pi is now a clean Debian 13 / Bookworm
+  install with zero v1 artifacts. See the Phase H0 table above for
+  the per-increment record; this entry captures session-level
+  context and lessons.
+- **Disk-full root cause** of the original "archive worker not
+  working / lost videos" complaint that started this whole rewrite
+  effort: `~/TeslaUSB` (306 GB of `.img` files) + `~/ArchivedClips`
+  (148 GB) had filled the 470 GB SD card to **100% used / 461 GB**.
+  With no free space, the v1 archive worker couldn't copy
+  RecentClips → ArchivedClips, so Tesla's circular buffer overwrote
+  clips before they could be saved. Load avg was 8.67 / 8.51 / 6.30
+  at first contact. H0.10 deleted both directories in **6.8 seconds**
+  (ext4 just updates inode + bitmap, no data copy). Disk now at
+  **7.7 GB used / 2%** — restoring the actual root cause we've been
+  trying to fix at the application layer for weeks. B-1 must
+  architect for this: SD-card-resident state grows, and the
+  worker must enforce a high-watermark eviction policy long before
+  the disk fills. Captured as Anti-Pattern in `02-LEARNINGS.md`
+  (forthcoming).
+- **D-Bus wedge mid-flight** (operational hazard noted): three
+  back-to-back `systemctl reboot` calls during H0.4 / H0.7 / H0.13
+  triggered a state where `systemd-logind` couldn't be reached over
+  D-Bus — `systemctl status` returned "Transport endpoint is not
+  connected", and SSH key-auth succeeded in <1 sec but
+  `pam_systemd(sshd:session): Failed to create session: Connection
+  timed out` blocked non-interactive sessions for ~3-4 minutes.
+  Unrecoverable without a hard power-cycle (operator initiated at
+  11:55 EDT). **Lesson:** for B-1 Phase H1+, limit each session to
+  ONE controlled reboot and use the existing SSH window to capture
+  the journal before each reboot. Detailed forensic in
+  `session-state/.../files/h0-dbus-breakage-finding.md`.
+- **Clean-baseline journal** captured at `h0-clean-baseline-boot.log.gz`
+  (19.4 KB / 954 lines, 0 TeslaUSB-related warnings). All remaining
+  warnings are stock Pi OS noise: alsa rules, bcm2835 staging
+  modules, bluetooth perms, pipewire/wireplumber RTKit. Reference
+  baseline for diffing future H1+ post-deploy journals.
+- **Items preserved on the Pi for B-1 reuse** (validated):
+  `/etc/systemd/system/sshd-protect.conf` (RefuseManualStop), the
+  watchdog priority drop-in (Nice=-5 RT), NM `wifi-roaming.conf`,
+  desktop service masks (colord/pipewire/wireplumber/pipewire-pulse).
+  Items intentionally NOT touched: `/boot/firmware/cmdline.txt` and
+  `config.txt` — Phase 6 setup.sh will normalize idempotently with
+  `.b1-backup`.
+- **Test environment ready** for Phase H1+. `b1-userspace-rust`
+  remains 2 commits ahead of `main`, local-only (not yet pushed
+  to origin). Next session resumes the deferred Phase 0.2 – 0.8
+  scaffolding (Cargo workspace, Python skeleton, CI, pre-commit,
+  setup-dev.sh, CODEOWNERS, ADRs).

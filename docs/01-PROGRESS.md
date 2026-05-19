@@ -18,7 +18,7 @@ on empty crates + `pytest` returning 0 tests OK).
 | 0.2 | Cargo workspace at `rust/` (`Cargo.toml`, `rust-toolchain.toml`, `deny.toml`, empty crates `teslausb-core`, `teslafat`, `teslausb-worker`, each with `[lints]` per charter) | ✅ | ✅ APPROVED (charter coherence fixes applied in-place: 1.84→1.85 example, `teslafat/src/...` → `rust/crates/teslafat/src/...`, pre-commit `cd teslafat` → `cd rust`) | ✅ `cargo build / clippy -D warnings / fmt --check / test / doc` all green on pinned 1.85.0 |
 | 0.3 | Python skeleton `web/teslausb_web/` with `pyproject.toml` (ruff + mypy + pytest per charter) | ✅ | ✅ APPROVED (6 charter coherence fixes applied in-place: 4 `web/` → `web/teslausb_web/` path drifts in CI gate + dead-code-detection blocks, `--cov=web` → `--cov=teslausb_web` module-name, `mypy web/` → bare `mypy` from `web/` cwd; plus added `from __future__ import annotations` to 5 docstring-only Python modules per charter Python deep-dive rule) | ✅ `ruff check / ruff format --check / mypy --strict / pytest --cov=teslausb_web --cov-fail-under=80 (100%) / vulture / bandit` all green on Python 3.13 dev box (3.11 target) |
 | 0.4 | `scripts/check.sh` local gate runner with every gate from charter §"CI Gates" (operator-driven, NOT GitHub Actions — cloud CI deferred indefinitely per operator preference 2026-05-19; full hardware testing is H-phase territory anyway) | ✅ | ✅ APPROVED (charter coherence fix applied in-place: §"CI Gates" reframed from "hosted CI / PR" enforcement model to venue-neutral with explicit pointer to `scripts/check.sh`; hygiene wording updated `git diff` → `git ls-files` to match script behavior; 1 Nit accepted: magic `1048576` for 1 MiB is documented inline with charter line citation) | ✅ 12 PASS / 0 FAIL / 4 SKIP (cargo-llvm-cov, cargo-deny, cargo-machete, lychee — optional, install in Phase 0.6) on Windows dev box via Git Bash; exit 0 |
-| 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally | ⏳ | ⏳ | ⏳ |
+| 0.5 | `.pre-commit-config.yaml` mirroring CI gates locally via single-source delegation to `scripts/check.sh` (per operator preference 2026-05-19); upstream `pre-commit/pre-commit-hooks@v6.0.0` retained ONLY for cheap whitespace/EOF/yaml/TOML fixes | ✅ | ⏳ | ✅ `pre-commit run --all-files` 11 PASS / 0 FAIL / 1 SKIP (yaml — only file is the config itself), exit 0 on Windows dev box; `scripts/check.sh --all` still 12 PASS / 0 FAIL / 4 SKIP exit 0; defensive re-run after `.gitattributes` extension also clean |
 | 0.6 | `setup-dev.sh` (idempotent Rust + Python + tools install on a dev box) | ⏳ | ⏳ | ⏳ |
 | 0.7 | `CODEOWNERS` + PR template referencing the charter checklist | ⏳ | ⏳ | ⏳ |
 | 0.8 | ADRs 0001 – 0011 written (`docs/adr/`) | ⏳ | ⏳ | ⏳ |
@@ -774,3 +774,51 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   (inc-0.4 commit message + PROGRESS entry + charter §"CI Gates"
   preamble) so the decision is discoverable until the ADR batch
   arrives.
+
+
+### 2026-05-19 (resumed, third time) — Phase 0.5 implementation
+
+- Asked operator: "single source via scripts/check.sh OR per-tool hooks?"
+  Answer: **single source** (matches the cloud-CI-deferred posture from
+  inc-0.4; minimizes duplication; charter changes propagate via one
+  script edit instead of two).
+- Created `.pre-commit-config.yaml` (~60 LOC). Three local hooks
+  (`scripts-check-hygiene`, `scripts-check-rust`,
+  `scripts-check-python`) all funnel into `scripts/check.sh` with
+  the matching `--<suite>` flag. `files:` regex on each hook so
+  the rust suite only runs when `.rs` / `Cargo.toml` / `Cargo.lock`
+  / `rust-toolchain.toml` is staged, python suite only when `.py`
+  / `web/pyproject.toml` is staged. Hygiene hook is `always_run: true`.
+- Kept upstream `pre-commit/pre-commit-hooks@v6.0.0` for cheap
+  whitespace/EOF/yaml/TOML/merge-conflict/large-file/private-key/
+  mixed-line-ending fixes — these have NO equivalent in
+  scripts/check.sh and are battle-tested; the one-time clone is
+  cached under `~/.cache/pre-commit`. `v4.6.0` was the charter
+  default but emits a deprecated-stage-names warning;
+  `pre-commit autoupdate` resolved it to `v6.0.0`.
+- Added `pre-commit>=3.7` to `web/pyproject.toml` dev extras so
+  `pip install -e web/[dev]` brings it in.
+- First `pre-commit run --all-files` flagged `mixed-line-ending`
+  on 27 tracked files (CRLF crept in via Windows tooling — the
+  existing `.gitattributes` only covered `.sh / .py / .json / .conf`
+  and missed `.rs / .toml / .md / .yaml`). **Fixed at the source:**
+  extended `.gitattributes` to declare `* text=auto eol=lf` plus
+  explicit lines for every text file type. After re-running, all
+  hooks pass; the 25 EOL-only modifications collapsed to zero diff
+  under the new attributes (git normalized them on stage).
+- Final state: `pre-commit run --all-files` -> 11 PASS / 0 FAIL /
+  1 SKIP (yaml hook skipped because the only `.yaml` is the config
+  itself; pre-commit always skips its own config file). Defensive
+  `./scripts/check.sh --all` -> 12 PASS / 0 FAIL / 4 SKIP, exit 0.
+- Real diff in the inc-0.5 commit: just 3 files (.gitattributes +
+  .pre-commit-config.yaml + web/pyproject.toml), +76 lines. The
+  `mixed-line-ending` auto-fixes do NOT appear in the diff because
+  git normalizes them transparently once the attributes are correct.
+- **Anticipated inc-0.5 review-gate finds:**
+  1. Charter §"Pre-commit Hooks" still prescribes the OLD MIXED model
+     (per-tool `astral-sh/ruff-pre-commit` + `mirrors-mypy` +
+     local `cargo fmt`/`cargo clippy` hooks). Now incoherent with
+     the single-source design just implemented. Will rewrite §"Pre-
+     commit Hooks" in the inc-0.5 review fix-up commit to match.
+  2. `.pre-commit-config.yaml` ~60 LOC — well under any reasonable
+     budget; no expected pillar finds.

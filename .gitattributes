@@ -1,12 +1,21 @@
-# Ensure shell scripts always use LF line endings (Unix style)
-*.sh text eol=lf
-*.py text eol=lf
+# Auto-detect text files and normalize line endings to LF in the repo.
+# Working-tree EOL conversion on Windows is controlled by core.autocrlf;
+# the LF in the repo is the source of truth.
+* text=auto eol=lf
 
-# Ensure config files use LF line endings
+# Source / config files where LF is REQUIRED at runtime (scripts run on Pi).
+*.sh   text eol=lf
+*.py   text eol=lf
+*.rs   text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
 *.json text eol=lf
 *.conf text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
 
-# Binary files
+# Binary files — Git must NOT munge these.
 *.img binary
 *.wav binary
 *.mp3 binary

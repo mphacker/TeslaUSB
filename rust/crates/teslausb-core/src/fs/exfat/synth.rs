@@ -32,16 +32,21 @@
 //! | 3+B+U..end               | Free (zero-filled)   |
 //!
 //! …where `B = bitmap.size_clusters(geometry)` and
-//! `U = ceil(131_072 / bytes_per_cluster)`.
+//! `U = ceil(upcase.size_bytes() / bytes_per_cluster)`. The current
+//! `UpcaseTable::ascii_identity` table is 256 bytes (one ASCII
+//! fold entry per code unit U+0000..=U+007F) and therefore always
+//! fits inside a single cluster regardless of cluster size — see
+//! [`crate::fs::exfat::upcase_table`] for the rationale.
 //!
 //! ## What this module does NOT do
 //!
 //! * It does not allocate per-read. Construction reserves the
 //!   12-sector boot region, the `AllocationBitmap` `Vec<u8>`, the
-//!   `UpcaseTable` `Vec<u8>` (`131_072` bytes), and one
-//!   `bytes_per_cluster`-sized root directory `Vec<u8>`.
-//!   [`ExfatSynth::read`] takes a caller-supplied buffer and
-//!   never allocates.
+//!   `UpcaseTable` `Vec<u8>`
+//!   ([`crate::fs::exfat::upcase_table::UPCASE_TABLE_SIZE_BYTES`]
+//!   bytes), and one `bytes_per_cluster`-sized root directory
+//!   `Vec<u8>`. [`ExfatSynth::read`] takes a caller-supplied
+//!   buffer and never allocates.
 //! * It does not yet synthesize user files — every cluster outside
 //!   the root / bitmap / upcase ranges reads back as zeros. The
 //!   lazy file loader is Phase 2.13.

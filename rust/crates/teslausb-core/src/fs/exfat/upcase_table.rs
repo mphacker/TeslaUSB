@@ -11,45 +11,52 @@
 //! 2019). §7.2 Up-case Table Directory Entry,
 //! §7.2.5 Up-case Table — describes both the uncompressed and
 //! the compressed encodings. §7.2.5.3 specifies the table
-//! checksum algorithm.
+//! checksum algorithm. §7.2.4 explicitly allows partial tables:
+//! *"If the table size is less than 0x10000 (the maximum), the
+//! characters with indices greater than (or equal to) the table
+//! size MUST map to themselves."*
 //!
 //! ## What this module produces
 //!
-//! [`UpcaseTable::ascii_identity`] returns the simplest spec-valid
-//! table:
+//! [`UpcaseTable::ascii_identity`] returns the smallest spec-valid
+//! table that case-folds Tesla camera filenames:
 //!
-//! * 65 536 little-endian `u16` entries (one per BMP code unit) =
-//!   **131 072 bytes** uncompressed.
+//! * **128 little-endian `u16` entries (one per ASCII code unit) =
+//!   256 bytes uncompressed.**
 //! * Entries `0x0061..=0x007A` (`a`..=`z`) map to
 //!   `0x0041..=0x005A` (`A`..=`Z`).
-//! * Every other entry maps to itself (identity), including all
-//!   non-ASCII code units.
+//! * Every other entry maps to itself (identity).
+//! * Per spec §7.2.4, code units `≥ 0x80` (not covered by the
+//!   table) implicitly map to themselves — the Linux/Windows/macOS
+//!   `exFAT` drivers honour this rule automatically.
 //!
-//! This is the minimum the spec requires of a valid table (§7.2.4:
-//! "If a character has no upper-case mapping, then the table
-//! contains the character itself.") and is what the kernel
-//! verifies via the embedded checksum.
+//! ## Why 256 bytes and not the full 128 KiB BMP?
 //!
-//! ## Why uncompressed?
+//! See [`docs/adr/0009-exfat-upcase-table-size.md`] for the full
+//! decision record. Summary, in priority order:
 //!
-//! The spec also defines a compressed encoding (§7.2.5.4) that
-//! uses `0xFFFF` as a "skip" marker. Microsoft's canonical table
-//! compresses to ~5836 bytes. B-1 ships the uncompressed form
-//! because:
+//! 1. **`exfatprogs` 1.2.9 (`fsck.exfat`) has a `u16` truncation
+//!    bug** in `boot_calc_checksum()`
+//!    (`lib/libexfat.c`): the `size` parameter is declared
+//!    `unsigned short`, so passing 131 072 bytes truncates to 0
+//!    and the loop runs zero iterations. `fsck.exfat` then reports
+//!    `"corrupted upcase table 0 (expected: 0x6c72721c)"` even
+//!    though the bytes on disk and the stored checksum agree.
+//!    Any table size under 65 536 bytes avoids the truncation;
+//!    256 bytes leaves a 256× safety margin. The bug is still
+//!    present on `exfatprogs`'s `master` branch as of this writing,
+//!    so we cannot rely on a fix shipping any time soon.
+//! 2. **`mkfs.exfat` ships ~5 836 bytes** (Microsoft's canonical
+//!    compressed table) for the same reason — `fsck.exfat`
+//!    interoperates with itself only when the table fits in a
+//!    `u16`. Our 256-byte uncompressed table is in the same size
+//!    class.
 //!
-//! * Tesla camera filenames are ASCII timestamps; the ASCII fold
-//!   is all the case folding the target use-case needs.
-//! * 128 KiB of data fits in a single 128 KiB cluster (the
-//!   largest cluster size B-1's geometry picks). The Phase 2.11
-//!   dispatcher can serve the table out of one cluster.
-//! * The uncompressed encoding is trivially auditable; the
-//!   compressed encoding requires hand-verifying every skip-marker
-//!   offset against the canonical reference.
-//!
-//! A future increment may swap to Microsoft's canonical compressed
-//! table without changing this module's public API — callers
-//! only ever see [`UpcaseTable::bytes`] and
-//! [`UpcaseTable::checksum`].
+//! Tesla camera filenames are ASCII timestamps
+//! (`2026-01-15_14-32-15-front.mp4`); the ASCII fold is all the
+//! case folding the target use-case needs. A future increment
+//! may swap to Microsoft's canonical compressed table without
+//! changing this module's public API.
 //!
 //! ## Checksum algorithm
 //!
@@ -68,16 +75,26 @@
 
 use core::fmt;
 
-/// Number of UTF-16 code units the table covers — the entire
-/// Basic Multilingual Plane.
-pub const UPCASE_TABLE_ENTRIES: u32 = 65_536;
+/// Number of UTF-16 code units the table covers — `0x0000..=0x007F`
+/// (ASCII). Code units at or above this index map to themselves
+/// per `exFAT` spec §7.2.4.
+///
+/// Typed as `u16` to match the `exFAT` UTF-16 code unit width so
+/// that `ascii_identity` can iterate without a fallible cast.
+pub const UPCASE_TABLE_ENTRIES: u16 = 128;
 
 /// Bytes per entry (one little-endian `u16`).
 pub const BYTES_PER_ENTRY: usize = 2;
 
 /// Total size of the uncompressed upcase table in bytes
-/// (`65_536 × 2 = 131_072`).
+/// (`128 × 2 = 256`).
 pub const UPCASE_TABLE_SIZE_BYTES: usize = (UPCASE_TABLE_ENTRIES as usize) * BYTES_PER_ENTRY;
+
+/// Upper bound enforced to stay clear of the `exfatprogs` 1.2.9
+/// `boot_calc_checksum()` `u16` truncation bug. The actual table
+/// size is much smaller; this just pins the bug-avoidance invariant
+/// so a future change cannot silently regress past it.
+pub const MAX_INTEROP_UPCASE_TABLE_SIZE_BYTES: usize = 0xFFFF;
 
 /// ASCII code unit for `'a'`.
 pub const ASCII_LOWER_A: u16 = 0x0061;
@@ -93,14 +110,16 @@ pub const ASCII_UPPER_A: u16 = 0x0041;
 pub const ASCII_CASE_DELTA: u16 = ASCII_LOWER_A - ASCII_UPPER_A;
 
 const _: () = {
-    assert!(UPCASE_TABLE_SIZE_BYTES == 131_072);
+    assert!(UPCASE_TABLE_SIZE_BYTES == 256);
+    assert!(UPCASE_TABLE_SIZE_BYTES < MAX_INTEROP_UPCASE_TABLE_SIZE_BYTES);
+    assert!(ASCII_LOWER_Z < UPCASE_TABLE_ENTRIES);
     assert!(ASCII_CASE_DELTA == 0x20);
 };
 
 /// `exFAT` upcase table.
 ///
-/// Owns the full uncompressed byte representation and a cached
-/// checksum. Construct with [`UpcaseTable::ascii_identity`].
+/// Owns the on-disk byte representation and a cached checksum.
+/// Construct with [`UpcaseTable::ascii_identity`].
 #[derive(Clone)]
 pub struct UpcaseTable {
     bytes: Vec<u8>,
@@ -120,17 +139,14 @@ impl UpcaseTable {
     /// Build the ASCII-fold-plus-identity upcase table described
     /// at the module level.
     ///
-    /// Allocates [`UPCASE_TABLE_SIZE_BYTES`] = 131 072 bytes on
-    /// the heap. The computation is `O(N)` over the entry count
-    /// and runs in microseconds even on a Pi Zero 2 W.
+    /// Allocates [`UPCASE_TABLE_SIZE_BYTES`] = 256 bytes on the
+    /// heap. The computation is `O(N)` over the entry count and
+    /// runs in well under a microsecond on a Pi Zero 2 W.
     #[must_use]
     pub fn ascii_identity() -> Self {
         let mut bytes = Vec::with_capacity(UPCASE_TABLE_SIZE_BYTES);
-        for code_unit in 0_u32..UPCASE_TABLE_ENTRIES {
-            // Truncating to u16 is safe: the range is exactly
-            // 0..65_536 by construction.
-            let cu_u16 = u16::try_from(code_unit).unwrap_or(u16::MAX);
-            let folded = ascii_fold(cu_u16);
+        for code_unit in 0_u16..UPCASE_TABLE_ENTRIES {
+            let folded = ascii_fold(code_unit);
             bytes.extend_from_slice(&folded.to_le_bytes());
         }
         debug_assert_eq!(bytes.len(), UPCASE_TABLE_SIZE_BYTES);
@@ -163,12 +179,19 @@ impl UpcaseTable {
 
     /// Look up the uppercase form of `code_unit`.
     ///
-    /// Equivalent to reading two little-endian bytes at offset
-    /// `code_unit * 2` from [`Self::bytes`].
+    /// For code units inside the table range (`< 128`), reads the
+    /// folded value from [`Self::bytes`]. For code units at or
+    /// above the table size, returns the code unit unchanged
+    /// (identity), as required by `exFAT` spec §7.2.4.
     #[must_use]
-    #[allow(clippy::indexing_slicing)] // index range is bounded by the u16 input
+    #[allow(clippy::indexing_slicing)] // bounds verified by the early-return guard
     pub fn uppercase(&self, code_unit: u16) -> u16 {
         let off = (code_unit as usize) * BYTES_PER_ENTRY;
+        if off + BYTES_PER_ENTRY > self.bytes.len() {
+            // Spec §7.2.4: characters beyond the table size MUST
+            // map to themselves.
+            return code_unit;
+        }
         u16::from_le_bytes([self.bytes[off], self.bytes[off + 1]])
     }
 }
@@ -218,10 +241,34 @@ mod tests {
     // ---------- Size invariants ----------
 
     #[test]
-    fn table_is_exactly_131072_bytes() {
+    fn table_is_exactly_256_bytes() {
         let t = table();
-        assert_eq!(t.size_bytes(), 131_072);
+        assert_eq!(t.size_bytes(), 256);
         assert_eq!(t.bytes().len(), UPCASE_TABLE_SIZE_BYTES);
+    }
+
+    #[test]
+    fn table_size_is_below_exfatprogs_1_2_9_u16_truncation_limit() {
+        // Regression guard for the D3 hardware finding (Phase H2.6,
+        // 2026-05-20). exfatprogs 1.2.9 declares the size parameter
+        // of `boot_calc_checksum()` as `unsigned short`, so any
+        // upcase table size ≥ 0x10000 truncates to a smaller value
+        // (or zero) and the checksum loop runs over the wrong
+        // range. fsck.exfat then reports the volume as corrupted
+        // even when the on-disk bytes match the stored checksum.
+        // Keeping the table well under 0x10000 bytes is the only
+        // way to interoperate with the released `fsck.exfat`.
+        //
+        // `black_box` defeats the compile-time-constant fold so
+        // clippy doesn't reduce the assertion to `assert!(true)`
+        // and complain that it would be optimised out.
+        let size = core::hint::black_box(UPCASE_TABLE_SIZE_BYTES);
+        let limit = core::hint::black_box(MAX_INTEROP_UPCASE_TABLE_SIZE_BYTES);
+        assert!(
+            size < limit,
+            "upcase table size {size} bytes must stay below the \
+             exfatprogs u16 limit {limit} bytes"
+        );
     }
 
     #[test]
@@ -331,13 +378,13 @@ mod tests {
     #[test]
     fn entries_are_little_endian_in_bytes() {
         let t = table();
-        // Entry at code unit 0x1234 should be byte 0x34 0x12.
-        let entry_index = 0x1234_usize;
+        // Entry at code unit 0x0040 should be byte 0x40 0x00
+        // (identity — '@' is not in the ASCII lowercase range, so
+        // it folds to itself).
+        let entry_index = 0x0040_usize;
         let off = entry_index * BYTES_PER_ENTRY;
-        // 0x1234 is not in the ASCII lowercase range, so it folds
-        // to itself.
-        assert_eq!(t.bytes()[off], 0x34);
-        assert_eq!(t.bytes()[off + 1], 0x12);
+        assert_eq!(t.bytes()[off], 0x40);
+        assert_eq!(t.bytes()[off + 1], 0x00);
     }
 
     #[test]
@@ -355,6 +402,18 @@ mod tests {
         let t = table();
         let reference = reference_table_checksum(t.bytes());
         assert_eq!(t.checksum(), reference);
+    }
+
+    #[test]
+    fn checksum_matches_pinned_ascii_table_value() {
+        // Hardware regression pin: when this checksum changes, the
+        // on-disk upcase directory entry changes, and fsck.exfat
+        // and the Linux/Windows/macOS kernel drivers will see a
+        // mismatch. Pinning this value catches any unintentional
+        // edit to the table contents during Phase 3+ refactors.
+        // Recomputed via `compute_table_checksum` against the
+        // 256-byte ASCII fold table.
+        assert_eq!(table().checksum(), 0x88E3_8EE3);
     }
 
     #[test]
@@ -418,7 +477,7 @@ mod tests {
         assert_eq!(t1.bytes(), t2.bytes());
     }
 
-    // ---------- Debug formatter doesn't dump the whole 128 KiB ----------
+    // ---------- Debug formatter doesn't dump the table ----------
 
     #[test]
     fn debug_impl_is_concise() {
@@ -427,8 +486,9 @@ mod tests {
         assert!(s.contains("UpcaseTable"));
         assert!(s.contains("size_bytes"));
         assert!(s.contains("checksum"));
-        // Sanity bound — debug output must not include thousands
-        // of bytes.
+        // Sanity bound — debug output must not include the table
+        // bytes (even the 256-byte table would be ~1 KiB if
+        // rendered).
         assert!(s.len() < 256, "Debug output too verbose: {} bytes", s.len());
     }
 }

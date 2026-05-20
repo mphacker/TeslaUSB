@@ -583,8 +583,10 @@ pub struct RootDirectoryParams<'a> {
     pub bitmap_size_bytes: u64,
     /// First cluster of the upcase table stream.
     pub upcase_first_cluster: u32,
-    /// `Upcase` table size in bytes (always `131_072` for the
-    /// uncompressed ASCII-fold table).
+    /// `Upcase` table size in bytes. Always equals
+    /// [`crate::fs::exfat::upcase_table::UPCASE_TABLE_SIZE_BYTES`]
+    /// (`256` for the ASCII-fold table; see that module for why
+    /// the table is intentionally kept small).
     pub upcase_size_bytes: u64,
     /// Cached upcase checksum (`UpcaseTable::checksum`).
     pub upcase_checksum: u32,

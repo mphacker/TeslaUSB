@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,8 +17,6 @@ from teslausb_web.config import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from flask import Flask
     from flask.testing import FlaskClient
 
@@ -239,3 +238,39 @@ def test_blueprint_abort_works_alongside_error_handler() -> None:
     app = create_app(cfg, extra_blueprints=[bp])
     resp = app.test_client().get("/abrt")
     assert resp.status_code == 403
+
+
+def test_cache_invalidator_registered_on_app(app: Flask) -> None:
+    from teslausb_web.services.cache_invalidation import CacheInvalidator
+
+    invalidator = app.extensions["cache_invalidator"]
+    assert isinstance(invalidator, CacheInvalidator)
+
+
+def test_cache_invalidator_uses_configured_script_path() -> None:
+    cfg = WebConfig(
+        web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
+        paths=PathsSection(cache_invalidate_script=Path("/opt/custom/invalidate.sh")),
+        features=FeaturesSection(),
+        source_path=None,
+    )
+    app = create_app(cfg)
+    invalidator = app.extensions["cache_invalidator"]
+    cmd = list(invalidator.command)
+    assert cmd[0] == "sudo"
+    assert Path(cmd[1]) == Path("/opt/custom/invalidate.sh")
+
+
+def test_cache_invalidator_shutdown_registered_at_atexit(monkeypatch: pytest.MonkeyPatch) -> None:
+    registered: list[object] = []
+
+    def fake_register(fn: object, /) -> object:
+        registered.append(fn)
+        return fn
+
+    monkeypatch.setattr("teslausb_web.app.atexit.register", fake_register)
+    app = create_app(_make_config())
+    # Exactly one new atexit entry, and it is the invalidator's shutdown bound method.
+    assert any(
+        getattr(fn, "__self__", None) is app.extensions["cache_invalidator"] for fn in registered
+    )

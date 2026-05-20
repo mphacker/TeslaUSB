@@ -19,6 +19,7 @@ log handlers (charter §3 "no shortcut globals").
 
 from __future__ import annotations
 
+import atexit
 import errno
 import logging
 import secrets
@@ -28,6 +29,7 @@ from flask import Flask, abort, jsonify, request, send_from_directory
 
 from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
 from teslausb_web.config import WebConfig, load_config
+from teslausb_web.services.cache_invalidation import CacheInvalidator
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -109,6 +111,7 @@ def create_app(
     _register_standard_routes(app)
     _register_template_globals(app)
     _register_blueprints(app, extra_blueprints)
+    _register_cache_invalidator(app, cfg)
 
     logger.info(
         "teslausb_web app created (port=%d, max_upload_mb=%d, samba=%s, source=%s)",
@@ -189,6 +192,28 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         if scaffold_bp.name in registered_names:
             continue
         app.register_blueprint(scaffold_bp)
+
+
+def _register_cache_invalidator(app: Flask, cfg: WebConfig) -> None:
+    """Instantiate one :class:`CacheInvalidator` and stash it on the app.
+
+    Blueprints that mutate Tesla-visible files (chimes, light shows,
+    music, wraps, boombox, license-plate images) call
+    ``current_app.extensions["cache_invalidator"].schedule()`` after a
+    successful write. The singleton lives for the lifetime of the
+    gunicorn worker; ``atexit`` ensures pending timers are cancelled
+    and any in-flight cycle drains during graceful shutdown so the
+    medium-change pipeline never leaves Tesla in a half-cycled state.
+
+    Tests construct apps via ``create_app`` and inherit the invalidator
+    for free. The wired command is ``["sudo", str(cache_invalidate_script)]``
+    matching the sudoers fragment installed in Phase 4c.2.
+    """
+    invalidator = CacheInvalidator(
+        command=("sudo", str(cfg.paths.cache_invalidate_script)),
+    )
+    app.extensions["cache_invalidator"] = invalidator
+    atexit.register(invalidator.shutdown)
 
 
 def _register_template_globals(app: Flask) -> None:

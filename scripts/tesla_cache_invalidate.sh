@@ -70,12 +70,23 @@ EXIT CODES:
 USAGE
 }
 
+require_value() {
+    # $1 = flag name, $2 = value (may be empty if missing).
+    # Bash `set -u` would normally turn a missing `$2` into a noisy
+    # "unbound variable" exit 1; explicit check produces a clean
+    # exit 2 (usage error) per the documented exit-code contract.
+    if [[ -z "${2:-}" ]]; then
+        echo "tesla_cache_invalidate.sh: $1 requires a value" >&2
+        exit 2
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --lun) LUN="$2"; shift 2 ;;
-        --gadget) GADGET="$2"; shift 2 ;;
-        --function) FUNCTION="$2"; shift 2 ;;
-        --eject-ms) EJECT_MS="$2"; shift 2 ;;
+        --lun) require_value "$1" "${2:-}"; LUN="$2"; shift 2 ;;
+        --gadget) require_value "$1" "${2:-}"; GADGET="$2"; shift 2 ;;
+        --function) require_value "$1" "${2:-}"; FUNCTION="$2"; shift 2 ;;
+        --eject-ms) require_value "$1" "${2:-}"; EJECT_MS="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "tesla_cache_invalidate.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;

@@ -129,6 +129,31 @@ def test_eject_ms_non_integer_exits_two(tmp_path: Path) -> None:
     assert res.returncode == 2
 
 
+def test_lun_missing_value_exits_two(tmp_path: Path) -> None:
+    """--lun with no value -> clean exit 2 (NOT bash's exit 1 unbound-variable)."""
+    res = _run_script(tmp_path, "--lun")
+    assert res.returncode == 2
+    assert "requires a value" in res.stderr
+
+
+def test_gadget_missing_value_exits_two(tmp_path: Path) -> None:
+    res = _run_script(tmp_path, "--gadget")
+    assert res.returncode == 2
+    assert "requires a value" in res.stderr
+
+
+def test_function_missing_value_exits_two(tmp_path: Path) -> None:
+    res = _run_script(tmp_path, "--function")
+    assert res.returncode == 2
+    assert "requires a value" in res.stderr
+
+
+def test_eject_ms_missing_value_exits_two(tmp_path: Path) -> None:
+    res = _run_script(tmp_path, "--eject-ms")
+    assert res.returncode == 2
+    assert "requires a value" in res.stderr
+
+
 def test_missing_gadget_exits_three(tmp_path: Path) -> None:
     # tmp_path has no teslausb/ subtree — script must detect that
     # the LUN file path doesn't exist and exit 3, NOT 0 or 5.
@@ -204,12 +229,19 @@ def test_custom_gadget_and_function_names(tmp_path: Path) -> None:
 
 
 def test_script_is_executable() -> None:
-    # On Linux, the script must be executable so the systemd-installed
-    # path (/usr/local/bin/tesla_cache_invalidate.sh) doesn't need
-    # +x bolted on at install time. On Windows the executable bit is
-    # synthetic — this assertion is only meaningful on POSIX, and a
-    # `git update-index --chmod=+x` would persist the bit. We assert
-    # it weakly: file exists and is readable.
+    # The script ships as a real executable in the repo
+    # (`git update-index --chmod=+x` persists the bit) so the
+    # Phase 6 setup.sh can `install -m 0755` without an extra
+    # chmod step, and developers can run the script directly
+    # from a checkout. Verify both readable AND executable on
+    # POSIX; on Windows the executable bit is synthetic so we
+    # check only readable (the integration tests above use
+    # `bash <SCRIPT>` rather than direct invocation precisely
+    # so they work on either OS).
     assert SCRIPT.is_file()
     mode = SCRIPT.stat().st_mode
     assert mode & stat.S_IRUSR
+    if sys.platform != "win32":
+        assert mode & stat.S_IXUSR, (
+            f"{SCRIPT} must be executable (run `git update-index --chmod=+x {SCRIPT.name}` to fix)"
+        )

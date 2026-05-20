@@ -169,7 +169,61 @@ def test_schedule_during_in_flight_drains_to_one_rerun(
     assert call_count == 2
 
 
-def test_invalidate_now_cancels_pending_timer(invalidator: CacheInvalidator) -> None:
+def test_invalidate_now_waits_for_in_flight_fire(invalidator: CacheInvalidator) -> None:
+    """invalidate_now() must NOT overlap a _fire() cycle (single-flight)."""
+    overlap_detected = False
+    active = 0
+    active_lock = threading.Lock()
+    block = threading.Event()
+    release = threading.Event()
+    call_count = 0
+
+    def fake_run(*_args: object, **_kwargs: object) -> MagicMock:
+        nonlocal overlap_detected, active, call_count
+        with active_lock:
+            active += 1
+            if active > 1:
+                overlap_detected = True
+            call_count += 1
+            this_call = call_count
+        if this_call == 1:
+            block.set()
+            release.wait(timeout=5.0)
+        with active_lock:
+            active -= 1
+        return _ok_result()
+
+    with patch("subprocess.run", side_effect=fake_run):
+        # First, kick off a debounced cycle and wait for it to start.
+        invalidator.schedule()
+        assert block.wait(timeout=2.0), "first cycle never started"
+
+        # Now ask for an immediate invalidation from another thread.
+        # It MUST block until the in-flight cycle drains, then run.
+        result_holder: list[InvalidationResult] = []
+
+        def call_now() -> None:
+            result_holder.append(invalidator.invalidate_now())
+
+        t = threading.Thread(target=call_now)
+        t.start()
+
+        # Give it a moment to attempt; it should still be waiting.
+        time.sleep(TEST_DEBOUNCE * 2)
+        assert t.is_alive(), "invalidate_now() should still be waiting for the in-flight cycle"
+        with active_lock:
+            assert active == 1, "still exactly one subprocess running"
+
+        # Release the first cycle; invalidate_now should now proceed.
+        release.set()
+        t.join(timeout=5.0)
+        assert not t.is_alive(), "invalidate_now() hung after release"
+        assert len(result_holder) == 1
+        assert result_holder[0].ok
+
+    assert not overlap_detected, "two subprocesses overlapped — single-flight broken"
+    assert call_count == 2
+
     """invalidate_now() cancels the debounced timer (covers the cancel branch)."""
     with patch("subprocess.run", return_value=_ok_result()) as mock_run:
         invalidator.schedule()

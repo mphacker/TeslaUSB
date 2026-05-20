@@ -132,16 +132,38 @@ class CacheInvalidator:
     def invalidate_now(self) -> InvalidationResult:
         """Run an invalidation synchronously, bypassing the debounce.
 
-        Cancels any pending timer first. Returns the subprocess
-        result. Used by integration tests and CLI tools; production
-        request handlers should use :meth:`schedule` instead so
-        rapid-fire uploads coalesce.
+        Cancels any pending timer first. If a debounced cycle is
+        already executing in ``_fire``, waits for it to drain before
+        running so the class's single-flight invariant — "no two
+        ``tesla_cache_invalidate.sh`` invocations overlap" — holds
+        even when callers mix :meth:`schedule` and
+        :meth:`invalidate_now`.
+
+        Used by integration tests and CLI tools; production request
+        handlers should use :meth:`schedule` instead so rapid-fire
+        uploads coalesce.
         """
-        with self._lock:
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
-        return self._run_once()
+        # Acquire the single-flight slot under the lock. If a cycle
+        # is already in flight, busy-wait briefly (releasing the
+        # lock each iteration) until it drains. Using a busy-wait
+        # rather than a condition variable keeps the state machine
+        # small; the lock contention here is bounded by the
+        # subprocess runtime (~200 ms typical), so a few-millisecond
+        # sleep loop is cheap.
+        while True:
+            with self._lock:
+                if self._timer is not None:
+                    self._timer.cancel()
+                    self._timer = None
+                if not self._in_flight:
+                    self._in_flight = True
+                    break
+            threading.Event().wait(0.005)
+        try:
+            return self._run_once()
+        finally:
+            with self._lock:
+                self._in_flight = False
 
     def shutdown(self) -> None:
         """Cancel pending timer; mark shutdown so no new ones start."""
@@ -191,7 +213,13 @@ class CacheInvalidator:
             # result so the caller (or journalctl) can see what
             # happened; we never raise CalledProcessError because
             # the timer thread has no useful way to surface it.
-            completed = subprocess.run(  # noqa: S603 — argv is module-level constant
+            # rationale for the noqa below: argv is constructed from
+            # `self.command`, which defaults to DEFAULT_COMMAND (a
+            # frozen tuple pinned to the sudoers-permitted argv);
+            # the only way to inject is to construct CacheInvalidator
+            # with a different command, which is trusted DI not
+            # user input.
+            completed = subprocess.run(  # noqa: S603
                 cmd,
                 capture_output=True,
                 text=True,

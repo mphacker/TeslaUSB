@@ -63,6 +63,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # 0003).
 teslausb-core = { path = "../teslausb-core" }
 
+# Typed errors at module boundaries inside the binary crate, per
+# charter §"Rust standards" line 222. The outer-layer `main.rs`
+# may use `anyhow::Result` for ergonomic propagation, but library-
+# style modules within this binary (Phase 3.3 `backend::dir_tree`
+# and later) expose typed errors derived with `thiserror`. Adopted
+# in Phase 3.3.
+thiserror = "1.0"
+
 [dev-dependencies]
 # Integration test runs the compiled binary against a fixture TOML
 # and greps stderr for the "started" sentinel line that Phase 1.1

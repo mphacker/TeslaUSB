@@ -629,6 +629,7 @@ dependencies = [
  "serde",
  "tempfile",
  "teslausb-core",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",

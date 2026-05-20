@@ -466,7 +466,8 @@ test suite).
 | 4b.1b | `teslausb-core::sei::payload` — H.264 SEI envelope + Tesla 0x42-padding/0x69-marker framing | ✅ |
 | 4b.1c | `teslausb-core::sei::tesla` — protobuf demarshal + `SeiMessage` + v1 golden parity | ✅ |
 | 4b.1z | `teslausb-worker::sei` — clip walker that drives 4b.1a/b/c against real files | ✅ |
-| 4b.2 | `teslausb-worker::indexer` (inotify → SEI → SQLite) | ⏳ |
+| 4b.2a | `teslausb-worker::config` + `teslausb-worker::store` — TOML loader + SQLite-backed clip/waypoint store (ADR-0010) | ✅ |
+| 4b.2b | `teslausb-worker::watcher` + `teslausb-worker::indexer` (inotify → SEI → store) | ⏳ |
 | 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion) | ⏳ |
 | 4b.4 | `teslausb-worker::main` task supervisor | ⏳ |
 | 4b.5 | `teslausb-worker.service` systemd unit | ⏳ |
@@ -681,6 +682,82 @@ boundary lives in worker. No new workspace deps (teslausb-core
 
 **Test count:** workspace 1123 → 1151 (+28 tests: 11 mp4 +
 17 worker). Phase 4b.1 series (a+b+c+z) now totals 106 tests.
+
+### Phase 4b.2a — worker config + SQLite indexer store ✅
+
+First half of the indexer pillar. Stands up the worker's
+config file and the SQLite-backed `clips` + `waypoints`
+store the cleanup worker (4b.3) and the future web map
+(Phase 5+) will query against.
+
+**New deps** (worker `Cargo.toml`):
+
+* `rusqlite = "0.31"` with `features = ["bundled"]` — see
+  ADR-0010 for the rationale vs. JSON sidecars, redb, sled.
+  Bundling SQLite C source keeps cross-build self-contained
+  and the on-Pi binary apt-free at runtime.
+* `anyhow`, `clap`, `serde`, `toml`, `tracing`,
+  `tracing-subscriber` — needed now for the config loader
+  (`anyhow::Result` at the binary boundary, `serde` + `toml`
+  for the file format). The remaining ones are part of the
+  worker's binary surface that 4b.4 will fill in; pulling
+  them now keeps the dep set stable across 4b.
+
+**New in `teslausb-worker::config`** (18 tests):
+
+* `Config` (TOML, `deny_unknown_fields`) with three sections:
+  `backing_root` + `db_path` at the top level, plus
+  `[indexer]` (`sei_sample_rate`, `debounce_ms`) and
+  `[cleanup]` (`interval_seconds`, `retention_days`,
+  `min_free_pct`, `preserve_with_gps`).
+* All fields have defaults that match v1 cadence (5-min
+  cleanup, 1-day retention, 10% free floor, GPS-preserve on,
+  sample-every-30th-frame, 1.5 s inotify debounce).
+* `Config::load(&Path)` returns `anyhow::Result` with the
+  offending file path attached via `.with_context(...)` —
+  mirrors `teslafat::config`. `validate()` enforces
+  semantic invariants (`retention_days ≤ 730`,
+  `min_free_pct ≤ 100`, no-empty paths, positive intervals).
+
+**New in `teslausb-worker::store`** (22 tests):
+
+* `Store` wrapping `rusqlite::Connection`. WAL + foreign-keys
+  pragmas set at open; in-memory variant skips WAL so tests
+  do not need a tempdir.
+* `Bucket` enum (`Recent`/`Saved`/`Sentry`) → stable DB
+  strings (`"recent"`/`"saved"`/`"sentry"`). The enum makes
+  it impossible for a cleanup query to typo a bucket name.
+* `ClipRecord { id, relative_path, bucket, clip_started_utc,
+  indexed_at_utc, waypoint_count, gps_waypoint_count }`.
+  `has_gps()` derives the cleanup-worker's preserve check
+  from the cached GPS waypoint count (no per-clip waypoint
+  scan needed at delete time).
+* `record_clip(bucket, relative_path, &ClipWalk)` — single
+  transaction. UPSERTs the `clips` row (idempotent on path),
+  wipes its existing waypoints, re-inserts the new set.
+  Re-indexing a clip after a sample-rate change leaves no
+  stale rows.
+* `clip_by_path` / `knows_clip` / `clip_has_gps` /
+  `list_clips_in_bucket_older_than` (with
+  `COALESCE(clip_started_utc, indexed_at_utc)` fallback so a
+  clip with a missing `mvhd` is not immortal) /
+  `delete_clip_by_path` / `clip_count` / `waypoint_count`.
+* Migration discipline: `MIGRATIONS: &[&str]` ordered list,
+  `CURRENT_SCHEMA_VERSION` constant, `schema_version` row in
+  a `meta` table. Reopen of a current-version DB is a no-op.
+  Reopen of a future-version DB is rejected with
+  `StoreError::SchemaTooNew` rather than silently corrupting
+  data.
+
+**Charter:** layering preserved — `rusqlite` is a Layer-3
+adapter dep, lives only in `teslausb-worker`, never imported
+by `teslausb-core`. Typed errors via thiserror at module
+boundaries; `anyhow` only at the binary outer layer (the
+config loader). All gates green.
+
+**Test count:** workspace 1151 → 1191 (+40 tests: 18 config +
+22 store). Phase 4b.1+4b.2a now totals 146 tests in the worker
+crate.
 
 ## Phase H4 — Retention + worker on hardware
 

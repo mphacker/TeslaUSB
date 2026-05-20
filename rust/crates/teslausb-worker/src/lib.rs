@@ -23,4 +23,6 @@
 // pattern.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::indexing_slicing))]
 
+pub mod config;
 pub mod sei;
+pub mod store;

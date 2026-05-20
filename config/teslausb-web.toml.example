@@ -1,0 +1,82 @@
+# TeslaUSB B-1 web app — sample configuration.
+#
+# Install path (matches Phase 6 setup.sh and the gunicorn unit):
+#   /etc/teslausb/teslausb-web.toml
+#
+# Every key shown below is OPTIONAL — omit a key to fall back to
+# the default baked into ``teslausb_web.config``. The values shown
+# here ARE the defaults except where called out.
+#
+# Charter §"No shortcuts": validation runs at load time. A malformed
+# value causes the gunicorn worker to fail to start with a path-
+# anchored error in journalctl. There is no silent fall-through to
+# defaults for misconfigured keys.
+
+[web]
+# Bind address for gunicorn. Use 127.0.0.1 when nginx is the only
+# upstream (the production layout), 0.0.0.0 only if you need to
+# reach gunicorn directly from another host.
+host = "127.0.0.1"
+
+# Port gunicorn listens on. nginx in front terminates 80/443 and
+# proxies to this port. Default 8080 matches the v1 web_port so
+# existing bookmarks and screenshots continue to work.
+port = 8080
+
+# Flask session signing key. MUST be set in production — leave
+# empty for tests only. setup.sh writes a fresh 64-char hex key
+# on first install. To rotate, edit this and restart gunicorn.
+secret_key = "CHANGE-ME-ON-INSTALL"
+
+# Hard cap on a single upload request body, in MiB. Larger requests
+# get a clean 413 before Flask reads the body, so a malicious or
+# accidental 8 GiB upload cannot exhaust the Pi Zero 2 W's 512 MiB
+# of RAM. 512 MiB is the v1 default.
+max_upload_mb = 512
+
+# Memory-buffered chunk size, in MiB. The full upload is streamed
+# to a tmpfile when it exceeds this, so a Light Show ZIP larger
+# than this still works without OOMing. Must be <= max_upload_mb.
+max_chunk_mb = 64
+
+[paths]
+# Root of the btrfs subvolume tree that Tesla writes to and the
+# user can browse. Both `teslacam/` and `media/` live under here.
+backing_root = "/srv/teslausb"
+
+# SQLite index built by `teslausb-worker`. Read-only from the
+# web app's perspective.
+db_path = "/var/lib/teslausb/index.sqlite3"
+
+# Unix domain socket where `teslausb-worker` listens for IPC
+# requests (status, retention policy updates, force cache
+# invalidate). Created with mode 0660 owned by `teslausb:teslausb`.
+ipc_socket = "/run/teslausb/worker.sock"
+
+# Path the cache-invalidation Python service shells out to. Must
+# match the trailing argv pinned in the sudoers fragment at
+# /etc/sudoers.d/teslausb-cache-invalidate (Phase 4c.2).
+cache_invalidate_script = "/usr/local/bin/tesla_cache_invalidate.sh"
+
+[features]
+# Music browsing UI. Disabled by default to match v1; users can
+# flip this in Settings. When false the /media/music page returns
+# 404 and the nav tab is hidden.
+music_enabled = false
+
+# Boombox (5-file alphabetical cap) browsing UI. Same gating
+# as music_enabled.
+boombox_enabled = false
+
+# Samba (SMB1/SMB2) network sharing. When true the `smbd` and
+# `nmbd` services run and the `/srv/teslausb/teslacam/TeslaCam`
+# and `/srv/teslausb/media` paths are shared RW to the local
+# network. When false the services are stopped and no SMB
+# exposure exists. The Settings → Network Sharing toggle flips
+# this at runtime; this key is the initial state at boot.
+samba_enabled = false
+
+# Cloud archive (rclone-backed) sync UI. Enabled by default —
+# matches v1. Set to false on devices that should never push
+# clips offsite.
+cloud_archive_enabled = true

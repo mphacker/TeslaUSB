@@ -21,9 +21,16 @@ classifiers = [
     "Framework :: Flask",
 ]
 
-# Runtime dependencies land in Phase 5 when the Flask code is ported.
-# Empty list until then; the test smoke import only needs stdlib.
-dependencies = []
+# Runtime dependencies. Pinned to floor versions; setup.sh installs
+# `web/` with `pip install -e .` so these come along automatically.
+# - Flask 3.0 is the minimum that supports `MAX_FORM_MEMORY_SIZE`
+#   (released 2024-01-04) — required by the upload chunk-size guard.
+# - gunicorn 22 has the security fixes for HTTP request smuggling
+#   (CVE-2024-1135). Earlier is forbidden.
+dependencies = [
+    "flask>=3.0",
+    "gunicorn>=22.0",
+]
 
 [project.optional-dependencies]
 # Installed by `setup-dev.sh` (Phase 0.6) into the developer's venv.
@@ -99,7 +106,15 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "PLR2004"]     # asserts + magic nums OK in tests
+"tests/*" = [
+    "S101",      # asserts OK in tests
+    "PLR2004",   # magic numbers OK in tests
+    "S105",      # tests can ship fake secret-key strings
+    "S106",      # ditto for keyword args
+    "S107",      # ditto for default-arg secret strings
+    "PLC0415",   # tests can do local imports to override module constants
+    "ARG001",    # pytest fixtures often look unused but aren't (sys.path/monkeypatch)
+]
 
 # ---------------------------------------------------------------------------
 # mypy — strict type checking. Mirrors charter §"Lints" + §"Type discipline".

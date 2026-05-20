@@ -987,15 +987,22 @@ round-trip; no new modules).
 
 H4.1 – H4.5 per `00-PLAN.md`. All ⏳.
 
-## Phase 4c — Tesla cache invalidation
+## Phase 4c — Tesla cache invalidation ✅ COMPLETE
 
-| Inc | Deliverable | Status |
-|---|---|---|
-| 4c.1 | `scripts/tesla_cache_invalidate.sh` | ⏳ |
-| 4c.2 | sudoers fragment + install path | ⏳ |
-| 4c.3 | `services/cache_invalidation.py` debouncer | ⏳ |
-| 4c.4 | Unit tests | ⏳ |
-| 4c.5 | Integration test on dev box | ⏳ |
+Single combined charter-review at end of phase per plan.md.
+Charter-review fixes landed in commit `432f828`. Report:
+`~/.copilot/session-state/.../files/charter-review-phase-4c.md`.
+
+| Inc | Deliverable | Status | Review | Test |
+|---|---|---|---|---|
+| 4c.1 | `scripts/tesla_cache_invalidate.sh` (149 LOC, idempotent LUN clear/restore via configfs writes; `set -uo pipefail`; trap-based restore; exit codes 0/2/3/4/5 documented in --help; shellcheck `-S warning` clean) — commit `ba07097` | ✅ | ✅ APPROVED (charter-review Major #2 found arg-missing returned bash's exit 1 unbound-var instead of documented exit 2; fixed in `432f828` via `require_value` helper + 4 regression integration tests; Major #1 found script committed `100644` instead of `100755`, fixed in `432f828` via `git update-index --chmod=+x`; report at `~/.copilot/session-state/.../files/charter-review-phase-4c.md`) | ✅ shellcheck `-S warning` clean; 15 integration tests pass on Linux (podman `python:3.11-slim`); cycle/idempotent/dry-run/empty-LUN/missing-gadget/missing-value paths all covered |
+| 4c.2 | `etc/sudoers.d/teslausb-cache-invalidate` (36 LOC, NOPASSWD pinned to zero-args via trailing `""`, `Defaults!cmd env_reset, !requiretty`, visudo-validated against debian:bookworm-slim sudo 1.9.13p3) + `scripts/check.sh` shellcheck gate wired into `--hygiene` (skips with WARN if shellcheck missing) + 5 pre-existing SC2164 unchecked-`cd` warnings fixed across `check.sh` — commit `1bb93ee` | ✅ | ✅ APPROVED (no new findings; sudoers `""` syntax + `sudo -n` in DEFAULT_COMMAND prevent argv injection and password-prompt hangs) | ✅ `visudo -c` parsed OK; shellcheck `-S warning` clean across all 3 tracked `.sh` files; gate skips cleanly if shellcheck not installed |
+| 4c.3 | `web/teslausb_web/services/cache_invalidation.py` (242 LOC, `CacheInvalidator` dataclass with `schedule()` debounce + `invalidate_now()` sync bypass + `shutdown()` + context manager; single-flight via `_in_flight` + `_pending` flags; `DEFAULT_COMMAND = ("sudo", "-n", "/usr/local/bin/tesla_cache_invalidate.sh")` locked to sudoers fragment; ruff/mypy --strict/vulture/bandit clean) — commit `88ebd7b` | ✅ | ✅ APPROVED (charter-review Minor #1 found `invalidate_now()` could overlap an in-flight `_fire()` cycle; tightened in `432f828` to acquire `_in_flight` slot with bounded busy-wait, subprocess still runs outside the lock; Minor #2 reworded misleading `# noqa: S603` rationale) | ✅ see 4c.4 |
+| 4c.4 | `web/tests/test_cache_invalidation.py` — 13 unit tests, centerpiece `test_five_rapid_calls_coalesce_to_one`; covers in-flight drain via `threading.Event`-pinned `subprocess.run`, shutdown, timeout, missing-binary, nonzero-exit, context manager; 100% coverage on `cache_invalidation.py` — commit `88ebd7b` (+ `test_invalidate_now_waits_for_in_flight_fire` added in `432f828` for Minor #1 regression) | ✅ | ✅ APPROVED (single-flight invariant now has dedicated test exercising both `schedule()` and `invalidate_now()` thread contention) | ✅ pytest 16 passed 0 failed; coverage 100% on cache_invalidation.py (98 stmts, 16 branches, 0 missed); strict-markers + strict-config |
+| 4c.5 | `web/tests/test_cache_invalidation_integration.py` (215 LOC, 11 tests originally) — spawns real `bash <SCRIPT>` with `CONFIGFS_ROOT` env redirected to tmpdir; module-level `pytest.mark.skipif(sys.platform == "win32")` because WSL bash.exe corrupts paths; covers --help, unknown flag, non-integer args, real cycle, dry-run, idempotent, empty-LUN, custom gadget/function names, executable bit — commit `1643588` (+ 4 missing-value regression tests added in `432f828` for Major #2; total 15 tests) | ✅ | ✅ APPROVED (executable-bit test strengthened in `432f828` to assert `S_IXUSR` on POSIX; falls back to readable-only on Windows where exec bit is synthetic) | ✅ pytest 15 passed on Linux (podman `python:3.11-slim`); 15 skipped on Windows dev box (module-level win32 skip); all 28 unit+integration tests pass on Linux |
+
+**Phase 4c summary:** 5 increments shipped in 4 commits (`ba07097`, `1bb93ee`, `88ebd7b`, `1643588`) plus 1 charter-review-fix commit (`432f828`). Tracked-files delta: 4 new files, 2 modified (`scripts/check.sh` + `web/pyproject.toml` not touched — check.sh hygiene gate is now real). Gates green on Windows dev box (16/15 pytest) + Linux podman (28/0 pytest). Hardware verification deferred to Phase H4c (post-Phase-6) per operator directive: "finish phases 4 and 5 and 6 and then test and debug on the hardware."
+
 
 ## Phase H4c — Cache invalidation on hardware
 

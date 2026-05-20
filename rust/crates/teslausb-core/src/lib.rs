@@ -20,6 +20,9 @@
 //! * [`fs`] — filesystem geometry trait + FAT32 implementation
 //!   (Phase 2.1). Consumed by `teslafat`'s read-dispatcher
 //!   (forthcoming in Phase 2.6).
+//! * [`sei`] — Tesla SEI extraction (Phase 4b.1): MP4 box scanner
+//!   plus AVCC NAL iterator plus H.264 emulation-prevention strip;
+//!   SEI payload framing + Tesla protobuf demarshal land in 4b.1b/c.
 //!
 //! ## Planned additions
 //!
@@ -30,3 +33,4 @@
 pub mod backend;
 pub mod fs;
 pub mod ipc;
+pub mod sei;

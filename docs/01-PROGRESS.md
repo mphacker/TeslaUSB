@@ -462,11 +462,62 @@ test suite).
 
 | Inc | Deliverable | Status |
 |---|---|---|
-| 4b.1 | `teslausb-worker::sei` (port v1 logic to Rust, golden parity) | ⏳ |
+| 4b.1a | `teslausb-core::sei::{nal,mp4}` — AVCC NAL iterator, emulation-prevention strip, BMFF box scanner, mvhd extractor | ✅ |
+| 4b.1b | `teslausb-core::sei::payload` — H.264 SEI envelope + Tesla 0x42-padding/0x69-marker framing | ⏳ |
+| 4b.1c | `teslausb-core::sei::tesla` — protobuf demarshal + `SeiMessage` + v1 golden parity | ⏳ |
+| 4b.1z | `teslausb-worker::sei` — mmap adapter + walker that drives 4b.1a/b/c against real files | ⏳ |
 | 4b.2 | `teslausb-worker::indexer` (inotify → SEI → SQLite) | ⏳ |
 | 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion) | ⏳ |
 | 4b.4 | `teslausb-worker::main` task supervisor | ⏳ |
 | 4b.5 | `teslausb-worker.service` systemd unit | ⏳ |
+
+### Phase 4b.1a — SEI byte-level foundations ✅
+
+Pure-logic primitives the rest of Phase 4b builds on, ported
+line-for-line from v1's `scripts/web/services/sei_parser.py`
+(saved verbatim under the session-state files dir for traceability).
+
+* `teslausb-core::sei::nal` (~400 LOC, 15 tests):
+  - `AvccIter` — iterator over NAL units in an AVCC byte buffer
+    (4-byte big-endian length prefix; Tesla's `lengthSizeMinusOne
+    = 3` is universal across HW3/HW4). Stops silently on
+    zero-length padding (matches v1's `nal_size < 1: break`);
+    one-shot errors on truncated prefix or length overrun.
+  - `NalUnit { nal_type, payload }` — `nal_type` pre-extracted
+    (`payload[0] & 0x1F`) for branch-friendly filtering against
+    the SEI / IDR / non-IDR-slice constants.
+  - `strip_emulation_prevention(&[u8]) -> Cow<'_, [u8]>` — H.264
+    `0x000003` removal. Borrowed fast path when no preventions
+    are present (the common case for short non-zero-prone payloads);
+    Owned otherwise. State machine matches v1 line-for-line
+    (`zeros >= 2 and byte == 0x03 → drop`).
+* `teslausb-core::sei::mp4` (~450 LOC, 16 tests):
+  - `find_box(buf, start, end, name) -> Result<BoxRef, Mp4Error>`
+    — sibling-level BMFF box scan. Handles 32-bit sizes,
+    extended 64-bit sizes (`size == 1`), and "to end of
+    container" (`size == 0`). Rejects truncated headers,
+    truncated extended sizes, oversized boxes, and
+    size-smaller-than-header malformations explicitly — refusing
+    to silently skip past corruption matches v1's `_find_box`
+    behaviour.
+  - `find_box_path(buf, &[*b"moov", *b"trak", *b"mdia", *b"mdhd"])`
+    — convenience descent.
+  - `parse_mvhd(body) -> Result<Mvhd, Mp4Error>` — decodes the
+    Movie Header. Handles version 0 (32-bit times at body
+    offset 4) and version 1 (64-bit times at body offset 4).
+    Converts MP4-epoch (1904-01-01 UTC) seconds to Unix
+    `SystemTime`; rejects creation_time ≤ epoch offset (the
+    "uninitialised GPS clock" guard from v1).
+
+**Charter compliance:** no `tokio`, no `std::fs`, no syscalls —
+fits the `teslausb-core` layering rule. Indexing operations are
+guarded by explicit length checks earlier in the same arm and
+file-scoped `#[allow(clippy::indexing_slicing)]` follows the
+project pattern already established in `fs::exfat::boot_sector`
+and friends. Every error variant and public type carries doc
+comments; every byte-level invariant pinned by tests.
+
+**Test count:** workspace 1048 → 1079 (+31 sei tests).
 
 ## Phase H4 — Retention + worker on hardware
 

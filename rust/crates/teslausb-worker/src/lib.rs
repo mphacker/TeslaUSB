@@ -24,5 +24,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::indexing_slicing))]
 
 pub mod config;
+pub mod indexer;
 pub mod sei;
 pub mod store;
+pub mod watcher;

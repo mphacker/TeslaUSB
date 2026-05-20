@@ -39,7 +39,7 @@ clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 
-# Indexer waypoint / clip store. SQLite via rusqlite with the
+# Indexer waypoint store. SQLite via rusqlite with the
 # `bundled` feature so cross-build does NOT require a system
 # libsqlite3-dev on the target sysroot and the produced binary
 # carries no runtime apt-package dependency. See ADR-0010.
@@ -48,6 +48,15 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Structured logging to stderr → journald. Matches teslafat.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# Linux inotify(7) bindings for the clip watcher (Phase 4b.2b).
+# Direct `IN_CLOSE_WRITE` / `IN_MOVED_TO` mask avoids the
+# "was the write complete?" race that polling or notify's
+# coarser Modify event would force. See ADR-0011. The crate
+# is Linux-only; non-Linux builds compile the pure-logic
+# half of `watcher` and cfg-gate out the `ClipWatcher` type.
+[target.'cfg(target_os = "linux")'.dependencies]
+inotify = "0.10"
 
 [dev-dependencies]
 tempfile = "3.10"

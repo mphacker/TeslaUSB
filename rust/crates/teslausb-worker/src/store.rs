@@ -110,6 +110,36 @@ impl Bucket {
         }
     }
 
+    /// Tesla on-disk directory name. These are dictated by
+    /// the Tesla firmware and MUST match exactly.
+    #[must_use]
+    pub const fn tesla_dir_name(self) -> &'static str {
+        match self {
+            Self::Recent => "RecentClips",
+            Self::Saved => "SavedClips",
+            Self::Sentry => "SentryClips",
+        }
+    }
+
+    /// Inverse of [`Self::tesla_dir_name`]. Used by the
+    /// watcher to map an event's path back to a bucket.
+    #[must_use]
+    pub fn from_tesla_dir_name(name: &str) -> Option<Self> {
+        match name {
+            "RecentClips" => Some(Self::Recent),
+            "SavedClips" => Some(Self::Saved),
+            "SentryClips" => Some(Self::Sentry),
+            _ => None,
+        }
+    }
+
+    /// All three buckets in a stable order. Used by the
+    /// indexer's bootstrap walk.
+    #[must_use]
+    pub const fn all() -> [Self; 3] {
+        [Self::Recent, Self::Saved, Self::Sentry]
+    }
+
     /// Parse the DB-stored string back to a [`Bucket`]. Used
     /// by [`Store`] queries that return rows.
     fn from_db_str(s: &str) -> Result<Self> {

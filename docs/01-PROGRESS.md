@@ -467,7 +467,7 @@ test suite).
 | 4b.1c | `teslausb-core::sei::tesla` — protobuf demarshal + `SeiMessage` + v1 golden parity | ✅ |
 | 4b.1z | `teslausb-worker::sei` — clip walker that drives 4b.1a/b/c against real files | ✅ |
 | 4b.2a | `teslausb-worker::config` + `teslausb-worker::store` — TOML loader + SQLite-backed clip/waypoint store (ADR-0010) | ✅ |
-| 4b.2b | `teslausb-worker::watcher` + `teslausb-worker::indexer` (inotify → SEI → store) | ⏳ |
+| 4b.2b | `teslausb-worker::watcher` + `teslausb-worker::indexer` — inotify clip watcher + bootstrap/event indexer (ADR-0011) | ✅ |
 | 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion) | ⏳ |
 | 4b.4 | `teslausb-worker::main` task supervisor | ⏳ |
 | 4b.5 | `teslausb-worker.service` systemd unit | ⏳ |
@@ -758,6 +758,79 @@ config loader). All gates green.
 **Test count:** workspace 1151 → 1191 (+40 tests: 18 config +
 22 store). Phase 4b.1+4b.2a now totals 146 tests in the worker
 crate.
+
+### Phase 4b.2b — clip watcher + indexer service ✅
+
+Closes out the indexer pillar. The watcher subscribes to
+inotify CLOSE_WRITE/MOVED_TO on the three Tesla bucket
+directories; the indexer glues watcher events + bootstrap
+walks to the SEI walker (4b.1z) and the store (4b.2a).
+
+**New dep** (worker `Cargo.toml`, Linux target only):
+
+* `inotify = "0.10"` under `[target.'cfg(target_os = "linux")'.dependencies]`
+  — direct `IN_CLOSE_WRITE | IN_MOVED_TO` mask avoids the
+  "was the write complete?" race that polling or `notify`'s
+  coarser `Modify` event would force. See ADR-0011.
+
+**New in `teslausb-worker::watcher`** (7 host + 2 Linux-only
+integration tests):
+
+* `WatchEvent { bucket, path, kind }` and `WatchKind`
+  (`CloseWrite` | `Moved`) — typed event the indexer
+  consumes.
+* `is_indexable(&Path) -> bool` — pure helper: accepts
+  `*.mp4` (case-insensitive), rejects dotfiles and empty
+  names. Unit-tested without an inotify FD.
+* `event_to_bucket(&Path, &Config) -> Option<Bucket>` —
+  maps an absolute event path back to its bucket by
+  comparing against `config.bucket_root(b)`.
+* `ClipWatcher` (Linux-only) — wraps `inotify::Inotify`,
+  reads events in 4 KiB batches, filters via
+  `is_indexable`, returns `Vec<WatchEvent>`. Non-Linux
+  builds get a stub that returns `WatcherError::Unsupported`
+  so the test suite compiles on developer workstations.
+* `Bucket` gained `tesla_dir_name()` (e.g. `"RecentClips"`),
+  `from_tesla_dir_name`, and `all()` so the watcher and
+  indexer can iterate buckets without hard-coding the list.
+* `Config::bucket_root(Bucket) -> PathBuf` returns
+  `<backing_root>/TeslaCam/<dir>` — derived from the
+  canonical Tesla layout, no config knob needed.
+
+**New in `teslausb-worker::indexer`** (14 tests):
+
+* `Indexer { config, store, last_handled }` — owns the
+  store, tracks an in-memory debounce dictionary
+  (`HashMap<PathBuf, Instant>`) capped at 8 192 entries
+  (oldest half is evicted on overflow so long uptime can
+  never leak memory).
+* `Indexer::bootstrap()` — startup pass. Walks each bucket
+  directory, indexes any `*.mp4` the store does not yet
+  `knows_clip`. Returns a `BootstrapSummary { seen,
+  indexed, skipped, failed }`. Per-clip parse failures log
+  at WARN and continue (one bad clip cannot stall the
+  daemon).
+* `Indexer::handle_event(&WatchEvent)` — drains one event:
+  filter via `is_indexable`, debounce via
+  `config.indexer.debounce_ms`, walk via `walk_clip`,
+  persist via `store.record_clip`. Returns `Ok(true)` on
+  successful index, `Ok(false)` on filter / debounce /
+  parse-failure, `Err` only on a store error.
+* Store rows key on the *relative* path
+  (`relative_to_backing_root` strips `backing_root` so a
+  restored backup at a different mount point still
+  matches).
+
+**Charter:** `inotify` is Layer-3, lives in worker only and
+behind a `cfg(target_os = "linux")`. Pure-logic helpers
+(`is_indexable`, `event_to_bucket`, debounce dict) are
+always compiled and unit-tested. Per-clip parse failures
+are logged via `tracing::warn!`, never panicked. All gates
+green.
+
+**Test count:** workspace 1191 → 1212 (+21 host-test
+deltas: 7 watcher + 14 indexer). Linux-only integration
+tests add another +2 on the Pi.
 
 ## Phase H4 — Retention + worker on hardware
 

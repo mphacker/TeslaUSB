@@ -204,6 +204,18 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Absolute path to the on-disk directory backing
+    /// `bucket`. Matches the standard Tesla layout
+    /// (`<backing_root>/TeslaCam/<BucketDir>/`). The three
+    /// bucket dirs are always direct children of `TeslaCam/`;
+    /// the worker never invents alternate locations.
+    #[must_use]
+    pub fn bucket_root(&self, bucket: crate::store::Bucket) -> PathBuf {
+        self.backing_root
+            .join("TeslaCam")
+            .join(bucket.tesla_dir_name())
+    }
+
     fn validate(&self) -> Result<()> {
         ensure!(
             !self.backing_root.as_os_str().is_empty(),

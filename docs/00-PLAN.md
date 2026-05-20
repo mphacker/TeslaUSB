@@ -612,7 +612,11 @@ all H2.x green; bench number recorded in `docs/V2_HARDWARE_VALIDATION.md`.
 | 3.2 | `fs::exfat::parse::decode_write` parallel | ~300 |
 | 3.3 | `backend::dir_tree` adapter — implements `BlockBackend` over a POSIX directory tree, `.partial` write atomicity, `O_CREAT|O_EXCL` collision handling | ~400 |
 | 3.4 | `cluster_map` extent-based `BTreeMap<u32, Extent>` with `Arc` for lock-free reads; rebuild-on-startup test | ~300 |
-| 3.5 | Wire 3.1 + 3.2 + 3.3 + 3.4 into `synth::write`; integration test: format → copy file → eject → file appears on disk byte-identical | ~200 |
+| 3.5a | `fs::fat32::dir_decode` — read-side FAT32 directory-entry decoder (LFN aggregation, SFN, deleted, malformed) | ~600 |
+| 3.5b | `fs::fat32::chain` — FAT32 cluster-chain walker with cycle/oob/free-entry diagnostics | ~300 |
+| 3.5c | Wire 3.1 + 3.3 + 3.4 + 3.5a + 3.5b into FAT32 `synth::write` via `backend::fat32_write` state machine; 11-test end-to-end integration through public `BlockBackend::write/flush` API | ~1700 (incl. 23 tests) |
+| 3.5d | `fs::exfat::dir_decode` — read-side exFAT directory-entry decoder (file/stream-ext/file-name set decode, attribute extraction, deleted state) | ~500 |
+| 3.5e | `backend::exfat_write` state machine + wire 3.2 + 3.3 + 3.4 + 3.5d into exFAT `synth::write` | ~1500 |
 | 3.6 | Power-cut harness: `kill -9 teslafat` mid-write; on restart, partial files have `.partial` suffix and are not visible to Tesla | ~250 (test) |
 
 **🔍 REVIEW GATE per increment. ✅ TEST GATE:** per-increment

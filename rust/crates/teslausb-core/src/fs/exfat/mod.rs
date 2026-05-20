@@ -30,5 +30,6 @@ pub mod directory;
 pub mod geometry;
 pub mod layout;
 pub mod lazy_load;
+pub mod parse;
 pub mod synth;
 pub mod upcase_table;

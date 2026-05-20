@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from flask import Flask, abort, jsonify, request, send_from_directory
 
+from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
 from teslausb_web.config import WebConfig, load_config
 
 if TYPE_CHECKING:
@@ -106,6 +107,7 @@ def create_app(
 
     _register_error_handlers(app)
     _register_standard_routes(app)
+    _register_template_globals(app)
     _register_blueprints(app, extra_blueprints)
 
     logger.info(
@@ -161,11 +163,75 @@ def _register_standard_routes(app: Flask) -> None:
 
 
 def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
-    """Register all known blueprints.
+    """Register scaffolding blueprints + any extras supplied by tests.
 
-    Currently a stub: the real per-feature blueprints land in
-    Phase 5.7 - 5.16 (one per increment). Extras passed by tests
-    are registered as-is so the factory itself is exercised.
+    Phase 5.4 wires placeholder blueprints (`mapping`, `analytics`,
+    `media`, `cloud_archive`, `settings`) so `base.html` can render
+    via `url_for(...)` before the real per-feature blueprints land
+    in Phase 5.7-5.16. Each real blueprint replaces its scaffold
+    with the same `name` + endpoint contract.
+
+    `extras` are registered FIRST so tests / future increments can
+    pre-register the real blueprint and have the scaffold step
+    skip it (Flask raises if a name is registered twice — we
+    detect and skip rather than raise).
     """
+    registered_names: set[str] = set()
     for bp in extras:
         app.register_blueprint(bp)  # type: ignore[arg-type]
+        # Track by Blueprint.name when available so the scaffold
+        # step below doesn't double-register.
+        bp_name = getattr(bp, "name", None)
+        if isinstance(bp_name, str):
+            registered_names.add(bp_name)
+
+    for scaffold_bp in build_scaffold_blueprints():
+        if scaffold_bp.name in registered_names:
+            continue
+        app.register_blueprint(scaffold_bp)
+
+
+def _register_template_globals(app: Flask) -> None:
+    """Inject defaults for the flags ``base.html`` reads.
+
+    `base.html` references a number of context variables (`page`,
+    `samba_on`, `*_available`, `auto_refresh`, `operation_in_progress`,
+    `videos_available`, etc.) without setting them itself — they're
+    expected to be supplied by each view's `render_template` call or
+    by a context processor. To keep `base.html` standalone-renderable
+    (which we exploit in Phase 5.4 tests + the captive-portal page
+    that doesn't have business logic to compute these), we register
+    a context processor that supplies a conservative default for
+    every flag.
+
+    Real views override these via the `render_template` kwargs they
+    pass. The Jinja precedence rules ensure view-supplied kwargs
+    win over context-processor defaults, so this is purely a
+    safety net — not a behaviour shift.
+    """
+
+    @app.context_processor
+    def _inject_base_defaults() -> dict[str, object]:
+        return {
+            "page": "",
+            "samba_on": False,
+            "auto_refresh": False,
+            "expandable": False,
+            "operation_in_progress": False,
+            "estimated_completion": 0,
+            "lock_age": 0,
+            "map_available": True,
+            "analytics_available": True,
+            "videos_available": True,
+            "cloud_archive_available": True,
+            # Composite media-hub flag — `base.html` recomputes this
+            # from the sub-flags below, but we ship a default in
+            # case the template is refactored.
+            "media_available": False,
+            "chimes_available": False,
+            "music_available": False,
+            "shows_available": False,
+            "wraps_available": False,
+            "boombox_available": False,
+            "license_plates_available": False,
+        }

@@ -1,0 +1,412 @@
+<!doctype html>
+{# B-1: ported verbatim from v1 main:scripts/web/templates/base.html
+   with the following mode-removal edits applied per
+   docs/05-UI-UX-DESIGN-SYSTEM.md §"What changed for B-1":
+     1. Top-bar status-dot: mode_token/mode_label removed. The dot
+        now reflects Samba state only; when Samba is OFF (the
+        default + v1's "present mode") the dot is hidden entirely.
+     2. `mode_control.index` endpoint references replaced with
+        `settings.index` (the v1 Settings blueprint absorbed the
+        mode-control page; B-1 keeps Settings but drops the mode
+        controls inside it).
+     3. The "status-dot vocabulary" comment in the health-dot poll
+        script was rewritten — it referenced --mode-present /
+        --mode-edit tokens that no longer exist.
+   No structural changes; the rest of the template (sidebar rail,
+   bottom tabs, watchdog banner, health dot, theme switcher, toast
+   container, mobile/desktop layouts) is byte-for-byte v1.
+#}
+<html>
+<head>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% if auto_refresh %}
+    <meta http-equiv="refresh" content="15">
+    {% endif %}
+    <title>Tesla USB Gadget Control</title>
+    <script>
+        // Apply theme immediately before page renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap-icons-subset.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    {# Compute media_available from individual flags #}
+    {% set media_available = chimes_available or music_available or shows_available or wraps_available or boombox_available or license_plates_available %}
+
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <a href="{{ url_for('mapping.map_view') }}" class="top-bar-brand">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-hard-drive"></use></svg>
+                <span class="top-bar-title">TeslaUSB</span>
+            </a>
+        </div>
+        <div class="top-bar-right">
+            {# Phase 4.8 (#101) — system-health status dot. Polls
+               /api/system/health every 30 s. Color = overall severity:
+               ok=green, warn=amber, error=red, unknown=gray.
+               Click navigates to Settings (where the Phase 4.2
+               system-health card shows the per-subsystem breakdown).
+               Hidden until first poll arrives so we never flash a
+               stale color. #}
+            <a href="{{ url_for('settings.index') }}#system-health-card"
+               class="health-dot-link"
+               id="health-dot-link"
+               title="System status"
+               aria-label="System status"
+               hidden>
+                <span class="status-dot health-dot"
+                      id="health-dot"
+                      data-status-dot="health"></span>
+            </a>
+            {# B-1: mode/quick_edit removed. The status dot now reflects
+               Samba state ONLY. When Samba is OFF (the default, which is
+               also v1's "present mode"), the dot is hidden — the USB is
+               always connected to the vehicle, there's no useful state
+               to communicate. When Samba is ON, the dot is amber and
+               reads "Network sharing active". See
+               docs/05-UI-UX-DESIGN-SYSTEM.md §"Status Indicator". #}
+            {% if samba_on %}
+            <span class="status-dot status-samba-on" title="Network sharing active"></span>
+            {% endif %}
+            <button class="theme-toggle-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+                <svg class="nav-icon" id="theme-icon-svg" aria-hidden="true">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-moon"></use>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Desktop Sidebar Rail -->
+    <nav class="sidebar-rail" id="sidebarRail" aria-label="Main navigation">
+        {% if map_available %}
+        <a href="{{ url_for('mapping.map_view') }}" class="nav-item{% if page == 'map' %} active{% endif %}" title="Map">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-map-pin"></use></svg>
+            <span class="nav-label">Map</span>
+        </a>
+        {% endif %}
+        {% if analytics_available %}
+        <a href="{{ url_for('analytics.dashboard') }}" class="nav-item{% if page == 'analytics' %} active{% endif %}" title="Analytics">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use></svg>
+            <span class="nav-label">Analytics</span>
+        </a>
+        {% endif %}
+        {% if media_available %}
+        <a href="{{ url_for('media.media_home') }}" class="nav-item{% if page == 'media' %} active{% endif %}" title="Media">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use></svg>
+            <span class="nav-label">Media</span>
+        </a>
+        {% endif %}
+        {% if cloud_archive_available %}
+        <a href="{{ url_for('cloud_archive.index') }}" class="nav-item{% if page == 'cloud' %} active{% endif %}" title="Cloud">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
+            <span class="nav-label">Cloud</span>
+        </a>
+        {% endif %}
+        <a href="{{ url_for('settings.index') }}" class="nav-item{% if page == 'settings' %} active{% endif %}" title="Settings">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-settings"></use></svg>
+            <span class="nav-label">Settings</span>
+        </a>
+    </nav>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-tabs" aria-label="Main navigation">
+        {% if map_available %}
+        <a href="{{ url_for('mapping.map_view') }}" class="tab-item{% if page == 'map' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-map-pin"></use></svg>
+            <span class="tab-label">Map</span>
+        </a>
+        {% endif %}
+        {% if analytics_available %}
+        <a href="{{ url_for('analytics.dashboard') }}" class="tab-item{% if page == 'analytics' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use></svg>
+            <span class="tab-label">Analytics</span>
+        </a>
+        {% endif %}
+        {% if media_available %}
+        <a href="{{ url_for('media.media_home') }}" class="tab-item{% if page == 'media' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-music"></use></svg>
+            <span class="tab-label">Media</span>
+        </a>
+        {% endif %}
+        {% if cloud_archive_available %}
+        <a href="{{ url_for('cloud_archive.index') }}" class="tab-item{% if page == 'cloud' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
+            <span class="tab-label">Cloud</span>
+        </a>
+        {% endif %}
+        <a href="{{ url_for('settings.index') }}" class="tab-item{% if page == 'settings' %} active{% endif %}">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-settings"></use></svg>
+            <span class="tab-label">Settings</span>
+        </a>
+    </nav>
+
+    <main class="main-content{% if expandable %} expandable{% endif %}" role="main">
+        {% if videos_available %}
+        <!-- Phase 2c: archive watchdog banner. Hidden by default; the
+             polling JS below shows it when /api/archive/status returns
+             severity 'error' or 'critical'. Dismiss is sticky for 1h. -->
+        <div class="archive-watchdog-banner" id="archive-watchdog-banner"
+             role="alert" aria-live="polite" hidden>
+            <div class="archive-watchdog-content">
+                <div class="archive-watchdog-icon">
+                    <svg class="nav-icon" aria-hidden="true">
+                        <use id="archive-watchdog-icon-use"
+                             href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use>
+                    </svg>
+                </div>
+                <div class="archive-watchdog-message" id="archive-watchdog-message">
+                    Archive subsystem health degraded.
+                </div>
+                <div class="archive-watchdog-actions">
+                    <button type="button"
+                            class="archive-watchdog-btn"
+                            id="archive-watchdog-run-btn"
+                            aria-label="Run archive now">
+                        Run archive now
+                    </button>
+                    <button type="button"
+                            class="archive-watchdog-btn archive-watchdog-btn-secondary"
+                            id="archive-watchdog-dismiss-btn"
+                            aria-label="Dismiss banner for 1 hour">
+                        Dismiss
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if operation_in_progress %}
+        <div class="operation-banner" id="operation-banner">
+            <div class="operation-content">
+                <div class="operation-icon">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                </div>
+                <div class="operation-message">
+                    <strong>File operation in progress...</strong>
+                    <span id="operation-details">
+                        {% if estimated_completion > 0 %}
+                        Estimated completion: {{ estimated_completion }}s
+                        {% else %}
+                        Completing soon...
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="spinner"></div>
+            </div>
+            <div class="operation-countdown" id="retry-countdown"></div>
+        </div>
+        {% endif %}
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    {% for cat, msg in messages %}
+                    showToast('{{ msg|e }}', '{{ cat }}');
+                    {% endfor %}
+                });
+            </script>
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% if operation_in_progress %}
+    <script>
+        // Auto-refresh when operation completes
+        window.operationInProgress = true;
+        window.lockAge = {{ lock_age|default(0) }};
+    </script>
+    {% endif %}
+    {% if videos_available %}
+    <script>
+        // Phase 2c: archive watchdog banner — polls /api/archive/status
+        // every 60 s and shows a sticky bar when severity is 'error' or
+        // 'critical'. Dismiss persists for 1 h via sessionStorage.
+        (function() {
+            const POLL_INTERVAL_MS = 60000;
+            const DISMISS_KEY = 'archiveWatchdogDismissUntil';
+            const banner = document.getElementById('archive-watchdog-banner');
+            if (!banner) return;
+            const messageEl = document.getElementById('archive-watchdog-message');
+            const iconUse = document.getElementById('archive-watchdog-icon-use');
+            const runBtn = document.getElementById('archive-watchdog-run-btn');
+            const dismissBtn = document.getElementById('archive-watchdog-dismiss-btn');
+            const SPRITE = '{{ url_for("static", filename="icons/lucide-sprite.svg") }}';
+
+            function dismissedNow() {
+                try {
+                    const until = parseInt(
+                        sessionStorage.getItem(DISMISS_KEY) || '0', 10);
+                    return Date.now() < until;
+                } catch (e) { return false; }
+            }
+
+            function applySeverity(severity, message) {
+                banner.classList.remove(
+                    'archive-watchdog-warning',
+                    'archive-watchdog-error',
+                    'archive-watchdog-critical');
+                let icon = 'icon-alert-triangle';
+                if (severity === 'critical') {
+                    banner.classList.add('archive-watchdog-critical');
+                    icon = 'icon-shield-alert';
+                } else if (severity === 'error') {
+                    banner.classList.add('archive-watchdog-error');
+                    icon = 'icon-alert-circle';
+                }
+                if (iconUse) iconUse.setAttribute('href', SPRITE + '#' + icon);
+                if (messageEl) messageEl.textContent = message || '';
+            }
+
+            async function poll() {
+                if (dismissedNow()) {
+                    banner.hidden = true;
+                    return;
+                }
+                try {
+                    const r = await fetch('/api/archive/status', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) { banner.hidden = true; return; }
+                    const data = await r.json();
+                    // Issue #180 follow-up — banner is gated on
+                    // BOTH severity (error/critical) AND actionable
+                    // (the user can actually fix the underlying
+                    // issue). Stale-only conditions where the
+                    // worker is doing its best under heavy backlog
+                    // are reported in the System Health card but
+                    // never popped as a banner — banners that the
+                    // operator has no remedy for are pure noise.
+                    const sevBad = data.severity === 'error'
+                        || data.severity === 'critical';
+                    // Default to true when the field is missing so
+                    // an older deployment without the actionable
+                    // flag still surfaces the banner as before.
+                    const actionable = (data.actionable !== false);
+                    if (sevBad && actionable) {
+                        applySeverity(data.severity, data.message);
+                        banner.hidden = false;
+                    } else {
+                        banner.hidden = true;
+                    }
+                } catch (e) {
+                    // Network blip — leave the banner state unchanged.
+                }
+            }
+
+            if (runBtn) {
+                runBtn.addEventListener('click', async function() {
+                    runBtn.disabled = true;
+                    try {
+                        const r = await fetch(
+                            '/api/recent_archive/trigger',
+                            { method: 'POST',
+                              credentials: 'same-origin' });
+                        if (typeof showToast === 'function') {
+                            showToast(
+                                r.ok
+                                ? 'Archive run triggered.'
+                                : 'Failed to trigger archive run.',
+                                r.ok ? 'success' : 'error');
+                        }
+                    } catch (e) {
+                        if (typeof showToast === 'function') {
+                            showToast('Network error triggering archive.',
+                                'error');
+                        }
+                    } finally {
+                        runBtn.disabled = false;
+                        setTimeout(poll, 2000);
+                    }
+                });
+            }
+            if (dismissBtn) {
+                dismissBtn.addEventListener('click', function() {
+                    try {
+                        sessionStorage.setItem(
+                            DISMISS_KEY,
+                            String(Date.now() + 60 * 60 * 1000));
+                    } catch (e) {}
+                    banner.hidden = true;
+                });
+            }
+
+            poll();
+            setInterval(poll, POLL_INTERVAL_MS);
+        })();
+    </script>
+    {% endif %}
+
+    {# Phase 4.8 (#101) — system-health status dot in the top-bar.
+       Polls /api/system/health every 30 s; colours the dot per the
+       overall.severity (ok/warn/error/unknown). Hidden until the
+       first response arrives so we never flash a stale colour.
+       Lives outside the videos_available guard above because system
+       health is a global concern (cloud, WiFi, disk all matter even
+       on a Pi without a TeslaCam image). #}
+    <script>
+        (function() {
+            const POLL_MS = 30000;
+            const link = document.getElementById('health-dot-link');
+            const dot = document.getElementById('health-dot');
+            if (!link || !dot) return;
+
+            // Map subsystem severity → CSS class + tooltip prefix.
+            // B-1: uses the design-system accent tokens for ok/warn/
+            // error so dark/light mode work automatically. (v1's mode
+            // status-dot vocabulary that this comment used to reference
+            // was removed when mode/quick_edit went away.)
+            const SEV_TO_CLASS = {
+                ok:      'health-dot-ok',
+                warn:    'health-dot-warn',
+                error:   'health-dot-error',
+                unknown: 'health-dot-unknown',
+            };
+
+            function applyHealth(payload) {
+                const overall = (payload && payload.overall) || {};
+                const sev = overall.severity || 'unknown';
+                const msg = overall.message || 'System status';
+                // Reset any prior class then apply the new one.
+                dot.className = 'status-dot health-dot ' +
+                    (SEV_TO_CLASS[sev] || SEV_TO_CLASS.unknown);
+                link.title = msg;
+                link.setAttribute('aria-label', msg);
+                link.hidden = false;
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch('/api/system/health', {
+                        credentials: 'same-origin',
+                    });
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    applyHealth(data);
+                } catch (e) { /* network blip — keep last known colour */ }
+            }
+
+            poll();
+            setInterval(poll, POLL_MS);
+        })();
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

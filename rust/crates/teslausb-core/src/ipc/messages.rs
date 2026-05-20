@@ -113,6 +113,25 @@ pub enum Request {
         /// Per-clip retention changes to apply atomically.
         updates: Vec<RetentionUpdate>,
     },
+    /// Reload the global mtime-based retention policy without
+    /// restarting the daemon.
+    ///
+    /// The daemon re-walks the backing tree, re-applies the
+    /// retention filter with the new threshold, and rebuilds the
+    /// in-memory file-extent table that drives reads. The
+    /// write-state machine and pending writes are NOT touched.
+    /// Replies with [`Response::RetentionReloadAck`].
+    ///
+    /// `hide_after_seconds = 0` is interpreted as "retention
+    /// disabled" — see the `teslafat::config` module (the
+    /// `teslafat` crate)
+    /// for the operator-facing semantic.
+    ReloadRetention {
+        /// New threshold in seconds. Files under top-level
+        /// `RecentClips/` aged strictly past this value are
+        /// hidden from Tesla's view at the next read snapshot.
+        hide_after_seconds: u64,
+    },
     /// Force Tesla to re-enumerate the USB device (simulated
     /// unplug/replug). No body — applies to the LUN this socket
     /// serves.
@@ -133,6 +152,21 @@ pub enum Response {
         /// Updates the daemon could not apply, each with a human-
         /// readable reason.
         failed: Vec<RetentionFailure>,
+    },
+    /// Reply to [`Request::ReloadRetention`] — reports the new
+    /// effective hide / show counts after the filter was
+    /// re-applied with the new threshold.
+    RetentionReloadAck {
+        /// Threshold that was just applied (echoes the request,
+        /// so the operator can correlate the ack with the request
+        /// without keeping client-side state).
+        hide_after_seconds: u64,
+        /// Number of files newly hidden by the filter (regardless
+        /// of whether they were hidden before — this is the post-
+        /// reload hide count).
+        hidden: u32,
+        /// Number of files still visible after the reload.
+        shown: u32,
     },
     /// Reply to [`Request::InvalidateCache`] — UDC rebind kicked off.
     InvalidateAck,
@@ -508,5 +542,46 @@ mod tests {
         let bogus = r#"{"type":"DELETE_ALL_THE_THINGS"}"#;
         let res: Result<Request, _> = serde_json::from_str(bogus);
         assert!(res.is_err(), "unknown variant should fail to parse");
+    }
+
+    #[test]
+    fn reload_retention_request_carries_threshold_via_tag() {
+        let req = Request::ReloadRetention {
+            hide_after_seconds: 7200,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"RELOAD_RETENTION\""), "{json}");
+        assert!(json.contains("\"hide_after_seconds\":7200"), "{json}");
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn reload_retention_zero_is_a_valid_disable_request() {
+        // The wire layer doesn't reject 0 — the semantic ("0 =
+        // disabled") is applied by the daemon's reload handler.
+        // This test pins that contract: the message round-trips.
+        let req = Request::ReloadRetention {
+            hide_after_seconds: 0,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn retention_reload_ack_round_trips_via_json() {
+        let resp = Response::RetentionReloadAck {
+            hide_after_seconds: 3600,
+            hidden: 12,
+            shown: 47,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"type\":\"RETENTION_RELOAD_ACK\""), "{json}");
+        assert!(json.contains("\"hide_after_seconds\":3600"), "{json}");
+        assert!(json.contains("\"hidden\":12"), "{json}");
+        assert!(json.contains("\"shown\":47"), "{json}");
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, resp);
     }
 }

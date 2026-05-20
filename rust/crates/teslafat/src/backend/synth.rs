@@ -72,7 +72,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
 use teslausb_core::backend::{BackendError, BackendResult, BlockBackend, WriteFlags, check_bounds};
@@ -138,6 +138,10 @@ pub enum SynthBackendError {
     /// path) failed — typically because `backing_root` is not a
     /// directory.
     DirTree(DirTreeError),
+    /// Phase 4.4: the `file_extents` `RwLock` was poisoned by a
+    /// panic in another thread holding the read or write guard.
+    /// Recovery requires a daemon restart.
+    LockPoisoned,
 }
 
 impl fmt::Display for SynthBackendError {
@@ -155,6 +159,7 @@ impl fmt::Display for SynthBackendError {
                  exFAT allows at most 11",
             ),
             Self::DirTree(err) => write!(f, "building DirTreeWriter: {err}"),
+            Self::LockPoisoned => write!(f, "file_extents lock poisoned by panicked thread"),
         }
     }
 }
@@ -168,10 +173,27 @@ impl std::error::Error for SynthBackendError {
             Self::Fat32Synth(err) => Some(err),
             Self::ExfatLayout(err) => Some(err),
             Self::ExfatSynth(err) => Some(err),
-            Self::LabelTooLong { .. } => None,
+            Self::LabelTooLong { .. } | Self::LockPoisoned => None,
             Self::DirTree(err) => Some(err),
         }
     }
+}
+
+/// Phase 4.4 — outcome of a runtime retention reload.
+///
+/// Returned by [`SynthBackend::reload_retention`] and echoed back
+/// to operators by the IPC layer (Phase 1.5) as a
+/// [`teslausb_core::ipc::messages::Response::RetentionReloadAck`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReloadStats {
+    /// The threshold applied during this reload, in seconds.
+    /// `0` is interpreted as "retention disabled" — see
+    /// `SynthBackend::build_retention_policy` (private helper).
+    pub hide_after_seconds: u64,
+    /// Number of files the new policy hid.
+    pub hidden: u32,
+    /// Number of files the new policy left visible.
+    pub shown: u32,
 }
 
 /// A contiguous run of clusters that belongs to a single
@@ -183,7 +205,7 @@ impl std::error::Error for SynthBackendError {
 /// `bytes_per_cluster`, so the overlay loop in
 /// [`SynthBackend::read`] does only `u64` arithmetic (no
 /// per-read multiplications).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FileExtent {
     /// First volume byte covered by this extent (inclusive).
     first_byte: u64,
@@ -208,7 +230,18 @@ pub struct SynthBackend {
     /// File extents sorted ascending by `first_byte`. Each
     /// extent is unique (no overlap) because the cluster
     /// allocator hands out disjoint extents.
-    file_extents: Vec<FileExtent>,
+    ///
+    /// Behind an `RwLock` so Phase 4.4's
+    /// [`SynthBackend::reload_retention`] can swap the snapshot
+    /// atomically at runtime. Reads are common, writes (reloads)
+    /// rare; `RwLock` is the right pick. Charter ADR exception:
+    /// no new dependency added (std lib only).
+    file_extents: RwLock<Vec<FileExtent>>,
+    /// Retained for Phase 4.4 reload: the originally-walked
+    /// `cfg.backing_root`, so re-walks and re-applications of the
+    /// retention filter don't drift from the construction-time
+    /// path.
+    backing_root: PathBuf,
     size: u64,
     /// Phase 3.5c (FAT32) / Phase 3.5e (exFAT) write-side state.
     write_state: Mutex<WriteState>,
@@ -239,7 +272,13 @@ impl fmt::Debug for SynthBackend {
         f.debug_struct("SynthBackend")
             .field("fs_type", &kind)
             .field("size", &self.size)
-            .field("file_count", &self.file_extents.len())
+            .field(
+                "file_count",
+                &self
+                    .file_extents
+                    .read()
+                    .map_or_else(|p| p.into_inner().len(), |g| g.len()),
+            )
             .field("writable", &true)
             .finish_non_exhaustive()
     }
@@ -304,20 +343,8 @@ impl SynthBackend {
         // backend (see `retention_hides_aged_recentclips` test
         // below for the pattern).
         let now = SystemTime::now();
-        // `recentclips_hide_after_seconds = 0` is interpreted as
-        // "retention disabled" — translate to `Duration::MAX` so
-        // the filter never hides. Without this special case, a
-        // zero threshold would hide every `RecentClips/` file
-        // because `decide` is `age > threshold` strict-greater,
-        // and any non-zero age beats `Duration::ZERO`. The
-        // operator-facing semantics (zero = off) trump the
-        // module-internal semantics (zero = strictest).
         let hide_after = cfg.retention.recentclips_hide_after_seconds;
-        let policy = if hide_after == 0 {
-            retention::Policy::new(Duration::MAX)
-        } else {
-            retention::Policy::new(Duration::from_secs(hide_after))
-        };
+        let policy = Self::build_retention_policy(hide_after);
         let stats = retention::apply(&mut tree, &cfg.backing_root, now, &policy);
         if stats.hidden > 0 {
             tracing::info!(
@@ -398,7 +425,8 @@ impl SynthBackend {
         let synth = synth.with_data_source(Box::new(layout));
         Ok(Self {
             inner: SynthInner::Fat32(Box::new(synth)),
-            file_extents,
+            file_extents: RwLock::new(file_extents),
+            backing_root: cfg.backing_root.clone(),
             size: volume_size,
             write_state: Mutex::new(WriteState::Fat32(fat32_write)),
         })
@@ -490,7 +518,8 @@ impl SynthBackend {
             .with_allocation_bitmap(bitmap_first_cluster, bitmap_cluster_count);
         Ok(Self {
             inner: SynthInner::Exfat(Box::new(synth)),
-            file_extents,
+            file_extents: RwLock::new(file_extents),
+            backing_root: cfg.backing_root.clone(),
             size: volume_size,
             write_state: Mutex::new(WriteState::Exfat(exfat_write)),
         })
@@ -513,7 +542,9 @@ impl SynthBackend {
     /// what was expected.
     #[must_use]
     pub fn file_count(&self) -> usize {
-        self.file_extents.len()
+        self.file_extents
+            .read()
+            .map_or_else(|p| p.into_inner().len(), |g| g.len())
     }
 
     /// Whether this backend is serving a FAT32 view (as opposed
@@ -521,6 +552,104 @@ impl SynthBackend {
     #[must_use]
     pub fn is_fat32(&self) -> bool {
         matches!(self.inner, SynthInner::Fat32(_))
+    }
+
+    /// Snapshot the current extent table. Test-only helper: the
+    /// production read path acquires the lock per-call.
+    #[cfg(test)]
+    fn extents_snapshot(&self) -> Vec<FileExtent> {
+        self.file_extents
+            .read()
+            .map_or_else(|p| p.into_inner().clone(), |g| g.clone())
+    }
+
+    /// Translate the operator-facing `recentclips_hide_after_seconds`
+    /// knob into a [`retention::Policy`].
+    ///
+    /// `0` is interpreted as "retention disabled" — translated to
+    /// [`Duration::MAX`] so the filter never hides. Without this,
+    /// a zero threshold would hide every `RecentClips/` file
+    /// because [`retention::decide`] is `age > threshold`
+    /// strict-greater and any non-zero age beats
+    /// [`Duration::ZERO`]. Operator semantics (zero = off)
+    /// trump module-internal semantics (zero = strictest).
+    fn build_retention_policy(hide_after_seconds: u64) -> retention::Policy {
+        if hide_after_seconds == 0 {
+            retention::Policy::new(Duration::MAX)
+        } else {
+            retention::Policy::new(Duration::from_secs(hide_after_seconds))
+        }
+    }
+
+    /// Phase 4.4 — recompute what the retention filter would do
+    /// under a new `hide_after_seconds` threshold.
+    ///
+    /// Re-walks `backing_root` (captured at construction time),
+    /// applies the new policy, and returns the resulting hidden /
+    /// shown counts. Intended to be called by the IPC dispatcher
+    /// (Phase 1.5) in response to a
+    /// [`teslausb_core::ipc::messages::Request::ReloadRetention`].
+    ///
+    /// # Scope (read this carefully)
+    ///
+    /// This method **previews** the new policy and atomically
+    /// shrinks the live extent table so that hidden files stop
+    /// returning content on reads. It does NOT re-render the
+    /// underlying FAT/bitmap/directory entries the synth pre-built
+    /// at [`SynthBackend::open`] time — that would require swapping
+    /// `inner` and `write_state` atomically with respect to
+    /// concurrent NBD reads and active writers, which is the
+    /// Phase 1.5 daemon-dispatcher's job (full re-open + host-level
+    /// `ArcSwap`). Until that lands, the operator-visible effect
+    /// of a runtime reload is: previously-visible-but-now-hidden
+    /// files stop overlaying their content (reads return synth
+    /// zeros for those clusters) while their dir entries and
+    /// FAT/bitmap allocation flags remain until the next daemon
+    /// restart. Newly-shown (un-hidden) files do NOT come back at
+    /// runtime — they only re-appear after a restart, because the
+    /// synth would need to re-render the directory tree.
+    ///
+    /// The returned [`ReloadStats`] reflect what a full re-open
+    /// WOULD show, so the operator can confirm the new threshold
+    /// has the intended scope before deciding whether to restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SynthBackendError::Walk`] if the re-walk fails
+    /// (e.g., backing root removed between open and reload).
+    pub fn reload_retention(
+        &self,
+        hide_after_seconds: u64,
+    ) -> Result<ReloadStats, SynthBackendError> {
+        let mut tree = walk(&self.backing_root).map_err(SynthBackendError::Walk)?;
+        let policy = Self::build_retention_policy(hide_after_seconds);
+        let now = SystemTime::now();
+        let stats = retention::apply(&mut tree, &self.backing_root, now, &policy);
+        // Shrink the live extent table to the surviving files so
+        // hidden clusters stop returning the old content. We hold
+        // the write lock for the swap; reads will block briefly.
+        let mut surviving: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        collect_file_paths(&tree.root, &mut surviving);
+        let mut guard = self
+            .file_extents
+            .write()
+            .map_err(|_| SynthBackendError::LockPoisoned)?;
+        guard.retain(|ext| surviving.contains(&ext.backing_path));
+        let live_extents = guard.len();
+        drop(guard);
+        tracing::info!(
+            hide_after_seconds,
+            hidden = stats.hidden,
+            shown = stats.shown,
+            live_extents,
+            "retention reload preview applied (full effect requires daemon restart \
+             until Phase 1.5 dispatcher lands)"
+        );
+        Ok(ReloadStats {
+            hide_after_seconds,
+            hidden: u32::try_from(stats.hidden).unwrap_or(u32::MAX),
+            shown: u32::try_from(stats.shown).unwrap_or(u32::MAX),
+        })
     }
 
     fn read_sync(&self, offset: u64, buf: &mut [u8]) -> BackendResult<()> {
@@ -541,7 +670,11 @@ impl SynthBackend {
         // the optimisation to a future increment if profiling
         // shows it matters.
         let read_end = offset.saturating_add(buf.len() as u64);
-        for extent in &self.file_extents {
+        let extents = self
+            .file_extents
+            .read()
+            .map_err(|_| BackendError::Io(std::io::Error::other("file_extents lock poisoned")))?;
+        for extent in extents.iter() {
             if extent.end_byte <= offset {
                 continue;
             }
@@ -550,6 +683,7 @@ impl SynthBackend {
             }
             overlay_file_extent(extent, offset, buf)?;
         }
+        drop(extents);
 
         // Phase 3.5f: overlay any in-memory write-state updates
         // (kernel-written FAT entries and directory cluster
@@ -677,6 +811,22 @@ const fn first_data_byte_for_cluster_two(
     _bytes_per_cluster: u32,
 ) -> u64 {
     cluster_heap_byte_offset
+}
+
+/// Recursively gather absolute backing paths of every file in
+/// `dir` (and its descendants) into `out`. Used by
+/// [`SynthBackend::reload_retention`] to compute the set of
+/// surviving files after applying a new retention policy.
+fn collect_file_paths(
+    dir: &teslausb_core::fs::backing_tree::BackingDir,
+    out: &mut std::collections::HashSet<PathBuf>,
+) {
+    for f in &dir.files {
+        out.insert(f.backing_path.clone());
+    }
+    for d in &dir.subdirs {
+        collect_file_paths(d, out);
+    }
 }
 
 fn overlay_file_extent(extent: &FileExtent, read_offset: u64, buf: &mut [u8]) -> BackendResult<()> {
@@ -807,8 +957,9 @@ mod tests {
         // first_cluster which we can recover from the backend's
         // own extent table.
         let extent_first = backend
-            .file_extents
-            .first()
+            .extents_snapshot()
+            .into_iter()
+            .next()
             .expect("at least one extent")
             .first_byte;
         let mut buf = vec![0u8; payload.len()];
@@ -825,7 +976,11 @@ mod tests {
         write_file(&dir.path().join("short.bin"), &payload);
         let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
         let backend = SynthBackend::open(&cfg).expect("open ok");
-        let extent = backend.file_extents.first().expect("at least one extent");
+        let extent = backend
+            .extents_snapshot()
+            .first()
+            .cloned()
+            .expect("at least one extent");
         let cluster_bytes = extent.end_byte - extent.first_byte;
         let mut buf = vec![0xFFu8; usize::try_from(cluster_bytes).unwrap()];
         backend
@@ -929,8 +1084,9 @@ mod tests {
         let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = SynthBackend::open(&cfg).expect("open ok");
         let extent_first = backend
-            .file_extents
-            .first()
+            .extents_snapshot()
+            .into_iter()
+            .next()
             .expect("at least one extent")
             .first_byte;
         let mut buf = vec![0u8; payload.len()];
@@ -1007,11 +1163,11 @@ mod tests {
         let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
-        let aged_present = backend.file_extents.iter().any(|e| {
+        let aged_present = backend.extents_snapshot().iter().any(|e| {
             e.backing_path
                 .ends_with("RecentClips/2026-01-01_12-00-00-front.mp4")
         });
-        let fresh_present = backend.file_extents.iter().any(|e| {
+        let fresh_present = backend.extents_snapshot().iter().any(|e| {
             e.backing_path
                 .ends_with("RecentClips/2026-05-19_12-00-00-front.mp4")
         });
@@ -1051,11 +1207,11 @@ mod tests {
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
         let sentry_present = backend
-            .file_extents
+            .extents_snapshot()
             .iter()
             .any(|e| e.backing_path.to_string_lossy().contains("SentryClips"));
         let saved_present = backend
-            .file_extents
+            .extents_snapshot()
             .iter()
             .any(|e| e.backing_path.to_string_lossy().contains("SavedClips"));
         assert!(sentry_present, "SentryClips must never be hidden by mtime");
@@ -1085,7 +1241,7 @@ mod tests {
         cfg.retention.recentclips_hide_after_seconds = 0;
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
-        let present = backend.file_extents.iter().any(|e| {
+        let present = backend.extents_snapshot().iter().any(|e| {
             e.backing_path
                 .ends_with("RecentClips/2026-05-19_12-00-00-front.mp4")
         });
@@ -1108,11 +1264,11 @@ mod tests {
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
         let old_present = backend
-            .file_extents
+            .extents_snapshot()
             .iter()
             .any(|e| e.backing_path.ends_with("RecentClips/old.mp4"));
         let new_present = backend
-            .file_extents
+            .extents_snapshot()
             .iter()
             .any(|e| e.backing_path.ends_with("RecentClips/new.mp4"));
         assert!(!old_present, "exFAT layout must also honor retention");
@@ -1141,7 +1297,7 @@ mod tests {
         let backend = SynthBackend::open(&cfg).expect("open ok");
 
         // No extent in the layout names the hidden file.
-        for extent in &backend.file_extents {
+        for extent in &backend.extents_snapshot() {
             assert!(
                 !extent.backing_path.ends_with("hidden.mp4"),
                 "hidden file's extent leaked into the layout: {:?}",
@@ -1151,9 +1307,88 @@ mod tests {
         // The kept file is still represented.
         assert!(
             backend
-                .file_extents
+                .extents_snapshot()
                 .iter()
                 .any(|e| e.backing_path.ends_with("kept.mp4"))
         );
+    }
+
+    #[tokio::test]
+    async fn reload_retention_with_stricter_threshold_drops_aged_extents() {
+        // Start with retention disabled, then reload with a 1 h
+        // threshold and verify aged files lose their extents.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir.path().join("RecentClips/old.mp4"), &[0xAA; 4096]);
+        write_file(&dir.path().join("RecentClips/fresh.mp4"), &[0xBB; 4096]);
+        backdate(&dir.path().join("RecentClips/old.mp4"), 7200);
+
+        let mut cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        cfg.retention.recentclips_hide_after_seconds = 0;
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+        assert!(
+            backend
+                .extents_snapshot()
+                .iter()
+                .any(|e| e.backing_path.ends_with("old.mp4")),
+            "old.mp4 must be visible before reload"
+        );
+
+        let stats = backend.reload_retention(3600).expect("reload ok");
+        assert_eq!(stats.hide_after_seconds, 3600);
+        assert!(
+            stats.hidden >= 1,
+            "expected at least 1 hidden, got {stats:?}"
+        );
+
+        assert!(
+            !backend
+                .extents_snapshot()
+                .iter()
+                .any(|e| e.backing_path.ends_with("old.mp4")),
+            "old.mp4 must be evicted from extents after reload"
+        );
+        assert!(
+            backend
+                .extents_snapshot()
+                .iter()
+                .any(|e| e.backing_path.ends_with("fresh.mp4")),
+            "fresh.mp4 must still be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_retention_with_zero_disables_filter() {
+        // Open with a tight threshold (everything aged is hidden),
+        // then reload with 0 and verify hidden=0.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir.path().join("RecentClips/clip.mp4"), &[0xAA; 4096]);
+        backdate(&dir.path().join("RecentClips/clip.mp4"), 7200);
+
+        let mut cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        cfg.retention.recentclips_hide_after_seconds = 3600;
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+
+        let stats = backend.reload_retention(0).expect("reload ok");
+        assert_eq!(stats.hide_after_seconds, 0);
+        assert_eq!(
+            stats.hidden, 0,
+            "0 = disabled must produce zero hidden, got {stats:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_retention_returns_walk_error_if_root_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir.path().join("RecentClips/x.mp4"), &[0xAA; 1024]);
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+        let kept = dir; // keep alive
+        // Force a walk failure by handing the backend a now-empty
+        // path. Simulate this by deleting the backing root.
+        std::fs::remove_dir_all(kept.path()).expect("rm root");
+        let err = backend
+            .reload_retention(3600)
+            .expect_err("walk should fail with root gone");
+        assert!(matches!(err, SynthBackendError::Walk(_)));
     }
 }

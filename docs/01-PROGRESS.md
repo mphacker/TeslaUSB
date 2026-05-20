@@ -301,9 +301,9 @@ H3.1 – H3.5 per `00-PLAN.md`. All ⏳.
 | Inc | Deliverable | Status |
 |---|---|---|
 | 4.1 | `retention::filter` (mtime hide) | ✅ ccc7066 |
-| 4.2 | Tesla-delete interception | ✅ (pending commit) |
-| 4.3 | Virtual free-cluster reporting | ✅ (pending commit) |
-| 4.4 | TOML config + IPC reload | ⏳ |
+| 4.2 | Tesla-delete interception | ✅ db0a44b |
+| 4.3 | Virtual free-cluster reporting | ✅ 778bde1 |
+| 4.4 | TOML config + IPC reload | ✅ (pending commit) |
 
 **Phase 4.1 (`ccc7066`):** new `teslafat::retention`
 module — pure-logic hide-from-view filter. `decide(relative_path,
@@ -413,6 +413,50 @@ RecentClips hidden in both FAT32 and exFAT layouts, Sentry/Saved
 never hidden regardless of age, `0 = disabled` knob honored,
 hidden file's first cluster proven absent from the layout's
 extent table. Workspace total 1037 → 1042 (+5). All gates green.
+
+**Phase 4.4 (pending commit):** TOML + IPC runtime reload of
+the retention threshold.
+
+Wire format (`teslausb-core::ipc::messages`): two new variants on
+the existing tagged-JSON envelope —
+`Request::ReloadRetention { hide_after_seconds: u64 }` and
+`Response::RetentionReloadAck { hide_after_seconds, hidden, shown }`.
+The ack echoes the threshold so async clients can correlate without
+keeping state.
+
+Backend hook (`teslafat::backend::synth::SynthBackend`):
+`reload_retention(&self, hide_after_seconds) -> ReloadStats`
+re-walks the backing tree (path captured at construction time),
+applies the new retention policy via the shared
+`build_retention_policy` helper (so `0 = disabled` semantic is
+honored identically with `open`), and atomically shrinks the live
+extent table by retaining only the files that survived the new
+filter. The extent table is now wrapped in `RwLock<Vec<FileExtent>>`
+so the runtime swap is safe against concurrent NBD reads.
+
+Scope note: this is a real (not stub) runtime reload, but it is
+intentionally **partial** — it stops hidden files from overlaying
+their content on reads (clusters return synth zeros instead) but
+does not re-render the FAT/bitmap/directory entries the synth
+pre-built at `open` time. The full layout swap requires a
+host-level `Arc<dyn BlockBackend>` `ArcSwap` that lands with the
+Phase 1.5 daemon dispatcher; the returned `ReloadStats` reflect
+what a full re-open WOULD show so operators can confirm the new
+threshold's scope before deciding whether to restart. This
+limitation is documented inline on `reload_retention`.
+
+Tests: 6 new — 3 IPC wire-format round-trip tests
+(`reload_retention_round_trips_via_json`,
+`retention_reload_ack_round_trips_via_json`,
+`reload_retention_zero_seconds_round_trips`) and 3 backend
+integration tests (`reload_retention_with_stricter_threshold_drops_aged_extents`,
+`reload_retention_with_zero_disables_filter`,
+`reload_retention_returns_walk_error_if_root_removed`).
+New `SynthBackendError::LockPoisoned` variant covers the
+unreachable-in-practice case where another thread panics holding
+the `RwLock` write guard. Workspace total 1042 → 1048 (+6). All
+gates green (fmt, clippy `-D warnings`, doc `-D warnings`, full
+test suite).
 
 ## Phase 4b — Cleanup + indexer-driven preservation (Rust)
 

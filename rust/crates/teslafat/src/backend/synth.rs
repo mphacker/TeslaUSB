@@ -73,6 +73,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use teslausb_core::backend::{BackendError, BackendResult, BlockBackend, WriteFlags, check_bounds};
 use teslausb_core::fs::backing_tree::BackingTree;
@@ -93,6 +94,7 @@ use crate::backend::exfat_write::ExfatWriteState;
 use crate::backend::fat32_write::Fat32WriteState;
 use crate::backing_walker::{WalkError, walk};
 use crate::config::{Config, FsType};
+use crate::retention;
 
 /// One GiB in bytes; used to convert `volume_size_gb` (the
 /// operator-facing knob) into the `u64` size the backend
@@ -281,7 +283,50 @@ impl SynthBackend {
                 );
             }
         }
-        let tree = walk(&cfg.backing_root).map_err(SynthBackendError::Walk)?;
+        let mut tree = walk(&cfg.backing_root).map_err(SynthBackendError::Walk)?;
+        // Phase 4.3: apply the retention filter before layout
+        // planning. Files aged past `retention.recentclips_hide_after_seconds`
+        // (and only those under top-level `RecentClips/`) are
+        // dropped from the synthesized view — they don't claim
+        // clusters, don't appear in directory listings, and
+        // their clusters report free in FSInfo /
+        // allocation-bitmap. The backing files stay on disk
+        // until the Phase 4b cleanup worker decides whether to
+        // reap them.
+        //
+        // System clock is read here instead of through a Clock
+        // trait: `SynthBackend::open` is the single integration
+        // point, called once per daemon launch; injecting a
+        // mockable clock all the way down to this call site
+        // would cost more in plumbing than the test value it
+        // would add. Tests that need to exercise hidden files
+        // pre-date the file mtimes before constructing the
+        // backend (see `retention_hides_aged_recentclips` test
+        // below for the pattern).
+        let now = SystemTime::now();
+        // `recentclips_hide_after_seconds = 0` is interpreted as
+        // "retention disabled" — translate to `Duration::MAX` so
+        // the filter never hides. Without this special case, a
+        // zero threshold would hide every `RecentClips/` file
+        // because `decide` is `age > threshold` strict-greater,
+        // and any non-zero age beats `Duration::ZERO`. The
+        // operator-facing semantics (zero = off) trump the
+        // module-internal semantics (zero = strictest).
+        let hide_after = cfg.retention.recentclips_hide_after_seconds;
+        let policy = if hide_after == 0 {
+            retention::Policy::new(Duration::MAX)
+        } else {
+            retention::Policy::new(Duration::from_secs(hide_after))
+        };
+        let stats = retention::apply(&mut tree, &cfg.backing_root, now, &policy);
+        if stats.hidden > 0 {
+            tracing::info!(
+                hidden = stats.hidden,
+                shown = stats.shown,
+                hide_after_seconds = hide_after,
+                "retention filter applied at synth open"
+            );
+        }
         let serial = compute_volume_serial(&cfg.volume_label);
         match cfg.fs_type {
             FsType::Fat32 => Self::open_fat32(cfg, volume_size, &tree, serial),
@@ -921,5 +966,194 @@ mod tests {
         let cfg = sample_cfg(missing, FsType::Fat32);
         let err = SynthBackend::open(&cfg).expect_err("open should fail");
         assert!(matches!(err, SynthBackendError::Walk(_)));
+    }
+
+    // Phase 4.3 — retention filter wiring at synth open
+
+    /// Helper: backdate a file's mtime so it appears older than
+    /// `seconds` to the retention filter. Uses `filetime` via
+    /// `std::fs::File::set_modified` (Rust 1.75+) — `TeslaUSB`'s
+    /// MSRV is 1.86 per workspace `rust-version`.
+    fn backdate(path: &Path, seconds: u64) {
+        // Need write access to update mtime on Windows;
+        // open-for-read fails with PermissionDenied here.
+        let f = fs::OpenOptions::new().write(true).open(path).unwrap();
+        let mtime = SystemTime::now() - Duration::from_secs(seconds);
+        f.set_modified(mtime).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retention_hides_aged_recentclips_from_synth_layout() {
+        // Two RecentClips files: one fresh, one older than the
+        // default 1-hour threshold. The aged one must not appear
+        // in the synth's file_extents (i.e., it claimed no
+        // clusters), so Tesla's view of free space reflects the
+        // hidden file's clusters as free.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            &dir.path().join("RecentClips/2026-01-01_12-00-00-front.mp4"),
+            &[0xAA; 4096],
+        );
+        write_file(
+            &dir.path().join("RecentClips/2026-05-19_12-00-00-front.mp4"),
+            &[0xBB; 4096],
+        );
+        // Backdate the first clip past the default 3600s window.
+        backdate(
+            &dir.path().join("RecentClips/2026-01-01_12-00-00-front.mp4"),
+            7200,
+        );
+
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+
+        let aged_present = backend.file_extents.iter().any(|e| {
+            e.backing_path
+                .ends_with("RecentClips/2026-01-01_12-00-00-front.mp4")
+        });
+        let fresh_present = backend.file_extents.iter().any(|e| {
+            e.backing_path
+                .ends_with("RecentClips/2026-05-19_12-00-00-front.mp4")
+        });
+        assert!(
+            !aged_present,
+            "Phase 4.3: aged RecentClips file must be hidden from the synth layout"
+        );
+        assert!(
+            fresh_present,
+            "Phase 4.3: fresh RecentClips file must remain visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_does_not_hide_sentry_or_saved_regardless_of_age() {
+        // Sentry and Saved are outside the retention scope —
+        // even ancient files must remain in the synth layout.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            &dir.path().join("SentryClips/2020-01-01_00-00-00/event.mp4"),
+            &[0xCC; 4096],
+        );
+        write_file(
+            &dir.path().join("SavedClips/2020-01-01_00-00-00/event.mp4"),
+            &[0xDD; 4096],
+        );
+        backdate(
+            &dir.path().join("SentryClips/2020-01-01_00-00-00/event.mp4"),
+            86_400 * 365,
+        );
+        backdate(
+            &dir.path().join("SavedClips/2020-01-01_00-00-00/event.mp4"),
+            86_400 * 365,
+        );
+
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+
+        let sentry_present = backend
+            .file_extents
+            .iter()
+            .any(|e| e.backing_path.to_string_lossy().contains("SentryClips"));
+        let saved_present = backend
+            .file_extents
+            .iter()
+            .any(|e| e.backing_path.to_string_lossy().contains("SavedClips"));
+        assert!(sentry_present, "SentryClips must never be hidden by mtime");
+        assert!(saved_present, "SavedClips must never be hidden by mtime");
+    }
+
+    #[tokio::test]
+    async fn retention_zero_seconds_means_disabled_not_hide_all() {
+        // `recentclips_hide_after_seconds = 0` is the operator's
+        // "disable retention" knob — it must not flip into the
+        // strictest possible hide.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            &dir.path().join("RecentClips/2026-05-19_12-00-00-front.mp4"),
+            &[0xEE; 4096],
+        );
+        // Backdate by a year. Under the literal `Duration::ZERO`
+        // interpretation this would be hidden; under the
+        // operator-facing `0 = disabled` interpretation it must
+        // be shown.
+        backdate(
+            &dir.path().join("RecentClips/2026-05-19_12-00-00-front.mp4"),
+            86_400 * 365,
+        );
+
+        let mut cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        cfg.retention.recentclips_hide_after_seconds = 0;
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+
+        let present = backend.file_extents.iter().any(|e| {
+            e.backing_path
+                .ends_with("RecentClips/2026-05-19_12-00-00-front.mp4")
+        });
+        assert!(
+            present,
+            "hide_after_seconds = 0 must mean retention disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_hides_aged_recentclips_in_exfat_layout_too() {
+        // Symmetric assertion for the exFAT path — both layout
+        // planners must consume the filtered tree.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir.path().join("RecentClips/old.mp4"), &[0xAA; 4096]);
+        write_file(&dir.path().join("RecentClips/new.mp4"), &[0xBB; 4096]);
+        backdate(&dir.path().join("RecentClips/old.mp4"), 7200);
+
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+
+        let old_present = backend
+            .file_extents
+            .iter()
+            .any(|e| e.backing_path.ends_with("RecentClips/old.mp4"));
+        let new_present = backend
+            .file_extents
+            .iter()
+            .any(|e| e.backing_path.ends_with("RecentClips/new.mp4"));
+        assert!(!old_present, "exFAT layout must also honor retention");
+        assert!(new_present);
+    }
+
+    #[tokio::test]
+    async fn retention_frees_clusters_that_a_new_write_can_reuse() {
+        // The user-visible payoff: a hidden file's clusters
+        // become free, which means a new file Tesla writes can
+        // legitimately receive those cluster numbers without
+        // colliding with the (still-on-disk) backing file. We
+        // can't easily exercise Tesla's allocator here, but we
+        // can prove the invariant the allocator relies on: the
+        // hidden file's first cluster is no longer claimed by
+        // any extent in the synth's view.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            &dir.path().join("RecentClips/hidden.mp4"),
+            &[0xAA; 16384], // 4 clusters at 4 KiB
+        );
+        write_file(&dir.path().join("RecentClips/kept.mp4"), &[0xBB; 4096]);
+        backdate(&dir.path().join("RecentClips/hidden.mp4"), 7200);
+
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+
+        // No extent in the layout names the hidden file.
+        for extent in &backend.file_extents {
+            assert!(
+                !extent.backing_path.ends_with("hidden.mp4"),
+                "hidden file's extent leaked into the layout: {:?}",
+                extent.backing_path
+            );
+        }
+        // The kept file is still represented.
+        assert!(
+            backend
+                .file_extents
+                .iter()
+                .any(|e| e.backing_path.ends_with("kept.mp4"))
+        );
     }
 }

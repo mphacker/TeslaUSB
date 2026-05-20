@@ -302,7 +302,7 @@ H3.1 – H3.5 per `00-PLAN.md`. All ⏳.
 |---|---|---|
 | 4.1 | `retention::filter` (mtime hide) | ✅ ccc7066 |
 | 4.2 | Tesla-delete interception | ✅ (pending commit) |
-| 4.3 | Virtual free-cluster reporting | ⏳ |
+| 4.3 | Virtual free-cluster reporting | ✅ (pending commit) |
 | 4.4 | TOML config + IPC reload | ⏳ |
 
 **Phase 4.1 (`ccc7066`):** new `teslafat::retention`
@@ -340,7 +340,7 @@ cases; 3 `apply` end-to-end + 1 pathological). Workspace total
 1013 → 1027 (+14, one new lib test was a config test that
 already existed). All gates green.
 
-**Phase 4.2 (pending commit):** Tesla-delete interception. New
+**Phase 4.2 (`db0a44b`):** Tesla-delete interception. New
 `retention::DeletedSet` — `HashSet<PathBuf>` of relative paths
 Tesla has marked deleted via directory-entry mutation
 (FAT32: SFN leading byte rewritten to `0xE5`; exFAT: File-entry
@@ -380,6 +380,39 @@ breakages in `teslausb-core/src/fs/exfat/parse.rs` (FAT\[0\]/\[1\]
 bracket escapes) and `teslafat/src/backend/fat32_write.rs`
 (`FileExtent` intra-doc link) fixed in the same commit per the
 charter "fix bugs as you find them" rule.
+
+**Phase 4.3 (pending commit):** Virtual free-cluster reporting.
+`SynthBackend::open` now applies `retention::apply(&mut tree, ...)`
+between `backing_walker::walk` and the FS-specific layout
+planner. Hidden files (top-level `RecentClips/` aged past
+`recentclips_hide_after_seconds`) are dropped from the
+`BackingTree` before any cluster is allocated to them — they
+don't appear in directory listings, don't claim cluster numbers,
+and their clusters reflect as free in the FAT32 FSInfo
+`FSI_Free_Count` and the exFAT allocation bitmap because the
+layout planner never sees them. The backing files persist on
+disk until Phase 4b's cleanup worker decides whether to reap
+them.
+
+Operator-facing knob `recentclips_hide_after_seconds = 0` is
+explicitly translated to `Duration::MAX` (retention disabled)
+to avoid the footgun of `Duration::ZERO`'s "hide everything in
+the past" semantic. Documented in `RetentionConfig` and pinned
+by a regression test.
+
+Runtime deletes (`handle_child_deleted` from Phase 4.2) free
+their clusters via the existing Phase 3.5f read-after-write
+overlay — the kernel writes FAT entries / bitmap bits when it
+deletes the dir entry, and the overlay reflects those writes
+back to Tesla on the next read. No new free-cluster reporting
+path is needed for runtime deletes; the synth + overlay already
+agree.
+
+Tests: 5 new at `backend::synth::tests::retention_*` — aged
+RecentClips hidden in both FAT32 and exFAT layouts, Sentry/Saved
+never hidden regardless of age, `0 = disabled` knob honored,
+hidden file's first cluster proven absent from the layout's
+extent table. Workspace total 1037 → 1042 (+5). All gates green.
 
 ## Phase 4b — Cleanup + indexer-driven preservation (Rust)
 

@@ -151,6 +151,12 @@ pub struct RetentionConfig {
     /// Hide `RecentClips` files older than this many seconds from
     /// Tesla's directory view. Defaults to `DEFAULT_HIDE_AFTER_S`
     /// (one hour) which matches Tesla's own rotation window.
+    /// A value of `0` is interpreted by [`crate::backend::SynthBackend::open`]
+    /// as "retention disabled" — no file is ever hidden by the
+    /// mtime filter. This matches operator intuition (`0 = off`)
+    /// rather than the [`crate::retention::Policy`] internal
+    /// semantics where `Duration::ZERO` is the strictest possible
+    /// threshold.
     #[serde(default = "default_hide_after_s")]
     pub recentclips_hide_after_seconds: u64,
 }

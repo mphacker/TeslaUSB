@@ -294,18 +294,11 @@ impl SynthBackend {
         let upcase = UpcaseTable::ascii_identity();
         let bytes_per_cluster = geometry.bytes_per_cluster();
         let bitmap_first = synth.bitmap_first_cluster();
+        let bitmap_clusters = synth.bitmap_cluster_count();
         let upcase_first = synth.upcase_first_cluster();
-        let bitmap_clusters = upcase_first.saturating_sub(bitmap_first);
+        let upcase_clusters = synth.upcase_cluster_count();
         let bitmap_size_bytes = u64::from(bitmap_clusters) * u64::from(bytes_per_cluster);
         let upcase_size_bytes = UPCASE_TABLE_SIZE_BYTES as u64;
-        let upcase_clusters = u32::try_from(
-            upcase_size_bytes.div_ceil(u64::from(bytes_per_cluster)),
-        )
-        .map_err(|_| {
-            SynthBackendError::ExfatLayout(ExfatLayoutError::BadMetadata {
-                reason: "upcase cluster count exceeds u32::MAX",
-            })
-        })?;
         let first_free = upcase_first.saturating_add(upcase_clusters);
         let metadata = ExfatLayoutMetadata {
             bitmap_first_cluster: bitmap_first,

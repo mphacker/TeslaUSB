@@ -375,10 +375,32 @@ impl ExfatSynth {
         self.bitmap_first_cluster
     }
 
+    /// Number of clusters occupied by the allocation bitmap stream.
+    ///
+    /// The bitmap stream is contiguous starting at
+    /// [`Self::bitmap_first_cluster`] and runs for this many
+    /// clusters. Callers that need to know the byte range covered
+    /// by the bitmap can multiply by
+    /// [`ExfatGeometry::bytes_per_cluster`].
+    #[must_use]
+    pub fn bitmap_cluster_count(&self) -> u32 {
+        self.bitmap_cluster_count
+    }
+
     /// First cluster of the upcase table stream.
     #[must_use]
     pub fn upcase_first_cluster(&self) -> u32 {
         self.upcase_first_cluster
+    }
+
+    /// Number of clusters occupied by the upcase table stream.
+    ///
+    /// The upcase stream is contiguous starting at
+    /// [`Self::upcase_first_cluster`] and runs for this many
+    /// clusters.
+    #[must_use]
+    pub fn upcase_cluster_count(&self) -> u32 {
+        self.upcase_cluster_count
     }
 
     /// Fill `out` with the bytes that live at `offset` in the
@@ -710,6 +732,24 @@ mod tests {
     fn construction_assigns_upcase_after_bitmap() {
         let s = synth_64mib();
         assert!(s.upcase_first_cluster() > s.bitmap_first_cluster());
+    }
+
+    #[test]
+    fn bitmap_cluster_count_accessor_matches_internal() {
+        let s = synth_64mib();
+        // The bitmap stream is contiguous: upcase_first - bitmap_first
+        // is the number of clusters between them, which is exactly the
+        // bitmap's cluster footprint.
+        let derived = s.upcase_first_cluster() - s.bitmap_first_cluster();
+        assert_eq!(s.bitmap_cluster_count(), derived);
+        assert!(s.bitmap_cluster_count() >= 1);
+    }
+
+    #[test]
+    fn upcase_cluster_count_accessor_matches_internal() {
+        let s = synth_64mib();
+        let last = s.upcase_first_cluster() + s.upcase_cluster_count() - 1;
+        assert_eq!(read_fat_entry(&s, last), 0xFFFF_FFFF);
     }
 
     #[test]

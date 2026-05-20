@@ -69,6 +69,7 @@ _DEFAULT_BACKOFF_MULTIPLIER: Final[float] = 2.0
 _DEFAULT_BACKOFF_CEILING_S: Final[float] = 1.0
 _RECV_CHUNK: Final[int] = 4096
 _REQUEST_ID_MAX: Final[int] = 2**63 - 1  # u64 wire field; signed-int safe.
+_AF_UNIX_FAMILY: Final[int | None] = getattr(socket, "AF_UNIX", None)
 
 
 class IpcDaemonError(Exception):
@@ -254,7 +255,9 @@ class TeslaFatClient:
         """Open and connect a SOCK_STREAM AF_UNIX socket."""
         if self._socket_factory is not None:
             return self._socket_factory(self._socket_path)
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined] # AF_UNIX is Linux-only; Windows dev box doesn't expose the constant but production target is Linux.
+        if _AF_UNIX_FAMILY is None:
+            raise OSError("AF_UNIX is unavailable on this platform")
+        sock = socket.socket(_AF_UNIX_FAMILY, socket.SOCK_STREAM)
         sock.settimeout(self._connect_timeout_s)
         sock.connect(self._socket_path)
         return sock

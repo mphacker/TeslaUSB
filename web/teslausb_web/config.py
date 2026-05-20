@@ -49,6 +49,7 @@ _DEFAULT_LOCK_CHIME_FILENAME: Final[str] = "LockChime.wav"
 _DEFAULT_CHIMES_FOLDER: Final[str] = "Chimes"
 _DEFAULT_GROUPS_FILE_RELPATH: Final[str] = "chime_groups.json"
 _DEFAULT_RANDOM_CONFIG_RELPATH: Final[str] = "chime_random_config.json"
+_DEFAULT_SCHEDULES_FILE_RELPATH: Final[str] = "chime_schedules.json"
 _DEFAULT_MAX_LOCK_CHIME_SIZE: Final[int] = 1_048_576
 _DEFAULT_MAX_LOCK_CHIME_DURATION: Final[int] = 5
 _DEFAULT_MIN_LOCK_CHIME_DURATION: Final[int] = 1
@@ -159,6 +160,7 @@ class ChimesSection:
     chimes_folder: str = _DEFAULT_CHIMES_FOLDER
     groups_file_relpath: str = _DEFAULT_GROUPS_FILE_RELPATH
     random_config_relpath: str = _DEFAULT_RANDOM_CONFIG_RELPATH
+    schedules_file_relpath: str = _DEFAULT_SCHEDULES_FILE_RELPATH
     max_lock_chime_size: int = _DEFAULT_MAX_LOCK_CHIME_SIZE
     max_lock_chime_duration: int = _DEFAULT_MAX_LOCK_CHIME_DURATION
     min_lock_chime_duration: int = _DEFAULT_MIN_LOCK_CHIME_DURATION
@@ -173,6 +175,7 @@ class ChimesSection:
             raise ConfigError(None, "[chimes] lock_chime_filename must end with .wav")
         _validate_relpath_filename(self.groups_file_relpath, key="groups_file_relpath")
         _validate_relpath_filename(self.random_config_relpath, key="random_config_relpath")
+        _validate_relpath_filename(self.schedules_file_relpath, key="schedules_file_relpath")
         if self.max_lock_chime_size <= 0:
             raise ConfigError(None, "[chimes] max_lock_chime_size must be > 0")
         if self.min_lock_chime_duration >= self.max_lock_chime_duration:
@@ -356,6 +359,12 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             chimes_raw,
             "random_config_relpath",
             _DEFAULT_RANDOM_CONFIG_RELPATH,
+            source,
+        ),
+        schedules_file_relpath=_coerce_str(
+            chimes_raw,
+            "schedules_file_relpath",
+            _DEFAULT_SCHEDULES_FILE_RELPATH,
             source,
         ),
         max_lock_chime_size=_coerce_int(

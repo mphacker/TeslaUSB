@@ -241,6 +241,7 @@ def test_chimes_defaults_round_trip(tmp_path: Path) -> None:
     assert cfg.chimes == ChimesSection()
     assert cfg.chimes.lock_chime_filename == "LockChime.wav"
     assert cfg.chimes.chimes_folder == "Chimes"
+    assert cfg.chimes.schedules_file_relpath == "chime_schedules.json"
 
 
 def test_invalid_chimes_speed_range_raises(tmp_path: Path) -> None:
@@ -316,7 +317,10 @@ def test_os_environ_not_mutated(monkeypatch: MonkeyPatch, tmp_path: Path) -> Non
     assert dict(os.environ) == before
 
 
-@pytest.mark.parametrize("key", ["groups_file_relpath", "random_config_relpath"])
+@pytest.mark.parametrize(
+    "key",
+    ["groups_file_relpath", "random_config_relpath", "schedules_file_relpath"],
+)
 def test_chime_relpaths_reject_path_traversal(tmp_path: Path, key: str) -> None:
     cfg_file = tmp_path / f"{key}.toml"
     _write(cfg_file, f'[chimes]\n{key} = "../foo"\n')

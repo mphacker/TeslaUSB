@@ -603,3 +603,226 @@ fn every_region_kind_in_geometry_map_is_reachable_via_read() {
         );
     }
 }
+
+// ── Phase 2.18 — layout-backed synth ──────────────────────────────────
+
+mod phase_2_18 {
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    use teslausb_core::fs::backing_tree::{BackingDir, BackingFile, BackingTree};
+    use teslausb_core::fs::exfat::directory::{
+        ENTRY_TYPE_ALLOCATION_BITMAP, ENTRY_TYPE_FILE, ENTRY_TYPE_STREAM_EXTENSION,
+        ENTRY_TYPE_UPCASE_TABLE, ENTRY_TYPE_VOLUME_LABEL,
+    };
+    use teslausb_core::fs::exfat::geometry::{ExfatGeometry, FIRST_CLUSTER_NUMBER};
+    use teslausb_core::fs::exfat::layout::{ExfatLayout, LayoutMetadata};
+    use teslausb_core::fs::exfat::synth::ExfatSynth;
+    use teslausb_core::fs::exfat::upcase_table::{UPCASE_TABLE_SIZE_BYTES, UpcaseTable};
+    use teslausb_core::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
+
+    const SIXTY_FOUR_MIB: u64 = 64 * 1024 * 1024;
+    const SERIAL: u32 = 0xCAFE_BABE;
+    const LABEL: &[u16] = &[
+        b'T' as u16,
+        b'E' as u16,
+        b'S' as u16,
+        b'T' as u16,
+        b'V' as u16,
+        b'O' as u16,
+        b'L' as u16,
+    ];
+
+    fn epoch() -> SystemTime {
+        SystemTime::UNIX_EPOCH
+    }
+
+    fn empty_dir(name: &str) -> BackingDir {
+        BackingDir {
+            name: name.to_string(),
+            backing_path: PathBuf::from("/").join(name),
+            mtime: epoch(),
+            subdirs: Vec::new(),
+            files: Vec::new(),
+        }
+    }
+
+    fn file(name: &str, size: u64) -> BackingFile {
+        BackingFile {
+            name: name.to_string(),
+            backing_path: PathBuf::from("/").join(name),
+            mtime: epoch(),
+            size,
+        }
+    }
+
+    fn cluster_offset_bytes(geo: &ExfatGeometry, cluster: u32) -> u64 {
+        let heap = u64::from(geo.cluster_heap_offset_sectors()) * u64::from(SECTOR_SIZE_BYTES);
+        let bpc = u64::from(geo.bytes_per_cluster());
+        heap + u64::from(cluster - FIRST_CLUSTER_NUMBER) * bpc
+    }
+
+    fn build_synth_with_tree(tree: &BackingTree) -> ExfatSynth {
+        let geo = ExfatGeometry::for_volume_size(SIXTY_FOUR_MIB).expect("64 MiB geometry");
+        let synth = ExfatSynth::new(geo.clone(), SERIAL, LABEL).expect("synth ok");
+
+        // Build the metadata for the layout from the synth's
+        // cluster reservations. ExfatSynth doesn't expose the
+        // bitmap cluster count directly, but we can recompute
+        // it from the geometry the same way ExfatSynth::new does.
+        let upcase = UpcaseTable::ascii_identity();
+        let bytes_per_cluster = geo.bytes_per_cluster();
+        let bitmap_first = synth.bitmap_first_cluster();
+        let upcase_first = synth.upcase_first_cluster();
+        let bitmap_clusters = upcase_first - bitmap_first;
+        let bitmap_size_bytes = u64::from(bitmap_clusters) * u64::from(bytes_per_cluster);
+        let upcase_size_bytes = UPCASE_TABLE_SIZE_BYTES as u64;
+        let upcase_clusters =
+            u32::try_from(upcase_size_bytes.div_ceil(u64::from(bytes_per_cluster))).unwrap();
+        let first_free = upcase_first + upcase_clusters;
+
+        let metadata = LayoutMetadata {
+            bitmap_first_cluster: bitmap_first,
+            bitmap_size_bytes,
+            upcase_first_cluster: upcase_first,
+            upcase_size_bytes,
+            upcase: &upcase,
+            volume_label_utf16: LABEL,
+            first_free_cluster: first_free,
+        };
+
+        let layout = ExfatLayout::plan(&geo, &metadata, tree).expect("layout ok");
+        synth.with_layout(layout).expect("with_layout ok")
+    }
+
+    #[test]
+    fn synth_with_empty_layout_still_serves_three_special_root_entries() {
+        let tree = BackingTree {
+            root: empty_dir("root"),
+        };
+        let synth = build_synth_with_tree(&tree);
+        let root_off = cluster_offset_bytes(synth.geometry(), 2);
+        let mut buf = vec![0u8; 96];
+        synth.read(root_off, &mut buf).expect("read ok");
+        assert_eq!(buf[0x00], ENTRY_TYPE_ALLOCATION_BITMAP);
+        assert_eq!(buf[0x20], ENTRY_TYPE_UPCASE_TABLE);
+        assert_eq!(buf[0x40], ENTRY_TYPE_VOLUME_LABEL);
+    }
+
+    #[test]
+    fn synth_with_top_level_file_emits_file_entry_set_in_root() {
+        let mut root = empty_dir("root");
+        root.files.push(file("clip.mp4", 4096));
+        let tree = BackingTree { root };
+        let synth = build_synth_with_tree(&tree);
+        let root_off = cluster_offset_bytes(synth.geometry(), 2);
+        // Skip past the 96-byte (3 entries) header, read the
+        // file entry set.
+        let mut buf = vec![0u8; 32];
+        synth.read(root_off + 0x60, &mut buf).expect("read ok");
+        assert_eq!(buf[0], ENTRY_TYPE_FILE);
+        // Secondary count = 1 stream + 1 name entry = 2.
+        assert_eq!(buf[1], 2);
+        // Next entry should be the stream extension.
+        let mut buf2 = vec![0u8; 32];
+        synth.read(root_off + 0x80, &mut buf2).expect("read ok");
+        assert_eq!(buf2[0], ENTRY_TYPE_STREAM_EXTENSION);
+    }
+
+    #[test]
+    fn synth_with_subdir_serves_subdir_cluster_bytes() {
+        let mut root = empty_dir("root");
+        let mut sub = empty_dir("RecentClips");
+        sub.files.push(file("a.mp4", 100));
+        sub.files.push(file("b.mp4", 200));
+        root.subdirs.push(sub);
+        let tree = BackingTree { root };
+        let synth = build_synth_with_tree(&tree);
+        // The first subdir is allocated at first_free_cluster
+        // (= the cluster immediately after the upcase stream).
+        // Its first entry must be a File primary (0x85).
+        let upcase_first = synth.upcase_first_cluster();
+        let upcase_size = UPCASE_TABLE_SIZE_BYTES as u64;
+        let bytes_per_cluster = u64::from(synth.geometry().bytes_per_cluster());
+        let upcase_clusters = u32::try_from(upcase_size.div_ceil(bytes_per_cluster)).unwrap();
+        let subdir_cluster = upcase_first + upcase_clusters;
+        let off = cluster_offset_bytes(synth.geometry(), subdir_cluster);
+        let mut buf = vec![0u8; 32];
+        synth.read(off, &mut buf).expect("read ok");
+        assert_eq!(
+            buf[0], ENTRY_TYPE_FILE,
+            "first subdir entry must be File primary, got 0x{:02X}",
+            buf[0]
+        );
+    }
+
+    #[test]
+    fn synth_without_layout_still_zero_fills_data_region() {
+        // Regression guard: a synth built via plain
+        // ExfatSynth::new (no with_layout) must continue to
+        // zero-fill clusters beyond root/bitmap/upcase, per
+        // Phase 2.11.
+        let geo = ExfatGeometry::for_volume_size(SIXTY_FOUR_MIB).expect("geo");
+        let synth = ExfatSynth::new(geo, SERIAL, LABEL).expect("synth");
+        let upcase_first = synth.upcase_first_cluster();
+        let upcase_clusters = u32::try_from(
+            (UPCASE_TABLE_SIZE_BYTES as u64)
+                .div_ceil(u64::from(synth.geometry().bytes_per_cluster())),
+        )
+        .unwrap();
+        let free_cluster = upcase_first + upcase_clusters;
+        let off = cluster_offset_bytes(synth.geometry(), free_cluster);
+        let mut buf = vec![0xFFu8; 64];
+        synth.read(off, &mut buf).expect("read ok");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "free cluster must zero-fill without a layout installed",
+        );
+    }
+
+    #[test]
+    fn with_layout_rejects_layout_planned_for_different_geometry() {
+        let small = ExfatGeometry::for_volume_size(SIXTY_FOUR_MIB).expect("small geo");
+        let large = ExfatGeometry::for_volume_size(4 * 1024 * 1024 * 1024).expect("large geo");
+        // Build a synth from `small`, then try to install a
+        // layout planned for `large` — should fail unless they
+        // happen to share bytes_per_cluster. To force a
+        // mismatch we just compare the BPC and run only if
+        // different.
+        if small.bytes_per_cluster() == large.bytes_per_cluster() {
+            // The geometry picker happens to agree on
+            // bytes_per_cluster for these two volumes; the
+            // mismatch path can't be exercised at this size,
+            // so this test trivially passes.
+            return;
+        }
+        let synth = ExfatSynth::new(small.clone(), SERIAL, LABEL).expect("synth");
+        let upcase = UpcaseTable::ascii_identity();
+        let bitmap_first = 3u32;
+        let bitmap_size_bytes = u64::from(large.bytes_per_cluster());
+        let bitmap_clusters = 1u32;
+        let upcase_first = bitmap_first + bitmap_clusters;
+        let upcase_size = UPCASE_TABLE_SIZE_BYTES as u64;
+        let upcase_clusters =
+            u32::try_from(upcase_size.div_ceil(u64::from(large.bytes_per_cluster()))).unwrap();
+        let first_free = upcase_first + upcase_clusters;
+        let metadata = LayoutMetadata {
+            bitmap_first_cluster: bitmap_first,
+            bitmap_size_bytes,
+            upcase_first_cluster: upcase_first,
+            upcase_size_bytes: upcase_size,
+            upcase: &upcase,
+            volume_label_utf16: LABEL,
+            first_free_cluster: first_free,
+        };
+        let tree = BackingTree {
+            root: empty_dir("root"),
+        };
+        let layout = ExfatLayout::plan(&large, &metadata, &tree).expect("layout");
+        let err = synth.with_layout(layout).unwrap_err();
+        match err {
+            teslausb_core::fs::exfat::synth::ExfatSynthError::LayoutMismatch { .. } => {}
+            other => panic!("expected LayoutMismatch, got {other:?}"),
+        }
+    }
+}

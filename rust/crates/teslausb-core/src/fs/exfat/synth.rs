@@ -55,7 +55,9 @@ use super::allocation_bitmap::{AllocationBitmap, AllocationBitmapError};
 use super::boot_sector::{self, BOOT_REGION_SIZE_BYTES, BootSectorError};
 use super::directory::{self, DirectoryError, RootDirectoryParams};
 use super::geometry::{ExfatGeometry, FIRST_CLUSTER_NUMBER};
+use super::layout::ExfatLayout;
 use super::upcase_table::{UPCASE_TABLE_SIZE_BYTES, UpcaseTable};
+use crate::fs::data_cluster_source::DataClusterSource;
 use crate::fs::geometry::{Geometry, Region, RegionKind, SECTOR_SIZE_BYTES};
 
 /// Materialised `exFAT` synthesizer: pre-computed boot region,
@@ -76,6 +78,11 @@ pub struct ExfatSynth {
     upcase_first_cluster: u32,
     /// Number of clusters occupied by the upcase table stream.
     upcase_cluster_count: u32,
+    /// Optional source for cluster-heap bytes outside the
+    /// root/bitmap/upcase ranges. Installed via
+    /// [`Self::with_layout`]; unset by default so the data
+    /// region zero-fills as Phase 2.11 documented.
+    data_source: Option<Box<dyn DataClusterSource + Send + Sync>>,
 }
 
 /// Errors returned by [`ExfatSynth::new`] and [`ExfatSynth::read`].
@@ -123,6 +130,16 @@ pub enum ExfatSynthError {
         /// The offending region kind.
         kind: RegionKind,
     },
+    /// [`ExfatSynth::with_layout`] received a layout planned
+    /// against a different `bytes_per_cluster` than this synth's
+    /// geometry. The layout and synth must come from the same
+    /// geometry.
+    LayoutMismatch {
+        /// The synth's `bytes_per_cluster`.
+        synth_bytes_per_cluster: u32,
+        /// The layout's `bytes_per_cluster`.
+        layout_bytes_per_cluster: u32,
+    },
 }
 
 impl fmt::Display for ExfatSynthError {
@@ -157,6 +174,14 @@ impl fmt::Display for ExfatSynthError {
             Self::UnsupportedRegion { kind } => {
                 write!(f, "exFAT synth received an unsupported region kind: {kind}")
             }
+            Self::LayoutMismatch {
+                synth_bytes_per_cluster,
+                layout_bytes_per_cluster,
+            } => write!(
+                f,
+                "exFAT layout was planned for {layout_bytes_per_cluster} bytes per cluster but \
+                 this synth's geometry uses {synth_bytes_per_cluster}",
+            ),
         }
     }
 }
@@ -170,7 +195,8 @@ impl core::error::Error for ExfatSynthError {
             Self::ClusterHeapTooSmall { .. }
             | Self::OffsetBeyondVolume { .. }
             | Self::LengthExceedsVolume { .. }
-            | Self::UnsupportedRegion { .. } => None,
+            | Self::UnsupportedRegion { .. }
+            | Self::LayoutMismatch { .. } => None,
         }
     }
 }
@@ -282,7 +308,59 @@ impl ExfatSynth {
             bitmap_cluster_count,
             upcase_first_cluster,
             upcase_cluster_count,
+            data_source: None,
         })
+    }
+
+    /// Install a planned [`ExfatLayout`] into this synth: marks
+    /// every layout extent in the allocation bitmap, replaces
+    /// the default 3-entry root cluster with the layout's
+    /// fully-rendered root cluster (which still begins with the
+    /// mandatory bitmap + upcase + label entries), and wires
+    /// the layout as the data source for subdirectory cluster
+    /// reads.
+    ///
+    /// File data clusters fall through to zero-fill at this
+    /// layer; the Phase-2.19 `DirTreeMaterializer` wraps the
+    /// layout to serve real file bytes.
+    ///
+    /// # Errors
+    ///
+    /// * [`ExfatSynthError::LayoutMismatch`] if `layout`'s
+    ///   `bytes_per_cluster` doesn't match this synth's
+    ///   geometry — indicates the layout was planned against a
+    ///   different volume.
+    /// * [`ExfatSynthError::Bitmap`] if marking any layout
+    ///   extent in the allocation bitmap fails (would only
+    ///   happen if the layout allocator and the bitmap
+    ///   disagree about cluster bounds, which is a
+    ///   construction bug).
+    pub fn with_layout(mut self, layout: ExfatLayout) -> Result<Self, ExfatSynthError> {
+        let expected_bytes_per_cluster = self.geometry.bytes_per_cluster();
+        if layout.bytes_per_cluster() != expected_bytes_per_cluster {
+            return Err(ExfatSynthError::LayoutMismatch {
+                synth_bytes_per_cluster: expected_bytes_per_cluster,
+                layout_bytes_per_cluster: layout.bytes_per_cluster(),
+            });
+        }
+        let expected_root_len = expected_bytes_per_cluster as usize;
+        if layout.root_directory_bytes().len() != expected_root_len {
+            return Err(ExfatSynthError::LayoutMismatch {
+                synth_bytes_per_cluster: expected_bytes_per_cluster,
+                layout_bytes_per_cluster: layout.bytes_per_cluster(),
+            });
+        }
+        for extent in layout.allocated_extents() {
+            if extent.is_empty() {
+                continue;
+            }
+            self.bitmap
+                .mark_range_allocated(extent.first_cluster, extent.cluster_count)
+                .map_err(ExfatSynthError::Bitmap)?;
+        }
+        self.root_directory = layout.root_directory_bytes().to_vec();
+        self.data_source = Some(Box::new(layout));
+        Ok(self)
     }
 
     /// The geometry this synthesizer was built for.
@@ -498,6 +576,11 @@ impl ExfatSynth {
             u64::from(self.geometry.bytes_per_cluster()),
         ) {
             copy_from_stream(self.upcase.bytes(), local_offset, out);
+            return;
+        }
+        if let Some(source) = self.data_source.as_ref() {
+            let byte_in_cluster_usize = usize::try_from(byte_in_cluster).unwrap_or(usize::MAX);
+            source.read_cluster_bytes(cluster, byte_in_cluster_usize, out);
             return;
         }
         out.fill(0);

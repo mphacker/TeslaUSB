@@ -120,7 +120,7 @@ session-state as `h1-journal.log`.
 | 2.6 | `fs::fat32::synth::read` dispatcher | ✅ | ✅ | ✅ |
 | 2.7 | `fs::fat32` integration test (synth+mount+cmp) | ✅ | ✅ | ✅ |
 | 2.8 | `fs::exfat::geometry` + boot region | ✅ | ✅ | ✅ |
-| 2.9 | `fs::exfat::allocation_bitmap` + `upcase_table` | ⏳ | ⏳ | ⏳ |
+| 2.9 | `fs::exfat::allocation_bitmap` + `upcase_table` | ✅ | ✅ | ✅ |
 | 2.10 | `fs::exfat::directory` | ⏳ | ⏳ | ⏳ |
 | 2.11 | `fs::exfat::synth::read` dispatcher | ⏳ | ⏳ | ⏳ |
 | 2.12 | `fs::exfat` integration test | ⏳ | ⏳ | ⏳ |

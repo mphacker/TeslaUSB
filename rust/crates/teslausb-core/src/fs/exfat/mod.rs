@@ -8,10 +8,10 @@
 //! [`crate::fs::geometry::Geometry::region_at`] method to route an
 //! incoming byte-offset to the correct synthesizer module.
 //!
-//! Phase 2.8 ships [`geometry`] and [`boot_sector`]. Subsequent
+//! Phase 2.8 ships [`geometry`] and [`boot_sector`]. Phase 2.9
+//! adds [`allocation_bitmap`] and [`upcase_table`]. Subsequent
 //! increments add:
 //!
-//! * Phase 2.9 — `allocation_bitmap` + `upcase_table`.
 //! * Phase 2.10 — `directory` (file / stream extension / file name
 //!   entry encoders + name-hash computation).
 //! * Phase 2.11 — `synth::ExfatSynth` dispatcher.
@@ -26,5 +26,7 @@
 //! regions are §3.1–3.2; the FAT layout is §4; the cluster heap
 //! is §5; directory entries are §6.
 
+pub mod allocation_bitmap;
 pub mod boot_sector;
 pub mod geometry;
+pub mod upcase_table;

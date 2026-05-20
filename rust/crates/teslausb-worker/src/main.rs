@@ -34,11 +34,33 @@ struct Cli {
     /// after a fresh deploy or after wiping the `SQLite` db.
     #[arg(long)]
     bootstrap_only: bool,
+
+    /// Load and validate the config, then exit. Used as the
+    /// systemd `ExecStartPre` gate so a malformed config
+    /// surfaces in journalctl before the supervisor starts
+    /// the watcher / opens the store.
+    #[arg(long)]
+    check_config: bool,
 }
 
 fn main() -> ExitCode {
     install_tracing();
     let cli = Cli::parse();
+    if cli.check_config {
+        match teslausb_worker::config::Config::load(&cli.config) {
+            Ok(_) => {
+                tracing::info!(
+                    config = %cli.config.display(),
+                    "--check-config: config OK",
+                );
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                tracing::error!(error = ?e, "--check-config: config invalid");
+                return ExitCode::from(2);
+            }
+        }
+    }
     let opts = RunOptions {
         config_path: cli.config,
         bootstrap_only: cli.bootstrap_only,

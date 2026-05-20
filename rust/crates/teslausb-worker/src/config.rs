@@ -446,4 +446,23 @@ bogus = 1
             "path missing from error chain: {chain:?}"
         );
     }
+
+    /// The example TOML shipped in `examples/worker.toml` is
+    /// the source of truth operators copy into
+    /// `/etc/teslausb/worker.toml`. Verify it parses and
+    /// validates with the loader so a typo in the example
+    /// can't ship undetected. Mirror of teslafat's example
+    /// config test.
+    #[test]
+    fn example_worker_toml_parses_and_validates() {
+        let raw = include_str!("../examples/worker.toml");
+        let cfg: Config = toml::from_str(raw).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.backing_root, PathBuf::from("/srv/teslausb"));
+        assert_eq!(
+            cfg.db_path,
+            PathBuf::from("/var/lib/teslausb/index.sqlite3")
+        );
+        assert!(cfg.cleanup.preserve_with_gps);
+    }
 }

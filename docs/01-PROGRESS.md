@@ -470,7 +470,7 @@ test suite).
 | 4b.2b | `teslausb-worker::watcher` + `teslausb-worker::indexer` — inotify clip watcher + bootstrap/event indexer (ADR-0011) | ✅ |
 | 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion, rustix-statvfs pressure floor, path-traversal defense, store split, ADR-0012) | ✅ |
 | 4b.4 | `teslausb-worker::main` task supervisor (tokio current-thread, ADR-0013) | ✅ |
-| 4b.5 | `teslausb-worker.service` systemd unit | ⏳ |
+| 4b.5 | `teslausb-worker.service` systemd unit + sample TOML | ✅ |
 
 ### Phase 4b.1a — SEI byte-level foundations ✅
 
@@ -942,6 +942,46 @@ fresh deployment without entering the steady-state loop.
 tests: 3 interval-floor + 4 ShutdownReason + 1 channel
 capacity invariant + 1 tracing idempotency + 1 missing-config
 error + 1 Linux-gated bootstrap-only smoke test).
+
+### Phase 4b.5 — systemd unit + sample config ✅
+
+Wraps up Phase 4b. Two artifacts:
+
+* `rust/crates/teslausb-worker/units/teslausb-worker.service`
+  — `User=teslausb`, `After=teslafat@0.service`,
+  `Restart=on-failure`. Same hardening template as
+  `teslafat@.service`: empty `CapabilityBoundingSet`,
+  `NoNewPrivileges`, `ProtectSystem=strict`,
+  `PrivateNetwork=yes` (the worker uses no sockets in 4b),
+  `RestrictAddressFamilies=` (empty), `@system-service`
+  syscall filter. `ReadWritePaths=` is scoped to
+  `/var/lib/teslausb` (SQLite store) and `/srv/teslausb`
+  (backing tree); operators with non-default paths edit
+  this one line. `Nice=10 IOSchedulingClass=idle` so the
+  worker never disrupts a recording in progress.
+
+* `rust/crates/teslausb-worker/examples/worker.toml` —
+  documented sample of every config knob the loader
+  understands, with defaults that match the unit's
+  `ReadWritePaths`. Operators copy this to
+  `/etc/teslausb/worker.toml` during install.
+
+`main.rs` grew a `--check-config` flag wired to
+`ExecStartPre=` so a malformed config surfaces in
+journalctl as a fast-fail (exit 2) before the supervisor
+opens the watcher / store. New regression test
+`example_worker_toml_parses_and_validates` does
+`include_str!` on the example so a typo in the file fails
+the test suite, not the operator's deploy.
+
+**Phase 4b complete.** All five increments (4b.1 SEI,
+4b.2 indexer, 4b.3 cleanup, 4b.4 supervisor, 4b.5
+unit+config) shipped on branch `b1-userspace-rust` with
+charter-review findings addressed in-band. Next: hardware
+phase H4 (deploy + smoke on `cybertruckusb.local`).
+
+**Test count:** workspace 1263 → 1264 (+1 example TOML
+round-trip; no new modules).
 
 ## Phase H4 — Retention + worker on hardware
 

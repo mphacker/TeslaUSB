@@ -238,12 +238,37 @@ impl SynthBackend {
     /// requested `cfg.fs_type`, and assembles the synth +
     /// materializer overlay.
     ///
+    /// **Power-cut recovery (Phase 3.6):** before the walk,
+    /// `open` scans the backing tree for stale `<path>.partial`
+    /// files (in-flight writes from a previous run that did not
+    /// complete) and discards them. The number discarded is
+    /// logged at INFO level. See
+    /// [`crate::backend::dir_tree::DirTreeWriter::recover_partials`]
+    /// for the policy rationale.
+    ///
     /// # Errors
     ///
     /// Returns [`SynthBackendError`] if any pipeline step fails.
     /// All variants preserve the original error as `source()`.
     pub fn open(cfg: &Config) -> Result<Self, SynthBackendError> {
         let volume_size = u64::from(cfg.volume_size_gb) * BYTES_PER_GIB;
+        if cfg.backing_root.is_dir() {
+            // Run recovery only if the root exists — if it doesn't
+            // the walk below will produce the right error and we
+            // don't want to mask it with a recovery I/O failure.
+            let recover_writer =
+                DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
+            let discarded = recover_writer
+                .recover_partials()
+                .map_err(SynthBackendError::DirTree)?;
+            if discarded > 0 {
+                tracing::info!(
+                    discarded,
+                    backing_root = %cfg.backing_root.display(),
+                    "discarded stale .partial files from previous run"
+                );
+            }
+        }
         let tree = walk(&cfg.backing_root).map_err(SynthBackendError::Walk)?;
         let serial = compute_volume_serial(&cfg.volume_label);
         match cfg.fs_type {

@@ -425,6 +425,46 @@ impl DirTreeWriter {
         out.sort();
         Ok(out)
     }
+
+    /// Discard every `<path>.partial` file under the backing root.
+    ///
+    /// This is the **conservative power-cut recovery policy**: any
+    /// `.partial` file found at startup represents a write that was
+    /// in flight when the daemon previously stopped, and whose
+    /// in-memory state (which clusters belong to which file, what
+    /// the dir entry said the size was, whether the FAT chain was
+    /// fully resolved) is lost. Without that state we cannot safely
+    /// finalize — finalize would expose a possibly-incomplete file
+    /// to Tesla.
+    ///
+    /// Discarding is safe because:
+    ///
+    /// * Tesla's FAT/exFAT contract is "the data is not durable
+    ///   until the host issues `FLUSH`" — any client that cares
+    ///   about durability across a power cut must have FUA'd the
+    ///   write, in which case Phase 3.5c's FUA path finalized the
+    ///   `.partial` to its final filename BEFORE the write returned.
+    ///   A `.partial` survivor by definition belongs to a non-FUA
+    ///   write that the host hadn't yet flushed.
+    /// * The data still exists on the source side (Tesla's
+    ///   gadget endpoint will re-issue the write the next time it
+    ///   wants the file to land).
+    ///
+    /// Returns the number of `.partial` files discarded.
+    ///
+    /// # Errors
+    ///
+    /// * [`DirTreeError::Io`] if the scan or any `remove_file`
+    ///   fails. A `NotFound` error for an individual file is treated
+    ///   as already-cleaned-up (no error).
+    pub fn recover_partials(&self) -> Result<usize, DirTreeError> {
+        let partials = self.scan_partials()?;
+        let count = partials.len();
+        for relative in partials {
+            self.discard(&relative)?;
+        }
+        Ok(count)
+    }
 }
 
 fn scan_partials_recursive(

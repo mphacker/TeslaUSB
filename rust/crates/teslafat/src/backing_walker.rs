@@ -48,6 +48,8 @@ use teslausb_core::fs::backing_tree::{
     BackingDir, BackingFile, BackingTree, NameError, validate_name,
 };
 
+use crate::backend::dir_tree::PARTIAL_SUFFIX;
+
 /// Maximum directory nesting depth the walker will descend
 /// before refusing to recurse further.
 ///
@@ -242,6 +244,15 @@ fn walk_dir(
         let leaf = leaf_os.to_str().ok_or_else(|| WalkError::NonUtf8Name {
             path: entry_path.clone(),
         })?;
+        // `.partial` files are in-flight writes from the Phase
+        // 3.5c FAT32 write state machine. They MUST NOT appear
+        // in the synthesized FAT/exFAT view because they hold
+        // partially-written bytes that would surface to Tesla
+        // as corrupt files. The `recover_partials` startup
+        // routine reaps them; the walker just hides them.
+        if leaf.ends_with(PARTIAL_SUFFIX) {
+            continue;
+        }
         validate_name(leaf).map_err(|source| WalkError::InvalidName {
             path: entry_path.clone(),
             source,

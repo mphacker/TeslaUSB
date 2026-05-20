@@ -159,7 +159,7 @@ Target `cybertruckusb.local` (pi). Full results: `~/.copilot/session-state/<sid>
 
 | Inc | Deliverable | Status |
 |---|---|---|
-| 3.1 | `fs::fat32::parse::decode_write` | ⏳ |
+| 3.1 | `fs::fat32::parse::decode_write` | ✅ `4288e70` |
 | 3.2 | `fs::exfat::parse::decode_write` | ⏳ |
 | 3.3 | `backend::dir_tree` POSIX adapter | ⏳ |
 | 3.4 | `cluster_map` extent-based | ⏳ |

@@ -34,7 +34,13 @@
 // lints stay `deny` in production code.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::indexing_slicing))]
 
+//! * [`backing_walker`] — Phase 2.15 — `std::fs::read_dir`-driven
+//!   walker that produces a [`teslausb_core::fs::backing_tree::BackingTree`]
+//!   for the synthesizer to render. I/O half of Phase 2.15; the
+//!   type definitions + name validator live in `teslausb-core`.
+
 pub mod backend;
+pub mod backing_walker;
 pub mod config;
 pub mod nbd;
 pub mod server;

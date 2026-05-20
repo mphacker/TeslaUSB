@@ -27,14 +27,15 @@
 //!   `exfat::boot_sector::synthesize` (Phase 2.8); subsequent
 //!   `exfat::*` submodules land in Phases 2.9 – 2.12.
 //!
-//! ## Planned additions
-//!
-//! * Phase 2.9 — `exfat::allocation_bitmap` + `exfat::upcase_table`.
-//! * Phase 2.10 — `exfat::directory` (file / stream / file-name
-//!   entry encoders).
-//! * Phase 2.11 — `exfat::synth::ExfatSynth` dispatcher.
-//! * Phase 2.12 — `tests/fs_exfat_integration.rs`.
+//! * [`backing_tree`] — In-memory representation of a real Linux
+//!   directory tree plus the shared name-validation rule
+//!   (`validate_name`). Filesystem-agnostic; consumed by the
+//!   cluster-layout planner (Phase 2.16) and the per-FS
+//!   dir-entry synthesizers (Phases 2.17 / 2.18). The walker
+//!   that fills a `BackingTree` from `std::fs` lives in
+//!   `teslafat::backing_walker` (Phase 2.15 second deliverable).
 
+pub mod backing_tree;
 pub mod exfat;
 pub mod fat32;
 pub mod geometry;

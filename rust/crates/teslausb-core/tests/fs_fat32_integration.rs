@@ -350,6 +350,147 @@ fn unaligned_chunk_sizes_produce_consistent_byte_stream() {
     );
 }
 
+// ── Phase 2.17: BackingTree → Fat32Layout → Fat32Synth round-trip ────
+
+mod phase_2_17 {
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    use teslausb_core::fs::backing_tree::{BackingDir, BackingFile, BackingTree};
+    use teslausb_core::fs::data_cluster_source::DataClusterSource;
+    use teslausb_core::fs::fat32::boot_sector::ROOT_DIRECTORY_CLUSTER;
+    use teslausb_core::fs::fat32::directory::{ATTR_DIRECTORY, FileAttributes};
+    use teslausb_core::fs::fat32::geometry::Fat32Geometry;
+    use teslausb_core::fs::fat32::layout::Fat32Layout;
+    use teslausb_core::fs::fat32::synth::Fat32Synth;
+
+    const LABEL: &[u8; 11] = b"TESTVOL    ";
+    const SERIAL: u32 = 0xDEAD_BEEF;
+    const SMALL: u64 = 34 * 1024 * 1024;
+
+    fn empty_dir(name: &str) -> BackingDir {
+        BackingDir {
+            name: name.to_string(),
+            backing_path: PathBuf::from("/").join(name),
+            mtime: SystemTime::UNIX_EPOCH,
+            subdirs: Vec::new(),
+            files: Vec::new(),
+        }
+    }
+
+    fn file(name: &str, size: u64) -> BackingFile {
+        BackingFile {
+            name: name.to_string(),
+            backing_path: PathBuf::from("/").join(name),
+            size,
+            mtime: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn build_synth(tree: &BackingTree, volume_bytes: u64) -> (Fat32Synth, Fat32Layout, u64, u32) {
+        let geo = Fat32Geometry::for_volume_size(volume_bytes).expect("valid geometry");
+        let layout = Fat32Layout::plan(&geo, tree).expect("layout plans");
+        let first_data_byte = layout.first_data_byte();
+        let bytes_per_cluster = layout.bytes_per_cluster();
+        // Snapshot the chains so we can build the synth (which
+        // consumes `geo`) and still move the layout into
+        // `with_data_source`.
+        let chains = layout.chains().clone();
+        let synth = Fat32Synth::new(geo, LABEL, SERIAL, None, None, &chains).expect("synth builds");
+        // Plan once more to obtain an owned `Fat32Layout` to
+        // hand to `with_data_source`. Planning is deterministic
+        // for a given (geometry, tree), so the data-source
+        // layout matches the chain layout byte-for-byte.
+        let layout_for_source =
+            Fat32Layout::plan(&Fat32Geometry::for_volume_size(volume_bytes).unwrap(), tree)
+                .expect("data-source layout plans");
+        let synth = synth.with_data_source(Box::new(layout_for_source));
+        (synth, layout, first_data_byte, bytes_per_cluster)
+    }
+
+    fn cluster_offset(first_data_byte: u64, bytes_per_cluster: u32, cluster: u32) -> u64 {
+        first_data_byte + u64::from(cluster - 2) * u64::from(bytes_per_cluster)
+    }
+
+    #[test]
+    fn dispatcher_serves_root_dir_entries_for_one_file_tree() {
+        let mut root = empty_dir("");
+        root.files.push(file("hello.txt", 0));
+        let tree = BackingTree { root };
+        let (synth, _layout, first_data_byte, bytes_per_cluster) = build_synth(&tree, SMALL);
+
+        let root_offset =
+            cluster_offset(first_data_byte, bytes_per_cluster, ROOT_DIRECTORY_CLUSTER);
+        let mut buf = vec![0u8; 64];
+        synth
+            .read(root_offset, &mut buf)
+            .expect("read root cluster");
+        // LFN ordinal 1 + LAST bit at offset 0, attribute 0x0F at 11,
+        // SFN starting at 32.
+        assert_eq!(buf[0], 0x41);
+        assert_eq!(buf[11], 0x0F);
+        assert_eq!(&buf[32..43], b"F000001    ");
+        assert_eq!(buf[43], FileAttributes::archive().raw());
+    }
+
+    #[test]
+    fn dispatcher_serves_subdir_dot_entries() {
+        let mut root = empty_dir("");
+        root.subdirs.push(empty_dir("sub"));
+        let tree = BackingTree { root };
+        let (synth, _layout, first_data_byte, bytes_per_cluster) = build_synth(&tree, SMALL);
+
+        // sub = cluster 3.
+        let sub_offset = cluster_offset(first_data_byte, bytes_per_cluster, 3);
+        let mut buf = vec![0u8; 64];
+        synth.read(sub_offset, &mut buf).expect("read sub cluster");
+        assert_eq!(buf[0], b'.');
+        assert_eq!(buf[11], ATTR_DIRECTORY);
+        assert_eq!(&buf[32..34], b"..");
+    }
+
+    #[test]
+    fn dispatcher_without_data_source_still_zero_fills() {
+        // The Phase-2.6 contract: with no DataClusterSource
+        // installed, the data region zero-fills. The existing
+        // tests above already cover this, but this test pins it
+        // down in the new BackingTree-aware module to catch any
+        // future regression where the wiring code accidentally
+        // installs a source by default.
+        use teslausb_core::fs::fat32::fat_table::InMemoryDirTree;
+        let tree = InMemoryDirTree::from_chains(vec![vec![ROOT_DIRECTORY_CLUSTER]]);
+        let geo = Fat32Geometry::for_volume_size(SMALL).unwrap();
+        let synth = Fat32Synth::new(geo, LABEL, SERIAL, None, None, &tree).unwrap();
+        // Cluster 2's offset.
+        let off = synth.geometry().first_data_sector()
+            * u64::from(teslausb_core::fs::geometry::SECTOR_SIZE_BYTES);
+        let mut buf = vec![0u8; 512];
+        synth.read(off, &mut buf).unwrap();
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn dispatcher_partial_offset_within_cluster_matches_layout_source() {
+        let mut root = empty_dir("");
+        root.files.push(file("a.bin", 0));
+        let tree = BackingTree { root };
+        let (synth, layout, first_data_byte, bytes_per_cluster) = build_synth(&tree, SMALL);
+
+        let root_offset =
+            cluster_offset(first_data_byte, bytes_per_cluster, ROOT_DIRECTORY_CLUSTER);
+        // Read 11 bytes starting at offset 32 within the root
+        // cluster — should be the SFN field of the first entry.
+        let mut via_synth = vec![0u8; 11];
+        synth
+            .read(root_offset + 32, &mut via_synth)
+            .expect("partial read");
+        let mut via_layout = vec![0u8; 11];
+        layout.read_cluster_bytes(ROOT_DIRECTORY_CLUSTER, 32, &mut via_layout);
+        assert_eq!(via_synth, via_layout);
+        assert_eq!(&via_synth[..], b"F000001    ");
+    }
+}
+
 // ── Error-path integration ───────────────────────────────────────────
 
 #[test]

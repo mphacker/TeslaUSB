@@ -47,11 +47,12 @@
 
 use core::fmt;
 
+use crate::fs::data_cluster_source::DataClusterSource;
 use crate::fs::fat32::boot_sector::{self, BOOT_SECTOR_SIZE_BYTES, BootSectorError};
 use crate::fs::fat32::fat_table::{DirTreeBackend, FAT_SECTOR_SIZE_BYTES, FatTable, FatTableError};
 use crate::fs::fat32::fsinfo::{self, FSINFO_SECTOR_SIZE_BYTES, FsInfoError};
 use crate::fs::fat32::geometry::Fat32Geometry;
-use crate::fs::geometry::{Geometry, Region, RegionKind};
+use crate::fs::geometry::{Geometry, Region, RegionKind, SECTOR_SIZE_BYTES};
 
 /// Materialised FAT32 synthesizer: pre-computed boot + `FsInfo`
 /// sectors and a built FAT table, ready to serve byte-range
@@ -62,12 +63,25 @@ use crate::fs::geometry::{Geometry, Region, RegionKind};
 /// out-of-bounds (or if the underlying [`FatTable::synthesize_sector`]
 /// ever returns an error, which the dispatcher's own bounds checks
 /// make unreachable).
+///
+/// ## Data region
+///
+/// By default the data region zero-fills — Phase 2.6's
+/// original behaviour, preserved for backwards compatibility
+/// with the 461 Phase-2 tests. Wire in a
+/// [`DataClusterSource`] via [`Self::with_data_source`] to
+/// serve real cluster bytes (Phase 2.17 introduces
+/// [`crate::fs::fat32::layout::Fat32Layout`] as the canonical
+/// source for directory clusters).
 #[derive(Debug)]
 pub struct Fat32Synth {
     geometry: Fat32Geometry,
     boot_sector: [u8; BOOT_SECTOR_SIZE_BYTES],
     fsinfo_sector: [u8; FSINFO_SECTOR_SIZE_BYTES],
     fat_table: FatTable,
+    data_source: Option<Box<dyn DataClusterSource + Send + Sync>>,
+    first_data_byte: u64,
+    bytes_per_cluster: u32,
 }
 
 /// Errors returned by [`Fat32Synth::new`] and [`Fat32Synth::read`].
@@ -200,12 +214,39 @@ impl Fat32Synth {
             .map_err(Fat32SynthError::BootSector)?;
         let fsinfo_sector = fsinfo::synthesize(&geometry, free_count, next_free_hint)
             .map_err(Fat32SynthError::FsInfo)?;
+        let first_data_byte = geometry
+            .first_data_sector()
+            .saturating_mul(u64::from(SECTOR_SIZE_BYTES));
+        let bytes_per_cluster = geometry.bytes_per_cluster();
         Ok(Self {
             geometry,
             boot_sector,
             fsinfo_sector,
             fat_table,
+            data_source: None,
+            first_data_byte,
+            bytes_per_cluster,
         })
+    }
+
+    /// Install a [`DataClusterSource`] to back the data region.
+    ///
+    /// Without a source, reads of any data-region byte return
+    /// zeros (Phase 2.6 behaviour). With a source installed,
+    /// the dispatcher routes each touched data cluster through
+    /// [`DataClusterSource::read_cluster_bytes`] — typically
+    /// supplied by [`crate::fs::fat32::layout::Fat32Layout`]
+    /// (Phase 2.17) for directory clusters or by
+    /// `teslafat::DirTreeMaterializer` (Phase 2.19) for full
+    /// directory + file content.
+    ///
+    /// Builder-style on purpose: existing call sites that
+    /// don't care about the data region keep passing the
+    /// six-argument [`Self::new`] form unchanged.
+    #[must_use]
+    pub fn with_data_source(mut self, source: Box<dyn DataClusterSource + Send + Sync>) -> Self {
+        self.data_source = Some(source);
+        self
     }
 
     /// The geometry this synthesizer was built for.
@@ -315,8 +356,11 @@ impl Fat32Synth {
             RegionKind::Fat32FsInfo => {
                 copy_within_sector(&self.fsinfo_sector, byte_in_region, out);
             }
-            RegionKind::Reserved | RegionKind::Data => {
+            RegionKind::Reserved => {
                 out.fill(0);
+            }
+            RegionKind::Data => {
+                self.read_data_region(offset, out);
             }
             RegionKind::FatTable { .. } => {
                 self.read_fat_table(byte_in_region, out)?;
@@ -349,6 +393,42 @@ impl Fat32Synth {
             out = rest;
         }
         Ok(())
+    }
+
+    /// Data region split into per-cluster reads.
+    ///
+    /// `offset` is the absolute byte offset into the volume
+    /// (already validated by [`Self::read`] to lie within the
+    /// data region). The dispatcher hands out each contiguous
+    /// chunk to [`DataClusterSource::read_cluster_bytes`], or
+    /// zero-fills when no source is installed.
+    fn read_data_region(&self, offset: u64, out: &mut [u8]) {
+        let Some(ref source) = self.data_source else {
+            out.fill(0);
+            return;
+        };
+        if out.is_empty() || self.bytes_per_cluster == 0 {
+            out.fill(0);
+            return;
+        }
+        let bytes_per_cluster_u64 = u64::from(self.bytes_per_cluster);
+        let bytes_per_cluster_usize = self.bytes_per_cluster as usize;
+        let mut cursor = offset;
+        let mut remaining = out;
+        while !remaining.is_empty() {
+            let byte_in_data = cursor.saturating_sub(self.first_data_byte);
+            let cluster_index = byte_in_data / bytes_per_cluster_u64;
+            let byte_in_cluster_u64 = byte_in_data % bytes_per_cluster_u64;
+            let byte_in_cluster = usize::try_from(byte_in_cluster_u64).unwrap_or(usize::MAX);
+            let cluster_number = u32::try_from(cluster_index.saturating_add(2)).unwrap_or(u32::MAX);
+            let chunk_len = bytes_per_cluster_usize
+                .saturating_sub(byte_in_cluster)
+                .min(remaining.len());
+            let (chunk, rest) = remaining.split_at_mut(chunk_len);
+            source.read_cluster_bytes(cluster_number, byte_in_cluster, chunk);
+            cursor = cursor.saturating_add(chunk_len as u64);
+            remaining = rest;
+        }
     }
 }
 

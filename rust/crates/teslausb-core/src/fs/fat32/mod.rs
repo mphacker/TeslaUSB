@@ -29,4 +29,5 @@ pub mod directory;
 pub mod fat_table;
 pub mod fsinfo;
 pub mod geometry;
+pub mod layout;
 pub mod synth;

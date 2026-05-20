@@ -248,6 +248,50 @@ Tests: +1 regression test
 (`overlay_read_returns_kernel_written_bitmap_bytes_h3_2_part_2`).
 Workspace total now 1011 pass / 0 fail. All gates green.
 
+**Phase 3.5g charter follow-up (commit pending):** addresses
+the 4 Majors found in the Phase 3.5g charter review. All are
+internal refactors; no behavior change visible to callers.
+
+- **MAJOR-3 (primitive obsession / magic-value sentinel) →**
+  the three `bitmap_first_cluster: u32 (== 0 means none) +
+  bitmap_buf: Vec<u8> + dirty_bitmap: DirtyByteMap` fields
+  collapsed into `bitmap: Option<BitmapTracker>` with an
+  encapsulated `BitmapTracker { first_cluster, cluster_count,
+  buf, dirty }` struct. Eliminates the `== 0` sentinel and
+  removes the data clump.
+- **MAJOR-1 (function > 50 SLOC) →** `apply_data_cluster_write`
+  now delegates bitmap routing to `BitmapTracker::owns_cluster`
+  + `BitmapTracker::apply_write`; the fn body is back well
+  under the charter ceiling.
+- **MAJOR-2 (function > 50 SLOC) →** `overlay_read` extracted
+  per-surface helpers: the directory-cluster loop moved to
+  `overlay_directory_clusters`; the bitmap overlay moved into
+  `BitmapTracker::overlay`; the data-cluster overlay stays in
+  the existing free fn. `overlay_read` is now a ~25-line
+  driver that names the four surfaces.
+- **MAJOR-4 (untested overlay surface) →** new direct unit
+  test `overlay_data_clusters_serves_file_bytes_from_backing_tree_h3_2_part_3`
+  covers cluster-boundary-straddling read, fully-outside-extent
+  read (caller buffer preserved), and missing-backing-file
+  (log-and-skip, caller buffer preserved). The function was
+  previously only covered by hardware smoke.
+
+Refactor surfaced one real bug the original code carried: the
+old bitmap fast-path only checked `cluster >= first_cluster`,
+so a file-data write to a cluster above the bitmap range with
+a small `byte_in_cluster` could fall inside `bitmap_buf.len()`
+and be silently swallowed. The new `BitmapTracker::owns_cluster`
+bounds against `first_cluster + cluster_count`, and a new
+regression test (`bitmap_tracker_does_not_capture_writes_to_higher_clusters`)
+pins the fix. The
+`exfat_power_cut_mid_write_recovery_discards_partial` harness
+test caught the regression mid-refactor.
+
+Tests: +2 regression tests
+(`bitmap_tracker_does_not_capture_writes_to_higher_clusters`,
+`overlay_data_clusters_serves_file_bytes_from_backing_tree_h3_2_part_3`).
+Workspace total now 1013 pass / 0 fail. All gates green.
+
 ## Phase H3 — Write-side on hardware
 
 H3.1 – H3.5 per `00-PLAN.md`. All ⏳.

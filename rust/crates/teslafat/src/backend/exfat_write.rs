@@ -196,20 +196,96 @@ pub struct ExfatWriteState {
     /// the backing tree.
     recorded_file_sizes: HashMap<PathBuf, u64>,
 
-    /// First cluster of the allocation bitmap stream (set by
-    /// [`Self::with_allocation_bitmap`]; `0` means no bitmap
-    /// tracking is configured — used by unit tests that don't
-    /// need the overlay).
-    bitmap_first_cluster: u32,
-    /// In-memory mirror of the allocation bitmap. Sized exactly
-    /// to `bitmap_cluster_count * bytes_per_cluster`. Kernel
-    /// writes to bitmap clusters land here; the read overlay
-    /// surfaces only the byte ranges marked dirty in
-    /// `dirty_bitmap` (Phase 3.5g — Bug H3-2 part 2).
-    bitmap_buf: Vec<u8>,
-    /// Dirty-byte tracker for `bitmap_buf` (indices are
-    /// `bitmap_buf` byte offsets).
-    dirty_bitmap: DirtyByteMap,
+    /// Allocation-bitmap overlay tracker (Phase 3.5g — Bug H3-2
+    /// part 2). `None` when no bitmap tracking is configured —
+    /// used by unit tests that don't exercise the remount path.
+    /// Production callers must populate this via
+    /// [`Self::with_allocation_bitmap`].
+    bitmap: Option<BitmapTracker>,
+}
+
+/// Tracks the in-memory mirror of the exFAT allocation bitmap and
+/// the byte ranges the kernel has written to it. The synth's
+/// startup snapshot of the bitmap reflects only files present at
+/// daemon launch; without this tracker, a remount would see new
+/// files' clusters marked FREE in the bitmap while the directory
+/// entry claims them allocated, and the Linux exFAT driver rejects
+/// that inconsistency with EIO on stat (hardware-observed
+/// 2026-05-20 on any file ≥ ~2 MB).
+#[derive(Debug)]
+struct BitmapTracker {
+    /// First cluster of the allocation bitmap stream.
+    first_cluster: u32,
+    /// Number of clusters the bitmap stream occupies. Used to
+    /// bound-check incoming writes — writes past
+    /// `first_cluster + cluster_count` belong to other clusters
+    /// (file data, directories) and must fall through to the
+    /// regular dispatch path.
+    cluster_count: u32,
+    /// In-memory mirror, sized to `cluster_count * bytes_per_cluster`.
+    buf: Vec<u8>,
+    /// Dirty-byte tracker for `buf` (indices are `buf` byte offsets).
+    dirty: DirtyByteMap,
+}
+
+impl BitmapTracker {
+    fn new(first_cluster: u32, cluster_count: u32, bytes_per_cluster: u32) -> Self {
+        let size = (cluster_count as usize).saturating_mul(bytes_per_cluster as usize);
+        Self {
+            first_cluster,
+            cluster_count,
+            buf: vec![0u8; size],
+            dirty: DirtyByteMap::new(),
+        }
+    }
+
+    /// Returns `true` if `cluster_number` falls within this bitmap's
+    /// cluster range. Callers route writes here before the
+    /// directory / file-data dispatch; writes to clusters outside
+    /// the bitmap range fall through unchanged.
+    fn owns_cluster(&self, cluster_number: u32) -> bool {
+        if self.buf.is_empty() {
+            return false;
+        }
+        let end = self.first_cluster.saturating_add(self.cluster_count);
+        cluster_number >= self.first_cluster && cluster_number < end
+    }
+
+    /// Apply a kernel write to a bitmap cluster. The caller has
+    /// already verified [`Self::owns_cluster`].
+    fn apply_write(&mut self, cluster_number: u32, byte_in_cluster: usize, bytes: &[u8], bpc: u32) {
+        let cluster_offset = (cluster_number - self.first_cluster) as usize * bpc as usize;
+        let dst_start = cluster_offset.saturating_add(byte_in_cluster);
+        if dst_start >= self.buf.len() {
+            return;
+        }
+        let avail = self.buf.len() - dst_start;
+        let copy_len = bytes.len().min(avail);
+        if copy_len == 0 {
+            return;
+        }
+        if let (Some(dst), Some(src)) = (
+            self.buf.get_mut(dst_start..dst_start + copy_len),
+            bytes.get(..copy_len),
+        ) {
+            dst.copy_from_slice(src);
+            self.dirty.mark(dst_start, copy_len);
+        }
+    }
+
+    /// Overlay any kernel-written bitmap bytes onto `buf`.
+    fn overlay(&self, read_offset: u64, buf: &mut [u8], cluster_heap_start: u64, bpc: u64) {
+        let bitmap_first_byte = cluster_heap_start
+            .saturating_add(u64::from(self.first_cluster - FIRST_DATA_CLUSTER) * bpc);
+        overlay_region_with_base(
+            read_offset,
+            buf,
+            bitmap_first_byte,
+            &self.buf,
+            &self.dirty,
+            0,
+        );
+    }
 }
 
 /// Describes a pre-existing file extent the [`ExfatWriteState`]
@@ -294,9 +370,7 @@ impl ExfatWriteState {
             in_flight_files: HashSet::new(),
             pre_existing_files,
             recorded_file_sizes,
-            bitmap_first_cluster: 0,
-            bitmap_buf: Vec::new(),
-            dirty_bitmap: DirtyByteMap::new(),
+            bitmap: None,
         };
         // Bootstrap the root directory with a single-cluster
         // chain. A FAT write that extends it will rebuild the
@@ -326,10 +400,11 @@ impl ExfatWriteState {
         bitmap_first_cluster: u32,
         bitmap_cluster_count: u32,
     ) -> Self {
-        self.bitmap_first_cluster = bitmap_first_cluster;
-        let size = (bitmap_cluster_count as usize) * (self.bytes_per_cluster as usize);
-        self.bitmap_buf = vec![0u8; size];
-        self.dirty_bitmap = DirtyByteMap::new();
+        self.bitmap = Some(BitmapTracker::new(
+            bitmap_first_cluster,
+            bitmap_cluster_count,
+            self.bytes_per_cluster,
+        ));
         self
     }
 
@@ -419,25 +494,14 @@ impl ExfatWriteState {
         // dir entry claims them allocated — Linux exFAT driver
         // rejects this inconsistency with EIO on stat
         // (Bug H3-2, hardware-observed 2026-05-20).
-        if self.bitmap_first_cluster != 0
-            && cluster_number >= self.bitmap_first_cluster
-            && !self.bitmap_buf.is_empty()
-        {
-            let bpc = self.bytes_per_cluster as usize;
-            let bitmap_cluster_offset = (cluster_number - self.bitmap_first_cluster) as usize * bpc;
-            let dst_start = bitmap_cluster_offset.saturating_add(byte_in_cluster);
-            if dst_start < self.bitmap_buf.len() {
-                let avail = self.bitmap_buf.len() - dst_start;
-                let copy_len = bytes.len().min(avail);
-                if copy_len > 0 {
-                    if let (Some(dst), Some(src)) = (
-                        self.bitmap_buf.get_mut(dst_start..dst_start + copy_len),
-                        bytes.get(..copy_len),
-                    ) {
-                        dst.copy_from_slice(src);
-                        self.dirty_bitmap.mark(dst_start, copy_len);
-                    }
-                }
+        if let Some(bitmap) = self.bitmap.as_mut() {
+            if bitmap.owns_cluster(cluster_number) {
+                bitmap.apply_write(
+                    cluster_number,
+                    byte_in_cluster,
+                    bytes,
+                    self.bytes_per_cluster,
+                );
                 return Ok(());
             }
         }
@@ -983,13 +1047,45 @@ impl ExfatWriteState {
             return;
         }
         let sector = u64::from(SECTOR_SIZE_BYTES);
-        // FAT region overlay.
         let fat_start = u64::from(self.geometry.fat_offset_sectors()).saturating_mul(sector);
-        overlay_region_with_base(offset, buf, fat_start, &self.fat, &self.dirty_fat, 0);
-        // Per-directory cluster overlays.
         let cluster_heap_start =
             u64::from(self.geometry.cluster_heap_offset_sectors()).saturating_mul(sector);
         let bpc = u64::from(self.bytes_per_cluster);
+
+        // Surface 1: FAT entries the kernel wrote.
+        overlay_region_with_base(offset, buf, fat_start, &self.fat, &self.dirty_fat, 0);
+        // Surface 2: per-directory dirty cluster bytes.
+        self.overlay_directory_clusters(offset, buf, cluster_heap_start, bpc);
+        // Surface 3: allocation-bitmap bytes (Bug H3-2 part 2).
+        if let Some(bitmap) = self.bitmap.as_ref() {
+            bitmap.overlay(offset, buf, cluster_heap_start, bpc);
+        }
+        // Surface 4: finalized file data clusters read from the
+        // backing tree (Phase 3.5f addendum). Without this, a
+        // post-remount read of a finalized file's data clusters
+        // returns zeros even though the dir entry + FAT chain are
+        // visible via surfaces 1+2.
+        overlay_data_clusters_from_cluster_map(
+            offset,
+            buf,
+            &self.cluster_map,
+            cluster_heap_start,
+            bpc,
+            self.dir_tree.backing_root(),
+        );
+    }
+
+    /// Overlay every dirty byte in every tracked directory cluster
+    /// onto `buf`. Extracted from [`Self::overlay_read`] to keep
+    /// that fn under the charter's 50-SLOC ceiling and to make
+    /// each overlay surface independently testable.
+    fn overlay_directory_clusters(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+        cluster_heap_start: u64,
+        bpc: u64,
+    ) {
         let bpc_usize = self.bytes_per_cluster as usize;
         for dir_state in self.directories.values() {
             for (chain_idx, &cluster) in dir_state.chain.iter().enumerate() {
@@ -998,7 +1094,6 @@ impl ExfatWriteState {
                 }
                 let cluster_offset_in_heap = u64::from(cluster - FIRST_DATA_CLUSTER) * bpc;
                 let cluster_start = cluster_heap_start.saturating_add(cluster_offset_in_heap);
-                // Slice of the buffer for this single cluster.
                 let buf_cluster_start = chain_idx.saturating_mul(bpc_usize);
                 let buf_cluster_end = buf_cluster_start.saturating_add(bpc_usize);
                 let Some(cluster_bytes) = dir_state.buffer.get(buf_cluster_start..buf_cluster_end)
@@ -1007,7 +1102,7 @@ impl ExfatWriteState {
                 };
                 // Dirty map is keyed in `buffer` coordinates;
                 // shift to per-cluster coordinates by passing the
-                // cluster's buf_cluster_start as base.
+                // cluster's buf_cluster_start as the dirty-map base.
                 overlay_region_with_base(
                     offset,
                     buf,
@@ -1018,43 +1113,6 @@ impl ExfatWriteState {
                 );
             }
         }
-
-        // Phase 3.5g (Bug H3-2 part 2): overlay allocation bitmap
-        // writes. Without this, the synth's startup snapshot
-        // shows the new file's clusters as FREE while the dir
-        // entry claims them allocated, and the Linux exFAT driver
-        // rejects the inconsistency with EIO on stat.
-        if self.bitmap_first_cluster != 0 && !self.bitmap_buf.is_empty() {
-            let bitmap_first_byte = cluster_heap_start
-                .saturating_add(u64::from(self.bitmap_first_cluster - FIRST_DATA_CLUSTER) * bpc);
-            overlay_region_with_base(
-                offset,
-                buf,
-                bitmap_first_byte,
-                &self.bitmap_buf,
-                &self.dirty_bitmap,
-                0,
-            );
-        }
-
-        // Phase 3.5f addendum: overlay file data clusters from
-        // the backing tree. After a file is finalized to the
-        // backing tree, its bytes are NOT in `synth.file_extents`
-        // (that snapshot is captured at startup). Without this
-        // overlay, a kernel read of the file's data clusters
-        // after umount/remount would return zeros even though
-        // the directory entry and FAT chain are visible via the
-        // dirty-byte overlay above. The cluster_map already
-        // tracks extent → file_path; this step turns that into
-        // actual byte reads.
-        overlay_data_clusters_from_cluster_map(
-            offset,
-            buf,
-            &self.cluster_map,
-            cluster_heap_start,
-            bpc,
-            self.dir_tree.backing_root(),
-        );
     }
 }
 
@@ -1764,6 +1822,149 @@ mod tests {
         assert_eq!(
             elsewhere, before,
             "overlay must not mark un-written bitmap bytes dirty"
+        );
+    }
+
+    #[test]
+    fn bitmap_tracker_does_not_capture_writes_to_higher_clusters() {
+        // Regression for a refactor that initially used only
+        // `cluster_number >= first_cluster` as the bitmap-range
+        // predicate. The bitmap occupies a fixed cluster span
+        // (`first_cluster .. first_cluster + cluster_count`).
+        // Writes to clusters above that span are file-data or
+        // directory writes and MUST fall through to the regular
+        // dispatch path — otherwise file data is silently
+        // swallowed into the bitmap mirror (caught the
+        // `exfat_power_cut_mid_write_recovery_discards_partial`
+        // harness test mid-implementation, 2026-05-20).
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let mut s = ExfatWriteState::new(g.clone(), writer(&tmp), &[]).with_allocation_bitmap(2, 1);
+
+        // Write to cluster 9 (well past bitmap end). The write
+        // must NOT be captured by the bitmap tracker; with no
+        // matching directory or cluster_map entry it lands in
+        // pending_data instead.
+        write_cluster_data(&mut s, 9, b"payload");
+        assert!(
+            s.pending_data.contains_key(&9),
+            "data write past bitmap end must fall through to pending_data, not be swallowed"
+        );
+    }
+
+    #[test]
+    fn overlay_data_clusters_serves_file_bytes_from_backing_tree_h3_2_part_3() {
+        // Phase 3.5g regression test for `overlay_data_clusters_from_cluster_map`.
+        // After a file is finalized into the backing tree, its
+        // bytes are NOT in `synth.file_extents` (that snapshot is
+        // captured at daemon startup). The overlay must open the
+        // backing file on demand and surface those bytes at the
+        // volume offsets the cluster_map describes; without this,
+        // a kernel read of a post-startup file's data clusters
+        // would return zeros even though the dir entry + FAT
+        // chain + bitmap are visible via the other overlay
+        // surfaces (Bug H3-2, file-data half).
+        use teslausb_core::fs::cluster_map::{ClusterMap, FileExtent};
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let bpc = u64::from(g.bytes_per_cluster());
+
+        // Write a known byte pattern to a backing file at a
+        // sub-path the cluster_map will reference. The bytes must
+        // span across a cluster boundary so the overlay's offset
+        // math is exercised, not just the trivial single-cluster
+        // case.
+        let rel = std::path::PathBuf::from("CAM0/video.mp4");
+        let abs = tmp.path().join(&rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        let file_len = (bpc as usize) * 2 + 17;
+        let pattern: Vec<u8> = (0..file_len).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&abs, &pattern).unwrap();
+
+        // Register the extent: 3 clusters starting at cluster 50,
+        // mapped to the file's bytes from offset 0.
+        let first_cluster: u32 = 50;
+        let cluster_count: u32 = 3;
+        let mut cluster_map = ClusterMap::new();
+        cluster_map
+            .insert(FileExtent {
+                first_cluster,
+                cluster_count,
+                first_byte_in_file: 0,
+                file_path: rel.clone(),
+            })
+            .expect("insert extent");
+
+        let data_region_start = data_start_byte(&g);
+        let extent_volume_byte =
+            data_region_start + u64::from(first_cluster - FIRST_DATA_CLUSTER) * bpc;
+
+        // Case 1: read straddling the cluster-1/cluster-2 boundary
+        // returns the expected backing-file bytes.
+        let read_offset = extent_volume_byte + bpc - 32;
+        let read_len = 64usize;
+        let mut buf = vec![0u8; read_len];
+        overlay_data_clusters_from_cluster_map(
+            read_offset,
+            &mut buf,
+            &cluster_map,
+            data_region_start,
+            bpc,
+            tmp.path(),
+        );
+        let pattern_start = (bpc - 32) as usize;
+        assert_eq!(
+            buf,
+            pattern[pattern_start..pattern_start + read_len],
+            "overlay must serve backing-file bytes across cluster boundary"
+        );
+
+        // Case 2: read fully outside the extent leaves the
+        // caller's buffer untouched (synth's pre-existing bytes
+        // win for non-overlapping ranges).
+        let mut untouched = vec![0xAAu8; 16];
+        let before = untouched.clone();
+        let outside_offset =
+            data_region_start + u64::from(first_cluster + cluster_count - FIRST_DATA_CLUSTER) * bpc;
+        overlay_data_clusters_from_cluster_map(
+            outside_offset,
+            &mut untouched,
+            &cluster_map,
+            data_region_start,
+            bpc,
+            tmp.path(),
+        );
+        assert_eq!(
+            untouched, before,
+            "overlay must not touch bytes outside any registered extent"
+        );
+
+        // Case 3: missing backing file (extent points at a path
+        // that no longer exists) is logged-and-skipped, not a
+        // panic — the caller's buffer is preserved.
+        let mut empty_cluster_map = ClusterMap::new();
+        empty_cluster_map
+            .insert(FileExtent {
+                first_cluster: 100,
+                cluster_count: 1,
+                first_byte_in_file: 0,
+                file_path: std::path::PathBuf::from("nonexistent/file.mp4"),
+            })
+            .expect("insert extent");
+        let mut buf2 = vec![0x5Au8; 16];
+        let before2 = buf2.clone();
+        let missing_offset = data_region_start + u64::from(100 - FIRST_DATA_CLUSTER) * bpc;
+        overlay_data_clusters_from_cluster_map(
+            missing_offset,
+            &mut buf2,
+            &empty_cluster_map,
+            data_region_start,
+            bpc,
+            tmp.path(),
+        );
+        assert_eq!(
+            buf2, before2,
+            "missing backing file must be skipped without modifying caller buffer"
         );
     }
 }

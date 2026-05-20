@@ -329,8 +329,8 @@ fn emit_region_chunks<'a>(
 ///
 /// Cluster numbering: [`FIRST_DATA_CLUSTER`] (cluster 2) is the
 /// first cluster of the data region; exFAT reserves cluster
-/// numbers 0 and 1 (per spec §4 the FAT[0] slot holds the media
-/// descriptor and FAT[1] is unused). Cluster numbers can in
+/// numbers 0 and 1 (per spec §4 the FAT\[0\] slot holds the media
+/// descriptor and FAT\[1\] is unused). Cluster numbers can in
 /// principle exceed `cluster_count + 1` if the geometry's data
 /// region byte length is not an exact multiple of
 /// `bytes_per_cluster` — those writes would be off-the-end-of-

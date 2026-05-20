@@ -51,6 +51,7 @@ use teslausb_core::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
 
 use super::dir_tree::{DirTreeError, DirTreeWriter};
 use super::dirty_map::DirtyByteMap;
+use crate::retention::DeletedSet;
 
 /// `exFAT` FAT entry width (spec §4.1).
 const FAT_ENTRY_SIZE_BYTES: usize = 4;
@@ -202,6 +203,13 @@ pub struct ExfatWriteState {
     /// Production callers must populate this via
     /// [`Self::with_allocation_bitmap`].
     bitmap: Option<BitmapTracker>,
+
+    /// Paths Tesla has marked deleted via directory-entry
+    /// mutation (File entry `InUse` bit cleared). Phase 4.2
+    /// records the deletion here and leaves the backing file
+    /// in place; the Phase 4b cleanup worker decides whether
+    /// to actually reap based on GPS / SEI metadata.
+    deleted: DeletedSet,
 }
 
 /// Tracks the in-memory mirror of the exFAT allocation bitmap and
@@ -371,6 +379,7 @@ impl ExfatWriteState {
             pre_existing_files,
             recorded_file_sizes,
             bitmap: None,
+            deleted: DeletedSet::new(),
         };
         // Bootstrap the root directory with a single-cluster
         // chain. A FAT write that extends it will rebuild the
@@ -692,6 +701,11 @@ impl ExfatWriteState {
         is_directory: bool,
         no_fat_chain: bool,
     ) -> Result<(), ExfatWriteError> {
+        // If Tesla previously deleted this path and is now
+        // re-creating it, drop the stale retention mark so the
+        // cleanup worker doesn't reap the now-live file.
+        self.deleted.forget(relative_path);
+
         let cluster_count = self.clusters_for_data_length(data_length);
         let pending = self
             .pending_files
@@ -735,18 +749,23 @@ impl ExfatWriteState {
         if still_referenced {
             return;
         }
+        // Phase 4.2: record in retention `DeletedSet` and KEEP
+        // the committed backing file. See the matching block in
+        // `fat32_write::Fat32WriteState::handle_child_deleted`
+        // for the design rationale (Tesla's blind round-robin
+        // reuse must not destroy GPS/SEI-tagged clips).
         self.pending_files.remove(&first_cluster);
         let removed = self.cluster_map.remove_at(first_cluster);
         if removed.is_some() {
             tracing::debug!(
                 first_cluster,
                 ?previous_path,
-                "child deleted; freed cluster map extent"
+                "child deleted; recorded in retention set, freed cluster map extent"
             );
         }
         let _ = self.dir_tree.discard(previous_path);
-        let _ = self.dir_tree.unlink(previous_path);
         self.in_flight_files.remove(previous_path);
+        self.deleted.mark(previous_path.clone());
     }
 
     fn ensure_directory_registered(
@@ -1006,6 +1025,14 @@ impl ExfatWriteState {
     #[must_use]
     pub fn directory_count(&self) -> usize {
         self.directories.len()
+    }
+
+    /// Read-only handle to the set of paths Tesla has marked
+    /// deleted via directory-entry mutation in this session. The
+    /// Phase 4b cleanup worker reads this to drive reap decisions.
+    #[must_use]
+    pub fn deleted(&self) -> &DeletedSet {
+        &self.deleted
     }
 
     /// Number of files in `.partial` waiting on flush.
@@ -1568,6 +1595,71 @@ mod tests {
         assert_eq!(s.in_flight_file_count(), 0);
         let partial = tmp.path().join("gone.bin.partial");
         assert!(!partial.exists(), ".partial must be discarded on delete");
+        // Phase 4.2: deletion is also recorded in the retention
+        // set so the cleanup worker can evaluate it later.
+        assert!(s.deleted().contains(Path::new("gone.bin")));
+    }
+
+    #[test]
+    fn dir_entry_deletion_after_flush_keeps_backing_file_and_records_retention() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = state(&tmp);
+        let payload = b"survivor".to_vec();
+        let cluster = 5;
+
+        // Create + flush — file is finalized on the backing tree.
+        write_cluster_data(&mut s, cluster, &payload);
+        let entry = build_file_entry("survivor.bin", cluster, payload.len() as u64, true);
+        s.apply_write(root_cluster_byte(), &entry).expect("dir");
+        s.flush().expect("flush");
+        let backing = tmp.path().join("survivor.bin");
+        assert!(backing.exists());
+        assert!(s.deleted().is_empty());
+
+        // Tesla rewrites the dir cluster to drop the entry.
+        let g = geo();
+        let bpc = g.bytes_per_cluster() as usize;
+        let zeros = vec![0u8; bpc];
+        s.apply_write(root_cluster_byte(), &zeros)
+            .expect("dir wipe");
+
+        assert!(
+            backing.exists(),
+            "Phase 4.2: backing file must persist past Tesla's dir-entry delete"
+        );
+        assert_eq!(s.deleted().len(), 1);
+        assert!(s.deleted().contains(Path::new("survivor.bin")));
+    }
+
+    #[test]
+    fn exfat_recreating_deleted_path_clears_retention_mark() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = state(&tmp);
+        let payload = b"phoenix".to_vec();
+
+        // Create + flush.
+        write_cluster_data(&mut s, 5, &payload);
+        let entry = build_file_entry("phoenix.bin", 5, payload.len() as u64, true);
+        s.apply_write(root_cluster_byte(), &entry).expect("dir");
+        s.flush().expect("flush");
+
+        // Delete.
+        let g = geo();
+        let bpc = g.bytes_per_cluster() as usize;
+        let zeros = vec![0u8; bpc];
+        s.apply_write(root_cluster_byte(), &zeros)
+            .expect("dir wipe");
+        assert!(s.deleted().contains(Path::new("phoenix.bin")));
+
+        // Re-create at a different cluster.
+        write_cluster_data(&mut s, 7, &payload);
+        let new_entry = build_file_entry("phoenix.bin", 7, payload.len() as u64, true);
+        s.apply_write(root_cluster_byte(), &new_entry)
+            .expect("dir re-create");
+        assert!(
+            !s.deleted().contains(Path::new("phoenix.bin")),
+            "re-creating a deleted path must clear its retention mark"
+        );
     }
 
     #[test]

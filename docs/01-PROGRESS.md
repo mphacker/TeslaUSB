@@ -300,12 +300,12 @@ H3.1 – H3.5 per `00-PLAN.md`. All ⏳.
 
 | Inc | Deliverable | Status |
 |---|---|---|
-| 4.1 | `retention::filter` (mtime hide) | ✅ ca7ed5e+1 |
-| 4.2 | Tesla-delete interception | ⏳ |
+| 4.1 | `retention::filter` (mtime hide) | ✅ ccc7066 |
+| 4.2 | Tesla-delete interception | ✅ (pending commit) |
 | 4.3 | Virtual free-cluster reporting | ⏳ |
 | 4.4 | TOML config + IPC reload | ⏳ |
 
-**Phase 4.1 (pending commit):** new `teslafat::retention`
+**Phase 4.1 (`ccc7066`):** new `teslafat::retention`
 module — pure-logic hide-from-view filter. `decide(relative_path,
 mtime, now, &policy) -> Decision { Show | Hide }` scopes
 filtering to the `RecentClips/` subtree only (Sentry, Saved, and
@@ -339,6 +339,47 @@ Tests: 15 new (4 surface invariants for `decide`; 8 semantic
 cases; 3 `apply` end-to-end + 1 pathological). Workspace total
 1013 → 1027 (+14, one new lib test was a config test that
 already existed). All gates green.
+
+**Phase 4.2 (pending commit):** Tesla-delete interception. New
+`retention::DeletedSet` — `HashSet<PathBuf>` of relative paths
+Tesla has marked deleted via directory-entry mutation
+(FAT32: SFN leading byte rewritten to `0xE5`; exFAT: File-entry
+`InUse` bit cleared, modeled in tests by a full dir-cluster
+zeroing which the redecode treats identically).
+
+Behavior change: both `ExfatWriteState::handle_child_deleted`
+and `Fat32WriteState::handle_child_deleted` no longer call
+`DirTreeWriter::unlink`. Instead they:
+
+- discard any in-flight `.partial` companion (still safe — that
+  was uncommitted bytes for *this* generation of the dir entry)
+- free the cluster_map extent (the kernel reused those clusters;
+  keeping the extent would mis-route a future write that
+  allocates into the same clusters)
+- drop the in-flight tracker
+- record the path in the `DeletedSet`
+
+`handle_child_seen` calls `DeletedSet::forget(path)` when Tesla
+re-creates a file at a previously-deleted path, so the cleanup
+worker doesn't reap a now-live file.
+
+Both write states expose `pub fn deleted(&self) -> &DeletedSet`
+for the Phase 4b cleanup worker. The set is also wired into the
+Phase 4.4 IPC snapshot (deferred).
+
+Existing integration tests `fat32_deletion_removes_backing_file_after_finalize`
+and `exfat_deletion_removes_backing_file_after_finalize` were
+renamed to `*_keeps_backing_file_and_records_retention` and
+inverted to assert the new contract.
+
+Tests: 6 new (4 lib unit tests for `DeletedSet`; 2 new state-machine
+tests asserting backing-file preservation + retention mark + mark
+clearing on re-create) + 2 integration test inversions. Workspace
+total 1027 → 1037 (+10). All gates green. Pre-existing rustdoc
+breakages in `teslausb-core/src/fs/exfat/parse.rs` (FAT\[0\]/\[1\]
+bracket escapes) and `teslafat/src/backend/fat32_write.rs`
+(`FileExtent` intra-doc link) fixed in the same commit per the
+charter "fix bugs as you find them" rule.
 
 ## Phase 4b — Cleanup + indexer-driven preservation (Rust)
 

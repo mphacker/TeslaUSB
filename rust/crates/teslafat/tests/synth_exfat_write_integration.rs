@@ -249,7 +249,7 @@ async fn exfat_fat_chained_file_resolves() {
 }
 
 #[tokio::test]
-async fn exfat_deletion_removes_backing_file_after_finalize() {
+async fn exfat_deletion_keeps_backing_file_and_records_retention() {
     let (dir, backend) = open_empty_backend();
     let g = geometry();
     let payload = b"will be deleted exfat".repeat(8);
@@ -278,9 +278,13 @@ async fn exfat_deletion_removes_backing_file_after_finalize() {
         .expect("delete write");
     backend.flush().await.expect("flush delete");
 
+    // Phase 4.2: backing file must be preserved past Tesla's
+    // dir-entry delete. The retention `DeletedSet` records the
+    // path for the cleanup worker to evaluate against its GPS /
+    // SEI policy.
     assert!(
-        !dir.path().join("doomed.bin").exists(),
-        "delete should remove backing file"
+        dir.path().join("doomed.bin").exists(),
+        "Phase 4.2: backing file must persist past Tesla's dir-entry delete"
     );
 }
 

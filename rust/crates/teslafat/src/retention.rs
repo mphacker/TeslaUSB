@@ -21,7 +21,8 @@
 //! in Phase 4.3 (free-cluster reporting) and Phase 4.4 (config
 //! plumbing).
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use teslausb_core::fs::backing_tree::{BackingDir, BackingTree};
@@ -186,6 +187,76 @@ fn is_under_recentclips(relative_path: &Path) -> bool {
         .components()
         .next()
         .is_some_and(|c| c.as_os_str() == RECENTCLIPS_DIR)
+}
+
+/// Set of backing-tree-relative paths that Tesla has marked as
+/// deleted via a directory-entry mutation (FAT32: SFN leading byte
+/// rewritten to `0xE5`; exFAT: File entry `InUse` bit cleared).
+///
+/// Phase 4.2 intercepts those deletions instead of honoring them
+/// against the backing tree: the write-state machine records the
+/// path here and leaves the backing file present on disk. The
+/// cleanup worker (Phase 4b) consults this set, the file's mtime,
+/// and the SEI / GPS index to decide whether to actually reap the
+/// file or to keep it because it carries event metadata Tesla's
+/// blind round-robin reuse would otherwise destroy.
+///
+/// The set carries no timestamps: time-of-deletion is not useful
+/// to the cleanup policy (which keys off the file's own mtime), and
+/// omitting it keeps the struct trivially serializable for the
+/// Phase 4.4 IPC snapshot.
+#[derive(Debug, Default, Clone)]
+pub struct DeletedSet {
+    paths: HashSet<PathBuf>,
+}
+
+impl DeletedSet {
+    /// Construct an empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record `relative_path` as deleted. Returns `true` when this
+    /// is the first time the path has been marked, `false` if it
+    /// was already present (Tesla rewrites the same dir cluster
+    /// many times; re-decodes will replay the deletion).
+    pub fn mark(&mut self, relative_path: PathBuf) -> bool {
+        self.paths.insert(relative_path)
+    }
+
+    /// `true` if `relative_path` has been recorded as deleted.
+    #[must_use]
+    pub fn contains(&self, relative_path: &Path) -> bool {
+        self.paths.contains(relative_path)
+    }
+
+    /// Remove `relative_path` from the set. Returns `true` if it
+    /// was present. Used by the cleanup worker to acknowledge
+    /// reaping (or by the write-state machine when the kernel
+    /// re-creates a file with the same name in the same dir, in
+    /// which case the prior deletion is no longer relevant).
+    pub fn forget(&mut self, relative_path: &Path) -> bool {
+        self.paths.remove(relative_path)
+    }
+
+    /// Iterate the recorded deleted paths. Iteration order is
+    /// unspecified (backed by `HashSet`).
+    pub fn iter(&self) -> impl Iterator<Item = &Path> {
+        self.paths.iter().map(PathBuf::as_path)
+    }
+
+    /// Number of recorded deletions.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    /// `true` when no deletions are recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -583,5 +654,48 @@ mod tests {
         assert_eq!(stats.hidden, 0);
         assert_eq!(stats.shown, 1);
         assert_eq!(tree.root.files.len(), 1);
+    }
+
+    // ---- DeletedSet ----
+
+    #[test]
+    fn deleted_set_starts_empty() {
+        let d = DeletedSet::new();
+        assert!(d.is_empty());
+        assert_eq!(d.len(), 0);
+        assert!(!d.contains(Path::new("RecentClips/foo.mp4")));
+    }
+
+    #[test]
+    fn deleted_set_mark_returns_true_first_time_false_after() {
+        let mut d = DeletedSet::new();
+        let p = PathBuf::from("RecentClips/2024-01-01_12-00-00-front.mp4");
+        assert!(d.mark(p.clone()), "first mark should report novel");
+        assert!(!d.mark(p.clone()), "second mark should report duplicate");
+        assert_eq!(d.len(), 1);
+        assert!(d.contains(&p));
+    }
+
+    #[test]
+    fn deleted_set_forget_removes_recorded_entry() {
+        let mut d = DeletedSet::new();
+        let p = PathBuf::from("SentryClips/2024-01-01_12-00-00/event.json");
+        d.mark(p.clone());
+        assert!(d.forget(&p));
+        assert!(!d.forget(&p), "forget on missing path is false");
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn deleted_set_iter_yields_all_marked() {
+        let mut d = DeletedSet::new();
+        let a = PathBuf::from("RecentClips/a.mp4");
+        let b = PathBuf::from("RecentClips/b.mp4");
+        d.mark(a.clone());
+        d.mark(b.clone());
+        let collected: HashSet<PathBuf> = d.iter().map(Path::to_path_buf).collect();
+        assert_eq!(collected.len(), 2);
+        assert!(collected.contains(&a));
+        assert!(collected.contains(&b));
     }
 }

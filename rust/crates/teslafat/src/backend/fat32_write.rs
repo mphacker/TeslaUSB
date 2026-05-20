@@ -75,6 +75,7 @@ use teslausb_core::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
 
 use super::dir_tree::{DirTreeError, DirTreeWriter};
 use super::dirty_map::DirtyByteMap;
+use crate::retention::DeletedSet;
 
 /// Number of FAT mirrors the FAT32 geometry advertises. Pulled
 /// into the state machine so the per-mirror buffer array has a
@@ -170,7 +171,7 @@ impl DirectoryState {
 }
 
 /// One pending dir entry that is awaiting its cluster chain
-/// before we can register a [`FileExtent`].
+/// before we can register a `FileExtent`.
 #[derive(Debug)]
 struct PendingFile {
     relative_path: PathBuf,
@@ -233,6 +234,12 @@ pub struct Fat32WriteState {
     /// to this size so cluster-tail padding doesn't leak into
     /// the backing tree.
     recorded_file_sizes: HashMap<PathBuf, u64>,
+    /// Paths Tesla has marked deleted via directory-entry
+    /// mutation (SFN leading byte rewritten to `0xE5`). Phase
+    /// 4.2 records the deletion here and leaves the backing
+    /// file in place; the Phase 4b cleanup worker decides
+    /// whether to actually reap based on GPS/SEI metadata.
+    deleted: DeletedSet,
 }
 
 /// Describes a pre-existing file extent the [`Fat32WriteState`]
@@ -334,6 +341,7 @@ impl Fat32WriteState {
             in_flight_files: HashSet::new(),
             pre_existing_files,
             recorded_file_sizes,
+            deleted: DeletedSet::new(),
         };
         // Bootstrap the root directory with a single-cluster
         // chain. The FAT write that extends it past one cluster
@@ -665,6 +673,12 @@ impl Fat32WriteState {
         file_size: u64,
         is_directory: bool,
     ) -> Result<(), Fat32WriteError> {
+        // If Tesla previously deleted this path and is now
+        // re-creating it (same relative path, possibly different
+        // clusters), the prior deletion mark is stale — drop it
+        // so the cleanup worker doesn't reap a now-live file.
+        self.deleted.forget(relative_path);
+
         let pending = self
             .pending_files
             .entry(first_cluster)
@@ -704,21 +718,34 @@ impl Fat32WriteState {
             return;
         }
         // The entry is no longer referenced by any directory we
-        // know about. Treat as deletion: drop pending entry,
-        // remove cluster_map extent, unlink + discard .partial,
-        // drop any in-flight tracker.
+        // know about. Phase 4.2: treat as a *Tesla* deletion —
+        // record the path in the retention `DeletedSet` and leave
+        // the backing file present on disk. The Phase 4b cleanup
+        // worker decides whether to actually reap based on the
+        // file's GPS / SEI metadata; this shim refuses to honor
+        // Tesla's round-robin reuse blindly.
+        //
+        // We still drop the in-flight tracker and the `.partial`
+        // companion — those were uncommitted bytes for *this*
+        // generation of the dir-entry; if Tesla re-creates a file
+        // with the same name we must start that .partial fresh.
+        // We also still free the cluster_map extent because the
+        // FAT entries those clusters belong to are now legitimately
+        // free from the filesystem's perspective; if we kept the
+        // extent we'd mis-route a future write that the kernel
+        // allocates into the same clusters.
         self.pending_files.remove(&first_cluster);
         let removed = self.cluster_map.remove_at(first_cluster);
         if removed.is_some() {
             tracing::debug!(
                 first_cluster,
                 ?previous_path,
-                "child deleted; freed cluster map extent"
+                "child deleted; recorded in retention set, freed cluster map extent"
             );
         }
         let _ = self.dir_tree.discard(previous_path);
-        let _ = self.dir_tree.unlink(previous_path);
         self.in_flight_files.remove(previous_path);
+        self.deleted.mark(previous_path.clone());
     }
 
     fn ensure_directory_registered(
@@ -994,6 +1021,14 @@ impl Fat32WriteState {
     #[must_use]
     pub fn directory_count(&self) -> usize {
         self.directories.len()
+    }
+
+    /// Read-only handle to the set of paths Tesla has marked
+    /// deleted via directory-entry mutation in this session. The
+    /// Phase 4b cleanup worker reads this to drive reap decisions.
+    #[must_use]
+    pub fn deleted(&self) -> &DeletedSet {
+        &self.deleted
     }
 
     /// Number of files that have been written to but not yet
@@ -1440,7 +1475,7 @@ mod tests {
     }
 
     #[test]
-    fn dir_entry_deletion_unlinks_file_and_frees_extent() {
+    fn dir_entry_deletion_keeps_backing_file_and_records_in_retention_set() {
         let tmp = TempDir::new().unwrap();
         let mut s = state(&tmp);
         let g = geo();
@@ -1453,20 +1488,61 @@ mod tests {
         s.apply_write(cluster_to_volume_byte(&g, 3), b"data")
             .unwrap();
         s.flush().unwrap();
-        assert!(tmp.path().join("doomed.bin").exists());
+        let backing = tmp.path().join("doomed.bin");
+        assert!(backing.exists());
         assert_eq!(s.extent_count(), 1);
+        assert!(s.deleted().is_empty());
 
-        // Now Tesla marks the dir entry deleted — first byte of
-        // the SFN becomes 0xE5. Zero the WHOLE dir entry chain
-        // (LFN + SFN) to simulate a full re-write of the dir
+        // Now Tesla marks the dir entry deleted — zero the whole
+        // dir entry chain to simulate a re-write of the dir
         // cluster without the entry.
         let root_byte = cluster_to_volume_byte(&g, 2);
         let zero = vec![0u8; dir_entry.len()];
         s.apply_write(root_byte, &zero).unwrap();
 
-        // Extent freed, file unlinked.
+        // Phase 4.2: extent freed, .partial discarded, BUT the
+        // committed backing file is preserved and the path is
+        // recorded in the retention `DeletedSet` for the cleanup
+        // worker to evaluate against its GPS / SEI policy.
         assert_eq!(s.extent_count(), 0);
-        assert!(!tmp.path().join("doomed.bin").exists());
+        assert!(
+            backing.exists(),
+            "Phase 4.2: backing file must persist past Tesla's dir-entry delete"
+        );
+        assert_eq!(s.deleted().len(), 1);
+        assert!(s.deleted().contains(Path::new("doomed.bin")));
+    }
+
+    #[test]
+    fn recreating_deleted_path_clears_retention_mark() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = state(&tmp);
+        let g = geo();
+
+        // Create, then delete.
+        let dir_entry = build_file_dir_entry("respawn.bin", 3, 4);
+        s.apply_write(cluster_to_volume_byte(&g, 2), &dir_entry)
+            .unwrap();
+        write_fat_entry(&mut s, 3, 0x0FFF_FFFF);
+        s.apply_write(cluster_to_volume_byte(&g, 3), b"data")
+            .unwrap();
+        s.flush().unwrap();
+
+        let root_byte = cluster_to_volume_byte(&g, 2);
+        let zero = vec![0u8; dir_entry.len()];
+        s.apply_write(root_byte, &zero).unwrap();
+        assert!(s.deleted().contains(Path::new("respawn.bin")));
+
+        // Tesla re-creates a file with the same name (different
+        // cluster). The retention mark must clear so the cleanup
+        // worker won't reap the now-live file.
+        let new_entry = build_file_dir_entry("respawn.bin", 5, 4);
+        s.apply_write(root_byte, &new_entry).unwrap();
+        assert!(
+            !s.deleted().contains(Path::new("respawn.bin")),
+            "re-creating a deleted path must clear its retention mark"
+        );
+        assert!(s.deleted().is_empty());
     }
 
     #[test]

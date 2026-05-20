@@ -468,7 +468,7 @@ test suite).
 | 4b.1z | `teslausb-worker::sei` — clip walker that drives 4b.1a/b/c against real files | ✅ |
 | 4b.2a | `teslausb-worker::config` + `teslausb-worker::store` — TOML loader + SQLite-backed clip/waypoint store (ADR-0010) | ✅ |
 | 4b.2b | `teslausb-worker::watcher` + `teslausb-worker::indexer` — inotify clip watcher + bootstrap/event indexer (ADR-0011) | ✅ |
-| 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion) | ⏳ |
+| 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion, rustix-statvfs pressure floor, path-traversal defense, store split, ADR-0012) | ✅ |
 | 4b.4 | `teslausb-worker::main` task supervisor | ⏳ |
 | 4b.5 | `teslausb-worker.service` systemd unit | ⏳ |
 
@@ -831,6 +831,74 @@ green.
 **Test count:** workspace 1191 → 1212 (+21 host-test
 deltas: 7 watcher + 14 indexer). Linux-only integration
 tests add another +2 on the Pi.
+
+### Phase 4b.3 — cleanup worker (GPS-aware deletion) ✅
+
+Final increment of the indexer pillar. The cleanup module
+sweeps `RecentClips` only, preserves any clip whose
+indexed waypoints carry a real GPS fix (when
+`preserve_with_gps = true`), and broadens the cutoff to
+"now" when free-space drops below `min_free_pct`. Order of
+operations is **store-first, file-second**: a failed unlink
+leaves the file in place for re-indexing on the next
+bootstrap pass, so the system converges rather than losing
+ground.
+
+**Free-space probe (rustix, not libc).** The Linux
+free-space check goes through `rustix::fs::statvfs` — a
+safe wrapper — so we don't need an `unsafe` block (would
+fail the workspace `unsafe_code = "deny"` lint). Documented
+in **ADR-0012**. The non-Linux build returns `100.0` as a
+stub so dev-workstation tests never see synthetic pressure.
+
+**Pressure-driven cutoff.** Extracted `effective_cutoff`
+as a pure-logic helper so tests verify the broaden-cutoff
+behaviour without freezing the clock or stubbing
+`statvfs`. Under pressure the helper returns `now_unix_s`,
+which causes `Store::list_clips_in_bucket_older_than` to
+return every no-GPS `RecentClips` clip; the ASC ordering
+on `clip_started_utc` then ensures oldest-first deletion.
+
+**Path-traversal defense (security review).** Cleanup is
+the only code path that deletes files, so it re-validates
+every `relative_path` from the store before calling
+`std::fs::remove_file`. The `safe_absolute_path` helper
+rejects absolute paths, Windows prefix components, root
+components, and any `..` segment; `.` segments are
+harmless (normalized by `Path::components()`). A bad row
+counts as `failed` and stays in the store; the file is
+untouched. Five tests pin the behaviour, including one
+end-to-end test that injects a `../victim.txt` row and
+asserts the victim file outside `backing_root` is *not*
+deleted.
+
+**Store split (charter §1 god-module fix).** The original
+`store.rs` was 1148 lines (674 prod SLOC), over the
+charter's 500-line hard cap. Split into a `store/`
+directory with one responsibility per file: `mod.rs`
+(re-exports + module docs), `bucket.rs`, `types.rs`,
+`schema.rs`, `helpers.rs`, `store_impl.rs`, `tests.rs`.
+Every file is now under 500 lines (largest is
+`store_impl.rs` at 377, with the `tests.rs` sibling at
+481).
+
+**Charter findings addressed in-band.** The pre-commit
+charter-review on 4b.2+4b.3 flagged 3 Blockers + 2 Majors
+— all fixed in this same commit rather than deferred:
+Blocker #1 (`unsafe`-libc statvfs would fail Linux build)
+became the rustix swap; Blocker #2 (`min_free_pct`
+documented but unused) became the pressure logic; Blocker
+#3 (1148-line `store.rs`) became the directory split;
+Major #1 (easy libc over harder safe wrapper) was the
+same as Blocker #1; Major #2 (new dep without ADR) became
+ADR-0012.
+
+**Test count:** workspace 1212 → 1253 (+41 host-test
+deltas: cleanup module now 27 tests including 5 new
+traversal-defense tests, 4 new pressure tests, 1
+Linux-gated `statvfs` smoke test; store split kept all 22
+existing store tests intact). Linux-only integration test
+adds another +1 on the Pi.
 
 ## Phase H4 — Retention + worker on hardware
 

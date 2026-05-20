@@ -48,4 +48,5 @@ pub mod backend;
 pub mod backing_walker;
 pub mod config;
 pub mod nbd;
+pub mod retention;
 pub mod server;

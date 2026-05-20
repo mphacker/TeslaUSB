@@ -300,10 +300,45 @@ H3.1 – H3.5 per `00-PLAN.md`. All ⏳.
 
 | Inc | Deliverable | Status |
 |---|---|---|
-| 4.1 | `retention::filter` (mtime hide) | ⏳ |
+| 4.1 | `retention::filter` (mtime hide) | ✅ ca7ed5e+1 |
 | 4.2 | Tesla-delete interception | ⏳ |
 | 4.3 | Virtual free-cluster reporting | ⏳ |
 | 4.4 | TOML config + IPC reload | ⏳ |
+
+**Phase 4.1 (pending commit):** new `teslafat::retention`
+module — pure-logic hide-from-view filter. `decide(relative_path,
+mtime, now, &policy) -> Decision { Show | Hide }` scopes
+filtering to the `RecentClips/` subtree only (Sentry, Saved, and
+top-level files always shown). Threshold is strict `age >`
+(not `>=`) so the boundary is pinned by a regression test.
+`apply(&mut tree, backing_root, now, &policy) -> ApplyStats`
+walks a `BackingTree` recursively, drops hidden files, and
+returns counters for observability.
+
+Defensive behavior — pinned by tests:
+- mtime in the future (clock skew) → age clamped to zero, file
+  shown
+- `Duration::MAX` policy → no file ever hidden
+- `Duration::ZERO` policy → any file with mtime < now hidden
+  (boundary `==` shown)
+- substring match (`RecentClipsBackup/`) → not under
+  `RecentClips/`, file shown
+- nested path (`RecentClips/<event>/<file>.mp4`) → filter applies
+  by first path component regardless of depth
+- `backing_path` not under `backing_root` → file kept visible
+  (better to show a confusing entry than to silently delete on
+  a walker bug)
+- empty directories preserved (Tesla UI handles them fine; the
+  alternative could confuse Tesla on remount)
+
+All time inputs are explicit so tests use a frozen `SystemTime`
+constant — no `Clock` trait, no `mockall`, no `tokio::time::pause`.
+Wiring into the synth deferred to Phase 4.3.
+
+Tests: 15 new (4 surface invariants for `decide`; 8 semantic
+cases; 3 `apply` end-to-end + 1 pathological). Workspace total
+1013 → 1027 (+14, one new lib test was a config test that
+already existed). All gates green.
 
 ## Phase 4b — Cleanup + indexer-driven preservation (Rust)
 

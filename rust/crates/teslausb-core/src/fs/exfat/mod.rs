@@ -10,9 +10,9 @@
 //!
 //! Phase 2.8 ships [`geometry`] and [`boot_sector`]. Phase 2.9
 //! adds [`allocation_bitmap`] and [`upcase_table`]. Phase 2.10
-//! adds [`directory`]. Subsequent increments add:
+//! adds [`directory`]. Phase 2.11 adds the [`synth`] read
+//! dispatcher. Subsequent increments add:
 //!
-//! * Phase 2.11 — `synth::ExfatSynth` dispatcher.
 //! * Phase 2.12 — external integration test parallel to the FAT32
 //!   `fs_fat32_integration.rs` harness.
 //!
@@ -28,4 +28,5 @@ pub mod allocation_bitmap;
 pub mod boot_sector;
 pub mod directory;
 pub mod geometry;
+pub mod synth;
 pub mod upcase_table;

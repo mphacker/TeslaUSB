@@ -103,6 +103,16 @@ pub enum Fat32SynthError {
         /// The geometry's volume size.
         volume_size: u64,
     },
+    /// The geometry returned a [`RegionKind`] that is not part of
+    /// the FAT32 on-disk layout (for example, an exFAT boot region).
+    /// A correctly-constructed [`Fat32Geometry`] never produces such
+    /// regions; this variant exists as defense-in-depth for callers
+    /// who hand-build a [`crate::fs::geometry::Region`] slice or
+    /// extend [`RegionKind`] in the future.
+    UnsupportedRegion {
+        /// The offending region kind.
+        kind: RegionKind,
+    },
 }
 
 impl fmt::Display for Fat32SynthError {
@@ -126,6 +136,9 @@ impl fmt::Display for Fat32SynthError {
                 f,
                 "read of {length} bytes at offset {offset} extends past the volume size {volume_size}"
             ),
+            Self::UnsupportedRegion { kind } => {
+                write!(f, "FAT32 synth received an unsupported region kind: {kind}")
+            }
         }
     }
 }
@@ -136,7 +149,9 @@ impl std::error::Error for Fat32SynthError {
             Self::BootSector(err) => Some(err),
             Self::FsInfo(err) => Some(err),
             Self::FatTable(err) => Some(err),
-            Self::OffsetBeyondVolume { .. } | Self::LengthExceedsVolume { .. } => None,
+            Self::OffsetBeyondVolume { .. }
+            | Self::LengthExceedsVolume { .. }
+            | Self::UnsupportedRegion { .. } => None,
         }
     }
 }
@@ -305,6 +320,9 @@ impl Fat32Synth {
             }
             RegionKind::FatTable { .. } => {
                 self.read_fat_table(byte_in_region, out)?;
+            }
+            RegionKind::ExfatMainBootRegion | RegionKind::ExfatBackupBootRegion => {
+                return Err(Fat32SynthError::UnsupportedRegion { kind: region.kind });
             }
         }
         Ok(())

@@ -19,12 +19,22 @@
 //!   `fat32::fat_table::FatTable` (Phase 2.4),
 //!   `fat32::directory` (Phase 2.5), and
 //!   `fat32::synth::Fat32Synth` — the byte-offset read dispatcher
-//!   that wires all the above together (Phase 2.6).
+//!   that wires all the above together (Phase 2.6). Phase 2.7
+//!   added the public-API-only external integration test under
+//!   `tests/fs_fat32_integration.rs`.
+//! * [`exfat`] — Microsoft `exFAT` implementation. Ships
+//!   `exfat::geometry::ExfatGeometry` and
+//!   `exfat::boot_sector::synthesize` (Phase 2.8); subsequent
+//!   `exfat::*` submodules land in Phases 2.9 – 2.12.
 //!
 //! ## Planned additions
 //!
-//! * Phase 2.7 — `fat32` integration test (synth + mount + cmp).
-//! * Phase 2.8+ — `exfat::*` parallel modules.
+//! * Phase 2.9 — `exfat::allocation_bitmap` + `exfat::upcase_table`.
+//! * Phase 2.10 — `exfat::directory` (file / stream / file-name
+//!   entry encoders).
+//! * Phase 2.11 — `exfat::synth::ExfatSynth` dispatcher.
+//! * Phase 2.12 — `tests/fs_exfat_integration.rs`.
 
+pub mod exfat;
 pub mod fat32;
 pub mod geometry;

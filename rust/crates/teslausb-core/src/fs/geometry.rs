@@ -160,8 +160,10 @@ impl Region {
 /// in Phase 2.1; the corresponding `synthesize` modules land in
 /// 2.2 – 2.5 and consume these variants.
 ///
-/// `exFAT` (Phase 2.8) will extend this enum with `AllocationBitmap`,
-/// `UpcaseTable`, and friends.
+/// `exFAT` boot-region variants land in Phase 2.8 alongside the
+/// `fs::exfat::geometry` and `fs::exfat::boot_sector` modules.
+/// Subsequent exFAT phases (2.9+) will extend this enum with
+/// `AllocationBitmap`, `UpcaseTable`, and friends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RegionKind {
     /// FAT32 boot sector (sector 0 of the reserved region).
@@ -170,6 +172,17 @@ pub enum RegionKind {
     Fat32FsInfo,
     /// FAT32 backup boot sector (typically sector 6).
     Fat32BackupBootSector,
+    /// exFAT main boot region — 12 contiguous 512-byte sectors at
+    /// the start of the volume (sectors 0..12). Contains, in order:
+    /// the main boot sector, 8 main extended boot sectors, the main
+    /// OEM parameters sector, a reserved sector, and the main boot
+    /// checksum sector. Microsoft exFAT spec v1.00 §3.1.
+    ExfatMainBootRegion,
+    /// exFAT backup boot region — 12 contiguous 512-byte sectors
+    /// immediately following the main boot region (sectors 12..24).
+    /// Mirror of [`Self::ExfatMainBootRegion`]. Microsoft exFAT
+    /// spec v1.00 §3.2.
+    ExfatBackupBootRegion,
     /// Reserved sectors that contain no defined structure — must
     /// be zero-filled on read.
     Reserved,
@@ -190,6 +203,8 @@ impl fmt::Display for RegionKind {
             Self::Fat32BootSector => f.write_str("fat32-boot-sector"),
             Self::Fat32FsInfo => f.write_str("fat32-fsinfo"),
             Self::Fat32BackupBootSector => f.write_str("fat32-backup-boot-sector"),
+            Self::ExfatMainBootRegion => f.write_str("exfat-main-boot-region"),
+            Self::ExfatBackupBootRegion => f.write_str("exfat-backup-boot-region"),
             Self::Reserved => f.write_str("reserved"),
             Self::FatTable { index } => write!(f, "fat-table-{index}"),
             Self::Data => f.write_str("data"),

@@ -25,9 +25,10 @@ import logging
 import secrets
 from typing import TYPE_CHECKING
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
 
 from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
+from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.config import WebConfig, load_config
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 
@@ -187,6 +188,16 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         bp_name = getattr(bp, "name", None)
         if isinstance(bp_name, str):
             registered_names.add(bp_name)
+
+    # Real B-1 blueprints (Phase 5.7+). Each replaces a scaffold of
+    # the same name where one exists; system_health has no scaffold
+    # (it is API-only with no URL in base.html).
+    real_blueprints: tuple[Blueprint, ...] = (system_health_bp,)
+    for bp in real_blueprints:
+        if bp.name in registered_names:
+            continue
+        app.register_blueprint(bp)
+        registered_names.add(bp.name)
 
     for scaffold_bp in build_scaffold_blueprints():
         if scaffold_bp.name in registered_names:

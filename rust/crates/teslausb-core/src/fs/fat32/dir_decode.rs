@@ -318,10 +318,7 @@ pub fn decode_directory_cluster(
     Ok(result)
 }
 
-fn decode_deleted_entry(
-    bytes: &[u8; DIR_ENTRY_SIZE_BYTES],
-    offset: usize,
-) -> DecodedDirEntry {
+fn decode_deleted_entry(bytes: &[u8; DIR_ENTRY_SIZE_BYTES], offset: usize) -> DecodedDirEntry {
     let mut raw_name = [0u8; VOLUME_LABEL_NAME_LEN];
     raw_name.copy_from_slice(&bytes[..VOLUME_LABEL_NAME_LEN]);
     if raw_name[0] == DIR_ENTRY_ESCAPED_E5 {
@@ -335,19 +332,13 @@ fn decode_deleted_entry(
     }
 }
 
-fn decode_volume_label(
-    bytes: &[u8; DIR_ENTRY_SIZE_BYTES],
-    offset: usize,
-) -> DecodedDirEntry {
+fn decode_volume_label(bytes: &[u8; DIR_ENTRY_SIZE_BYTES], offset: usize) -> DecodedDirEntry {
     let mut label = [0u8; VOLUME_LABEL_NAME_LEN];
     label.copy_from_slice(&bytes[..VOLUME_LABEL_NAME_LEN]);
     DecodedDirEntry::VolumeLabel { label, offset }
 }
 
-fn decode_lfn_entry(
-    bytes: &[u8; DIR_ENTRY_SIZE_BYTES],
-    offset: usize,
-) -> Option<LfnEntry> {
+fn decode_lfn_entry(bytes: &[u8; DIR_ENTRY_SIZE_BYTES], offset: usize) -> Option<LfnEntry> {
     let ord_raw = bytes[LFN_OFFSET_ORD];
     let is_last_in_chain = ord_raw & LAST_LONG_ENTRY != 0;
     let ordinal = ord_raw & !LAST_LONG_ENTRY;

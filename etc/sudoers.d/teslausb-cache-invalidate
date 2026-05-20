@@ -1,0 +1,36 @@
+# /etc/sudoers.d/teslausb-cache-invalidate
+#
+# Allows the `teslausb` service user (which the web app and worker
+# run as) to invoke `tesla_cache_invalidate.sh` with NO arguments,
+# under root, without a password.
+#
+# Why NOPASSWD: the web request handler is non-interactive — there
+# is no human at a TTY to type a password. The blast radius is
+# intentionally limited (see below).
+#
+# Why "no-args only": the script's `--gadget`, `--function`, and
+# `--lun` flags accept arbitrary strings. Even though the script
+# validates them before constructing configfs paths, the principle
+# of least authority says: the only call the service should ever
+# need is the default (LUN 1 == media drive), so that is the only
+# call sudoers allows. Diagnostics that want a non-default LUN must
+# be invoked manually by an admin (separate `sudo` invocation,
+# subject to the system sudoers policy, NOT this fragment).
+#
+# The trailing `""` after the command path is what restricts to
+# zero arguments — without it, sudo's default is to allow ANY
+# arguments. See sudoers(5) "Wildcards" / "Command arguments".
+#
+# Install:    /etc/sudoers.d/teslausb-cache-invalidate (root:root 0440)
+# Owned by:   Phase 6 setup.sh (installs via `install -m 0440 -o root -g root`)
+# Validates:  visudo -c -f /etc/sudoers.d/teslausb-cache-invalidate
+#
+# Defaults stanza scoped to this command only:
+#   - env_reset (default; reaffirmed for clarity) wipes the caller's
+#     env so the teslausb user CANNOT pass CONFIGFS_ROOT, GADGET,
+#     FUNCTION, LUN, or EJECT_MS via env to redirect the script
+#     elsewhere. The script falls back to its built-in defaults.
+#   - !requiretty so the web request handler (no TTY) can invoke.
+Defaults!/usr/local/bin/tesla_cache_invalidate.sh env_reset, !requiretty
+
+teslausb ALL=(root) NOPASSWD: /usr/local/bin/tesla_cache_invalidate.sh ""

@@ -114,7 +114,7 @@ print_summary() {
 run_rust_gates() {
     require_cmd cargo
     require_cmd rustup
-    cd "$REPO_ROOT/rust"
+    cd "$REPO_ROOT/rust" || exit 1
 
     # Ensures pinned toolchain (from rust-toolchain.toml) is installed.
     rustup show >/dev/null
@@ -152,12 +152,12 @@ run_rust_gates() {
     RUSTDOCFLAGS="-D warnings" run_gate "rust: cargo doc (no broken doc links)" \
         cargo doc --no-deps --document-private-items --workspace
 
-    cd "$REPO_ROOT"
+    cd "$REPO_ROOT" || exit 1
 }
 
 run_python_gates() {
     require_cmd python3 || require_cmd python
-    cd "$REPO_ROOT/web"
+    cd "$REPO_ROOT/web" || exit 1
 
     # Find a python that has the dev tools. Order:
     #   1. $PYTHON env var (operator override)
@@ -188,11 +188,11 @@ run_python_gates() {
     run_gate "python: bandit -r teslausb_web -ll" \
         "$py" -m bandit -r teslausb_web -ll
 
-    cd "$REPO_ROOT"
+    cd "$REPO_ROOT" || exit 1
 }
 
 run_hygiene_gates() {
-    cd "$REPO_ROOT"
+    cd "$REPO_ROOT" || exit 1
     require_cmd git
 
     # Charter L564: no files > 1 MiB without LFS approval.
@@ -230,6 +230,23 @@ run_hygiene_gates() {
         fi
     }
     run_gate "hygiene: no forbidden artifacts in git" check_forbidden_artifacts
+
+    # Phase 4c.2: shell scripts in the repo must be shellcheck-clean
+    # at `-S warning` (charter §"CI Gates" + 00-PLAN.md Phase 4c review
+    # gate). Scoped to tracked .sh files so out-of-tree scratch scripts
+    # don't break the gate. Optional gate — skips cleanly if shellcheck
+    # isn't installed (CI installs it via setup-dev.sh / podman image).
+    if command -v shellcheck >/dev/null 2>&1; then
+        check_shellcheck() {
+            local sh_files
+            mapfile -t sh_files < <(git ls-files '*.sh')
+            [[ ${#sh_files[@]} -eq 0 ]] && return 0
+            shellcheck -S warning "${sh_files[@]}"
+        }
+        run_gate "hygiene: shellcheck -S warning (tracked *.sh)" check_shellcheck
+    else
+        skip_gate "hygiene: shellcheck -S warning (tracked *.sh)" "shellcheck not installed"
+    fi
 
     # Charter L568: markdown links resolve (lychee). Scoped to tracked
     # markdown so out-of-tree generated docs don't break the gate.

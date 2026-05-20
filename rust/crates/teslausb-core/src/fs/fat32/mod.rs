@@ -30,4 +30,5 @@ pub mod fat_table;
 pub mod fsinfo;
 pub mod geometry;
 pub mod layout;
+pub mod parse;
 pub mod synth;

@@ -47,6 +47,7 @@
 
 use core::fmt;
 
+use crate::fs::cluster_layout::FIRST_DATA_CLUSTER;
 use crate::fs::data_cluster_source::DataClusterSource;
 use crate::fs::fat32::boot_sector::{self, BOOT_SECTOR_SIZE_BYTES, BootSectorError};
 use crate::fs::fat32::fat_table::{DirTreeBackend, FAT_SECTOR_SIZE_BYTES, FatTable, FatTableError};
@@ -420,7 +421,9 @@ impl Fat32Synth {
             let cluster_index = byte_in_data / bytes_per_cluster_u64;
             let byte_in_cluster_u64 = byte_in_data % bytes_per_cluster_u64;
             let byte_in_cluster = usize::try_from(byte_in_cluster_u64).unwrap_or(usize::MAX);
-            let cluster_number = u32::try_from(cluster_index.saturating_add(2)).unwrap_or(u32::MAX);
+            let cluster_number =
+                u32::try_from(cluster_index.saturating_add(u64::from(FIRST_DATA_CLUSTER)))
+                    .unwrap_or(u32::MAX);
             let chunk_len = bytes_per_cluster_usize
                 .saturating_sub(byte_in_cluster)
                 .min(remaining.len());

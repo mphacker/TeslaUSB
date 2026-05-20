@@ -163,8 +163,41 @@ Target `cybertruckusb.local` (pi). Full results: `~/.copilot/session-state/<sid>
 | 3.2 | `fs::exfat::parse::decode_write` | ✅ `0f5dc78` |
 | 3.3 | `backend::dir_tree` POSIX adapter | ✅ `a23c4e2` |
 | 3.4 | `cluster_map` extent-based | ✅ `6cbfb5c` |
-| 3.5 | Wire `synth::write` integration test | ✅ `895c75c` (3.5a `9077357` + 3.5b `f6c3a8a` + 3.5c `a6e58d6` + 3.5d `d37d57c` + 3.5e `895c75c`) |
+| 3.5 | Wire `synth::write` integration test | ✅ `895c75c` (3.5a `9077357` + 3.5b `f6c3a8a` + 3.5c `a6e58d6` + 3.5d `d37d57c` + 3.5e `895c75c` + 3.5f `089342f`) |
 | 3.6 | Power-cut harness | ✅ `b3437d2` |
+
+**Phase 3.5f (`089342f`):** synth read overlay + Bug H3-1
+extent-replacement fix. Two hardware-surfaced bugs from the
+H3 NBD-loopback exFAT write smoke (Phase 3.5e binary on
+`cybertruckusb.local`):
+
+- **Bug H3-1 (data corruption):** when the kernel rewrote a
+  directory entry with progressively larger `data_length`
+  values during a 50 MB copy, the second `try_resolve_file`
+  call silently dropped the new larger extents via the
+  idempotent-insert path. Tail data writes fell into
+  `pending_data` forever. Backing file got correct size but
+  the last ~21 MB was zero-filled. Fix: unconditional
+  `cluster_map.remove_file(path)` before re-inserting all
+  extents for the path. Symmetric fix in both
+  `fat32_write::try_resolve_file` and
+  `exfat_write::try_resolve_file`.
+- **Bug H3-2 (read invisibility after write):** kernel-written
+  FAT entries and dir cluster bytes lived only in
+  `WriteState.fat` / `DirectoryState.buffer` and were
+  invisible to subsequent `SynthBackend::read` calls. New
+  `DirtyByteMap` (sparse BTreeMap of disjoint byte intervals)
+  tracks per-byte dirty regions in both write states; new
+  `overlay_read` methods walk the FAT + per-directory cluster
+  buffers and overlay only kernel-written bytes onto the
+  synth's startup snapshot. Wired into `SynthBackend::read_sync`
+  after the file-extents overlay.
+
+Tests: +14 `dirty_map` unit tests, +2 exfat_write H3
+regression tests (`growing_extent_replaces_stale_chain_h3_1`,
+`overlay_read_returns_kernel_written_fat_and_dir_bytes_h3_2`),
++2 fat32_write H3 regression tests (same names). Workspace
+total now 1010 pass / 0 fail. All gates green.
 
 ## Phase H3 — Write-side on hardware
 

@@ -28,5 +28,6 @@ pub mod allocation_bitmap;
 pub mod boot_sector;
 pub mod directory;
 pub mod geometry;
+pub mod lazy_load;
 pub mod synth;
 pub mod upcase_table;

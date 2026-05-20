@@ -124,7 +124,7 @@ session-state as `h1-journal.log`.
 | 2.10 | `fs::exfat::directory` | ✅ | ✅ | ✅ |
 | 2.11 | `fs::exfat::synth::read` dispatcher | ✅ | ✅ | ✅ |
 | 2.12 | `fs::exfat` integration test | ✅ | ✅ | ✅ |
-| 2.13 | `lazy_load.rs` (deferred deep-dir materialization) | ⏳ | ⏳ | ⏳ |
+| 2.13 | `lazy_load.rs` (deferred deep-dir materialization) | ✅ | ✅ | ✅ |
 | 2.14 | Cold-start benchmark (≤ 1 s for 10K files) | ⏳ | ⏳ | ⏳ |
 
 ## Phase H2 — Read-only synth on hardware

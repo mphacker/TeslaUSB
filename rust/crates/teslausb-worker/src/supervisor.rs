@@ -35,6 +35,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use tracing::warn;
 use tracing::{error, info};
 
 use crate::cleanup::Cleanup;

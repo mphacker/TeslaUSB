@@ -119,7 +119,7 @@ mod linux_impl {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use inotify::{Event, EventMask, Inotify, WatchDescriptor, WatchMask};
+    use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 
     use super::{Result, WatchEvent, WatchKind, WatcherError, event_to_bucket, is_indexable};
     use crate::config::Config;
@@ -183,26 +183,44 @@ mod linux_impl {
         /// Returns `Err` on a fatal inotify error. Recoverable
         /// `EINTR` is handled by the underlying crate.
         pub fn next_batch(&mut self) -> Result<Vec<WatchEvent>> {
-            let events = self.inotify.read_events_blocking(&mut self.buf)?;
+            // Detach event data from the read buffer so we can call
+            // `&self`-borrowing helpers in the loop without colliding
+            // with the `&mut self.buf` lifetime that backs `events`.
+            let detached: Vec<(WatchDescriptor, EventMask, Option<std::ffi::OsString>)> = self
+                .inotify
+                .read_events_blocking(&mut self.buf)?
+                .map(|ev| {
+                    (
+                        ev.wd.clone(),
+                        ev.mask,
+                        ev.name.map(std::ffi::OsString::from),
+                    )
+                })
+                .collect();
             let mut out = Vec::new();
-            for ev in events {
-                if let Some(watch_event) = self.classify(&ev) {
+            for (wd, mask, name) in detached {
+                if let Some(watch_event) = self.classify(&wd, mask, name.as_deref()) {
                     out.push(watch_event);
                 }
             }
             Ok(out)
         }
 
-        fn classify(&self, ev: &Event<&std::ffi::OsStr>) -> Option<WatchEvent> {
-            let dir = self.descriptors.get(&ev.wd)?;
-            let name = ev.name?;
+        fn classify(
+            &self,
+            wd: &WatchDescriptor,
+            mask: EventMask,
+            name: Option<&std::ffi::OsStr>,
+        ) -> Option<WatchEvent> {
+            let dir = self.descriptors.get(wd)?;
+            let name = name?;
             let path = dir.join(name);
             if !is_indexable(&path) {
                 return None;
             }
-            let kind = if ev.mask.contains(EventMask::CLOSE_WRITE) {
+            let kind = if mask.contains(EventMask::CLOSE_WRITE) {
                 WatchKind::CloseWrite
-            } else if ev.mask.contains(EventMask::MOVED_TO) {
+            } else if mask.contains(EventMask::MOVED_TO) {
                 WatchKind::Moved
             } else {
                 return None;
@@ -379,7 +397,12 @@ mod tests {
         fn new_errors_when_bucket_root_missing() {
             let dir = tempfile::tempdir().unwrap();
             let c = cfg(dir.path());
-            let err = ClipWatcher::new(&c).unwrap_err();
+            // `.err().expect(_)` avoids requiring `ClipWatcher: Debug`
+            // (Inotify itself is not Debug and we don't want to derive
+            // a noisy bound across the type just for one negative test).
+            let err = ClipWatcher::new(&c)
+                .err()
+                .expect("expected error when bucket root missing");
             assert!(matches!(err, WatcherError::BucketRootMissing(_)));
         }
 

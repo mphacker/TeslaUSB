@@ -323,6 +323,11 @@ enum DeleteError {
 /// dev-workstation test suite never sees synthetic free-space
 /// pressure.
 #[cfg(target_os = "linux")]
+// Filesystem block counts fit comfortably in an `f64` mantissa
+// (53 bits). For a 1 PB volume with 4 KiB blocks `f_blocks` is
+// ~2^38, four orders of magnitude below the precision threshold;
+// the resulting `free / total` ratio is exact to ~15 digits.
+#[allow(clippy::cast_precision_loss)]
 fn free_pct(path: &Path) -> std::io::Result<f64> {
     let stat = rustix::fs::statvfs(path).map_err(std::io::Error::from)?;
     let total = stat.f_blocks as f64 * stat.f_frsize as f64;

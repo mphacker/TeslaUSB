@@ -25,6 +25,7 @@
 //! version 1.03, December 6, 2000. Sections are quoted inline.
 
 pub mod boot_sector;
+pub mod dir_decode;
 pub mod directory;
 pub mod fat_table;
 pub mod fsinfo;

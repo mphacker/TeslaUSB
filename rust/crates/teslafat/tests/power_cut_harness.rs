@@ -556,3 +556,87 @@ fn assert_consistency(
         );
     }
 }
+
+// =====================================================================
+// Phase 3.5e — cross-cutting exFAT smoke (single power-cut scenario)
+// =====================================================================
+
+#[tokio::test]
+async fn exfat_power_cut_mid_write_recovery_discards_partial() {
+    use teslausb_core::fs::exfat::directory::{
+        FileAttributes as ExfatAttrs, FileEntrySetParams, FileTimestamps, encode_file_entry_set,
+    };
+    use teslausb_core::fs::exfat::geometry::ExfatGeometry;
+    use teslausb_core::fs::exfat::upcase_table::UpcaseTable;
+
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = Config {
+        backing_root: dir.path().to_path_buf(),
+        volume_size_gb: 4,
+        volume_label: "PWCEXFAT".to_string(),
+        cluster_size: None,
+        fs_type: FsType::Exfat,
+        retention: RetentionConfig::default(),
+        nbd: NbdConfig::default(),
+    };
+    let backend = SynthBackend::open(&cfg).expect("open exfat");
+    let g = ExfatGeometry::for_volume_size(VOLUME_BYTES).expect("geo");
+
+    let payload = b"unflushed exfat power-cut payload".repeat(4);
+    let file_cluster = 9;
+    let cluster_offset = u64::from(g.cluster_heap_offset_sectors()) * SECTOR
+        + u64::from(file_cluster - FIRST_DATA_CLUSTER) * u64::from(g.bytes_per_cluster());
+    backend
+        .write(cluster_offset, &payload, WriteFlags::NONE)
+        .await
+        .expect("data");
+
+    let name_utf16: Vec<u16> = "killed.bin".encode_utf16().collect();
+    let upcase = UpcaseTable::ascii_identity();
+    let params = FileEntrySetParams {
+        name: &name_utf16,
+        attributes: ExfatAttrs::default(),
+        timestamps: FileTimestamps {
+            create_timestamp: 0x4A21_0000,
+            modify_timestamp: 0x4A21_0001,
+            access_timestamp: 0x4A21_0002,
+            create_10ms: 50,
+            modify_10ms: 25,
+            create_utc_offset: 0x80,
+            modify_utc_offset: 0x80,
+            access_utc_offset: 0x80,
+        },
+        first_cluster: file_cluster,
+        valid_data_length: payload.len() as u64,
+        data_length: payload.len() as u64,
+        no_fat_chain: true,
+    };
+    let entry = encode_file_entry_set(&params, &upcase).expect("encode");
+    let root_byte = u64::from(g.cluster_heap_offset_sectors()) * SECTOR
+        + u64::from(g.first_root_directory_cluster() - FIRST_DATA_CLUSTER)
+            * u64::from(g.bytes_per_cluster());
+    backend
+        .write(root_byte, &entry, WriteFlags::NONE)
+        .await
+        .expect("dir entry");
+
+    // ".partial" should exist before kill.
+    let partials = list_partials_on_disk(dir.path());
+    assert_eq!(
+        partials.len(),
+        1,
+        "exfat .partial should exist: {partials:?}"
+    );
+
+    // Kill: drop without flush.
+    drop(backend);
+
+    // Restart: recovery must discard the .partial.
+    let _backend2 = SynthBackend::open(&cfg).expect("restart");
+    let partials_after = list_partials_on_disk(dir.path());
+    assert!(
+        partials_after.is_empty(),
+        "exfat .partial must be discarded on recovery: {partials_after:?}"
+    );
+    assert!(!dir.path().join("killed.bin").exists());
+}

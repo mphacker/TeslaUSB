@@ -54,21 +54,23 @@
 //! medium. Phase 3+ will revisit this when a write path is
 //! added.
 //!
-//! ## Write semantics (Phase 2.19)
+//! ## Write semantics
 //!
-//! Writes return [`teslausb_core::backend::BackendError::Io`]
-//! with [`std::io::ErrorKind::PermissionDenied`]. The Phase 2
-//! contract is read-only: the synth has no write path, and the
-//! NBD handshake advertises FUA + FLUSH only because the
-//! transmission loop drives them through to the backend.
-//! Phase 3 will add write support and either gate it behind a
-//! config flag or advertise the export as read-only via
-//! `NBD_FLAG_READ_ONLY`.
+//! As of Phase 3.5e, writes route through an FS-specific state
+//! machine ([`Fat32WriteState`] / [`ExfatWriteState`]) selected
+//! at [`SynthBackend::open`] time. Writes to the boot region or
+//! reserved sectors are swallowed as metadata that the synth
+//! itself owns; FAT-table writes update the in-memory FAT;
+//! directory-cluster writes are decoded to discover new files
+//! and route subsequent data-cluster writes to `.partial` files
+//! on the backing tree, finalized atomically on `flush`. See
+//! `backend::fat32_write` and `backend::exfat_write` for
+//! details.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
-use std::io::{ErrorKind, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -87,6 +89,7 @@ use teslausb_core::fs::fat32::synth::{Fat32Synth, Fat32SynthError};
 use teslausb_core::fs::geometry::{Geometry, GeometryError};
 
 use crate::backend::dir_tree::{DirTreeError, DirTreeWriter};
+use crate::backend::exfat_write::ExfatWriteState;
 use crate::backend::fat32_write::Fat32WriteState;
 use crate::backing_walker::{WalkError, walk};
 use crate::config::{Config, FsType};
@@ -205,10 +208,19 @@ pub struct SynthBackend {
     /// allocator hands out disjoint extents.
     file_extents: Vec<FileExtent>,
     size: u64,
-    /// Phase 3.5c write-side state. `Some` for FAT32, `None`
-    /// for `exFAT` (where writes still return `PermissionDenied`
-    /// — exFAT write support is deferred to Phase 3.5d).
-    fat32_write: Option<Mutex<Fat32WriteState>>,
+    /// Phase 3.5c (FAT32) / Phase 3.5e (exFAT) write-side state.
+    write_state: Mutex<WriteState>,
+}
+
+/// FS-specific write-side state machine selected at
+/// [`SynthBackend::open`] time. Both FAT32 (Phase 3.5c) and
+/// `exFAT` (Phase 3.5e) variants own a state machine; there is
+/// no read-only fallback because every supported filesystem now
+/// has a write path.
+#[derive(Debug)]
+enum WriteState {
+    Fat32(Fat32WriteState),
+    Exfat(ExfatWriteState),
 }
 
 enum SynthInner {
@@ -226,8 +238,8 @@ impl fmt::Debug for SynthBackend {
             .field("fs_type", &kind)
             .field("size", &self.size)
             .field("file_count", &self.file_extents.len())
-            .field("writable", &self.fat32_write.is_some())
-            .finish()
+            .field("writable", &true)
+            .finish_non_exhaustive()
     }
 }
 
@@ -328,11 +340,7 @@ impl SynthBackend {
         }
         let dir_tree =
             DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
-        let fat32_write = Mutex::new(Fat32WriteState::new(
-            geometry.clone(),
-            dir_tree,
-            &pre_existing_extents,
-        ));
+        let fat32_write = Fat32WriteState::new(geometry.clone(), dir_tree, &pre_existing_extents);
         let synth = Fat32Synth::new(
             geometry,
             cfg.volume_label.as_bytes(),
@@ -347,7 +355,7 @@ impl SynthBackend {
             inner: SynthInner::Fat32(Box::new(synth)),
             file_extents,
             size: volume_size,
-            fat32_write: Some(fat32_write),
+            write_state: Mutex::new(WriteState::Fat32(fat32_write)),
         })
     }
 
@@ -399,14 +407,44 @@ impl SynthBackend {
             first_data_byte_for_cluster_two(first_data_byte, bytes_per_cluster),
             bytes_per_cluster,
         );
+        // Build pre-existing extents for the Phase 3.5e exFAT
+        // write-side cluster map. Same shape and semantics as
+        // the FAT32 path: skip empty files (no clusters) and
+        // skip files that can't be relativised against the
+        // backing root.
+        let mut pre_existing_extents: Vec<crate::backend::exfat_write::PreExistingExfatExtent> =
+            Vec::new();
+        for f in layout.file_placements() {
+            if f.allocation.is_empty() {
+                continue;
+            }
+            let Ok(relative) = f.backing_path.strip_prefix(&cfg.backing_root) else {
+                tracing::warn!(
+                    backing_path = %f.backing_path.display(),
+                    backing_root = %cfg.backing_root.display(),
+                    "skipping file: backing_path not under backing_root"
+                );
+                continue;
+            };
+            pre_existing_extents.push(crate::backend::exfat_write::PreExistingExfatExtent {
+                first_cluster: f.allocation.first_cluster,
+                cluster_count: f.allocation.cluster_count,
+                first_byte_in_file: 0,
+                file_size_bytes: f.size_bytes,
+                relative_path: relative.to_path_buf(),
+            });
+        }
         let synth = synth
             .with_layout(layout)
             .map_err(SynthBackendError::ExfatSynth)?;
+        let dir_tree =
+            DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
+        let exfat_write = ExfatWriteState::new(geometry.clone(), dir_tree, &pre_existing_extents);
         Ok(Self {
             inner: SynthInner::Exfat(Box::new(synth)),
             file_extents,
             size: volume_size,
-            fat32_write: None,
+            write_state: Mutex::new(WriteState::Exfat(exfat_write)),
         })
     }
 
@@ -486,39 +524,36 @@ impl BlockBackend for SynthBackend {
         if buf.is_empty() {
             return Ok(());
         }
-        // FAT32 write path is shipped (Phase 3.5c); exFAT writes
-        // still return PermissionDenied — exFAT write support is
-        // deferred to Phase 3.5d.
-        let Some(state) = self.fat32_write.as_ref() else {
-            return Err(BackendError::Io(std::io::Error::new(
-                ErrorKind::PermissionDenied,
-                "exFAT write support not yet implemented (Phase 3.5d)",
-            )));
-        };
-        let mut guard = state
+        let mut guard = self
+            .write_state
             .lock()
-            .map_err(|_| BackendError::Io(std::io::Error::other("fat32 write lock poisoned")))?;
-        guard.apply_write(offset, buf)?;
-        if flags.contains(WriteFlags::FUA) {
-            // FUA: durability promise. Finalize touched files
-            // before returning. NBD clients use FUA on
-            // close/sync. Held under the same lock guard as
-            // apply_write so no other writer can interleave.
-            guard.flush()?;
+            .map_err(|_| BackendError::Io(std::io::Error::other("write lock poisoned")))?;
+        match &mut *guard {
+            WriteState::Fat32(state) => {
+                state.apply_write(offset, buf)?;
+                if flags.contains(WriteFlags::FUA) {
+                    state.flush()?;
+                }
+            }
+            WriteState::Exfat(state) => {
+                state.apply_write(offset, buf)?;
+                if flags.contains(WriteFlags::FUA) {
+                    state.flush()?;
+                }
+            }
         }
         Ok(())
     }
 
     async fn flush(&self) -> BackendResult<()> {
-        // For FAT32: finalize every in-flight `.partial` file.
-        // For exFAT: no write state, nothing to flush.
-        let Some(state) = self.fat32_write.as_ref() else {
-            return Ok(());
-        };
-        let mut guard = state
+        let mut guard = self
+            .write_state
             .lock()
-            .map_err(|_| BackendError::Io(std::io::Error::other("fat32 write lock poisoned")))?;
-        guard.flush()?;
+            .map_err(|_| BackendError::Io(std::io::Error::other("write lock poisoned")))?;
+        match &mut *guard {
+            WriteState::Fat32(state) => state.flush()?,
+            WriteState::Exfat(state) => state.flush()?,
+        }
         Ok(())
     }
 }
@@ -762,23 +797,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exfat_write_returns_permission_denied() {
-        // Phase 3.5d will add exFAT write support. Until then,
-        // exFAT volumes remain read-only and the write contract
-        // is pinned by this test.
+    async fn exfat_write_to_boot_sector_is_accepted_as_metadata() {
+        // Phase 3.5e shipped exFAT write support. Writes to the
+        // boot region are swallowed as metadata (the synth is the
+        // source of truth for boot bytes); writes to data
+        // clusters / FAT / dirs are exercised by
+        // exfat_write::tests.
         let dir = tempfile::tempdir().unwrap();
         let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = SynthBackend::open(&cfg).expect("open ok");
-        let err = backend
+        backend
             .write(0, &[0u8; 16], WriteFlags::NONE)
             .await
-            .expect_err("exFAT write should be rejected");
-        match err {
-            BackendError::Io(io_err) => {
-                assert_eq!(io_err.kind(), ErrorKind::PermissionDenied);
-            }
-            other => panic!("expected Io(PermissionDenied), got {other:?}"),
-        }
+            .expect("metadata write should be accepted");
     }
 
     #[tokio::test]

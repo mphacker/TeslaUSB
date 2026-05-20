@@ -21,9 +21,10 @@
 //!   FAT / data regions. The test inspects the resulting
 //!   backing tree (NOT the synthesised reads) because that's
 //!   the only externally visible side effect of a write.
-//! * exFAT writes are still rejected (Phase 3.5d will lift that
-//!   restriction); the `exfat_writes_still_rejected` test pins
-//!   the contract.
+//! * exFAT writes shipped in Phase 3.5e and have their own
+//!   integration suite in `synth_exfat_write_integration.rs`;
+//!   the boot-region acceptance test here is a thin smoke
+//!   check that the shared dispatch path also reaches exFAT.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -35,13 +36,12 @@
 )]
 
 use std::collections::HashMap;
-use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
 use teslafat::backend::SynthBackend;
 use teslafat::config::{Config, FsType, NbdConfig, RetentionConfig};
-use teslausb_core::backend::{BackendError, BlockBackend, WriteFlags};
+use teslausb_core::backend::{BlockBackend, WriteFlags};
 use teslausb_core::fs::cluster_layout::FIRST_DATA_CLUSTER;
 use teslausb_core::fs::fat32::directory::{
     FileAttributes, ShortName, Timestamps, synthesize_lfn_sequence, synthesize_sfn_entry,
@@ -393,18 +393,16 @@ async fn fat32_fua_flag_finalizes_immediately() {
 }
 
 #[tokio::test]
-async fn exfat_writes_still_rejected_with_permission_denied() {
-    // Phase 3.5d will add exFAT write support. Until then,
-    // SynthBackend::write must reject all exFAT writes.
+async fn exfat_writes_to_boot_region_are_accepted_as_metadata() {
+    // Phase 3.5e shipped exFAT write support. Boot-region writes
+    // are swallowed as metadata (the synth is the source of
+    // truth); full exFAT write coverage lives in
+    // `synth_exfat_write_integration.rs`.
     let (_dir, backend) = open_empty_backend(FsType::Exfat);
-    let err = backend
+    backend
         .write(0, &[0u8; 16], WriteFlags::NONE)
         .await
-        .expect_err("exFAT write should be rejected");
-    match err {
-        BackendError::Io(io) => assert_eq!(io.kind(), ErrorKind::PermissionDenied),
-        other => panic!("expected Io(PermissionDenied), got {other:?}"),
-    }
+        .expect("exFAT metadata write should be accepted");
 }
 
 #[tokio::test]

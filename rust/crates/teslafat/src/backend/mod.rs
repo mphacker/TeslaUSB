@@ -22,15 +22,23 @@
 //!   that orchestrates `decode_write` → directory-entry decoding
 //!   → FAT chain walking → cluster-map insertion → `dir_tree`
 //!   routing, with crash-safe finalize on flush.
+//! * [`exfat_write`] — `ExfatWriteState`: Phase 3.5e parallel
+//!   state machine for `exFAT`. Shares the same crash-safe
+//!   `.partial` rename discipline; differs in carrying
+//!   `PartialEntrySet` between dir-cluster boundaries and
+//!   short-circuiting the FAT walk for the common
+//!   `NoFatChain == true` extents.
 //!
 //! [`BlockBackend`]: teslausb_core::backend::BlockBackend
 
 pub mod dir_tree;
+pub mod exfat_write;
 pub mod fat32_write;
 pub mod synth;
 pub mod zero;
 
 pub use dir_tree::{DirTreeError, DirTreeWriter, PARTIAL_SUFFIX};
+pub use exfat_write::{ExfatWriteError, ExfatWriteState};
 pub use fat32_write::{Fat32WriteError, Fat32WriteState};
 pub use synth::{SynthBackend, SynthBackendError};
 pub use zero::ZeroBackend;

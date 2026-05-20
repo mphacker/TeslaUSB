@@ -164,7 +164,7 @@ Target `cybertruckusb.local` (pi). Full results: `~/.copilot/session-state/<sid>
 | 3.3 | `backend::dir_tree` POSIX adapter | ✅ `a23c4e2` |
 | 3.4 | `cluster_map` extent-based | ✅ `6cbfb5c` |
 | 3.5 | Wire `synth::write` integration test | ✅ `a6e58d6` (3.5a `9077357` + 3.5b `f6c3a8a` + 3.5c `a6e58d6`) |
-| 3.6 | Power-cut harness | ⏳ |
+| 3.6 | Power-cut harness | ✅ `b3437d2` |
 
 ## Phase H3 — Write-side on hardware
 

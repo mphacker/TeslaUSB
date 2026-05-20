@@ -134,7 +134,17 @@ session-state as `h1-journal.log`.
 
 ## Phase H2 — Read-only synth on hardware
 
-H2.1 – H2.8 per `00-PLAN.md`. All ⏳.
+| Inc | Step | Status |
+|---|---|---|
+| Preflight | `ExfatSynth::bitmap_cluster_count` + `upcase_cluster_count` accessors (closes 2.18/2.19 charter-review nit) | ✅ (`a13a5c8`) |
+| H2.1 | Cross-build `teslafat` aarch64 binary + deploy to `cybertruckusb.local` | 🔨 build done (binary `%TEMP%\teslausb-h2\teslafat`, 1.75 MB, sha256 `a3a0b95b…46752ee`); deploy ⏳ |
+| H2.2 | Create tiny synthetic backing tree at `/home/pi/teslausb-b1/test-backing/` (3 mp4s, 2 subdirs) | ⏳ |
+| H2.3 | Start `teslafat-test@0` pointing at the tree | ⏳ |
+| H2.4 | `nbd-client + losetup + mount -o ro` and verify all files visible + byte-identical (`cmp`) | ⏳ |
+| H2.5 | `fsck.vfat -v /dev/nbd1` clean | ⏳ |
+| H2.6 | Same for exFAT mode (`fsck.exfat`) | ⏳ |
+| H2.7 | Cold-start wall-clock captured: synth start → mount succeeds. Target ≤ 1 s. | ⏳ |
+| H2.8 | Teardown, SSH alive, WiFi alive | ⏳ |
 
 ## Phase 3 — FS write-side (FAT32 + exFAT)
 

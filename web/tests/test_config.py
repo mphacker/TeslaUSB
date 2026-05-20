@@ -227,6 +227,13 @@ def test_empty_file_uses_all_defaults(tmp_path: Path) -> None:
     assert cfg.paths.backing_root == Path("/srv/teslausb")
 
 
+def test_paths_state_dir_defaults_to_standard_state_path(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "state_dir_default.toml"
+    _write(cfg_file, "")
+    cfg = load_config(cfg_file)
+    assert cfg.paths.state_dir == Path("/var/lib/teslausb")
+
+
 def test_chimes_defaults_round_trip(tmp_path: Path) -> None:
     cfg_file = tmp_path / "chimes_defaults.toml"
     _write(cfg_file, "[chimes]\n")
@@ -307,3 +314,11 @@ def test_os_environ_not_mutated(monkeypatch: MonkeyPatch, tmp_path: Path) -> Non
     before = dict(os.environ)
     load_config(cfg_file)
     assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize("key", ["groups_file_relpath", "random_config_relpath"])
+def test_chime_relpaths_reject_path_traversal(tmp_path: Path, key: str) -> None:
+    cfg_file = tmp_path / f"{key}.toml"
+    _write(cfg_file, f'[chimes]\n{key} = "../foo"\n')
+    with pytest.raises(ConfigError, match="must not contain path separators"):
+        load_config(cfg_file)

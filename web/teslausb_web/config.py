@@ -41,11 +41,14 @@ _DEFAULT_HOST: str = "127.0.0.1"
 _DEFAULT_MAX_UPLOAD_MB: int = 512
 _DEFAULT_MAX_CHUNK_MB: int = 64
 _DEFAULT_BACKING_ROOT: Path = Path("/srv/teslausb")
+_DEFAULT_STATE_DIR: Path = Path("/var/lib/teslausb")
 _DEFAULT_DB_PATH: Path = Path("/var/lib/teslausb/index.sqlite3")
 _DEFAULT_IPC_SOCKET: Path = Path("/run/teslausb/worker.sock")
 _DEFAULT_CACHE_SCRIPT: Path = Path("/usr/local/bin/tesla_cache_invalidate.sh")
 _DEFAULT_LOCK_CHIME_FILENAME: Final[str] = "LockChime.wav"
 _DEFAULT_CHIMES_FOLDER: Final[str] = "Chimes"
+_DEFAULT_GROUPS_FILE_RELPATH: Final[str] = "chime_groups.json"
+_DEFAULT_RANDOM_CONFIG_RELPATH: Final[str] = "chime_random_config.json"
 _DEFAULT_MAX_LOCK_CHIME_SIZE: Final[int] = 1_048_576
 _DEFAULT_MAX_LOCK_CHIME_DURATION: Final[int] = 5
 _DEFAULT_MIN_LOCK_CHIME_DURATION: Final[int] = 1
@@ -112,6 +115,7 @@ class PathsSection:
     """Filesystem locations the web app reads or writes."""
 
     backing_root: Path = _DEFAULT_BACKING_ROOT
+    state_dir: Path = _DEFAULT_STATE_DIR
     db_path: Path = _DEFAULT_DB_PATH
     ipc_socket: Path = _DEFAULT_IPC_SOCKET
     cache_invalidate_script: Path = _DEFAULT_CACHE_SCRIPT
@@ -123,6 +127,7 @@ class PathsSection:
         # because there's no drive letter) and on Linux production.
         for name, value in (
             ("backing_root", self.backing_root),
+            ("state_dir", self.state_dir),
             ("db_path", self.db_path),
             ("ipc_socket", self.ipc_socket),
             ("cache_invalidate_script", self.cache_invalidate_script),
@@ -152,6 +157,8 @@ class ChimesSection:
 
     lock_chime_filename: str = _DEFAULT_LOCK_CHIME_FILENAME
     chimes_folder: str = _DEFAULT_CHIMES_FOLDER
+    groups_file_relpath: str = _DEFAULT_GROUPS_FILE_RELPATH
+    random_config_relpath: str = _DEFAULT_RANDOM_CONFIG_RELPATH
     max_lock_chime_size: int = _DEFAULT_MAX_LOCK_CHIME_SIZE
     max_lock_chime_duration: int = _DEFAULT_MAX_LOCK_CHIME_DURATION
     min_lock_chime_duration: int = _DEFAULT_MIN_LOCK_CHIME_DURATION
@@ -164,6 +171,8 @@ class ChimesSection:
             raise ConfigError(None, "[chimes] lock_chime_filename must be non-empty")
         if not self.lock_chime_filename.lower().endswith(".wav"):
             raise ConfigError(None, "[chimes] lock_chime_filename must end with .wav")
+        _validate_relpath_filename(self.groups_file_relpath, key="groups_file_relpath")
+        _validate_relpath_filename(self.random_config_relpath, key="random_config_relpath")
         if self.max_lock_chime_size <= 0:
             raise ConfigError(None, "[chimes] max_lock_chime_size must be > 0")
         if self.min_lock_chime_duration >= self.max_lock_chime_duration:
@@ -278,6 +287,16 @@ def _coerce_path(section: dict[str, object], key: str, default: Path, source: Pa
     return Path(value)
 
 
+def _validate_relpath_filename(value: str, *, key: str) -> None:
+    if not value.strip():
+        raise ConfigError(None, f"[chimes] {key} must be non-empty")
+    if "/" in value or "\\" in value:
+        raise ConfigError(
+            None,
+            f"[chimes] {key} must not contain path separators",
+        )
+
+
 def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     web_raw = _expect_section(raw, "web", source)
     paths_raw = _expect_section(raw, "paths", source)
@@ -293,6 +312,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     )
     paths_section = PathsSection(
         backing_root=_coerce_path(paths_raw, "backing_root", _DEFAULT_BACKING_ROOT, source),
+        state_dir=_coerce_path(paths_raw, "state_dir", _DEFAULT_STATE_DIR, source),
         db_path=_coerce_path(paths_raw, "db_path", _DEFAULT_DB_PATH, source),
         ipc_socket=_coerce_path(paths_raw, "ipc_socket", _DEFAULT_IPC_SOCKET, source),
         cache_invalidate_script=_coerce_path(
@@ -326,6 +346,18 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             source,
         ),
         chimes_folder=_coerce_str(chimes_raw, "chimes_folder", _DEFAULT_CHIMES_FOLDER, source),
+        groups_file_relpath=_coerce_str(
+            chimes_raw,
+            "groups_file_relpath",
+            _DEFAULT_GROUPS_FILE_RELPATH,
+            source,
+        ),
+        random_config_relpath=_coerce_str(
+            chimes_raw,
+            "random_config_relpath",
+            _DEFAULT_RANDOM_CONFIG_RELPATH,
+            source,
+        ),
         max_lock_chime_size=_coerce_int(
             chimes_raw,
             "max_lock_chime_size",

@@ -18,6 +18,15 @@ per file).
 
 from __future__ import annotations
 
+from teslausb_web.services.chime_group_service import (
+    ChimeGroup,
+    ChimeGroupError,
+    ChimeGroupManager,
+    ChimeGroupStateError,
+    GroupOperationResult,
+    RandomConfig,
+    make_chime_group_manager,
+)
 from teslausb_web.services.lock_chime_service import (
     ChimeInfo,
     DeleteResult,
@@ -40,17 +49,24 @@ from teslausb_web.services.lock_chime_service import (
 )
 
 __all__ = (
+    "ChimeGroup",
+    "ChimeGroupError",
+    "ChimeGroupManager",
+    "ChimeGroupStateError",
     "ChimeInfo",
     "DeleteResult",
     "FileStorageLike",
+    "GroupOperationResult",
     "LockChimeAudioError",
     "LockChimeFileError",
+    "RandomConfig",
     "ReencodeResult",
     "ReplaceResult",
     "UploadResult",
     "WavValidation",
     "delete_chime_file",
     "list_chime_files",
+    "make_chime_group_manager",
     "normalize_audio",
     "reencode_wav_for_tesla",
     "replace_lock_chime",

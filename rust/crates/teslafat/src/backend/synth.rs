@@ -502,6 +502,23 @@ impl SynthBackend {
             }
             overlay_file_extent(extent, offset, buf)?;
         }
+
+        // Phase 3.5f: overlay any in-memory write-state updates
+        // (kernel-written FAT entries and directory cluster
+        // bytes) on top of the synth's startup snapshot. Without
+        // this, the kernel would see only the pre-existing files
+        // after umount/remount even though the write path has
+        // already persisted the new files to the backing tree.
+        // See `ExfatWriteState::overlay_read` for the full
+        // rationale and the hardware bug (H3-2) it fixes.
+        let guard = self
+            .write_state
+            .lock()
+            .map_err(|_| BackendError::Io(std::io::Error::other("write lock poisoned")))?;
+        match &*guard {
+            WriteState::Fat32(state) => state.overlay_read(offset, buf),
+            WriteState::Exfat(state) => state.overlay_read(offset, buf),
+        }
         Ok(())
     }
 }

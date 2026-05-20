@@ -74,6 +74,7 @@ use teslausb_core::fs::fat32::parse::{DecodeWriteError, DecodedWrite, decode_wri
 use teslausb_core::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
 
 use super::dir_tree::{DirTreeError, DirTreeWriter};
+use super::dirty_map::DirtyByteMap;
 
 /// Number of FAT mirrors the FAT32 geometry advertises. Pulled
 /// into the state machine so the per-mirror buffer array has a
@@ -140,6 +141,12 @@ struct DirectoryState {
     /// Concatenated cluster bytes, length =
     /// `chain.len() * bytes_per_cluster` (or 0 if chain empty).
     buffer: Vec<u8>,
+    /// Tracks which bytes of `buffer` the kernel has written
+    /// (Phase 3.5f). Used by the synth read-overlay path so that
+    /// pre-existing directory entries (which never enter
+    /// `buffer` — it starts zero) are preserved while
+    /// kernel-written entries are returned on subsequent reads.
+    dirty_buffer: DirtyByteMap,
     /// Parent path relative to backing root. Root directory's
     /// parent is `""` (empty `PathBuf`).
     parent_path: PathBuf,
@@ -155,6 +162,7 @@ impl DirectoryState {
         Self {
             chain: Vec::new(),
             buffer: Vec::new(),
+            dirty_buffer: DirtyByteMap::new(),
             parent_path,
             registered_children: HashMap::new(),
         }
@@ -192,6 +200,13 @@ pub struct Fat32WriteState {
     fat_mirror_size_bytes: usize,
 
     fat_mirrors: [Vec<u8>; NUM_FAT_MIRRORS],
+    /// Per-mirror dirty-byte tracking for the read overlay
+    /// (Phase 3.5f). Only the primary mirror's dirty state is
+    /// used today (overlay reads the primary), but tracking
+    /// both keeps the data structure symmetric and ready for
+    /// any future "read from secondary on primary corruption"
+    /// recovery path.
+    dirty_fat_mirrors: [DirtyByteMap; NUM_FAT_MIRRORS],
     cluster_map: ClusterMap,
     /// `first_cluster -> DirectoryState` for every known directory.
     directories: HashMap<u32, DirectoryState>,
@@ -310,6 +325,7 @@ impl Fat32WriteState {
             bytes_per_cluster,
             fat_mirror_size_bytes,
             fat_mirrors,
+            dirty_fat_mirrors: [DirtyByteMap::new(), DirtyByteMap::new()],
             cluster_map,
             directories: HashMap::new(),
             cluster_to_directory: HashMap::new(),
@@ -410,6 +426,9 @@ impl Fat32WriteState {
             {
                 dest.copy_from_slice(src);
             }
+            if let Some(dirty) = self.dirty_fat_mirrors.get_mut(mirror_idx) {
+                dirty.mark(byte_in_fat, copy_len);
+            }
         }
 
         // The primary mirror is authoritative for our reconcile
@@ -504,6 +523,7 @@ impl Fat32WriteState {
         ) {
             dst.copy_from_slice(src);
         }
+        dir_state.dirty_buffer.mark(dst_start, copy_len);
         self.redecode_directory(dir_first)?;
         Ok(())
     }
@@ -764,16 +784,30 @@ impl Fat32WriteState {
         }
         let extents =
             chain::chain_to_extents(&chain_vec, relative_path.clone(), self.bytes_per_cluster);
+
+        // Phase 3.5f (Bug H3-1 fix): replace all extents owned by
+        // this path before inserting the new chain. Without this,
+        // when the kernel writes the directory entry incrementally
+        // (first with a short `file_size`, then later updated to
+        // the final size), the earlier short extents would still
+        // satisfy `lookup(first_cluster)` for the same path and
+        // the new larger extents would be silently skipped by
+        // the idempotent-insert path. The result: data-cluster
+        // writes for the file's tail fell into `pending_data`
+        // forever, producing zero-filled gaps on the backing
+        // file. (Symmetric to the exFAT bug fixed in
+        // `exfat_write::try_resolve_file`.)
+        let removed = self.cluster_map.remove_file(relative_path.as_path());
+        if removed > 0 {
+            tracing::debug!(
+                first_cluster,
+                ?relative_path,
+                removed_extent_count = removed,
+                new_extent_count = extents.len(),
+                "replacing stale extents for updated dir entry"
+            );
+        }
         for extent in extents {
-            // If overlap with existing extent for the same file
-            // path, skip (idempotent insert).
-            if let Some(existing) = self.cluster_map.lookup(extent.first_cluster) {
-                if existing.extent.first_cluster == extent.first_cluster
-                    && existing.extent.file_path == extent.file_path
-                {
-                    continue;
-                }
-            }
             match self.cluster_map.insert(extent.clone()) {
                 Ok(()) => {}
                 Err(ClusterMapError::Overlap { .. }) => {
@@ -975,6 +1009,109 @@ impl Fat32WriteState {
     pub fn fat_mirror_size_bytes(&self) -> usize {
         self.fat_mirror_size_bytes
     }
+
+    /// Overlay any in-memory write-state updates (kernel-written
+    /// FAT entries and directory cluster bytes) onto the bytes
+    /// the synth produced for a read of `[offset, offset+buf.len())`
+    /// in the volume.
+    ///
+    /// See [`super::exfat_write::ExfatWriteState::overlay_read`]
+    /// for the full rationale (Bug H3-2, Phase 3.5f). FAT32-side
+    /// differences: there are `NUM_FAT_MIRRORS` FAT mirrors at
+    /// adjacent sector offsets; both are overlaid (the synth
+    /// keeps the two in sync, so kernel-written entries in either
+    /// mirror need to be visible on subsequent reads of either).
+    pub fn overlay_read(&self, offset: u64, buf: &mut [u8]) {
+        if buf.is_empty() {
+            return;
+        }
+        let sector = u64::from(SECTOR_SIZE_BYTES);
+        let reserved_bytes =
+            u64::from(teslausb_core::fs::fat32::geometry::RESERVED_SECTORS).saturating_mul(sector);
+        let mirror_bytes = u64::from(self.geometry.fat_size_sectors()).saturating_mul(sector);
+        for (idx, mirror) in self.fat_mirrors.iter().enumerate() {
+            let mirror_start = reserved_bytes.saturating_add((idx as u64) * mirror_bytes);
+            if let Some(dirty) = self.dirty_fat_mirrors.get(idx) {
+                overlay_region(offset, buf, mirror_start, mirror, dirty);
+            }
+        }
+
+        // Per-directory cluster overlays.
+        let data_start_bytes = self.geometry.first_data_sector().saturating_mul(sector);
+        let bpc = u64::from(self.bytes_per_cluster);
+        let bpc_usize = self.bytes_per_cluster as usize;
+        for dir_state in self.directories.values() {
+            for (chain_idx, &cluster) in dir_state.chain.iter().enumerate() {
+                if cluster < FIRST_DATA_CLUSTER {
+                    continue;
+                }
+                let cluster_offset_in_data = u64::from(cluster - FIRST_DATA_CLUSTER) * bpc;
+                let cluster_start = data_start_bytes.saturating_add(cluster_offset_in_data);
+                let buf_cluster_start = chain_idx.saturating_mul(bpc_usize);
+                let buf_cluster_end = buf_cluster_start.saturating_add(bpc_usize);
+                let Some(cluster_bytes) = dir_state.buffer.get(buf_cluster_start..buf_cluster_end)
+                else {
+                    continue;
+                };
+                overlay_region_with_base(
+                    offset,
+                    buf,
+                    cluster_start,
+                    cluster_bytes,
+                    &dir_state.dirty_buffer,
+                    buf_cluster_start,
+                );
+            }
+        }
+    }
+}
+
+fn overlay_region(
+    read_offset: u64,
+    read_buf: &mut [u8],
+    region_start: u64,
+    source: &[u8],
+    dirty_map: &DirtyByteMap,
+) {
+    overlay_region_with_base(read_offset, read_buf, region_start, source, dirty_map, 0);
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn overlay_region_with_base(
+    read_offset: u64,
+    read_buf: &mut [u8],
+    region_start: u64,
+    source: &[u8],
+    dirty_map: &DirtyByteMap,
+    dirty_map_base: usize,
+) {
+    let read_end = read_offset.saturating_add(read_buf.len() as u64);
+    let region_end = region_start.saturating_add(source.len() as u64);
+    if read_end <= region_start || read_offset >= region_end {
+        return;
+    }
+    let overlap_start = read_offset.max(region_start);
+    let overlap_end = read_end.min(region_end);
+    if overlap_end <= overlap_start {
+        return;
+    }
+    // Cast safety: `overlap_start - region_start` < `source.len()` (usize),
+    // `overlap_end - overlap_start` <= `read_buf.len()` (usize).
+    let source_base = (overlap_start - region_start) as usize;
+    let overlap_len = (overlap_end - overlap_start) as usize;
+    let dirty_start = dirty_map_base.saturating_add(source_base);
+    dirty_map.for_each_overlap(dirty_start, overlap_len, |d_start, d_end| {
+        let dirty_len = d_end - d_start;
+        let src_off = d_start - dirty_map_base;
+        // Cast safety: dst_off < read_buf.len() (usize) by construction.
+        let dst_off = (region_start + src_off as u64 - read_offset) as usize;
+        if let (Some(dst), Some(src)) = (
+            read_buf.get_mut(dst_off..dst_off + dirty_len),
+            source.get(src_off..src_off + dirty_len),
+        ) {
+            dst.copy_from_slice(src);
+        }
+    });
 }
 
 fn pick_entry_name(long_name: Option<&str>, short_name: &ShortName) -> String {
@@ -1450,5 +1587,108 @@ mod tests {
         s.apply_data_cluster_write(0, 0, &[0u8; 4]).unwrap();
         s.apply_data_cluster_write(1, 0, &[0u8; 4]).unwrap();
         assert!(s.pending_data.is_empty());
+    }
+
+    // === Phase 3.5f regression tests ===
+
+    /// Bug H3-1 regression (FAT32 mirror of the exFAT bug): when
+    /// the kernel rewrites the directory entry with a larger
+    /// `file_size` (longer cluster chain), the new tail clusters
+    /// must be inserted into the cluster map. The pre-fix
+    /// idempotent-skip path silently dropped them.
+    #[test]
+    fn growing_extent_replaces_stale_chain_h3_1() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = state(&tmp);
+        let g = geo();
+        let bpc = g.bytes_per_cluster() as usize;
+
+        // Build a 4-cluster chain rooted at cluster 5.
+        let chain: [u32; 4] = [5, 6, 7, 8];
+        for window in chain.windows(2) {
+            write_fat_entry(&mut s, window[0], window[1]);
+        }
+        write_fat_entry(&mut s, *chain.last().unwrap(), 0x0FFF_FFFF);
+
+        // First dir entry: short — 2 clusters' worth of data.
+        let short_size = (2 * bpc) as u32;
+        let entry_short = build_file_dir_entry("VIDEO.MP4", 5, short_size);
+        s.apply_write(cluster_to_volume_byte(&g, 2), &entry_short)
+            .expect("short dir");
+
+        // Now extend the dir entry to the final 4-cluster size.
+        let final_size = (4 * bpc) as u32;
+        let entry_full = build_file_dir_entry("VIDEO.MP4", 5, final_size);
+        s.apply_write(cluster_to_volume_byte(&g, 2), &entry_full)
+            .expect("full dir");
+
+        // Write data to every cluster including the new tail.
+        for &c in &chain {
+            let mut payload = vec![0u8; bpc];
+            payload[0] = c as u8;
+            s.apply_write(cluster_to_volume_byte(&g, c), &payload)
+                .expect("data write");
+        }
+        s.flush().expect("flush");
+
+        // The backing file must be exactly 4 clusters long with
+        // no zero-filled tail.
+        let final_path = tmp.path().join("VIDEO.MP4");
+        let bytes = fs::read(&final_path).expect("file finalized");
+        assert_eq!(
+            bytes.len(),
+            4 * bpc,
+            "all 4 clusters must be present (H3-1 regression)"
+        );
+        for (i, &c) in chain.iter().enumerate() {
+            assert_eq!(
+                bytes[i * bpc],
+                c as u8,
+                "cluster {c} payload must be at offset {}",
+                i * bpc
+            );
+        }
+    }
+
+    /// Bug H3-2 regression: a read covering the FAT and root
+    /// directory region after a write must return the kernel-
+    /// written bytes (not the synth's startup snapshot).
+    #[test]
+    fn overlay_read_returns_kernel_written_fat_and_dir_bytes_h3_2() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = state(&tmp);
+
+        // Kernel writes a FAT entry.
+        write_fat_entry(&mut s, 5, 0x0FFF_FFFF);
+        // Kernel writes a dir entry into the root cluster (2).
+        let g = geo();
+        let entry = build_file_dir_entry("HI.TXT", 5, 12);
+        s.apply_write(cluster_to_volume_byte(&g, 2), &entry)
+            .expect("dir write");
+
+        // Read back the FAT entry via overlay.
+        let off = fat_entry_volume_byte(5);
+        let mut fat_buf = [0u8; 4];
+        s.overlay_read(off, &mut fat_buf);
+        assert_eq!(
+            u32::from_le_bytes(fat_buf),
+            0x0FFF_FFFF,
+            "overlay must surface kernel-written FAT entry"
+        );
+
+        // Read back the dir cluster start via overlay.
+        let mut dir_buf = vec![0u8; entry.len()];
+        s.overlay_read(cluster_to_volume_byte(&g, 2), &mut dir_buf);
+        assert_eq!(
+            &dir_buf, &entry,
+            "overlay must surface kernel-written dir entry bytes"
+        );
+
+        // Read of an unrelated region returns the caller's buffer
+        // unchanged (overlay does not corrupt synth bytes).
+        let mut elsewhere = vec![0xAAu8; 32];
+        let before = elsewhere.clone();
+        s.overlay_read(off + 4096, &mut elsewhere);
+        assert_eq!(elsewhere, before, "overlay must skip non-dirty regions");
     }
 }

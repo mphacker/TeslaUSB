@@ -32,6 +32,7 @@
 //! [`BlockBackend`]: teslausb_core::backend::BlockBackend
 
 pub mod dir_tree;
+pub mod dirty_map;
 pub mod exfat_write;
 pub mod fat32_write;
 pub mod synth;

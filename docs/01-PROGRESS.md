@@ -464,7 +464,7 @@ test suite).
 |---|---|---|
 | 4b.1a | `teslausb-core::sei::{nal,mp4}` — AVCC NAL iterator, emulation-prevention strip, BMFF box scanner, mvhd extractor | ✅ |
 | 4b.1b | `teslausb-core::sei::payload` — H.264 SEI envelope + Tesla 0x42-padding/0x69-marker framing | ✅ |
-| 4b.1c | `teslausb-core::sei::tesla` — protobuf demarshal + `SeiMessage` + v1 golden parity | ⏳ |
+| 4b.1c | `teslausb-core::sei::tesla` — protobuf demarshal + `SeiMessage` + v1 golden parity | ✅ |
 | 4b.1z | `teslausb-worker::sei` — mmap adapter + walker that drives 4b.1a/b/c against real files | ⏳ |
 | 4b.2 | `teslausb-worker::indexer` (inotify → SEI → SQLite) | ⏳ |
 | 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion) | ⏳ |
@@ -566,6 +566,56 @@ same arm) + per-test allows for `unwrap_used` / `panic` /
 **Test count:** workspace 1079 → 1096 (+17 tests). 31 + 17 + 3
 deny-warning-only doc tests = 51 reported by
 `cargo test -p teslausb-core --lib sei`.
+
+### Phase 4b.1c — Tesla SeiMetadata protobuf decoder ✅
+
+`teslausb-core::sei::tesla` (~650 LOC, 27 tests). Hand-rolled
+minimal protobuf wire decoder targeted at the frozen
+`SeiMetadata` schema in v1's `scripts/web/static/dashcam.proto`.
+
+**Why hand-rolled instead of `prost`:** the Pi cross-build
+podman image does not carry `protoc`, and adding the
+`prost-build` build dep would force every contributor to install
+the protobuf compiler. `dashcam.proto` is a 16-field, no-nesting,
+no-repeated, frozen schema; a hand-roll is ~250 LOC of pure
+Rust with no build script, no codegen, and no new workspace
+deps. (Per charter: avoiding a third-party dep removes the need
+for an ADR entirely, and "the hard right" — owning the wire
+decode — is more transparent than a generated 100k-line
+codegen pipeline for a single 16-field message.)
+
+* **`SeiMessage`** struct — 16 fields matching the proto schema
+  one-for-one (u32 / u64 / f32 / f64 / bool / Gear /
+  AutopilotState). `Default` follows proto3 semantics
+  (zero-valued numerics, `Park`, `None`). Public `has_gps_fix()`
+  helper matches v1's "lat ≠ 0 OR lon ≠ 0" preserve-clip
+  heuristic.
+* **`Gear`** / **`AutopilotState`** enums with `Unknown(u32)`
+  catch-alls so a future Tesla firmware revision adding new
+  enum integers does not crash the decoder. Each has a `From<u32>`
+  impl.
+* **`decode_sei_message(&[u8]) -> Result<SeiMessage, ProtoError>`**
+  — the wire decoder. Supports the four proto3 wire types
+  (varint / fixed32 / fixed64 / length-delimited). Skips
+  unknown field numbers AND unknown-wire-type-on-known-field
+  silently per proto3 forward-compat. Rejects
+  `VarintTooLong` (> 10 bytes), `UnexpectedEnd`,
+  `LengthOverflow`, `UnknownWireType` (3 = deprecated group
+  start, 4 = group end, etc.), and `InvalidFieldNumber`
+  (field 0 is reserved).
+* Internal `Cursor<'a>` keeps the read-varint /
+  read-fixed-N / skip-field state machine in one place with
+  panic-free `.get()`-based access (no `[..]` indexing in the
+  hot path).
+
+**Charter compliance:** pure logic, no `tokio`, no `std::fs`,
+no syscalls, no new deps (so no ADR needed per charter
+"locks in a new third-party dependency" trigger). Each enum
+unknown-variant carry-through documented; every wire-type
+guard pinned by tests.
+
+**Test count:** workspace 1096 → 1123 (+27 tests). Total SEI
+suite: 78 tests across 4b.1a/b/c.
 
 ## Phase H4 — Retention + worker on hardware
 

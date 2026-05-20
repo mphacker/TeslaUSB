@@ -147,6 +147,20 @@ impl FileAttributes {
         }
         bits
     }
+
+    /// Unpack an on-disk u16 attribute field back into the
+    /// boolean representation. Reserved bits (3, 6, 7..15)
+    /// are silently discarded.
+    #[must_use]
+    pub const fn from_u16(bits: u16) -> Self {
+        Self {
+            read_only: bits & (1 << 0) != 0,
+            hidden: bits & (1 << 1) != 0,
+            system: bits & (1 << 2) != 0,
+            directory: bits & (1 << 4) != 0,
+            archive: bits & (1 << 5) != 0,
+        }
+    }
 }
 
 /// `exFAT` timestamp fields for a File entry (`exFAT` spec §7.4.8 –

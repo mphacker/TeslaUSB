@@ -26,6 +26,7 @@
 
 pub mod allocation_bitmap;
 pub mod boot_sector;
+pub mod dir_decode;
 pub mod directory;
 pub mod geometry;
 pub mod layout;

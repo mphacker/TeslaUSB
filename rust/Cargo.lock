@@ -650,6 +650,11 @@ dependencies = [
 [[package]]
 name = "teslausb-worker"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "teslausb-core",
+ "thiserror",
+]
 
 [[package]]
 name = "thiserror"

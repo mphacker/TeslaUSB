@@ -246,8 +246,7 @@ pub fn decode_sei_message(buf: &[u8]) -> Result<SeiMessage, ProtoError> {
                 msg.version = u32::try_from(cur.read_varint()?).unwrap_or(u32::MAX);
             }
             (2, WIRE_VARINT) => {
-                msg.gear_state =
-                    Gear::from(u32::try_from(cur.read_varint()?).unwrap_or(u32::MAX));
+                msg.gear_state = Gear::from(u32::try_from(cur.read_varint()?).unwrap_or(u32::MAX));
             }
             (3, WIRE_VARINT) => msg.frame_seq_no = cur.read_varint()?,
             (4, WIRE_FIXED32) => msg.vehicle_speed_mps = f32::from_bits(cur.read_fixed32()?),

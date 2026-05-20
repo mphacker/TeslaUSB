@@ -14,3 +14,17 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+# Domain-core: SEI primitives (mp4/nal/payload/tesla) + future
+# IPC types. The dependency direction is binary → core (ADR 0003).
+teslausb-core = { path = "../teslausb-core" }
+
+# Typed errors at module boundaries inside the binary crate, per
+# charter §"Rust standards". The outer-layer `main.rs` may use
+# `anyhow::Result`; library-style modules inside the binary expose
+# typed errors via thiserror.
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"

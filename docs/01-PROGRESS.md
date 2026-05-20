@@ -465,7 +465,7 @@ test suite).
 | 4b.1a | `teslausb-core::sei::{nal,mp4}` — AVCC NAL iterator, emulation-prevention strip, BMFF box scanner, mvhd extractor | ✅ |
 | 4b.1b | `teslausb-core::sei::payload` — H.264 SEI envelope + Tesla 0x42-padding/0x69-marker framing | ✅ |
 | 4b.1c | `teslausb-core::sei::tesla` — protobuf demarshal + `SeiMessage` + v1 golden parity | ✅ |
-| 4b.1z | `teslausb-worker::sei` — mmap adapter + walker that drives 4b.1a/b/c against real files | ⏳ |
+| 4b.1z | `teslausb-worker::sei` — clip walker that drives 4b.1a/b/c against real files | ✅ |
 | 4b.2 | `teslausb-worker::indexer` (inotify → SEI → SQLite) | ⏳ |
 | 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion) | ⏳ |
 | 4b.4 | `teslausb-worker::main` task supervisor | ⏳ |
@@ -616,6 +616,71 @@ guard pinned by tests.
 
 **Test count:** workspace 1096 → 1123 (+27 tests). Total SEI
 suite: 78 tests across 4b.1a/b/c.
+
+### Phase 4b.1z — `teslausb-worker::sei` clip walker ✅
+
+I/O adapter that drives the pure-logic `teslausb-core::sei`
+primitives against on-disk Tesla MP4 clips. New library face
+on `teslausb-worker` (lib.rs) so unit tests run against a
+stable public surface (same pattern as `teslafat`).
+
+**New in `teslausb-core::sei::mp4`** (11 added tests):
+
+* `Mdhd` struct + `parse_mdhd` — Media Header timescale +
+  duration, v0 and v1 layouts.
+* `parse_stts_durations` — expands the (count, delta) sample-
+  to-time table into a flat `Vec<f64>` of per-sample ms
+  durations. Caps at `STTS_MAX_ENTRY_COUNT = 50_000` declared
+  entries and `STTS_MAX_TOTAL_SAMPLES = 10_000` emitted samples
+  (v1 parity — bounds RSS on the Pi Zero 2 W).
+* Two new `Mp4Error` variants: `MdhdTruncated`, `SttsTruncated`,
+  `SttsEntryCountSuspicious`.
+
+**New in `teslausb-worker::sei`** (17 tests):
+
+* `walk_clip(path, sample_rate) -> Result<ClipWalk, WalkError>`
+  — public API. Reads the file (`std::fs::read`, capped at
+  `MAX_CLIP_BYTES = 150 MB` matching v1) and drives the walker.
+* `walk_clip_bytes(buf, sample_rate)` — same logic against a
+  pre-loaded buffer. Used by the tests and any future caller
+  that already has the bytes in RAM.
+* `Waypoint { frame_index, timestamp_ms, message }` — one
+  decoded SEI sample with its frame-accurate ms offset.
+* `ClipWalk { clip_started_utc, timescale, frame_count, waypoints }`
+  — walk result. `clip_started_utc` is best-effort from `mvhd`
+  (None on missing / pre-epoch value); the walker tolerates
+  missing timing tables by falling back to a 30 fps default.
+* `WalkError` (thiserror) — `Io`, `FileTooSmall`, `FileTooLarge`,
+  `Mp4`. Per-frame decode failures (corrupt NAL, non-Tesla SEI,
+  garbled protobuf) are silently dropped — matches v1's
+  `if sei is not None` filter.
+
+**Why `std::fs::read` and not `mmap`:** v1 used mmap to escape
+OOM when *multiple concurrent* indexer/archive ops stacked
+~60 MB clip buffers. B-1's supervisor runs the walker strictly
+one-clip-at-a-time, so worst-case RSS is one 60-150 MB clip —
+fine on the Pi Zero 2 W's 512 MB. Avoiding `memmap2` keeps the
+dep list short (no ADR needed) and dodges a small `unsafe`
+surface where `Mmap` deref-to-`&[u8]` relies on the file not
+being unmapped or truncated mid-walk (exactly what could
+happen if `teslafat` reflows the backing store). If profiling
+shows this matters, the `walk_clip` signature stays — only the
+body changes, behind an ADR.
+
+**Walker algorithm (v1 parity):** moov→mvhd → start time;
+moov→trak→mdia→{mdhd, minf/stbl/stts} → timescale + durations;
+mdat → `AvccIter` → on SEI NAL with `frame_index % sample_rate
+== 0`: `extract_tesla_payload` then `decode_sei_message` and
+yield a `Waypoint`; on VCL NAL (type 1 / 5): advance frame
+counter and cumulative ms.
+
+**Charter:** typed errors via thiserror (no `anyhow` outside
+main.rs); pure logic stays in core; only the file-read I/O
+boundary lives in worker. No new workspace deps (teslausb-core
++ thiserror were already approved). All gates green.
+
+**Test count:** workspace 1123 → 1151 (+28 tests: 11 mp4 +
+17 worker). Phase 4b.1 series (a+b+c+z) now totals 106 tests.
 
 ## Phase H4 — Retention + worker on hardware
 

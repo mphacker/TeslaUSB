@@ -130,6 +130,27 @@ pub enum Mp4Error {
         /// Raw value from the file, in MP4-epoch seconds.
         raw_seconds: u64,
     },
+    /// The `mdhd` box content is shorter than the version-required
+    /// minimum (24 bytes for v0, 36 bytes for v1).
+    MdhdTruncated {
+        /// Box version (0 or 1) parsed from the first content byte.
+        version: u8,
+        /// Number of body bytes actually present.
+        body_len: usize,
+    },
+    /// The `stts` box content is shorter than the 8-byte header
+    /// (version + flags + entry_count).
+    SttsTruncated {
+        /// Number of body bytes actually present.
+        body_len: usize,
+    },
+    /// The `stts` box declares more entries than the body can hold,
+    /// or more samples than the per-clip cap. Bounds match v1
+    /// (`entry_count > 50_000` warning, `MAX_TOTAL_SAMPLES = 10_000`).
+    SttsEntryCountSuspicious {
+        /// Entry count declared in the box header.
+        declared_entries: u32,
+    },
 }
 
 impl std::fmt::Display for Mp4Error {
@@ -172,9 +193,33 @@ impl std::fmt::Display for Mp4Error {
                 "mvhd creation_time {raw_seconds} is at or before \
                  the Unix epoch — treating as uninitialised"
             ),
+            Self::MdhdTruncated { version, body_len } => write!(
+                f,
+                "mdhd box body too short for version {version}: \
+                 {body_len} byte(s)"
+            ),
+            Self::SttsTruncated { body_len } => {
+                write!(f, "stts box body too short for header: {body_len} byte(s)")
+            }
+            Self::SttsEntryCountSuspicious { declared_entries } => write!(
+                f,
+                "stts declares {declared_entries} entries — refusing \
+                 (cap is {STTS_MAX_ENTRY_COUNT})"
+            ),
         }
     }
 }
+
+/// Hard cap on the number of `stts` entries we will parse. Tesla
+/// dashcam clips are ~30–60 s at 30 fps ≈ 1800 frames, encoded
+/// as a single-entry stts in practice. v1 warns and bails above
+/// 50 000 entries (`_get_timescale_and_durations`); we mirror that.
+pub const STTS_MAX_ENTRY_COUNT: u32 = 50_000;
+
+/// Hard cap on the total number of per-sample durations we will
+/// emit from [`parse_stts_durations`]. v1 caps at 10 000 to bound
+/// indexer RSS on the Pi Zero 2 W; we do the same.
+pub const STTS_MAX_TOTAL_SAMPLES: usize = 10_000;
 
 impl std::error::Error for Mp4Error {}
 
@@ -380,6 +425,156 @@ pub fn parse_mvhd(body: &[u8]) -> Result<Mvhd, Mp4Error> {
     })
 }
 
+/// Parsed `mdhd` (Media Header) box for one track.
+///
+/// We only surface the fields the SEI walker consumes —
+/// timescale and duration. v1 reads `timescale` to convert
+/// `stts` deltas to milliseconds and ignores everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mdhd {
+    /// Box version: 0 (32-bit time fields) or 1 (64-bit).
+    pub version: u8,
+    /// Units per second for this track's time fields. Tesla
+    /// dashcam video typically uses 30000.
+    pub timescale: u32,
+    /// Media duration in `timescale` units. May be zero on
+    /// truncated clips; the SEI walker tolerates that.
+    pub duration: u64,
+}
+
+/// Parse an `mdhd` box body into a structured [`Mdhd`].
+///
+/// `body` must be the content slice of the mdhd box (the v1
+/// path is `moov.trak.mdia.mdhd` for the video track).
+///
+/// # Errors
+///
+/// * [`Mp4Error::MdhdTruncated`] if `body` is shorter than the
+///   version-specific minimum (24 bytes for v0, 36 for v1).
+pub fn parse_mdhd(body: &[u8]) -> Result<Mdhd, Mp4Error> {
+    if body.is_empty() {
+        return Err(Mp4Error::MdhdTruncated {
+            version: 0,
+            body_len: 0,
+        });
+    }
+    let version = body[0];
+    if version == 1 {
+        // v1 layout:
+        //   [0]      version
+        //   [1..4]   flags
+        //   [4..12]  creation_time (u64)
+        //   [12..20] modification_time (u64)
+        //   [20..24] timescale (u32)
+        //   [24..32] duration (u64)
+        if body.len() < 32 {
+            return Err(Mp4Error::MdhdTruncated {
+                version: 1,
+                body_len: body.len(),
+            });
+        }
+        let timescale = u32::from_be_bytes([body[20], body[21], body[22], body[23]]);
+        let duration = u64::from_be_bytes([
+            body[24], body[25], body[26], body[27], body[28], body[29], body[30], body[31],
+        ]);
+        Ok(Mdhd {
+            version,
+            timescale,
+            duration,
+        })
+    } else {
+        // v0 (and any forward-compat unrecognised version) layout:
+        //   [0]      version
+        //   [1..4]   flags
+        //   [4..8]   creation_time (u32)
+        //   [8..12]  modification_time (u32)
+        //   [12..16] timescale (u32)
+        //   [16..20] duration (u32)
+        if body.len() < 20 {
+            return Err(Mp4Error::MdhdTruncated {
+                version,
+                body_len: body.len(),
+            });
+        }
+        let timescale = u32::from_be_bytes([body[12], body[13], body[14], body[15]]);
+        let duration = u32::from_be_bytes([body[16], body[17], body[18], body[19]]);
+        Ok(Mdhd {
+            version,
+            timescale,
+            duration: u64::from(duration),
+        })
+    }
+}
+
+/// Decode the per-sample duration table from an `stts`
+/// (Sample-to-Time) box body, in milliseconds.
+///
+/// The `stts` box layout is:
+///   `[0]    version`
+///   `[1..4] flags`
+///   `[4..8] entry_count (u32 BE)`
+///   then `entry_count` records of `[count u32 BE][delta u32 BE]`,
+/// each record meaning "the next `count` samples each have
+/// duration `delta` in `timescale` units."
+///
+/// Returns one `f64` ms duration per logical sample (i.e. the
+/// `(count, delta)` pairs are expanded into a flat vector).
+///
+/// Capped at [`STTS_MAX_TOTAL_SAMPLES`] entries to bound RSS on
+/// the Pi Zero 2 W. Capped at [`STTS_MAX_ENTRY_COUNT`] declared
+/// entries to short-circuit malicious files. `timescale = 0` is
+/// silently coerced to 30 000 (v1's same fallback) so the caller
+/// never divides by zero.
+///
+/// # Errors
+///
+/// * [`Mp4Error::SttsTruncated`] if `body` is shorter than the
+///   8-byte header.
+/// * [`Mp4Error::SttsEntryCountSuspicious`] if the declared
+///   `entry_count` exceeds [`STTS_MAX_ENTRY_COUNT`].
+pub fn parse_stts_durations(body: &[u8], timescale: u32) -> Result<Vec<f64>, Mp4Error> {
+    if body.len() < 8 {
+        return Err(Mp4Error::SttsTruncated {
+            body_len: body.len(),
+        });
+    }
+    let entry_count = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+    if entry_count > STTS_MAX_ENTRY_COUNT {
+        return Err(Mp4Error::SttsEntryCountSuspicious {
+            declared_entries: entry_count,
+        });
+    }
+    // Coerce timescale 0 to v1's 30000 fallback; otherwise every
+    // duration would be NaN/inf and the indexer would silently
+    // ship garbage timestamps.
+    let timescale_f = if timescale == 0 {
+        30_000.0_f64
+    } else {
+        f64::from(timescale)
+    };
+    let mut durations: Vec<f64> = Vec::new();
+    let mut pos = 8usize;
+    for _ in 0..entry_count {
+        if pos + 8 > body.len() {
+            // Truncated mid-table: stop, return what we have.
+            // v1 does the same (`if pos + 8 > stts['end']: break`).
+            break;
+        }
+        let count = u32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
+        let delta =
+            u32::from_be_bytes([body[pos + 4], body[pos + 5], body[pos + 6], body[pos + 7]]);
+        pos += 8;
+        let remaining = STTS_MAX_TOTAL_SAMPLES.saturating_sub(durations.len());
+        if remaining == 0 {
+            break;
+        }
+        let take = (count as usize).min(remaining);
+        let duration_ms = (f64::from(delta) / timescale_f) * 1000.0;
+        durations.extend(std::iter::repeat_n(duration_ms, take));
+    }
+    Ok(durations)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -583,5 +778,133 @@ mod tests {
         let mvhd = parse_mvhd(&body).unwrap();
         assert_eq!(mvhd.version, 7);
         assert_eq!(mvhd.creation_time, UNIX_EPOCH + Duration::from_secs(5));
+    }
+
+    fn mdhd_v0_body(timescale: u32, duration: u32) -> Vec<u8> {
+        let mut v = vec![0u8; 20];
+        v[0] = 0; // version
+        // creation/modification at [4..8], [8..12] — zeroed is fine
+        v[12..16].copy_from_slice(&timescale.to_be_bytes());
+        v[16..20].copy_from_slice(&duration.to_be_bytes());
+        v
+    }
+
+    fn mdhd_v1_body(timescale: u32, duration: u64) -> Vec<u8> {
+        let mut v = vec![0u8; 32];
+        v[0] = 1; // version
+        // creation [4..12], mod [12..20] zeroed
+        v[20..24].copy_from_slice(&timescale.to_be_bytes());
+        v[24..32].copy_from_slice(&duration.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn parse_mdhd_v0_extracts_timescale_and_duration() {
+        let mdhd = parse_mdhd(&mdhd_v0_body(30_000, 1_800_000)).unwrap();
+        assert_eq!(mdhd.version, 0);
+        assert_eq!(mdhd.timescale, 30_000);
+        assert_eq!(mdhd.duration, 1_800_000);
+    }
+
+    #[test]
+    fn parse_mdhd_v1_extracts_64bit_duration() {
+        let mdhd = parse_mdhd(&mdhd_v1_body(48_000, 0x1_0000_0000_u64)).unwrap();
+        assert_eq!(mdhd.version, 1);
+        assert_eq!(mdhd.timescale, 48_000);
+        assert_eq!(mdhd.duration, 0x1_0000_0000_u64);
+    }
+
+    #[test]
+    fn parse_mdhd_empty_body_rejected() {
+        let err = parse_mdhd(&[]).unwrap_err();
+        assert!(matches!(err, Mp4Error::MdhdTruncated { .. }));
+    }
+
+    #[test]
+    fn parse_mdhd_v1_truncated_rejected() {
+        let mut body = mdhd_v1_body(30_000, 0);
+        body.truncate(30);
+        let err = parse_mdhd(&body).unwrap_err();
+        assert!(matches!(
+            err,
+            Mp4Error::MdhdTruncated {
+                version: 1,
+                body_len: 30
+            }
+        ));
+    }
+
+    fn stts_body(entries: &[(u32, u32)]) -> Vec<u8> {
+        let mut v = vec![0u8; 8];
+        v[0] = 0; // version
+        let count = u32::try_from(entries.len()).unwrap();
+        v[4..8].copy_from_slice(&count.to_be_bytes());
+        for (c, d) in entries {
+            v.extend_from_slice(&c.to_be_bytes());
+            v.extend_from_slice(&d.to_be_bytes());
+        }
+        v
+    }
+
+    #[test]
+    fn parse_stts_single_entry_expands_to_per_sample_durations() {
+        let body = stts_body(&[(5, 1000)]); // 5 samples, delta 1000 / timescale 30000 = 33.33 ms each
+        let d = parse_stts_durations(&body, 30_000).unwrap();
+        assert_eq!(d.len(), 5);
+        for ms in &d {
+            assert!((ms - 1000.0 / 30_000.0 * 1000.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn parse_stts_multi_entry_expands_in_order() {
+        let body = stts_body(&[(2, 1000), (3, 2000)]);
+        let d = parse_stts_durations(&body, 30_000).unwrap();
+        assert_eq!(d.len(), 5);
+        assert!((d[0] - 33.333).abs() < 0.01);
+        assert!((d[2] - 66.666).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_stts_truncated_header_rejected() {
+        let err = parse_stts_durations(&[0u8; 4], 30_000).unwrap_err();
+        assert!(matches!(err, Mp4Error::SttsTruncated { body_len: 4 }));
+    }
+
+    #[test]
+    fn parse_stts_suspicious_entry_count_rejected() {
+        let mut body = vec![0u8; 8];
+        body[4..8].copy_from_slice(&(STTS_MAX_ENTRY_COUNT + 1).to_be_bytes());
+        let err = parse_stts_durations(&body, 30_000).unwrap_err();
+        assert!(matches!(err, Mp4Error::SttsEntryCountSuspicious { .. }));
+    }
+
+    #[test]
+    fn parse_stts_truncated_mid_table_returns_partial_like_v1() {
+        // Header claims 3 entries but only 2 are actually present.
+        let mut body = vec![0u8; 8];
+        body[4..8].copy_from_slice(&3u32.to_be_bytes());
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&1000u32.to_be_bytes());
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&2000u32.to_be_bytes());
+        let d = parse_stts_durations(&body, 30_000).unwrap();
+        assert_eq!(d.len(), 2);
+    }
+
+    #[test]
+    fn parse_stts_caps_total_samples() {
+        // Single entry asking for 20_000 samples — must clamp to 10_000.
+        let body = stts_body(&[(20_000, 1000)]);
+        let d = parse_stts_durations(&body, 30_000).unwrap();
+        assert_eq!(d.len(), STTS_MAX_TOTAL_SAMPLES);
+    }
+
+    #[test]
+    fn parse_stts_zero_timescale_uses_v1_fallback() {
+        let body = stts_body(&[(1, 1000)]);
+        let d = parse_stts_durations(&body, 0).unwrap();
+        // 30000 fallback ⇒ 33.33 ms
+        assert!((d[0] - 33.333).abs() < 0.01);
     }
 }

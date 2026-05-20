@@ -43,6 +43,7 @@
 
 pub mod backing_tree;
 pub mod cluster_layout;
+pub mod cluster_map;
 pub mod data_cluster_source;
 pub mod exfat;
 pub mod fat32;

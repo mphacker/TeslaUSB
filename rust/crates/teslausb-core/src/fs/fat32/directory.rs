@@ -802,6 +802,68 @@ fn split_cluster(cluster: u32) -> (u16, u16) {
     (hi, lo)
 }
 
+// ── Volume label entry synthesizer ────────────────────────────────────
+
+/// Byte width of the FAT volume-label entry's name field.
+///
+/// Equal to [`DIR_ENTRY_SIZE_BYTES`]'s `Name` field width
+/// (fatgen103 §6) and to the boot sector's `BS_VolLab` width
+/// (`super::boot_sector::VOLUME_LABEL_LEN_BYTES`). A volume label
+/// always occupies exactly 11 bytes, space-padded.
+pub const VOLUME_LABEL_NAME_LEN: usize = 11;
+
+const _: () = {
+    assert!(
+        VOLUME_LABEL_NAME_LEN == SHORT_NAME_LEN,
+        "volume-label name field must match SFN name width",
+    );
+};
+
+/// Synthesize the 32-byte root-directory volume label entry.
+///
+/// fatgen103 §6.1 states that the volume label appears twice on a
+/// FAT volume: in the boot sector's `BS_VolLab` field AND as a
+/// distinguished entry in the root directory carrying
+/// [`ATTR_VOLUME_ID`] (`0x08`). The two MUST agree; `fsck.vfat`
+/// reports `"Label in boot sector is X, but there is no volume
+/// label in root directory."` when the root entry is missing.
+///
+/// `label_11` MUST be the same 11-byte padded label that
+/// [`super::boot_sector::synthesize`] wrote at offset `0x47`;
+/// callers obtain it from
+/// [`super::boot_sector::pad_volume_label`] so a single validation
+/// + padding step feeds both consumers.
+///
+/// Per spec, the volume label entry's `FstClusHI`, `FstClusLO`,
+/// and `FileSize` MUST be zero — the entry is metadata-only and
+/// does not own any cluster chain. This function enforces that
+/// invariant unconditionally; only the timestamps come from the
+/// caller.
+///
+/// `Attr` is fixed at [`ATTR_VOLUME_ID`] (`0x08`) — never
+/// combined with [`ATTR_DIRECTORY`] or [`ATTR_ARCHIVE`].
+#[must_use]
+pub fn synthesize_volume_label_entry(
+    label_11: &[u8; VOLUME_LABEL_NAME_LEN],
+    timestamps: &Timestamps,
+) -> [u8; DIR_ENTRY_SIZE_BYTES] {
+    let mut buf = [0u8; DIR_ENTRY_SIZE_BYTES];
+    write_bytes(&mut buf, 0x00, label_11);
+    write_u8(&mut buf, 0x0B, ATTR_VOLUME_ID);
+    write_u8(&mut buf, 0x0C, 0); // NTRes
+    write_u8(&mut buf, 0x0D, 0); // CrtTimeTenth
+    write_u16_le(&mut buf, 0x0E, timestamps.created.time.to_bits());
+    write_u16_le(&mut buf, 0x10, timestamps.created.date.to_bits());
+    write_u16_le(&mut buf, 0x12, timestamps.accessed.to_bits());
+    // FstClusHI (0x14) and FstClusLO (0x1A) must remain zero per
+    // fatgen103 §6.1 — leave the buffer's initial zero-fill
+    // untouched at those offsets.
+    write_u16_le(&mut buf, 0x16, timestamps.modified.time.to_bits());
+    write_u16_le(&mut buf, 0x18, timestamps.modified.date.to_bits());
+    // FileSize (0x1C) must remain zero per fatgen103 §6.1.
+    buf
+}
+
 // ── LFN sequence synthesizer ──────────────────────────────────────────
 
 /// Synthesize the LFN entries describing `long_name` for an SFN
@@ -1046,6 +1108,20 @@ mod tests {
 
     fn epoch_ts() -> Timestamps {
         Timestamps::epoch()
+    }
+
+    fn sample_ts() -> Timestamps {
+        Timestamps {
+            created: FatDateTime::new(
+                FatDate::new(2024, 1, 15).unwrap(),
+                FatTime::new(12, 34, 56).unwrap(),
+            ),
+            modified: FatDateTime::new(
+                FatDate::new(2024, 6, 30).unwrap(),
+                FatTime::new(23, 59, 58).unwrap(),
+            ),
+            accessed: FatDate::new(2024, 12, 31).unwrap(),
+        }
     }
 
     fn read_u16_le(entry: &[u8; 32], offset: usize) -> u16 {
@@ -1752,5 +1828,65 @@ mod tests {
         let [dot, _] = synthesize_dot_entries(0xABCD_EF12, 0, &epoch_ts());
         assert_eq!(read_u16_le(&dot, 0x14), 0xABCD);
         assert_eq!(read_u16_le(&dot, 0x1A), 0xEF12);
+    }
+
+    // ── Volume label entry ─────────────────────────────────────────
+
+    #[test]
+    fn volume_label_entry_name_field_is_the_supplied_label() {
+        let label: [u8; VOLUME_LABEL_NAME_LEN] = *b"TESLACAM   ";
+        let entry = synthesize_volume_label_entry(&label, &epoch_ts());
+        assert_eq!(&entry[0x00..0x0B], &label[..]);
+    }
+
+    #[test]
+    fn volume_label_entry_attribute_is_volume_id_alone() {
+        let label: [u8; VOLUME_LABEL_NAME_LEN] = *b"TESLACAM   ";
+        let entry = synthesize_volume_label_entry(&label, &epoch_ts());
+        assert_eq!(entry[0x0B], ATTR_VOLUME_ID);
+        // Spec: ATTR_VOLUME_ID must NOT be combined with
+        // ATTR_DIRECTORY (0x10) or ATTR_ARCHIVE (0x20) on the
+        // volume label entry. fsck.vfat enforces this.
+        assert_eq!(entry[0x0B] & ATTR_DIRECTORY, 0);
+        assert_eq!(entry[0x0B] & ATTR_ARCHIVE, 0);
+    }
+
+    #[test]
+    fn volume_label_entry_first_cluster_and_size_are_zero() {
+        let label: [u8; VOLUME_LABEL_NAME_LEN] = *b"TESLACAM   ";
+        let entry = synthesize_volume_label_entry(&label, &epoch_ts());
+        assert_eq!(read_u16_le(&entry, 0x14), 0, "FstClusHI must be 0");
+        assert_eq!(read_u16_le(&entry, 0x1A), 0, "FstClusLO must be 0");
+        assert_eq!(read_u32_le(&entry, 0x1C), 0, "FileSize must be 0");
+    }
+
+    #[test]
+    fn volume_label_entry_carries_caller_timestamps() {
+        let label: [u8; VOLUME_LABEL_NAME_LEN] = *b"BACKUP     ";
+        let ts = sample_ts();
+        let entry = synthesize_volume_label_entry(&label, &ts);
+        assert_eq!(read_u16_le(&entry, 0x0E), ts.created.time.to_bits());
+        assert_eq!(read_u16_le(&entry, 0x10), ts.created.date.to_bits());
+        assert_eq!(read_u16_le(&entry, 0x12), ts.accessed.to_bits());
+        assert_eq!(read_u16_le(&entry, 0x16), ts.modified.time.to_bits());
+        assert_eq!(read_u16_le(&entry, 0x18), ts.modified.date.to_bits());
+    }
+
+    #[test]
+    fn volume_label_entry_is_exactly_one_directory_entry() {
+        let label: [u8; VOLUME_LABEL_NAME_LEN] = *b"NO NAME    ";
+        let entry = synthesize_volume_label_entry(&label, &epoch_ts());
+        assert_eq!(entry.len(), DIR_ENTRY_SIZE_BYTES);
+    }
+
+    #[test]
+    fn volume_label_entry_does_not_collide_with_long_name_attr() {
+        // A directory entry whose Attr == 0x0F is interpreted as
+        // LFN by the FAT driver, regardless of the rest of its
+        // bytes. The volume label entry must carry 0x08 (not
+        // 0x0F) so it's never mistaken for an LFN slot.
+        let label: [u8; VOLUME_LABEL_NAME_LEN] = *b"TESLACAM   ";
+        let entry = synthesize_volume_label_entry(&label, &epoch_ts());
+        assert_ne!(entry[0x0B], ATTR_LONG_NAME);
     }
 }

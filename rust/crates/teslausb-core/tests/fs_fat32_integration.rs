@@ -389,21 +389,27 @@ mod phase_2_17 {
 
     fn build_synth(tree: &BackingTree, volume_bytes: u64) -> (Fat32Synth, Fat32Layout, u64, u32) {
         let geo = Fat32Geometry::for_volume_size(volume_bytes).expect("valid geometry");
-        let layout = Fat32Layout::plan(&geo, tree).expect("layout plans");
+        let layout = Fat32Layout::plan(&geo, LABEL, tree).expect("layout plans");
         let first_data_byte = layout.first_data_byte();
         let bytes_per_cluster = layout.bytes_per_cluster();
         // Snapshot the chains so we can build the synth (which
         // consumes `geo`) and still move the layout into
         // `with_data_source`.
         let chains = layout.chains().clone();
-        let synth = Fat32Synth::new(geo, LABEL, SERIAL, None, None, &chains).expect("synth builds");
+        let free = layout.free_cluster_count();
+        let next_free = layout.next_free_cluster_hint();
+        let synth = Fat32Synth::new(geo, LABEL, SERIAL, Some(free), next_free, &chains)
+            .expect("synth builds");
         // Plan once more to obtain an owned `Fat32Layout` to
         // hand to `with_data_source`. Planning is deterministic
         // for a given (geometry, tree), so the data-source
         // layout matches the chain layout byte-for-byte.
-        let layout_for_source =
-            Fat32Layout::plan(&Fat32Geometry::for_volume_size(volume_bytes).unwrap(), tree)
-                .expect("data-source layout plans");
+        let layout_for_source = Fat32Layout::plan(
+            &Fat32Geometry::for_volume_size(volume_bytes).unwrap(),
+            LABEL,
+            tree,
+        )
+        .expect("data-source layout plans");
         let synth = synth.with_data_source(Box::new(layout_for_source));
         (synth, layout, first_data_byte, bytes_per_cluster)
     }
@@ -421,16 +427,20 @@ mod phase_2_17 {
 
         let root_offset =
             cluster_offset(first_data_byte, bytes_per_cluster, ROOT_DIRECTORY_CLUSTER);
-        let mut buf = vec![0u8; 64];
+        let mut buf = vec![0u8; 96];
         synth
             .read(root_offset, &mut buf)
             .expect("read root cluster");
-        // LFN ordinal 1 + LAST bit at offset 0, attribute 0x0F at 11,
-        // SFN starting at 32.
-        assert_eq!(buf[0], 0x41);
-        assert_eq!(buf[11], 0x0F);
-        assert_eq!(&buf[32..43], b"F000001    ");
-        assert_eq!(buf[43], FileAttributes::archive().raw());
+        // Layout after D1:
+        //   [0..32]   volume label entry → "TESTVOL    " + ATTR_VOLUME_ID
+        //   [32..64]  LFN ordinal 1+LAST at 32, attribute 0x0F at 43
+        //   [64..96]  SFN entry "F000001    " + ATTR_ARCHIVE
+        assert_eq!(&buf[0..11], LABEL);
+        assert_eq!(buf[11], 0x08);
+        assert_eq!(buf[32], 0x41);
+        assert_eq!(buf[32 + 11], 0x0F);
+        assert_eq!(&buf[64..75], b"F000001    ");
+        assert_eq!(buf[75], FileAttributes::archive().raw());
     }
 
     #[test]
@@ -478,14 +488,15 @@ mod phase_2_17 {
 
         let root_offset =
             cluster_offset(first_data_byte, bytes_per_cluster, ROOT_DIRECTORY_CLUSTER);
-        // Read 11 bytes starting at offset 32 within the root
-        // cluster — should be the SFN field of the first entry.
+        // Read 11 bytes starting at offset 64 within the root
+        // cluster — should be the SFN field of the first child
+        // entry (label at 0, LFN at 32, SFN at 64).
         let mut via_synth = vec![0u8; 11];
         synth
-            .read(root_offset + 32, &mut via_synth)
+            .read(root_offset + 64, &mut via_synth)
             .expect("partial read");
         let mut via_layout = vec![0u8; 11];
-        layout.read_cluster_bytes(ROOT_DIRECTORY_CLUSTER, 32, &mut via_layout);
+        layout.read_cluster_bytes(ROOT_DIRECTORY_CLUSTER, 64, &mut via_layout);
         assert_eq!(via_synth, via_layout);
         assert_eq!(&via_synth[..], b"F000001    ");
     }

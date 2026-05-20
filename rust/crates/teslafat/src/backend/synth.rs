@@ -246,7 +246,8 @@ impl SynthBackend {
     ) -> Result<Self, SynthBackendError> {
         let geometry =
             Fat32Geometry::for_volume_size(volume_size).map_err(SynthBackendError::Geometry)?;
-        let layout = Fat32Layout::plan(&geometry, tree).map_err(SynthBackendError::Fat32Layout)?;
+        let layout = Fat32Layout::plan(&geometry, cfg.volume_label.as_bytes(), tree)
+            .map_err(SynthBackendError::Fat32Layout)?;
         let bytes_per_cluster = layout.bytes_per_cluster();
         let first_data_byte = layout.first_data_byte();
         let file_extents = build_file_extents(
@@ -262,8 +263,8 @@ impl SynthBackend {
             geometry,
             cfg.volume_label.as_bytes(),
             serial,
-            None,
-            None,
+            Some(layout.free_cluster_count()),
+            layout.next_free_cluster_hint(),
             layout.chains(),
         )
         .map_err(SynthBackendError::Fat32Synth)?;

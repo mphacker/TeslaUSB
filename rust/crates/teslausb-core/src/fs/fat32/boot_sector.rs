@@ -346,9 +346,19 @@ fn write_u32_le(buf: &mut [u8; BOOT_SECTOR_SIZE_BYTES], offset: usize, value: u3
 /// Validate `label` and right-pad with ASCII space to
 /// [`VOLUME_LABEL_LEN_BYTES`].
 ///
-/// Empty labels are replaced with [`DEFAULT_VOLUME_LABEL`].
+/// Empty labels are replaced with [`DEFAULT_VOLUME_LABEL`]. The
+/// returned bytes are suitable for both the boot sector
+/// `BS_VolLab` field at offset `0x47` and the 11-byte name field
+/// of the root-directory volume-label entry that fatgen103 §6.1
+/// requires to mirror the boot-sector label.
+///
+/// # Errors
+///
+/// * [`BootSectorError::LabelTooLong`] — `label.len() > 11`.
+/// * [`BootSectorError::LabelHasInvalidByte`] — `label` contains
+///   a byte not allowed in FAT volume labels per fatgen103 §6.1.
 #[allow(clippy::indexing_slicing)] // bounds checked above the slice op
-fn pad_volume_label(label: &[u8]) -> Result<[u8; VOLUME_LABEL_LEN_BYTES], BootSectorError> {
+pub fn pad_volume_label(label: &[u8]) -> Result<[u8; VOLUME_LABEL_LEN_BYTES], BootSectorError> {
     if label.is_empty() {
         return Ok(DEFAULT_VOLUME_LABEL);
     }

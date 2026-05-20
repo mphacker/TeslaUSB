@@ -72,10 +72,13 @@ use crate::fs::cluster_layout::{
     AllocError, AllocatedChains, Allocation, ClusterAllocator, FIRST_DATA_CLUSTER,
 };
 use crate::fs::data_cluster_source::DataClusterSource;
-use crate::fs::fat32::boot_sector::ROOT_DIRECTORY_CLUSTER;
+use crate::fs::fat32::boot_sector::{
+    BootSectorError, ROOT_DIRECTORY_CLUSTER, VOLUME_LABEL_LEN_BYTES, pad_volume_label,
+};
 use crate::fs::fat32::directory::{
     DIR_ENTRY_SIZE_BYTES, FileAttributes, LFN_CHARS_PER_ENTRY, LfnError, ShortName, ShortNameError,
     Timestamps, synthesize_dot_entries, synthesize_lfn_sequence, synthesize_sfn_entry,
+    synthesize_volume_label_entry,
 };
 use crate::fs::fat32::geometry::Fat32Geometry;
 use crate::fs::geometry::{Geometry, SECTOR_SIZE_BYTES};
@@ -109,6 +112,13 @@ pub enum LayoutError {
     /// The cluster allocator rejected an allocation — typically
     /// because the volume isn't large enough to hold the tree.
     Alloc(AllocError),
+    /// The supplied volume label failed the fatgen103 §6.1
+    /// character/length rules. The padded form is required by
+    /// the root-directory volume-label entry produced for D1
+    /// compliance (`fsck.vfat` warns when the boot-sector label
+    /// and the root entry disagree), so layout validates it at
+    /// plan time and refuses to proceed on a bad label.
+    Label(BootSectorError),
     /// One of the synthesized SFN aliases failed validation.
     /// Should never happen with the deterministic `F<6 hex>`
     /// generator but surfaced rather than swallowed.
@@ -149,6 +159,7 @@ impl core::fmt::Display for LayoutError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Alloc(err) => write!(f, "cluster allocator failed during planning: {err}"),
+            Self::Label(err) => write!(f, "volume label rejected by layout planner: {err}"),
             Self::ShortName(err) => {
                 write!(f, "synthetic short name failed validation: {err}")
             }
@@ -174,6 +185,7 @@ impl std::error::Error for LayoutError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Alloc(err) => Some(err),
+            Self::Label(err) => Some(err),
             Self::ShortName(err) => Some(err),
             Self::Lfn(err) => Some(err),
             Self::DirectoryTooBig { .. }
@@ -192,11 +204,21 @@ pub struct Fat32Layout {
     first_data_byte: u64,
     dir_clusters: BTreeMap<u32, Vec<u8>>,
     files: Vec<FilePlacement>,
+    free_cluster_count: u32,
+    next_free_cluster_hint: Option<u32>,
 }
 
 impl Fat32Layout {
     /// Plan the cluster layout for `tree` on a FAT32 volume
     /// with the given `geometry`.
+    ///
+    /// `volume_label` is the same caller-supplied label that
+    /// [`super::boot_sector::synthesize`] receives. The planner
+    /// pads + validates it once via
+    /// [`pad_volume_label`] and emits a matching root-directory
+    /// volume-label entry as the first 32 bytes of cluster 2.
+    /// This satisfies fatgen103 §6.1's requirement that the boot
+    /// sector label and root-directory label entry agree (D1).
     ///
     /// The walk is pre-order with deterministic child
     /// ordering (the caller is expected to have sorted the
@@ -207,6 +229,9 @@ impl Fat32Layout {
     ///
     /// # Errors
     ///
+    /// * [`LayoutError::Label`] if `volume_label` exceeds 11
+    ///   bytes or contains a byte not allowed in FAT volume
+    ///   labels per fatgen103 §6.1.
     /// * [`LayoutError::Alloc`] if the volume is too small to
     ///   hold the tree (or if the geometry is malformed).
     /// * [`LayoutError::Lfn`] if a backing name can't be
@@ -221,10 +246,15 @@ impl Fat32Layout {
     ///   directory's entry array exceeds `u32::MAX` bytes.
     /// * [`LayoutError::FileTooLarge`] if a backing file
     ///   exceeds `u32::MAX` bytes.
-    pub fn plan(geometry: &Fat32Geometry, tree: &BackingTree) -> Result<Self, LayoutError> {
+    pub fn plan(
+        geometry: &Fat32Geometry,
+        volume_label: &[u8],
+        tree: &BackingTree,
+    ) -> Result<Self, LayoutError> {
+        let padded_label = pad_volume_label(volume_label).map_err(LayoutError::Label)?;
         let bytes_per_cluster = geometry.bytes_per_cluster();
-        let max_cluster_exclusive =
-            FIRST_DATA_CLUSTER.saturating_add(geometry.data_cluster_count());
+        let data_cluster_count = geometry.data_cluster_count();
+        let max_cluster_exclusive = FIRST_DATA_CLUSTER.saturating_add(data_cluster_count);
         let mut allocator =
             ClusterAllocator::new(bytes_per_cluster, FIRST_DATA_CLUSTER, max_cluster_exclusive)
                 .map_err(LayoutError::Alloc)?;
@@ -236,15 +266,22 @@ impl Fat32Layout {
         let mut dir_clusters: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
         let mut files: Vec<FilePlacement> = Vec::new();
 
-        plan_dir(
-            &tree.root,
-            None,
-            true,
-            &mut allocator,
-            &mut chains,
-            &mut dir_clusters,
-            &mut files,
-        )?;
+        {
+            let mut state = PlanState {
+                allocator: &mut allocator,
+                chains: &mut chains,
+                dir_clusters: &mut dir_clusters,
+                files: &mut files,
+            };
+            plan_dir(&tree.root, None, true, &padded_label, &mut state)?;
+        }
+
+        let (free_cluster_count, next_free_cluster_hint) = free_cluster_summary(
+            &chains,
+            &allocator,
+            data_cluster_count,
+            max_cluster_exclusive,
+        );
 
         Ok(Self {
             chains,
@@ -252,6 +289,8 @@ impl Fat32Layout {
             first_data_byte,
             dir_clusters,
             files,
+            free_cluster_count,
+            next_free_cluster_hint,
         })
     }
 
@@ -292,6 +331,26 @@ impl Fat32Layout {
     pub fn first_data_byte(&self) -> u64 {
         self.first_data_byte
     }
+
+    /// Number of unallocated data clusters after planning the
+    /// tree. Suitable for `FsInfo`'s `FSI_Free_Count` field —
+    /// pass through `Some(layout.free_cluster_count())` to
+    /// [`super::fsinfo::synthesize`] so `fsck.vfat` reports a
+    /// real count instead of the `0xFFFFFFFF` "unknown"
+    /// sentinel (D2).
+    #[must_use]
+    pub fn free_cluster_count(&self) -> u32 {
+        self.free_cluster_count
+    }
+
+    /// The next cluster the planner would have allocated, or
+    /// `None` if the volume is exactly full and there is no
+    /// legal free cluster to point at. Suitable for `FsInfo`'s
+    /// `FSI_Nxt_Free` hint.
+    #[must_use]
+    pub fn next_free_cluster_hint(&self) -> Option<u32> {
+        self.next_free_cluster_hint
+    }
 }
 
 impl DataClusterSource for Fat32Layout {
@@ -318,14 +377,58 @@ impl DataClusterSource for Fat32Layout {
 
 // ── Planning core ─────────────────────────────────────────────────────
 
+/// Mutable state threaded through the recursive planner. Bundles
+/// the cluster allocator together with the three output
+/// accumulators so the recursion's per-call signature stays
+/// readable and within Clippy's `too_many_arguments` limit.
+struct PlanState<'a> {
+    allocator: &'a mut ClusterAllocator,
+    chains: &'a mut AllocatedChains,
+    dir_clusters: &'a mut BTreeMap<u32, Vec<u8>>,
+    files: &'a mut Vec<FilePlacement>,
+}
+
+/// Compute the values that go straight into `FsInfo` after the
+/// tree has been planned (D2): the total count of unallocated
+/// data clusters and the optional next-free hint.
+///
+/// `FsInfo`'s `FSI_Nxt_Free` must satisfy
+/// `FIRST_DATA_CLUSTER <= n <= data_cluster_count + 1` per
+/// fatgen103 §4.1. When the volume is fully allocated the
+/// allocator advances `next_cluster()` to `max_cluster_exclusive`,
+/// which is one past the last legal cluster; in that edge case we
+/// return `None` so the caller writes `FSI_UNKNOWN`
+/// (`0xFFFF_FFFF`) rather than a spec-violating sentinel.
+fn free_cluster_summary(
+    chains: &AllocatedChains,
+    allocator: &ClusterAllocator,
+    data_cluster_count: u32,
+    max_cluster_exclusive: u32,
+) -> (u32, Option<u32>) {
+    let used_clusters: u32 = chains
+        .as_slice()
+        .iter()
+        .map(|a| a.cluster_count)
+        .fold(0_u32, u32::saturating_add);
+    // `used_clusters` cannot exceed `data_cluster_count` because
+    // the allocator hands out at most that many; the subtraction
+    // therefore cannot underflow. `saturating_sub` is defensive.
+    let free = data_cluster_count.saturating_sub(used_clusters);
+    let next = allocator.next_cluster();
+    let hint = if next < max_cluster_exclusive {
+        Some(next)
+    } else {
+        None
+    };
+    (free, hint)
+}
+
 fn plan_dir(
     dir: &BackingDir,
     parent_first_cluster: Option<u32>,
     is_root: bool,
-    allocator: &mut ClusterAllocator,
-    chains: &mut AllocatedChains,
-    dir_clusters: &mut BTreeMap<u32, Vec<u8>>,
-    files: &mut Vec<FilePlacement>,
+    root_volume_label: &[u8; VOLUME_LABEL_LEN_BYTES],
+    state: &mut PlanState<'_>,
 ) -> Result<Allocation, LayoutError> {
     let child_count = dir.subdirs.len().saturating_add(dir.files.len());
     let child_count_u64 = child_count as u64;
@@ -337,7 +440,8 @@ fn plan_dir(
     }
 
     let dir_bytes_u64 = directory_entry_bytes(dir, is_root)?;
-    let dir_alloc = allocator
+    let dir_alloc = state
+        .allocator
         .allocate(dir_bytes_u64.max(1))
         .map_err(LayoutError::Alloc)?;
     // Root must land at cluster 2 — `ClusterAllocator::new`
@@ -347,7 +451,7 @@ fn plan_dir(
         !is_root || dir_alloc.first_cluster == ROOT_DIRECTORY_CLUSTER,
         "root must be allocated first so it lands at cluster {ROOT_DIRECTORY_CLUSTER}",
     );
-    chains.push(dir_alloc);
+    state.chains.push(dir_alloc);
 
     // Now allocate children (DFS pre-order). Subdirs first so
     // their cluster numbers are stable regardless of how many
@@ -360,16 +464,14 @@ fn plan_dir(
             sub,
             Some(dir_alloc.first_cluster),
             false,
-            allocator,
-            chains,
-            dir_clusters,
-            files,
+            root_volume_label,
+            state,
         )?;
         child_first_clusters.push((ChildKind::Subdir, sub_alloc.first_cluster, idx));
     }
 
     for (idx, file) in dir.files.iter().enumerate() {
-        let file_alloc = plan_file(file, allocator, chains, files)?;
+        let file_alloc = plan_file(file, state)?;
         child_first_clusters.push((ChildKind::File, file_alloc.first_cluster, idx));
     }
 
@@ -388,6 +490,7 @@ fn plan_dir(
     let entry_bytes = render_directory_bytes(
         dir,
         is_root,
+        root_volume_label,
         dir_alloc.first_cluster,
         parent_for_dotdot,
         &child_first_clusters,
@@ -396,8 +499,8 @@ fn plan_dir(
     write_into_clusters(
         &entry_bytes,
         dir_alloc,
-        allocator.bytes_per_cluster(),
-        dir_clusters,
+        state.allocator.bytes_per_cluster(),
+        state.dir_clusters,
     );
 
     Ok(dir_alloc)
@@ -409,23 +512,21 @@ enum ChildKind {
     File,
 }
 
-fn plan_file(
-    file: &BackingFile,
-    allocator: &mut ClusterAllocator,
-    chains: &mut AllocatedChains,
-    files: &mut Vec<FilePlacement>,
-) -> Result<Allocation, LayoutError> {
+fn plan_file(file: &BackingFile, state: &mut PlanState<'_>) -> Result<Allocation, LayoutError> {
     if file.size > u64::from(u32::MAX) {
         return Err(LayoutError::FileTooLarge {
             path: file.backing_path.clone(),
             size_bytes: file.size,
         });
     }
-    let alloc = allocator.allocate(file.size).map_err(LayoutError::Alloc)?;
+    let alloc = state
+        .allocator
+        .allocate(file.size)
+        .map_err(LayoutError::Alloc)?;
     if !alloc.is_empty() {
-        chains.push(alloc);
+        state.chains.push(alloc);
     }
-    files.push(FilePlacement {
+    state.files.push(FilePlacement {
         allocation: alloc,
         size_bytes: file.size,
         backing_path: file.backing_path.clone(),
@@ -437,7 +538,13 @@ fn plan_file(
 
 fn directory_entry_bytes(dir: &BackingDir, is_root: bool) -> Result<u64, LayoutError> {
     let mut bytes: u64 = 0;
-    if !is_root {
+    if is_root {
+        // Volume label entry (fatgen103 §6.1) — one 32-byte
+        // entry at the very start of the root directory; D1
+        // compliance ensures `fsck.vfat` does not warn that
+        // the boot-sector label has no root-directory mirror.
+        bytes = bytes.saturating_add(DIR_ENTRY_SIZE_BYTES as u64);
+    } else {
         // `.` + `..` = 2 entries.
         bytes = bytes.saturating_add(2 * DIR_ENTRY_SIZE_BYTES as u64);
     }
@@ -471,15 +578,29 @@ fn directory_entry_bytes_usize(dir: &BackingDir, is_root: bool) -> Result<usize,
 fn render_directory_bytes(
     dir: &BackingDir,
     is_root: bool,
+    root_volume_label: &[u8; VOLUME_LABEL_LEN_BYTES],
     this_cluster: u32,
     parent_cluster_for_dotdot: u32,
     children: &[(ChildKind, u32, usize)],
 ) -> Result<Vec<u8>, LayoutError> {
     let total_bytes = directory_entry_bytes_usize(dir, is_root)?;
     let mut out = Vec::with_capacity(total_bytes);
+    // Epoch timestamps for synthesized "structural" entries
+    // (root volume label, dot, dotdot). Matches the convention
+    // already used for `.`/`..` — these entries describe the
+    // volume's own metadata rather than user-visible files, so
+    // their dates carry no meaningful value to surface. Tesla
+    // never reads or displays them.
     let stamps = Timestamps::epoch();
 
-    if !is_root {
+    if is_root {
+        // D1: the very first entry in the root directory must be
+        // the volume label, mirroring the boot sector's
+        // BS_VolLab. Non-root callers pass a label that is
+        // intentionally ignored here.
+        let entry = synthesize_volume_label_entry(root_volume_label, &stamps);
+        out.extend_from_slice(&entry);
+    } else {
         let dots = synthesize_dot_entries(this_cluster, parent_cluster_for_dotdot, &stamps);
         for entry in &dots {
             out.extend_from_slice(entry);
@@ -578,7 +699,7 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
-    use crate::fs::fat32::directory::ATTR_DIRECTORY;
+    use crate::fs::fat32::directory::{ATTR_DIRECTORY, ATTR_VOLUME_ID};
 
     fn epoch() -> SystemTime {
         SystemTime::UNIX_EPOCH
@@ -607,14 +728,34 @@ mod tests {
         Fat32Geometry::for_volume_size(34 * 1024 * 1024).expect("34 MiB geometry")
     }
 
+    /// Default 11-byte test label used by every layout test that
+    /// doesn't care about D1 specifics. Plain ASCII so it
+    /// satisfies fatgen103 §6.1's character rules.
+    const TEST_LABEL: &[u8] = b"TESTLABEL";
+
+    /// Offset of the very first non-label entry in the root
+    /// directory's cluster bytes. fatgen103 §6.1 reserves the
+    /// first 32-byte slot for the volume label (D1); regular
+    /// child entries follow immediately after.
+    const ROOT_FIRST_CHILD_OFFSET: usize = DIR_ENTRY_SIZE_BYTES;
+
+    fn plan(geo: &Fat32Geometry, tree: &BackingTree) -> Fat32Layout {
+        Fat32Layout::plan(geo, TEST_LABEL, tree).expect("layout plans with TEST_LABEL")
+    }
+
     // ── Sizing ────────────────────────────────────────────────────
 
     #[test]
-    fn root_with_no_children_has_zero_entry_bytes() {
+    fn root_with_no_children_has_one_volume_label_entry() {
         let tree = BackingTree {
             root: empty_dir(""),
         };
-        assert_eq!(directory_entry_bytes(&tree.root, true).unwrap(), 0);
+        // D1: even with no files, the root must reserve 32
+        // bytes for the volume label entry.
+        assert_eq!(
+            directory_entry_bytes(&tree.root, true).unwrap(),
+            DIR_ENTRY_SIZE_BYTES as u64,
+        );
     }
 
     #[test]
@@ -651,15 +792,19 @@ mod tests {
             root: empty_dir(""),
         };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
         assert_eq!(layout.chains().len(), 1);
         let root = layout.chains().as_slice()[0];
         assert_eq!(root.first_cluster, ROOT_DIRECTORY_CLUSTER);
         assert_eq!(root.cluster_count, 1);
-        // Root cluster is entirely zero (no entries).
+        // Root cluster starts with the 32-byte volume label
+        // entry; everything past the first 32 bytes is zero
+        // (end-of-directory marker).
         let bytes = layout.dir_clusters().get(&ROOT_DIRECTORY_CLUSTER).unwrap();
         assert_eq!(bytes.len(), geo.bytes_per_cluster() as usize);
-        assert!(bytes.iter().all(|&b| b == 0));
+        assert_eq!(&bytes[0x00..0x0B], b"TESTLABEL  ");
+        assert_eq!(bytes[0x0B], ATTR_VOLUME_ID);
+        assert!(bytes[ROOT_FIRST_CHILD_OFFSET..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -668,21 +813,25 @@ mod tests {
         root.files.push(file("hi.txt", 0));
         let tree = BackingTree { root };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
         let root_bytes = layout.dir_clusters().get(&ROOT_DIRECTORY_CLUSTER).unwrap();
-        // First 32 bytes = LFN entry; next 32 bytes = SFN entry.
-        // LFN entry's first byte = ordinal | LAST_LONG_ENTRY (0x40)
-        // since 1 entry covers the whole name.
-        assert_eq!(root_bytes[0], 0x41, "ordinal 1 + LAST_LONG_ENTRY bit");
-        assert_eq!(root_bytes[11], 0x0F, "LFN attribute byte");
-        // SFN entry at offset 32: first 11 bytes = synthetic SFN.
-        assert_eq!(&root_bytes[32..43], b"F000001    ");
-        assert_eq!(root_bytes[43], FileAttributes::archive().raw());
+        // Root cluster layout after D1:
+        //   [0..32]   volume label entry
+        //   [32..64]  LFN entry for "hi.txt"
+        //   [64..96]  SFN entry
+        //   [96..]    end-of-directory zero fill
+        let lfn = ROOT_FIRST_CHILD_OFFSET;
+        let sfn = lfn + DIR_ENTRY_SIZE_BYTES;
+        assert_eq!(root_bytes[lfn], 0x41, "ordinal 1 + LAST_LONG_ENTRY bit");
+        assert_eq!(root_bytes[lfn + 11], 0x0F, "LFN attribute byte");
+        // SFN entry: first 11 bytes = synthetic SFN.
+        assert_eq!(&root_bytes[sfn..sfn + 11], b"F000001    ");
+        assert_eq!(root_bytes[sfn + 11], FileAttributes::archive().raw());
         // The 32-byte cell after SFN is end-of-dir (0x00 first byte).
-        assert_eq!(root_bytes[64], 0x00);
+        assert_eq!(root_bytes[sfn + DIR_ENTRY_SIZE_BYTES], 0x00);
         // File is empty → first_cluster fields are 0.
-        let clus_hi = u16::from_le_bytes(root_bytes[52..54].try_into().unwrap());
-        let clus_lo = u16::from_le_bytes(root_bytes[58..60].try_into().unwrap());
+        let clus_hi = u16::from_le_bytes(root_bytes[sfn + 20..sfn + 22].try_into().unwrap());
+        let clus_lo = u16::from_le_bytes(root_bytes[sfn + 26..sfn + 28].try_into().unwrap());
         assert_eq!(clus_hi, 0);
         assert_eq!(clus_lo, 0);
     }
@@ -697,7 +846,7 @@ mod tests {
         let geo = Fat32Geometry::for_volume_size(64 * 1024 * 1024 * 1024).expect("64 GiB geometry");
         // At 64 GiB, sectors_per_cluster = 64 → 32 KiB
         // clusters → 10 KiB fits in 1 cluster.
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
         // 2 chains: root cluster + file cluster.
         assert_eq!(layout.chains().len(), 2);
         assert_eq!(layout.files().len(), 1);
@@ -713,10 +862,11 @@ mod tests {
         root.subdirs.push(empty_dir("sub"));
         let tree = BackingTree { root };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
         // root=2, sub=3.
         let sub_bytes = layout.dir_clusters().get(&3).unwrap();
-        // "." entry: bytes 0..11 = ". " then 9 spaces.
+        // Subdir clusters carry "." and ".." at offset 0 (D1
+        // does NOT add a label entry to non-root dirs).
         assert_eq!(sub_bytes[0], b'.');
         assert_eq!(&sub_bytes[1..11], b"          ");
         // Attr byte: directory.
@@ -741,7 +891,7 @@ mod tests {
         root.subdirs.push(middle);
         let tree = BackingTree { root };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
         // root=2, middle=3, child=4.
         let child_bytes = layout.dir_clusters().get(&4).unwrap();
         // ".." entry at offset 32 — clus_lo should be 3 (middle), not 0.
@@ -757,10 +907,11 @@ mod tests {
         root.files.push(file("a.txt", 0));
         let tree = BackingTree { root };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
+        // Read past the volume-label entry; the LFN+SFN for
+        // "a.txt" sit immediately after.
         let mut buf = vec![0u8; 64];
-        layout.read_cluster_bytes(ROOT_DIRECTORY_CLUSTER, 0, &mut buf);
-        // Same first byte we asserted above.
+        layout.read_cluster_bytes(ROOT_DIRECTORY_CLUSTER, ROOT_FIRST_CHILD_OFFSET, &mut buf);
         assert_eq!(buf[0], 0x41);
         assert_eq!(buf[32..43], *b"F000001    ");
     }
@@ -771,10 +922,14 @@ mod tests {
         root.files.push(file("a.txt", 0));
         let tree = BackingTree { root };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
         let mut buf = vec![0u8; 11];
-        // Offset 32 = SFN field of first SFN entry.
-        layout.read_cluster_bytes(ROOT_DIRECTORY_CLUSTER, 32, &mut buf);
+        // Offset = label(32) + LFN(32) = 64; that's the SFN field.
+        layout.read_cluster_bytes(
+            ROOT_DIRECTORY_CLUSTER,
+            ROOT_FIRST_CHILD_OFFSET + DIR_ENTRY_SIZE_BYTES,
+            &mut buf,
+        );
         assert_eq!(&buf[..], b"F000001    ");
     }
 
@@ -784,7 +939,7 @@ mod tests {
             root: empty_dir(""),
         };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
         let mut buf = [0xAAu8; 32];
         layout.read_cluster_bytes(9999, 0, &mut buf);
         assert!(buf.iter().all(|&b| b == 0));
@@ -796,12 +951,17 @@ mod tests {
         root.files.push(file("a.txt", 0));
         let tree = BackingTree { root };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
-        // The dir has 2 entries (LFN + SFN = 64 bytes); the
-        // cluster is bytes_per_cluster long, so a read at
-        // offset 64 should yield zeros (end-of-dir region).
+        let layout = plan(&geo, &tree);
+        // The root dir has 3 entries (label + LFN + SFN = 96
+        // bytes after D1); the cluster is bytes_per_cluster
+        // long, so a read at offset 96 should yield zeros
+        // (end-of-dir region).
         let mut buf = vec![0xAAu8; 16];
-        layout.read_cluster_bytes(ROOT_DIRECTORY_CLUSTER, 64, &mut buf);
+        layout.read_cluster_bytes(
+            ROOT_DIRECTORY_CLUSTER,
+            ROOT_FIRST_CHILD_OFFSET + 2 * DIR_ENTRY_SIZE_BYTES,
+            &mut buf,
+        );
         assert!(buf.iter().all(|&b| b == 0));
     }
 
@@ -813,7 +973,7 @@ mod tests {
         root.files.push(file("huge.bin", u64::from(u32::MAX) + 1));
         let tree = BackingTree { root };
         let geo = Fat32Geometry::for_volume_size(16 * 1024 * 1024 * 1024).expect("16 GiB geometry");
-        let err = Fat32Layout::plan(&geo, &tree).unwrap_err();
+        let err = Fat32Layout::plan(&geo, TEST_LABEL, &tree).unwrap_err();
         match err {
             LayoutError::FileTooLarge { size_bytes, .. } => {
                 assert_eq!(size_bytes, u64::from(u32::MAX) + 1);
@@ -832,11 +992,141 @@ mod tests {
         }
         let tree = BackingTree { root };
         let geo = small_geometry();
-        let err = Fat32Layout::plan(&geo, &tree).unwrap_err();
+        let err = Fat32Layout::plan(&geo, TEST_LABEL, &tree).unwrap_err();
         assert!(matches!(
             err,
             LayoutError::Alloc(AllocError::OutOfClusters { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_label_with_lowercase_ascii() {
+        let tree = BackingTree {
+            root: empty_dir(""),
+        };
+        let geo = small_geometry();
+        let err = Fat32Layout::plan(&geo, b"lowercase", &tree)
+            .expect_err("lowercase label must be rejected");
+        assert!(matches!(err, LayoutError::Label(_)));
+    }
+
+    #[test]
+    fn rejects_label_longer_than_eleven_bytes() {
+        let tree = BackingTree {
+            root: empty_dir(""),
+        };
+        let geo = small_geometry();
+        let err = Fat32Layout::plan(&geo, b"TOOLONGLABEL", &tree)
+            .expect_err("12-byte label must be rejected");
+        assert!(matches!(err, LayoutError::Label(_)));
+    }
+
+    // ── D1: root volume-label entry ────────────────────────────────
+
+    #[test]
+    fn root_directory_first_entry_is_volume_label() {
+        let tree = BackingTree {
+            root: empty_dir(""),
+        };
+        let geo = small_geometry();
+        let layout = Fat32Layout::plan(&geo, b"TESLACAM", &tree).expect("planned");
+        let root_bytes = layout.dir_clusters().get(&ROOT_DIRECTORY_CLUSTER).unwrap();
+        // Name field: "TESLACAM" right-padded with spaces.
+        assert_eq!(&root_bytes[0x00..0x0B], b"TESLACAM   ");
+        // Attr byte: ATTR_VOLUME_ID, alone.
+        assert_eq!(root_bytes[0x0B], ATTR_VOLUME_ID);
+        // FstClusHI / FstClusLO / FileSize MUST be zero per
+        // fatgen103 §6.1.
+        assert_eq!(
+            u16::from_le_bytes(root_bytes[0x14..0x16].try_into().unwrap()),
+            0,
+            "FstClusHI must be 0 on volume label entry",
+        );
+        assert_eq!(
+            u16::from_le_bytes(root_bytes[0x1A..0x1C].try_into().unwrap()),
+            0,
+            "FstClusLO must be 0 on volume label entry",
+        );
+        assert_eq!(
+            u32::from_le_bytes(root_bytes[0x1C..0x20].try_into().unwrap()),
+            0,
+            "FileSize must be 0 on volume label entry",
+        );
+    }
+
+    #[test]
+    fn root_volume_label_matches_boot_sector_label() {
+        // The label written into the root entry must equal the
+        // padded form the boot sector would write — this is the
+        // exact agreement fsck.vfat checks for D1.
+        let tree = BackingTree {
+            root: empty_dir(""),
+        };
+        let geo = small_geometry();
+        let layout = Fat32Layout::plan(&geo, b"BACKUP", &tree).expect("planned");
+        let expected = pad_volume_label(b"BACKUP").expect("valid label");
+        let root_bytes = layout.dir_clusters().get(&ROOT_DIRECTORY_CLUSTER).unwrap();
+        assert_eq!(&root_bytes[0x00..0x0B], &expected[..]);
+    }
+
+    // ── D2: free cluster accounting ────────────────────────────────
+
+    #[test]
+    fn free_cluster_count_equals_data_clusters_minus_used() {
+        let mut root = empty_dir("");
+        root.subdirs.push(empty_dir("sub"));
+        let tree = BackingTree { root };
+        let geo = small_geometry();
+        let layout = plan(&geo, &tree);
+        let total = geo.data_cluster_count();
+        let used: u32 = layout
+            .chains()
+            .as_slice()
+            .iter()
+            .map(|a| a.cluster_count)
+            .sum();
+        assert_eq!(used, 2, "root + sub each take 1 cluster");
+        assert_eq!(layout.free_cluster_count(), total - used);
+    }
+
+    #[test]
+    fn free_cluster_count_uses_zero_when_volume_full() {
+        // We can't realistically allocate 1M+ clusters in a
+        // unit test, but we can verify the saturating-subtract
+        // behaves: an empty tree on a small volume should leave
+        // free = data_count - 1.
+        let tree = BackingTree {
+            root: empty_dir(""),
+        };
+        let geo = small_geometry();
+        let layout = plan(&geo, &tree);
+        assert_eq!(
+            layout.free_cluster_count(),
+            geo.data_cluster_count() - 1,
+            "only root cluster is used",
+        );
+    }
+
+    #[test]
+    fn next_free_cluster_hint_points_one_past_last_allocation() {
+        let mut root = empty_dir("");
+        root.subdirs.push(empty_dir("sub")); // takes cluster 3
+        let tree = BackingTree { root };
+        let geo = small_geometry();
+        let layout = plan(&geo, &tree);
+        // Root@2, sub@3 → allocator's next is 4.
+        assert_eq!(layout.next_free_cluster_hint(), Some(4));
+    }
+
+    #[test]
+    fn next_free_cluster_hint_is_some_for_typical_volume() {
+        let tree = BackingTree {
+            root: empty_dir(""),
+        };
+        let geo = small_geometry();
+        let layout = plan(&geo, &tree);
+        // 34 MiB has many free clusters; root@2 → next@3.
+        assert_eq!(layout.next_free_cluster_hint(), Some(3));
     }
 
     // ── Integration with FatTable ─────────────────────────────────
@@ -849,7 +1139,7 @@ mod tests {
         root.files.push(file("hi.txt", 0));
         let tree = BackingTree { root };
         let geo = small_geometry();
-        let layout = Fat32Layout::plan(&geo, &tree).unwrap();
+        let layout = plan(&geo, &tree);
         let table = FatTable::build(&geo, layout.chains()).expect("fat table builds");
         let entries = table.entries();
         // 2 chains, each 1 cluster: root (cluster 2) + sub

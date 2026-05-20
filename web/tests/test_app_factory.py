@@ -85,11 +85,16 @@ def test_healthz_returns_json_ok(client: FlaskClient) -> None:
     assert resp.get_json() == {"status": "ok"}
 
 
-def test_tile_cache_sw_404_when_file_missing(client: FlaskClient) -> None:
-    # Default Flask static folder doesn't contain `tile-cache-sw.js`
-    # yet — Phase 5.3 lands the real asset. Until then the route
-    # should 404 cleanly, not crash.
-    resp = client.get("/tile-cache-sw.js")
+def test_tile_cache_sw_404_when_file_missing(tmp_path: Path) -> None:
+    # Phase 5.3 lands the real ``tile-cache-sw.js`` in the package's
+    # static dir, so to exercise the missing-file branch we must
+    # point Flask at an empty static folder explicitly.
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    cfg = _make_config()
+    app = create_app(cfg)
+    app.static_folder = str(static_dir)
+    resp = app.test_client().get("/tile-cache-sw.js")
     assert resp.status_code == 404
 
 

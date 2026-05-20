@@ -34,8 +34,15 @@
 //!   dir-entry synthesizers (Phases 2.17 / 2.18). The walker
 //!   that fills a `BackingTree` from `std::fs` lives in
 //!   `teslafat::backing_walker` (Phase 2.15 second deliverable).
+//! * [`cluster_layout`] — Phase 2.16 — `ClusterAllocator` that
+//!   hands out contiguous cluster ranges, `Allocation`
+//!   value-type, and `AllocatedChains` which implements
+//!   `DirTreeBackend` so the layout drops straight into
+//!   `FatTable::build`. FS-agnostic; the per-FS code drives the
+//!   allocator with FS-specific dir-entry sizing.
 
 pub mod backing_tree;
+pub mod cluster_layout;
 pub mod exfat;
 pub mod fat32;
 pub mod geometry;

@@ -28,6 +28,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Final
 
 ENV_CONFIG_PATH: str = "TESLAUSB_WEB_CONFIG"
 DEFAULT_CONFIG_PATH: Path = Path("/etc/teslausb/teslausb-web.toml")
@@ -43,6 +44,14 @@ _DEFAULT_BACKING_ROOT: Path = Path("/srv/teslausb")
 _DEFAULT_DB_PATH: Path = Path("/var/lib/teslausb/index.sqlite3")
 _DEFAULT_IPC_SOCKET: Path = Path("/run/teslausb/worker.sock")
 _DEFAULT_CACHE_SCRIPT: Path = Path("/usr/local/bin/tesla_cache_invalidate.sh")
+_DEFAULT_LOCK_CHIME_FILENAME: Final[str] = "LockChime.wav"
+_DEFAULT_CHIMES_FOLDER: Final[str] = "Chimes"
+_DEFAULT_MAX_LOCK_CHIME_SIZE: Final[int] = 1_048_576
+_DEFAULT_MAX_LOCK_CHIME_DURATION: Final[int] = 5
+_DEFAULT_MIN_LOCK_CHIME_DURATION: Final[int] = 1
+_DEFAULT_SPEED_RANGE_MIN: Final[float] = 0.5
+_DEFAULT_SPEED_RANGE_MAX: Final[float] = 2.0
+_DEFAULT_SPEED_STEP: Final[float] = 0.1
 
 # Highest valid TCP/UDP port number per RFC 793. Named to silence
 # the magic-value lint and document intent at the call site.
@@ -138,12 +147,44 @@ class FeaturesSection:
 
 
 @dataclass(frozen=True, slots=True)
+class ChimesSection:
+    """Lock-chime audio constraints and folder naming."""
+
+    lock_chime_filename: str = _DEFAULT_LOCK_CHIME_FILENAME
+    chimes_folder: str = _DEFAULT_CHIMES_FOLDER
+    max_lock_chime_size: int = _DEFAULT_MAX_LOCK_CHIME_SIZE
+    max_lock_chime_duration: int = _DEFAULT_MAX_LOCK_CHIME_DURATION
+    min_lock_chime_duration: int = _DEFAULT_MIN_LOCK_CHIME_DURATION
+    speed_range_min: float = _DEFAULT_SPEED_RANGE_MIN
+    speed_range_max: float = _DEFAULT_SPEED_RANGE_MAX
+    speed_step: float = _DEFAULT_SPEED_STEP
+
+    def validate(self) -> None:
+        if not self.lock_chime_filename:
+            raise ConfigError(None, "[chimes] lock_chime_filename must be non-empty")
+        if not self.lock_chime_filename.lower().endswith(".wav"):
+            raise ConfigError(None, "[chimes] lock_chime_filename must end with .wav")
+        if self.max_lock_chime_size <= 0:
+            raise ConfigError(None, "[chimes] max_lock_chime_size must be > 0")
+        if self.min_lock_chime_duration >= self.max_lock_chime_duration:
+            raise ConfigError(
+                None,
+                "[chimes] min_lock_chime_duration must be < max_lock_chime_duration",
+            )
+        if self.speed_range_min >= self.speed_range_max:
+            raise ConfigError(None, "[chimes] speed_range_min must be < speed_range_max")
+        if self.speed_step <= 0:
+            raise ConfigError(None, "[chimes] speed_step must be > 0")
+
+
+@dataclass(frozen=True, slots=True)
 class WebConfig:
     """Root config dataclass — what the rest of the app sees."""
 
     web: WebSection = field(default_factory=WebSection)
     paths: PathsSection = field(default_factory=PathsSection)
     features: FeaturesSection = field(default_factory=FeaturesSection)
+    chimes: ChimesSection = field(default_factory=ChimesSection)
     source_path: Path | None = None
 
     def validate(self) -> None:
@@ -151,6 +192,7 @@ class WebConfig:
         try:
             self.web.validate()
             self.paths.validate()
+            self.chimes.validate()
         except ConfigError as exc:
             raise ConfigError(self.source_path, str(exc).split(": ", 1)[-1]) from exc
 
@@ -166,13 +208,19 @@ def _resolve_config_path(explicit: Path | None) -> Path | None:
     return None
 
 
-def _expect_section(raw: object, name: str, source: Path | None) -> dict[str, object]:
-    if name not in raw:  # type: ignore[operator]
+def _as_mapping(raw: object, source: Path | None) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise ConfigError(source, "top-level TOML document must be a table")
+    return {str(key): value for key, value in raw.items()}
+
+
+def _expect_section(raw: dict[str, object], name: str, source: Path | None) -> dict[str, object]:
+    if name not in raw:
         return {}
-    section = raw[name]  # type: ignore[index]
+    section = raw[name]
     if not isinstance(section, dict):
         raise ConfigError(source, f"section [{name}] must be a table, got {type(section).__name__}")
-    return section
+    return {str(key): value for key, value in section.items()}
 
 
 def _coerce_int(section: dict[str, object], key: str, default: int, source: Path | None) -> int:
@@ -207,6 +255,20 @@ def _coerce_str(section: dict[str, object], key: str, default: str, source: Path
     return value
 
 
+def _coerce_float(
+    section: dict[str, object],
+    key: str,
+    default: float,
+    source: Path | None,
+) -> float:
+    if key not in section:
+        return default
+    value = section[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(source, f"{key} must be a float, got {type(value).__name__}")
+    return float(value)
+
+
 def _coerce_path(section: dict[str, object], key: str, default: Path, source: Path | None) -> Path:
     if key not in section:
         return default
@@ -214,6 +276,97 @@ def _coerce_path(section: dict[str, object], key: str, default: Path, source: Pa
     if not isinstance(value, str):
         raise ConfigError(source, f"{key} must be a string path, got {type(value).__name__}")
     return Path(value)
+
+
+def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
+    web_raw = _expect_section(raw, "web", source)
+    paths_raw = _expect_section(raw, "paths", source)
+    features_raw = _expect_section(raw, "features", source)
+    chimes_raw = _expect_section(raw, "chimes", source)
+
+    web = WebSection(
+        host=_coerce_str(web_raw, "host", _DEFAULT_HOST, source),
+        port=_coerce_int(web_raw, "port", _DEFAULT_PORT, source),
+        secret_key=_coerce_str(web_raw, "secret_key", "", source),
+        max_upload_mb=_coerce_int(web_raw, "max_upload_mb", _DEFAULT_MAX_UPLOAD_MB, source),
+        max_chunk_mb=_coerce_int(web_raw, "max_chunk_mb", _DEFAULT_MAX_CHUNK_MB, source),
+    )
+    paths_section = PathsSection(
+        backing_root=_coerce_path(paths_raw, "backing_root", _DEFAULT_BACKING_ROOT, source),
+        db_path=_coerce_path(paths_raw, "db_path", _DEFAULT_DB_PATH, source),
+        ipc_socket=_coerce_path(paths_raw, "ipc_socket", _DEFAULT_IPC_SOCKET, source),
+        cache_invalidate_script=_coerce_path(
+            paths_raw,
+            "cache_invalidate_script",
+            _DEFAULT_CACHE_SCRIPT,
+            source,
+        ),
+    )
+    features = FeaturesSection(
+        music_enabled=_coerce_bool(features_raw, "music_enabled", default=False, source=source),
+        boombox_enabled=_coerce_bool(
+            features_raw,
+            "boombox_enabled",
+            default=False,
+            source=source,
+        ),
+        samba_enabled=_coerce_bool(features_raw, "samba_enabled", default=False, source=source),
+        cloud_archive_enabled=_coerce_bool(
+            features_raw,
+            "cloud_archive_enabled",
+            default=True,
+            source=source,
+        ),
+    )
+    chimes = ChimesSection(
+        lock_chime_filename=_coerce_str(
+            chimes_raw,
+            "lock_chime_filename",
+            _DEFAULT_LOCK_CHIME_FILENAME,
+            source,
+        ),
+        chimes_folder=_coerce_str(chimes_raw, "chimes_folder", _DEFAULT_CHIMES_FOLDER, source),
+        max_lock_chime_size=_coerce_int(
+            chimes_raw,
+            "max_lock_chime_size",
+            _DEFAULT_MAX_LOCK_CHIME_SIZE,
+            source,
+        ),
+        max_lock_chime_duration=_coerce_int(
+            chimes_raw,
+            "max_lock_chime_duration",
+            _DEFAULT_MAX_LOCK_CHIME_DURATION,
+            source,
+        ),
+        min_lock_chime_duration=_coerce_int(
+            chimes_raw,
+            "min_lock_chime_duration",
+            _DEFAULT_MIN_LOCK_CHIME_DURATION,
+            source,
+        ),
+        speed_range_min=_coerce_float(
+            chimes_raw,
+            "speed_range_min",
+            _DEFAULT_SPEED_RANGE_MIN,
+            source,
+        ),
+        speed_range_max=_coerce_float(
+            chimes_raw,
+            "speed_range_max",
+            _DEFAULT_SPEED_RANGE_MAX,
+            source,
+        ),
+        speed_step=_coerce_float(chimes_raw, "speed_step", _DEFAULT_SPEED_STEP, source),
+    )
+    cfg = WebConfig(
+        web=web,
+        paths=paths_section,
+        features=features,
+        chimes=chimes,
+        source_path=source,
+    )
+    cfg.validate()
+    return cfg
 
 
 def load_config(path: Path | None = None, *, allow_defaults: bool = False) -> WebConfig:
@@ -249,49 +402,8 @@ def load_config(path: Path | None = None, *, allow_defaults: bool = False) -> We
 
     try:
         with resolved.open("rb") as fh:
-            raw = tomllib.load(fh)
+            raw = _as_mapping(tomllib.load(fh), resolved)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(resolved, f"TOML parse error: {exc}") from exc
 
-    web_raw = _expect_section(raw, "web", resolved)
-    paths_raw = _expect_section(raw, "paths", resolved)
-    features_raw = _expect_section(raw, "features", resolved)
-
-    web = WebSection(
-        host=_coerce_str(web_raw, "host", _DEFAULT_HOST, resolved),
-        port=_coerce_int(web_raw, "port", _DEFAULT_PORT, resolved),
-        secret_key=_coerce_str(web_raw, "secret_key", "", resolved),
-        max_upload_mb=_coerce_int(web_raw, "max_upload_mb", _DEFAULT_MAX_UPLOAD_MB, resolved),
-        max_chunk_mb=_coerce_int(web_raw, "max_chunk_mb", _DEFAULT_MAX_CHUNK_MB, resolved),
-    )
-    paths_section = PathsSection(
-        backing_root=_coerce_path(paths_raw, "backing_root", _DEFAULT_BACKING_ROOT, resolved),
-        db_path=_coerce_path(paths_raw, "db_path", _DEFAULT_DB_PATH, resolved),
-        ipc_socket=_coerce_path(paths_raw, "ipc_socket", _DEFAULT_IPC_SOCKET, resolved),
-        cache_invalidate_script=_coerce_path(
-            paths_raw,
-            "cache_invalidate_script",
-            _DEFAULT_CACHE_SCRIPT,
-            resolved,
-        ),
-    )
-    features = FeaturesSection(
-        music_enabled=_coerce_bool(features_raw, "music_enabled", default=False, source=resolved),
-        boombox_enabled=_coerce_bool(
-            features_raw,
-            "boombox_enabled",
-            default=False,
-            source=resolved,
-        ),
-        samba_enabled=_coerce_bool(features_raw, "samba_enabled", default=False, source=resolved),
-        cloud_archive_enabled=_coerce_bool(
-            features_raw,
-            "cloud_archive_enabled",
-            default=True,
-            source=resolved,
-        ),
-    )
-
-    cfg = WebConfig(web=web, paths=paths_section, features=features, source_path=resolved)
-    cfg.validate()
-    return cfg
+    return _parse_config(raw, resolved)

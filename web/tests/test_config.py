@@ -10,6 +10,7 @@ import pytest
 from teslausb_web.config import (
     DEFAULT_CONFIG_PATH,
     ENV_CONFIG_PATH,
+    ChimesSection,
     ConfigError,
     WebConfig,
     load_config,
@@ -224,6 +225,58 @@ def test_empty_file_uses_all_defaults(tmp_path: Path) -> None:
     assert cfg.source_path == cfg_file
     assert cfg.web.port == 8080
     assert cfg.paths.backing_root == Path("/srv/teslausb")
+
+
+def test_chimes_defaults_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "chimes_defaults.toml"
+    _write(cfg_file, "[chimes]\n")
+    cfg = load_config(cfg_file)
+    assert cfg.chimes == ChimesSection()
+    assert cfg.chimes.lock_chime_filename == "LockChime.wav"
+    assert cfg.chimes.chimes_folder == "Chimes"
+
+
+def test_invalid_chimes_speed_range_raises(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "bad_chimes_speed.toml"
+    _write(
+        cfg_file,
+        """
+[chimes]
+speed_range_min = 2.0
+speed_range_max = 1.0
+""",
+    )
+    with pytest.raises(ConfigError, match="speed_range_min must be < speed_range_max"):
+        load_config(cfg_file)
+
+
+def test_full_chimes_section_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "full_chimes.toml"
+    _write(
+        cfg_file,
+        """
+[chimes]
+lock_chime_filename = "CustomLock.wav"
+chimes_folder = "CustomChimes"
+max_lock_chime_size = 999999
+max_lock_chime_duration = 4
+min_lock_chime_duration = 1
+speed_range_min = 0.7
+speed_range_max = 1.7
+speed_step = 0.2
+""",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.chimes == ChimesSection(
+        lock_chime_filename="CustomLock.wav",
+        chimes_folder="CustomChimes",
+        max_lock_chime_size=999999,
+        max_lock_chime_duration=4,
+        min_lock_chime_duration=1,
+        speed_range_min=0.7,
+        speed_range_max=1.7,
+        speed_step=0.2,
+    )
 
 
 def test_webconfig_dataclass_is_frozen() -> None:

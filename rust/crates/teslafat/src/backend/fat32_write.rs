@@ -1063,6 +1063,19 @@ impl Fat32WriteState {
                 );
             }
         }
+
+        // Phase 3.5f addendum: overlay file data clusters from
+        // the backing tree via the cluster_map. See
+        // `exfat_write::ExfatWriteState::overlay_read` for the
+        // full rationale.
+        super::exfat_write::overlay_data_clusters_from_cluster_map(
+            offset,
+            buf,
+            &self.cluster_map,
+            data_start_bytes,
+            bpc,
+            self.dir_tree.backing_root(),
+        );
     }
 }
 

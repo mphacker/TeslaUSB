@@ -163,7 +163,7 @@ Target `cybertruckusb.local` (pi). Full results: `~/.copilot/session-state/<sid>
 | 3.2 | `fs::exfat::parse::decode_write` | ✅ `0f5dc78` |
 | 3.3 | `backend::dir_tree` POSIX adapter | ✅ `a23c4e2` |
 | 3.4 | `cluster_map` extent-based | ✅ `6cbfb5c` |
-| 3.5 | Wire `synth::write` integration test | ✅ `895c75c` (3.5a `9077357` + 3.5b `f6c3a8a` + 3.5c `a6e58d6` + 3.5d `d37d57c` + 3.5e `895c75c` + 3.5f `089342f`) |
+| 3.5 | Wire `synth::write` integration test | ✅ `895c75c` (3.5a `9077357` + 3.5b `f6c3a8a` + 3.5c `a6e58d6` + 3.5d `d37d57c` + 3.5e `895c75c` + 3.5f `089342f` + 3.5g `<pending>`) |
 | 3.6 | Power-cut harness | ✅ `b3437d2` |
 
 **Phase 3.5f (`089342f`):** synth read overlay + Bug H3-1
@@ -198,6 +198,55 @@ regression tests (`growing_extent_replaces_stale_chain_h3_1`,
 `overlay_read_returns_kernel_written_fat_and_dir_bytes_h3_2`),
 +2 fat32_write H3 regression tests (same names). Workspace
 total now 1010 pass / 0 fail. All gates green.
+
+**Phase 3.5g (pending commit):** Bug H3-2 part 2 — allocation
+bitmap + data-cluster overlay. The Phase 3.5f overlay surfaced
+FAT entries and directory cluster bytes the kernel wrote, but
+left two gaps that re-broke the H3 smoke for files ≥ 2 MB
+(verified breakpoint between 1 MB and 2 MB on hardware
+2026-05-20):
+
+- **Data-cluster overlay (uncommitted addendum to 3.5f):** new
+  files' DATA bytes were not in `SynthBackend.file_extents`
+  (that snapshot is captured at startup), so a post-remount
+  read of the file's data clusters returned zeros even though
+  the directory entry was visible. Added
+  `overlay_data_clusters_from_cluster_map` which, for every
+  extent in `cluster_map` overlapping the read range, opens
+  the backing file and reads the overlapping bytes into
+  `read_buf`. Same helper used by both write states.
+- **Allocation bitmap overlay (Phase 3.5g proper):** the
+  kernel writes to the allocation bitmap clusters (in the
+  data region) to mark new clusters as allocated. Pre-3.5g
+  these writes landed in `pending_data` and were silently
+  dropped because the bitmap clusters aren't in `cluster_map`
+  (the bitmap is part of synth's metadata, not a user file).
+  On remount, the synth re-rendered the bitmap with only
+  the startup-time files marked allocated. The Linux exFAT
+  driver rejected the resulting dir-entry-vs-bitmap
+  inconsistency (file claims clusters allocated, bitmap says
+  free) with EIO on `stat` — observed as `ls -? ? ?` +
+  "Input/output error" on every file ≥ 16 clusters. Fix:
+  new `ExfatWriteState::with_allocation_bitmap` builder
+  attaches a `bitmap_buf: Vec<u8>` + `dirty_bitmap:
+  DirtyByteMap` sized to the bitmap stream; new fast path in
+  `apply_data_cluster_write` routes bitmap-region writes
+  into the buffer + marks dirty; `overlay_read` surfaces
+  the dirty bytes onto subsequent reads of the bitmap
+  region.
+
+Hardware re-test on `cybertruckusb.local` 2026-05-20:
+- 4 KB, 1 MB, 2 MB, 10 MB, 50 MB files all round-trip
+  byte-identical after umount + remount (pre-3.5g: ≥ 2 MB
+  reproduced `?????????` EIO every time).
+- `fsck.exfat -n /dev/nbd0` → "clean. directories 3,
+  files 5" after writing 50 MB + 2 MB + 4 KB files.
+- Daemon journal: zero WARN/ERROR entries across all five
+  size sweeps.
+
+Tests: +1 regression test
+(`overlay_read_returns_kernel_written_bitmap_bytes_h3_2_part_2`).
+Workspace total now 1011 pass / 0 fail. All gates green.
 
 ## Phase H3 — Write-side on hardware
 

@@ -439,7 +439,10 @@ impl SynthBackend {
             .map_err(SynthBackendError::ExfatSynth)?;
         let dir_tree =
             DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
-        let exfat_write = ExfatWriteState::new(geometry.clone(), dir_tree, &pre_existing_extents);
+        let bitmap_first_cluster = synth.bitmap_first_cluster();
+        let bitmap_cluster_count = synth.bitmap_cluster_count();
+        let exfat_write = ExfatWriteState::new(geometry.clone(), dir_tree, &pre_existing_extents)
+            .with_allocation_bitmap(bitmap_first_cluster, bitmap_cluster_count);
         Ok(Self {
             inner: SynthInner::Exfat(Box::new(synth)),
             file_extents,

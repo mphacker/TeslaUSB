@@ -64,5 +64,15 @@ inotify = "0.10"
 # allow on every libc call. See ADR-0012.
 rustix = { version = "0.38", features = ["fs"] }
 
+[dependencies.tokio]
+version = "1.36"
+# Current-thread reactor + signal + interval + select! macro
+# + Mutex/Notify primitives. The `net` feature is what gates
+# Builder::enable_io / enable_all — signal::unix routes its
+# notifications through the reactor's IO driver. No
+# `rt-multi-thread` — the supervisor runs on a single async
+# thread plus the blocking pool. See ADR-0013.
+features = ["rt", "macros", "signal", "time", "sync", "net"]
+
 [dev-dependencies]
 tempfile = "3.10"

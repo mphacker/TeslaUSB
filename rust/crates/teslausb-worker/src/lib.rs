@@ -28,4 +28,5 @@ pub mod config;
 pub mod indexer;
 pub mod sei;
 pub mod store;
+pub mod supervisor;
 pub mod watcher;

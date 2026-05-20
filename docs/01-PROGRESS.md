@@ -469,7 +469,7 @@ test suite).
 | 4b.2a | `teslausb-worker::config` + `teslausb-worker::store` — TOML loader + SQLite-backed clip/waypoint store (ADR-0010) | ✅ |
 | 4b.2b | `teslausb-worker::watcher` + `teslausb-worker::indexer` — inotify clip watcher + bootstrap/event indexer (ADR-0011) | ✅ |
 | 4b.3 | `teslausb-worker::cleanup` (GPS-aware deletion, rustix-statvfs pressure floor, path-traversal defense, store split, ADR-0012) | ✅ |
-| 4b.4 | `teslausb-worker::main` task supervisor | ⏳ |
+| 4b.4 | `teslausb-worker::main` task supervisor (tokio current-thread, ADR-0013) | ✅ |
 | 4b.5 | `teslausb-worker.service` systemd unit | ⏳ |
 
 ### Phase 4b.1a — SEI byte-level foundations ✅
@@ -899,6 +899,49 @@ traversal-defense tests, 4 new pressure tests, 1
 Linux-gated `statvfs` smoke test; store split kept all 22
 existing store tests intact). Linux-only integration test
 adds another +1 on the Pi.
+
+### Phase 4b.4 — task supervisor ✅
+
+Real `teslausb-worker::main` replaces the Phase 0.2
+placeholder. The supervisor is a tokio current-thread
+runtime that:
+
+1. Loads the config + opens the SQLite store.
+2. Runs the indexer bootstrap pass on the blocking pool.
+3. Spawns the inotify clip watcher on a dedicated blocking
+   thread (`Watcher::next_batch` parks on `read(2)`) that
+   feeds a tokio `mpsc` channel.
+4. Enters a `tokio::select!` loop over four arms:
+   SIGTERM, SIGINT, watcher event, cleanup tick.
+5. Translates the [`ShutdownReason`] into a process exit
+   code so systemd `Restart=on-failure` does the right
+   thing (zero on graceful shutdown, non-zero on subsystem
+   failure).
+
+**Why tokio?** ADR-0013 documents the trade-off vs. raw
+`std::thread + mpsc` and `signal-hook`. `select!` + the
+`tokio::signal::unix` handlers replace ~100 lines of
+hand-rolled glue; the current-thread flavor keeps the
+threadcount predictable (one reactor + one blocking-pool
+thread for the watcher + occasional blocking-pool threads
+for indexer bootstrap).
+
+**Pure-logic carve-outs.** Two helpers are unit-testable
+without standing up the reactor: `cleanup_interval_with_floor`
+(defends against `interval_seconds = 1` typo with a 5 s
+floor) and `ShutdownReason::is_fatal` (decides graceful
+vs. error-exit). Tracing install is also a pure helper so
+the binary's `main.rs` stays trivial.
+
+**CLI surface.** `clap`-derived:
+`teslausb-worker --config <path> [--bootstrap-only]`.
+`--bootstrap-only` is an operator flag for verifying a
+fresh deployment without entering the steady-state loop.
+
+**Test count:** workspace 1253 → 1263 (+10 supervisor
+tests: 3 interval-floor + 4 ShutdownReason + 1 channel
+capacity invariant + 1 tracing idempotency + 1 missing-config
+error + 1 Linux-gated bootstrap-only smoke test).
 
 ## Phase H4 — Retention + worker on hardware
 

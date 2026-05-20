@@ -17,14 +17,20 @@
 //!   [`teslausb_core::fs::fat32::parse::DecodedWrite`] /
 //!   [`teslausb_core::fs::exfat::parse::DecodedWrite`]) onto the
 //!   backing tree with `.partial`-suffix atomicity. Phase 3.5
-//!   will wire it into `SynthBackend::write`.
+//!   wires it into `SynthBackend::write` via [`fat32_write`].
+//! * [`fat32_write`] — `Fat32WriteState`: Phase 3.5c state machine
+//!   that orchestrates `decode_write` → directory-entry decoding
+//!   → FAT chain walking → cluster-map insertion → `dir_tree`
+//!   routing, with crash-safe finalize on flush.
 //!
 //! [`BlockBackend`]: teslausb_core::backend::BlockBackend
 
 pub mod dir_tree;
+pub mod fat32_write;
 pub mod synth;
 pub mod zero;
 
 pub use dir_tree::{DirTreeError, DirTreeWriter, PARTIAL_SUFFIX};
+pub use fat32_write::{Fat32WriteError, Fat32WriteState};
 pub use synth::{SynthBackend, SynthBackendError};
 pub use zero::ZeroBackend;

@@ -70,6 +70,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use teslausb_core::backend::{BackendError, BackendResult, BlockBackend, WriteFlags, check_bounds};
 use teslausb_core::fs::backing_tree::BackingTree;
@@ -85,6 +86,8 @@ use teslausb_core::fs::fat32::layout::{Fat32Layout, LayoutError as Fat32LayoutEr
 use teslausb_core::fs::fat32::synth::{Fat32Synth, Fat32SynthError};
 use teslausb_core::fs::geometry::{Geometry, GeometryError};
 
+use crate::backend::dir_tree::{DirTreeError, DirTreeWriter};
+use crate::backend::fat32_write::Fat32WriteState;
 use crate::backing_walker::{WalkError, walk};
 use crate::config::{Config, FsType};
 
@@ -126,6 +129,10 @@ pub enum SynthBackendError {
         /// encodes to.
         encoded_len: usize,
     },
+    /// Constructing the [`DirTreeWriter`] (Phase 3.5c write
+    /// path) failed — typically because `backing_root` is not a
+    /// directory.
+    DirTree(DirTreeError),
 }
 
 impl fmt::Display for SynthBackendError {
@@ -142,6 +149,7 @@ impl fmt::Display for SynthBackendError {
                 "volume_label encodes to {encoded_len} UTF-16 code units; \
                  exFAT allows at most 11",
             ),
+            Self::DirTree(err) => write!(f, "building DirTreeWriter: {err}"),
         }
     }
 }
@@ -156,6 +164,7 @@ impl std::error::Error for SynthBackendError {
             Self::ExfatLayout(err) => Some(err),
             Self::ExfatSynth(err) => Some(err),
             Self::LabelTooLong { .. } => None,
+            Self::DirTree(err) => Some(err),
         }
     }
 }
@@ -196,6 +205,10 @@ pub struct SynthBackend {
     /// allocator hands out disjoint extents.
     file_extents: Vec<FileExtent>,
     size: u64,
+    /// Phase 3.5c write-side state. `Some` for FAT32, `None`
+    /// for `exFAT` (where writes still return `PermissionDenied`
+    /// — exFAT write support is deferred to Phase 3.5d).
+    fat32_write: Option<Mutex<Fat32WriteState>>,
 }
 
 enum SynthInner {
@@ -213,6 +226,7 @@ impl fmt::Debug for SynthBackend {
             .field("fs_type", &kind)
             .field("size", &self.size)
             .field("file_count", &self.file_extents.len())
+            .field("writable", &self.fat32_write.is_some())
             .finish()
     }
 }
@@ -259,6 +273,41 @@ impl SynthBackend {
             first_data_byte,
             bytes_per_cluster,
         );
+        // Build pre-existing extents for the Phase 3.5c
+        // write-side cluster map. Skip empty files (no clusters
+        // allocated → nothing to seed); skip files we can't
+        // relativize against the backing root (defensive — every
+        // backing_path is rooted at cfg.backing_root by
+        // construction).
+        let mut pre_existing_extents: Vec<crate::backend::fat32_write::PreExistingExtent> =
+            Vec::new();
+        for f in layout.files() {
+            if f.allocation.is_empty() {
+                continue;
+            }
+            let Ok(relative) = f.backing_path.strip_prefix(&cfg.backing_root) else {
+                tracing::warn!(
+                    backing_path = %f.backing_path.display(),
+                    backing_root = %cfg.backing_root.display(),
+                    "skipping file: backing_path not under backing_root"
+                );
+                continue;
+            };
+            pre_existing_extents.push(crate::backend::fat32_write::PreExistingExtent {
+                first_cluster: f.allocation.first_cluster,
+                cluster_count: f.allocation.cluster_count,
+                first_byte_in_file: 0,
+                file_size_bytes: f.size_bytes,
+                relative_path: relative.to_path_buf(),
+            });
+        }
+        let dir_tree =
+            DirTreeWriter::new(cfg.backing_root.clone()).map_err(SynthBackendError::DirTree)?;
+        let fat32_write = Mutex::new(Fat32WriteState::new(
+            geometry.clone(),
+            dir_tree,
+            &pre_existing_extents,
+        ));
         let synth = Fat32Synth::new(
             geometry,
             cfg.volume_label.as_bytes(),
@@ -273,6 +322,7 @@ impl SynthBackend {
             inner: SynthInner::Fat32(Box::new(synth)),
             file_extents,
             size: volume_size,
+            fat32_write: Some(fat32_write),
         })
     }
 
@@ -331,6 +381,7 @@ impl SynthBackend {
             inner: SynthInner::Exfat(Box::new(synth)),
             file_extents,
             size: volume_size,
+            fat32_write: None,
         })
     }
 
@@ -405,18 +456,44 @@ impl BlockBackend for SynthBackend {
         self.read_sync(offset, buf)
     }
 
-    async fn write(&self, offset: u64, buf: &[u8], _flags: WriteFlags) -> BackendResult<()> {
+    async fn write(&self, offset: u64, buf: &[u8], flags: WriteFlags) -> BackendResult<()> {
         check_bounds(offset, buf.len(), self.size)?;
-        Err(BackendError::Io(std::io::Error::new(
-            ErrorKind::PermissionDenied,
-            "SynthBackend is read-only (Phase 2); writes are rejected",
-        )))
+        if buf.is_empty() {
+            return Ok(());
+        }
+        // FAT32 write path is shipped (Phase 3.5c); exFAT writes
+        // still return PermissionDenied — exFAT write support is
+        // deferred to Phase 3.5d.
+        let Some(state) = self.fat32_write.as_ref() else {
+            return Err(BackendError::Io(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "exFAT write support not yet implemented (Phase 3.5d)",
+            )));
+        };
+        let mut guard = state
+            .lock()
+            .map_err(|_| BackendError::Io(std::io::Error::other("fat32 write lock poisoned")))?;
+        guard.apply_write(offset, buf)?;
+        if flags.contains(WriteFlags::FUA) {
+            // FUA: durability promise. Finalize touched files
+            // before returning. NBD clients use FUA on
+            // close/sync. Held under the same lock guard as
+            // apply_write so no other writer can interleave.
+            guard.flush()?;
+        }
+        Ok(())
     }
 
     async fn flush(&self) -> BackendResult<()> {
-        // SynthBackend has no persistent state to flush — every
-        // read is synthesised on the fly from the immutable
-        // layout + backing files.
+        // For FAT32: finalize every in-flight `.partial` file.
+        // For exFAT: no write state, nothing to flush.
+        let Some(state) = self.fat32_write.as_ref() else {
+            return Ok(());
+        };
+        let mut guard = state
+            .lock()
+            .map_err(|_| BackendError::Io(std::io::Error::other("fat32 write lock poisoned")))?;
+        guard.flush()?;
         Ok(())
     }
 }
@@ -643,14 +720,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_returns_permission_denied() {
+    async fn fat32_write_to_boot_sector_is_accepted_as_metadata() {
+        // Phase 3.5c: FAT32 writes are now wired through
+        // Fat32WriteState. Writes to metadata regions (boot
+        // sector, FSInfo, reserved) are swallowed silently;
+        // they don't fail. The actual file content survives a
+        // round-trip via tests in `fat32_write::tests` and
+        // tests/synth_write_integration.rs.
         let dir = tempfile::tempdir().unwrap();
         let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Fat32);
+        let backend = SynthBackend::open(&cfg).expect("open ok");
+        backend
+            .write(0, &[0u8; 16], WriteFlags::NONE)
+            .await
+            .expect("metadata write should be accepted");
+    }
+
+    #[tokio::test]
+    async fn exfat_write_returns_permission_denied() {
+        // Phase 3.5d will add exFAT write support. Until then,
+        // exFAT volumes remain read-only and the write contract
+        // is pinned by this test.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = sample_cfg(dir.path().to_path_buf(), FsType::Exfat);
         let backend = SynthBackend::open(&cfg).expect("open ok");
         let err = backend
             .write(0, &[0u8; 16], WriteFlags::NONE)
             .await
-            .expect_err("write should be rejected");
+            .expect_err("exFAT write should be rejected");
         match err {
             BackendError::Io(io_err) => {
                 assert_eq!(io_err.kind(), ErrorKind::PermissionDenied);

@@ -325,6 +325,86 @@ impl DirTreeWriter {
         }
     }
 
+    /// Atomically replace the final filename at `relative_path`
+    /// with the in-flight `.partial` companion, deleting any
+    /// pre-existing target as part of the operation.
+    ///
+    /// Unlike [`Self::finalize`] this *succeeds* when the target
+    /// already exists — Phase 3.5c's `SynthBackend::write` calls
+    /// it on `flush()` for every file Tesla touched, and Tesla
+    /// happily rewrites pre-existing backing-tree files in place
+    /// (e.g. `SentryClips` → `SavedClips` moves do an in-place
+    /// overwrite of the destination event metadata).
+    ///
+    /// The unlink + rename pair is **not atomic** across process
+    /// death between them. Power-cut recovery (Phase 3.6) handles
+    /// the "target deleted, .partial still present" window by
+    /// finalizing the leftover `.partial` on startup.
+    ///
+    /// # Errors
+    ///
+    /// * [`DirTreeError::InvalidRelativePath`] if `relative_path`
+    ///   is absolute or contains a `..` component.
+    /// * [`DirTreeError::NoPartialToFinalize`] if no `.partial`
+    ///   file exists for this path.
+    /// * [`DirTreeError::Io`] for any underlying `std::fs` error.
+    pub fn finalize_with_replace(&self, relative_path: &Path) -> Result<(), DirTreeError> {
+        let partial = self.partial_path(relative_path)?;
+        let target = self.resolve(relative_path)?;
+        if !partial.exists() {
+            return Err(DirTreeError::NoPartialToFinalize { path: target });
+        }
+        if target.exists() {
+            std::fs::remove_file(&target)
+                .map_err(|source| DirTreeError::io(target.clone(), source))?;
+        }
+        std::fs::rename(&partial, &target)
+            .map_err(|source| DirTreeError::io(partial.clone(), source))?;
+        Ok(())
+    }
+
+    /// If `<relative_path>` already exists in the backing tree
+    /// but `<relative_path>.partial` does not yet exist, copy the
+    /// target into the `.partial` so a subsequent
+    /// [`Self::apply_chunk`] preserves the un-touched bytes of
+    /// the original file.
+    ///
+    /// Returns `true` if a copy was performed, `false` if the
+    /// seed was unnecessary (either the target doesn't exist —
+    /// new-file write — or `.partial` already exists — write
+    /// already in flight).
+    ///
+    /// This is the FAT semantic for in-place rewrites: the kernel
+    /// only re-issues the sectors it wants to change, leaving the
+    /// rest of the file's clusters as their previous contents on
+    /// the backing medium. Without this seed, a single-byte
+    /// rewrite of a 10-MiB file would land in a 1-byte `.partial`
+    /// and the eventual [`Self::finalize_with_replace`] would
+    /// silently truncate the file to 1 byte.
+    ///
+    /// # Errors
+    ///
+    /// * [`DirTreeError::InvalidRelativePath`] if `relative_path`
+    ///   is absolute or contains a `..` component.
+    /// * [`DirTreeError::Io`] for any underlying `std::fs` error.
+    pub fn seed_partial_from_target(&self, relative_path: &Path) -> Result<bool, DirTreeError> {
+        let target = self.resolve(relative_path)?;
+        let partial = self.partial_path(relative_path)?;
+        if partial.exists() {
+            return Ok(false);
+        }
+        if !target.exists() {
+            return Ok(false);
+        }
+        if let Some(parent) = partial.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|source| DirTreeError::io(parent.to_path_buf(), source))?;
+        }
+        std::fs::copy(&target, &partial)
+            .map_err(|source| DirTreeError::io(partial.clone(), source))?;
+        Ok(true)
+    }
+
     /// Return the relative paths of every `.partial` file under
     /// the backing root, recursively.
     ///
@@ -611,5 +691,116 @@ mod tests {
         w.finalize(&found[0]).expect("finalize from scan");
         assert!(tmp.path().join("recovery.bin").exists());
         assert!(!tmp.path().join("recovery.bin.partial").exists());
+    }
+
+    #[test]
+    fn finalize_with_replace_succeeds_when_target_exists() {
+        let (tmp, w) = writer();
+        // Pre-seed an existing final file.
+        let rel = PathBuf::from("clip.mp4");
+        std::fs::write(tmp.path().join(&rel), b"OLD_CONTENT").expect("seed");
+        // Write a new partial.
+        w.apply_chunk(&rel, 0, b"NEW_CONTENT_HERE").expect("write");
+        // finalize_with_replace must succeed (vs finalize which
+        // would fail with TargetAlreadyExists).
+        w.finalize_with_replace(&rel).expect("replace");
+        let final_bytes = std::fs::read(tmp.path().join(&rel)).expect("read final");
+        assert_eq!(&final_bytes, b"NEW_CONTENT_HERE");
+        assert!(!tmp.path().join("clip.mp4.partial").exists());
+    }
+
+    #[test]
+    fn finalize_with_replace_succeeds_when_target_absent() {
+        let (tmp, w) = writer();
+        let rel = PathBuf::from("fresh.bin");
+        w.apply_chunk(&rel, 0, b"FRESH").expect("write");
+        w.finalize_with_replace(&rel).expect("finalize fresh");
+        let bytes = std::fs::read(tmp.path().join(&rel)).expect("read fresh");
+        assert_eq!(&bytes, b"FRESH");
+    }
+
+    #[test]
+    fn finalize_with_replace_errors_when_no_partial() {
+        let (tmp, w) = writer();
+        let rel = PathBuf::from("missing.bin");
+        // Pre-existing target, no .partial.
+        std::fs::write(tmp.path().join(&rel), b"existing").expect("seed");
+        let err = w
+            .finalize_with_replace(&rel)
+            .expect_err("must error when no partial");
+        match err {
+            DirTreeError::NoPartialToFinalize { .. } => {}
+            other => panic!("expected NoPartialToFinalize, got {other:?}"),
+        }
+        // The pre-existing target must not be deleted.
+        assert!(tmp.path().join(&rel).exists());
+    }
+
+    #[test]
+    fn finalize_with_replace_rejects_absolute_path() {
+        let (_tmp, w) = writer();
+        let abs = if cfg!(windows) {
+            PathBuf::from(r"C:\evil\path.bin")
+        } else {
+            PathBuf::from("/evil/path.bin")
+        };
+        let err = w
+            .finalize_with_replace(&abs)
+            .expect_err("must reject absolute");
+        assert!(matches!(err, DirTreeError::InvalidRelativePath { .. }));
+    }
+
+    #[test]
+    fn seed_partial_from_target_copies_existing_file() {
+        let (tmp, w) = writer();
+        let rel = PathBuf::from("original.bin");
+        let original = b"ORIGINAL_CONTENTS_THAT_MUST_SURVIVE";
+        std::fs::write(tmp.path().join(&rel), original).expect("seed");
+        let copied = w.seed_partial_from_target(&rel).expect("seed call");
+        assert!(copied, "should report true on first seed");
+        let partial = tmp.path().join("original.bin.partial");
+        assert!(partial.exists());
+        let partial_bytes = std::fs::read(&partial).expect("read partial");
+        assert_eq!(&partial_bytes, original);
+    }
+
+    #[test]
+    fn seed_partial_from_target_is_noop_when_partial_already_exists() {
+        let (tmp, w) = writer();
+        let rel = PathBuf::from("inflight.bin");
+        std::fs::write(tmp.path().join(&rel), b"OLD").expect("seed");
+        // Pretend a write is already in flight.
+        w.apply_chunk(&rel, 0, b"PARTIAL_BYTES").expect("write");
+        let copied = w.seed_partial_from_target(&rel).expect("seed call");
+        assert!(!copied, "should report false: partial already exists");
+        // Partial must be untouched.
+        let partial_bytes =
+            std::fs::read(tmp.path().join("inflight.bin.partial")).expect("read partial");
+        assert_eq!(&partial_bytes, b"PARTIAL_BYTES");
+    }
+
+    #[test]
+    fn seed_partial_from_target_is_noop_when_target_absent() {
+        let (tmp, w) = writer();
+        let rel = PathBuf::from("brandnew.bin");
+        let copied = w.seed_partial_from_target(&rel).expect("seed call");
+        assert!(!copied, "should report false: nothing to seed");
+        assert!(!tmp.path().join("brandnew.bin.partial").exists());
+    }
+
+    #[test]
+    fn seed_then_partial_overwrite_then_finalize_preserves_untouched_bytes() {
+        let (tmp, w) = writer();
+        let rel = PathBuf::from("doc.txt");
+        let original = b"AAAAAAAAAA1234567890BBBBBBBBBB";
+        std::fs::write(tmp.path().join(&rel), original).expect("seed");
+        // Tesla seeds the partial from the original first.
+        w.seed_partial_from_target(&rel).expect("seed");
+        // Then writes only bytes 10..20 (the "1234567890" region).
+        w.apply_chunk(&rel, 10, b"XXXXXXXXXX")
+            .expect("partial write");
+        w.finalize_with_replace(&rel).expect("finalize");
+        let final_bytes = std::fs::read(tmp.path().join(&rel)).expect("read");
+        assert_eq!(&final_bytes, b"AAAAAAAAAAXXXXXXXXXXBBBBBBBBBB");
     }
 }

@@ -139,19 +139,20 @@ Target `cybertruckusb.local` (pi). Full results: `~/.copilot/session-state/<sid>
 | Inc | Step | Status |
 |---|---|---|
 | Preflight | `ExfatSynth::bitmap_cluster_count` + `upcase_cluster_count` accessors (closes 2.18/2.19 charter-review nit) | ✅ (`a13a5c8`) |
+| Preflight-D3 | Shrink exFAT upcase table 131_072 → 256 bytes (ASCII-only) to work around exfatprogs 1.2.9 u16 truncation bug; new ADR-0009; 2 new regression tests; hardware-verified `fsck.exfat -v` clean on H2.6 re-run | ✅ (`f50a454`) |
 | H2.1 | Cross-build `teslafat` aarch64 binary + deploy to `cybertruckusb.local` | ✅ (sha256 device-side matches dev box) |
 | H2.2 | Create tiny synthetic backing tree (3 mp4s, 2 subdirs, 917 KiB total) | ✅ at `/var/teslacam-test/` |
 | H2.3 | Start `teslafat-test@0` pointing at the tree | ✅ (`SynthBackend ready fs_type=fat32 size=4 GiB file_count=3`) |
 | H2.4 | `nbd-client -unix` + `losetup` + `mount -o ro -t vfat` + `cmp` byte-identical readback | ✅ 3/3 files cmp clean, sha256 matches source |
 | H2.5 | `fsck.vfat -v -n /dev/nbd0` clean | ⚠️ structurally clean; 2 advisory nits (D1: missing root-dir volume label entry; D2: FSInfo `free_cluster_count = 0xFFFFFFFF`) |
-| H2.6 | Same in exFAT mode (`fs_type = "exfat"`, 32 GiB) | ⚠️ mounts cleanly + 3/3 cmp clean; **fsck.exfat flags "corrupted upcase table" (D3 — Phase 3 blocker)** |
+| H2.6 | Same in exFAT mode (`fs_type = "exfat"`, 32 GiB) | ✅ (post-`f50a454` re-run): mounts cleanly + 3/3 cmp clean + **`fsck.exfat -v` → `clean. directories 3, files 3`** (was D3 ⚠️ on first H2 run — see Defect D3 below for root cause and fix) |
 | H2.7 | Cold-start wall-clock: synth start → mount succeeds. Target ≤ 1 s. | ⚠️ 1577 ms total (1324 ms systemd unit start + 159 ms NBD attach + 93 ms kernel mount). **Synth itself ~1 ms**; overhead is systemd `ExecStartPre` + Tokio init. Closes naturally via Phase 6 socket activation. |
 | H2.8 | Teardown, SSH alive, WiFi alive | ✅ socket gone, service inactive, /dev/nbd0 detached, SSH+WiFi up, boot `degraded` (baseline) |
 
 **Defects discovered (filed as Phase 3 prerequisites):**
 - **D1 (low)** — FAT32 root-dir volume label entry missing (mirror of boot-sector label per spec).
 - **D2 (low)** — FAT32 FSInfo `free_cluster_count = 0xFFFFFFFF` (valid per spec but fsck-noisy; trivial to compute).
-- **D3 (HIGH)** — exFAT `UpcaseTable` directory-entry `TableChecksum` does not match the CRC32 of the table data. Linux exfat is lenient; Windows + Tesla likely strict. **Blocks any exFAT production until fixed.**
+- **D3 (HIGH)** — ✅ **CLOSED** (commit `f50a454`, hardware-verified 2026-05-20). Root cause was **NOT** ours — `exfatprogs` 1.2.9's `boot_calc_checksum()` has a u16 truncation bug (`size` declared `unsigned short`), so our 131,072-byte upcase table truncated to 0 and fsck's computed checksum stayed 0; the misleading "expected:" label in the error printed our (correct) stored value. Fix: shrink upcase table to 256 bytes (128 ASCII entries U+0000..U+007F) per spec §7.2.4's partial-table allowance. ADR-0009 codifies the decision + the 0xFFFF interop ceiling enforced by const-assert + regression test. `fsck.exfat -v /dev/nbd0` now reports `clean. directories 3, files 3` on hardware (H2.6 re-run). See `hw-d3-fix-journal-20260520.log`.
 
 ## Phase 3 — FS write-side (FAT32 + exFAT)
 

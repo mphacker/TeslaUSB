@@ -463,7 +463,7 @@ test suite).
 | Inc | Deliverable | Status |
 |---|---|---|
 | 4b.1a | `teslausb-core::sei::{nal,mp4}` — AVCC NAL iterator, emulation-prevention strip, BMFF box scanner, mvhd extractor | ✅ |
-| 4b.1b | `teslausb-core::sei::payload` — H.264 SEI envelope + Tesla 0x42-padding/0x69-marker framing | ⏳ |
+| 4b.1b | `teslausb-core::sei::payload` — H.264 SEI envelope + Tesla 0x42-padding/0x69-marker framing | ✅ |
 | 4b.1c | `teslausb-core::sei::tesla` — protobuf demarshal + `SeiMessage` + v1 golden parity | ⏳ |
 | 4b.1z | `teslausb-worker::sei` — mmap adapter + walker that drives 4b.1a/b/c against real files | ⏳ |
 | 4b.2 | `teslausb-worker::indexer` (inotify → SEI → SQLite) | ⏳ |
@@ -518,6 +518,54 @@ and friends. Every error variant and public type carries doc
 comments; every byte-level invariant pinned by tests.
 
 **Test count:** workspace 1048 → 1079 (+31 sei tests).
+
+### Phase 4b.1b — SEI envelope + Tesla framing ✅
+
+`teslausb-core::sei::payload` (~500 LOC, 17 tests). Sits on
+top of 4b.1a's `nal` + `mp4` and turns a raw SEI NAL unit into
+the protobuf-ready byte slice.
+
+* **`extract_tesla_payload(&[u8]) -> Result<Cow<'_, [u8]>, SeiError>`**
+  — the fast path that matches v1's `_decode_sei_nal`
+  byte-for-byte. Skips the first 3 NAL bytes (header + SEI
+  type + size), scans the variable 0x42 padding run, asserts
+  the 0x69 marker, slices `[i+1 .. len-1]` to drop the 0x80
+  RBSP trailing byte, and routes through
+  [`super::nal::strip_emulation_prevention`]. Returns
+  `Cow::Borrowed` when no emulation-prevention triples were
+  present (common); `Cow::Owned` when 0x03 stripping was
+  needed.
+* **`parse_h264_sei_envelope(&[u8]) -> Result<Vec<Sei<'_>>, SeiError>`**
+  — the spec-correct ITU-T H.264 §7.3.2.3.1 envelope decoder
+  for multi-payload SEI NALs. Handles the `0xFF`-chain encoding
+  for both `payload_type` and `payload_size`; rejects overflow
+  and truncated fields with typed errors. Currently unused by
+  the Tesla fast path; provided so future non-Tesla SEI parsing
+  (e.g. cleanup-time CEA-608/708 closed captions) does not
+  have to re-discover the envelope rules.
+* Typed [`SeiError`] variants: `TooShort` (NAL < 7 bytes —
+  tighter than v1's `< 4` lax guard), `UnexpectedEnd`,
+  `NoTeslaPadding`, `MissingProtobufMarker { found }`,
+  `EnvelopeFieldOverflow`. v1 collapses all framing failures
+  to `return None`; the indexer (4b.2) will use the typed
+  errors to distinguish Tesla-vs-non-Tesla SEI in logs.
+* Public constants: `SEI_PAYLOAD_TYPE_USER_DATA_UNREGISTERED`
+  (= 5), `TESLA_PADDING_BYTE` (= 0x42),
+  `TESLA_PROTOBUF_MARKER` (= 0x69), `RBSP_TRAILING_BYTE`
+  (= 0x80). Documented so the indexer can filter without
+  re-importing the envelope decoder.
+
+**Charter compliance:** no `tokio`, no `std::fs`, no syscalls.
+Lints addressed in-place (no deferral): file-scoped
+`#[allow(clippy::indexing_slicing)]` (every index is preceded
+by an explicit `len < N` or `i + N >= len` guard within the
+same arm) + per-test allows for `unwrap_used` / `panic` /
+`expect_used` matching the project pattern from
+`fs::exfat::lazy_load::tests`.
+
+**Test count:** workspace 1079 → 1096 (+17 tests). 31 + 17 + 3
+deny-warning-only doc tests = 51 reported by
+`cargo test -p teslausb-core --lib sei`.
 
 ## Phase H4 — Retention + worker on hardware
 

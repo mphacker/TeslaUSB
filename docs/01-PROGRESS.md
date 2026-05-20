@@ -130,7 +130,7 @@ session-state as `h1-journal.log`.
 | 2.16 | `fs::cluster_layout` planner | ✅ | ✅ | ✅ |
 | 2.17 | FAT32 cluster-content synth from layout | ✅ | ✅ | ✅ |
 | 2.18 | exFAT cluster-content synth from layout | ✅ | ✅ | ✅ |
-| 2.19 | `teslafat::SynthBackend` + `fs_type` config + daemon wiring | ⏳ | ⏳ | ⏳ |
+| 2.19 | `teslafat::SynthBackend` + `fs_type` config + daemon wiring | ✅ | ✅ | ✅ |
 
 ## Phase H2 — Read-only synth on hardware
 

@@ -19,8 +19,13 @@
 //! * [`nbd`] — NBD newstyle handshake (Phase 1.3) +
 //!   transmission-phase dispatch loop (Phase 1.5) backed by
 //!   [`teslausb_core::backend::BlockBackend`].
-//! * [`backend`] — `teslafat`-local [`BlockBackend`] impls; the
-//!   Phase 1.6 placeholder is [`backend::ZeroBackend`].
+//! * [`backend`] — `teslafat`-local [`BlockBackend`] impls.
+//!   `backend::zero::ZeroBackend` (Phase 1.6) is the
+//!   zero-allocation placeholder retained for smoke tests.
+//!   `backend::synth::SynthBackend` (Phase 2.19) is the
+//!   production backend: walks `backing_root`, plans a FAT32
+//!   or `exFAT` layout, and serves byte-level reads from the
+//!   metadata synthesizer + on-demand backing-file overlay.
 //! * [`server`] — accept loop that wraps [`nbd::handshake::run`]
 //!   in a configurable timeout and hands the established
 //!   connection to [`nbd::transmission::run`] (Phase 1.6). The

@@ -20,6 +20,29 @@ use serde::Deserialize;
 
 const VOLUME_SIZE_GB_MIN: u32 = 4;
 const VOLUME_SIZE_GB_MAX: u32 = 2048;
+
+/// Filesystem flavour to synthesize on the NBD export.
+///
+/// Defaults to [`FsType::Fat32`] (Tesla's classic compatibility
+/// target). [`FsType::Exfat`] is supported for very large
+/// volumes where the FAT32 32 KiB cluster size becomes wasteful;
+/// firmware support for exFAT on the dashcam volume varies by
+/// vehicle model and Tesla firmware version, so the default is
+/// conservative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FsType {
+    /// Synthesize a FAT32 volume (default).
+    Fat32,
+    /// Synthesize an `exFAT` volume.
+    Exfat,
+}
+
+impl Default for FsType {
+    fn default() -> Self {
+        Self::Fat32
+    }
+}
 const CLUSTER_SIZE_MIN: u32 = 512;
 const CLUSTER_SIZE_MAX: u32 = 131_072;
 const VOLUME_LABEL_MAX: usize = 11;
@@ -55,6 +78,12 @@ pub struct Config {
     /// in `[CLUSTER_SIZE_MIN, CLUSTER_SIZE_MAX]`.
     #[serde(default)]
     pub cluster_size: Option<u32>,
+
+    /// Filesystem flavour to synthesize on the NBD export.
+    /// Defaults to [`FsType::Fat32`] (Tesla's compatibility
+    /// target). See [`FsType`] for the available options.
+    #[serde(default)]
+    pub fs_type: FsType,
 
     /// Retention policy applied to the synthesised view (Phase 4).
     #[serde(default)]
@@ -213,6 +242,7 @@ volume_size_gb = 64
             volume_size_gb: 64,
             volume_label: DEFAULT_LABEL.to_string(),
             cluster_size: None,
+            fs_type: FsType::default(),
             retention: RetentionConfig::default(),
             nbd: NbdConfig::default(),
         }
@@ -226,6 +256,7 @@ volume_size_gb = 64
         assert_eq!(cfg.volume_size_gb, 64);
         assert_eq!(cfg.volume_label, DEFAULT_LABEL);
         assert_eq!(cfg.cluster_size, None);
+        assert_eq!(cfg.fs_type, FsType::Fat32);
         assert_eq!(
             cfg.retention.recentclips_hide_after_seconds,
             DEFAULT_HIDE_AFTER_S
@@ -244,6 +275,7 @@ backing_root = \"/srv/cam\"
 volume_size_gb = 256
 volume_label = \"DASHCAM\"
 cluster_size = 32768
+fs_type = \"exfat\"
 
 [retention]
 recentclips_hide_after_seconds = 7200
@@ -258,12 +290,36 @@ handshake_timeout_seconds = 45
         assert_eq!(cfg.volume_size_gb, 256);
         assert_eq!(cfg.volume_label, "DASHCAM");
         assert_eq!(cfg.cluster_size, Some(32_768));
+        assert_eq!(cfg.fs_type, FsType::Exfat);
         assert_eq!(cfg.retention.recentclips_hide_after_seconds, 7200);
         assert_eq!(
             cfg.nbd.socket_path,
             PathBuf::from("/run/teslausb/teslafat-0.sock")
         );
         assert_eq!(cfg.nbd.handshake_timeout_seconds, 45);
+    }
+
+    #[test]
+    fn parses_fat32_fs_type_explicitly() {
+        let raw = "\
+backing_root = \"/var/teslacam\"
+volume_size_gb = 64
+fs_type = \"fat32\"
+";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.fs_type, FsType::Fat32);
+    }
+
+    #[test]
+    fn rejects_unknown_fs_type() {
+        let raw = "\
+backing_root = \"/var/teslacam\"
+volume_size_gb = 64
+fs_type = \"ntfs\"
+";
+        let err = toml::from_str::<Config>(raw).unwrap_err();
+        assert!(err.to_string().contains("fs_type"), "got: {err}");
     }
 
     #[test]

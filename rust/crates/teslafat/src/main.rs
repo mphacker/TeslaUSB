@@ -124,14 +124,9 @@ mod unix_serve {
     use tokio::signal::unix::{SignalKind, signal};
     use tracing::{info, warn};
 
-    use teslafat::backend::ZeroBackend;
+    use teslafat::backend::SynthBackend;
     use teslafat::config::Config;
     use teslafat::server;
-
-    /// One GiB in bytes; used to convert `volume_size_gb` (the
-    /// operator-facing knob) into the `u64` size the backend
-    /// advertises in the NBD handshake.
-    const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 
     /// Build the runtime, bind the listener, and run the accept
     /// loop until `SIGTERM` or `SIGINT`. Returns `Ok(())` on a
@@ -149,7 +144,14 @@ mod unix_serve {
 
         runtime.block_on(async {
             let listener = prepare_listener(&cfg.nbd.socket_path)?;
-            let backend = ZeroBackend::new(u64::from(cfg.volume_size_gb) * BYTES_PER_GIB);
+            let backend =
+                SynthBackend::open(cfg).context("opening SynthBackend from backing tree")?;
+            info!(
+                fs_type = if backend.is_fat32() { "fat32" } else { "exfat" },
+                size_bytes = backend.volume_size(),
+                file_count = backend.file_count(),
+                "SynthBackend ready"
+            );
             let result = server::serve(
                 listener,
                 &backend,

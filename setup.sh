@@ -132,11 +132,12 @@ fi
 declare -A ONLY_SET SKIP_SET
 if [[ -n "${ONLY_LIST}" ]]; then
   IFS=',' read -ra _only <<< "${ONLY_LIST}"
-  for n in "${_only[@]}"; do ONLY_SET["$(printf '%02d' "${n}")"]=1; done
+  # 10#${n} forces base-10 so "08" / "09" aren't parsed as octal.
+  for n in "${_only[@]}"; do ONLY_SET["$(printf '%02d' "$((10#${n}))")"]=1; done
 fi
 if [[ -n "${SKIP_LIST}" ]]; then
   IFS=',' read -ra _skip <<< "${SKIP_LIST}"
-  for n in "${_skip[@]}"; do SKIP_SET["$(printf '%02d' "${n}")"]=1; done
+  for n in "${_skip[@]}"; do SKIP_SET["$(printf '%02d' "$((10#${n}))")"]=1; done
 fi
 
 b1_log "setup.sh starting (dry_run=${TESLAUSB_DRY_RUN:-0}, steps=${#STEP_FILES[@]})"

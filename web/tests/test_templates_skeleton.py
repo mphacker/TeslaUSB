@@ -84,15 +84,17 @@ def test_mapping_scaffold_now_renders_real_page(app: Flask) -> None:
     resp = app.test_client().get("/mapping/")
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
-    assert '<h1 class="mapping-title">Mapping</h1>' in html
+    assert 'class="map-container"' in html
+    assert 'id="videoPanel"' in html
 
 
 def test_cloud_archive_scaffold_now_renders_real_page(app: Flask) -> None:
     resp = app.test_client().get("/cloud/")
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
-    assert '<h1 class="cloud-archive-title">Cloud Archive</h1>' in html
-    assert 'type="module" src="/static/js/cloud_archive.js"' in html
+    assert 'id="syncNowBtn"' in html
+    assert 'id="oauthStartBtn"' in html
+    assert "window.syncNow = async function()" in html
 
 
 def test_license_plates_page_renders_real_template(tmp_path: Path) -> None:

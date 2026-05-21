@@ -393,3 +393,44 @@ class TestMatchRoute:
         )
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.get_json()["success"] is False
+
+
+class TestPhotoStubRoutes:
+    """Stub photo upload routes return expected degraded responses until implemented."""
+
+    def test_upload_plate_stub_redirects(self, client: FlaskClient) -> None:
+        response = client.post("/license_plates/upload", data={"plate_region": "na"})
+        assert response.status_code == HTTPStatus.FOUND
+
+    def test_upload_multiple_stub_returns_json_error(self, client: FlaskClient) -> None:
+        response = client.post(
+            "/license_plates/upload_multiple",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
+        payload = response.get_json()
+        assert payload is not None
+        assert "not yet implemented" in payload.get("error", "").lower()
+
+    def test_download_plate_stub_redirects(self, client: FlaskClient) -> None:
+        response = client.get("/license_plates/download/na/test.png")
+        assert response.status_code == HTTPStatus.FOUND
+
+    def test_delete_plate_stub_redirects(self, client: FlaskClient) -> None:
+        response = client.post("/license_plates/delete_image/na/test.png")
+        assert response.status_code == HTTPStatus.FOUND
+
+
+class TestPhotoContextVars:
+    """Index route must expose photo spec context so the template can render."""
+
+    def test_index_includes_photo_spec_context(self, client: FlaskClient) -> None:
+        html = client.get("/license_plates/").get_data(as_text=True)
+        # max_file_size (524288) and plate dimensions are embedded as data-* attrs
+        assert "524288" in html
+        assert "420" in html  # plate_width_na
+        assert "492" in html  # plate_width_eu
+
+    def test_template_body_over_25kb(self, client: FlaskClient) -> None:
+        data = client.get("/license_plates/").get_data(as_text=True)
+        assert len(data) > 25_000, f"Template too short: {len(data)} bytes"

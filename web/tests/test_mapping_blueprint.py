@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -648,7 +649,9 @@ def test_map_view_renders_mapping_template(client) -> None:
     response = client.get("/mapping/")
     html = response.get_data(as_text=True)
     assert response.status_code == HTTPStatus.OK
-    assert '<h1 class="mapping-title">Mapping</h1>' in html
+    assert 'class="map-container"' in html
+    assert 'id="videoPanel"' in html
+    assert "const BOOTSTRAP =" in html
     assert "Edit Mode" not in html
     assert "Present Mode" not in html
     assert "quick_edit" not in html
@@ -657,7 +660,34 @@ def test_map_view_renders_mapping_template(client) -> None:
     assert "jsdelivr" not in html
     assert "lucide-sprite.svg" in html
     assert "vendor/leaflet/leaflet.css" in html
-    assert "js/mapping.js" in html
+
+
+def test_mapping_template_has_video_panel(client) -> None:
+    response = client.get("/mapping/")
+    assert b"video-panel" in response.data
+
+
+def test_mapping_template_has_clip_list(client) -> None:
+    response = client.get("/mapping/")
+    assert b"vp-clip" in response.data or b"video-panel-list" in response.data
+
+
+def test_mapping_template_has_event_details(client) -> None:
+    response = client.get("/mapping/")
+    assert b"overlayHud" in response.data or b"overlay-hud" in response.data
+
+
+def test_mapping_template_no_mode_toggle(client) -> None:
+    response = client.get("/mapping/")
+    assert b"Enable Network Sharing" not in response.data
+    assert b"Reconnect to Tesla" not in response.data
+
+
+def test_mapping_template_no_emoji(client) -> None:
+    response = client.get("/mapping/")
+    text = response.data.decode("utf-8", errors="replace")
+    emoji_pattern = re.compile(r"[\U0001F300-\U0001FAFF]")
+    assert not emoji_pattern.search(text), "Template contains emoji characters"
 
 
 def test_api_trips_returns_seeded_rows(client, seeded_data: SeededMappingData) -> None:

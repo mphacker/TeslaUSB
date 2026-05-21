@@ -156,6 +156,18 @@ def _index_context(
         "max_label_length": service_config.max_label_length,
         "max_notes_length": service_config.max_notes_length,
         "default_partition": _DEFAULT_PARTITION,
+        # Photo plate stub context (Tesla PNG background management).
+        # Populated with spec constants until the photo service is
+        # implemented.  plate_files=() means the photo list section
+        # renders as empty — upload is gated by the stub routes below.
+        "plate_files": (),
+        "max_file_size": 512 * 1024,  # Tesla spec: 512 KB max per PNG
+        "max_filename_length": 12,  # Tesla spec: 12 alphanumeric chars
+        "max_plate_count": 5,  # Tesla spec: 5 plates max
+        "plate_width_na": 420,  # Tesla NA spec: 420 x 75 px
+        "plate_height_na": 75,
+        "plate_width_eu": 492,  # Tesla EU/Italy spec: 492 x 75 px
+        "plate_height_eu": 75,
     }
 
 
@@ -352,6 +364,61 @@ def _serialize_bulk_result(result: PlateBulkOperationResult) -> dict[str, object
         "message": result.message,
         "success": result.success,
     }
+
+
+# ---------------------------------------------------------------------------
+# Photo plate stub routes — referenced by the template's upload/download UI.
+# These return 501 until the photo plate service is wired up in a future
+# phase.  The routes MUST exist so url_for() resolves at render time.
+# ---------------------------------------------------------------------------
+
+
+@license_plates_bp.route("/upload", methods=["POST"])
+def upload_plate() -> ResponseReturnValue:
+    # TODO(#photo-upload): implement single-file plate image upload and
+    # conversion via PIL + the photo plate service.
+    if _wants_json_response():
+        return (
+            _json_error_payload("Photo plate upload is not yet implemented"),
+            HTTPStatus.NOT_IMPLEMENTED,
+        )
+    flash("Photo plate upload is not yet implemented.", "error")
+    return _redirect_to_license_plates()
+
+
+@license_plates_bp.route("/upload_multiple", methods=["POST"])
+def upload_multiple_plates() -> ResponseReturnValue:
+    # TODO(#photo-upload): implement multi-file plate image upload.
+    if _wants_json_response():
+        return (
+            _json_error_payload("Photo plate upload is not yet implemented"),
+            HTTPStatus.NOT_IMPLEMENTED,
+        )
+    flash("Photo plate upload is not yet implemented.", "error")
+    return _redirect_to_license_plates()
+
+
+@license_plates_bp.route("/download/<partition>/<path:filename>")
+def download_plate(partition: str, filename: str) -> ResponseReturnValue:
+    # TODO(#photo-upload): serve the PNG from the backing store once the
+    # photo plate service can resolve partition + filename to a file path.
+    del partition, filename
+    flash("Photo plate download is not yet implemented.", "error")
+    return _redirect_to_license_plates()
+
+
+@license_plates_bp.route("/delete_image/<partition>/<path:filename>", methods=["POST"])
+def delete_plate(partition: str, filename: str) -> ResponseReturnValue:
+    # TODO(#photo-upload): delete the plate PNG from the backing store and
+    # schedule a cache invalidation after the photo plate service exists.
+    del partition, filename
+    if _wants_json_response():
+        return (
+            _json_error_payload("Photo plate delete is not yet implemented"),
+            HTTPStatus.NOT_IMPLEMENTED,
+        )
+    flash("Photo plate delete is not yet implemented.", "error")
+    return _redirect_to_license_plates()
 
 
 __all__ = ("license_plates_bp",)

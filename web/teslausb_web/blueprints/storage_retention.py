@@ -101,6 +101,7 @@ def _serialize_policy(policy: RetentionPolicy) -> dict[str, object]:
 
 def _policy_payload(policy: RetentionPolicy) -> dict[str, object]:
     service = _get_service()
+    preview_summary = service.preview_summary()
     return {
         "policy": _serialize_policy(policy),
         "rows": [
@@ -117,7 +118,8 @@ def _policy_payload(policy: RetentionPolicy) -> dict[str, object]:
             for row in service.policy_rows(policy)
         ],
         "ranges": service.ranges(),
-        "preview_available": False,
+        "preview_available": preview_summary.preview_available,
+        "preview_message": preview_summary.deferred_reason,
     }
 
 
@@ -173,6 +175,7 @@ def _request_policy_update() -> dict[str, object]:
 
 def _index_context(policy: RetentionPolicy) -> dict[str, object]:
     service = _get_service()
+    preview_summary = service.preview_summary()
     return {
         "page": "settings",
         "auto_refresh": False,
@@ -181,7 +184,8 @@ def _index_context(policy: RetentionPolicy) -> dict[str, object]:
         "policy": policy,
         "policy_rows": service.policy_rows(policy),
         "ranges": service.ranges(),
-        "preview_available": False,
+        "preview_available": preview_summary.preview_available,
+        "preview_message": preview_summary.deferred_reason,
     }
 
 
@@ -227,22 +231,3 @@ def current_policy() -> ResponseReturnValue:
         return jsonify(payload), HTTPStatus.OK
     except (RetentionConfigError, RetentionStateError) as exc:
         return _boundary_error(exc)
-
-
-@storage_retention_bp.route("/cleanup/preview")
-@storage_retention_bp.route("/api/cleanup/preview")
-def preview() -> ResponseReturnValue:
-    try:
-        preview_summary = _get_service().preview_summary()
-        return jsonify(
-            {
-                "success": True,
-                "preview_available": preview_summary.preview_available,
-                "deferred_reason": preview_summary.deferred_reason,
-            }
-        )
-    except (RetentionConfigError, RetentionStateError) as exc:
-        if _wants_json_response() or request.path.startswith("/api/cleanup/"):
-            return _json_error_payload(str(exc)), HTTPStatus.SERVICE_UNAVAILABLE
-        flash(str(exc), "error")
-        return _redirect_to_settings(cache_bust=request.args.get("_", "0"))

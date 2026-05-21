@@ -32,6 +32,7 @@ from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
 from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
 from teslausb_web.blueprints.boombox import boombox_bp
 from teslausb_web.blueprints.captive_portal import captive_portal_bp
+from teslausb_web.blueprints.cleanup import cleanup_bp
 from teslausb_web.blueprints.cloud_archive import cloud_archive_bp
 from teslausb_web.blueprints.license_plates import license_plates_bp
 from teslausb_web.blueprints.light_shows import light_shows_bp
@@ -47,6 +48,7 @@ from teslausb_web.services.boombox_service import make_boombox_service
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
+from teslausb_web.services.cleanup import make_cleanup_service
 from teslausb_web.services.cloud_archive import make_cloud_archive_service
 from teslausb_web.services.cloud_oauth_service import CloudOAuthService, make_oauth_service
 from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_rclone_service
@@ -172,6 +174,7 @@ def create_app(
         app.register_blueprint(cloud_archive_bp)
     _register_wrap_services(app, cfg)
     _register_mapping_services(app, cfg)
+    _register_cleanup_services(app, cfg)
 
     logger.info(
         "teslausb_web app created (port=%d, max_upload_mb=%d, samba=%s, source=%s)",
@@ -263,6 +266,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         captive_portal_bp,
         wraps_bp,
         mapping_bp,
+        cleanup_bp,
     )
     for bp in real_blueprints:
         if bp.name in registered_names:
@@ -470,6 +474,28 @@ def _register_mapping_services(app: Flask, cfg: WebConfig) -> None:
     )
 
 
+def _register_cleanup_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the cleanup service after mapping and retention are ready."""
+    retention_service = app.extensions.get("storage_retention_service")
+    mapping_service = app.extensions.get("mapping_service")
+    if retention_service is None or mapping_service is None:
+        raise RuntimeError("cleanup_service requires storage_retention_service and mapping_service")
+    cleanup_service = make_cleanup_service(
+        cfg,
+        retention_service,
+        mapping_service,
+        _get_cache_invalidator(app).schedule,
+    )
+    app.extensions["cleanup_service"] = cleanup_service
+    if hasattr(retention_service, "bind_preview_summary_provider"):
+        retention_service.bind_preview_summary_provider(cleanup_service.preview_summary)
+    atexit.register(cleanup_service.shutdown)
+    app.extensions["cleanup_service_finalizer"] = weakref.finalize(
+        app,
+        cleanup_service.shutdown,
+    )
+
+
 def _register_template_globals(app: Flask) -> None:
     """Inject defaults for the flags ``base.html`` reads.
 
@@ -514,4 +540,5 @@ def _register_template_globals(app: Flask) -> None:
             "boombox_available": False,
             "license_plates_available": False,
             "storage_retention_available": False,
+            "cleanup_available": False,
         }

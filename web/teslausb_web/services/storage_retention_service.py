@@ -173,6 +173,7 @@ class StorageRetentionService:
     def __init__(self, config: StorageRetentionConfig) -> None:
         self._config = config
         self._lock = threading.RLock()
+        self._preview_summary_provider: Callable[[], RetentionPreviewSummary] | None = None
 
     @property
     def config(self) -> StorageRetentionConfig:
@@ -279,8 +280,24 @@ class StorageRetentionService:
             },
         }
 
+    def bind_preview_summary_provider(
+        self,
+        provider: Callable[[], RetentionPreviewSummary],
+    ) -> None:
+        with self._lock:
+            self._preview_summary_provider = provider
+
     def preview_summary(self) -> RetentionPreviewSummary:
-        raise RetentionStateError("preview deferred to Phase 5.18 cleanup_service")
+        provider = self._preview_summary_provider
+        if provider is None:
+            return RetentionPreviewSummary(
+                preview_available=False,
+                deferred_reason="cleanup service unavailable",
+            )
+        try:
+            return provider()
+        except RuntimeError as exc:
+            raise RetentionStateError(str(exc)) from exc
 
     def _policy_from_mapping(
         self,

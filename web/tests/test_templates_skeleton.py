@@ -139,6 +139,55 @@ def test_cleanup_settings_page_renders_real_template(tmp_path: Path) -> None:
     assert "#" not in html.split("<style>", 1)[1].split("</style>", 1)[0]
 
 
+def test_cleanup_preview_page_renders_real_template(tmp_path: Path) -> None:
+    cfg = WebConfig(
+        web=WebSection(secret_key="t" * 32),
+        paths=PathsSection(
+            backing_root=tmp_path / "backing",
+            state_dir=tmp_path / "state",
+            cache_invalidate_script=tmp_path / "invalidate.sh",
+        ),
+        features=FeaturesSection(),
+        storage_retention=StorageRetentionSection(
+            policy_path=tmp_path / "state" / "retention_policy.json"
+        ),
+    )
+    app = create_app(cfg)
+    resp = app.test_client().get("/cleanup/preview")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "Cleanup Preview" in html
+    assert "Execute cleanup" in html
+    assert "Orphan scan" in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "unpkg.com" not in html
+    assert "<svg" in html
+
+
+def test_cleanup_report_page_renders_real_template(tmp_path: Path) -> None:
+    cfg = WebConfig(
+        web=WebSection(secret_key="t" * 32),
+        paths=PathsSection(
+            backing_root=tmp_path / "backing",
+            state_dir=tmp_path / "state",
+            cache_invalidate_script=tmp_path / "invalidate.sh",
+        ),
+        features=FeaturesSection(),
+        storage_retention=StorageRetentionSection(
+            policy_path=tmp_path / "state" / "retention_policy.json"
+        ),
+    )
+    app = create_app(cfg)
+    resp = app.test_client().get("/cleanup/report")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "Cleanup Report" in html
+    assert "Recent runs" in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "unpkg.com" not in html
+    assert "<svg" in html
+
+
 def test_advanced_settings_page_renders_real_template(tmp_path: Path) -> None:
     cfg = WebConfig(
         web=WebSection(secret_key="t" * 32),

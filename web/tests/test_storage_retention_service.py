@@ -301,9 +301,13 @@ class TestStorageRetentionService:
             service.save_policy(RetentionPolicy())
         assert not config.policy_path.with_name(f"{config.policy_path.name}.tmp").exists()
 
-    def test_preview_summary_is_deferred(self, service: StorageRetentionService) -> None:
-        with pytest.raises(RetentionStateError, match=r"Phase 5\.18 cleanup_service"):
-            service.preview_summary()
+    def test_preview_summary_defaults_to_unavailable(
+        self,
+        service: StorageRetentionService,
+    ) -> None:
+        summary = service.preview_summary()
+        assert summary.preview_available is False
+        assert summary.deferred_reason == "cleanup service unavailable"
 
     def test_make_storage_retention_service_from_web_config(self, tmp_path: Path) -> None:
         cfg = WebConfig(

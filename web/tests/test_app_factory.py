@@ -243,6 +243,13 @@ def test_blueprint_abort_works_alongside_error_handler() -> None:
     assert resp.status_code == 403
 
 
+def test_cleanup_service_registered_on_app(app: Flask) -> None:
+    from teslausb_web.services.cleanup import CleanupService
+
+    cleanup_service = app.extensions["cleanup_service"]
+    assert isinstance(cleanup_service, CleanupService)
+
+
 def test_cache_invalidator_registered_on_app(app: Flask) -> None:
     from teslausb_web.services.cache_invalidation import CacheInvalidator
 

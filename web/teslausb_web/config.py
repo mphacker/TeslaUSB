@@ -98,6 +98,16 @@ _DEFAULT_RETENTION_TARGET_FREE_PCT_MIN: Final[int] = 5
 _DEFAULT_RETENTION_TARGET_FREE_PCT_MAX: Final[int] = 50
 _DEFAULT_RETENTION_MAX_ARCHIVE_SIZE_GB: Final[int] = 0
 _DEFAULT_RETENTION_WARNING_DAYS: Final[int] = 7
+_DEFAULT_CLEANUP_HISTORY_DB_NAME: Final[str] = "cleanup_history.db"
+_DEFAULT_CLEANUP_HISTORY_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLEANUP_HISTORY_DB_NAME
+_DEFAULT_CLEANUP_MAX_CONCURRENT_RUNS: Final[int] = 1
+_DEFAULT_CLEANUP_DRY_RUN_DEFAULT: Final[bool] = True
+_DEFAULT_CLEANUP_ORPHAN_SCAN_BATCH_SIZE: Final[int] = 500
+_DEFAULT_CLEANUP_SAMPLE_PATH_LIMIT: Final[int] = 12
+_DEFAULT_CLEANUP_RECENT_PROTECTION_HOURS: Final[int] = 1
+_DEFAULT_CLEANUP_DELETE_GPS_TAGGED_CLIPS: Final[bool] = False
+_DEFAULT_CLEANUP_ORPHAN_MIN_AGE_SECONDS: Final[int] = 300
+_DEFAULT_CLEANUP_REPORT_LIMIT: Final[int] = 20
 _DEFAULT_SYSTEM_SETTINGS_FILENAME: Final[str] = "system_settings.json"
 _DEFAULT_SYSTEM_SETTINGS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_SYSTEM_SETTINGS_FILENAME
 _DEFAULT_SYSTEM_SETTINGS_LOG_LEVEL: Final[str] = "INFO"
@@ -559,6 +569,44 @@ class StorageRetentionSection:
 
 
 @dataclass(frozen=True, slots=True)
+class CleanupSection:
+    """Cleanup execution history, orphan scanning, and safety rails."""
+
+    history_db_path: Path = _DEFAULT_CLEANUP_HISTORY_DB_PATH
+    max_concurrent_runs: int = _DEFAULT_CLEANUP_MAX_CONCURRENT_RUNS
+    dry_run_default: bool = _DEFAULT_CLEANUP_DRY_RUN_DEFAULT
+    orphan_scan_batch_size: int = _DEFAULT_CLEANUP_ORPHAN_SCAN_BATCH_SIZE
+    sample_path_limit: int = _DEFAULT_CLEANUP_SAMPLE_PATH_LIMIT
+    recent_protection_hours: int = _DEFAULT_CLEANUP_RECENT_PROTECTION_HOURS
+    delete_gps_tagged_clips: bool = _DEFAULT_CLEANUP_DELETE_GPS_TAGGED_CLIPS
+    orphan_min_age_seconds: int = _DEFAULT_CLEANUP_ORPHAN_MIN_AGE_SECONDS
+    report_limit: int = _DEFAULT_CLEANUP_REPORT_LIMIT
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            not self.history_db_path.is_absolute()
+            and not PurePosixPath(self.history_db_path.as_posix()).is_absolute()
+        ):
+            raise ConfigError(
+                None,
+                f"[cleanup] history_db_path must be absolute, got {self.history_db_path!r}",
+            )
+        for key, value in (
+            ("max_concurrent_runs", self.max_concurrent_runs),
+            ("orphan_scan_batch_size", self.orphan_scan_batch_size),
+            ("sample_path_limit", self.sample_path_limit),
+            ("recent_protection_hours", self.recent_protection_hours),
+            ("orphan_min_age_seconds", self.orphan_min_age_seconds),
+            ("report_limit", self.report_limit),
+        ):
+            if value <= 0:
+                raise ConfigError(None, f"[cleanup] {key} must be > 0")
+
+
+@dataclass(frozen=True, slots=True)
 class SystemSettingsSection:
     """Advanced-settings persistence and default expert toggles."""
 
@@ -860,6 +908,7 @@ class WebConfig:
     boombox: BoomboxSection = field(default_factory=BoomboxSection)
     license_plates: LicensePlateSection = field(default_factory=LicensePlateSection)
     storage_retention: StorageRetentionSection = field(default_factory=StorageRetentionSection)
+    cleanup: CleanupSection = field(default_factory=CleanupSection)
     system_settings: SystemSettingsSection = field(default_factory=SystemSettingsSection)
     samba: SambaSection = field(default_factory=SambaSection)
     wifi: WifiSection = field(default_factory=WifiSection)
@@ -879,6 +928,7 @@ class WebConfig:
             self.boombox.validate()
             self.license_plates.validate()
             self.storage_retention.validate()
+            self.cleanup.validate()
             self.system_settings.validate()
             self.samba.validate()
             self.wifi.validate()
@@ -1019,6 +1069,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     boombox_raw = _expect_section(raw, "boombox", source)
     license_plates_raw = _expect_section(raw, "license_plates", source)
     storage_retention_raw = _expect_section(raw, "storage_retention", source)
+    cleanup_raw = _expect_section(raw, "cleanup", source)
     system_settings_raw = _expect_section(raw, "system_settings", source)
     samba_raw = _expect_section(raw, "samba", source)
     samba_shares_raw = _coerce_table_array(samba_raw, "shares", source)
@@ -1297,6 +1348,62 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 storage_retention_raw,
                 "default_short_retention_warning_days",
                 _DEFAULT_RETENTION_WARNING_DAYS,
+                source,
+            ),
+        )
+        cleanup = CleanupSection(
+            history_db_path=_coerce_path(
+                cleanup_raw,
+                "history_db_path",
+                paths_section.state_dir / _DEFAULT_CLEANUP_HISTORY_DB_NAME,
+                source,
+            ),
+            max_concurrent_runs=_coerce_int(
+                cleanup_raw,
+                "max_concurrent_runs",
+                _DEFAULT_CLEANUP_MAX_CONCURRENT_RUNS,
+                source,
+            ),
+            dry_run_default=_coerce_bool(
+                cleanup_raw,
+                "dry_run_default",
+                _DEFAULT_CLEANUP_DRY_RUN_DEFAULT,
+                source,
+            ),
+            orphan_scan_batch_size=_coerce_int(
+                cleanup_raw,
+                "orphan_scan_batch_size",
+                _DEFAULT_CLEANUP_ORPHAN_SCAN_BATCH_SIZE,
+                source,
+            ),
+            sample_path_limit=_coerce_int(
+                cleanup_raw,
+                "sample_path_limit",
+                _DEFAULT_CLEANUP_SAMPLE_PATH_LIMIT,
+                source,
+            ),
+            recent_protection_hours=_coerce_int(
+                cleanup_raw,
+                "recent_protection_hours",
+                _DEFAULT_CLEANUP_RECENT_PROTECTION_HOURS,
+                source,
+            ),
+            delete_gps_tagged_clips=_coerce_bool(
+                cleanup_raw,
+                "delete_gps_tagged_clips",
+                _DEFAULT_CLEANUP_DELETE_GPS_TAGGED_CLIPS,
+                source,
+            ),
+            orphan_min_age_seconds=_coerce_int(
+                cleanup_raw,
+                "orphan_min_age_seconds",
+                _DEFAULT_CLEANUP_ORPHAN_MIN_AGE_SECONDS,
+                source,
+            ),
+            report_limit=_coerce_int(
+                cleanup_raw,
+                "report_limit",
+                _DEFAULT_CLEANUP_REPORT_LIMIT,
                 source,
             ),
         )
@@ -1667,6 +1774,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         boombox=boombox,
         license_plates=license_plates,
         storage_retention=storage_retention,
+        cleanup=cleanup,
         system_settings=system_settings,
         samba=samba,
         wifi=wifi,

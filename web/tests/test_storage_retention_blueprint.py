@@ -169,7 +169,7 @@ class TestJsonPolicyRoutes:
         assert response.status_code == HTTPStatus.OK
         assert payload["success"] is True
         assert payload["policy"]["max_age_days"] == 30
-        assert payload["preview_available"] is False
+        assert payload["preview_available"] is True
         assert len(payload["rows"]) == 5
 
     def test_status_alias_returns_same_shape(self, client: FlaskClient) -> None:
@@ -290,22 +290,21 @@ class TestFormSaveRoute:
         assert policy.archived_clips_days == 11
 
 
-class TestPreviewRoute:
-    def test_preview_json_endpoint_returns_deferred_error(self, client: FlaskClient) -> None:
-        response = client.get(
-            "/api/cleanup/preview",
-            headers={"X-Requested-With": "XMLHttpRequest"},
-        )
+class TestPreviewAvailability:
+    def test_current_policy_json_marks_preview_available(self, client: FlaskClient) -> None:
+        response = client.get("/api/cleanup/policy")
         payload = response.get_json()
-        assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
-        assert payload["success"] is False
-        assert "Phase 5.18 cleanup_service" in payload["error"]
+        assert response.status_code == HTTPStatus.OK
+        assert payload["preview_available"] is True
+        assert payload["preview_message"] == ""
 
-    def test_preview_html_endpoint_redirects_back(self, client: FlaskClient) -> None:
-        response = client.get("/cleanup/preview")
-        assert response.status_code == HTTPStatus.FOUND
-        assert response.headers["Location"] == "/cleanup/settings?_=0"
+    def test_settings_page_links_to_cleanup_preview(self, client: FlaskClient) -> None:
+        response = client.get("/cleanup/settings")
+        html = response.get_data(as_text=True)
+        assert response.status_code == HTTPStatus.OK
+        assert 'href="/cleanup/preview"' in html
 
-    @pytest.mark.skip(reason="preview deferred to Phase 5.18 cleanup_service")
-    def test_preview_dry_run_summary_requires_cleanup_engine(self) -> None:
-        raise AssertionError("unreachable")
+    def test_preview_summary_provider_is_bound(self, service: StorageRetentionService) -> None:
+        summary = service.preview_summary()
+        assert summary.preview_available is True
+        assert summary.deferred_reason == ""

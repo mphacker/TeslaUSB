@@ -28,12 +28,14 @@ from typing import TYPE_CHECKING
 from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
 
 from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
+from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.config import WebConfig, load_config
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
+from teslausb_web.services.light_show_service import make_light_show_service
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -117,6 +119,7 @@ def create_app(
     _register_blueprints(app, extra_blueprints)
     _register_cache_invalidator(app, cfg)
     _register_chime_services(app, cfg)
+    _register_light_show_services(app, cfg)
 
     logger.info(
         "teslausb_web app created (port=%d, max_upload_mb=%d, samba=%s, source=%s)",
@@ -196,7 +199,11 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
     # Real B-1 blueprints (Phase 5.7+). Each replaces a scaffold of
     # the same name where one exists; system_health has no scaffold
     # (it is API-only with no URL in base.html).
-    real_blueprints: tuple[Blueprint, ...] = (system_health_bp, lock_chimes_bp)
+    real_blueprints: tuple[Blueprint, ...] = (
+        system_health_bp,
+        lock_chimes_bp,
+        light_shows_bp,
+    )
     for bp in real_blueprints:
         if bp.name in registered_names:
             continue
@@ -235,6 +242,11 @@ def _register_chime_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the chime group manager and scheduler once at app startup."""
     app.extensions["chime_group_manager"] = make_chime_group_manager(cfg)
     app.extensions["chime_scheduler"] = make_chime_scheduler(cfg)
+
+
+def _register_light_show_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the light-show service once at app startup."""
+    app.extensions["light_show_service"] = make_light_show_service(cfg)
 
 
 def _register_template_globals(app: Flask) -> None:

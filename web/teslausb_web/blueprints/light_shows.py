@@ -1,8 +1,6 @@
 """Light-show blueprint.
 
-Ports v1's light-show routes onto the B-1 service layer. The HTML
-template lands in Phase 5.9c; until then the index route returns the
-placeholder context payload the template will consume.
+Ports v1's light-show routes and HTML UI onto the B-1 service layer.
 """
 
 from __future__ import annotations
@@ -22,6 +20,7 @@ from flask import (
     flash,
     jsonify,
     redirect,
+    render_template,
     request,
     send_file,
     send_from_directory,
@@ -280,9 +279,10 @@ def _mimetype_for_filename(filename: str) -> str:
 
 @light_shows_bp.route("/")
 def light_shows() -> ResponseReturnValue:
-    """Return the placeholder context payload until the 5.9c HTML template lands."""
+    """Render the light-shows index page."""
     try:
-        return jsonify(_index_context()), HTTPStatus.OK
+        context = _index_context()
+        return render_template("light_shows.html", **context)
     except LightShowError as exc:
         return _json_error_payload(str(exc)), HTTPStatus.BAD_REQUEST
     except LightShowFileError as exc:

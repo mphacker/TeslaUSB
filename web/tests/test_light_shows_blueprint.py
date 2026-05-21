@@ -124,8 +124,21 @@ def _read_active(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_index_route_skipped_until_template_lands() -> None:
-    pytest.skip(reason="template in 5.9c")
+def test_index_route_renders_template_charter_compliant(client, service: LightShowService) -> None:
+    service.upload_files([_file_upload("show.fseq", b"fseq"), _file_upload("show.wav", b"wav")])
+    service.set_active_show("show.fseq")
+
+    response = client.get("/light_shows/")
+
+    assert response.status_code == HTTPStatus.OK
+    assert b"<title>" in response.data
+    assert b"Light Shows" in response.data
+    assert b"Edit Mode" not in response.data
+    assert b"Present Mode" not in response.data
+    assert b"quick_edit" not in response.data
+    assert b"cdn.jsdelivr.net" not in response.data
+    assert b"unpkg.com" not in response.data
+    assert b"<svg" in response.data
 
 
 def test_helper_invalidate_caches_is_noop_without_extension(app: Flask) -> None:

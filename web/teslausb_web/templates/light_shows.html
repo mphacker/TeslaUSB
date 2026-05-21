@@ -1,0 +1,923 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.light-shows-page {
+    display: grid;
+    gap: var(--space-6);
+}
+
+.light-shows-header,
+.light-shows-panel,
+.light-shows-library {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 24px var(--shadow);
+}
+
+.light-shows-header {
+    padding: var(--space-6);
+    display: grid;
+    gap: var(--space-4);
+}
+
+.light-shows-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+}
+
+.light-shows-title-group {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.light-shows-title {
+    margin: 0;
+    font-size: var(--text-3xl);
+    color: var(--text-primary);
+}
+
+.light-shows-subtitle {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.light-shows-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+}
+
+.light-shows-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-4);
+    border-radius: 999px;
+    background: var(--form-label-bg);
+    border: 1px solid var(--border-input);
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.light-shows-pill.active {
+    background: var(--msg-success-bg);
+    border-color: var(--success-border);
+    color: var(--msg-success-text);
+}
+
+.light-shows-icon,
+.light-shows-inline-icon {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex: 0 0 auto;
+}
+
+.light-shows-panel {
+    padding: var(--space-6);
+    display: grid;
+    gap: var(--space-5);
+}
+
+.light-shows-panel-head {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.light-shows-panel-title {
+    margin: 0;
+    font-size: var(--text-xl);
+    color: var(--text-primary);
+}
+
+.light-shows-panel-copy {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.light-shows-upload-grid {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.light-shows-upload-card {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+}
+
+.light-shows-upload-card h3,
+.light-shows-upload-card h4 {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.light-shows-upload-note,
+.light-shows-results-copy,
+.light-shows-empty-copy,
+.light-shows-file-meta,
+.light-shows-file-list,
+.light-shows-library-copy,
+.light-shows-preview-empty,
+.light-shows-warning-copy {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.light-shows-field {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.light-shows-field label,
+.light-shows-upload-card legend {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.light-shows-field input[type="file"] {
+    inline-size: 100%;
+    min-height: 44px;
+    padding: var(--space-3);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.light-shows-actions,
+.light-shows-drop-actions,
+.light-shows-library-actions,
+.light-shows-card-actions,
+.light-shows-row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    align-items: center;
+}
+
+.light-shows-btn,
+.light-shows-link,
+.light-shows-upload-card button,
+.light-shows-drop-zone,
+.light-shows-library-select,
+.light-shows-library-select-all {
+    min-height: 44px;
+}
+
+.light-shows-btn,
+.light-shows-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    border: 1px solid transparent;
+    font: inherit;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+
+.light-shows-btn:hover,
+.light-shows-link:hover,
+.light-shows-drop-zone:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px var(--shadow-hover);
+}
+
+.light-shows-btn:disabled,
+.light-shows-link[aria-disabled="true"] {
+    cursor: not-allowed;
+    opacity: 0.7;
+    transform: none;
+    box-shadow: none;
+}
+
+.light-shows-btn-primary {
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+.light-shows-btn-secondary,
+.light-shows-link-secondary {
+    background: var(--form-label-bg);
+    border-color: var(--border-input);
+    color: var(--text-primary);
+}
+
+.light-shows-btn-success {
+    background: var(--btn-success-bg);
+    color: var(--btn-success-text);
+}
+
+.light-shows-btn-danger {
+    background: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
+.light-shows-drop-zone {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-3);
+    padding: var(--space-8);
+    border: 2px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+    text-align: center;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.light-shows-drop-zone.is-dragover {
+    border-color: var(--btn-primary-bg);
+    background: var(--msg-info-bg);
+}
+
+.light-shows-drop-zone svg {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: var(--btn-primary-bg);
+}
+
+.light-shows-drop-title {
+    margin: 0;
+    font-size: var(--text-lg);
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.light-shows-drop-copy {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+.light-shows-preview {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+
+.light-shows-preview[hidden] {
+    display: none;
+}
+
+.light-shows-preview-list,
+.light-shows-results-list,
+.light-shows-file-stack {
+    display: grid;
+    gap: var(--space-3);
+}
+
+.light-shows-preview-item,
+.light-shows-results-item,
+.light-shows-file-chip {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.light-shows-file-chip {
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--form-label-bg);
+    border: 1px solid var(--border-input);
+    color: var(--text-primary);
+    flex-wrap: wrap;
+}
+
+.light-shows-preview-name,
+.light-shows-results-text,
+.light-shows-file-name {
+    min-width: 0;
+    word-break: break-word;
+    color: var(--text-primary);
+}
+
+.light-shows-preview-remove {
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+}
+
+.light-shows-warning {
+    display: grid;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--ios-warning-bg);
+    border: 1px solid var(--ios-warning-border);
+    color: var(--ios-warning-text);
+}
+
+.light-shows-warning[hidden] {
+    display: none;
+}
+
+.light-shows-progress {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--upload-progress-bg);
+    border: 1px solid var(--border-input);
+}
+
+.light-shows-progress-bar {
+    inline-size: 100%;
+    block-size: 2rem;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--upload-progress-bar-bg);
+    border: 1px solid var(--border-input);
+}
+
+.light-shows-progress-fill {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    block-size: 100%;
+    inline-size: 0%;
+    background: linear-gradient(90deg, var(--btn-primary-bg), var(--btn-info-bg));
+    color: var(--btn-primary-text);
+    font-weight: 700;
+    transition: inline-size 0.2s ease;
+}
+
+.light-shows-progress.is-success .light-shows-progress-fill {
+    background: linear-gradient(90deg, var(--btn-success-bg), var(--success-border));
+}
+
+.light-shows-progress.is-error .light-shows-progress-fill {
+    background: linear-gradient(90deg, var(--btn-danger-bg), var(--msg-error-text));
+}
+
+.light-shows-progress.is-warning .light-shows-progress-fill {
+    background: linear-gradient(90deg, var(--warning-border), var(--status-unknown-text));
+}
+
+.light-shows-library {
+    padding: var(--space-6);
+    display: grid;
+    gap: var(--space-5);
+}
+
+.light-shows-library-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+}
+
+.light-shows-library-select,
+.light-shows-library-select-all {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.light-shows-library-select input,
+.light-shows-library-select-all input {
+    width: 1.125rem;
+    height: 1.125rem;
+    margin: 0;
+}
+
+.light-shows-library-select-count {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.light-shows-table-shell {
+    border: 1px solid var(--border-table);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+}
+
+.light-shows-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.light-shows-table th,
+.light-shows-table td {
+    padding: var(--space-4);
+    vertical-align: top;
+    border-bottom: 1px solid var(--border-table);
+    text-align: left;
+}
+
+.light-shows-table th {
+    background: var(--bg-table-header);
+    color: var(--text-table-header);
+    font-size: var(--text-sm);
+}
+
+.light-shows-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.light-shows-row-active {
+    background: var(--msg-success-bg);
+}
+
+.light-shows-active-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: 999px;
+    background: var(--msg-success-bg);
+    color: var(--msg-success-text);
+    font-weight: 700;
+}
+
+.light-shows-muted-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: 999px;
+    background: var(--form-label-bg);
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.light-shows-library-name {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.light-shows-library-name strong {
+    color: var(--text-primary);
+    font-size: var(--text-lg);
+}
+
+.light-shows-mobile-grid {
+    display: none;
+    gap: var(--space-4);
+}
+
+.light-shows-card {
+    display: grid;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    box-shadow: 0 8px 24px var(--shadow);
+}
+
+.light-shows-card.is-active {
+    border-color: var(--success-border);
+}
+
+.light-shows-card-header {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+    align-items: flex-start;
+}
+
+.light-shows-card-title {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.light-shows-card-title h3 {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.light-shows-audio {
+    width: 100%;
+}
+
+.light-shows-empty {
+    display: grid;
+    gap: var(--space-3);
+    justify-items: center;
+    padding: var(--space-8);
+    text-align: center;
+    border: 1px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+}
+
+.light-shows-empty svg {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: var(--text-secondary);
+}
+
+@media (min-width: 768px) {
+    .light-shows-upload-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .light-shows-upload-card:first-child {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 1023px) {
+    .light-shows-table-shell {
+        display: none;
+    }
+
+    .light-shows-mobile-grid {
+        display: grid;
+    }
+}
+
+@media (min-width: 1024px) {
+    .light-shows-mobile-grid {
+        display: none;
+    }
+}
+
+@media (max-width: 767px) {
+    .light-shows-header,
+    .light-shows-panel,
+    .light-shows-library {
+        padding: var(--space-4);
+    }
+
+    .light-shows-drop-zone {
+        padding: var(--space-5);
+    }
+
+    .light-shows-card-actions .light-shows-btn,
+    .light-shows-card-actions .light-shows-link {
+        width: 100%;
+    }
+}
+</style>
+{% endblock %}
+{% block content %}
+<div class="container">
+    {% include 'media_hub_nav.html' %}
+
+    <div
+        class="light-shows-page"
+        id="lightShowsPage"
+        data-upload-single-url="{{ url_for('light_shows.upload_light_show') }}"
+        data-upload-multiple-url="{{ url_for('light_shows.upload_multiple_light_shows') }}"
+        data-upload-zip-url="{{ url_for('light_shows.upload_light_show_zip') }}"
+        data-bulk-delete-url="{{ url_for('light_shows.bulk_delete_light_shows') }}"
+        data-set-active-template="{{ url_for('light_shows.set_active_light_show', filename='__LIGHT_SHOW_FILENAME__') }}"
+        data-delete-show-template="{{ url_for('light_shows.delete_light_show', partition='library', base_name='__LIGHT_SHOW_BASE__') }}"
+    >
+        <section class="light-shows-header" aria-labelledby="light-shows-title">
+            <div class="light-shows-header-row">
+                <div class="light-shows-title-group">
+                    <h2 class="light-shows-title" id="light-shows-title">Light Shows</h2>
+                    <p class="light-shows-subtitle">
+                        Upload Tesla-ready show files, manage your library, and choose which FSEQ file should stay active.
+                    </p>
+                </div>
+                <div class="light-shows-summary" aria-label="Light show summary">
+                    <span class="light-shows-pill{% if active_show %} active{% endif %}">
+                        <svg class="light-shows-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-sparkles"></use></svg>
+                        {% if active_show %}
+                        Active show: {{ active_show }}
+                        {% else %}
+                        No active show selected
+                        {% endif %}
+                    </span>
+                    <span class="light-shows-pill">
+                        <svg class="light-shows-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-folder"></use></svg>
+                        {{ show_groups|length }} saved show{{ '' if show_groups|length == 1 else 's' }}
+                    </span>
+                </div>
+            </div>
+        </section>
+
+        <section class="light-shows-panel" aria-labelledby="light-shows-upload-title">
+            <div class="light-shows-panel-head">
+                <h3 class="light-shows-panel-title" id="light-shows-upload-title">Upload light shows</h3>
+                <p class="light-shows-panel-copy">
+                    Add a single show file, stage multiple files at once, or upload a ZIP archive that expands into the LightShow library.
+                </p>
+            </div>
+
+            <div class="light-shows-warning" id="lightShowsIosWarning" hidden>
+                <p class="light-shows-warning-copy"><strong><svg class="light-shows-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg> iOS browser limitation:</strong> Uploading works on iOS only when this page is opened in Safari.</p>
+                <p class="light-shows-warning-copy">Desktop browsers continue to work normally.</p>
+            </div>
+
+            <div class="light-shows-upload-grid" id="lightShowsUploadControls">
+                <form class="light-shows-upload-card js-light-show-upload-form" id="lightShowsMultiForm" action="{{ url_for('light_shows.upload_multiple_light_shows') }}" method="post" enctype="multipart/form-data" data-upload-kind="multiple">
+                    <div>
+                        <h3>Drag and drop upload</h3>
+                        <p class="light-shows-upload-note">Drop one or more <strong>.fseq</strong>, <strong>.mp3</strong>, <strong>.wav</strong>, or <strong>.zip</strong> files here, or browse from storage.</p>
+                    </div>
+                    <button class="light-shows-drop-zone" id="lightShowsDropZone" type="button">
+                        <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud-upload"></use></svg>
+                        <span class="light-shows-drop-title">Drop files here or tap to browse</span>
+                        <span class="light-shows-drop-copy">Multiple file selection is supported on desktop and mobile browsers that expose it.</span>
+                    </button>
+                    <input type="file" id="lightShowsMultiInput" name="show_files" accept=".fseq,.mp3,.wav,.zip" multiple>
+                    <div class="light-shows-preview" id="lightShowsPreview" hidden>
+                        <div class="light-shows-drop-actions">
+                            <h4>Selected files</h4>
+                            <button class="light-shows-btn light-shows-btn-secondary" id="lightShowsClearSelection" type="button">
+                                <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-x"></use></svg>
+                                Clear selection
+                            </button>
+                        </div>
+                        <p class="light-shows-preview-empty" id="lightShowsPreviewCount">No files selected yet.</p>
+                        <div class="light-shows-preview-list" id="lightShowsPreviewList"></div>
+                    </div>
+                    <div class="light-shows-actions">
+                        <button class="light-shows-btn light-shows-btn-primary" type="submit" id="lightShowsMultiSubmit">
+                            <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use></svg>
+                            Upload selected files
+                        </button>
+                    </div>
+                </form>
+
+                <form class="light-shows-upload-card js-light-show-upload-form" id="lightShowsSingleForm" action="{{ url_for('light_shows.upload_light_show') }}" method="post" enctype="multipart/form-data" data-upload-kind="single">
+                    <div>
+                        <h3>Single file upload</h3>
+                        <p class="light-shows-upload-note">Use this for one FSEQ or audio file.</p>
+                    </div>
+                    <div class="light-shows-field">
+                        <label for="lightShowsSingleInput">Choose one file</label>
+                        <input type="file" id="lightShowsSingleInput" name="show_file" accept=".fseq,.mp3,.wav">
+                    </div>
+                    <div class="light-shows-actions">
+                        <button class="light-shows-btn light-shows-btn-primary" type="submit" id="lightShowsSingleSubmit">
+                            <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use></svg>
+                            Upload file
+                        </button>
+                    </div>
+                </form>
+
+                <form class="light-shows-upload-card js-light-show-upload-form" id="lightShowsZipForm" action="{{ url_for('light_shows.upload_light_show_zip') }}" method="post" enctype="multipart/form-data" data-upload-kind="zip">
+                    <div>
+                        <h3>ZIP archive upload</h3>
+                        <p class="light-shows-upload-note">Use a ZIP archive when you want folder structure preserved during import.</p>
+                    </div>
+                    <div class="light-shows-field">
+                        <label for="lightShowsZipInput">Choose one ZIP archive</label>
+                        <input type="file" id="lightShowsZipInput" name="show_file" accept=".zip">
+                    </div>
+                    <div class="light-shows-actions">
+                        <button class="light-shows-btn light-shows-btn-primary" type="submit" id="lightShowsZipSubmit">
+                            <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use></svg>
+                            Upload ZIP
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="light-shows-progress" id="lightShowsProgress" role="status" aria-live="polite">
+                <div class="light-shows-panel-head">
+                    <h4 id="lightShowsProgressTitle">Ready to upload</h4>
+                    <p class="light-shows-panel-copy" id="lightShowsProgressMessage">Choose files above to start an upload.</p>
+                </div>
+                <div class="light-shows-progress-bar" aria-hidden="true">
+                    <div class="light-shows-progress-fill" id="lightShowsProgressFill">0%</div>
+                </div>
+                <div class="light-shows-results-list" id="lightShowsResults"></div>
+            </div>
+        </section>
+
+        <section class="light-shows-library" aria-labelledby="light-shows-library-title">
+            <div class="light-shows-library-toolbar">
+                <div class="light-shows-panel-head">
+                    <h3 class="light-shows-panel-title" id="light-shows-library-title">Library</h3>
+                    <p class="light-shows-library-copy">Each show groups its FSEQ and optional audio file together. Bulk delete removes every file in the selected show bundle.</p>
+                </div>
+                <div class="light-shows-library-actions">
+                    <label class="light-shows-library-select-all" for="lightShowsSelectAll">
+                        <input type="checkbox" id="lightShowsSelectAll">
+                        Select all
+                    </label>
+                    <span class="light-shows-library-select-count" id="lightShowsSelectedCount">0 selected</span>
+                    <form id="lightShowsBulkDeleteForm" action="{{ url_for('light_shows.bulk_delete_light_shows') }}" method="post"></form>
+                    <button class="light-shows-btn light-shows-btn-danger" id="lightShowsBulkDeleteButton" type="submit" form="lightShowsBulkDeleteForm" disabled>
+                        <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                        Delete selected
+                    </button>
+                </div>
+            </div>
+
+            {% if show_groups %}
+            <div class="light-shows-table-shell" aria-label="Light show library table">
+                <table class="light-shows-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Select</th>
+                            <th scope="col">Show</th>
+                            <th scope="col">Library files</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for group in show_groups %}
+                        <tr class="{% if group.is_active %}light-shows-row-active{% endif %}">
+                            <td>
+                                <label class="light-shows-library-select" for="light-show-select-{{ loop.index }}">
+                                    <input
+                                        type="checkbox"
+                                        id="light-show-select-{{ loop.index }}"
+                                        class="js-light-show-bulk-checkbox"
+                                        form="lightShowsBulkDeleteForm"
+                                        name="base_names"
+                                        value="{{ group.base_name }}"
+                                    >
+                                    <span class="sr-only">Select {{ group.base_name }}</span>
+                                </label>
+                            </td>
+                            <td>
+                                <div class="light-shows-library-name">
+                                    <strong>{{ group.base_name }}</strong>
+                                    {% if group.fseq_file %}
+                                    <span class="light-shows-file-meta">Active candidate: {{ group.fseq_file.filename }}</span>
+                                    {% else %}
+                                    <span class="light-shows-file-meta">No FSEQ file available in this show bundle.</span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td>
+                                <div class="light-shows-file-stack">
+                                    {% if group.fseq_file %}
+                                    <div class="light-shows-file-chip">
+                                        <span class="light-shows-file-name">{{ group.fseq_file.filename }}</span>
+                                        <span class="light-shows-file-meta">{{ group.fseq_file.size_str }}</span>
+                                    </div>
+                                    {% endif %}
+                                    {% if group.audio_file %}
+                                    <div class="light-shows-file-chip">
+                                        <span class="light-shows-file-name">{{ group.audio_file.filename }}</span>
+                                        <span class="light-shows-file-meta">{{ group.audio_file.size_str }}</span>
+                                    </div>
+                                    <audio class="light-shows-audio" controls preload="none" aria-label="Audio preview of {{ group.audio_file.filename }}">
+                                        {% if group.audio_file.filename.lower().endswith('.mp3') %}
+                                        <source src="{{ url_for('light_shows.play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/mpeg">
+                                        {% else %}
+                                        <source src="{{ url_for('light_shows.play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/wav">
+                                        {% endif %}
+                                    </audio>
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td>
+                                {% if group.is_active %}
+                                <span class="light-shows-active-badge">
+                                    <svg class="light-shows-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
+                                    Active
+                                </span>
+                                {% else %}
+                                <span class="light-shows-muted-badge">Available</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="light-shows-row-actions">
+                                    {% if group.fseq_file %}
+                                    <form class="js-light-show-action-form" action="{{ url_for('light_shows.set_active_light_show', filename=group.fseq_file.filename) }}" method="post" data-action-label="Set {{ group.fseq_file.filename }} active">
+                                        <button class="light-shows-btn light-shows-btn-success" type="submit">
+                                            <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
+                                            Set active
+                                        </button>
+                                    </form>
+                                    {% endif %}
+                                    <a class="light-shows-link light-shows-link-secondary" href="{{ url_for('light_shows.download_light_show', partition=group.partition_key, base_name=group.base_name) }}">
+                                        <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-download"></use></svg>
+                                        Download ZIP
+                                    </a>
+                                    <form class="js-light-show-action-form" action="{{ url_for('light_shows.delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" method="post" data-confirm="Delete every file in {{ group.base_name }}?" data-action-label="Delete {{ group.base_name }}">
+                                        <button class="light-shows-btn light-shows-btn-danger" type="submit">
+                                            <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                                            Delete
+                                        </button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="light-shows-mobile-grid" aria-label="Light show library cards">
+                {% for group in show_groups %}
+                <article class="light-shows-card{% if group.is_active %} is-active{% endif %}">
+                    <div class="light-shows-card-header">
+                        <div class="light-shows-card-title">
+                            <h3>{{ group.base_name }}</h3>
+                            {% if group.is_active %}
+                            <span class="light-shows-active-badge">
+                                <svg class="light-shows-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
+                                Active show
+                            </span>
+                            {% else %}
+                            <span class="light-shows-muted-badge">Available</span>
+                            {% endif %}
+                        </div>
+                        <label class="light-shows-library-select" for="light-show-card-select-{{ loop.index }}">
+                            <input
+                                type="checkbox"
+                                id="light-show-card-select-{{ loop.index }}"
+                                class="js-light-show-bulk-checkbox"
+                                form="lightShowsBulkDeleteForm"
+                                name="base_names"
+                                value="{{ group.base_name }}"
+                            >
+                            <span class="sr-only">Select {{ group.base_name }}</span>
+                        </label>
+                    </div>
+
+                    <div class="light-shows-file-stack">
+                        {% if group.fseq_file %}
+                        <div class="light-shows-file-chip">
+                            <span class="light-shows-file-name">{{ group.fseq_file.filename }}</span>
+                            <span class="light-shows-file-meta">{{ group.fseq_file.size_str }}</span>
+                        </div>
+                        {% endif %}
+                        {% if group.audio_file %}
+                        <div class="light-shows-file-chip">
+                            <span class="light-shows-file-name">{{ group.audio_file.filename }}</span>
+                            <span class="light-shows-file-meta">{{ group.audio_file.size_str }}</span>
+                        </div>
+                        <audio class="light-shows-audio" controls preload="none" aria-label="Audio preview of {{ group.audio_file.filename }}">
+                            {% if group.audio_file.filename.lower().endswith('.mp3') %}
+                            <source src="{{ url_for('light_shows.play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/mpeg">
+                            {% else %}
+                            <source src="{{ url_for('light_shows.play_light_show_audio', partition=group.partition_key, filename=group.audio_file.filename) }}" type="audio/wav">
+                            {% endif %}
+                        </audio>
+                        {% endif %}
+                    </div>
+
+                    <div class="light-shows-card-actions">
+                        {% if group.fseq_file %}
+                        <form class="js-light-show-action-form" action="{{ url_for('light_shows.set_active_light_show', filename=group.fseq_file.filename) }}" method="post" data-action-label="Set {{ group.fseq_file.filename }} active">
+                            <button class="light-shows-btn light-shows-btn-success" type="submit">
+                                <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
+                                Set active
+                            </button>
+                        </form>
+                        {% endif %}
+                        <a class="light-shows-link light-shows-link-secondary" href="{{ url_for('light_shows.download_light_show', partition=group.partition_key, base_name=group.base_name) }}">
+                            <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-download"></use></svg>
+                            Download ZIP
+                        </a>
+                        <form class="js-light-show-action-form" action="{{ url_for('light_shows.delete_light_show', partition=group.partition_key, base_name=group.base_name) }}" method="post" data-confirm="Delete every file in {{ group.base_name }}?" data-action-label="Delete {{ group.base_name }}">
+                            <button class="light-shows-btn light-shows-btn-danger" type="submit">
+                                <svg class="light-shows-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                                Delete
+                            </button>
+                        </form>
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="light-shows-empty">
+                <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-folder"></use></svg>
+                <h3 class="light-shows-panel-title">No light shows yet</h3>
+                <p class="light-shows-empty-copy">Upload your first FSEQ, audio file, or ZIP archive to populate the library.</p>
+            </div>
+            {% endif %}
+        </section>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/light_shows.js') }}"></script>
+{% endblock %}

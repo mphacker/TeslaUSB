@@ -41,7 +41,8 @@ from teslausb_web.services.boombox_service import make_boombox_service
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
-from teslausb_web.services.cloud_oauth_service import make_oauth_service
+from teslausb_web.services.cloud_oauth_service import CloudOAuthService, make_oauth_service
+from teslausb_web.services.cloud_rclone_service import make_rclone_service
 from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
 from teslausb_web.services.music_service import make_music_service
@@ -133,6 +134,7 @@ def create_app(
     _register_music_services(app, cfg)
     _register_boombox_services(app, cfg)
     _register_cloud_oauth_services(app, cfg)
+    _register_cloud_rclone_services(app, cfg)
     _register_wrap_services(app, cfg)
     _register_mapping_services(app, cfg)
 
@@ -291,6 +293,14 @@ def _register_boombox_services(app: Flask, cfg: WebConfig) -> None:
 def _register_cloud_oauth_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the cloud OAuth service once at app startup."""
     app.extensions["cloud_oauth_service"] = make_oauth_service(cfg)
+
+
+def _register_cloud_rclone_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the rclone wrapper once and inject the OAuth service."""
+    oauth_service = app.extensions.get("cloud_oauth_service")
+    if not isinstance(oauth_service, CloudOAuthService):
+        raise RuntimeError("cloud_oauth_service must be registered before cloud_rclone_service")
+    app.extensions["cloud_rclone_service"] = make_rclone_service(cfg, oauth_service)
 
 
 def _register_wrap_services(app: Flask, cfg: WebConfig) -> None:

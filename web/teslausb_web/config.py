@@ -87,10 +87,18 @@ _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".mp3", ".wav")
 _DEFAULT_CLOUD_CREDENTIALS_FILENAME: Final[str] = "cloud_oauth_credentials.json"
 _DEFAULT_CLOUD_STATE_FILENAME: Final[str] = "cloud_oauth_state.json"
 _DEFAULT_CLOUD_RCLONE_CONFIG_DIRNAME: Final[str] = "rclone"
+_DEFAULT_CLOUD_RCLONE_LOG_FILENAME: Final[str] = "rclone.log"
 _DEFAULT_CLOUD_REFRESH_WINDOW_SECONDS: Final[int] = 300
+_DEFAULT_CLOUD_TRANSFER_TIMEOUT_SECONDS: Final[int] = 3600
+_DEFAULT_CLOUD_BWLIMIT_KBPS: Final[int] = 0
+_DEFAULT_CLOUD_RETRIES: Final[int] = 3
+_DEFAULT_CLOUD_RCLONE_BINARY: Final[str] = "rclone"
 _DEFAULT_CLOUD_CREDENTIALS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_CREDENTIALS_FILENAME
 _DEFAULT_CLOUD_STATE_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_STATE_FILENAME
 _DEFAULT_CLOUD_RCLONE_CONFIG_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_RCLONE_CONFIG_DIRNAME
+_DEFAULT_CLOUD_RCLONE_LOG_PATH: Path = (
+    _DEFAULT_CLOUD_RCLONE_CONFIG_PATH / _DEFAULT_CLOUD_RCLONE_LOG_FILENAME
+)
 _DEFAULT_MAPPING_DB_NAME: Final[str] = "mapping.db"
 _DEFAULT_MAPPING_BACKUP_DIRNAME: Final[str] = "mapping-backups"
 _DEFAULT_MAPPING_BACKUP_RETENTION: Final[int] = 3
@@ -417,12 +425,17 @@ class BoomboxSection:
 
 @dataclass(frozen=True, slots=True)
 class CloudSection:
-    """Cloud OAuth state, credentials, and rclone config locations."""
+    """Cloud OAuth state plus the B-1 rclone working directory and defaults."""
 
     credentials_path: Path = _DEFAULT_CLOUD_CREDENTIALS_PATH
     oauth_state_path: Path = _DEFAULT_CLOUD_STATE_PATH
     rclone_config_path: Path = _DEFAULT_CLOUD_RCLONE_CONFIG_PATH
+    rclone_log_path: Path = _DEFAULT_CLOUD_RCLONE_LOG_PATH
     refresh_window_seconds: int = _DEFAULT_CLOUD_REFRESH_WINDOW_SECONDS
+    transfer_timeout_seconds: int = _DEFAULT_CLOUD_TRANSFER_TIMEOUT_SECONDS
+    bwlimit_kbps: int = _DEFAULT_CLOUD_BWLIMIT_KBPS
+    retries: int = _DEFAULT_CLOUD_RETRIES
+    rclone_binary: str = _DEFAULT_CLOUD_RCLONE_BINARY
 
     def __post_init__(self) -> None:
         self.validate()
@@ -432,11 +445,20 @@ class CloudSection:
             ("credentials_path", self.credentials_path),
             ("oauth_state_path", self.oauth_state_path),
             ("rclone_config_path", self.rclone_config_path),
+            ("rclone_log_path", self.rclone_log_path),
         ):
             if not value.is_absolute() and not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[cloud] {name} must be absolute, got {value!r}")
         if self.refresh_window_seconds < 0:
             raise ConfigError(None, "[cloud] refresh_window_seconds must be >= 0")
+        if self.transfer_timeout_seconds <= 0:
+            raise ConfigError(None, "[cloud] transfer_timeout_seconds must be > 0")
+        if self.bwlimit_kbps < 0:
+            raise ConfigError(None, "[cloud] bwlimit_kbps must be >= 0")
+        if self.retries < 0:
+            raise ConfigError(None, "[cloud] retries must be >= 0")
+        if not self.rclone_binary.strip():
+            raise ConfigError(None, "[cloud] rclone_binary must be non-empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -880,10 +902,42 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 paths_section.state_dir / _DEFAULT_CLOUD_RCLONE_CONFIG_DIRNAME,
                 source,
             ),
+            rclone_log_path=_coerce_path(
+                cloud_raw,
+                "rclone_log_path",
+                paths_section.state_dir
+                / _DEFAULT_CLOUD_RCLONE_CONFIG_DIRNAME
+                / _DEFAULT_CLOUD_RCLONE_LOG_FILENAME,
+                source,
+            ),
             refresh_window_seconds=_coerce_int(
                 cloud_raw,
                 "refresh_window_seconds",
                 _DEFAULT_CLOUD_REFRESH_WINDOW_SECONDS,
+                source,
+            ),
+            transfer_timeout_seconds=_coerce_int(
+                cloud_raw,
+                "transfer_timeout_seconds",
+                _DEFAULT_CLOUD_TRANSFER_TIMEOUT_SECONDS,
+                source,
+            ),
+            bwlimit_kbps=_coerce_int(
+                cloud_raw,
+                "bwlimit_kbps",
+                _DEFAULT_CLOUD_BWLIMIT_KBPS,
+                source,
+            ),
+            retries=_coerce_int(
+                cloud_raw,
+                "retries",
+                _DEFAULT_CLOUD_RETRIES,
+                source,
+            ),
+            rclone_binary=_coerce_str(
+                cloud_raw,
+                "rclone_binary",
+                _DEFAULT_CLOUD_RCLONE_BINARY,
                 source,
             ),
         )

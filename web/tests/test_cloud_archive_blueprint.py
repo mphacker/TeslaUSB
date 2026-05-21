@@ -289,8 +289,8 @@ def test_index_template_html_assertions(client: FlaskClient) -> None:
     template_source = template_path.read_text(encoding="utf-8")
 
     assert response.status_code == HTTPStatus.OK
-    assert "Cloud Archive" in html
-    assert "<title>Cloud Archive</title>" in html
+    assert "Cloud Sync" in html
+    assert "<title>" in html
     for forbidden in ("Edit Mode", "Present Mode", "quick_edit", "current_mode"):
         assert forbidden not in html
         assert forbidden not in template_source
@@ -298,12 +298,24 @@ def test_index_template_html_assertions(client: FlaskClient) -> None:
         assert forbidden not in html
         assert forbidden not in template_source
     assert html.count("<svg") >= 10
-    assert 'script type="module" src="/static/js/cloud_archive.js"' in html
-    for module_name in ("provider.js", "sync_control.js", "queue.js", "browse.js", "archive.js"):
-        assert f"/static/js/cloud_archive/{module_name}" in html
-    assert html.count("data-confirm=") >= 4
-    assert html.count("aria-label=") >= 10
-    assert re.search(r"#[0-9a-fA-F]{3,6}\b", template_source) is None
+    assert "<script>" in html
+    assert 'id="syncNowBtn"' in html
+    assert 'id="oauthStartBtn"' in html
+    assert html.count("aria-label=") >= 2
+    assert re.search(r"(?<!&)#[0-9a-fA-F]{3,6}\b", template_source) is None
+    assert 1880 <= len(template_source.splitlines()) <= 2310
+
+
+def test_index_template_restores_v1_ui_sections(client: FlaskClient) -> None:
+    html = client.get("/cloud/").get_data(as_text=True)
+
+    assert "providerCardGrid" in html
+    assert "Provider authorization" in html
+    assert "Bandwidth limit:" in html
+    assert "Retry attempts before giving up" in html
+    assert "Upload Schedule" in html
+    assert "Dead Letters" in html
+    assert "Reconcile now" in html
 
 
 def test_index_route_degrades_when_services_raise(

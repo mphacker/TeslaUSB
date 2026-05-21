@@ -1,1235 +1,2005 @@
 {% extends "base.html" %}
-{% macro icon(name, classes='cloud-archive-icon') -%}
-<svg class="{{ classes }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    {% if name == 'cloud' %}
-    <path d="M17.5 19H9a7 7 0 1 1 2.1-13.7A5 5 0 1 1 17.5 19Z"></path>
-    {% elif name == 'link' %}
-    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07L11 5"></path>
-    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 1 0 7.07 7.07L13 19"></path>
-    {% elif name == 'unlink' %}
-    <path d="m18.84 12.25 1.41-1.41a5 5 0 0 0-7.07-7.07L11.77 5.2"></path>
-    <path d="m5.16 11.75-1.41 1.41a5 5 0 0 0 7.07 7.07l1.41-1.41"></path>
-    <path d="M8 8h.01"></path>
-    <path d="M16 16h.01"></path>
-    <path d="m3 3 18 18"></path>
-    {% elif name == 'refresh-cw' %}
-    <path d="M21 2v6h-6"></path>
-    <path d="M3 22v-6h6"></path>
-    <path d="M21 8a9 9 0 0 0-15-3l-3 3"></path>
-    <path d="M3 16a9 9 0 0 0 15 3l3-3"></path>
-    {% elif name == 'folder' %}
-    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"></path>
-    {% elif name == 'history' %}
-    <path d="M12 8v5l4 2"></path>
-    <path d="M3 3v5h5"></path>
-    <path d="M3.05 13a9 9 0 1 0 .5-4"></path>
-    {% elif name == 'bar-chart-2' %}
-    <line x1="18" x2="18" y1="20" y2="10"></line>
-    <line x1="12" x2="12" y1="20" y2="4"></line>
-    <line x1="6" x2="6" y1="20" y2="14"></line>
-    {% elif name == 'upload' %}
-    <path d="M12 3v12"></path>
-    <path d="m17 8-5-5-5 5"></path>
-    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-    {% elif name == 'wifi' %}
-    <path d="M12 20h.01"></path>
-    <path d="M8.5 16.5a5 5 0 0 1 7 0"></path>
-    <path d="M5 13a10 10 0 0 1 14 0"></path>
-    <path d="M2 9.5a15 15 0 0 1 20 0"></path>
-    {% elif name == 'stop-circle' %}
-    <circle cx="12" cy="12" r="10"></circle>
-    <rect x="9" y="9" width="6" height="6" rx="1"></rect>
-    {% elif name == 'database' %}
-    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
-    <path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"></path>
-    <path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"></path>
-    {% elif name == 'trash-2' %}
-    <path d="M3 6h18"></path>
-    <path d="M8 6V4h8v2"></path>
-    <path d="M19 6l-1 14H6L5 6"></path>
-    <path d="M10 11v6"></path>
-    <path d="M14 11v6"></path>
-    {% elif name == 'alert-triangle' %}
-    <path d="m10.29 3.86-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.71-3.14l-8-14a2 2 0 0 0-3.42 0Z"></path>
-    <path d="M12 9v4"></path>
-    <path d="M12 17h.01"></path>
-    {% elif name == 'search' %}
-    <circle cx="11" cy="11" r="8"></circle>
-    <path d="m21 21-4.35-4.35"></path>
-    {% elif name == 'hard-drive' %}
-    <line x1="22" x2="2" y1="12" y2="12"></line>
-    <path d="M5.45 5.11 2 12l3.45 6.89"></path>
-    <path d="M18.55 5.11 22 12l-3.45 6.89"></path>
-    <path d="M12 6v12"></path>
-    {% elif name == 'list' %}
-    <path d="M8 6h13"></path>
-    <path d="M8 12h13"></path>
-    <path d="M8 18h13"></path>
-    <path d="M3 6h.01"></path>
-    <path d="M3 12h.01"></path>
-    <path d="M3 18h.01"></path>
-    {% elif name == 'x' %}
-    <path d="M18 6 6 18"></path>
-    <path d="m6 6 12 12"></path>
-    {% elif name == 'plus' %}
-    <path d="M12 5v14"></path>
-    <path d="M5 12h14"></path>
-    {% elif name == 'play' %}
-    <circle cx="12" cy="12" r="10"></circle>
-    <polygon points="10 8 16 12 10 16 10 8"></polygon>
-    {% elif name == 'check-circle' %}
-    <circle cx="12" cy="12" r="10"></circle>
-    <path d="m9 12 2 2 4-4"></path>
-    {% elif name == 'chevron-up' %}
-    <path d="m18 15-6-6-6 6"></path>
-    {% else %}
-    <circle cx="12" cy="12" r="10"></circle>
-    {% endif %}
-</svg>
-{%- endmacro %}
-{% block title %}Cloud Archive{% endblock %}
-{% block head %}
-<link rel="modulepreload" href="{{ url_for('static', filename='js/cloud_archive/provider.js') }}">
-<link rel="modulepreload" href="{{ url_for('static', filename='js/cloud_archive/sync_control.js') }}">
-<link rel="modulepreload" href="{{ url_for('static', filename='js/cloud_archive/queue.js') }}">
-<link rel="modulepreload" href="{{ url_for('static', filename='js/cloud_archive/browse.js') }}">
-<link rel="modulepreload" href="{{ url_for('static', filename='js/cloud_archive/archive.js') }}">
-<style>
-.cloud-archive-page,
-.cloud-archive-header,
-.cloud-archive-grid,
-.cloud-archive-panel,
-.cloud-archive-panel-head,
-.cloud-archive-summary,
-.cloud-archive-actions,
-.cloud-archive-status-copy,
-.cloud-archive-metrics,
-.cloud-archive-metric,
-.cloud-archive-history-shell,
-.cloud-archive-history-cards,
-.cloud-archive-history-card,
-.cloud-archive-form-grid,
-.cloud-archive-field,
-.cloud-archive-provider-grid,
-.cloud-archive-provider-card,
-.cloud-archive-connection-stack,
-.cloud-archive-storage-grid,
-.cloud-archive-storage-bar,
-.cloud-archive-storage-meta,
-.cloud-archive-browse-shell,
-.cloud-archive-browse-breadcrumbs,
-.cloud-archive-tree,
-.cloud-archive-tree-row,
-.cloud-archive-table-wrap,
-.cloud-archive-folder-table,
-.cloud-archive-queue-shell,
-.cloud-archive-list,
-.cloud-archive-list-item,
-.cloud-archive-list-copy,
-.cloud-archive-badge-row,
-.cloud-archive-batch-results,
-.cloud-archive-empty,
-.cloud-archive-callout,
-.cloud-archive-progress,
-.cloud-archive-progress-meta,
-.cloud-archive-status-actions,
-.cloud-archive-bandwidth-grid,
-.cloud-archive-stat,
-.cloud-archive-stat-grid {
-    display: grid;
-    gap: var(--space-4);
-}
-
-.cloud-archive-page {
-    gap: var(--space-6);
-}
-
-.cloud-archive-header,
-.cloud-archive-panel,
-.cloud-archive-callout,
-.cloud-archive-empty,
-.cloud-archive-provider-card,
-.cloud-archive-history-card,
-.cloud-archive-list-item,
-.cloud-archive-tree-row,
-.cloud-archive-status-card,
-.cloud-archive-stat,
-.cloud-archive-batch-results,
-.cloud-archive-folder-table tbody tr {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    box-shadow: 0 12px 24px var(--shadow);
-}
-
-.cloud-archive-header,
-.cloud-archive-panel,
-.cloud-archive-callout,
-.cloud-archive-empty,
-.cloud-archive-provider-card,
-.cloud-archive-history-card,
-.cloud-archive-list-item,
-.cloud-archive-status-card,
-.cloud-archive-stat,
-.cloud-archive-batch-results {
-    padding: var(--space-5);
-}
-
-.cloud-archive-header {
-    grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
-    align-items: start;
-}
-
-.cloud-archive-title,
-.cloud-archive-panel-title,
-.cloud-archive-section-title,
-.cloud-archive-list-title,
-.cloud-archive-empty-title {
-    margin: 0;
-    color: var(--text-primary);
-}
-
-.cloud-archive-title {
-    font-size: var(--text-3xl);
-}
-
-.cloud-archive-panel-title,
-.cloud-archive-section-title,
-.cloud-archive-list-title,
-.cloud-archive-empty-title {
-    font-size: var(--text-xl);
-}
-
-.cloud-archive-copy,
-.cloud-archive-subtitle,
-.cloud-archive-panel-copy,
-.cloud-archive-label,
-.cloud-archive-meta,
-.cloud-archive-empty-copy,
-.cloud-archive-list-path,
-.cloud-archive-status-line,
-.cloud-archive-storage-copy {
-    margin: 0;
-    color: var(--text-secondary);
-    line-height: 1.5;
-}
-
-.cloud-archive-summary,
-.cloud-archive-actions,
-.cloud-archive-panel-head,
-.cloud-archive-status-copy,
-.cloud-archive-progress-meta,
-.cloud-archive-storage-meta,
-.cloud-archive-badge-row {
-    display: flex;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-}
-
-.cloud-archive-panel-head,
-.cloud-archive-progress-meta,
-.cloud-archive-storage-meta {
-    justify-content: space-between;
-    align-items: flex-start;
-}
-
-.cloud-archive-pill,
-.cloud-archive-badge,
-.cloud-archive-history-badge,
-.cloud-archive-folder-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-height: 44px;
-    padding: var(--space-2) var(--space-4);
-    border: 1px solid var(--border-input);
-    border-radius: 999px;
-    background: var(--form-label-bg);
-    color: var(--text-primary);
-    font-weight: 600;
-}
-
-.cloud-archive-badge,
-.cloud-archive-history-badge {
-    min-height: auto;
-    padding: var(--space-1) var(--space-2);
-    font-size: var(--text-xs);
-}
-
-.cloud-archive-badge.is-success,
-.cloud-archive-history-badge.is-success,
-.cloud-archive-status-card.is-connected {
-    background: var(--msg-success-bg);
-    color: var(--msg-success-text);
-}
-
-.cloud-archive-badge.is-warning,
-.cloud-archive-history-badge.is-warning,
-.cloud-archive-status-card.is-running {
-    background: var(--msg-warning-bg);
-    color: var(--msg-warning-text);
-}
-
-.cloud-archive-badge.is-info,
-.cloud-archive-history-badge.is-info {
-    background: var(--msg-info-bg);
-    color: var(--msg-info-text);
-}
-
-.cloud-archive-badge.is-danger,
-.cloud-archive-history-badge.is-danger,
-.cloud-archive-status-card.is-error,
-.cloud-archive-callout.is-danger {
-    background: var(--msg-error-bg);
-    color: var(--msg-error-text);
-}
-
-.cloud-archive-callout.is-warning {
-    background: var(--msg-warning-bg);
-    color: var(--msg-warning-text);
-}
-
-.cloud-archive-grid {
-    grid-template-columns: repeat(1, minmax(0, 1fr));
-}
-
-.cloud-archive-panel {
-    align-content: start;
-}
-
-.cloud-archive-panel.is-wide {
-    gap: var(--space-5);
-}
-
-.cloud-archive-status-card {
-    gap: var(--space-4);
-    padding: var(--space-5);
-    background: var(--form-label-bg);
-}
-
-.cloud-archive-status-line {
-    color: inherit;
-}
-
-.cloud-archive-progress {
-    min-height: 14px;
-    border-radius: 999px;
-    overflow: hidden;
-    background: var(--bg-info);
-}
-
-.cloud-archive-progress > span,
-.cloud-archive-storage-bar > span {
-    display: block;
-    min-height: 100%;
-    border-radius: inherit;
-    background: var(--btn-primary-bg);
-    transition: width var(--transition-normal);
-}
-
-.cloud-archive-storage-bar {
-    min-height: 12px;
-    border-radius: 999px;
-    overflow: hidden;
-    background: var(--bg-info);
-}
-
-.cloud-archive-status-actions {
-    display: flex;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-}
-
-.cloud-archive-btn,
-.cloud-archive-secondary-btn,
-.cloud-archive-icon-btn,
-.cloud-archive-select,
-.cloud-archive-input,
-.cloud-archive-textarea {
-    min-height: 44px;
-    border-radius: var(--radius-md);
-    font: inherit;
-}
-
-.cloud-archive-btn,
-.cloud-archive-secondary-btn,
-.cloud-archive-icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-2);
-    padding: 0 var(--space-4);
-    border: 1px solid var(--border-input);
-    cursor: pointer;
-    text-decoration: none;
-    transition: transform var(--transition-fast), background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
-}
-
-.cloud-archive-btn {
-    background: var(--btn-primary-bg);
-    border-color: var(--btn-primary-bg);
-    color: var(--btn-primary-text);
-}
-
-.cloud-archive-btn.is-success {
-    background: var(--btn-success-bg);
-    border-color: var(--btn-success-bg);
-    color: var(--btn-success-text);
-}
-
-.cloud-archive-btn.is-danger {
-    background: var(--btn-danger-bg);
-    border-color: var(--btn-danger-bg);
-    color: var(--btn-danger-text);
-}
-
-.cloud-archive-secondary-btn,
-.cloud-archive-icon-btn {
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-}
-
-.cloud-archive-btn:disabled,
-.cloud-archive-secondary-btn:disabled,
-.cloud-archive-icon-btn:disabled,
-.cloud-archive-select:disabled,
-.cloud-archive-input:disabled,
-.cloud-archive-textarea:disabled {
-    cursor: not-allowed;
-    opacity: 0.65;
-}
-
-.cloud-archive-icon-btn {
-    inline-size: 44px;
-    padding: 0;
-}
-
-.cloud-archive-btn:hover:not(:disabled),
-.cloud-archive-secondary-btn:hover:not(:disabled),
-.cloud-archive-icon-btn:hover:not(:disabled) {
-    transform: translateY(-1px);
-}
-
-.cloud-archive-select,
-.cloud-archive-input,
-.cloud-archive-textarea {
-    width: 100%;
-    padding: 0 var(--space-3);
-    border: 1px solid var(--border-input);
-    background: var(--form-input-bg);
-    color: var(--text-primary);
-}
-
-.cloud-archive-textarea {
-    min-height: 8rem;
-    padding-block: var(--space-3);
-    resize: vertical;
-}
-
-.cloud-archive-form-grid {
-    grid-template-columns: repeat(1, minmax(0, 1fr));
-}
-
-.cloud-archive-field {
-    gap: var(--space-2);
-}
-
-.cloud-archive-provider-grid,
-.cloud-archive-bandwidth-grid,
-.cloud-archive-stat-grid,
-.cloud-archive-storage-grid {
-    grid-template-columns: repeat(1, minmax(0, 1fr));
-}
-
-.cloud-archive-provider-card.is-active {
-    border-color: var(--btn-primary-bg);
-}
-
-.cloud-archive-provider-card.is-connected {
-    border-color: var(--success-border);
-}
-
-.cloud-archive-provider-card .cloud-archive-actions {
-    justify-content: flex-end;
-}
-
-.cloud-archive-storage-key {
-    color: var(--text-primary);
-    font-weight: 600;
-}
-
-.cloud-archive-history-shell {
-    gap: var(--space-3);
-}
-
-.cloud-archive-table-wrap {
-    overflow-x: auto;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border-table);
-}
-
-.cloud-archive-history-table,
-.cloud-archive-folder-table,
-.cloud-archive-batch-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-.cloud-archive-history-table th,
-.cloud-archive-history-table td,
-.cloud-archive-folder-table th,
-.cloud-archive-folder-table td,
-.cloud-archive-batch-table th,
-.cloud-archive-batch-table td {
-    padding: var(--space-3);
-    border-bottom: 1px solid var(--border-table);
-    text-align: left;
-    color: var(--text-primary);
-}
-
-.cloud-archive-history-table th,
-.cloud-archive-folder-table th,
-.cloud-archive-batch-table th {
-    background: var(--bg-table-header);
-    color: var(--text-table-header);
-    font-weight: 600;
-}
-
-.cloud-archive-history-cards,
-.cloud-archive-empty {
-    display: none;
-}
-
-.cloud-archive-tree {
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    overflow: hidden;
-    background: var(--form-input-bg);
-}
-
-.cloud-archive-tree-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
-    border-radius: 0;
-    box-shadow: none;
-    border: 0;
-    border-bottom: 1px solid var(--border-table);
-    cursor: pointer;
-}
-
-.cloud-archive-tree-row:last-child {
-    border-bottom: 0;
-}
-
-.cloud-archive-tree-row.is-current {
-    background: var(--bg-info);
-}
-
-.cloud-archive-list {
-    gap: var(--space-3);
-}
-
-.cloud-archive-list-item {
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-}
-
-.cloud-archive-list-copy {
-    gap: var(--space-1);
-}
-
-.cloud-archive-list-name {
-    margin: 0;
-    color: var(--text-primary);
-    font-weight: 600;
-    overflow-wrap: anywhere;
-}
-
-.cloud-archive-stat-value {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: var(--text-2xl);
-    font-weight: 700;
-}
-
-.cloud-archive-section-divider {
-    block-size: 1px;
-    background: var(--border-color);
-}
-
-.cloud-archive-sr-only {
-    position: absolute;
-    inline-size: 1px;
-    block-size: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-}
-
-.cloud-archive-icon {
-    inline-size: 1.125rem;
-    block-size: 1.125rem;
-    flex: 0 0 auto;
-}
-
-.cloud-archive-empty {
-    justify-items: center;
-    text-align: center;
-}
-
-.cloud-archive-empty svg {
-    inline-size: 2rem;
-    block-size: 2rem;
-}
-
-.cloud-archive-status-copy strong,
-.cloud-archive-storage-key,
-.cloud-archive-folder-name {
-    color: var(--text-primary);
-}
-
-@media (min-width: 768px) {
-    .cloud-archive-form-grid,
-    .cloud-archive-provider-grid,
-    .cloud-archive-bandwidth-grid,
-    .cloud-archive-storage-grid,
-    .cloud-archive-stat-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-}
-
-@media (min-width: 1024px) {
-    .cloud-archive-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .cloud-archive-panel.is-span-2 {
-        grid-column: span 2;
-    }
-
-    .cloud-archive-provider-grid,
-    .cloud-archive-bandwidth-grid,
-    .cloud-archive-storage-grid,
-    .cloud-archive-stat-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-}
-
-@media (max-width: 767px) {
-    .cloud-archive-table-wrap {
-        display: none;
-    }
-
-    .cloud-archive-history-cards,
-    .cloud-archive-empty {
-        display: grid;
-    }
-
-    .cloud-archive-history-shell.is-populated .cloud-archive-empty {
-        display: none;
-    }
-}
-</style>
-{% endblock %}
 {% block content %}
-<div class="cloud-archive-page" id="cloudArchivePage">
-    <div class="cloud-archive-sr-only" aria-hidden="true">
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 2.1-13.7A5 5 0 1 1 17.5 19Z"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07L11 5"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 1 0 7.07 7.07L13 19"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18.84 12.25 1.41-1.41a5 5 0 0 0-7.07-7.07L11.77 5.2"></path><path d="m5.16 11.75-1.41 1.41a5 5 0 0 0 7.07 7.07l1.41-1.41"></path><path d="M8 8h.01"></path><path d="M16 16h.01"></path><path d="m3 3 18 18"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 22v-6h6"></path><path d="M21 8a9 9 0 0 0-15-3l-3 3"></path><path d="M3 16a9 9 0 0 0 15 3l3-3"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5l4 2"></path><path d="M3 3v5h5"></path><path d="M3.05 13a9 9 0 1 0 .5-4"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="18" y1="20" y2="10"></line><line x1="12" x2="12" y1="20" y2="4"></line><line x1="6" x2="6" y1="20" y2="14"></line></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="m17 8-5-5-5 5"></path><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"></path><path d="M8.5 16.5a5 5 0 0 1 7 0"></path><path d="M5 13a10 10 0 0 1 14 0"></path><path d="M2 9.5a15 15 0 0 1 20 0"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10.29 3.86-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.71-3.14l-8-14a2 2 0 0 0-3.42 0Z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"></path><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"></path></svg>
-        <svg class="cloud-archive-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path></svg>
+<div class="container">
+
+    <h1 class="cloud-archive-title" aria-label="Cloud Archive">Cloud Archive</h1>
+
+    <!-- ================================================================
+         Section 1: Sync Status Card
+         ================================================================ -->
+    <div id="syncStatusCard" class="device-status-card
+        {%- if sync_status.running %} device-status-edit
+        {%- elif sync_status.error %} device-status-unknown
+        {%- else %} device-status-present{% endif %}">
+
+        {% if sync_status.running %}
+        {# ---- SYNCING STATE ---- #}
+        <div class="device-status-header">
+            <span class="status-dot status-edit" id="syncDot"></span>
+            <div class="device-status-info">
+                <strong id="syncTitle">Syncing to {{ provider or 'Cloud' }}</strong>
+                <p id="syncSubtitle">
+                    {{ sync_status.files_done|default(0) }} of {{ sync_status.files_total|default('?') }} files
+                    {% if sync_status.bytes_transferred %} &mdash; {{ sync_status.bytes_transferred|filesizeformat }}{% endif %}
+                </p>
+            </div>
+        </div>
+        <div class="progress-container" style="margin: 12px 0 8px;">
+            <div class="progress-bar progress-normal" id="syncProgressBar"
+                 style="width: {{ sync_status.progress|default(0) }}%; transition: width 0.5s ease;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span id="syncCurrentFile" style="font-size: var(--text-sm); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%;">
+                {{ sync_status.current_file or '' }}
+            </span>
+            <button type="button" class="present-btn" onclick="syncStop()" id="syncStopBtn"
+                    style="padding: 8px 16px; font-size: 14px;">Stop Sync</button>
+        </div>
+
+        {% elif sync_status.error %}
+        {# ---- ERROR STATE ---- #}
+        <div class="device-status-header">
+            <span class="status-dot status-unknown"></span>
+            <div class="device-status-info">
+                <strong>Sync Error</strong>
+                <p id="syncError" style="color: var(--error-text);">{{ sync_status.error }}</p>
+            </div>
+        </div>
+        <div style="margin-top: 8px;">
+            <button type="button" class="edit-btn" onclick="syncNow()" style="padding: 8px 16px; font-size: 14px;">Retry</button>
+        </div>
+
+        {% else %}
+        {# ---- IDLE STATE ---- #}
+        <div class="device-status-header">
+            <span class="status-dot status-present" id="syncDot"></span>
+            <div class="device-status-info">
+                <strong id="syncTitle">Cloud Sync</strong>
+                <p id="syncSubtitle">
+                    {% if sync_status.last_run %}
+                        Last sync: <span id="lastSyncTime" data-ts="{{ sync_status.last_run }}">{{ sync_status.last_run }}</span>
+                    {% else %}
+                        No syncs yet
+                    {% endif %}
+                    {% if sync_stats.total_pending %}
+                        &mdash; {{ sync_stats.total_pending }} file{{ 's' if sync_stats.total_pending != 1 else '' }} pending
+                    {% endif %}
+                </p>
+            </div>
+        </div>
+        <div style="margin-top: 8px;">
+            <button type="button" class="edit-btn" onclick="syncNow()" id="syncNowBtn"
+                    style="padding: 8px 16px; font-size: 14px;"
+                    {% if not provider_connected %}disabled title="Configure a cloud provider first"{% endif %}>Sync Now</button>
+            {% if not provider_connected %}
+            <span style="font-size: var(--text-sm); color: var(--text-secondary); margin-left: 8px;">Set up a cloud provider below to start syncing.</span>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {# Hidden progress elements used by JS when state changes dynamically #}
+        <div class="progress-container" id="syncProgressWrap"
+             style="margin: 12px 0 8px;{% if not sync_status.running %} display:none;{% endif %}">
+            <div class="progress-bar progress-normal" id="syncProgressBarDyn" style="width: 0%;"></div>
+        </div>
     </div>
-    <section class="cloud-archive-header">
-        <div>
-            <h1 class="cloud-archive-title">Cloud Archive</h1>
-            <p class="cloud-archive-subtitle">Manage provider authorization, watch sync progress, review archive queues, and browse the remote destination from one responsive dashboard.</p>
-        </div>
-        <div class="cloud-archive-summary" aria-label="Cloud archive summary">
-            <span class="cloud-archive-pill" id="cloudHeaderConnection">{{ icon('link') }}<span>{{ 'Connected' if provider_connected else 'Not connected' }}</span></span>
-            <span class="cloud-archive-pill" id="cloudHeaderProvider">{{ icon('cloud') }}<span>{{ provider|replace('-', ' ')|title if provider else 'Choose a provider' }}</span></span>
-            <span class="cloud-archive-pill" id="cloudHeaderPending">{{ icon('upload') }}<span>{{ sync_stats.total_pending|default(0) }} pending</span></span>
-        </div>
-    </section>
 
-    <noscript>
-        <section class="cloud-archive-callout is-warning">
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('alert-triangle') }}
-                    <div>
-                        <h2 class="cloud-archive-panel-title">JavaScript required</h2>
-                        <p class="cloud-archive-panel-copy">Cloud Archive actions are fetch-driven in B-1. Enable JavaScript to connect a provider, refresh live status, browse the remote tree, or queue archive work.</p>
-                    </div>
+    {# ---- Archive Status Card (single-file archive from video panel) ---- #}
+    <div id="archiveStatusCard" style="display: none; margin-bottom: var(--space-4);">
+        <div class="device-status-card device-status-edit" id="archiveCardInner">
+            <div class="device-status-header">
+                <span class="status-dot status-edit" style="animation: pulse 1.5s ease-in-out infinite;"></span>
+                <div class="device-status-info">
+                    <strong id="archiveTitle">Archiving&hellip;</strong>
+                    <p id="archiveSubtitle" style="font-size: var(--text-sm); color: var(--text-secondary);"></p>
                 </div>
             </div>
-        </section>
-    </noscript>
-
-    {% if pending_authorization %}
-    <section class="cloud-archive-callout">
-        <div class="cloud-archive-panel-head">
-            <div class="cloud-archive-status-copy">
-                {{ icon('link') }}
-                <div>
-                    <h2 class="cloud-archive-panel-title">Authorization pending</h2>
-                    <p class="cloud-archive-panel-copy">Finish the {{ pending_authorization.provider|replace('-', ' ')|title }} authorization started for session <strong>{{ pending_authorization.session_id }}</strong> before {{ pending_authorization.expires_at }}.</p>
-                </div>
+            <div class="progress-container" style="margin: 12px 0 4px;">
+                <div class="progress-bar progress-normal" id="archiveProgressBar" style="width: 0%; transition: width 0.5s ease;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px;">
+                <span id="archiveDetail" style="font-size: var(--text-xs); color: var(--text-tertiary);"></span>
             </div>
         </div>
-    </section>
+    </div>
+
+    <!-- Sync statistics summary -->
+    {% if sync_stats %}
+    <div style="display: flex; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-4);">
+        <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
+            <div id="statSyncedCount" style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_synced|default(0) }}</div>
+            <div style="font-size: var(--text-sm); color: var(--text-secondary);">Events Synced</div>
+        </div>
+        <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
+            <div id="statPendingCount" style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_pending|default(0) }}</div>
+            <div style="font-size: var(--text-sm); color: var(--text-secondary);">Events Pending</div>
+        </div>
+        <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
+            <div id="statFailedCount" style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">{{ sync_stats.total_failed|default(0) }}</div>
+            <div style="font-size: var(--text-sm); color: var(--text-secondary);">Failed</div>
+        </div>
+        <div style="flex: 1; min-width: 120px; padding: var(--space-3); background: var(--bg-info); border-radius: var(--radius-md); text-align: center;">
+            <div id="statTotalBytes" style="font-size: var(--text-2xl); font-weight: 600; color: var(--text-primary);">
+                {% if sync_stats.total_bytes %}{{ sync_stats.total_bytes|filesizeformat }}{% else %}0 B{% endif %}
+            </div>
+            <div style="font-size: var(--text-sm); color: var(--text-secondary);">Transferred</div>
+        </div>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; margin: -8px 0 var(--space-4);">
+        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 0;">
+            Each event contains multiple camera files (up to 6 angles per clip).
+            <span id="statBaselineHint">{% if sync_stats.stats_baseline_at %}Synced/Transferred counts since {{ sync_stats.stats_baseline_at[:10] }}.{% endif %}</span>
+        </p>
+        <button type="button" id="resetStatsBtn" onclick="resetSyncStats()"
+                title="Reset Synced/Transferred counters. Does NOT delete the sync history that prevents re-uploads."
+                style="padding: 4px 12px; font-size: var(--text-xs); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--text-secondary); cursor: pointer;">
+            Reset counters
+        </button>
+    </div>
     {% endif %}
 
-    <section class="cloud-archive-grid">
-        <article class="cloud-archive-panel is-wide is-span-2">
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('upload') }}
-                    <div>
-                        <h2 class="cloud-archive-panel-title">Sync control</h2>
-                        <p class="cloud-archive-panel-copy">Start uploads, wake the worker, stop an active drain, and follow live telemetry from the shadow pipeline.</p>
-                    </div>
-                </div>
-                <div class="cloud-archive-actions">
-                    <button class="cloud-archive-icon-btn" id="cloudSyncRefreshButton" type="button" aria-label="Refresh sync status">{{ icon('refresh-cw') }}</button>
-                    <button class="cloud-archive-btn" id="cloudSyncNowButton" type="button">{{ icon('play') }}<span>Sync now</span></button>
-                    <button class="cloud-archive-secondary-btn" id="cloudWakeButton" type="button">{{ icon('wifi') }}<span>Wake worker</span></button>
-                    <button class="cloud-archive-btn is-danger" id="cloudSyncStopButton" type="button" data-confirm="Stop the active sync?">{{ icon('stop-circle') }}<span>Stop sync</span></button>
-                </div>
+    <!-- ================================================================
+         Section 2: Cloud Provider
+         ================================================================ -->
+    <details class="settings-section"{% if not provider_connected %} open{% endif %}>
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
+            Cloud Provider
+        </summary>
+        <div class="section-content" id="providerSection">
+            {% if provider_connected %}
+            {# ---- Connected state ---- #}
+            <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
+                <span style="display: inline-flex; align-items: center; gap: 6px;">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
+                    <strong style="color: var(--text-primary);">{{ provider|replace('-', ' ')|title }}</strong>
+                </span>
+                <span style="font-size: var(--text-sm); color: var(--text-secondary);">Connected</span>
+                <button type="button" class="action-btn danger" onclick="disconnectProvider()" style="margin-left: auto;">Disconnect</button>
             </div>
-            <section class="cloud-archive-status-card{% if provider_connected %} is-connected{% endif %}{% if sync_status.running %} is-running{% elif sync_status.error %} is-error{% endif %}" id="cloudSyncStatusCard" aria-live="polite">
-                <div class="cloud-archive-progress-meta">
-                    <div>
-                        <h3 class="cloud-archive-section-title" id="cloudSyncStatusTitle">{% if sync_status.running %}Syncing to {{ provider|replace('-', ' ')|title or 'cloud' }}{% elif sync_status.error %}Sync error{% elif provider_connected %}Ready to upload{% else %}Choose a provider{% endif %}</h3>
-                        <p class="cloud-archive-status-line" id="cloudSyncStatusLine">{% if sync_status.running %}{{ sync_status.files_done|default(0) }} of {{ sync_status.files_total|default(0) }} files{% elif sync_status.error %}{{ sync_status.error }}{% elif sync_status.last_run %}Last sync: {{ sync_status.last_run }}{% else %}No sync sessions yet{% endif %}</p>
-                    </div>
-                    <div class="cloud-archive-badge-row">
-                        <span class="cloud-archive-badge is-info" id="cloudSyncProviderBadge">{{ provider|replace('-', ' ')|title if provider else 'No provider' }}</span>
-                        <span class="cloud-archive-badge{% if sync_status.running %} is-warning{% elif sync_status.error %} is-danger{% else %} is-success{% endif %}" id="cloudSyncWorkerBadge">{% if sync_status.running %}Running{% elif sync_status.error %}Attention{% else %}Idle{% endif %}</span>
-                    </div>
-                </div>
-                <div class="cloud-archive-progress" aria-hidden="true"><span id="cloudSyncProgressBar" style="width: {% if sync_status.running and sync_status.total_bytes %}{{ ((sync_status.bytes_transferred|default(0) / sync_status.total_bytes) * 100)|round|int }}{% else %}0{% endif %}%"></span></div>
-                <div class="cloud-archive-progress-meta">
-                    <p class="cloud-archive-meta" id="cloudSyncCurrentFile">{{ sync_status.current_file or 'No current file' }}</p>
-                    <p class="cloud-archive-meta" id="cloudSyncEta">{% if sync_status.eta_seconds %}{{ sync_status.eta_seconds }}s remaining{% elif sync_status.throughput_bps %}{{ sync_status.throughput_bps }} B/s{% else %}Waiting{% endif %}</p>
-                </div>
-            </section>
-            <div class="cloud-archive-stat-grid">
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Uploaded events</p>
-                    <p class="cloud-archive-stat-value" id="cloudStatSynced">{{ sync_stats.total_synced|default(0) }}</p>
-                </section>
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Pending</p>
-                    <p class="cloud-archive-stat-value" id="cloudStatPending">{{ sync_stats.total_pending|default(0) }}</p>
-                </section>
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Failed or dead-lettered</p>
-                    <p class="cloud-archive-stat-value" id="cloudStatFailed">{{ sync_stats.total_failed|default(0) }}</p>
-                </section>
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Transferred</p>
-                    <p class="cloud-archive-stat-value" id="cloudStatBytes">{{ sync_stats.total_bytes|filesizeformat if sync_stats.total_bytes else '0 B' }}</p>
-                </section>
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Shadow agreement</p>
-                    <p class="cloud-archive-stat-value" id="cloudShadowAgreement">0</p>
-                </section>
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Shadow enqueues</p>
-                    <p class="cloud-archive-stat-value" id="cloudShadowEnqueues">0</p>
-                </section>
+            <div style="margin-top: var(--space-3); display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
+                <button type="button" class="action-btn" onclick="testConnection()" id="testConnBtn">Test Connection</button>
+                <span id="testConnResult" style="font-size: var(--text-sm);"></span>
             </div>
-            <div class="cloud-archive-actions">
-                <button class="cloud-archive-secondary-btn" id="cloudResetStatsButton" type="button" data-confirm="Reset the uploaded and transferred counters? The duplicate-upload history will be preserved.">{{ icon('history') }}<span>Reset counters</span></button>
-                <p class="cloud-archive-meta" id="cloudBaselineHint">{% if sync_stats.stats_baseline_at %}Counters are relative to {{ sync_stats.stats_baseline_at[:10] }}.{% else %}Counters cover the full cloud archive history.{% endif %}</p>
-            </div>
-        </article>
 
-        <article class="cloud-archive-panel is-wide">
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('cloud') }}
-                    <div>
-                        <h2 class="cloud-archive-panel-title">Provider connection</h2>
-                        <p class="cloud-archive-panel-copy">Select Dropbox, Google Drive, or OneDrive. Start PKCE authorization, paste the callback URL, test the remote, and review storage usage.</p>
-                    </div>
-                </div>
-                <div class="cloud-archive-actions">
-                    <button class="cloud-archive-icon-btn" id="cloudConnectionRefreshButton" type="button" aria-label="Refresh provider status">{{ icon('refresh-cw') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudConnectionTestButton" type="button" aria-label="Test provider connection">{{ icon('check-circle') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudDisconnectButton" type="button" aria-label="Disconnect provider" data-confirm="Disconnect the current provider? Existing remote files will not be removed.">{{ icon('unlink') }}</button>
+            <div id="storageUsageRow" style="margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-tertiary); display: none;">
+                <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:3px;opacity:0.6;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+                Storage: <span id="storageUsageText"></span>
+            </div>
+            <div id="storageWarning" style="display: none; margin-top: var(--space-2); padding: 8px 12px; border-radius: var(--radius-md); font-size: var(--text-sm); font-weight: 500;"></div>
+
+            {% if token_expiry %}
+            <div style="margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-tertiary);">
+                <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:3px;opacity:0.6;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Access token expires: <span id="tokenExpiryDate" data-expiry="{{ token_expiry }}">{{ token_expiry }}</span>
+            </div>
+            {% endif %}
+
+            <div style="margin-top: var(--space-4); border-top: 1px solid var(--border-primary); padding-top: var(--space-3);">
+                <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
+                    <strong style="color: var(--text-primary); font-size: var(--text-sm);">Automatic sync:</strong>
+                    <label style="display: inline-flex; align-items: center; cursor: pointer; gap: 8px;">
+                        <input type="checkbox" id="syncEnabledToggle" {% if sync_enabled %}checked{% endif %}
+                               onchange="toggleSyncEnabled(this.checked)"
+                               style="width: 18px; height: 18px; accent-color: var(--accent-success);">
+                        <span id="syncEnabledLabel" style="font-size: var(--text-sm); color: var(--text-secondary);">
+                            {{ 'Enabled — syncs automatically when WiFi connects' if sync_enabled else 'Disabled — provider stays connected, no auto-sync' }}
+                        </span>
+                    </label>
                 </div>
             </div>
-            <section class="cloud-archive-status-card{% if provider_connected %} is-connected{% endif %}" id="cloudConnectionStatusCard">
-                <div class="cloud-archive-progress-meta">
-                    <div>
-                        <h3 class="cloud-archive-section-title" id="cloudProviderStatusTitle">{{ provider|replace('-', ' ')|title if provider else 'No provider connected' }}</h3>
-                        <p class="cloud-archive-status-line" id="cloudProviderStatusLine">{% if provider_connected %}Authorization is stored locally and rclone configuration is ready to render.{% else %}Choose a provider card below to start authorization.{% endif %}</p>
+
+            <div style="margin-top: var(--space-3);">
+                <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-2);">
+                    <strong style="color: var(--text-primary); font-size: var(--text-sm);">Sync destination:</strong>
+                    <code id="currentRemotePath" style="font-size: var(--text-sm); color: var(--accent-info); background: var(--bg-tertiary); padding: 2px 8px; border-radius: var(--radius-sm);">{{ remote_path or 'TeslaUSB' }}</code>
+                    <button type="button" class="action-btn" onclick="openFolderBrowser()" id="browseFolderBtn" style="font-size: 13px; padding: 4px 12px;">
+                        <svg style="width:14px;height:14px;vertical-align:-2px;margin-right:3px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        Choose Folder
+                    </button>
+                </div>
+
+                <div id="folderBrowser" style="display: none; border: 1px solid var(--border-primary); border-radius: var(--radius-md); background: var(--bg-secondary); overflow: hidden; max-width: 500px;">
+                    <div id="folderBreadcrumbs" style="padding: 8px 12px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary); font-size: 13px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-height: 36px;">
+                        <span style="color: var(--text-tertiary);">Loading…</span>
                     </div>
-                    <span class="cloud-archive-badge{% if provider_connected %} is-success{% else %} is-warning{% endif %}" id="cloudProviderStateBadge">{{ 'Connected' if provider_connected else 'Awaiting authorization' }}</span>
+                    <div id="folderList" style="max-height: 280px; overflow-y: auto; min-height: 60px;">
+                        <div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">Loading…</div>
+                    </div>
+                    <div style="padding: 8px 12px; border-top: 1px solid var(--border-primary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <button type="button" class="action-btn" onclick="createNewFolder()" style="font-size: 13px; padding: 4px 10px;">
+                            <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            New Folder
+                        </button>
+                        <span style="flex: 1;"></span>
+                        <button type="button" class="action-btn" onclick="closeFolderBrowser()" style="font-size: 13px; padding: 4px 10px;">Cancel</button>
+                        <button type="button" class="edit-btn" onclick="selectCurrentFolder()" id="selectFolderBtn" style="font-size: 13px; padding: 4px 14px;">
+                            Select This Folder
+                        </button>
+                    </div>
                 </div>
-                <div class="cloud-archive-storage-grid">
-                    <section class="cloud-archive-stat">
-                        <p class="cloud-archive-label">Provider</p>
-                        <p class="cloud-archive-stat-value" id="cloudProviderValue">{{ provider|replace('-', ' ')|title if provider else '—' }}</p>
-                    </section>
-                    <section class="cloud-archive-stat">
-                        <p class="cloud-archive-label">Token expiry</p>
-                        <p class="cloud-archive-stat-value" id="cloudTokenExpiryValue">{{ token_expiry if token_expiry else '—' }}</p>
-                    </section>
-                    <section class="cloud-archive-stat">
-                        <p class="cloud-archive-label">Remote root</p>
-                        <p class="cloud-archive-stat-value" id="cloudRemoteRootValue">{{ remote_path if remote_path else 'teslausb:' }}</p>
-                    </section>
-                </div>
-            </section>
-            <div class="cloud-archive-provider-grid" id="cloudProviderGrid">
+            </div>
+
+            {% else %}
+            {# ---- Authorization card selector ---- #}
+            <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
+                Select Dropbox, Google Drive, or OneDrive to begin the browser-based OAuth flow. The generated authorization URL and callback exchange stay on this page so the v1 setup path remains intact in B-1.
+            </p>
+
+            <div id="providerCardGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4);">
                 {% for provider_name in providers %}
-                <section class="cloud-archive-provider-card{% if provider == provider_name %} is-active{% endif %}{% if provider_connected and provider == provider_name %} is-connected{% endif %}" data-provider-card="{{ provider_name }}">
-                    <div class="cloud-archive-panel-head">
-                        <div class="cloud-archive-status-copy">
-                            {{ icon('link') }}
-                            <div>
-                                <h3 class="cloud-archive-section-title">{{ provider_name|replace('-', ' ')|title }}</h3>
-                                <p class="cloud-archive-panel-copy">OAuth 2.0 PKCE flow with manual callback paste and on-device token refresh.</p>
-                            </div>
-                        </div>
-                        {% if provider == provider_name %}
-                        <span class="cloud-archive-badge{% if provider_connected %} is-success{% else %} is-warning{% endif %}">{{ 'Active' if provider_connected else 'Selected' }}</span>
-                        {% endif %}
-                    </div>
-                    <div class="cloud-archive-actions">
-                        <button class="cloud-archive-btn" type="button" data-provider-connect="{{ provider_name }}">{{ icon('link') }}<span>Start authorization</span></button>
-                    </div>
-                </section>
+                <button type="button"
+                        class="action-btn provider-card{% if provider == provider_name %} primary{% endif %}"
+                        data-provider-card="{{ provider_name }}"
+                        onclick="selectProviderCard('{{ provider_name }}')"
+                        style="padding: 16px; justify-content: flex-start; text-align: left; min-height: 120px; border: 1px solid var(--border-input); border-radius: var(--radius-lg); background: {% if provider == provider_name %}var(--btn-primary-bg){% else %}var(--bg-secondary){% endif %}; color: {% if provider == provider_name %}var(--btn-primary-text){% else %}var(--text-primary){% endif %};">
+                    <span style="display: grid; gap: 6px; width: 100%;">
+                        <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600;">
+                            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
+                            {{ provider_name|replace('-', ' ')|title }}
+                        </span>
+                        <span style="font-size: var(--text-sm); opacity: 0.92; line-height: 1.5;">Authorize with PKCE in a provider tab, then paste the callback URL below to finish on-device.</span>
+                    </span>
+                </button>
                 {% endfor %}
             </div>
-            <section class="cloud-archive-callout" id="cloudAuthPanel">
-                <div class="cloud-archive-panel-head">
-                    <div class="cloud-archive-status-copy">
-                        {{ icon('link') }}
+
+            <input type="hidden" id="providerSelect" value="{{ provider }}">
+
+            <div style="display: grid; gap: var(--space-4);">
+                <div class="info-box">
+                    <strong>OAuth setup</strong>
+                    <ol style="margin: 8px 0 0; padding-left: 20px; font-size: var(--text-sm); line-height: 1.7;">
+                        <li>Select a provider card.</li>
+                        <li>Open the provider page and approve access for TeslaUSB.</li>
+                        <li>Paste the full callback URL or returned code into the exchange box below.</li>
+                    </ol>
+                </div>
+
+                <div style="display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border-input); border-radius: var(--radius-lg); background: var(--bg-secondary);">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;">
                         <div>
-                            <h3 class="cloud-archive-section-title">Complete authorization</h3>
-                            <p class="cloud-archive-panel-copy">After approving access in the provider tab, paste the full callback URL or the raw authorization code here to finish the flow.</p>
+                            <strong style="color: var(--text-primary);">Provider authorization</strong>
+                            <p style="margin: 4px 0 0; font-size: var(--text-sm); color: var(--text-secondary);">Start authorization to generate a session ID and provider URL.</p>
+                        </div>
+                        <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
+                            <button type="button" class="action-btn" onclick="startAuthorization()" id="oauthStartBtn">Start authorization</button>
+                            <a id="oauthVisitLink" class="action-btn" href="{{ pending_authorization.authorization_url if pending_authorization else '#' }}" target="_blank" rel="noopener"{% if not pending_authorization %} aria-disabled="true" style="pointer-events: none; opacity: 0.6;"{% endif %}>Open provider page</a>
                         </div>
                     </div>
-                    <a class="cloud-archive-secondary-btn" id="cloudAuthVisitLink" href="{{ pending_authorization.authorization_url if pending_authorization else '#' }}" target="_blank" rel="noopener">{{ icon('cloud') }}<span>Open provider page</span></a>
+
+                    <div style="display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
+                        <label style="display: grid; gap: 6px;">
+                            <span style="font-weight: 600; color: var(--text-primary);">Pending session</span>
+                            <input id="oauthSessionId" type="text" readonly value="{{ pending_authorization.session_id if pending_authorization else '' }}" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--form-input-bg); color: var(--text-primary);">
+                        </label>
+                        <label style="display: grid; gap: 6px; grid-column: 1 / -1;">
+                            <span style="font-weight: 600; color: var(--text-primary);">Authorization URL</span>
+                            <textarea id="oauthAuthorizationUrl" rows="3" readonly style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--form-input-bg); color: var(--text-primary); resize: vertical;">{{ pending_authorization.authorization_url if pending_authorization else '' }}</textarea>
+                        </label>
+                        <label style="display: grid; gap: 6px; grid-column: 1 / -1;">
+                            <span style="font-weight: 600; color: var(--text-primary);">Callback URL or code</span>
+                            <textarea id="oauthCallbackInput" rows="4" placeholder="Paste the redirected URL or the raw code here" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--form-input-bg); color: var(--text-primary); resize: vertical;"></textarea>
+                        </label>
+                    </div>
+
+                    <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
+                        <button type="button" class="edit-btn" onclick="completeAuthorization()" id="oauthCompleteBtn" style="padding: 8px 16px; font-size: 14px;">Complete authorization</button>
+                        <button type="button" class="action-btn" onclick="testConnection()" id="testConnBtnSetup">Test connection</button>
+                        <span id="testConnResultSetup" style="font-size: var(--text-sm); color: var(--text-secondary);"></span>
+                    </div>
                 </div>
-                <div class="cloud-archive-form-grid">
-                    <label class="cloud-archive-field">
-                        <span class="cloud-archive-label">Pending session</span>
-                        <input class="cloud-archive-input" id="cloudAuthSessionId" type="text" value="{{ pending_authorization.session_id if pending_authorization else '' }}" readonly>
+            </div>
+            {% endif %}
+        </div>
+    </details>
+    <!-- ================================================================
+         Section 3: Sync Settings
+         ================================================================ -->
+    <details class="settings-section" open>
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-settings"></use></svg>
+            Sync Settings
+        </summary>
+        <div class="section-content">
+            {# ---- How sync works ---- #}
+            <div class="info-box" style="margin-bottom: var(--space-4); font-size: var(--text-sm); line-height: 1.6; color: var(--text-secondary);">
+                <strong style="color: var(--text-primary);">How sync works:</strong>
+                <ul style="margin: 6px 0 0; padding-left: 18px;">
+                    <li><strong>Automatic:</strong> Starts syncing whenever WiFi connects</li>
+                    <li><strong>Events &amp; archived clips:</strong> Syncs Sentry / Saved event folders and the SD-card-resident <em>ArchivedClips</em> snapshot (RecentClips itself is skipped because Tesla rotates it hourly)</li>
+                    <li><strong>Oldest first:</strong> Within each folder, preserves the most at-risk clips first</li>
+                    <li><strong>Skip existing:</strong> Files already on cloud storage are never re-uploaded</li>
+                    <li><strong>Manual:</strong> Click &ldquo;Sync Now&rdquo; at any time</li>
+                </ul>
+                <p style="margin: 8px 0 0;">
+                    All camera angles for each event are uploaded together.
+                    You can continue browsing the web interface during sync.
+                </p>
+            </div>
+
+            <form method="post" action="{{ url_for('cloud_archive.save_settings') }}" id="syncSettingsForm">
+
+                {# Folder selection #}
+                <div style="margin-bottom: var(--space-4);">
+                    <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">Folders to sync:</label>
+                    <div style="display: flex; flex-direction: column; gap: var(--space-2);">
+                        {% set folder_options = [
+                            ('SentryClips',   'Sentry-triggered events (impacts, intrusions)'),
+                            ('SavedClips',    'Manually saved clips (horn-honk / on-screen save)'),
+                            ('ArchivedClips', 'SD-card snapshot of RecentClips (RecentClips itself rotates hourly)'),
+                        ] %}
+                        {% for folder, blurb in folder_options %}
+                        <label style="display: flex; align-items: flex-start; gap: var(--space-2); padding: 8px; border-radius: var(--radius-md); cursor: pointer; transition: background var(--transition-fast);"
+                               onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">
+                            <input type="checkbox" name="sync_folders" value="{{ folder }}"
+                                   {% if folder in sync_folders %}checked{% endif %}
+                                   style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--btn-success-bg); margin-top: 2px;">
+                            <span style="display: flex; flex-direction: column; gap: 2px;">
+                                <span style="color: var(--text-primary); font-size: 15px; font-weight: 500;">{{ folder }}</span>
+                                <span style="color: var(--text-muted); font-size: var(--text-xs);">{{ blurb }}</span>
+                            </span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                {# Priority order #}
+                <div style="margin-bottom: var(--space-4);">
+                    <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">Upload priority:</label>
+                    <p style="margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary);">
+                        Use the arrows to reorder. Top item is synced first.
+                    </p>
+                    <ol id="priorityList" style="margin: 0; padding-left: 0; color: var(--text-primary); list-style: none;">
+                        {% for folder in priority_order %}
+                        <li style="padding: 8px 12px; font-size: 15px; display: flex; align-items: center; gap: 8px; background: var(--bg-secondary); border-radius: 6px; margin-bottom: 4px;" data-folder="{{ folder }}">
+                            <span style="min-width: 20px; color: var(--text-muted); font-weight: 600;">{{ loop.index }}.</span>
+                            <span style="flex: 1;">{{ folder }}</span>
+                            <button type="button" onclick="movePriorityUp(this)" aria-label="Move up"
+                                    style="padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; font-size: 14px; min-width: 32px; min-height: 32px;"
+                                    {% if loop.first %}disabled{% endif %}>Up</button>
+                            <button type="button" onclick="movePriorityDown(this)" aria-label="Move down"
+                                    style="padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; font-size: 14px; min-width: 32px; min-height: 32px;"
+                                    {% if loop.last %}disabled{% endif %}>Down</button>
+                        </li>
+                        {% endfor %}
+                    </ol>
+                    <input type="hidden" name="priority_order" id="priorityOrderInput"
+                           value="{{ priority_order|join(',') }}">
+                </div>
+
+                {# Bandwidth limit #}
+                <div style="margin-bottom: var(--space-4);">
+                    <label for="bwSlider" style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
+                        Bandwidth limit: <span id="bwValue" style="font-weight: 400;">{{ max_upload_mbps }} Mbps</span>
                     </label>
-                    <label class="cloud-archive-field">
-                        <span class="cloud-archive-label">Callback URL or code</span>
-                        <textarea class="cloud-archive-textarea" id="cloudAuthCallbackInput" placeholder="Paste the redirected URL or the returned code"></textarea>
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <input type="range" id="bwSlider" name="max_upload_mbps"
+                               min="1" max="50" step="1" value="{{ max_upload_mbps }}"
+                               oninput="document.getElementById('bwValue').textContent = this.value + ' Mbps'"
+                               style="flex:1; max-width: 360px; cursor: pointer; accent-color: var(--btn-primary-bg);">
+                        <button type="button" onclick="runBandwidthTest()" id="bwTestBtn"
+                                class="btn btn-secondary" style="padding:6px 12px; font-size:0.8rem; white-space:nowrap;">
+                            Auto-Detect
+                        </button>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; max-width: 360px; font-size: var(--text-xs); color: var(--text-muted);">
+                        <span>1 Mbps</span>
+                        <span>50 Mbps</span>
+                    </div>
+                    <div id="bwTestResults" style="display:none; margin-top:8px; padding:10px; background:var(--bg-secondary); border-radius:8px; font-size:0.85rem;">
+                    </div>
+                </div>
+
+                {# Cloud storage reserve #}
+                <div style="margin-bottom: var(--space-4);">
+                    <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
+                        Cloud storage reserve (GB)
+                    </label>
+                    <input type="number" name="cloud_reserve_gb" value="{{ cloud_reserve_gb }}" min="0" max="100" step="0.5"
+                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary);">
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Keep this much free on cloud ΓÇö sync stops before filling to 100%.</p>
+                </div>
+
+                {# Phase 2.6 ΓÇö bulk cloud sync retry cap. Default 5,
+                   range 1-20. Setting writes to
+                   cloud_archive.retry_max_attempts; the worker
+                   re-reads it on every failure so the change takes
+                   effect on the next sync iteration without restart. #}
+                <div style="margin-bottom: var(--space-4);">
+                    <label for="cloudRetryMaxAttempts" style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
+                        Retry attempts before giving up
+                    </label>
+                    <input type="number" id="cloudRetryMaxAttempts" name="cloud_retry_max_attempts"
+                           min="1" max="20" step="1"
+                           value="{{ cloud_retry_max_attempts }}"
+                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary);">
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">
+                        How many times to retry a failed upload before marking it permanently failed.
+                        Failed uploads can still be retried manually from the Failed Jobs page.
+                    </p>
+                </div>
+
+                {# Advanced sync options #}
+                <div style="margin-bottom: var(--space-3);">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">
+                        <input type="checkbox" name="sync_non_event_videos" {% if sync_non_event_videos %}checked{% endif %}>
+                        <span>Sync videos without events or geolocation</span>
+                    </label>
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px">
+                        <input type="checkbox" name="cloud_auto_cleanup" {% if cloud_auto_cleanup %}checked{% endif %}>
+                        <span>Auto-delete old cloud videos when storage is low</span>
                     </label>
                 </div>
-                <div class="cloud-archive-actions">
-                    <button class="cloud-archive-btn is-success" id="cloudAuthCompleteButton" type="button">{{ icon('check-circle') }}<span>Complete authorization</span></button>
-                    <p class="cloud-archive-meta" id="cloudAuthStatus">{% if pending_authorization %}Pending authorization is ready to complete.{% else %}Start a provider authorization to populate this panel.{% endif %}</p>
-                </div>
-            </section>
-            <section class="cloud-archive-callout">
-                <div class="cloud-archive-panel-head">
-                    <div class="cloud-archive-status-copy">
-                        {{ icon('database') }}
-                        <div>
-                            <h3 class="cloud-archive-section-title">Storage usage</h3>
-                            <p class="cloud-archive-panel-copy">Query the connected remote for used and free capacity. This is refreshed on demand so the page remains responsive.</p>
-                        </div>
-                    </div>
-                    <button class="cloud-archive-icon-btn" id="cloudStorageRefreshButton" type="button" aria-label="Refresh storage usage">{{ icon('refresh-cw') }}</button>
-                </div>
-                <div class="cloud-archive-storage-grid">
-                    <section class="cloud-archive-stat">
-                        <p class="cloud-archive-label">Used</p>
-                        <p class="cloud-archive-stat-value" id="cloudStorageUsed">—</p>
-                    </section>
-                    <section class="cloud-archive-stat">
-                        <p class="cloud-archive-label">Free</p>
-                        <p class="cloud-archive-stat-value" id="cloudStorageFree">—</p>
-                    </section>
-                    <section class="cloud-archive-stat">
-                        <p class="cloud-archive-label">Objects</p>
-                        <p class="cloud-archive-stat-value" id="cloudStorageObjects">—</p>
-                    </section>
-                </div>
-                <div class="cloud-archive-storage-bar" aria-hidden="true"><span id="cloudStorageBar" style="width: 0%"></span></div>
-                <p class="cloud-archive-storage-copy" id="cloudStorageStatus">Refresh storage usage after connecting a provider.</p>
-            </section>
-        </article>
 
-        <article class="cloud-archive-panel is-wide">
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('history') }}
-                    <div>
-                        <h2 class="cloud-archive-panel-title">Sync history</h2>
-                        <p class="cloud-archive-panel-copy">Review recent sync sessions, spot failures quickly, and refresh the table without leaving the page.</p>
-                    </div>
+                {# Phase 1 item 1.3 ΓÇö retention-respects-cloud toggle.
+                   "Keep clips until backed up to cloud" is the
+                   positive-framed UI for the backend
+                   ``cloud_archive.delete_unsynced`` boolean (inverted).
+                   When ON, the local SD-card retention prune will not
+                   delete clips past their retention age until they have
+                   been confirmed uploaded to the cloud ΓÇö protecting
+                   un-uploaded footage during long WiFi outages. #}
+                <div style="margin-bottom: var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px {% if not provider_connected %}opacity: 0.55; cursor: not-allowed{% endif %}">
+                        <input type="checkbox" name="keep_clips_until_synced"
+                               {% if keep_clips_until_synced %}checked{% endif %}
+                               {% if not provider_connected %}disabled{% endif %}>
+                        <span style="font-weight: 600; color: var(--text-primary);">Keep clips until backed up to cloud</span>
+                    </label>
+                    {% if not provider_connected %}
+                        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
+                            <em>Cloud sync not configured</em> &mdash; this setting only takes effect once a provider is connected above.
+                        </p>
+                    {% elif keep_clips_until_synced %}
+                        <p style="font-size: var(--text-xs); color: var(--text-muted); margin: 4px 0 0;">
+                            Old clips that haven't finished uploading will not be deleted, even past the retention age.
+                        </p>
+                    {% else %}
+                        <p style="font-size: var(--text-xs); color: var(--msg-warning-text); margin: 4px 0 0;">
+                            <svg class="nav-icon" aria-hidden="true" style="width: 14px; height: 14px; vertical-align: -2px;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                            Clips will be deleted at the retention age even if they haven't been backed up yet &mdash; <em>risk of losing un-uploaded footage</em>.
+                        </p>
+                    {% endif %}
+                    {% if kept_unsynced_count and kept_unsynced_count > 0 %}
+                        <p style="font-size: var(--text-xs); color: var(--text-secondary); margin: 8px 0 0;">
+                            <strong>{{ kept_unsynced_count }}</strong> clip{{ '' if kept_unsynced_count == 1 else 's' }} currently kept past the retention age, awaiting upload.
+                        </p>
+                    {% endif %}
                 </div>
-                <div class="cloud-archive-actions">
-                    <label class="cloud-archive-sr-only" for="cloudHistoryLimit">History limit</label>
-                    <select class="cloud-archive-select" id="cloudHistoryLimit">
-                        <option value="20" selected>20 rows</option>
-                        <option value="50">50 rows</option>
-                        <option value="100">100 rows</option>
-                    </select>
-                    <button class="cloud-archive-icon-btn" id="cloudHistoryRefreshButton" type="button" aria-label="Refresh sync history">{{ icon('refresh-cw') }}</button>
-                </div>
-            </div>
-            <div class="cloud-archive-history-shell{% if sync_history %} is-populated{% endif %}" id="cloudHistoryShell">
-                <div class="cloud-archive-table-wrap">
-                    <table class="cloud-archive-history-table">
-                        <thead>
-                            <tr>
-                                <th>Started</th>
-                                <th>Trigger</th>
-                                <th>Files</th>
-                                <th>Transferred</th>
-                                <th>Duration</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="cloudHistoryTableBody">
-                            {% for row in sync_history %}
-                            <tr>
-                                <td>{{ row.started_at }}</td>
-                                <td>{{ row.trigger or 'auto' }}</td>
-                                <td>{{ row.files_synced|default(0) }}</td>
-                                <td>{{ row.bytes_transferred|filesizeformat if row.bytes_transferred else '—' }}</td>
-                                <td>{% if row.started_at and row.ended_at %}{{ row.ended_at }}{% else %}—{% endif %}</td>
-                                <td><span class="cloud-archive-history-badge{% if row.status == 'completed' %} is-success{% elif row.status in ('failed', 'dead_letter') %} is-danger{% elif row.status in ('running', 'interrupted') %} is-warning{% else %} is-info{% endif %}">{{ row.status }}</span></td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-                <div class="cloud-archive-history-cards" id="cloudHistoryCards"></div>
-                <div class="cloud-archive-empty" id="cloudHistoryEmpty"{% if sync_history %} hidden{% endif %}>
-                    {{ icon('history') }}
-                    <h3 class="cloud-archive-empty-title">No sync sessions yet</h3>
-                    <p class="cloud-archive-empty-copy">The history panel fills in once a manual or automatic sync completes.</p>
-                </div>
-            </div>
-        </article>
 
-        <article class="cloud-archive-panel is-wide">
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('folder') }}
-                    <div>
-                        <h2 class="cloud-archive-panel-title">Browse remote tree</h2>
-                        <p class="cloud-archive-panel-copy">Lazy-load the remote directory tree, preview the current destination, and surface the current Phase 5.14d route limits for remote mutations.</p>
-                    </div>
+                <div style="margin-bottom: var(--space-4);">
+                    <label style="display: block; margin-bottom: var(--space-2); font-weight: 600; color: var(--text-primary);">
+                        Minimum cloud retention (days)
+                    </label>
+                    <input type="number" name="cloud_min_retention_days" value="{{ cloud_min_retention_days }}" min="1" max="365"
+                           style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary);">
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Auto-cleanup won't delete videos newer than this.</p>
                 </div>
-                <div class="cloud-archive-actions">
-                    <button class="cloud-archive-icon-btn" id="cloudBrowseRefreshButton" type="button" aria-label="Refresh remote tree">{{ icon('refresh-cw') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudBrowseUpButton" type="button" aria-label="Browse parent folder">{{ icon('chevron-up') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudBrowseSelectButton" type="button" aria-label="Set current remote path">{{ icon('check-circle') }}</button>
-                </div>
-            </div>
-            <div class="cloud-archive-browse-shell">
-                <div class="cloud-archive-progress-meta">
-                    <div>
-                        <p class="cloud-archive-label">Remote path</p>
-                        <p class="cloud-archive-section-title" id="cloudRemotePathLabel">{{ remote_path if remote_path else 'Root' }}</p>
-                    </div>
-                    <button class="cloud-archive-secondary-btn" id="cloudBrowseCreateButton" type="button">{{ icon('plus') }}<span>Create folder</span></button>
-                </div>
-                <div class="cloud-archive-browse-breadcrumbs" id="cloudBrowseBreadcrumbs" aria-live="polite"></div>
-                <div class="cloud-archive-tree" id="cloudBrowseTree"></div>
-                <p class="cloud-archive-meta" id="cloudBrowseStatus">Browse the connected remote, then save the current path as the destination.</p>
-                <div class="cloud-archive-section-divider"></div>
-                <div class="cloud-archive-panel-head">
-                    <div>
-                        <h3 class="cloud-archive-section-title">Per-folder sync table</h3>
-                        <p class="cloud-archive-panel-copy">This mirrors the v1 folder control surface. In Phase 5.14d the toggle route responds but reports settings support as unavailable.</p>
-                    </div>
-                </div>
-                <div class="cloud-archive-table-wrap">
-                    <table class="cloud-archive-folder-table">
-                        <thead>
-                            <tr>
-                                <th>Folder</th>
-                                <th>Enabled</th>
-                                <th>Priority</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for folder_name in ('SentryClips', 'SavedClips', 'RecentClips', 'ArchivedClips') %}
-                            <tr>
-                                <td><span class="cloud-archive-folder-chip">{{ icon('folder') }}<span class="cloud-archive-folder-name">{{ folder_name }}</span></span></td>
-                                <td>{{ 'Yes' if folder_name in sync_folders else 'No' }}</td>
-                                <td>{{ (priority_order.index(folder_name) + 1) if folder_name in priority_order else '—' }}</td>
-                                <td><button class="cloud-archive-secondary-btn" type="button" data-toggle-folder="{{ folder_name }}">{{ icon('refresh-cw') }}<span>Toggle sync</span></button></td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </article>
 
-        <article class="cloud-archive-panel is-wide">
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('list') }}
-                    <div>
-                        <h2 class="cloud-archive-panel-title">Event queue</h2>
-                        <p class="cloud-archive-panel-copy">Add event folders manually, remove or clear queued uploads, and inspect per-event sync state with the batch status tool.</p>
+                <button type="submit" class="edit-btn" style="padding: 8px 20px; font-size: 14px; margin-top: var(--space-3);">Save Settings</button>
+            </form>
+        </div>
+    </details>
+
+
+
+
+    <!-- ================================================================
+         Section 3.25: Schedule Editor
+         ================================================================ -->
+    <details class="settings-section" id="scheduleSection">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-clock-3"></use></svg>
+            Upload Schedule
+        </summary>
+        <div class="section-content">
+            {# TODO: rewire to the B-1 schedule API once the cloud archive scheduler blueprint lands. #}
+            <div class="info-box" style="margin-bottom: var(--space-3);">
+                <strong>Schedule editor</strong>
+                <p style="margin: 8px 0 0; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.6;">
+                    Define when the archive worker should prefer uploads. The v1 UI allowed day-based rules, time windows, and cron-style review. B-1 keeps the editor visible for parity while the backend route is wired in a later increment.
+                </p>
+            </div>
+            <form style="display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border-input); border-radius: var(--radius-lg); background: var(--form-input-bg);">
+                <div style="display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
+                    <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
+                        <span>Rule name</span>
+                        <input type="text" value="Nightly WiFi upload" disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
+                    </label>
+                    <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
+                        <span>Schedule type</span>
+                        <select disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
+                            <option selected>Days of week</option>
+                            <option>Specific date</option>
+                            <option>Cron review</option>
+                        </select>
+                    </label>
+                    <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
+                        <span>Start time</span>
+                        <input type="time" value="22:00" disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
+                    </label>
+                    <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
+                        <span>End time</span>
+                        <input type="time" value="06:00" disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
+                    </label>
+                </div>
+                <div>
+                    <span style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">Days</span>
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                        {% for day in ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun') %}
+                        <label style="display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--bg-secondary); border-radius: 4px; border: 1px solid var(--border-input); color: var(--text-primary);">
+                            <input type="checkbox" {% if day in ('Mon', 'Tue', 'Wed', 'Thu', 'Fri') %}checked{% endif %} disabled>
+                            <span>{{ day }}</span>
+                        </label>
+                        {% endfor %}
                     </div>
                 </div>
-                <div class="cloud-archive-actions">
-                    <button class="cloud-archive-icon-btn" id="cloudQueueRefreshButton" type="button" aria-label="Refresh queue">{{ icon('refresh-cw') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudQueueClearButton" type="button" aria-label="Clear queue" data-confirm="Remove all queued files from the sync queue?">{{ icon('trash-2') }}</button>
-                </div>
-            </div>
-            <form class="cloud-archive-form-grid" id="cloudQueueForm">
-                <label class="cloud-archive-field">
-                    <span class="cloud-archive-label">Folder</span>
-                    <select class="cloud-archive-select" id="cloudQueueFolder">
-                        <option value="SentryClips">SentryClips</option>
-                        <option value="SavedClips">SavedClips</option>
-                        <option value="RecentClips">RecentClips</option>
-                        <option value="ArchivedClips">ArchivedClips</option>
-                    </select>
+                <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
+                    <span>Cron preview</span>
+                    <input type="text" value="0 22 * * 1-5" readonly style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
                 </label>
-                <label class="cloud-archive-field">
-                    <span class="cloud-archive-label">Event directory</span>
-                    <input class="cloud-archive-input" id="cloudQueueEvent" type="text" placeholder="2026-01-01_10-00-00">
-                </label>
-                <label class="cloud-archive-field">
-                    <span class="cloud-archive-label">Priority handling</span>
-                    <select class="cloud-archive-select" id="cloudQueuePriority">
-                        <option value="false" selected>Normal</option>
-                        <option value="true">Priority</option>
-                    </select>
-                </label>
-                <div class="cloud-archive-field">
-                    <span class="cloud-archive-label">Action</span>
-                    <button class="cloud-archive-btn is-success" type="submit">{{ icon('plus') }}<span>Add to queue</span></button>
+                <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
+                    <button type="button" class="edit-btn" disabled style="padding: 8px 16px; font-size: 14px;">Save schedule</button>
+                    <button type="button" class="action-btn" disabled style="padding: 8px 16px; font-size: 14px;">Add another rule</button>
                 </div>
             </form>
-            <p class="cloud-archive-meta" id="cloudQueueStatus">Queue contents load after the first refresh.</p>
-            <div class="cloud-archive-list" id="cloudQueueList"></div>
-            <div class="cloud-archive-section-divider"></div>
-            <div class="cloud-archive-panel-head">
-                <div>
-                    <h3 class="cloud-archive-section-title">Status batch view</h3>
-                    <p class="cloud-archive-panel-copy">Paste one event directory per line to resolve the latest sync status in bulk.</p>
-                </div>
-            </div>
-            <label class="cloud-archive-field">
-                <span class="cloud-archive-label">Event names</span>
-                <textarea class="cloud-archive-textarea" id="cloudBatchEventsInput" placeholder="2026-01-01_10-00-00&#10;2026-01-01_11-00-00"></textarea>
-            </label>
-            <div class="cloud-archive-actions">
-                <button class="cloud-archive-secondary-btn" id="cloudBatchCheckButton" type="button">{{ icon('search') }}<span>Check statuses</span></button>
-            </div>
-            <div class="cloud-archive-batch-results" id="cloudBatchResults" hidden></div>
-        </article>
+        </div>
+    </details>
 
-        <article class="cloud-archive-panel is-wide">
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('alert-triangle') }}
-                    <div>
-                        <h2 class="cloud-archive-panel-title">Dead letters</h2>
-                        <p class="cloud-archive-panel-copy">Review dead-lettered files, retry them one by one or in bulk, and delete stale entries after a confirmation prompt.</p>
-                    </div>
+    <!-- ================================================================
+         Section 3.3: WiFi Conditional Rules
+         ================================================================ -->
+    <details class="settings-section" id="wifiConditionalSection">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-wifi"></use></svg>
+            WiFi Conditional Rules
+        </summary>
+        <div class="section-content">
+            {# TODO: rewire to a B-1 endpoint that persists per-SSID archive rules. #}
+            <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
+                Control when uploads are allowed based on WiFi state. The parity UI preserves trusted-network, hotspot, and metered-link affordances even though Phase 5.22 does not yet expose the save route.
+            </p>
+            <div style="display: grid; gap: var(--space-3);">
+                <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
+                    <span>Allowed SSIDs</span>
+                    <textarea rows="3" disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--form-input-bg); color: var(--text-primary); resize: vertical;">HomeWiFi
+GarageMesh</textarea>
+                </label>
+                <div style="display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
+                    <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary);">
+                        <input type="checkbox" checked disabled>
+                        <span>Upload only on trusted WiFi</span>
+                    </label>
+                    <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary);">
+                        <input type="checkbox" checked disabled>
+                        <span>Pause when connection is metered</span>
+                    </label>
+                    <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary);">
+                        <input type="checkbox" disabled>
+                        <span>Allow hotspot fallback</span>
+                    </label>
                 </div>
-                <div class="cloud-archive-actions">
-                    <button class="cloud-archive-icon-btn" id="cloudDeadLetterRefreshButton" type="button" aria-label="Refresh dead letters">{{ icon('refresh-cw') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudDeadLetterRetryAllButton" type="button" aria-label="Retry all dead letters">{{ icon('play') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudDeadLetterDeleteAllButton" type="button" aria-label="Delete all dead letters" data-confirm="Delete all dead-letter entries?">{{ icon('trash-2') }}</button>
-                </div>
+                <button type="button" class="action-btn" disabled style="width: fit-content; padding: 8px 16px; font-size: 14px;">Save WiFi rules</button>
             </div>
-            <p class="cloud-archive-meta" id="cloudDeadLetterStatus">Dead-letter items are queried on demand from the SQLite queue.</p>
-            <div class="cloud-archive-list" id="cloudDeadLetterList"></div>
-        </article>
+        </div>
+    </details>
+    <!-- ================================================================
+         Section 3.5: Sync Queue
+         ================================================================ -->
+    <details class="settings-section" id="syncQueueSection">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-list"></use></svg>
+            Sync Queue
+            <span id="queueBadge" style="display: none; margin-left: 8px; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-info-bg); color: var(--msg-info-text);"></span>
+        </summary>
+        <div class="section-content">
+            <div id="queueContent" style="min-height: 60px;">
+                <div style="text-align: center; padding: var(--space-4); color: var(--text-muted);">Loading queue&hellip;</div>
+            </div>
+            <div style="margin-top: var(--space-3); display: flex; gap: var(--space-2); flex-wrap: wrap;">
+                <button type="button" class="action-btn" onclick="refreshQueue()" style="padding: 6px 14px; font-size: 13px;">Refresh</button>
+                <button type="button" class="action-btn danger" onclick="clearQueue()" id="clearQueueBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Clear Queue</button>
+            </div>
+        </div>
+    </details>
 
-        <article class="cloud-archive-panel is-wide is-span-2">
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('hard-drive') }}
-                    <div>
-                        <h2 class="cloud-archive-panel-title">Archive tools</h2>
-                        <p class="cloud-archive-panel-copy">Archive one event immediately, check transfer progress, surface the Phase 5.14d cleanup limits, and keep the bandwidth tool visible for the final template port.</p>
+
+
+    <!-- ================================================================
+         Section 3.75: Dead Letters
+         ================================================================ -->
+    <details class="settings-section" id="deadLettersSection">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+            Dead Letters
+            <span id="deadLetterBadge" style="display: none; margin-left: 8px; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-warning-bg); color: var(--msg-warning-text);"></span>
+        </summary>
+        <div class="section-content">
+            <div id="deadLetterContent" style="min-height: 60px;">
+                <div style="text-align: center; padding: var(--space-4); color: var(--text-muted);">Loading dead letters…</div>
+            </div>
+            <div style="margin-top: var(--space-3); display: flex; gap: var(--space-2); flex-wrap: wrap;">
+                <button type="button" class="action-btn" onclick="refreshDeadLetters()" style="padding: 6px 14px; font-size: 13px;">Refresh</button>
+                <button type="button" class="action-btn" onclick="retryDeadLetters()" id="retryDeadLettersBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Retry All</button>
+                <button type="button" class="action-btn danger" onclick="deleteDeadLetters()" id="deleteDeadLettersBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Delete All</button>
+            </div>
+        </div>
+    </details>
+
+    <!-- ================================================================
+         Section 3.9: Reconcile
+         ================================================================ -->
+    <details class="settings-section" id="reconcileSection">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+            Reconcile Remote State
+        </summary>
+        <div class="section-content">
+            {# TODO: rewire to a B-1 reconcile endpoint that exposes services.cloud_archive.reconcile._reconcile_with_remote. #}
+            <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
+                Reconcile compares remote cloud folders with the local SQLite mirror so manually uploaded or backfilled files can be marked synced without re-uploading them.
+            </p>
+            <button type="button" class="edit-btn" id="reconcileButton" disabled style="padding: 8px 16px; font-size: 14px;">Reconcile now</button>
+            <p style="margin: 8px 0 0; font-size: var(--text-xs); color: var(--text-muted);">UI restored for parity. Backend route remains to be exposed in B-1.</p>
+        </div>
+    </details>
+
+    <!-- ================================================================
+         Section 4: Sync History
+         ================================================================ -->
+    <details class="settings-section">
+        <summary>
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-bar-chart-2"></use></svg>
+            Sync History
+        </summary>
+        <div class="section-content">
+            {% if sync_history %}
+
+            {# Desktop table #}
+            <div class="video-table-container" id="historyTableWrap">
+                <table class="video-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Trigger</th>
+                            <th>Files</th>
+                            <th>Data</th>
+                            <th>Duration</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyTbody">
+                        {% for h in sync_history %}
+                        <tr>
+                            <td>
+                                <span class="history-date" data-ts="{{ h.started_at }}">{{ h.started_at }}</span>
+                            </td>
+                            <td style="text-transform: capitalize;">{{ h.trigger|default('auto') }}</td>
+                            <td>{{ h.files_synced|default(0) }}</td>
+                            <td>{% if h.bytes_transferred %}{{ h.bytes_transferred|filesizeformat }}{% else %}&mdash;{% endif %}</td>
+                            <td>
+                                {% if h.started_at and h.ended_at %}
+                                    <span class="history-duration" data-start="{{ h.started_at }}" data-end="{{ h.ended_at }}"></span>
+                                {% elif h.status == 'running' %}
+                                    &hellip;
+                                {% else %}
+                                    &mdash;
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if h.status == 'completed' %}
+                                    <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-success-bg); color: var(--msg-success-text);">completed</span>
+                                {% elif h.status == 'interrupted' %}
+                                    <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-warning-bg); color: var(--msg-warning-text);">interrupted</span>
+                                {% elif h.status == 'cancelled' %}
+                                    <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--bg-info); color: var(--text-secondary);">cancelled</span>
+                                {% elif h.status == 'running' %}
+                                    <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-info-bg); color: var(--msg-info-text); animation: pulse 1.5s infinite;">running</span>
+                                {% elif h.status == 'failed' %}
+                                    <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-error-bg); color: var(--msg-error-text);">failed</span>
+                                {% else %}
+                                    <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--bg-info); color: var(--text-secondary);">{{ h.status }}</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            {# Mobile card layout #}
+            <div id="historyCards" style="display: none;">
+                {% for h in sync_history %}
+                <div style="padding: var(--space-3); margin-bottom: var(--space-2); border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-container);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-2);">
+                        <span class="history-date" data-ts="{{ h.started_at }}" style="font-weight: 600; color: var(--text-primary);">{{ h.started_at }}</span>
+                        {% if h.status == 'completed' %}
+                            <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-success-bg); color: var(--msg-success-text);">completed</span>
+                        {% elif h.status == 'interrupted' %}
+                            <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-warning-bg); color: var(--msg-warning-text);">interrupted</span>
+                        {% elif h.status == 'cancelled' %}
+                            <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--bg-info); color: var(--text-secondary);">cancelled</span>
+                        {% elif h.status == 'running' %}
+                            <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-info-bg); color: var(--msg-info-text); animation: pulse 1.5s infinite;">running</span>
+                        {% elif h.status == 'failed' %}
+                            <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-error-bg); color: var(--msg-error-text);">failed</span>
+                        {% else %}
+                            <span style="display: inline-block; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--bg-info); color: var(--text-secondary);">{{ h.status }}</span>
+                        {% endif %}
+                    </div>
+                    <div style="display: flex; gap: var(--space-4); font-size: var(--text-sm); color: var(--text-secondary); flex-wrap: wrap;">
+                        <span>{{ h.trigger|default('auto')|capitalize }}</span>
+                        <span>{{ h.files_synced|default(0) }} files</span>
+                        <span>{% if h.bytes_transferred %}{{ h.bytes_transferred|filesizeformat }}{% else %}&mdash;{% endif %}</span>
                     </div>
                 </div>
-                <div class="cloud-archive-actions">
-                    <button class="cloud-archive-icon-btn" id="cloudArchiveRefreshButton" type="button" aria-label="Refresh archive status">{{ icon('refresh-cw') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudArchiveCancelButton" type="button" aria-label="Cancel archive transfer" data-confirm="Cancel the active archive transfer?">{{ icon('x') }}</button>
-                </div>
+                {% endfor %}
             </div>
-            <div class="cloud-archive-bandwidth-grid">
-                <form class="cloud-archive-callout" id="cloudArchiveForm">
-                    <div class="cloud-archive-panel-head">
-                        <div class="cloud-archive-status-copy">
-                            {{ icon('upload') }}
-                            <div>
-                                <h3 class="cloud-archive-section-title">Archive single event</h3>
-                                <p class="cloud-archive-panel-copy">Copy a specific TeslaCam event to the connected remote using the existing <code>/cloud/api/archive_file</code> route.</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="cloud-archive-form-grid">
-                        <label class="cloud-archive-field">
-                            <span class="cloud-archive-label">Folder</span>
-                            <select class="cloud-archive-select" id="cloudArchiveFolder">
-                                <option value="SentryClips">SentryClips</option>
-                                <option value="SavedClips">SavedClips</option>
-                                <option value="RecentClips">RecentClips</option>
-                                <option value="ArchivedClips">ArchivedClips</option>
-                            </select>
-                        </label>
-                        <label class="cloud-archive-field">
-                            <span class="cloud-archive-label">Event directory</span>
-                            <input class="cloud-archive-input" id="cloudArchiveEvent" type="text" placeholder="2026-01-01_10-00-00">
-                        </label>
-                    </div>
-                    <div class="cloud-archive-actions">
-                        <button class="cloud-archive-btn is-success" type="submit">{{ icon('upload') }}<span>Archive event</span></button>
-                    </div>
-                </form>
-                <section class="cloud-archive-callout" id="cloudArchiveStatusPanel">
-                    <div class="cloud-archive-panel-head">
-                        <div class="cloud-archive-status-copy">
-                            {{ icon('history') }}
-                            <div>
-                                <h3 class="cloud-archive-section-title">Archive status</h3>
-                                <p class="cloud-archive-panel-copy">Track the active rclone transfer summary, percentage, and raw progress line.</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="cloud-archive-status-card" id="cloudArchiveTransferCard">
-                        <div class="cloud-archive-progress-meta">
-                            <div>
-                                <h4 class="cloud-archive-section-title" id="cloudArchiveTransferTitle">No archive in progress</h4>
-                                <p class="cloud-archive-status-line" id="cloudArchiveTransferLine">Start an archive or poll the route to see live rclone progress.</p>
-                            </div>
-                            <span class="cloud-archive-badge is-info" id="cloudArchiveTransferBadge">Idle</span>
-                        </div>
-                        <div class="cloud-archive-progress" aria-hidden="true"><span id="cloudArchiveProgressBar" style="width: 0%"></span></div>
-                        <p class="cloud-archive-meta" id="cloudArchiveProgressMeta">Waiting for archive activity.</p>
-                    </div>
-                </section>
-                <section class="cloud-archive-callout">
-                    <div class="cloud-archive-panel-head">
-                        <div class="cloud-archive-status-copy">
-                            {{ icon('alert-triangle') }}
-                            <div>
-                                <h3 class="cloud-archive-section-title">Archive cleanup</h3>
-                                <p class="cloud-archive-panel-copy">The cleanup controls are present in the port, but the current blueprint intentionally reports the service is not exposed in Phase 5.14d.</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="cloud-archive-actions">
-                        <button class="cloud-archive-secondary-btn" id="cloudArchiveCleanupButton" type="button">{{ icon('trash-2') }}<span>Run cleanup</span></button>
-                    </div>
-                    <p class="cloud-archive-meta" id="cloudArchiveCleanupStatus">Cleanup results appear here.</p>
-                </section>
+
+            {% else %}
+            <div style="text-align: center; padding: var(--space-8) 0; color: var(--text-muted);">
+                <svg class="nav-icon" aria-hidden="true" style="width: 48px; height: 48px; opacity: 0.4; margin-bottom: var(--space-2);">
+                    <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use>
+                </svg>
+                <p style="margin: 0;">No sync sessions yet</p>
             </div>
-            <div class="cloud-archive-section-divider"></div>
-            <div class="cloud-archive-panel-head">
-                <div class="cloud-archive-status-copy">
-                    {{ icon('bar-chart-2') }}
-                    <div>
-                        <h3 class="cloud-archive-section-title">Bandwidth test</h3>
-                        <p class="cloud-archive-panel-copy">Keep the run, status, and apply preset controls visible while the backend remains intentionally disabled in 5.14d.</p>
-                    </div>
-                </div>
-                <div class="cloud-archive-actions">
-                    <button class="cloud-archive-icon-btn" id="cloudBandwidthRunButton" type="button" aria-label="Run bandwidth test">{{ icon('play') }}</button>
-                    <button class="cloud-archive-icon-btn" id="cloudBandwidthApplyButton" type="button" aria-label="Apply bandwidth preset">{{ icon('check-circle') }}</button>
-                </div>
-            </div>
-            <div class="cloud-archive-bandwidth-grid">
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Configured ceiling</p>
-                    <p class="cloud-archive-stat-value" id="cloudBandwidthConfigured">{{ max_upload_mbps }} Mbps</p>
-                </section>
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Suggested preset</p>
-                    <p class="cloud-archive-stat-value" id="cloudBandwidthSuggested">Unavailable</p>
-                </section>
-                <section class="cloud-archive-stat">
-                    <p class="cloud-archive-label">Runtime status</p>
-                    <p class="cloud-archive-stat-value" id="cloudBandwidthStatusValue">Idle</p>
-                </section>
-            </div>
-            <p class="cloud-archive-meta" id="cloudBandwidthStatus">Run the bandwidth test to query the current backend support and any recommended preset.</p>
-        </article>
-    </section>
+            {% endif %}
+        </div>
+    </details>
 </div>
-{% endblock %}
-{% block scripts %}
-<script>
-window.CLOUD_ARCHIVE_BOOTSTRAP = {{ {
-    'provider': provider,
-    'providerConnected': provider_connected,
-    'providers': providers,
-    'tokenExpiry': token_expiry,
-    'syncEnabled': sync_enabled,
-    'syncFolders': sync_folders,
-    'priorityOrder': priority_order,
-    'maxUploadMbps': max_upload_mbps,
-    'remotePath': remote_path,
-    'pendingAuthorization': pending_authorization,
-    'syncStatus': sync_status,
-    'syncStats': sync_stats,
-    'syncHistory': sync_history,
-    'urls': {
-        'index': url_for('cloud_archive.index'),
-        'status': url_for('cloud_archive.api_status'),
-        'history': url_for('cloud_archive.api_history'),
-        'resetStats': url_for('cloud_archive.api_reset_stats'),
-        'provider': url_for('cloud_archive.api_save_provider'),
-        'connect': url_for('cloud_archive.api_connect_provider'),
-        'disconnect': url_for('cloud_archive.api_disconnect_provider'),
-        'testConnection': url_for('cloud_archive.api_test_connection'),
-        'connectionStatus': url_for('cloud_archive.api_connection_status'),
-        'storageUsage': url_for('cloud_archive.api_storage_usage'),
-        'browse': url_for('cloud_archive.api_browse_folders'),
-        'createFolder': url_for('cloud_archive.api_create_folder'),
-        'setRemotePath': url_for('cloud_archive.api_set_remote_path'),
-        'toggleSync': url_for('cloud_archive.api_toggle_sync'),
-        'syncNow': url_for('cloud_archive.api_sync_now'),
-        'wake': url_for('cloud_archive.api_wake'),
-        'syncStop': url_for('cloud_archive.api_sync_stop'),
-        'syncStatusBatch': url_for('cloud_archive.api_sync_status_batch'),
-        'queueEvent': url_for('cloud_archive.api_queue_event'),
-        'queue': url_for('cloud_archive.api_queue'),
-        'queueRemove': url_for('cloud_archive.api_queue_remove'),
-        'queueClear': url_for('cloud_archive.api_queue_clear'),
-        'deadLetters': url_for('cloud_archive.api_dead_letters'),
-        'deadLettersRetry': url_for('cloud_archive.api_dead_letters_retry'),
-        'deadLettersDelete': url_for('cloud_archive.api_dead_letters_delete'),
-        'archiveCleanup': url_for('cloud_archive.api_archive_cleanup'),
-        'archiveFile': url_for('cloud_archive.api_archive_file'),
-        'archiveStatus': url_for('cloud_archive.api_archive_status'),
-        'archiveCancel': url_for('cloud_archive.api_archive_cancel'),
-        'bandwidthTest': url_for('cloud_archive.api_bandwidth_test'),
-        'bandwidthTestStatus': url_for('cloud_archive.api_bandwidth_test_status'),
-        'bandwidthTestApply': url_for('cloud_archive.api_bandwidth_test_apply')
+
+<!-- Busy overlay for cloud operations -->
+<div id="cloudBusyOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 9999; justify-content: center; align-items: center;">
+    <div style="text-align: center; color: white; padding: 24px;">
+        <div style="border: 6px solid rgba(255,255,255,0.2); border-top: 6px solid var(--text-primary); border-radius: 50%; width: 48px; height: 48px; animation: cloud-spin 1s linear infinite; margin: 0 auto 16px;"></div>
+        <div id="cloudBusyMsg" style="font-size: 16px; font-weight: 500;">Working&hellip;</div>
+    </div>
+</div>
+
+<style>
+    @keyframes cloud-spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
     }
-} | tojson }};
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    /* Mobile: show cards, hide table */
+    @media (max-width: 640px) {
+        #historyTableWrap { display: none !important; }
+        #historyCards { display: block !important; }
+    }
+    /* Desktop: show table, hide cards */
+    @media (min-width: 641px) {
+        #historyTableWrap { display: block !important; }
+        #historyCards { display: none !important; }
+    }
+</style>
+{% endblock %}
+
+{% block scripts %}
+
+<script>
+(function() {
+    'use strict';
+
+    /* ===================================================================
+       Utility helpers
+       =================================================================== */
+
+    function _showBusy(msg) {
+        var overlay = document.getElementById('cloudBusyOverlay');
+        var msgEl = document.getElementById('cloudBusyMsg');
+        if (msgEl) msgEl.textContent = msg || 'Working\u2026';
+        if (overlay) overlay.style.display = 'flex';
+    }
+
+    function _hideBusy() {
+        var overlay = document.getElementById('cloudBusyOverlay');
+        if (overlay) overlay.style.display = 'none';
+    }
+
+    function formatBytes(bytes) {
+        if (!bytes || bytes === 0) return '0 B';
+        var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        var i = Math.floor(Math.log(bytes) / Math.log(1024));
+        if (i >= units.length) i = units.length - 1;
+        return (bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+    }
+
+    /* Format token expiry date on page load */
+    (function() {
+        var el = document.getElementById('tokenExpiryDate');
+        if (!el) return;
+        var raw = el.getAttribute('data-expiry');
+        if (!raw) return;
+        try {
+            var d = new Date(raw);
+            if (isNaN(d.getTime())) { el.textContent = 'unknown'; return; }
+            var now = new Date();
+            var diffMs = d - now;
+            var diffHours = Math.round(diffMs / (1000 * 60 * 60));
+            if (diffMs < 0) {
+                el.innerHTML = '<span style="color:var(--error-text);">expired (will refresh on next sync)</span>';
+            } else if (diffHours < 2) {
+                el.textContent = 'in ' + Math.max(1, Math.round(diffMs / 60000)) + ' minutes (auto-refreshes)';
+            } else {
+                el.textContent = d.toLocaleString() + ' (auto-refreshes)';
+            }
+        } catch (e) { el.textContent = raw; }
+    })();
+
+    function timeAgo(dateStr) {
+        if (!dateStr) return '';
+        var date = new Date(dateStr);
+        if (isNaN(date.getTime())) return dateStr;
+        var seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+        if (seconds < 60) return 'just now';
+        if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+        if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+        return Math.floor(seconds / 86400) + 'd ago';
+    }
+
+    function formatDuration(startStr, endStr) {
+        if (!startStr || !endStr) return '';
+        var ms = new Date(endStr).getTime() - new Date(startStr).getTime();
+        if (isNaN(ms) || ms < 0) return '';
+        var s = Math.floor(ms / 1000);
+        if (s < 60) return s + 's';
+        if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+        return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    }
+
+    /* Format dates and durations on page load */
+    function formatTimestamps() {
+        document.querySelectorAll('.history-date[data-ts]').forEach(function(el) {
+            var ago = timeAgo(el.getAttribute('data-ts'));
+            if (ago) el.textContent = ago;
+        });
+        document.querySelectorAll('.history-duration[data-start]').forEach(function(el) {
+            el.textContent = formatDuration(el.getAttribute('data-start'), el.getAttribute('data-end')) || '\u2014';
+        });
+        var lastEl = document.getElementById('lastSyncTime');
+        if (lastEl && lastEl.getAttribute('data-ts')) {
+            var ago = timeAgo(lastEl.getAttribute('data-ts'));
+            if (ago) lastEl.textContent = ago;
+        }
+    }
+
+    /* ===================================================================
+       Sync status polling
+       =================================================================== */
+
+    var pollInterval = null;
+    var isSyncing = {{ 'true' if sync_status.running else 'false' }};
+
+    function startPolling() {
+        if (pollInterval) return;
+        pollInterval = setInterval(async function() {
+            try {
+                var resp = await fetch('{{ url_for("cloud_archive.api_status") }}');
+                if (!resp.ok) return;
+                var data = await resp.json();
+                updateStatusCard(data.status || {}, data.stats || {});
+                updateStatCounters(data.stats || {});
+                if (!(data.status && data.status.running)) {
+                    stopPolling();
+                }
+            } catch (e) {
+                /* network error ΓÇö keep polling */
+            }
+        }, 10000);
+    }
+
+    function stopPolling() {
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    }
+
+    /* ===================================================================
+       Counter card updaters (kept fresh by both the polling loop while
+       sync is running AND the manual ``Reset counters`` button so the
+       user sees the change immediately).
+       =================================================================== */
+    function _formatBytesPretty(n) {
+        if (!n) return '0 B';
+        if (n < 1024) return n + ' B';
+        var units = ['KB','MB','GB','TB'];
+        var i = -1; var v = n;
+        do { v /= 1024; i++; } while (v >= 1024 && i < units.length - 1);
+        return v.toFixed(v >= 100 ? 0 : 1) + ' ' + units[i];
+    }
+
+    function updateStatCounters(stats) {
+        if (!stats) return;
+        var ids = [
+            ['statSyncedCount',  stats.total_synced  || 0],
+            ['statPendingCount', stats.total_pending || 0],
+            ['statFailedCount',  stats.total_failed  || 0],
+        ];
+        ids.forEach(function(pair) {
+            var el = document.getElementById(pair[0]);
+            if (el) el.textContent = pair[1];
+        });
+        var bytesEl = document.getElementById('statTotalBytes');
+        if (bytesEl) bytesEl.textContent = _formatBytesPretty(stats.total_bytes || 0);
+        var hintEl = document.getElementById('statBaselineHint');
+        if (hintEl) {
+            if (stats.stats_baseline_at) {
+                hintEl.textContent = 'Synced/Transferred counts since ' +
+                    String(stats.stats_baseline_at).slice(0, 10) + '.';
+            } else {
+                hintEl.textContent = '';
+            }
+        }
+    }
+
+    async function resetSyncStats() {
+        if (!confirm("Reset the Synced and Transferred counters?\n\n" +
+                     "This only clears the displayed totals. Files already " +
+                     "uploaded to the cloud will NOT be re-uploaded ΓÇö the " +
+                     "sync history that prevents duplicates is preserved.")) {
+            return;
+        }
+        var btn = document.getElementById('resetStatsBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'ResettingΓÇª'; }
+        try {
+            var resp = await fetch(
+                '{{ url_for("cloud_archive.api_reset_stats") }}',
+                {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}}
+            );
+            var data = await resp.json();
+            if (!resp.ok || data.success === false) {
+                throw new Error((data && data.message) || 'Reset failed');
+            }
+            /* Immediately reflect zeroes in the UI; poll will refresh
+               the live state on the next tick. */
+            updateStatCounters({
+                total_synced: 0,
+                total_pending: parseInt(
+                    (document.getElementById('statPendingCount') || {}).textContent || '0', 10
+                ),
+                total_failed: parseInt(
+                    (document.getElementById('statFailedCount') || {}).textContent || '0', 10
+                ),
+                total_bytes: 0,
+                stats_baseline_at: data.stats_baseline_at,
+            });
+        } catch (e) {
+            alert('Reset failed: ' + (e && e.message ? e.message : e));
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Reset counters'; }
+        }
+    }
+
+    function updateStatusCard(status, stats) {
+        var card = document.getElementById('syncStatusCard');
+        if (!card) return;
+
+        /* Lock/unlock settings during sync */
+        _setSyncSettingsLocked(!!status.running);
+
+        if (status.running) {
+            var pct = 0;
+            if (status.total_bytes > 0) {
+                pct = Math.min(100, Math.round(status.bytes_transferred / status.total_bytes * 100));
+            } else if (status.files_total > 0) {
+                pct = Math.round(status.files_done / status.files_total * 100);
+            }
+
+            var etaText = '';
+            if (status.eta_seconds != null && status.eta_seconds > 0) {
+                var m = Math.floor(status.eta_seconds / 60);
+                var s = status.eta_seconds % 60;
+                etaText = m > 0 ? m + 'm ' + s + 's remaining' : s + 's remaining';
+            }
+
+            var throughputText = '';
+            if (status.throughput_bps > 0) {
+                throughputText = formatBytes(status.throughput_bps) + '/s';
+            }
+
+            card.className = 'device-status-card device-status-edit';
+            card.innerHTML =
+                '<div class="device-status-header">' +
+                    '<span class="status-dot status-edit" style="animation:pulse 1.5s ease-in-out infinite;"></span>' +
+                    '<div class="device-status-info">' +
+                        '<strong>Syncing to {{ provider or "Cloud" }}</strong>' +
+                        '<p>' + (status.files_done || 0) + ' of ' + (status.files_total || '?') + ' events' +
+                            (status.bytes_transferred ? ' \u2014 ' + formatBytes(status.bytes_transferred) : '') +
+                            (status.total_bytes ? ' / ' + formatBytes(status.total_bytes) : '') +
+                        '</p>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="progress-container" style="margin:12px 0 4px;">' +
+                    '<div class="progress-bar progress-normal" style="width:' + pct + '%;transition:width 0.5s ease;"></div>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px;margin-bottom:8px;">' +
+                    '<span style="font-size:var(--text-xs);color:var(--text-tertiary);">' + pct + '%' +
+                        (throughputText ? ' \u2014 ' + throughputText : '') +
+                        (etaText ? ' \u2014 ' + etaText : '') +
+                    '</span>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+                    '<span style="font-size:var(--text-sm);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%;">' +
+                        escapeHtml(status.current_file || '') +
+                    '</span>' +
+                    '<button type="button" class="present-btn" onclick="cancelSync()" style="padding:8px 16px;font-size:14px;">Cancel</button>' +
+                '</div>';
+            isSyncing = true;
+        } else if (status.error) {
+            card.className = 'device-status-card device-status-unknown';
+            card.innerHTML =
+                '<div class="device-status-header">' +
+                    '<span class="status-dot status-unknown"></span>' +
+                    '<div class="device-status-info">' +
+                        '<strong>Sync Error</strong>' +
+                        '<p style="color:var(--error-text);">' + escapeHtml(status.error) + '</p>' +
+                    '</div>' +
+                '</div>' +
+                '<div style="margin-top:8px;">' +
+                    '<button type="button" class="edit-btn" onclick="syncNow()" style="padding:8px 16px;font-size:14px;">Retry</button>' +
+                '</div>';
+            isSyncing = false;
+        } else {
+            card.className = 'device-status-card device-status-present';
+            var lastRun = status.last_run ? 'Last sync: ' + timeAgo(status.last_run) : 'No syncs yet';
+            var pending = (stats.total_pending) ? ' \u2014 ' + stats.total_pending + ' event' + (stats.total_pending !== 1 ? 's' : '') + ' pending' : '';
+            card.innerHTML =
+                '<div class="device-status-header">' +
+                    '<span class="status-dot status-present"></span>' +
+                    '<div class="device-status-info">' +
+                        '<strong>Cloud Sync</strong>' +
+                        '<p>' + lastRun + pending + '</p>' +
+                    '</div>' +
+                '</div>' +
+                '<div style="margin-top:8px;">' +
+                    '<button type="button" class="edit-btn" onclick="syncNow()" style="padding:8px 16px;font-size:14px;">Sync Now</button>' +
+                '</div>';
+            isSyncing = false;
+        }
+    }
+
+    /* Lock/unlock sync settings controls during active sync */
+    function _setSyncSettingsLocked(locked) {
+        var ids = ['providerSelect', 'rcloneSubmitBtn', 'browseFolderBtn'];
+        ids.forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.disabled = locked;
+        });
+        /* Disable all inputs/buttons in Sync Settings section */
+        var settingsForm = document.querySelector('#syncSettingsForm');
+        if (settingsForm) {
+            var inputs = settingsForm.querySelectorAll('input, button, select');
+            inputs.forEach(function(el) { el.disabled = locked; });
+        }
+        var disconnectBtns = document.querySelectorAll('[onclick*="disconnectProvider"]');
+        disconnectBtns.forEach(function(el) { el.disabled = locked; });
+    }
+
+    function escapeHtml(str) {
+        var div = document.createElement('div');
+        div.appendChild(document.createTextNode(str));
+        return div.innerHTML;
+    }
+
+    /* ===================================================================
+       Sync Now / Stop
+       =================================================================== */
+
+    window.syncNow = async function() {
+        var btn = document.getElementById('syncNowBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Starting\u2026'; }
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_sync_now") }}', {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+            if (data.success) {
+                showToast('Sync started.', 'success');
+                startPolling();
+            } else {
+                showToast(data.message || 'Failed to start sync.', 'error');
+                if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; }
+            }
+        } catch (e) {
+            showToast('Network error. Please try again.', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; }
+        }
+    };
+
+    window.syncStop = async function(graceful) {
+        _showBusy(graceful ? 'Finishing current file\u2026' : 'Stopping sync\u2026');
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_sync_stop") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ graceful: !!graceful })
+            });
+            var data = await resp.json();
+            _hideBusy();
+            if (data.success) {
+                showToast(data.message, 'info');
+            } else {
+                showToast(data.message || 'Failed to stop sync.', 'error');
+            }
+        } catch (e) {
+            _hideBusy();
+            showToast('Network error.', 'error');
+        }
+    };
+
+    window.cancelSync = function() {
+        /* Show a two-option cancel dialog */
+        var dialog = document.createElement('div');
+        dialog.id = 'cancelSyncDialog';
+        dialog.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;justify-content:center;align-items:center;';
+        dialog.innerHTML =
+            '<div style="background:var(--bg-primary);border:1px solid var(--border-primary);border-radius:var(--radius-lg);padding:24px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);">' +
+                '<h3 style="margin:0 0 12px;color:var(--text-primary);font-size:16px;">Cancel Sync</h3>' +
+                '<p style="margin:0 0 20px;color:var(--text-secondary);font-size:var(--text-sm);line-height:1.5;">How would you like to stop the sync?</p>' +
+                '<div style="display:flex;flex-direction:column;gap:10px;">' +
+                    '<button onclick="document.getElementById(\'cancelSyncDialog\').remove(); syncStop(true);" class="action-btn" style="padding:12px;font-size:14px;text-align:left;">' +
+                        '<strong>Finish current file</strong><br>' +
+                        '<span style="font-size:12px;color:var(--text-tertiary);">Completes the file being uploaded, then stops. No partial files.</span>' +
+                    '</button>' +
+                    '<button onclick="document.getElementById(\'cancelSyncDialog\').remove(); syncStop(false);" class="action-btn danger" style="padding:12px;font-size:14px;text-align:left;">' +
+                        '<strong>Stop immediately</strong><br>' +
+                        '<span style="font-size:12px;color:var(--text-tertiary);">Kills the upload now. The current file may be incomplete in the cloud.</span>' +
+                    '</button>' +
+                    '<button onclick="document.getElementById(\'cancelSyncDialog\').remove();" class="action-btn" style="padding:10px;font-size:13px;">Never mind</button>' +
+                '</div>' +
+            '</div>';
+        document.body.appendChild(dialog);
+        dialog.addEventListener('click', function(e) {
+            if (e.target === dialog) dialog.remove();
+        });
+    };
+
+    /* ===================================================================
+       Test Connection
+       =================================================================== */
+
+    window.testConnection = async function() {
+        var btn = document.getElementById('testConnBtn') || document.getElementById('testConnBtnSetup');
+        var result = document.getElementById('testConnResult') || document.getElementById('testConnResultSetup');
+        if (btn) { btn.disabled = true; btn.textContent = 'Testing\u2026'; }
+        if (result) { result.textContent = ''; result.style.color = 'var(--text-secondary)'; }
+        _showBusy('Testing cloud connection\u2026');
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_test_connection") }}', {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+            if (result) {
+                result.textContent = data.message || (data.success ? 'Connected!' : 'Failed');
+                result.style.color = data.success ? 'var(--success-text)' : 'var(--error-text)';
+            }
+            if (data.auth_error) {
+                showToast('Authorization expired. Please disconnect and reconnect.', 'error');
+            } else {
+                showToast(data.message || (data.success ? 'Connection successful.' : 'Connection failed.'), data.success ? 'success' : 'error');
+            }
+        } catch (e) {
+            if (result) { result.textContent = 'Network error'; result.style.color = 'var(--error-text)'; }
+            showToast('Network error.', 'error');
+        } finally {
+            _hideBusy();
+            if (btn) { btn.disabled = false; btn.textContent = 'Test Connection'; }
+        }
+    };
+
+    /* ===================================================================
+       Provider setup
+       =================================================================== */
+
+    var rcloneProviders = ['google-drive', 'onedrive', 'dropbox'];
+    var providerNames = {
+        'google-drive': 'Google Drive',
+        'onedrive': 'OneDrive',
+        'dropbox': 'Dropbox',
+    };
+
+    function _selectedProvider() {
+        var sel = document.getElementById('providerSelect');
+        return sel ? sel.value : '';
+    }
+
+    function _updateProviderCards(selected) {
+        document.querySelectorAll('[data-provider-card]').forEach(function(card) {
+            var active = card.getAttribute('data-provider-card') === selected;
+            card.style.background = active ? 'var(--btn-primary-bg)' : 'var(--bg-secondary)';
+            card.style.color = active ? 'var(--btn-primary-text)' : 'var(--text-primary)';
+        });
+    }
+
+    window.selectProviderCard = function(provider) {
+        if (rcloneProviders.indexOf(provider) === -1) {
+            showToast('Unsupported provider.', 'warning');
+            return;
+        }
+        var sel = document.getElementById('providerSelect');
+        if (sel) sel.value = provider;
+        _updateProviderCards(provider);
+    };
+
+    window.startAuthorization = async function() {
+        var provider = _selectedProvider();
+        if (!provider) {
+            showToast('Select a provider card first.', 'warning');
+            return;
+        }
+        var btn = document.getElementById('oauthStartBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+        _showBusy('Starting provider authorization…');
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ provider: provider })
+            });
+            var data = await resp.json();
+            if (!resp.ok || data.success === false) {
+                throw new Error((data && data.message) || 'Failed to start authorization.');
+            }
+            var sessionEl = document.getElementById('oauthSessionId');
+            var urlEl = document.getElementById('oauthAuthorizationUrl');
+            var visitEl = document.getElementById('oauthVisitLink');
+            if (sessionEl) sessionEl.value = data.session_id || '';
+            if (urlEl) urlEl.value = data.authorization_url || '';
+            if (visitEl) {
+                visitEl.href = data.authorization_url || '#';
+                visitEl.style.pointerEvents = '';
+                visitEl.style.opacity = '';
+                visitEl.removeAttribute('aria-disabled');
+            }
+            _hideBusy();
+            showToast('Authorization started. Open the provider page and approve access.', 'success');
+        } catch (e) {
+            _hideBusy();
+            showToast(e && e.message ? e.message : 'Failed to start authorization.', 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Start authorization'; }
+        }
+    };
+
+    window.completeAuthorization = async function() {
+        var sessionId = ((document.getElementById('oauthSessionId') || {}).value || '').trim();
+        var redirectValue = ((document.getElementById('oauthCallbackInput') || {}).value || '').trim();
+        if (!sessionId || !redirectValue) {
+            showToast('Start authorization, then paste the callback URL or code.', 'warning');
+            return;
+        }
+        var btn = document.getElementById('oauthCompleteBtn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Completing…'; }
+        _showBusy('Completing provider authorization…');
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ session_id: sessionId, redirect_url: redirectValue })
+            });
+            var data = await resp.json();
+            if (!resp.ok || data.success === false) {
+                throw new Error((data && data.message) || 'Failed to complete authorization.');
+            }
+            _hideBusy();
+            showToast('Connected! Reloading…', 'success');
+            setTimeout(function() { window.location.reload(); }, 1000);
+        } catch (e) {
+            _hideBusy();
+            showToast(e && e.message ? e.message : 'Failed to complete authorization.', 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Complete authorization'; }
+        }
+    };
+    window.disconnectProvider = async function() {
+        if (!confirm('Disconnect cloud provider? Existing archived files will remain in the cloud.')) return;
+        _showBusy('Disconnecting\u2026');
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_disconnect_provider") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+            });
+            var data = await resp.json();
+            if (data.success) {
+                showToast('Provider disconnected.', 'info');
+                setTimeout(function() { window.location.reload(); }, 1000);
+            } else {
+                _hideBusy();
+                showToast(data.message || 'Failed to disconnect.', 'error');
+            }
+        } catch (e) {
+            _hideBusy();
+            showToast('Network error.', 'error');
+        }
+    };
+
+    /* ===================================================================
+       Folder Browser
+       =================================================================== */
+
+    var _currentBrowsePath = '';
+
+    window.openFolderBrowser = function() {
+        var browser = document.getElementById('folderBrowser');
+        if (browser) {
+            browser.style.display = 'block';
+            _currentBrowsePath = '';
+            _loadFolders('');
+        }
+    };
+
+    window.closeFolderBrowser = function() {
+        var browser = document.getElementById('folderBrowser');
+        if (browser) browser.style.display = 'none';
+    };
+
+    function _renderBreadcrumbs(path) {
+        var el = document.getElementById('folderBreadcrumbs');
+        if (!el) return;
+
+        var parts = path ? path.split('/').filter(Boolean) : [];
+        var html = '<a href="#" onclick="_navigateFolder(\'\'); return false;" style="color: var(--link-color); text-decoration: none; font-weight: 500;">';
+        html += '<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+        html += ' Root</a>';
+
+        var cumulative = '';
+        for (var i = 0; i < parts.length; i++) {
+            cumulative += (cumulative ? '/' : '') + parts[i];
+            html += '<span style="color: var(--text-tertiary); margin: 0 2px;">/</span>';
+            if (i === parts.length - 1) {
+                html += '<strong style="color: var(--text-primary);">' + _escapeHtml(parts[i]) + '</strong>';
+            } else {
+                html += '<a href="#" onclick="_navigateFolder(\'' + _escapeAttr(cumulative) + '\'); return false;" style="color: var(--link-color); text-decoration: none;">' + _escapeHtml(parts[i]) + '</a>';
+            }
+        }
+        el.innerHTML = html;
+    }
+
+    function _renderFolderList(folders, path) {
+        var el = document.getElementById('folderList');
+        if (!el) return;
+
+        if (folders.length === 0 && !path) {
+            el.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">No folders found. Click &ldquo;New Folder&rdquo; to create one.</div>';
+            return;
+        }
+
+        var html = '';
+
+        /* Parent directory link */
+        if (path) {
+            var parent = path.split('/').slice(0, -1).join('/');
+            html += '<div onclick="_navigateFolder(\'' + _escapeAttr(parent) + '\')" style="padding: 10px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-primary);" onmouseover="this.style.background=\'var(--bg-tertiary)\'" onmouseout="this.style.background=\'\'">';
+            html += '<svg style="width:16px;height:16px;color:var(--text-tertiary);flex-shrink:0;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+            html += '<span style="color: var(--text-secondary); font-size: var(--text-sm);">..</span>';
+            html += '</div>';
+        }
+
+        if (folders.length === 0 && path) {
+            html += '<div style="padding: 16px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">Empty folder</div>';
+        }
+
+        for (var i = 0; i < folders.length; i++) {
+            var f = folders[i];
+            html += '<div onclick="_navigateFolder(\'' + _escapeAttr(f.path) + '\')" style="padding: 10px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-primary);" onmouseover="this.style.background=\'var(--bg-tertiary)\'" onmouseout="this.style.background=\'\'">';
+            html += '<svg style="width:16px;height:16px;color:var(--accent-warning);flex-shrink:0;" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M2 6a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6z"/></svg>';
+            html += '<span style="color: var(--text-primary); font-size: var(--text-sm);">' + _escapeHtml(f.name) + '</span>';
+            html += '<svg style="width:14px;height:14px;color:var(--text-tertiary);margin-left:auto;flex-shrink:0;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+            html += '</div>';
+        }
+
+        el.innerHTML = html;
+    }
+
+    window._navigateFolder = async function(path) {
+        _currentBrowsePath = path;
+        _renderBreadcrumbs(path);
+
+        var listEl = document.getElementById('folderList');
+        if (listEl) listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">Loading&hellip;</div>';
+
+        await _loadFolders(path);
+    };
+
+    async function _loadFolders(path) {
+        _showBusy('Loading folders\u2026');
+        try {
+            var url = '{{ url_for("cloud_archive.api_browse_folders") }}?path=' + encodeURIComponent(path);
+            var resp = await fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            var data = await resp.json();
+
+            _renderBreadcrumbs(path);
+
+            if (data.success) {
+                _renderFolderList(data.folders, path);
+            } else {
+                var listEl = document.getElementById('folderList');
+                if (data.auth_error) {
+                    if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; font-size: var(--text-sm);"><div style="color: var(--error-text); margin-bottom: 8px;">' + _escapeHtml(data.message) + '</div><button onclick="closeFolderBrowser(); disconnectProvider();" class="action-btn danger" style="font-size:13px;padding:6px 14px;">Disconnect &amp; Reconnect</button></div>';
+                } else {
+                    if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--error-text); font-size: var(--text-sm);">' + _escapeHtml(data.message || 'Failed to load folders.') + '</div>';
+                }
+            }
+        } catch (e) {
+            var listEl = document.getElementById('folderList');
+            if (listEl) listEl.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--error-text); font-size: var(--text-sm);">Network error loading folders.</div>';
+        } finally {
+            _hideBusy();
+        }
+    }
+
+    window.createNewFolder = async function() {
+        var name = prompt('Enter new folder name:');
+        if (!name || !name.trim()) return;
+        name = name.trim().replace(/[\/\\]/g, '');
+        if (!name) { showToast('Invalid folder name.', 'warning'); return; }
+
+        var fullPath = _currentBrowsePath ? _currentBrowsePath + '/' + name : name;
+        _showBusy('Creating folder\u2026');
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_create_folder") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ path: fullPath })
+            });
+            var data = await resp.json();
+            _hideBusy();
+            if (data.success) {
+                showToast('Folder created.', 'success');
+                _navigateFolder(fullPath);
+            } else {
+                showToast(data.message || 'Failed to create folder.', 'error');
+            }
+        } catch (e) {
+            _hideBusy();
+            showToast('Network error.', 'error');
+        }
+    };
+
+    window.selectCurrentFolder = async function() {
+        var path = _currentBrowsePath || '';
+        _showBusy('Saving destination\u2026');
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_set_remote_path") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ path: path })
+            });
+            var data = await resp.json();
+            _hideBusy();
+            if (data.success) {
+                var pathEl = document.getElementById('currentRemotePath');
+                if (pathEl) pathEl.textContent = data.path;
+                closeFolderBrowser();
+                showToast('Sync destination set to: ' + data.path, 'success');
+            } else {
+                showToast(data.message || 'Failed to set path.', 'error');
+            }
+        } catch (e) {
+            _hideBusy();
+            showToast('Network error.', 'error');
+        }
+    };
+
+    function _escapeHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+    function _escapeAttr(s) {
+        return s.replace(/'/g, "\\'").replace(/\\/g, '\\\\');
+    }
+
+    window.toggleSyncEnabled = async function(enabled) {
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_toggle_sync") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ enabled: enabled })
+            });
+            var data = await resp.json();
+            if (data.success) {
+                var label = document.getElementById('syncEnabledLabel');
+                if (label) label.textContent = enabled
+                    ? 'Enabled \u2014 syncs automatically when WiFi connects'
+                    : 'Disabled \u2014 provider stays connected, no auto-sync';
+                showToast('Auto-sync ' + (enabled ? 'enabled' : 'disabled') + '.', 'success');
+            } else {
+                showToast(data.message || 'Failed to update.', 'error');
+                /* Revert checkbox */
+                var cb = document.getElementById('syncEnabledToggle');
+                if (cb) cb.checked = !enabled;
+            }
+        } catch (e) {
+            showToast('Network error.', 'error');
+            var cb = document.getElementById('syncEnabledToggle');
+            if (cb) cb.checked = !enabled;
+        }
+    };
+
+    window.toggleCredSecret = function(btn) {
+        var field = document.getElementById('credSecret');
+        if (field.type === 'password') {
+            field.type = 'text';
+            btn.textContent = 'Hide';
+        } else {
+            field.type = 'password';
+            btn.textContent = 'Show';
+        }
+    };
+
+    /* ===================================================================
+       Priority list - up/down arrow buttons
+       =================================================================== */
+
+    function updatePriorityInput() {
+        var items = document.querySelectorAll('#priorityList li');
+        var order = [];
+        items.forEach(function(li, i) {
+            order.push(li.getAttribute('data-folder'));
+            // Update the number label
+            var numSpan = li.querySelector('span:first-child');
+            if (numSpan) numSpan.textContent = (i + 1) + '.';
+            // Enable/disable up/down buttons
+            var btns = li.querySelectorAll('button');
+            if (btns[0]) btns[0].disabled = (i === 0);
+            if (btns[1]) btns[1].disabled = (i === items.length - 1);
+        });
+        var input = document.getElementById('priorityOrderInput');
+        if (input) input.value = order.join(',');
+    }
+
+    window.movePriorityUp = function(btn) {
+        var li = btn.closest('li');
+        var prev = li.previousElementSibling;
+        if (prev) {
+            li.parentNode.insertBefore(li, prev);
+            updatePriorityInput();
+        }
+    };
+
+    window.movePriorityDown = function(btn) {
+        var li = btn.closest('li');
+        var next = li.nextElementSibling;
+        if (next) {
+            li.parentNode.insertBefore(next, li);
+            updatePriorityInput();
+        }
+    };
+
+    /* ===================================================================
+       Initialization
+       =================================================================== */
+
+    /* ===================================================================
+       Archive Status Polling (single-file archive from video panel)
+       =================================================================== */
+
+    var _archiveCloudPollTimer = null;
+
+    function startArchivePoll() {
+        if (_archiveCloudPollTimer) return;
+        _archiveCloudPollTimer = setInterval(async function() {
+            try {
+                var resp = await fetch('{{ url_for("cloud_archive.api_archive_status") }}', {
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                var st = await resp.json();
+                var card = document.getElementById('archiveStatusCard');
+                var inner = document.getElementById('archiveCardInner');
+
+                if (st.running) {
+                    if (card) card.style.display = 'block';
+                    var pct = st.total_size > 0
+                        ? Math.min(99, Math.round((st.bytes_transferred || 0) / st.total_size * 100)) : 0;
+                    var bar = document.getElementById('archiveProgressBar');
+                    if (bar) bar.style.width = pct + '%';
+
+                    var title = document.getElementById('archiveTitle');
+                    if (title) title.textContent = 'Archiving ' + (st.event_name || '') + '...';
+
+                    var sub = document.getElementById('archiveSubtitle');
+                    if (sub) sub.textContent = (st.files_done || 0) + ' of ' + st.file_count + ' files \u2014 ' + formatBytes(st.bytes_transferred || 0) + ' / ' + formatBytes(st.total_size || 0) + (st.current_file ? ' \u2014 ' + st.current_file : '');
+
+                    var etaText = '';
+                    if (st.eta_seconds != null && st.eta_seconds > 0) {
+                        var m = Math.floor(st.eta_seconds / 60);
+                        var s = st.eta_seconds % 60;
+                        etaText = m > 0 ? m + 'm ' + s + 's remaining' : s + 's remaining';
+                    }
+                    var detail = document.getElementById('archiveDetail');
+                    if (detail) detail.textContent = pct + '%' + (etaText ? ' \u2014 ' + etaText : '');
+                } else if (st.completed) {
+                    if (card) card.style.display = 'block';
+                    if (inner) inner.className = 'device-status-card device-status-present';
+                    var title = document.getElementById('archiveTitle');
+                    if (title) title.textContent = '\u2713 Archived ' + (st.event_name || '');
+                    var sub = document.getElementById('archiveSubtitle');
+                    if (sub) sub.textContent = st.file_count + ' files \u2014 ' + formatBytes(st.total_size || 0);
+                    var bar = document.getElementById('archiveProgressBar');
+                    if (bar) bar.style.width = '100%';
+                    var detail = document.getElementById('archiveDetail');
+                    if (detail) detail.textContent = 'Complete';
+                    stopArchivePoll();
+                    setTimeout(function() { if (card) card.style.display = 'none'; }, 10000);
+                } else if (st.error) {
+                    if (card) card.style.display = 'block';
+                    if (inner) inner.className = 'device-status-card device-status-unknown';
+                    var title = document.getElementById('archiveTitle');
+                    if (title) title.textContent = 'Archive Failed';
+                    var sub = document.getElementById('archiveSubtitle');
+                    if (sub) { sub.textContent = st.error; sub.style.color = 'var(--error-text)'; }
+                    var bar = document.getElementById('archiveProgressBar');
+                    if (bar) bar.style.width = '0%';
+                    var detail = document.getElementById('archiveDetail');
+                    if (detail) detail.textContent = '';
+                    stopArchivePoll();
+                    setTimeout(function() { if (card) card.style.display = 'none'; }, 15000);
+                } else {
+                    if (card) card.style.display = 'none';
+                    stopArchivePoll();
+                }
+            } catch (e) { /* keep polling */ }
+        }, 3000);
+    }
+
+    function stopArchivePoll() {
+        if (_archiveCloudPollTimer) { clearInterval(_archiveCloudPollTimer); _archiveCloudPollTimer = null; }
+    }
+
+    /* ===================================================================
+       Init
+       =================================================================== */
+
+    document.addEventListener('DOMContentLoaded', function() {
+        formatTimestamps();
+        if (isSyncing) startPolling();
+        startArchivePoll();
+        loadStorageUsage();
+        refreshQueue();
+        refreshDeadLetters();
+        _updateProviderCards(_selectedProvider());
+    });
+
+    /* Load cloud storage usage */
+    async function loadStorageUsage() {
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_storage_usage") }}', {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+            if (data.total || data.used) {
+                var row = document.getElementById('storageUsageRow');
+                var text = document.getElementById('storageUsageText');
+                if (row && text) {
+                    var used = formatBytes(data.used || 0);
+                    var total = data.total ? formatBytes(data.total) : 'unlimited';
+                    var free = data.free ? formatBytes(data.free) : '';
+                    text.textContent = used + ' used' + (data.total ? ' of ' + total : '') + (free ? ' (' + free + ' free)' : '');
+                    row.style.display = '';
+                }
+
+                // Storage warning banners
+                var warn = document.getElementById('storageWarning');
+                if (warn && data.total && data.used) {
+                    var pct = Math.round(data.used / data.total * 100);
+                    if (pct >= 95) {
+                        warn.style.display = '';
+                        warn.style.background = 'var(--msg-error-bg)';
+                        warn.style.color = 'var(--msg-error-text)';
+                        warn.textContent = '\u26a0 Critical: Cloud storage is ' + pct + '% full. Uploads may fail.';
+                    } else if (pct >= 80) {
+                        warn.style.display = '';
+                        warn.style.background = 'var(--msg-warning-bg)';
+                        warn.style.color = 'var(--msg-warning-text)';
+                        warn.textContent = '\u26a0 Warning: Cloud storage is ' + pct + '% full. Consider freeing space.';
+                    }
+                }
+            }
+        } catch (e) { /* non-critical */ }
+    }
+
+    /* ===================================================================
+       Sync Queue
+       =================================================================== */
+
+    /* All three Sync Queue helpers below MUST be assigned to ``window`` so
+       inline ``onclick="..."`` handlers in the HTML (and in the row markup
+       generated by ``refreshQueue`` itself) can resolve them ΓÇö the
+       surrounding script is wrapped in an IIFE, so plain ``async function
+       foo()`` declarations would be trapped in the IIFE scope and the
+       buttons would silently no-op (issue 159). */
+    window.refreshQueue = async function() {
+        var content = document.getElementById('queueContent');
+        var badge = document.getElementById('queueBadge');
+        var clearBtn = document.getElementById('clearQueueBtn');
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_queue") }}', {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+            var queue = data.queue || [];
+
+            if (badge) {
+                if (queue.length > 0) {
+                    badge.textContent = queue.length;
+                    badge.style.display = '';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+            if (clearBtn) {
+                clearBtn.style.display = queue.length > 0 ? '' : 'none';
+            }
+
+            if (queue.length === 0) {
+                content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--text-muted);">No files in sync queue</div>';
+                return;
+            }
+
+            var html = '<div style="display: flex; flex-direction: column; gap: var(--space-2);">';
+            queue.forEach(function(item) {
+                var fname = item.file_path.split('/').pop();
+                var safeName = fname.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                var size = item.file_size ? formatBytes(item.file_size) : '';
+                var statusLabel = item.status || 'queued';
+                var statusColor = statusLabel === 'uploading' ? 'var(--msg-info-text)' : 'var(--text-secondary)';
+                html += '<div style="display: flex; align-items: center; gap: var(--space-2); padding: 8px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-secondary);">' +
+                    '<div style="flex: 1; min-width: 0;">' +
+                        '<div style="font-size: var(--text-sm); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + safeName + '</div>' +
+                        '<div style="font-size: var(--text-xs); color: var(--text-muted);">' + size + ' &middot; <span style="color:' + statusColor + ';">' + statusLabel + '</span>' +
+                        (item.retry_count > 0 ? ' &middot; retries: ' + item.retry_count : '') + '</div>' +
+                    '</div>';
+                html += '<button type="button" class="action-btn danger" style="padding: 4px 10px; font-size: 12px; flex-shrink: 0;" ' +
+                    'aria-label="Remove from queue" ' +
+                    'onclick="removeFromQueue(\'' + item.file_path.replace(/'/g, "\\'") + '\')">&times;</button>';
+                html += '</div>';
+            });
+            html += '</div>';
+            content.innerHTML = html;
+        } catch(e) {
+            content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--error-text);">Failed to load queue</div>';
+        }
+    };
+
+    window.removeFromQueue = async function(filePath) {
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_queue_remove") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify({ file_path: filePath })
+            });
+            var data = {};
+            try { data = await resp.json(); } catch(e) { /* non-JSON response */ }
+            if (!resp.ok || (data && data.success === false)) {
+                var msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);
+                showToast('Could not remove from queue: ' + msg, 'error');
+            }
+            refreshQueue();
+        } catch(e) {
+            showToast('Could not remove from queue: ' + e.message, 'error');
+            refreshQueue();
+        }
+    };
+
+    window.clearQueue = async function() {
+        if (!confirm('Remove all queued files from the sync queue?')) return;
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_queue_clear") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = {};
+            try { data = await resp.json(); } catch(e) { /* non-JSON response */ }
+            if (!resp.ok || (data && data.success === false)) {
+                var msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);
+                showToast('Could not clear queue: ' + msg, 'error');
+            } else if (data && data.message) {
+                showToast(data.message, 'success');
+            }
+            refreshQueue();
+        } catch(e) {
+            showToast('Could not clear queue: ' + e.message, 'error');
+            refreshQueue();
+        }
+    };
+
+
+
+    /* ===================================================================
+       Dead Letters
+       =================================================================== */
+    window.refreshDeadLetters = async function() {
+        var content = document.getElementById('deadLetterContent');
+        var badge = document.getElementById('deadLetterBadge');
+        var retryBtn = document.getElementById('retryDeadLettersBtn');
+        var deleteBtn = document.getElementById('deleteDeadLettersBtn');
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_dead_letters") }}', {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await resp.json();
+            var items = data.dead_letters || [];
+            var count = data.count || items.length;
+            if (badge) {
+                if (count > 0) {
+                    badge.textContent = count;
+                    badge.style.display = '';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+            if (retryBtn) retryBtn.style.display = count > 0 ? '' : 'none';
+            if (deleteBtn) deleteBtn.style.display = count > 0 ? '' : 'none';
+            if (items.length === 0) {
+                content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--text-muted);">No dead-letter files</div>';
+                return;
+            }
+            var html = '<div style="display: flex; flex-direction: column; gap: var(--space-2);">';
+            items.forEach(function(item) {
+                var path = item.file_path || '';
+                var safePath = _escapeHtml(path);
+                var lastError = _escapeHtml(item.last_error || 'Unknown error');
+                html += '<div style="display:flex;align-items:flex-start;gap:var(--space-2);padding:8px;border:1px solid var(--border-color);border-radius:var(--radius-md);background:var(--bg-secondary);">';
+                html += '<div style="flex:1;min-width:0;">';
+                html += '<div style="font-size:var(--text-sm);color:var(--text-primary);overflow-wrap:anywhere;">' + safePath + '</div>';
+                html += '<div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:4px;">' + lastError + '</div>';
+                html += '</div>';
+                html += '<button type="button" class="action-btn" aria-label="Retry dead letter" style="padding:4px 10px;font-size:12px;flex-shrink:0;" onclick="retryDeadLetter(\'' + path.replace(/'/g, "\\'") + '\')">Retry</button>';
+                html += '<button type="button" class="action-btn danger" aria-label="Delete dead letter" style="padding:4px 10px;font-size:12px;flex-shrink:0;" onclick="deleteDeadLetter(\'' + path.replace(/'/g, "\\'") + '\')">Delete</button>';
+                html += '</div>';
+            });
+            html += '</div>';
+            content.innerHTML = html;
+        } catch (e) {
+            content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--error-text);">Failed to load dead letters</div>';
+        }
+    };
+
+    async function _deadLetterAction(url, payload, successMsg) {
+        var resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify(payload || {})
+        });
+        var data = await resp.json();
+        if (!resp.ok || data.success === false) {
+            throw new Error((data && data.error) || (data && data.message) || ('HTTP ' + resp.status));
+        }
+        if (successMsg) showToast(successMsg, 'success');
+        refreshDeadLetters();
+    }
+
+    window.retryDeadLetter = async function(filePath) {
+        try {
+            await _deadLetterAction('{{ url_for("cloud_archive.api_dead_letters_retry") }}', { file_path: filePath }, 'Dead letter queued for retry.');
+        } catch (e) {
+            showToast(e.message, 'error');
+        }
+    };
+
+    window.retryDeadLetters = async function() {
+        try {
+            await _deadLetterAction('{{ url_for("cloud_archive.api_dead_letters_retry") }}', {}, 'Dead letters queued for retry.');
+        } catch (e) {
+            showToast(e.message, 'error');
+        }
+    };
+
+    window.deleteDeadLetter = async function(filePath) {
+        if (!confirm('Delete this dead-letter entry?')) return;
+        try {
+            await _deadLetterAction('{{ url_for("cloud_archive.api_dead_letters_delete") }}', { file_path: filePath }, 'Dead letter deleted.');
+        } catch (e) {
+            showToast(e.message, 'error');
+        }
+    };
+
+    window.deleteDeadLetters = async function() {
+        if (!confirm('Delete all dead-letter entries?')) return;
+        try {
+            await _deadLetterAction('{{ url_for("cloud_archive.api_dead_letters_delete") }}', {}, 'Dead letters deleted.');
+        } catch (e) {
+            showToast(e.message, 'error');
+        }
+    };
+
+
+})();
+
+// Bandwidth Test (global scope for onclick handlers)
+function _bwEscape(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+async function runBandwidthTest() {
+    var btn = document.getElementById('bwTestBtn');
+    var results = document.getElementById('bwTestResults');
+    btn.disabled = true;
+    btn.textContent = 'TestingΓÇª';
+    results.style.display = 'block';
+    results.innerHTML = '<p>Starting bandwidth test ΓÇö this takes 1-2 minutesΓÇª</p>';
+
+    try {
+        var resp = await fetch('{{ url_for("cloud_archive.api_bandwidth_test") }}', {method: 'POST'});
+        var data = await resp.json();
+        if (!data.success) {
+            results.innerHTML = '<p style="color:var(--error-text);">' + _bwEscape(data.message) + '</p>';
+            btn.disabled = false;
+            btn.textContent = 'Auto-Detect';
+            return;
+        }
+        // Poll for results
+        var pollTimer = setInterval(async function() {
+            try {
+                var r = await fetch('{{ url_for("cloud_archive.api_bandwidth_test_status") }}');
+                var s = await r.json();
+                if (s.running) {
+                    results.innerHTML = '<p>' + _bwEscape(s.progress || 'TestingΓÇª') + '</p>';
+                } else {
+                    clearInterval(pollTimer);
+                    btn.disabled = false;
+                    btn.textContent = 'Auto-Detect';
+                    if (s.error) {
+                        results.innerHTML = '<p style="color:var(--error-text);">Error: ' + _bwEscape(s.error) + '</p>';
+                        return;
+                    }
+                    // Show results table
+                    var html = '<table style="width:100%;font-size:0.8rem;border-collapse:collapse;">';
+                    html += '<tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:4px;">Speed</th><th>Actual</th><th>Latency</th><th>Memory</th><th>Load</th><th>Status</th></tr>';
+                    (s.results || []).forEach(function(r) {
+                        var color = r.status === 'ok' ? 'var(--accent-success)' : 'var(--error-text)';
+                        html += '<tr style="border-bottom:1px solid var(--border);">';
+                        html += '<td style="padding:4px;">' + r.mbps + ' Mbps</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.actual_mbps || 'ΓÇö') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.web_latency ? r.web_latency + 's' : 'ΓÇö') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.free_memory_mb ? Math.round(r.free_memory_mb) + ' MB' : 'ΓÇö') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.load_avg || 'ΓÇö') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;color:' + color + ';">' + r.status + '</td>';
+                        html += '</tr>';
+                    });
+                    html += '</table>';
+                    if (s.recommended_mbps) {
+                        html += '<div style="margin-top:8px;display:flex;align-items:center;gap:8px;">';
+                        html += '<strong>Recommended: ' + s.recommended_mbps + ' Mbps</strong>';
+                        html += '<button type="button" onclick="applyBandwidth()" class="btn btn-primary" style="padding:4px 12px;font-size:0.8rem;">Apply</button>';
+                        html += '</div>';
+                    }
+                    results.innerHTML = html;
+                }
+            } catch(e) { /* keep polling */ }
+        }, 3000);
+    } catch(e) {
+        results.innerHTML = '<p style="color:var(--error-text);">Failed to start test</p>';
+        btn.disabled = false;
+        btn.textContent = 'Auto-Detect';
+    }
+}
+
+async function applyBandwidth() {
+    try {
+        var resp = await fetch('{{ url_for("cloud_archive.api_bandwidth_test_apply") }}', {method: 'POST'});
+        var data = await resp.json();
+        if (data.success) {
+            var status = await (await fetch('{{ url_for("cloud_archive.api_bandwidth_test_status") }}')).json();
+            var slider = document.getElementById('bwSlider');
+            var label = document.getElementById('bwValue');
+            if (slider && status.recommended_mbps) {
+                slider.value = status.recommended_mbps;
+                label.textContent = status.recommended_mbps + ' Mbps';
+            }
+            if (typeof showToast === 'function') showToast('Bandwidth updated to ' + status.recommended_mbps + ' Mbps', 'success');
+        }
+    } catch(e) { /* ignore */ }
+}
 </script>
 <script type="module" src="{{ url_for('static', filename='js/cloud_archive.js') }}"></script>
 {% endblock %}

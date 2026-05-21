@@ -167,8 +167,21 @@ def test_helper_music_response_redirects_for_non_xhr(app: Flask) -> None:
     assert response.headers["Location"] == "/music/?path=Albums&_=9"
 
 
-def test_music_home_route_skipped_until_template_lands() -> None:
-    pytest.skip(reason="template in 5.11c")
+def test_music_home_route_renders_template_charter_compliant(client, service: MusicService) -> None:
+    service.create_directory("", "Albums")
+    service.save_file(_upload("song.mp3", b"music"), "Albums")
+
+    response = client.get("/music/?path=Albums")
+
+    assert response.status_code == HTTPStatus.OK
+    assert b"<title>" in response.data
+    assert b"Music Library" in response.data
+    assert b"Edit Mode" not in response.data
+    assert b"Present Mode" not in response.data
+    assert b"quick_edit" not in response.data
+    assert b"cdn.jsdelivr.net" not in response.data
+    assert b"unpkg.com" not in response.data
+    assert b"<svg" in response.data
 
 
 def test_music_home_route_success_with_patched_template(client, service: MusicService) -> None:

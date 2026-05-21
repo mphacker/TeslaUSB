@@ -156,7 +156,8 @@ def _mime_type_for_path(filepath: str) -> str:
 def music_home() -> ResponseReturnValue:
     try:
         listing = _get_service().list_files(request.args.get("path", ""))
-        return render_template("music.html", **_index_context(listing))
+        context = _index_context(listing)
+        return render_template("music.html", **context)
     except MusicError as exc:
         return _json_error_payload(str(exc)), HTTPStatus.BAD_REQUEST
     except MusicFileError as exc:

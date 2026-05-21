@@ -1,0 +1,830 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.music-page,
+.music-header,
+.music-grid,
+.music-panel,
+.music-panel-head,
+.music-summary,
+.music-library,
+.music-entry-list,
+.music-upload-tools,
+.music-queue,
+.music-queue-list,
+.music-empty,
+.music-meter-shell {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.music-page {
+    gap: var(--space-6);
+}
+
+.music-header,
+.music-panel,
+.music-upload-panel {
+    padding: var(--space-6);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+}
+
+.music-header-row,
+.music-summary,
+.music-breadcrumb,
+.music-selection-controls,
+.music-entry-row,
+.music-entry-link,
+.music-entry-actions,
+.music-inline-form,
+.music-actions,
+.music-queue-row,
+.music-queue-meta,
+.music-drop-content {
+    display: flex;
+    gap: var(--space-3);
+}
+
+.music-header-row,
+.music-entry-row,
+.music-queue-row {
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.music-header-row,
+.music-summary,
+.music-selection-controls,
+.music-entry-actions,
+.music-inline-form,
+.music-actions,
+.music-queue-meta {
+    flex-wrap: wrap;
+}
+
+.music-title,
+.music-panel-title,
+.music-section-title,
+.music-drop-title,
+.music-empty-title,
+.music-overlay-title {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.music-title {
+    font-size: var(--text-3xl);
+}
+
+.music-panel-title,
+.music-section-title,
+.music-overlay-title {
+    font-size: var(--text-xl);
+}
+
+.music-copy,
+.music-subtitle,
+.music-entry-meta,
+.music-empty-copy,
+.music-drop-copy,
+.music-status,
+.music-overlay-copy {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.music-summary-pill,
+.music-size-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-full);
+    background: var(--form-label-bg);
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.music-icon,
+.music-inline-icon {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex: 0 0 auto;
+}
+
+.music-callout {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-input);
+    background: var(--msg-info-bg);
+}
+
+.music-callout-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    color: var(--msg-info-text);
+    font-size: var(--text-lg);
+}
+
+.music-callout-copy,
+.music-callout code {
+    color: var(--msg-info-text);
+}
+
+.music-callout code {
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--bg-code);
+}
+
+.music-grid {
+    align-items: start;
+}
+
+.music-library,
+.music-upload-panel {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.music-breadcrumb {
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.music-breadcrumb a,
+.music-breadcrumb span {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    color: var(--text-secondary);
+    text-decoration: none;
+}
+
+.music-breadcrumb a:hover {
+    color: var(--text-link);
+}
+
+.music-breadcrumb-current {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.music-meter {
+    overflow: hidden;
+    inline-size: 100%;
+    block-size: 1rem;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border-input);
+    background: var(--upload-progress-bar-bg);
+}
+
+.music-meter-fill {
+    display: block;
+    block-size: 100%;
+    inline-size: 0%;
+    background: linear-gradient(90deg, var(--btn-primary-bg), var(--btn-info-bg));
+    transition: inline-size var(--transition-normal);
+}
+
+.music-toolbar {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.music-selection-controls {
+    align-items: center;
+}
+
+.music-select-all,
+.music-file-select {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.music-select-all input,
+.music-file-select input {
+    width: 1.125rem;
+    height: 1.125rem;
+    margin: 0;
+}
+
+.music-selected-count {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.music-entry-card {
+    display: grid;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+}
+
+.music-entry-link {
+    min-width: 0;
+    min-height: 44px;
+    align-items: center;
+    color: var(--text-link);
+    font-weight: 600;
+}
+
+.music-entry-link:hover {
+    color: var(--btn-primary-bg);
+}
+
+.music-entry-name {
+    min-width: 0;
+    word-break: break-word;
+}
+
+.music-file-head {
+    display: grid;
+    gap: var(--space-3);
+}
+
+.music-file-title-wrap {
+    display: grid;
+    gap: var(--space-1);
+}
+
+.music-file-title {
+    color: var(--text-primary);
+    font-size: var(--text-lg);
+    font-weight: 700;
+    word-break: break-word;
+}
+
+.music-file-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
+
+.music-audio {
+    inline-size: 100%;
+}
+
+.music-audio::-webkit-media-controls-panel {
+    background: var(--form-label-bg);
+}
+
+.music-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    background: var(--form-label-bg);
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.music-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+.music-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.music-btn-primary {
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+.music-btn-secondary {
+    background: var(--form-label-bg);
+    border-color: var(--border-input);
+    color: var(--text-primary);
+}
+
+.music-btn-danger {
+    background: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
+.music-drop-zone {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-3);
+    min-height: 200px;
+    width: 100%;
+    padding: var(--space-8);
+    border: 2px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+    color: var(--text-primary);
+    text-align: center;
+    cursor: pointer;
+}
+
+.music-drop-zone:hover,
+.music-drop-zone.is-dragover {
+    border-color: var(--btn-primary-bg);
+    background: var(--msg-info-bg);
+}
+
+.music-drop-zone svg {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: var(--btn-primary-bg);
+}
+
+.music-field {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.music-field label {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.music-field input[type="text"] {
+    min-height: 44px;
+    padding: var(--space-3);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--form-input-bg);
+    color: var(--text-primary);
+    font: inherit;
+}
+
+.music-field input[type="text"]:focus {
+    outline: none;
+    border-color: var(--btn-primary-bg);
+    box-shadow: var(--shadow-md);
+}
+
+.music-queue {
+    padding: var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--form-label-bg);
+}
+
+.music-queue[hidden],
+.music-overlay[hidden] {
+    display: none;
+}
+
+.music-queue-name {
+    color: var(--text-primary);
+    font-weight: 700;
+    word-break: break-word;
+}
+
+.music-queue-meta {
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
+
+.music-queue-progress {
+    overflow: hidden;
+    inline-size: 100%;
+    block-size: 0.75rem;
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-full);
+    background: var(--upload-progress-bar-bg);
+}
+
+.music-queue-progress-fill {
+    display: block;
+    block-size: 100%;
+    inline-size: 0%;
+    background: linear-gradient(90deg, var(--btn-primary-bg), var(--btn-info-bg));
+    transition: inline-size var(--transition-normal);
+}
+
+.music-queue-item.is-complete .music-queue-progress-fill {
+    background: linear-gradient(90deg, var(--btn-success-bg), var(--success-border));
+}
+
+.music-queue-item.is-error .music-queue-progress-fill {
+    background: linear-gradient(90deg, var(--btn-danger-bg), var(--msg-error-text));
+}
+
+.music-status {
+    min-height: 1.5rem;
+}
+
+.music-status.is-error {
+    color: var(--msg-error-text);
+}
+
+.music-status.is-success {
+    color: var(--msg-success-text);
+}
+
+.music-status.is-working {
+    color: var(--text-primary);
+}
+
+.music-empty {
+    justify-items: center;
+    padding: var(--space-8);
+    border: 1px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+    text-align: center;
+}
+
+.music-empty svg {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: var(--text-secondary);
+}
+
+.music-overlay {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: var(--space-4);
+    background: var(--bg-overlay);
+    z-index: 200;
+}
+
+.music-overlay-card {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-4);
+    padding: var(--space-6);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    text-align: center;
+}
+
+.music-spinner {
+    width: 3rem;
+    height: 3rem;
+    border: 0.375rem solid var(--border-input);
+    border-top-color: var(--btn-primary-bg);
+    border-radius: var(--radius-full);
+    animation: music-spin 1s linear infinite;
+}
+
+@keyframes music-spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (min-width: 768px) {
+    .music-toolbar {
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+    }
+}
+
+@media (min-width: 1024px) {
+    .music-grid {
+        grid-template-columns: minmax(0, 1.5fr) minmax(320px, 1fr);
+    }
+}
+
+@media (max-width: 767px) {
+    .music-header,
+    .music-panel,
+    .music-upload-panel {
+        padding: var(--space-4);
+    }
+
+    .music-inline-form,
+    .music-actions,
+    .music-entry-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .music-btn {
+        width: 100%;
+    }
+}
+</style>
+{% endblock %}
+{% block content %}
+<div class="container">
+    {% include "media_hub_nav.html" %}
+    {% set sprite = url_for('static', filename='icons/lucide-sprite.svg') %}
+    {% set total_space = total_bytes if total_bytes else used_bytes + free_bytes %}
+    {% set used_pct = ((100 * used_bytes / total_space) if total_space else 0)|round(2) %}
+    {% set path_parts = current_path.split('/') if current_path else [] %}
+    {% set max_file_copy = (max_upload_size_mb ~ ' MiB per file') if max_upload_size_mb else 'the configured device limit' %}
+    {% set chunk_copy = (max_upload_chunk_mb ~ ' MiB') if max_upload_chunk_mb else 'the configured chunk size' %}
+    <div
+        class="music-page"
+        id="music-page"
+        data-upload-url="{{ url_for('music.upload_music') }}"
+        data-upload-chunk-url="{{ url_for('music.upload_chunk') }}"
+        data-delete-url="{{ url_for('music.delete_music', filename='__NAME__') }}"
+        data-delete-dir-url="{{ url_for('music.delete_music_dir', dirname='__DIR__') }}"
+        data-move-url="{{ url_for('music.move_music') }}"
+        data-mkdir-url="{{ url_for('music.create_music_folder') }}"
+        data-browse-url="{{ url_for('music.music_home') }}"
+        data-current-path="{{ current_path }}"
+        data-max-mb="{{ max_upload_size_mb }}"
+        data-chunk-mb="{{ max_upload_chunk_mb or 1 }}"
+        data-used-pct="{{ used_pct }}"
+    >
+        <section class="music-header" aria-labelledby="music-title">
+            <div class="music-header-row">
+                <div class="music-panel-head">
+                    <h2 class="music-title" id="music-title">Music Library</h2>
+                    <p class="music-subtitle">
+                        Browse folders, upload tracks, preview audio inline, move files, and remove one or many items without leaving the page.
+                    </p>
+                </div>
+                <div class="music-summary" aria-label="Music summary">
+                    <span class="music-summary-pill">
+                        <svg class="music-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-music"></use></svg>
+                        {{ files|length }} file{{ '' if files|length == 1 else 's' }}
+                    </span>
+                    <span class="music-summary-pill">
+                        <svg class="music-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-folder"></use></svg>
+                        {{ dirs|length }} folder{{ '' if dirs|length == 1 else 's' }}
+                    </span>
+                    <span class="music-summary-pill">
+                        <svg class="music-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-hard-drive"></use></svg>
+                        {{ format_file_size(used_bytes) }} used
+                    </span>
+                    <span class="music-summary-pill">
+                        <svg class="music-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-database"></use></svg>
+                        {{ format_file_size(free_bytes) }} free
+                    </span>
+                </div>
+            </div>
+            <div class="music-meter-shell" aria-label="Storage usage">
+                <p class="music-copy">Current folder: <strong>/Music{% if current_path %}/{{ current_path }}{% endif %}</strong></p>
+                <div class="music-meter" aria-hidden="true">
+                    <span class="music-meter-fill" id="musicUsageFill"></span>
+                </div>
+            </div>
+        </section>
+
+        <section class="music-callout" aria-labelledby="music-callout-title">
+            <h3 class="music-callout-title" id="music-callout-title">
+                <svg class="music-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-info"></use></svg>
+                Tesla scan path
+            </h3>
+            <p class="music-callout-copy">
+                Tesla only indexes audio stored inside <code>/Music</code>. This page always reads from that root, and the breadcrumb below shows your location relative to it.
+            </p>
+        </section>
+
+        <div class="music-grid">
+            <section class="music-panel music-library" aria-labelledby="music-library-title">
+                <div class="music-panel-head">
+                    <h3 class="music-panel-title" id="music-library-title">Library</h3>
+                    <p class="music-copy">Use the breadcrumb to navigate, select multiple files for bulk delete, or play individual tracks before moving or removing them.</p>
+                </div>
+
+                <nav class="music-breadcrumb" aria-label="Music breadcrumb">
+                    <a href="{{ url_for('music.music_home') }}">
+                        <svg class="music-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-folder"></use></svg>
+                        <span>Music</span>
+                    </a>
+                    {% set crumb = namespace(path='') %}
+                    {% for part in path_parts %}
+                        <svg class="music-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-chevron-right"></use></svg>
+                        {% set crumb.path = part if not crumb.path else crumb.path ~ '/' ~ part %}
+                        {% if loop.last %}
+                        <span class="music-breadcrumb-current" aria-current="page">{{ part }}</span>
+                        {% else %}
+                        <a href="{{ url_for('music.music_home', path=crumb.path) }}">{{ part }}</a>
+                        {% endif %}
+                    {% endfor %}
+                </nav>
+
+                <div class="music-toolbar">
+                    <div class="music-selection-controls">
+                        {% if current_path %}
+                        <a class="music-btn music-btn-secondary" href="{{ url_for('music.music_home', path=(current_path.rsplit('/', 1)[0] if '/' in current_path else '')) }}">
+                            <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-chevron-left"></use></svg>
+                            Up one level
+                        </a>
+                        {% endif %}
+                        <label class="music-select-all" for="musicSelectAll">
+                            <input type="checkbox" id="musicSelectAll">
+                            Select all files
+                        </label>
+                        <span class="music-selected-count" id="musicSelectedCount">0 selected</span>
+                    </div>
+                    <div class="music-actions">
+                        <button class="music-btn music-btn-danger" id="musicBulkDeleteButton" type="button" disabled>
+                            <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-trash-2"></use></svg>
+                            Delete selected
+                        </button>
+                    </div>
+                </div>
+
+                {% if dirs %}
+                <div class="music-panel-head">
+                    <h4 class="music-section-title">Folders</h4>
+                    <p class="music-copy">Open a folder to drill down, or delete it when you want to remove the full subtree.</p>
+                </div>
+                <div class="music-entry-list" id="musicFolderList">
+                    {% for directory in dirs %}
+                    <article class="music-entry-card" data-dir-row data-dir="{{ directory.path }}">
+                        <div class="music-entry-row">
+                            <a class="music-entry-link" href="{{ url_for('music.music_home', path=directory.path) }}">
+                                <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-folder"></use></svg>
+                                <span class="music-entry-name">{{ directory.name }}</span>
+                            </a>
+                            <div class="music-entry-actions">
+                                <button class="music-btn music-btn-danger js-delete-dir" type="button" data-delete-dir="{{ directory.path }}">
+                                    <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-trash-2"></use></svg>
+                                    Delete folder
+                                </button>
+                            </div>
+                        </div>
+                        <p class="music-entry-meta">Relative path: /Music/{{ directory.path }}</p>
+                    </article>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                <div class="music-panel-head">
+                    <h4 class="music-section-title">Files</h4>
+                    <p class="music-copy">Inline playback uses the current track source from <code>/music/play/&lt;filepath&gt;</code>.</p>
+                </div>
+
+                {% if files %}
+                <div class="music-entry-list" id="musicFileList" aria-label="Music files">
+                    {% for file in files %}
+                    <article class="music-entry-card" data-file-row data-filename="{{ file.path }}">
+                        <div class="music-file-head">
+                            <div class="music-entry-row">
+                                <label class="music-file-select" for="music-file-{{ loop.index }}">
+                                    <input
+                                        type="checkbox"
+                                        id="music-file-{{ loop.index }}"
+                                        class="js-music-file-select"
+                                        value="{{ file.path }}"
+                                    >
+                                    <span class="music-file-title-wrap">
+                                        <span class="music-file-title">{{ file.name }}</span>
+                                        <span class="music-file-meta">
+                                            <span>{{ format_file_size(file.size) }}</span>
+                                            <span>Updated {{ file.modified_at[:19].replace('T', ' ') }}</span>
+                                        </span>
+                                    </span>
+                                </label>
+                                <span class="music-size-pill">
+                                    <svg class="music-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-music"></use></svg>
+                                    Ready to play
+                                </span>
+                            </div>
+                        </div>
+                        <audio class="music-audio" controls preload="none">
+                            <source src="{{ url_for('music.play_music', filepath=file.path) }}">
+                        </audio>
+                        <div class="music-entry-actions">
+                            <button class="music-btn music-btn-secondary js-move-file" type="button" data-move="{{ file.path }}">
+                                <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-share"></use></svg>
+                                Move file
+                            </button>
+                            <button class="music-btn music-btn-danger js-delete-file" type="button" data-delete="{{ file.path }}">
+                                <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-trash-2"></use></svg>
+                                Delete file
+                            </button>
+                        </div>
+                    </article>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="music-empty" id="musicEmptyState">
+                    <svg aria-hidden="true"><use href="{{ sprite }}#icon-folder"></use></svg>
+                    <h4 class="music-empty-title">No music files in this folder</h4>
+                    <p class="music-empty-copy">Upload one or more supported audio files to start building the library for this location.</p>
+                </div>
+                {% endif %}
+            </section>
+
+            <section class="music-upload-panel" aria-labelledby="music-upload-title">
+                <div class="music-panel-head">
+                    <h3 class="music-panel-title" id="music-upload-title">Upload and organize</h3>
+                    <p class="music-copy">
+                        Choose one file, several files, or drop whole folders. Files up to {{ chunk_copy }} upload directly; larger files switch to chunked transfer automatically. Current target: <strong>/Music{% if current_path %}/{{ current_path }}{% endif %}</strong>.
+                    </p>
+                </div>
+
+                <button class="music-drop-zone" id="musicDropZone" type="button">
+                    <svg aria-hidden="true"><use href="{{ sprite }}#icon-cloud-upload"></use></svg>
+                    <div class="music-drop-content">
+                        <span class="music-drop-title">Drop audio files here or tap to browse</span>
+                    </div>
+                    <p class="music-drop-copy">Supported formats: MP3, FLAC, WAV, AAC, and M4A. Maximum size: {{ max_file_copy }}.</p>
+                </button>
+                <input
+                    id="musicFileInput"
+                    class="sr-only"
+                    type="file"
+                    name="music_files"
+                    accept=".mp3,.flac,.wav,.aac,.m4a"
+                    multiple
+                    webkitdirectory
+                    directory
+                >
+
+                <section class="music-queue" id="musicQueue" hidden aria-labelledby="music-queue-title">
+                    <div class="music-entry-row">
+                        <div class="music-panel-head">
+                            <h4 class="music-section-title" id="music-queue-title">Upload queue</h4>
+                            <p class="music-copy" id="musicQueueSummary">No files queued.</p>
+                        </div>
+                        <div class="music-actions">
+                            <button class="music-btn music-btn-secondary" id="musicClearSelection" type="button" disabled>
+                                <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-x"></use></svg>
+                                Clear queue
+                            </button>
+                        </div>
+                    </div>
+                    <div class="music-queue-list" id="musicQueueList"></div>
+                </section>
+
+                <div class="music-upload-tools">
+                    <div class="music-field">
+                        <label for="musicFolderName">Create folder</label>
+                        <div class="music-inline-form">
+                            <input id="musicFolderName" type="text" placeholder="Album, playlist, or artist folder">
+                            <button class="music-btn music-btn-secondary" id="musicCreateFolder" type="button">
+                                <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-plus"></use></svg>
+                                Create folder
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="music-actions">
+                    <button class="music-btn music-btn-primary" id="musicStartUpload" type="button" disabled>
+                        <svg class="music-icon" aria-hidden="true"><use href="{{ sprite }}#icon-upload"></use></svg>
+                        Upload queued files
+                    </button>
+                </div>
+                <p class="music-status" id="musicStatus" role="status" aria-live="polite">Ready.</p>
+            </section>
+        </div>
+    </div>
+</div>
+
+<div class="music-overlay" id="musicLoadingOverlay" hidden aria-live="polite" aria-busy="true">
+    <div class="music-overlay-card">
+        <div class="music-spinner" aria-hidden="true"></div>
+        <h3 class="music-overlay-title" id="musicOverlayText">Working…</h3>
+        <p class="music-overlay-copy">Please wait while TeslaUSB updates the music library.</p>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/music.js') }}"></script>
+{% endblock %}

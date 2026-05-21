@@ -1,23 +1,59 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="container">
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Switching modes, please wait...</div>
+    </div>
+
     <div id="apLoadingOverlay" class="loading-overlay">
         <div class="spinner"></div>
         <div class="loading-text">Updating AP settings, please wait...</div>
     </div>
 
-    <!-- B-1 keeps the dashboard entry point but drops v1's present/edit mode
-         toggles. The device is always Tesla-facing, so this is now a
-         passive status banner instead of an action card. -->
+    <!-- Device Status Card -->
+    {% if mode_token == 'present' %}
     <div class="device-status-card device-status-present">
         <div class="device-status-header">
             <span class="status-dot status-present"></span>
             <div class="device-status-info">
                 <strong>Connected to Tesla</strong>
-                <p>USB drive stays attached to the vehicle in B-1.</p>
+                <p>USB drive is active and accessible by your vehicle.</p>
+            </div>
+        </div>
+        <p class="device-status-hint">Access USB drive files from your computer via network.</p>
+    </div>
+    {% elif mode_token == 'edit' %}
+    <div class="device-status-card device-status-edit">
+        <div class="device-status-header">
+            <span class="status-dot status-edit"></span>
+            <div class="device-status-info">
+                <strong>Network Sharing Active</strong>
+                <p>Tesla USB disconnected ΓÇö files accessible via network.</p>
+            </div>
+        </div>
+        {% if share_paths %}
+        <div class="device-status-shares">
+            <strong>Network Shares:</strong>
+            <ul>
+                {% for path in share_paths %}
+                <li><code>{{ path }}</code></li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="device-status-card device-status-unknown">
+        <div class="device-status-header">
+            <span class="status-dot status-unknown"></span>
+            <div class="device-status-info">
+                <strong>Status Unknown</strong>
+                <p>Unable to determine current device status.</p>
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Files-Lost banner (Phase 4.3 ΓÇö issue #101).
          Hidden by default; shown by JS poller when archive.lost_24h > 0.
@@ -27,7 +63,7 @@
          this banner is intentionally loud (red) and links to the
          Failed Jobs page for the full archive history. -->
     <style>
-        /* Issue 170 follow-up: the banner div carries an inline
+        /* Issue #170 follow-up: the banner div carries an inline
            ``display:flex`` (specificity 1,0,0,0) which overrides the
            UA stylesheet's ``[hidden] { display:none }`` rule
            (specificity 0,0,1,0). Without this scoped !important rule,
@@ -41,14 +77,14 @@
            !important + the [hidden] selector match exactly what the
            UA rule would do, just with enough specificity to defeat
            the inline style. */
-        .files-lost-banner[hidden] { display: none !important; }
+        #files-lost-banner[hidden] { display: none !important; }
     </style>
-    <div id="files-lost-banner" class="files-lost-banner" hidden
+    <div id="files-lost-banner" hidden
          style="margin:12px 0; padding:12px 14px;
                 border-radius:8px;
-                background:var(--msg-error-bg);
-                color:var(--msg-error-text);
-                border:1px solid var(--accent-error);
+                background:var(--msg-error-bg, #4a1f1f);
+                color:var(--msg-error-text, #ffd7d7);
+                border:1px solid var(--accent-error, #f44336);
                 display:flex; align-items:center; gap:10px;">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2"
@@ -94,7 +130,7 @@
             <div id="system-health-card"
                  data-poll-url="{{ url_for('system_health.api_system_health') }}"
                  data-jobs-url="{{ url_for('jobs.failed_jobs_page') }}"
-                                  style="display:flex; flex-direction:column; gap:6px;">
+                 style="display:flex; flex-direction:column; gap:6px;">
                 <p id="system-health-overall"
                    style="margin:0 0 6px; padding:8px 12px;
                           border-radius:8px; font-size:0.95rem;
@@ -250,10 +286,10 @@
             font-variant-numeric: tabular-nums;
         }
         #live-metrics-card .metric-tile.warn {
-            border-color: var(--accent-warning);
+            border-color: var(--accent-warning, #ff9800);
         }
         #live-metrics-card .metric-tile.error {
-            border-color: var(--accent-error);
+            border-color: var(--accent-error, #f44336);
         }
     </style>
 
@@ -272,17 +308,17 @@
                 {% else %}
                     background-color: var(--msg-error-bg); border: 1px solid var(--error-text); color: var(--msg-error-text);
                 {% endif %}">
-                <button type="button" onclick="dismissWifiStatus()" aria-label="Dismiss Wi-Fi status"
-                        style="position: absolute; top: 8px; right: 8px; background: none; border: 1px solid currentColor; border-radius: 6px; cursor: pointer; opacity: 0.9; color: inherit; min-height: 44px; min-width: 44px; padding: 0 12px;"
-                        title="Dismiss">Close</button>
+                <button type="button" onclick="dismissWifiStatus()"
+                        style="position: absolute; top: 8px; right: 8px; background: none; border: none; font-size: 18px; cursor: pointer; opacity: 0.7; color: inherit;"
+                        title="Dismiss">&times;</button>
                 <div style="padding-right: 30px;">
                     <strong>
                         {% if wifi_change_status.success %}
-                            WiFi Connection Updated
+                            Γ£ô WiFi Connection Updated
                         {% elif wifi_change_status.action == 'reverted' %}
-                            WiFi Connection Reverted
+                            ΓÜá WiFi Connection Reverted
                         {% elif wifi_change_status.action == 'ap_started' %}
-                            WiFi Connection Failed - AP Started
+                            WiFi Connection Failed ΓÇö AP Started
                         {% else %}
                             WiFi Connection Failed
                         {% endif %}
@@ -303,7 +339,7 @@
                 <div style="text-align:center;padding:12px;color:var(--text-secondary)">Loading...</div>
             </div>
             <div style="margin-top:12px">
-                <button class="edit-btn" onclick="toggleAddNetwork()" id="btnAddNetwork" style="padding:4px 10px;font-size:0.85em">Add Network</button>
+                <button class="edit-btn" onclick="toggleAddNetwork()" id="btnAddNetwork" style="padding:4px 10px;font-size:0.85em">+ Add Network</button>
             </div>
             <div id="addNetworkPanel" style="display:none;margin-top:12px;padding:12px;background-color:var(--bg-info);border:1px solid var(--border-color);border-radius:var(--radius-md,8px)">
                 <div style="margin-bottom:8px">
@@ -343,7 +379,7 @@
 
                 <div style="padding: 12px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: var(--radius-md, 8px); margin-bottom: 12px;">
                     <strong style="color: var(--text-primary);">AP Configuration:</strong>
-                    <form method="post" action="{{ url_for('captive_portal.configure_ap') }}" id="apConfigForm" style="margin-top: 8px;">
+                    <form method="post" action="{{ url_for('settings.configure_ap') }}" id="apConfigForm" style="margin-top: 8px;">
                         <div style="margin-bottom: 8px;">
                             <label for="ap_ssid" style="display: inline-block; width: 100px; color: var(--text-primary);">SSID:</label>
                             <input type="text" id="ap_ssid" name="ssid" value="{{ ap_config.ssid }}" maxlength="32" required
@@ -362,11 +398,11 @@
                 </div>
 
                 <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
-                    <form method="post" action="{{ url_for('captive_portal.force_ap') }}" id="startApForm" style="margin: 0;">
+                    <form method="post" action="{{ url_for('settings.force_ap') }}" id="startApForm" style="margin: 0;">
                         <input type="hidden" name="mode" value="on">
                         <button type="submit" class="edit-btn" id="startApBtn">Start AP Now</button>
                     </form>
-                    <form method="post" action="{{ url_for('captive_portal.force_ap') }}" id="stopApForm" style="margin: 0;">
+                    <form method="post" action="{{ url_for('settings.force_ap') }}" id="stopApForm" style="margin: 0;">
                         <input type="hidden" name="mode" value="off">
                         <button type="submit" class="present-btn" id="stopApBtn">Stop AP</button>
                     </form>
@@ -384,7 +420,7 @@
     <details class="settings-section">
         <summary>Auto-Cleanup Settings</summary>
         <div class="section-content">
-            <a href="{{ url_for('storage_retention.settings') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
+            <a href="{{ url_for('cleanup.settings') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
                 <svg class="inline-icon" width="24" height="24" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-sparkles"></use></svg>
                 <div style="flex:1">
                     <strong>Configure Auto-Cleanup</strong>
@@ -574,11 +610,6 @@
     </details>
 
     {% if videos_available %}
-    <!-- Phase 5.20 keeps the v1 Archive Status shell visible so operators
-         can see where the legacy widgets will land once the B-1 archive
-         worker exports matching APIs. Leaving the cards in place avoids
-         reshuffling the page while the backend parity work finishes in
-         later Phase 5.x increments. -->
     <!-- Archive Status (Phase 2c ΓÇö issue #76) -->
     <details class="settings-section">
         <summary>Archive Status</summary>
@@ -641,7 +672,7 @@
                 <a href="{{ url_for('jobs.failed_jobs_page') }}"
                    class="btn btn-secondary"
                    style="min-height:44px; text-decoration:none;">
-                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
                     Failed jobs
                 </a>
                 <button type="button" class="btn btn-secondary"
@@ -657,7 +688,7 @@
                     <strong>Dead-letter queue</strong>
                     <button type="button" class="btn btn-ghost"
                             id="archive-dl-close-btn"
-                            aria-label="Close dead-letter list">Close</button>
+                            aria-label="Close dead-letter list">├ù</button>
                 </div>
                 <div id="archive-dl-content" style="font-size:0.85rem; max-height:300px; overflow:auto">
                     LoadingΓÇª
@@ -668,7 +699,7 @@
 
     <!-- Storage (Phase 2c ΓÇö issue #76) -->
     <details class="settings-section">
-        <summary>Storage &amp; Retention</summary>
+        <summary>Storage</summary>
         <div class="section-content">
             <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
                 SD card disk usage for ArchivedClips. Files older than the retention window
@@ -712,7 +743,7 @@
                class="storage-prune-summary"
                style="margin:0 0 12px; padding:10px 12px;
                       background:var(--bg-secondary);
-                      border-left:3px solid var(--accent-info);
+                      border-left:3px solid var(--accent-info, #0891B2);
                       border-radius:4px; font-size:0.9rem;
                       color:var(--text-primary);"
                hidden></p>
@@ -797,6 +828,55 @@
         </div>
     </details>
 
+    <!-- Filesystem Health Check -->
+    <details class="settings-section">
+        <summary>Filesystem Health Check</summary>
+        <div class="section-content">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                Run filesystem checks to detect and repair corruption.<br>
+                <strong>Quick Check:</strong> Any mode (read-only) | <strong>Repair:</strong> Requires Network Sharing mode
+            </p>
+
+            <div class="fsck-status-container" id="fsck-status-container"></div>
+
+            <div class="fsck-partitions">
+                <div class="fsck-partition-card">
+                    <h4>≡ƒô╣ TeslaCam Drive</h4>
+                    <div id="part1-last-check" class="last-check-info">Loading...</div>
+                    <div class="fsck-actions">
+                        <button onclick="startFsck(1, 'quick')" class="btn btn-secondary" id="btn-fsck-part1-quick">Quick Check</button>
+                        <button onclick="startFsck(1, 'repair')" class="btn btn-warning" id="btn-fsck-part1-repair">Check & Repair</button>
+                    </div>
+                </div>
+                <div class="fsck-partition-card">
+                    <h4>≡ƒÆí LightShow Drive</h4>
+                    <div id="part2-last-check" class="last-check-info">Loading...</div>
+                    <div class="fsck-actions">
+                        <button onclick="startFsck(2, 'quick')" class="btn btn-secondary" id="btn-fsck-part2-quick">Quick Check</button>
+                        <button onclick="startFsck(2, 'repair')" class="btn btn-warning" id="btn-fsck-part2-repair">Check & Repair</button>
+                    </div>
+                </div>
+                {% if music_available %}
+                <div class="fsck-partition-card">
+                    <h4>≡ƒÄ╡ Music Drive</h4>
+                    <div id="part3-last-check" class="last-check-info">Loading...</div>
+                    <div class="fsck-actions">
+                        <button onclick="startFsck(3, 'quick')" class="btn btn-secondary" id="btn-fsck-part3-quick">Quick Check</button>
+                        <button onclick="startFsck(3, 'repair')" class="btn btn-warning" id="btn-fsck-part3-repair">Check & Repair</button>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+
+            <div id="fsck-history-container" class="fsck-history-container" style="margin-top:12px">
+                <h4>Recent Checks</h4>
+                <div class="fsck-history-scroll">
+                    <div id="fsck-history-list">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </details>
+
     <!-- System -->
     <details class="settings-section">
         <summary>System</summary>
@@ -827,7 +907,7 @@
                 <strong style="font-size:0.9rem">USB Drive Images</strong>
                 <div style="display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;">
                     {% for img in system_info.disk_images %}
-                    <div style="padding:8px 14px; background:var(--bg-secondary); border-radius:8px; font-size:0.85rem;">
+                    <div style="padding:8px 14px; background:var(--bg-secondary, #f5f5f5); border-radius:8px; font-size:0.85rem;">
                         <strong>{{ img.label }}</strong><br>
                         <span style="color:var(--text-secondary)">{{ img.size_gb }} GB</span>
                     </div>
@@ -845,7 +925,7 @@
          top-level nav item ΓÇö buried at the bottom of Settings so casual
          users don't see it but power users can find it. -->
     <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border-color); text-align:right;">
-        <a href="{{ url_for('settings_advanced.advanced') }}"
+        <a href="{{ url_for('settings_advanced.index') }}"
            style="color:var(--text-secondary); font-size:0.85rem; text-decoration:none;">
             Advanced settings &rarr;
         </a>
@@ -888,61 +968,67 @@ function toggleWifiPassword(btn) {
 
 // --- WiFi Network Management ---
 function loadSavedNetworks() {
-    fetch('/api/wifi/saved')
+    fetch('{{ url_for("mode_control.api_wifi_saved") }}')
     .then(r => r.json())
     .then(networks => {
         const el = document.getElementById('savedNetworksList');
-        if (!Array.isArray(networks) || !networks.length || networks.error) {
+        if (!networks.length || networks.error) {
             el.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text-secondary)">No saved networks</div>';
             return;
         }
         let html = '';
         networks.forEach((net, idx) => {
-            const rawName = String(net.ssid || net.name || '');
-            const name = rawName.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            const escapedName = rawName
-                .replace(/\/g, '\\')
-                .replace(/'/g, "\'")
-                .replace(/&/g, '&amp;')
-                .replace(/"/g, '&quot;');
-            const status = net.active
-                ? '<span style="font-size:0.8em;color:var(--msg-success-text);font-weight:600">Active</span>'
-                : '<span style="font-size:0.8em;color:var(--text-secondary)">Saved</span>';
-            const signal = net.in_range
-                ? '<span style="font-size:0.8em;color:var(--text-secondary)">' + getSignalIcon(net.signal) + ' ' + (net.signal || 0) + '%</span>'
-                : '<span style="font-size:0.8em;color:var(--text-secondary)">Not in range</span>';
-            html += '<div style="display:flex;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border-color);gap:6px">';
-            html += status;
+            const dot = net.active ? '<span style="color:var(--success-text, #22c55e);margin-right:6px">ΓùÅ</span>' : '<span style="margin-right:14px"></span>';
+            const signal = net.in_range ? '<span style="font-size:0.8em;color:var(--text-secondary)">' + getSignalIcon(net.signal) + ' ' + net.signal + '%</span>' : '<span style="font-size:0.8em;color:var(--text-secondary)">Not in range</span>';
+            const name = (net.ssid || net.name).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            // Defence against XSS via SSID. The value is embedded inside
+            //   onclick="someFn('VALUE')"
+            // so we have to escape for two contexts in order:
+            //   1. JS string literal: backslash, then single quote (the JS
+            //      string delimiter).
+            //   2. HTML attribute value: ampersand first (must come before
+            //      other &-entities so we don't double-encode), then the
+            //      attribute delimiter (").
+            // Without the HTML attribute pass, an SSID containing `"` or
+            // `&quot;` could close the onclick attribute and inject
+            // arbitrary HTML. The order matters in BOTH passes.
+            const escapedName = net.name
+                .replace(/\\/g, '\\\\')   // JS: backslash
+                .replace(/'/g, "\\'")     // JS: single quote (string delimiter)
+                .replace(/&/g, '&amp;')   // HTML attr: ampersand (first!)
+                .replace(/"/g, '&quot;'); // HTML attr: double quote (delimiter)
+            html += '<div style="display:flex;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border-color, var(--border));gap:6px">';
+            html += dot;
             html += '<span style="flex:1;font-size:0.875rem;font-weight:' + (net.active ? '600' : '400') + '">' + name + '</span>';
             html += signal;
+            // Connect button: only shown for non-active networks. Disabled if not in range.
             if (!net.active) {
                 const cantConnect = !net.in_range;
-                html += '<button class="edit-btn wifi-connect-btn" onclick="connectToNetwork('' + escapedName + '')" title="' + (cantConnect ? 'Network not in range' : 'Connect to this network now') + '" style="padding:2px 8px;font-size:0.8em;min-height:auto"' + (cantConnect ? ' disabled' : '') + '>Connect</button>';
+                html += '<button class="edit-btn wifi-connect-btn" onclick="connectToNetwork(\'' + escapedName + '\')" title="' + (cantConnect ? 'Network not in range' : 'Connect to this network now') + '" style="padding:2px 8px;font-size:0.8em;min-height:auto"' + (cantConnect ? ' disabled' : '') + '>Connect</button>';
             }
-            html += '<button class="edit-btn" aria-label="Move network up" onclick="moveNetwork('' + escapedName + '',-1)" title="Move up" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === 0 ? ' disabled' : '') + '>Up</button>';
-            html += '<button class="edit-btn" aria-label="Move network down" onclick="moveNetwork('' + escapedName + '',1)" title="Move down" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === networks.length - 1 ? ' disabled' : '') + '>Down</button>';
-            html += '<button class="present-btn" aria-label="Forget network" onclick="forgetNetwork('' + escapedName + '')" title="Forget" style="padding:2px 6px;font-size:0.8em;min-height:auto">Forget</button>';
+            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',-1)" title="Move up" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === 0 ? ' disabled' : '') + '>Γû▓</button>';
+            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',1)" title="Move down" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === networks.length - 1 ? ' disabled' : '') + '>Γû╝</button>';
+            html += '<button class="present-btn" onclick="forgetNetwork(\'' + escapedName + '\')" title="Forget" style="padding:2px 6px;font-size:0.8em;min-height:auto">Γ£ò</button>';
             html += '</div>';
         });
         el.innerHTML = html;
         el._networks = networks;
     })
-    .catch(() => {
-        document.getElementById('savedNetworksList').innerHTML = '<div style="color:var(--msg-error-text)">Failed to load networks</div>';
+    .catch(e => {
+        document.getElementById('savedNetworksList').innerHTML = '<div style="color:var(--error-text)">Failed to load networks</div>';
     });
 }
-
 
 function moveNetwork(name, direction) {
     const el = document.getElementById('savedNetworksList');
     const nets = el._networks;
     if (!nets) return;
-    const idx = nets.findIndex(n => (n.ssid || n.name) === name);
+    const idx = nets.findIndex(n => n.name === name);
     const newIdx = idx + direction;
     if (newIdx < 0 || newIdx >= nets.length) return;
     [nets[idx], nets[newIdx]] = [nets[newIdx], nets[idx]];
-    const ordered = nets.map(n => n.ssid || n.name);
-    fetch('/api/wifi/reorder', {
+    const ordered = nets.map(n => n.name);
+    fetch('{{ url_for("mode_control.api_wifi_reorder") }}', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({networks: ordered})
@@ -952,46 +1038,40 @@ function moveNetwork(name, direction) {
     });
 }
 
-
 function forgetNetwork(name) {
     if (!confirm('Forget network "' + name + '"?')) return;
-    fetch('{{ url_for("captive_portal.forget_wifi") }}', {
+    fetch('{{ url_for("mode_control.api_wifi_forget") }}', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ssid: name})
+        body: JSON.stringify({name: name})
     }).then(r => r.json()).then(data => {
         if (data.message) alert(data.message);
         loadSavedNetworks();
     });
 }
 
-
 function connectToNetwork(name) {
-    const msg = 'Connect to "' + name + '" now?
-
-'
-        + 'If the offline access point is currently active, it will drop for about 30-60 seconds '
-        + 'while we attempt the connection. After about 60-90 seconds:
-
-'
+    const msg = 'Connect to "' + name + '" now?\n\n'
+        + 'If the offline access point is currently active, it will drop for ~30-60 seconds '
+        + 'while we attempt the connection. After about 60-90 seconds:\n\n'
         + '  - If WiFi reconnect succeeds, the AP stays off. Reach the Pi at '
-        + 'http://cybertruckusb.local on your home WiFi.
-'
+        + 'http://cybertruckusb.local on your home WiFi.\n'
         + '  - If WiFi reconnect fails, the AP comes back automatically. '
         + 'Reconnect to the TeslaUSB AP and try again.';
     if (!confirm(msg)) return;
 
+    // Disable all Connect buttons so the user cannot double-fire.
     document.querySelectorAll('.wifi-connect-btn').forEach(b => {
         b.disabled = true;
         if (b.getAttribute('onclick') && b.getAttribute('onclick').indexOf(name) !== -1) {
-            b.textContent = 'Connecting...';
+            b.textContent = 'ConnectingΓÇª';
         }
     });
 
-    fetch('{{ url_for("captive_portal.connect_wifi") }}', {
+    fetch('{{ url_for("mode_control.api_wifi_connect") }}', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ssid: name})
+        body: JSON.stringify({name: name})
     }).then(r => r.json().then(data => ({status: r.status, data: data})))
       .then(({status, data}) => {
           if (status === 202 || (data && data.success)) {
@@ -1004,13 +1084,14 @@ function connectToNetwork(name) {
               loadSavedNetworks();
           }
       })
-      .catch(() => {
-          alert('Reconnect attempt sent. The AP may have dropped. Wait about 60-90 seconds, '
+      .catch(err => {
+          // Expected when the AP drops mid-fetch: the request is in flight, the
+          // server is doing its work, but the response could not be delivered.
+          alert('Reconnect attempt sent. The AP may have dropped. Wait ~60-90s, '
               + 'then try http://cybertruckusb.local on your home WiFi, or '
               + 'reconnect to the TeslaUSB AP if the attempt failed.');
       });
 }
-
 
 function toggleAddNetwork() {
     const panel = document.getElementById('addNetworkPanel');
@@ -1025,10 +1106,10 @@ function addWifiNetwork() {
     btn.disabled = true; btn.textContent = 'Connecting...';
 
     const formData = new FormData();
-    formData.append('ssid', ssid);
-    formData.append('passphrase', password);
+    formData.append('wifi_ssid', ssid);
+    formData.append('wifi_password', password);
 
-    fetch('{{ url_for("captive_portal.connect_wifi") }}', {
+    fetch('{{ url_for("mode_control.configure_wifi") }}', {
         method: 'POST',
         body: formData
     }).then(response => {
@@ -1047,29 +1128,23 @@ function addWifiNetwork() {
     });
 }
 
-
 function scanAndRefreshNetworks() {
     const btn = document.getElementById('btnWifiScan');
     btn.disabled = true; btn.textContent = 'Scanning...';
-    fetch('/settings/wifi/networks?rescan=1')
+    fetch('{{ url_for("mode_control.api_wifi_scan") }}')
     .then(r => r.json())
-    .then(payload => {
-        const networks = Array.isArray(payload.networks) ? payload.networks : [];
+    .then(networks => {
         btn.disabled = false; btn.textContent = 'Scan';
+        // Update datalist for add-network panel
         const dl = document.getElementById('wifiScanResults');
-        if (dl) {
-            dl.innerHTML = networks.map(n => {
-                const ssid = String(n.ssid || '').replace(/"/g, '&quot;');
-                const signal = n.signal_strength == null ? 'Unknown signal' : String(n.signal_strength) + '%';
-                const security = n.secured ? ' Secured' : ' Open';
-                return '<option value="' + ssid + '">' + signal + security + '</option>';
-            }).join('');
+        if (dl && networks.length) {
+            dl.innerHTML = networks.map(n => '<option value="' + n.ssid.replace(/"/g, '&quot;') + '">' + n.signal + '% ' + (n.secured ? '≡ƒöÆ' : '') + '</option>').join('');
         }
+        // Refresh the saved networks list (now with updated signal info)
         loadSavedNetworks();
     })
     .catch(() => { btn.disabled = false; btn.textContent = 'Scan'; });
 }
-
 
 function confirmWifiUpdate() {
     const connectedViaWifi = {{ 'true' if wifi_status.connected else 'false' }};
@@ -1082,14 +1157,14 @@ function confirmWifiUpdate() {
     let message = '';
 
     if (connectedViaWifi && !accessingViaAP && currentSSID) {
-        message = 'WARNING: You are currently connected via WiFi (network: ' + currentSSID + ').\n\n';
+        message = 'ΓÜá∩╕Å WARNING: You are currently connected via WiFi (network: ' + currentSSID + ').\n\n';
         message += 'If you change the WiFi credentials and they are incorrect, you will lose this connection.\n\n';
         message += 'HOWEVER: The fallback AP is ' + (apActive ? 'already running' : 'available') + '.\n';
         message += 'If the new WiFi fails, you can reconnect to the AP to fix it.\n\n';
         message += 'Recommended: Connect to the AP first for safer credential updates.\n\n';
         message += 'Continue anyway?';
     } else if (accessingViaAP || apActive) {
-        message = 'You are connected via the fallback AP.\n\n';
+        message = 'Γ£ô You are connected via the fallback AP.\n\n';
         message += 'The Pi will attempt to connect to the new WiFi network.\n';
         message += 'Your AP connection will remain active during the process.\n\n';
         message += 'Continue?';
@@ -1146,10 +1221,10 @@ setTimeout(function() { scanAndRefreshNetworks(); }, 500);
 
 function getSignalIcon(signal) {
     const signalNum = parseInt(signal) || 0;
-    if (signalNum >= 75) return 'Strong';
-    if (signalNum >= 50) return 'Good';
-    if (signalNum >= 25) return 'Fair';
-    return 'Weak';
+    if (signalNum >= 75) return 'ΓûéΓûäΓûåΓûê';
+    if (signalNum >= 50) return 'ΓûéΓûäΓûå_';
+    if (signalNum >= 25) return 'ΓûéΓûä__';
+    return 'Γûé___';
 }
 
 function dismissWifiStatus() {
@@ -1157,7 +1232,7 @@ function dismissWifiStatus() {
     if (alert) {
         alert.style.display = 'none';
     }
-    fetch('/settings/wifi/dismiss-status', {
+    fetch('{{ url_for("mode_control.dismiss_wifi_status") }}', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -1165,6 +1240,138 @@ function dismissWifiStatus() {
     }).catch(error => {
         console.error('Error dismissing WiFi status:', error);
     });
+}
+
+// --- Filesystem Health Check ---
+let fsckCheckInterval = null;
+let currentMode = '{{ mode_token }}';
+
+function startFsck(partition, mode) {
+    if (mode === 'repair' && currentMode !== 'edit') {
+        if (confirm('Check & Repair requires Network Sharing mode.\n\nEnable Network Sharing, run repair, then switch back?')) {
+            startFsckWithModeSwitch(partition, mode);
+        }
+        return;
+    }
+    executeFsck(partition, mode);
+}
+
+function executeFsck(partition, mode) {
+    disableFsckButtons(true);
+    fetch('/fsck/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({partition, mode}) })
+    .then(r => r.json()).then(data => {
+        if (data.success) { showFsckStatus('Filesystem check started...', 'info'); startFsckStatusPolling(); }
+        else { showFsckStatus(data.message, 'error'); disableFsckButtons(false); }
+    }).catch(e => { showFsckStatus('Error: ' + e, 'error'); disableFsckButtons(false); });
+}
+
+function startFsckWithModeSwitch(partition, mode) {
+    const originalMode = currentMode;
+    const name = partition === 1 ? 'TeslaCam' : partition === 2 ? 'LightShow' : 'Music';
+    disableFsckButtons(true);
+    showFsckStatus('Enabling Network Sharing...', 'info');
+    fetch('/settings/edit_usb', { method: 'POST' })
+    .then(r => { if (!r.ok) throw new Error('Failed to switch'); currentMode = 'edit'; showFsckStatus('Network Sharing active...', 'info'); return new Promise(res => setTimeout(res, 3000)); })
+    .then(() => { showFsckStatus(`Starting ${name} repair...`, 'info'); return fetch('/fsck/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({partition, mode}) }); })
+    .then(r => r.json()).then(data => { if (data.success) { showFsckStatus(`${name} repair in progress...`, 'info'); startFsckStatusPollingWithRestore(originalMode); } else throw new Error(data.message); })
+    .catch(e => { showFsckStatus('Error: ' + e.message, 'error'); disableFsckButtons(false); if (currentMode !== originalMode) restoreMode(originalMode); });
+}
+
+function startFsckStatusPollingWithRestore(originalMode) {
+    if (fsckCheckInterval) clearInterval(fsckCheckInterval);
+    const poll = () => {
+        fetch('/fsck/api/status').then(r => r.json()).then(s => {
+            if (s.running) {
+                const elapsed = s.start_time ? Math.round((new Date() - new Date(s.start_time)) / 1000) : 0;
+                showFsckStatus(`${getFriendlyPartitionName(s.partition)} - ${s.progress || 'Running...'} (${elapsed}s)`, 'info');
+            } else {
+                clearInterval(fsckCheckInterval); fsckCheckInterval = null;
+                if (s.result) { const cls = (s.result === 'healthy' || s.result === 'repaired') ? 'success' : 'warning'; showFsckStatus(`${getFriendlyPartitionName(s.partition)} - ${s.result}: ${s.details} (${s.duration}s) - Restoring...`, cls); }
+                restoreMode(originalMode); updateLastChecks(); updateFsckHistory();
+            }
+        }).catch(e => console.error('Fsck status error:', e));
+    };
+    poll();
+    fsckCheckInterval = setInterval(poll, 2000);
+}
+
+function restoreMode(targetMode) {
+    if (currentMode === targetMode) { disableFsckButtons(false); return; }
+    const endpoint = targetMode === 'present' ? '/settings/present_usb' : '/settings/edit_usb';
+    fetch(endpoint, { method: 'POST' })
+    .then(r => { if (r.ok) { currentMode = targetMode; showFsckStatus('Mode restored', 'success'); setTimeout(() => { document.getElementById('fsck-status-container').style.display = 'none'; disableFsckButtons(false); }, 3000); } else throw new Error('Failed'); })
+    .catch(e => { showFsckStatus('Error restoring mode: ' + e.message, 'error'); disableFsckButtons(false); });
+}
+
+function startFsckStatusPolling() { if (fsckCheckInterval) clearInterval(fsckCheckInterval); updateFsckStatus(); fsckCheckInterval = setInterval(updateFsckStatus, 2000); }
+function getFriendlyPartitionName(p) { return p === 'part1' ? 'TeslaCam' : p === 'part2' ? 'LightShow' : p === 'part3' ? 'Music' : p; }
+
+function updateFsckStatus() {
+    fetch('/fsck/api/status').then(r => r.json()).then(s => {
+        if (s.running) {
+            disableFsckButtons(true);
+            const elapsed = s.start_time ? Math.round((new Date() - new Date(s.start_time)) / 1000) : 0;
+            showFsckStatus(`${getFriendlyPartitionName(s.partition)} - ${s.progress || 'Running...'} (${elapsed}s)`, 'info');
+            if (!fsckCheckInterval) fsckCheckInterval = setInterval(updateFsckStatus, 2000);
+        } else {
+            if (fsckCheckInterval) { clearInterval(fsckCheckInterval); fsckCheckInterval = null; }
+            if (s.result) {
+                const cls = (s.result === 'healthy' || s.result === 'repaired') ? 'success' : 'warning';
+                showFsckStatus(`${getFriendlyPartitionName(s.partition)} - ${s.result}: ${s.details} (${s.duration}s)`, cls);
+                setTimeout(() => { const c = document.getElementById('fsck-status-container'); if (c) c.style.display = 'none'; }, 30000);
+            } else { const c = document.getElementById('fsck-status-container'); if (c) c.style.display = 'none'; }
+            disableFsckButtons(false); updateLastChecks(); updateFsckHistory();
+        }
+    }).catch(e => console.error('Fsck status error:', e));
+}
+
+function showFsckStatus(msg, type) {
+    const c = document.getElementById('fsck-status-container'); if (!c) return;
+    c.style.display = 'block'; c.className = 'fsck-status-container fsck-status-' + type;
+    c.innerHTML = `<div class="fsck-status-message">${msg}</div>${type === 'info' ? '<button onclick="cancelFsck()" class="btn-cancel-fsck">Cancel</button>' : ''}`;
+}
+
+function cancelFsck() {
+    if (!confirm('Cancel the filesystem check?')) return;
+    fetch('/fsck/api/cancel', { method: 'POST', headers: {'Content-Type': 'application/json'} })
+    .then(r => r.json()).then(d => showFsckStatus(d.success ? 'Cancelling...' : 'Failed: ' + d.message, d.success ? 'warning' : 'error'))
+    .catch(e => showFsckStatus('Error: ' + e, 'error'));
+}
+
+function disableFsckButtons(disabled) { document.querySelectorAll('.fsck-actions button').forEach(b => b.disabled = disabled); }
+
+function updateLastChecks() {
+    [1, 2{{ ', 3' if music_available else '' }}].forEach(p => {
+        fetch(`/fsck/api/last-check/${p}`).then(r => r.json()).then(d => {
+            const c = document.getElementById(`part${p}-last-check`); if (!c) return;
+            if (d.timestamp) {
+                const age = d.age_hours || 0;
+                const ageStr = age < 1 ? 'Less than 1 hour ago' : age < 24 ? `${Math.round(age)} hours ago` : `${Math.round(age / 24)} days ago`;
+                const icon = {healthy:'Γ£à',repaired:'≡ƒöº',recording:'≡ƒô╣',errors:'ΓÜá∩╕Å',failed:'Γ¥î',timeout:'ΓÅ▒∩╕Å'}[d.result] || 'Γ¥ô';
+                const cls = {healthy:'status-healthy',repaired:'status-repaired',recording:'status-recording',errors:'status-errors'}[d.result] || 'status-warning';
+                c.innerHTML = `<div class="last-check-result ${cls}">${icon} Last checked: ${ageStr}<br><small>${d.details}</small></div>`;
+            } else { c.innerHTML = '<div class="last-check-never">Never checked</div>'; }
+        }).catch(e => console.error('Last check error:', e));
+    });
+}
+
+function updateFsckHistory() {
+    fetch('/fsck/api/history').then(r => r.json()).then(history => {
+        const c = document.getElementById('fsck-history-list'); if (!c) return;
+        if (!history.length) { c.innerHTML = '<div class="no-history">No filesystem checks recorded yet</div>'; return; }
+        const recent = history.slice(-5).reverse();
+        let html = '<table class="fsck-history-table"><thead><tr><th>Time</th><th>Drive</th><th>Mode</th><th>Result</th><th>Details</th></tr></thead><tbody>';
+        recent.forEach(e => {
+            const icon = {healthy:'Γ£à',repaired:'≡ƒöº',recording:'≡ƒô╣',timeout:'ΓÅ▒∩╕Å',failed:'Γ¥î'}[e.result] || 'Γ¥ô';
+            html += `<tr><td>${new Date(e.timestamp).toLocaleString()}</td><td>${getFriendlyPartitionName(e.partition)}</td><td>${e.mode}</td><td>${icon} ${e.result}</td><td><small>${e.details}</small></td></tr>`;
+        });
+        c.innerHTML = html + '</tbody></table>';
+    }).catch(e => console.error('Fsck history error:', e));
+}
+
+// Init fsck status on load
+if (document.getElementById('fsck-status-container')) {
+    updateLastChecks(); updateFsckHistory(); updateFsckStatus();
 }
 
 // =====================================================================
@@ -1769,9 +1976,9 @@ function dismissWifiStatus() {
         box.hidden = false;
         box.textContent = text;
         box.style.color = (level === 'error')
-            ? 'var(--accent-danger)'
+            ? 'var(--accent-danger, #DC2626)'
             : (level === 'success')
-                ? 'var(--accent-success)'
+                ? 'var(--accent-success, #16A34A)'
                 : 'var(--text-secondary)';
     }
 
@@ -1894,10 +2101,10 @@ function dismissWifiStatus() {
     ];
 
     var SEV_COLORS = {
-        ok:      'var(--accent-success)',
-        warn:    'var(--accent-warning)',
-        error:   'var(--accent-error)',
-        unknown: 'var(--text-secondary)',
+        ok:      'var(--accent-success, #4caf50)',
+        warn:    'var(--accent-warning, #ff9800)',
+        error:   'var(--accent-error,   #f44336)',
+        unknown: 'var(--text-secondary, #888)',
     };
 
     function escapeText(s) {

@@ -149,30 +149,44 @@
             {# ---- Connected state ---- #}
             <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
                 <span style="display: inline-flex; align-items: center; gap: 6px;">
-                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
+                    <span style="color: var(--success-text); font-size: 1.2em;">&#10003;</span>
                     <strong style="color: var(--text-primary);">{{ provider|replace('-', ' ')|title }}</strong>
                 </span>
                 <span style="font-size: var(--text-sm); color: var(--text-secondary);">Connected</span>
-                <button type="button" class="action-btn danger" onclick="disconnectProvider()" style="margin-left: auto;">Disconnect</button>
+                <button type="button" class="action-btn danger" onclick="disconnectProvider()"
+                        style="margin-left: auto;">Disconnect</button>
             </div>
-            <div style="margin-top: var(--space-3); display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
+            <div style="margin-top: var(--space-3);">
                 <button type="button" class="action-btn" onclick="testConnection()" id="testConnBtn">Test Connection</button>
-                <span id="testConnResult" style="font-size: var(--text-sm);"></span>
+                <span id="testConnResult" style="font-size: var(--text-sm); margin-left: var(--space-2);"></span>
             </div>
 
+            {# ---- Storage usage ---- #}
             <div id="storageUsageRow" style="margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-tertiary); display: none;">
                 <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:3px;opacity:0.6;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
                 Storage: <span id="storageUsageText"></span>
             </div>
             <div id="storageWarning" style="display: none; margin-top: var(--space-2); padding: 8px 12px; border-radius: var(--radius-md); font-size: var(--text-sm); font-weight: 500;"></div>
 
+            {# ---- Token expiry info ---- #}
             {% if token_expiry %}
             <div style="margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-tertiary);">
                 <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:3px;opacity:0.6;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                Access token expires: <span id="tokenExpiryDate" data-expiry="{{ token_expiry }}">{{ token_expiry }}</span>
+                Access token expires: <span id="tokenExpiryDate" data-expiry="{{ token_expiry }}"></span>
+                {% if provider in ('onedrive',) %}
+                <br><span style="color: var(--text-tertiary); font-size: var(--text-xs);">
+                    Refresh token stays valid for 90 days of inactivity. The system refreshes automatically when WiFi is connected.
+                    If the device cannot reach the cloud for 90 days, you will need to reconnect manually.
+                </span>
+                {% elif provider in ('google-drive', 'dropbox') %}
+                <br><span style="color: var(--text-tertiary); font-size: var(--text-xs);">
+                    Refresh token is valid indefinitely unless you revoke access in your account settings.
+                </span>
+                {% endif %}
             </div>
             {% endif %}
 
+            {# ---- Auto-sync toggle ---- #}
             <div style="margin-top: var(--space-4); border-top: 1px solid var(--border-primary); padding-top: var(--space-3);">
                 <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
                     <strong style="color: var(--text-primary); font-size: var(--text-sm);">Automatic sync:</strong>
@@ -181,29 +195,35 @@
                                onchange="toggleSyncEnabled(this.checked)"
                                style="width: 18px; height: 18px; accent-color: var(--accent-success);">
                         <span id="syncEnabledLabel" style="font-size: var(--text-sm); color: var(--text-secondary);">
-                            {{ 'Enabled — syncs automatically when WiFi connects' if sync_enabled else 'Disabled — provider stays connected, no auto-sync' }}
+                            {{ 'Enabled ΓÇö syncs automatically when WiFi connects' if sync_enabled else 'Disabled ΓÇö provider stays connected, no auto-sync' }}
                         </span>
                     </label>
                 </div>
             </div>
 
+            {# ---- Sync destination folder ---- #}
             <div style="margin-top: var(--space-3);">
                 <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-2);">
                     <strong style="color: var(--text-primary); font-size: var(--text-sm);">Sync destination:</strong>
                     <code id="currentRemotePath" style="font-size: var(--text-sm); color: var(--accent-info); background: var(--bg-tertiary); padding: 2px 8px; border-radius: var(--radius-sm);">{{ remote_path or 'TeslaUSB' }}</code>
-                    <button type="button" class="action-btn" onclick="openFolderBrowser()" id="browseFolderBtn" style="font-size: 13px; padding: 4px 12px;">
+                    <button type="button" class="action-btn" onclick="openFolderBrowser()" id="browseFolderBtn"
+                            style="font-size: 13px; padding: 4px 12px;">
                         <svg style="width:14px;height:14px;vertical-align:-2px;margin-right:3px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                         Choose Folder
                     </button>
                 </div>
 
+                {# ---- Folder browser (hidden by default) ---- #}
                 <div id="folderBrowser" style="display: none; border: 1px solid var(--border-primary); border-radius: var(--radius-md); background: var(--bg-secondary); overflow: hidden; max-width: 500px;">
+                    {# Breadcrumb bar #}
                     <div id="folderBreadcrumbs" style="padding: 8px 12px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-primary); font-size: 13px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-height: 36px;">
-                        <span style="color: var(--text-tertiary);">Loading…</span>
+                        <span style="color: var(--text-tertiary);">Loading&hellip;</span>
                     </div>
+                    {# Folder list #}
                     <div id="folderList" style="max-height: 280px; overflow-y: auto; min-height: 60px;">
-                        <div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">Loading…</div>
+                        <div style="padding: 20px; text-align: center; color: var(--text-tertiary); font-size: var(--text-sm);">Loading&hellip;</div>
                     </div>
+                    {# Action bar #}
                     <div style="padding: 8px 12px; border-top: 1px solid var(--border-primary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                         <button type="button" class="action-btn" onclick="createNewFolder()" style="font-size: 13px; padding: 4px 10px;">
                             <svg style="width:12px;height:12px;vertical-align:-1px;margin-right:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -219,78 +239,191 @@
             </div>
 
             {% else %}
-            {# ---- Authorization card selector ---- #}
+            {# ---- Not connected state ---- #}
             <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
-                Select Dropbox, Google Drive, or OneDrive to begin the browser-based OAuth flow. The generated authorization URL and callback exchange stay on this page so the v1 setup path remains intact in B-1.
+                Set up a cloud storage provider to automatically archive dashcam footage.
             </p>
 
-            <div id="providerCardGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4);">
-                {% for provider_name in providers %}
-                <button type="button"
-                        class="action-btn provider-card{% if provider == provider_name %} primary{% endif %}"
-                        data-provider-card="{{ provider_name }}"
-                        onclick="selectProviderCard('{{ provider_name }}')"
-                        style="padding: 16px; justify-content: flex-start; text-align: left; min-height: 120px; border: 1px solid var(--border-input); border-radius: var(--radius-lg); background: {% if provider == provider_name %}var(--btn-primary-bg){% else %}var(--bg-secondary){% endif %}; color: {% if provider == provider_name %}var(--btn-primary-text){% else %}var(--text-primary){% endif %};">
-                    <span style="display: grid; gap: 6px; width: 100%;">
-                        <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600;">
-                            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud"></use></svg>
-                            {{ provider_name|replace('-', ' ')|title }}
-                        </span>
-                        <span style="font-size: var(--text-sm); opacity: 0.92; line-height: 1.5;">Authorize with PKCE in a provider tab, then paste the callback URL below to finish on-device.</span>
-                    </span>
-                </button>
-                {% endfor %}
+            <div style="margin-bottom: var(--space-3);">
+                <label for="providerSelect" style="display: block; margin-bottom: var(--space-2); font-weight: 500; color: var(--text-primary);">Provider:</label>
+                <select id="providerSelect" onchange="onProviderChange()"
+                        style="width: 100%; max-width: 360px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); font-size: 15px; background-color: var(--form-input-bg); color: var(--text-primary);">
+                    <option value="">-- Select Provider --</option>
+                    <option value="google-drive"{% if provider == 'google-drive' %} selected{% endif %}>Google Drive</option>
+                    <option value="onedrive"{% if provider == 'onedrive' %} selected{% endif %}>OneDrive</option>
+                    <option value="dropbox"{% if provider == 'dropbox' %} selected{% endif %}>Dropbox</option>
+                    <option value="s3"{% if provider == 's3' %} selected{% endif %}>Amazon S3</option>
+                    <option value="b2"{% if provider == 'b2' %} selected{% endif %}>Backblaze B2</option>
+                    <option value="wasabi"{% if provider == 'wasabi' %} selected{% endif %}>Wasabi</option>
+                    <option value="generic"{% if provider == 'generic' %} selected{% endif %}>NAS / Custom rclone (SFTP, WebDAV, SMB, FTP, ...)</option>
+                </select>
             </div>
 
-            <input type="hidden" id="providerSelect" value="{{ provider }}">
-
-            <div style="display: grid; gap: var(--space-4);">
-                <div class="info-box">
-                    <strong>OAuth setup</strong>
+            {# rclone-based providers ΓÇö Token paste wizard #}
+            <div id="rcloneSetup" style="display: none;">
+                <div class="info-box" style="margin-bottom: var(--space-3);">
+                    <strong>How to connect <span id="rcloneProviderName">your cloud storage</span>:</strong>
                     <ol style="margin: 8px 0 0; padding-left: 20px; font-size: var(--text-sm); line-height: 1.7;">
-                        <li>Select a provider card.</li>
-                        <li>Open the provider page and approve access for TeslaUSB.</li>
-                        <li>Paste the full callback URL or returned code into the exchange box below.</li>
+                        <li>Install <a href="https://rclone.org/downloads/" target="_blank" rel="noopener" style="color: var(--link-color);">rclone</a> on a computer with a web browser</li>
+                        <li>Open a terminal and run:
+                            <div style="margin: 6px 0; padding: 8px 12px; background: var(--bg-tertiary); border-radius: var(--radius-sm); font-family: monospace; font-size: 13px; display: inline-flex; align-items: center; gap: 8px; max-width: 100%; overflow-x: auto;">
+                                <code id="rcloneCmd" style="white-space: nowrap;">rclone authorize "onedrive"</code>
+                                <button type="button" onclick="copyRcloneCmd()" title="Copy command"
+                                        style="background: none; border: none; cursor: pointer; padding: 2px; color: var(--text-secondary); flex-shrink: 0;">
+                                    <svg style="width:16px;height:16px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                </button>
+                            </div>
+                        </li>
+                        <li>Sign in and grant access in your browser</li>
+                        <li>Copy the token output and paste it below</li>
                     </ol>
                 </div>
 
-                <div style="display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border-input); border-radius: var(--radius-lg); background: var(--bg-secondary);">
-                    <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;">
-                        <div>
-                            <strong style="color: var(--text-primary);">Provider authorization</strong>
-                            <p style="margin: 4px 0 0; font-size: var(--text-sm); color: var(--text-secondary);">Start authorization to generate a session ID and provider URL.</p>
-                        </div>
-                        <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
-                            <button type="button" class="action-btn" onclick="startAuthorization()" id="oauthStartBtn">Start authorization</button>
-                            <a id="oauthVisitLink" class="action-btn" href="{{ pending_authorization.authorization_url if pending_authorization else '#' }}" target="_blank" rel="noopener"{% if not pending_authorization %} aria-disabled="true" style="pointer-events: none; opacity: 0.6;"{% endif %}>Open provider page</a>
-                        </div>
+                <div style="margin-bottom: var(--space-3);">
+                    <label for="rcloneTokenInput" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Paste rclone token:</label>
+                    <textarea id="rcloneTokenInput" rows="5" placeholder='Paste the entire JSON token here, e.g.: {"access_token":"...","token_type":"Bearer",...}'
+                              style="width: 100%; max-width: 480px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                    <button type="button" class="edit-btn" onclick="submitRcloneToken()" id="rcloneSubmitBtn"
+                            style="padding: 10px 20px; font-size: 14px;">
+                        Connect
+                    </button>
+                    <span id="rcloneResult" style="font-size: var(--text-sm);"></span>
+                </div>
+            </div>
+
+            {# Key-based providers #}
+            <div id="keySetup" style="display: none;">
+                <div style="margin-bottom: var(--space-3);">
+                    <label for="credAccessKey" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Access Key:</label>
+                    <input type="text" id="credAccessKey" autocomplete="off"
+                           style="width: 100%; max-width: 360px; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 14px;">
+                </div>
+                <div style="margin-bottom: var(--space-3);">
+                    <label for="credSecret" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Secret Key:</label>
+                    <div style="display: flex; gap: 4px; max-width: 360px;">
+                        <input type="password" id="credSecret" autocomplete="off"
+                               style="flex: 1; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 14px;">
+                        <button type="button" onclick="toggleCredSecret(this)"
+                                style="padding: 4px 8px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 6px; cursor: pointer; font-size: 13px;">Show</button>
+                    </div>
+                </div>
+                <div style="margin-bottom: var(--space-3);">
+                    <label for="credRegion" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Region:</label>
+                    <input type="text" id="credRegion" placeholder="e.g. us-east-1"
+                           style="width: 100%; max-width: 360px; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 14px;">
+                </div>
+                <div style="margin-bottom: var(--space-3);">
+                    <label for="credBucket" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Bucket Name:</label>
+                    <input type="text" id="credBucket" placeholder="my-teslausb-archive"
+                           style="width: 100%; max-width: 360px; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 14px;">
+                </div>
+                <div style="margin-bottom: var(--space-3);" id="endpointGroup">
+                    <label for="credEndpoint" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Endpoint URL <span style="font-weight: 400; color: var(--text-secondary);">(optional for S3)</span>:</label>
+                    <input type="url" id="credEndpoint" placeholder="https://s3.wasabisys.com"
+                           style="width: 100%; max-width: 360px; padding: 8px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 14px;">
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button type="button" class="edit-btn" onclick="saveProvider()" style="padding: 8px 16px; font-size: 14px;">
+                        Save &amp; Connect
+                    </button>
+                    <button type="button" class="action-btn" onclick="testConnection()" id="testConnBtnSetup">Test Connection</button>
+                    <span id="testConnResultSetup" style="font-size: var(--text-sm); color: var(--text-secondary); align-self: center;"></span>
+                </div>
+            </div>
+
+            {# ---------------------------------------------------------- #}
+            {# Generic rclone remote (issue #165) ΓÇö NAS / SFTP / WebDAV   #}
+            {# / SMB / FTP / S3 / B2 / Wasabi / Azure Blob / Swift.       #}
+            {# Two input modes: Form (guided fields) or Paste             #}
+            {# (an entire ``rclone.conf`` block).                         #}
+            {# ---------------------------------------------------------- #}
+            <div id="genericSetup" style="display: none;">
+                <div class="info-box" style="margin-bottom: var(--space-3);">
+                    <strong>Custom rclone backend</strong>
+                    <p style="margin: 6px 0 0; font-size: var(--text-sm); line-height: 1.5; color: var(--text-secondary);">
+                        Connect to a NAS or any rclone-supported storage backend. Use the
+                        <strong>Form</strong> tab for guided setup, or the <strong>Paste</strong> tab if you
+                        already have an <code>rclone.conf</code> block from
+                        <code>rclone config</code>.
+                    </p>
+                </div>
+
+                <div class="tab-bar" role="tablist" style="display: flex; gap: 4px; border-bottom: 1px solid var(--border-soft); margin-bottom: var(--space-3);">
+                    <button type="button" class="tab-btn active" id="genericFormTab"
+                            role="tab" aria-selected="true" aria-controls="genericFormPane"
+                            onclick="switchGenericTab('form')"
+                            style="padding: 8px 16px; background: none; border: none; border-bottom: 2px solid var(--accent-primary); color: var(--text-primary); cursor: pointer; font-size: 14px; font-weight: 500;">Form</button>
+                    <button type="button" class="tab-btn" id="genericPasteTab"
+                            role="tab" aria-selected="false" aria-controls="genericPastePane"
+                            onclick="switchGenericTab('paste')"
+                            style="padding: 8px 16px; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-secondary); cursor: pointer; font-size: 14px; font-weight: 500;">Paste rclone.conf</button>
+                </div>
+
+                {# ---- Form pane ---- #}
+                <div id="genericFormPane" role="tabpanel" aria-labelledby="genericFormTab">
+                    <div style="margin-bottom: var(--space-3);">
+                        <label for="genericTypeSelect" style="display: block; margin-bottom: 4px; font-weight: 500; color: var(--text-primary);">Backend type:</label>
+                        <select id="genericTypeSelect" onchange="onGenericTypeChange()"
+                                style="width: 100%; max-width: 360px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 15px;">
+                            <option value="">-- Select backend --</option>
+                            <option value="sftp">SFTP (most NAS units, including Synology / QNAP)</option>
+                            <option value="webdav">WebDAV (Nextcloud, Synology, generic WebDAV)</option>
+                            <option value="smb">SMB / CIFS (Windows share)</option>
+                            <option value="ftp">FTP</option>
+                            <option value="s3">S3-compatible (custom endpoint, MinIO, ...)</option>
+                            <option value="b2">Backblaze B2 (advanced ΓÇö keys-based)</option>
+                            <option value="wasabi">Wasabi (advanced ΓÇö keys-based)</option>
+                            <option value="azureblob">Azure Blob Storage</option>
+                            <option value="swift">OpenStack Swift</option>
+                        </select>
                     </div>
 
-                    <div style="display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
-                        <label style="display: grid; gap: 6px;">
-                            <span style="font-weight: 600; color: var(--text-primary);">Pending session</span>
-                            <input id="oauthSessionId" type="text" readonly value="{{ pending_authorization.session_id if pending_authorization else '' }}" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--form-input-bg); color: var(--text-primary);">
-                        </label>
-                        <label style="display: grid; gap: 6px; grid-column: 1 / -1;">
-                            <span style="font-weight: 600; color: var(--text-primary);">Authorization URL</span>
-                            <textarea id="oauthAuthorizationUrl" rows="3" readonly style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--form-input-bg); color: var(--text-primary); resize: vertical;">{{ pending_authorization.authorization_url if pending_authorization else '' }}</textarea>
-                        </label>
-                        <label style="display: grid; gap: 6px; grid-column: 1 / -1;">
-                            <span style="font-weight: 600; color: var(--text-primary);">Callback URL or code</span>
-                            <textarea id="oauthCallbackInput" rows="4" placeholder="Paste the redirected URL or the raw code here" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--form-input-bg); color: var(--text-primary); resize: vertical;"></textarea>
-                        </label>
+                    <div id="genericFormFields" style="display: none;">
+                        <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0 0 var(--space-2);">
+                            Required fields are marked with <span style="color: var(--error-text);">*</span>.
+                            See the <a href="https://rclone.org/" target="_blank" rel="noopener" style="color: var(--link-color);">rclone docs</a> for what each field means.
+                        </p>
+                        <div id="genericFieldsContainer" style="display: flex; flex-direction: column; gap: var(--space-2); max-width: 480px;"></div>
                     </div>
 
-                    <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
-                        <button type="button" class="edit-btn" onclick="completeAuthorization()" id="oauthCompleteBtn" style="padding: 8px 16px; font-size: 14px;">Complete authorization</button>
-                        <button type="button" class="action-btn" onclick="testConnection()" id="testConnBtnSetup">Test connection</button>
-                        <span id="testConnResultSetup" style="font-size: var(--text-sm); color: var(--text-secondary);"></span>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: var(--space-3);">
+                        <button type="button" class="edit-btn" id="genericFormConnectBtn"
+                                onclick="connectGenericProvider('form')"
+                                style="padding: 10px 20px; font-size: 14px;" disabled>
+                            Save &amp; Connect
+                        </button>
+                        <span id="genericFormResult" style="font-size: var(--text-sm);"></span>
+                    </div>
+                </div>
+
+                {# ---- Paste pane ---- #}
+                <div id="genericPastePane" role="tabpanel" aria-labelledby="genericPasteTab"
+                     style="display: none;">
+                    <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0 0 var(--space-2);">
+                        Paste a complete <code>[remote]</code> block from your existing
+                        <code>~/.config/rclone/rclone.conf</code>. The remote name (in
+                        brackets) is ignored ΓÇö TeslaUSB always stores it as
+                        <code>teslausb</code>.
+                    </p>
+                    <textarea id="genericPasteInput" rows="8"
+                              placeholder='[my-nas]&#10;type = sftp&#10;host = nas.local&#10;user = pi&#10;pass = AlreadyObscuredBlob...&#10;'
+                              style="width: 100%; max-width: 560px; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background-color: var(--form-input-bg); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"></textarea>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: var(--space-3);">
+                        <button type="button" class="edit-btn"
+                                onclick="connectGenericProvider('paste')"
+                                style="padding: 10px 20px; font-size: 14px;">
+                            Save &amp; Connect
+                        </button>
+                        <span id="genericPasteResult" style="font-size: var(--text-sm);"></span>
                     </div>
                 </div>
             </div>
             {% endif %}
         </div>
     </details>
+
     <!-- ================================================================
          Section 3: Sync Settings
          ================================================================ -->
@@ -355,10 +488,10 @@
                             <span style="flex: 1;">{{ folder }}</span>
                             <button type="button" onclick="movePriorityUp(this)" aria-label="Move up"
                                     style="padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; font-size: 14px; min-width: 32px; min-height: 32px;"
-                                    {% if loop.first %}disabled{% endif %}>Up</button>
+                                    {% if loop.first %}disabled{% endif %}>&#9650;</button>
                             <button type="button" onclick="movePriorityDown(this)" aria-label="Move down"
                                     style="padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; font-size: 14px; min-width: 32px; min-height: 32px;"
-                                    {% if loop.last %}disabled{% endif %}>Down</button>
+                                    {% if loop.last %}disabled{% endif %}>&#9660;</button>
                         </li>
                         {% endfor %}
                     </ol>
@@ -482,43 +615,6 @@
 
 
     <!-- ================================================================
-         Section 3.3: WiFi Conditional Rules
-         ================================================================ -->
-    <details class="settings-section" id="wifiConditionalSection">
-        <summary>
-            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-wifi"></use></svg>
-            WiFi Conditional Rules
-        </summary>
-        <div class="section-content">
-            {# TODO(#224): rewire to a B-1 endpoint that persists per-SSID archive rules. #}
-            <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
-                Control when uploads are allowed based on WiFi state. The parity UI preserves trusted-network, hotspot, and metered-link affordances even though Phase 5.22 does not yet expose the save route.
-            </p>
-            <div style="display: grid; gap: var(--space-3);">
-                <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
-                    <span>Allowed SSIDs</span>
-                    <textarea rows="3" disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--form-input-bg); color: var(--text-primary); resize: vertical;">HomeWiFi
-GarageMesh</textarea>
-                </label>
-                <div style="display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
-                    <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary);">
-                        <input type="checkbox" checked disabled>
-                        <span>Upload only on trusted WiFi</span>
-                    </label>
-                    <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary);">
-                        <input type="checkbox" checked disabled>
-                        <span>Pause when connection is metered</span>
-                    </label>
-                    <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary);">
-                        <input type="checkbox" disabled>
-                        <span>Allow hotspot fallback</span>
-                    </label>
-                </div>
-                <button type="button" class="action-btn" disabled style="width: fit-content; padding: 8px 16px; font-size: 14px;">Save WiFi rules</button>
-            </div>
-        </div>
-    </details>
-    <!-- ================================================================
          Section 3.5: Sync Queue
          ================================================================ -->
     <details class="settings-section" id="syncQueueSection">
@@ -534,29 +630,6 @@ GarageMesh</textarea>
             <div style="margin-top: var(--space-3); display: flex; gap: var(--space-2); flex-wrap: wrap;">
                 <button type="button" class="action-btn" onclick="refreshQueue()" style="padding: 6px 14px; font-size: 13px;">Refresh</button>
                 <button type="button" class="action-btn danger" onclick="clearQueue()" id="clearQueueBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Clear Queue</button>
-            </div>
-        </div>
-    </details>
-
-
-
-    <!-- ================================================================
-         Section 3.75: Dead Letters
-         ================================================================ -->
-    <details class="settings-section" id="deadLettersSection">
-        <summary>
-            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
-            Dead Letters
-            <span id="deadLetterBadge" style="display: none; margin-left: 8px; padding: 2px 8px; border-radius: var(--radius-full); font-size: var(--text-xs); font-weight: 600; background: var(--msg-warning-bg); color: var(--msg-warning-text);"></span>
-        </summary>
-        <div class="section-content">
-            <div id="deadLetterContent" style="min-height: 60px;">
-                <div style="text-align: center; padding: var(--space-4); color: var(--text-muted);">Loading dead letters…</div>
-            </div>
-            <div style="margin-top: var(--space-3); display: flex; gap: var(--space-2); flex-wrap: wrap;">
-                <button type="button" class="action-btn" onclick="refreshDeadLetters()" style="padding: 6px 14px; font-size: 13px;">Refresh</button>
-                <button type="button" class="action-btn" onclick="retryDeadLetters()" id="retryDeadLettersBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Retry All</button>
-                <button type="button" class="action-btn danger" onclick="deleteDeadLetters()" id="deleteDeadLettersBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Delete All</button>
             </div>
         </div>
     </details>
@@ -668,7 +741,7 @@ GarageMesh</textarea>
 <!-- Busy overlay for cloud operations -->
 <div id="cloudBusyOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 9999; justify-content: center; align-items: center;">
     <div style="text-align: center; color: white; padding: 24px;">
-        <div style="border: 6px solid rgba(255,255,255,0.2); border-top: 6px solid var(--text-primary); border-radius: 50%; width: 48px; height: 48px; animation: cloud-spin 1s linear infinite; margin: 0 auto 16px;"></div>
+        <div style="border: 6px solid rgba(255,255,255,0.2); border-top: 6px solid #fff; border-radius: 50%; width: 48px; height: 48px; animation: cloud-spin 1s linear infinite; margin: 0 auto 16px;"></div>
         <div id="cloudBusyMsg" style="font-size: 16px; font-weight: 500;">Working&hellip;</div>
     </div>
 </div>
@@ -696,7 +769,6 @@ GarageMesh</textarea>
 {% endblock %}
 
 {% block scripts %}
-
 <script>
 (function() {
     'use strict';
@@ -1113,105 +1185,466 @@ GarageMesh</textarea>
        =================================================================== */
 
     var rcloneProviders = ['google-drive', 'onedrive', 'dropbox'];
+    var keyProviders = ['s3', 'b2', 'wasabi'];
+    var genericProviders = ['generic'];
+    var rcloneCmds = {
+        'google-drive': 'rclone authorize "drive"',
+        'onedrive':     'rclone authorize "onedrive"',
+        'dropbox':      'rclone authorize "dropbox"',
+    };
     var providerNames = {
         'google-drive': 'Google Drive',
-        'onedrive': 'OneDrive',
-        'dropbox': 'Dropbox',
+        'onedrive':     'OneDrive',
+        'dropbox':      'Dropbox',
     };
 
-    function _selectedProvider() {
-        var sel = document.getElementById('providerSelect');
-        return sel ? sel.value : '';
-    }
+    /* Issue #165: per-rclone-backend field schema for the generic
+     * provider's Form tab. Each entry is the displayed label,
+     * placeholder, type (text|password|url|number), required flag,
+     * and the rclone config key it maps to. The flow MUST mirror
+     * services.cloud_rclone_service._GENERIC_RCLONE_TYPES; if a
+     * type is added there, add a schema here. ``obscure`` is the
+     * default obscure-keys list passed to the backend (the route
+     * still applies its own per-backend default if omitted, but
+     * shipping it explicitly keeps the JSON self-describing). */
+    var genericSchemas = {
+        'sftp': {
+            obscure: ['pass'],
+            fields: [
+                {key: 'host',     label: 'Host',         placeholder: 'nas.local',          type: 'text',     required: true},
+                {key: 'port',     label: 'Port',         placeholder: '22',                 type: 'number',   required: false},
+                {key: 'user',     label: 'Username',     placeholder: 'pi',                 type: 'text',     required: true},
+                {key: 'pass',     label: 'Password',     placeholder: '',                   type: 'password', required: false,
+                 hint: 'Leave blank if using a key file. Stored using rclone\u2019s standard obfuscation.'},
+                {key: 'key_file', label: 'Key file path', placeholder: '/home/pi/.ssh/id_ed25519', type: 'text', required: false},
+            ],
+        },
+        'webdav': {
+            obscure: ['pass'],
+            fields: [
+                {key: 'url',    label: 'URL',      placeholder: 'https://nextcloud.example.com/remote.php/dav/files/USER/', type: 'url', required: true},
+                {key: 'vendor', label: 'Vendor',   placeholder: 'nextcloud, owncloud, sharepoint, other', type: 'text', required: false,
+                 hint: 'Optional. Common values: nextcloud, owncloud, sharepoint, other.'},
+                {key: 'user',   label: 'Username', placeholder: 'alice', type: 'text', required: false},
+                {key: 'pass',   label: 'Password', placeholder: '',      type: 'password', required: false},
+            ],
+        },
+        'smb': {
+            obscure: ['pass'],
+            fields: [
+                {key: 'host', label: 'Host',        placeholder: 'nas.local', type: 'text',     required: true},
+                {key: 'user', label: 'Username',    placeholder: 'pi',        type: 'text',     required: true},
+                {key: 'pass', label: 'Password',    placeholder: '',          type: 'password', required: false},
+                {key: 'domain', label: 'Domain',    placeholder: 'WORKGROUP', type: 'text',     required: false},
+            ],
+        },
+        'ftp': {
+            obscure: ['pass'],
+            fields: [
+                {key: 'host', label: 'Host',     placeholder: 'ftp.example.com', type: 'text',     required: true},
+                {key: 'port', label: 'Port',     placeholder: '21',              type: 'number',   required: false},
+                {key: 'user', label: 'Username', placeholder: 'user',            type: 'text',     required: true},
+                {key: 'pass', label: 'Password', placeholder: '',                type: 'password', required: false},
+            ],
+        },
+        's3': {
+            obscure: [],
+            fields: [
+                {key: 'provider',          label: 'S3 provider',     placeholder: 'AWS, Wasabi, Minio, Other, ...', type: 'text', required: true,
+                 hint: 'See rclone S3 docs. Use "Other" for self-hosted MinIO and most generic S3-compatible services.'},
+                {key: 'access_key_id',     label: 'Access key ID',   placeholder: 'AKIA...',                  type: 'text',     required: true},
+                {key: 'secret_access_key', label: 'Secret access key', placeholder: '',                       type: 'password', required: true},
+                {key: 'region',            label: 'Region',          placeholder: 'us-east-1',                type: 'text',     required: false},
+                {key: 'endpoint',          label: 'Endpoint URL',    placeholder: 'https://s3.example.com',   type: 'url',      required: false,
+                 hint: 'Required for non-AWS providers; leave blank for AWS S3.'},
+            ],
+        },
+        'b2': {
+            obscure: [],
+            fields: [
+                {key: 'account', label: 'Account ID', placeholder: '...', type: 'text',     required: true},
+                {key: 'key',     label: 'Application key', placeholder: '...', type: 'password', required: true},
+            ],
+        },
+        'wasabi': {
+            obscure: [],
+            fields: [
+                {key: 'provider',          label: 'S3 provider',     placeholder: 'Wasabi',                       type: 'text',     required: true},
+                {key: 'access_key_id',     label: 'Access key ID',   placeholder: '',                             type: 'text',     required: true},
+                {key: 'secret_access_key', label: 'Secret access key', placeholder: '',                           type: 'password', required: true},
+                {key: 'region',            label: 'Region',          placeholder: 'us-east-1',                    type: 'text',     required: false},
+                {key: 'endpoint',          label: 'Endpoint URL',    placeholder: 'https://s3.us-east-1.wasabisys.com', type: 'url', required: true},
+            ],
+        },
+        'azureblob': {
+            obscure: [],
+            fields: [
+                {key: 'account', label: 'Storage account', placeholder: '',  type: 'text',     required: true},
+                {key: 'key',     label: 'Account key',     placeholder: '',  type: 'password', required: false,
+                 hint: 'Either Account key or SAS URL is required.'},
+                {key: 'sas_url', label: 'SAS URL',         placeholder: 'https://...?sv=...', type: 'url', required: false},
+            ],
+        },
+        'swift': {
+            obscure: [],
+            fields: [
+                {key: 'user',     label: 'User',          placeholder: '',           type: 'text',     required: true},
+                {key: 'key',      label: 'API key',       placeholder: '',           type: 'password', required: true},
+                {key: 'auth',     label: 'Auth URL',      placeholder: 'https://...', type: 'url',     required: true},
+                {key: 'tenant',   label: 'Tenant',        placeholder: '',           type: 'text',     required: false},
+                {key: 'region',   label: 'Region',        placeholder: '',           type: 'text',     required: false},
+            ],
+        },
+    };
 
-    function _updateProviderCards(selected) {
-        document.querySelectorAll('[data-provider-card]').forEach(function(card) {
-            var active = card.getAttribute('data-provider-card') === selected;
-            card.style.background = active ? 'var(--btn-primary-bg)' : 'var(--bg-secondary)';
-            card.style.color = active ? 'var(--btn-primary-text)' : 'var(--text-primary)';
+    window.onProviderChange = function() {
+        var sel = document.getElementById('providerSelect');
+        var val = sel ? sel.value : '';
+        var rcloneDiv = document.getElementById('rcloneSetup');
+        var keyDiv = document.getElementById('keySetup');
+        var genericDiv = document.getElementById('genericSetup');
+        var endpointGroup = document.getElementById('endpointGroup');
+
+        if (rcloneDiv) rcloneDiv.style.display = rcloneProviders.indexOf(val) !== -1 ? 'block' : 'none';
+        if (keyDiv) keyDiv.style.display = keyProviders.indexOf(val) !== -1 ? 'block' : 'none';
+        if (genericDiv) genericDiv.style.display = genericProviders.indexOf(val) !== -1 ? 'block' : 'none';
+
+        /* Update rclone command and provider name */
+        if (rcloneProviders.indexOf(val) !== -1) {
+            var cmdEl = document.getElementById('rcloneCmd');
+            if (cmdEl) cmdEl.textContent = rcloneCmds[val] || '';
+            var nameEl = document.getElementById('rcloneProviderName');
+            if (nameEl) nameEl.textContent = providerNames[val] || val;
+            var resultEl = document.getElementById('rcloneResult');
+            if (resultEl) resultEl.textContent = '';
+            var textarea = document.getElementById('rcloneTokenInput');
+            if (textarea) textarea.value = '';
+        }
+
+        /* Show endpoint field for Wasabi/B2, optional for S3 */
+        if (endpointGroup) {
+            var label = endpointGroup.querySelector('label');
+            if (val === 's3') {
+                endpointGroup.style.display = 'block';
+                if (label) label.innerHTML = 'Endpoint URL <span style="font-weight:400;color:var(--text-secondary);">(optional)</span>:';
+            } else if (val === 'b2' || val === 'wasabi') {
+                endpointGroup.style.display = 'block';
+                if (label) label.innerHTML = 'Endpoint URL:';
+            } else {
+                endpointGroup.style.display = 'none';
+            }
+        }
+    };
+
+    window.copyRcloneCmd = function() {
+        var cmdEl = document.getElementById('rcloneCmd');
+        if (cmdEl) {
+            navigator.clipboard.writeText(cmdEl.textContent).then(function() {
+                showToast('Command copied!', 'success');
+            }).catch(function() {
+                /* Fallback for older browsers */
+                var range = document.createRange();
+                range.selectNodeContents(cmdEl);
+                var sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                showToast('Command selected ΓÇö press Ctrl+C to copy.', 'info');
+            });
+        }
+    };
+
+    window.submitRcloneToken = async function() {
+        var sel = document.getElementById('providerSelect');
+        var provider = sel ? sel.value : '';
+        if (!provider || rcloneProviders.indexOf(provider) === -1) {
+            showToast('Please select a cloud provider.', 'warning');
+            return;
+        }
+        var tokenText = (document.getElementById('rcloneTokenInput') || {}).value || '';
+        if (!tokenText.trim()) {
+            showToast('Please paste the token from rclone authorize.', 'warning');
+            return;
+        }
+
+        var btn = document.getElementById('rcloneSubmitBtn');
+        var resultEl = document.getElementById('rcloneResult');
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
+        if (resultEl) resultEl.textContent = '';
+        _showBusy('Connecting to cloud provider\u2026');
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({ provider: provider, token: tokenText.trim() })
+            });
+            var data = await resp.json();
+            if (data.success) {
+                _hideBusy();
+                showToast('Connected! Reloading\u2026', 'success');
+                setTimeout(function() { window.location.reload(); }, 1500);
+            } else {
+                _hideBusy();
+                showToast(data.message || 'Failed to connect.', 'error');
+                if (resultEl) {
+                    resultEl.textContent = data.message || 'Failed';
+                    resultEl.style.color = 'var(--error-text)';
+                }
+                if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+            }
+        } catch (e) {
+            _hideBusy();
+            showToast('Network error.', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Connect'; }
+        }
+    };
+
+    /* Issue #165 fix: S3 / B2 / Wasabi previously POSTed to
+     * ``/api/provider`` which only persisted the provider name and
+     * silently dropped ``credentials``. They now route through the
+     * generic ``/api/connect`` path so the keys actually reach
+     * rclone.conf. ``credBucket`` is collected for the user's
+     * benefit but stored as a private metadata note (``_bucket``) ΓÇö
+     * rclone S3 backends don't take a bucket in the conf file
+     * itself; the bucket is the first path segment of the remote
+     * (and TeslaUSB sets that via the existing remote-path setting). */
+    window.saveProvider = async function() {
+        var sel = document.getElementById('providerSelect');
+        var provider = sel ? sel.value : '';
+        if (!provider) { showToast('Please select a provider.', 'warning'); return; }
+
+        if (keyProviders.indexOf(provider) === -1) {
+            /* Should not happen ΓÇö keySetup div is hidden ΓÇö but be defensive. */
+            showToast('Unsupported provider for this form.', 'warning');
+            return;
+        }
+
+        var accessKey = (document.getElementById('credAccessKey') || {}).value || '';
+        var secret    = (document.getElementById('credSecret')    || {}).value || '';
+        var region    = (document.getElementById('credRegion')    || {}).value || '';
+        var bucket    = (document.getElementById('credBucket')    || {}).value || '';
+        var endpoint  = (document.getElementById('credEndpoint')  || {}).value || '';
+        if (!accessKey || !secret || !bucket) {
+            showToast('Access Key, Secret, and Bucket are required.', 'warning');
+            return;
+        }
+
+        var fields;
+        if (provider === 's3') {
+            fields = {
+                provider: 'Other', access_key_id: accessKey,
+                secret_access_key: secret,
+            };
+            if (region)   fields.region = region;
+            if (endpoint) fields.endpoint = endpoint;
+        } else if (provider === 'wasabi') {
+            fields = {
+                provider: 'Wasabi', access_key_id: accessKey,
+                secret_access_key: secret, endpoint: endpoint || 'https://s3.us-east-1.wasabisys.com',
+            };
+            if (region) fields.region = region;
+        } else { /* b2 */
+            fields = {account: accessKey, key: secret};
+        }
+
+        try {
+            var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({
+                    provider: 'generic',
+                    rclone_type: provider,
+                    fields: fields,
+                })
+            });
+            var data = await resp.json();
+            if (data.success) {
+                /* Persist the user's chosen bucket so the existing
+                 * remote-path UI starts at the right place. */
+                if (bucket) {
+                    try {
+                        await fetch('{{ url_for("cloud_archive.api_set_remote_path") }}', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json',
+                                      'X-Requested-With': 'XMLHttpRequest'},
+                            body: JSON.stringify({path: bucket}),
+                        });
+                    } catch (_) { /* non-fatal */ }
+                }
+                showToast('Provider saved. Reloading\u2026', 'success');
+                setTimeout(function() { window.location.reload(); }, 1000);
+            } else {
+                showToast(data.message || 'Failed to save provider.', 'error');
+            }
+        } catch (e) {
+            showToast('Network error.', 'error');
+        }
+    };
+
+    /* ===================================================================
+       Generic rclone remote (issue #165) ΓÇö Form + Paste tabs
+       =================================================================== */
+
+    window.switchGenericTab = function(which) {
+        var formTab = document.getElementById('genericFormTab');
+        var pasteTab = document.getElementById('genericPasteTab');
+        var formPane = document.getElementById('genericFormPane');
+        var pastePane = document.getElementById('genericPastePane');
+        var isForm = (which === 'form');
+        if (formTab) {
+            formTab.setAttribute('aria-selected', isForm ? 'true' : 'false');
+            formTab.style.borderBottomColor = isForm ? 'var(--accent-primary)' : 'transparent';
+            formTab.style.color = isForm ? 'var(--text-primary)' : 'var(--text-secondary)';
+        }
+        if (pasteTab) {
+            pasteTab.setAttribute('aria-selected', !isForm ? 'true' : 'false');
+            pasteTab.style.borderBottomColor = !isForm ? 'var(--accent-primary)' : 'transparent';
+            pasteTab.style.color = !isForm ? 'var(--text-primary)' : 'var(--text-secondary)';
+        }
+        if (formPane) formPane.style.display = isForm ? 'block' : 'none';
+        if (pastePane) pastePane.style.display = !isForm ? 'block' : 'none';
+    };
+
+    window.onGenericTypeChange = function() {
+        var sel = document.getElementById('genericTypeSelect');
+        var rt = sel ? sel.value : '';
+        var wrap = document.getElementById('genericFormFields');
+        var container = document.getElementById('genericFieldsContainer');
+        var connectBtn = document.getElementById('genericFormConnectBtn');
+        if (!container || !wrap || !connectBtn) return;
+        container.innerHTML = '';
+        if (!rt || !genericSchemas[rt]) {
+            wrap.style.display = 'none';
+            connectBtn.disabled = true;
+            return;
+        }
+        var schema = genericSchemas[rt];
+        schema.fields.forEach(function(f) {
+            var group = document.createElement('div');
+            group.style.display = 'flex';
+            group.style.flexDirection = 'column';
+            group.style.gap = '4px';
+            var label = document.createElement('label');
+            label.htmlFor = 'genericField_' + f.key;
+            label.style.fontWeight = '500';
+            label.style.color = 'var(--text-primary)';
+            label.textContent = f.label;
+            if (f.required) {
+                var star = document.createElement('span');
+                star.textContent = ' *';
+                star.style.color = 'var(--error-text)';
+                label.appendChild(star);
+            }
+            var input = document.createElement('input');
+            input.type = f.type || 'text';
+            input.id = 'genericField_' + f.key;
+            input.dataset.fieldKey = f.key;
+            input.placeholder = f.placeholder || '';
+            input.autocomplete = 'off';
+            input.style.padding = '8px';
+            input.style.borderRadius = '6px';
+            input.style.border = '1px solid var(--border-input)';
+            input.style.backgroundColor = 'var(--form-input-bg)';
+            input.style.color = 'var(--text-primary)';
+            input.style.fontSize = '14px';
+            group.appendChild(label);
+            group.appendChild(input);
+            if (f.hint) {
+                var hint = document.createElement('p');
+                hint.style.margin = '0';
+                hint.style.fontSize = 'var(--text-sm)';
+                hint.style.color = 'var(--text-secondary)';
+                hint.textContent = f.hint;
+                group.appendChild(hint);
+            }
+            container.appendChild(group);
         });
-    }
-
-    window.selectProviderCard = function(provider) {
-        if (rcloneProviders.indexOf(provider) === -1) {
-            showToast('Unsupported provider.', 'warning');
-            return;
-        }
-        var sel = document.getElementById('providerSelect');
-        if (sel) sel.value = provider;
-        _updateProviderCards(provider);
+        wrap.style.display = 'block';
+        connectBtn.disabled = false;
     };
 
-    window.startAuthorization = async function() {
-        var provider = _selectedProvider();
-        if (!provider) {
-            showToast('Select a provider card first.', 'warning');
-            return;
+    window.connectGenericProvider = async function(mode) {
+        var btn, resultEl, payload;
+
+        if (mode === 'paste') {
+            var paste = (document.getElementById('genericPasteInput') || {}).value || '';
+            if (!paste.trim()) {
+                showToast('Please paste an rclone.conf block.', 'warning');
+                return;
+            }
+            payload = {provider: 'generic', config_block: paste};
+            resultEl = document.getElementById('genericPasteResult');
+            btn = document.querySelector('#genericPastePane button.edit-btn');
+        } else {
+            var sel = document.getElementById('genericTypeSelect');
+            var rt = sel ? sel.value : '';
+            if (!rt || !genericSchemas[rt]) {
+                showToast('Please select a backend type.', 'warning');
+                return;
+            }
+            var schema = genericSchemas[rt];
+            var fields = {};
+            var missing = [];
+            schema.fields.forEach(function(f) {
+                var el = document.getElementById('genericField_' + f.key);
+                var v = el ? el.value.trim() : '';
+                if (v) fields[f.key] = v;
+                else if (f.required) missing.push(f.label);
+            });
+            if (missing.length) {
+                showToast('Missing required field(s): ' + missing.join(', '), 'warning');
+                return;
+            }
+            payload = {
+                provider: 'generic',
+                rclone_type: rt,
+                fields: fields,
+                obscure_keys: schema.obscure || [],
+            };
+            resultEl = document.getElementById('genericFormResult');
+            btn = document.getElementById('genericFormConnectBtn');
         }
-        var btn = document.getElementById('oauthStartBtn');
-        if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
-        _showBusy('Starting provider authorization…');
+
+        if (btn) { btn.disabled = true; btn.textContent = 'Connecting\u2026'; }
+        if (resultEl) resultEl.textContent = '';
+        _showBusy('Connecting to cloud provider\u2026');
+
         try {
             var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ provider: provider })
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify(payload)
             });
             var data = await resp.json();
-            if (!resp.ok || data.success === false) {
-                throw new Error((data && data.message) || 'Failed to start authorization.');
+            if (data.success) {
+                _hideBusy();
+                showToast('Connected! Reloading\u2026', 'success');
+                setTimeout(function() { window.location.reload(); }, 1500);
+            } else {
+                _hideBusy();
+                showToast(data.message || 'Failed to connect.', 'error');
+                if (resultEl) {
+                    resultEl.textContent = data.message || 'Failed';
+                    resultEl.style.color = 'var(--error-text)';
+                }
+                if (btn) { btn.disabled = false; btn.textContent = 'Save & Connect'; }
             }
-            var sessionEl = document.getElementById('oauthSessionId');
-            var urlEl = document.getElementById('oauthAuthorizationUrl');
-            var visitEl = document.getElementById('oauthVisitLink');
-            if (sessionEl) sessionEl.value = data.session_id || '';
-            if (urlEl) urlEl.value = data.authorization_url || '';
-            if (visitEl) {
-                visitEl.href = data.authorization_url || '#';
-                visitEl.style.pointerEvents = '';
-                visitEl.style.opacity = '';
-                visitEl.removeAttribute('aria-disabled');
-            }
-            _hideBusy();
-            showToast('Authorization started. Open the provider page and approve access.', 'success');
         } catch (e) {
             _hideBusy();
-            showToast(e && e.message ? e.message : 'Failed to start authorization.', 'error');
-        } finally {
-            if (btn) { btn.disabled = false; btn.textContent = 'Start authorization'; }
+            showToast('Network error.', 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Save & Connect'; }
         }
     };
 
-    window.completeAuthorization = async function() {
-        var sessionId = ((document.getElementById('oauthSessionId') || {}).value || '').trim();
-        var redirectValue = ((document.getElementById('oauthCallbackInput') || {}).value || '').trim();
-        if (!sessionId || !redirectValue) {
-            showToast('Start authorization, then paste the callback URL or code.', 'warning');
-            return;
-        }
-        var btn = document.getElementById('oauthCompleteBtn');
-        if (btn) { btn.disabled = true; btn.textContent = 'Completing…'; }
-        _showBusy('Completing provider authorization…');
-        try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_connect_provider") }}', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ session_id: sessionId, redirect_url: redirectValue })
-            });
-            var data = await resp.json();
-            if (!resp.ok || data.success === false) {
-                throw new Error((data && data.message) || 'Failed to complete authorization.');
-            }
-            _hideBusy();
-            showToast('Connected! Reloading…', 'success');
-            setTimeout(function() { window.location.reload(); }, 1000);
-        } catch (e) {
-            _hideBusy();
-            showToast(e && e.message ? e.message : 'Failed to complete authorization.', 'error');
-        } finally {
-            if (btn) { btn.disabled = false; btn.textContent = 'Complete authorization'; }
-        }
-    };
     window.disconnectProvider = async function() {
         if (!confirm('Disconnect cloud provider? Existing archived files will remain in the cloud.')) return;
         _showBusy('Disconnecting\u2026');
@@ -1583,8 +2016,6 @@ GarageMesh</textarea>
         startArchivePoll();
         loadStorageUsage();
         refreshQueue();
-        refreshDeadLetters();
-        _updateProviderCards(_selectedProvider());
     });
 
     /* Load cloud storage usage */
@@ -1634,7 +2065,7 @@ GarageMesh</textarea>
        generated by ``refreshQueue`` itself) can resolve them ΓÇö the
        surrounding script is wrapped in an IIFE, so plain ``async function
        foo()`` declarations would be trapped in the IIFE scope and the
-       buttons would silently no-op (issue 159). */
+       buttons would silently no-op (#159). */
     window.refreshQueue = async function() {
         var content = document.getElementById('queueContent');
         var badge = document.getElementById('queueBadge');
@@ -1731,106 +2162,6 @@ GarageMesh</textarea>
     };
 
 
-
-    /* ===================================================================
-       Dead Letters
-       =================================================================== */
-    window.refreshDeadLetters = async function() {
-        var content = document.getElementById('deadLetterContent');
-        var badge = document.getElementById('deadLetterBadge');
-        var retryBtn = document.getElementById('retryDeadLettersBtn');
-        var deleteBtn = document.getElementById('deleteDeadLettersBtn');
-        try {
-            var resp = await fetch('{{ url_for("cloud_archive.api_dead_letters") }}', {
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            });
-            var data = await resp.json();
-            var items = data.dead_letters || [];
-            var count = data.count || items.length;
-            if (badge) {
-                if (count > 0) {
-                    badge.textContent = count;
-                    badge.style.display = '';
-                } else {
-                    badge.style.display = 'none';
-                }
-            }
-            if (retryBtn) retryBtn.style.display = count > 0 ? '' : 'none';
-            if (deleteBtn) deleteBtn.style.display = count > 0 ? '' : 'none';
-            if (items.length === 0) {
-                content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--text-muted);">No dead-letter files</div>';
-                return;
-            }
-            var html = '<div style="display: flex; flex-direction: column; gap: var(--space-2);">';
-            items.forEach(function(item) {
-                var path = item.file_path || '';
-                var safePath = _escapeHtml(path);
-                var lastError = _escapeHtml(item.last_error || 'Unknown error');
-                html += '<div style="display:flex;align-items:flex-start;gap:var(--space-2);padding:8px;border:1px solid var(--border-color);border-radius:var(--radius-md);background:var(--bg-secondary);">';
-                html += '<div style="flex:1;min-width:0;">';
-                html += '<div style="font-size:var(--text-sm);color:var(--text-primary);overflow-wrap:anywhere;">' + safePath + '</div>';
-                html += '<div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:4px;">' + lastError + '</div>';
-                html += '</div>';
-                html += '<button type="button" class="action-btn" aria-label="Retry dead letter" style="padding:4px 10px;font-size:12px;flex-shrink:0;" onclick="retryDeadLetter(\'' + path.replace(/'/g, "\\'") + '\')">Retry</button>';
-                html += '<button type="button" class="action-btn danger" aria-label="Delete dead letter" style="padding:4px 10px;font-size:12px;flex-shrink:0;" onclick="deleteDeadLetter(\'' + path.replace(/'/g, "\\'") + '\')">Delete</button>';
-                html += '</div>';
-            });
-            html += '</div>';
-            content.innerHTML = html;
-        } catch (e) {
-            content.innerHTML = '<div style="text-align: center; padding: var(--space-4); color: var(--error-text);">Failed to load dead letters</div>';
-        }
-    };
-
-    async function _deadLetterAction(url, payload, successMsg) {
-        var resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-            body: JSON.stringify(payload || {})
-        });
-        var data = await resp.json();
-        if (!resp.ok || data.success === false) {
-            throw new Error((data && data.error) || (data && data.message) || ('HTTP ' + resp.status));
-        }
-        if (successMsg) showToast(successMsg, 'success');
-        refreshDeadLetters();
-    }
-
-    window.retryDeadLetter = async function(filePath) {
-        try {
-            await _deadLetterAction('{{ url_for("cloud_archive.api_dead_letters_retry") }}', { file_path: filePath }, 'Dead letter queued for retry.');
-        } catch (e) {
-            showToast(e.message, 'error');
-        }
-    };
-
-    window.retryDeadLetters = async function() {
-        try {
-            await _deadLetterAction('{{ url_for("cloud_archive.api_dead_letters_retry") }}', {}, 'Dead letters queued for retry.');
-        } catch (e) {
-            showToast(e.message, 'error');
-        }
-    };
-
-    window.deleteDeadLetter = async function(filePath) {
-        if (!confirm('Delete this dead-letter entry?')) return;
-        try {
-            await _deadLetterAction('{{ url_for("cloud_archive.api_dead_letters_delete") }}', { file_path: filePath }, 'Dead letter deleted.');
-        } catch (e) {
-            showToast(e.message, 'error');
-        }
-    };
-
-    window.deleteDeadLetters = async function() {
-        if (!confirm('Delete all dead-letter entries?')) return;
-        try {
-            await _deadLetterAction('{{ url_for("cloud_archive.api_dead_letters_delete") }}', {}, 'Dead letters deleted.');
-        } catch (e) {
-            showToast(e.message, 'error');
-        }
-    };
-
-
 })();
 
 // Bandwidth Test (global scope for onclick handlers)
@@ -1917,5 +2248,4 @@ async function applyBandwidth() {
     } catch(e) { /* ignore */ }
 }
 </script>
-<script type="module" src="{{ url_for('static', filename='js/cloud_archive.js') }}"></script>
 {% endblock %}

@@ -1,1201 +1,1102 @@
 {% extends "base.html" %}
-{% block head %}
-<style>
-/* ===================================================================
-   License Plates page — all scoped CSS.
-   =================================================================== */
-
-/* Layout primitives — grid-based for the two-column desktop split. */
-.plates-page,
-.plates-header,
-.plates-grid,
-.plates-panel,
-.plates-panel-head,
-.plates-form,
-.plates-field,
-.plates-library,
-.plates-library-toolbar,
-.plates-cards,
-.plates-card,
-.plates-card-head,
-.plates-card-copy,
-.plates-card-meta,
-.plates-actions,
-.plates-empty,
-.plates-switch,
-.plates-filter,
-.plates-match-result,
-.plates-select-row,
-.plates-select-label,
-.plates-edit-panel,
-.plates-upload-section,
-.plates-photo-library {
-    display: grid;
-    gap: var(--space-4);
-}
-
-.plates-page {
-    gap: var(--space-6);
-}
-
-/* Card-style containers share the same elevation for consistent visual weight. */
-.plates-header,
-.plates-panel,
-.plates-library,
-.plates-upload-section,
-.plates-photo-library {
-    padding: var(--space-6);
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-lg);
-}
-
-/* Row elements that need flex + gap instead of grid. */
-.plates-header-row,
-.plates-summary,
-.plates-library-toolbar,
-.plates-library-actions,
-.plates-card-head,
-.plates-card-actions,
-.plates-actions,
-.plates-select-row,
-.plates-switch {
-    display: flex;
-    gap: var(--space-3);
-}
-
-.plates-header-row,
-.plates-library-toolbar,
-.plates-card-head,
-.plates-select-row {
-    justify-content: space-between;
-    align-items: flex-start;
-}
-
-.plates-header-row,
-.plates-summary,
-.plates-library-actions,
-.plates-card-actions,
-.plates-actions,
-.plates-select-row,
-.plates-switch {
-    flex-wrap: wrap;
-}
-
-/* Typography — enforce the type scale tokens everywhere. */
-.plates-title,
-.plates-panel-title,
-.plates-section-title,
-.plates-empty-title {
-    margin: 0;
-    color: var(--text-primary);
-}
-
-.plates-title {
-    font-size: var(--text-3xl);
-}
-
-.plates-panel-title,
-.plates-section-title,
-.plates-empty-title {
-    font-size: var(--text-xl);
-}
-
-.plates-copy,
-.plates-subtitle,
-.plates-field-copy,
-.plates-match-result,
-.plates-empty-copy,
-.plates-card-copy,
-.plates-card-meta dd {
-    margin: 0;
-    color: var(--text-secondary);
-    line-height: 1.5;
-}
-
-/* Status pills — semantic color tokens reflect current redaction state. */
-.plates-summary-pill,
-.plates-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-height: 44px;
-    padding: var(--space-2) var(--space-4);
-    border: 1px solid var(--border-input);
-    border-radius: var(--radius-full);
-    background: var(--form-label-bg);
-    color: var(--text-primary);
-    font-weight: 600;
-}
-
-.plates-badge.is-enabled {
-    background: var(--msg-success-bg);
-    color: var(--msg-success-text);
-}
-
-.plates-badge.is-disabled {
-    background: var(--msg-warning-bg);
-    color: var(--msg-warning-text);
-}
-
-/* Icon sizing — 18 px inline, 20 px buttons; design system icon-size matrix. */
-.plates-icon,
-.plates-inline-icon {
-    width: 1.125rem;
-    height: 1.125rem;
-    flex: 0 0 auto;
-}
-
-.plates-grid {
-    align-items: start;
-}
-
-/* Inner panels sit one level below outer cards — lower bg + border distinguish hierarchy. */
-.plates-panel,
-.plates-card,
-.plates-edit-panel {
-    padding: var(--space-4);
-    background: var(--form-input-bg);
-    border: 1px solid var(--border-input);
-    border-radius: var(--radius-md);
-}
-
-/* Form label weight is 600 (semibold); bold (700) is explicitly not used. */
-.plates-field label,
-.plates-select-label,
-.plates-switch-copy {
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-/* Inputs meet the 44 px minimum touch target and 16 px body font
-   size (prevents iOS Safari auto-zoom on focus). */
-.plates-field input,
-.plates-field textarea,
-.plates-filter input {
-    width: 100%;
-    min-height: 44px;
-    padding: var(--space-3);
-    border: 1px solid var(--border-input);
-    border-radius: var(--radius-md);
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font: inherit;
-}
-
-.plates-field textarea {
-    min-height: 8rem;
-    resize: vertical;
-}
-
-/* Shared button base — all variants inherit this. The transition
-   only animates transform + opacity to avoid costly layout reflows. */
-.plates-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-2);
-    min-height: 44px;
-    padding: var(--space-3) var(--space-4);
-    border: 1px solid transparent;
-    border-radius: var(--radius-md);
-    background: var(--form-label-bg);
-    color: var(--text-primary);
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-    text-decoration: none;
-    transition:
-        transform var(--transition-normal),
-        box-shadow var(--transition-normal),
-        background var(--transition-normal),
-        border-color var(--transition-normal);
-}
-
-.plates-btn:hover,
-.plates-btn:focus-visible {
-    transform: translateY(-1px);
-    box-shadow: 0 6px 16px var(--shadow-hover);
-}
-
-.plates-btn-primary {
-    background: var(--btn-primary-bg);
-    color: var(--btn-primary-text);
-}
-
-.plates-btn-danger {
-    background: var(--btn-danger-bg);
-    color: var(--btn-danger-text);
-}
-
-.plates-btn-secondary {
-    border-color: var(--border-input);
-}
-
-.plates-btn:disabled {
-    opacity: var(--opacity-disabled);
-    cursor: not-allowed;
-    transform: none;
-    box-shadow: none;
-}
-
-.plates-filter {
-    min-width: min(100%, 18rem);
-}
-
-.plates-library-toolbar {
-    align-items: end;
-}
-
-/* Auto-fit card grid — min 18 rem per card keeps them readable on
-   mobile while filling available space on wider viewports. */
-.plates-cards {
-    grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
-}
-
-.plates-card {
-    gap: var(--space-3);
-}
-
-.plates-card-title {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: var(--text-xl);
-}
-
-/* Two-column definition list for plate metadata — avoids a full
-   table just for four pairs. */
-.plates-card-meta {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-3);
-    margin: 0;
-}
-
-.plates-card-meta dt {
-    margin: 0 0 var(--space-1);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.plates-card-meta dd {
-    margin: 0;
-}
-
-.plates-card-actions {
-    align-items: center;
-}
-
-.plates-select-label {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-height: 44px;
-}
-
-.plates-switch {
-    align-items: flex-start;
-}
-
-.plates-switch input,
-.plates-select-label input {
-    width: 1.125rem;
-    height: 1.125rem;
-    margin-top: 0.25rem;
-}
-
-/* Normalization check result — uses semantic color tokens so the
-   match/no-match state is immediately legible without color alone. */
-.plates-match-result {
-    min-height: 44px;
-    padding: var(--space-3) var(--space-4);
-    border: 1px solid var(--border-input);
-    border-radius: var(--radius-md);
-    background: var(--form-input-bg);
-}
-
-.plates-match-result.is-success {
-    background: var(--msg-success-bg);
-    color: var(--msg-success-text);
-}
-
-.plates-match-result.is-warning {
-    background: var(--msg-warning-bg);
-    color: var(--msg-warning-text);
-}
-
-.plates-empty {
-    justify-items: start;
-}
-
-/* ===================================================================
-   Photo plate upload section styles (CSS tokens, no hex values).
-   =================================================================== */
-
-/* Info box used for Tesla spec requirements — amber left border
-   signals "important but not an error". */
-.plates-info-box {
-    padding: var(--space-4);
-    background: var(--msg-info-bg, var(--form-input-bg));
-    border: 1px solid var(--border-input);
-    border-left: 4px solid var(--accent-info, var(--accent-primary));
-    border-radius: var(--radius-md);
-}
-
-.plates-info-box ul {
-    margin: var(--space-2) 0 0 var(--space-5);
-    padding: 0;
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-}
-
-.plates-info-box p {
-    margin: 0 0 var(--space-2);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-}
-
-.plates-info-box a {
-    color: var(--accent-primary);
-}
-
-/* Drag-drop zone — dashed border replaces the standard card border
-   to hint that files can be dropped here. */
-.plates-drop-zone {
-    border: 3px dashed var(--border-input);
-    border-radius: var(--radius-md);
-    padding: var(--space-10);
-    text-align: center;
-    background: var(--form-input-bg);
-    cursor: pointer;
-    transition: border-color var(--transition-normal), background var(--transition-normal);
-    min-height: 44px;
-    margin-bottom: var(--space-5);
-}
-
-.plates-drop-zone:hover,
-.plates-drop-zone.is-active {
-    border-color: var(--accent-primary);
-    background: var(--bg-tertiary);
-}
-
-.plates-drop-zone-icon {
-    display: block;
-    width: 3rem;
-    height: 3rem;
-    color: var(--accent-primary);
-    margin: 0 auto var(--space-4);
-}
-
-/* Upload progress bar uses a solid accent fill that transitions
-   smoothly; animating only width is acceptable here because the
-   bar is narrow enough that reflow is imperceptible. */
-.plates-progress-bar-outer {
-    background: var(--bg-tertiary);
-    border-radius: var(--radius-md);
-    height: 1.875rem;
-    overflow: hidden;
-    margin-bottom: var(--space-3);
-}
-
-.plates-progress-bar-inner {
-    background: var(--accent-primary);
-    height: 100%;
-    width: 0%;
-    transition: width var(--transition-normal);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--bg-primary);
-    font-weight: 600;
-    font-size: var(--text-sm);
-}
-
-/* Photo file table — desktop layout with thumbnail column. */
-.plates-photo-table-wrap {
-    overflow-x: auto;
-}
-
-.plates-photo-table {
-    width: 100%;
-    table-layout: fixed;
-    border-collapse: collapse;
-    font-size: var(--text-sm);
-}
-
-.plates-photo-table th,
-.plates-photo-table td {
-    padding: var(--space-3);
-    text-align: left;
-    border-bottom: 1px solid var(--border-input);
-    color: var(--text-primary);
-    vertical-align: middle;
-}
-
-.plates-photo-table th {
-    font-weight: 600;
-    background: var(--bg-tertiary);
-    font-size: var(--text-sm);
-}
-
-.plates-photo-table tr.is-noncompliant {
-    background: var(--msg-warning-bg);
-}
-
-/* Mobile photo card list — replaces the table on narrow viewports. */
-.plates-photo-cards {
-    display: none;
-}
-
-/* Compliance warning badge inside file listings. */
-.plates-compliance-warn {
-    margin-top: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--accent-danger);
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-}
-
-/* Cropper modal — fixed overlay, z-index 9999 sits above sidebar (50) and toasts (100). */
-.plates-cropper-modal {
-    position: fixed;
-    inset: 0;
-    z-index: 9999;
-    background: var(--modal-overlay-bg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--space-3);
-    overflow-y: auto;
-}
-
-.plates-cropper-content {
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    border: 1px solid var(--border-input);
-    border-radius: var(--radius-lg);
-    padding: var(--space-4);
-    width: 100%;
-    max-width: 45rem;
-    max-height: 95vh;
-    overflow-y: auto;
-}
-
-.plates-cropper-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: var(--space-3);
-    gap: var(--space-2);
-}
-
-.plates-cropper-body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-}
-
-.plates-cropper-footer {
-    display: flex;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    margin-top: var(--space-4);
-}
-
-/* Responsive breakpoints */
-@media (min-width: 64rem) {
-    /* Two-column split at desktop: wider form panel on left,
-       redaction + normalization panel on right. */
-    .plates-grid {
-        grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
-    }
-}
-
-@media (max-width: 48rem) {
-    /* Below 768 px, swap the desktop photo table for the card list
-       to match the design system's "table → card list on mobile" rule. */
-    .plates-photo-table-wrap {
-        display: none;
-    }
-
-    .plates-photo-cards {
-        display: grid;
-        gap: var(--space-4);
-    }
-}
-</style>
-{% endblock %}
-
 {% block content %}
-<div
-    id="licensePlatesPage"
-    class="plates-page"
-    data-match-url="{{ url_for('license_plates.match_license_plate') }}"
-    data-upload-url="{{ url_for('license_plates.upload_multiple_plates') }}"
-    data-upload-single-url="{{ url_for('license_plates.upload_plate') }}"
-    data-max-file-size="{{ max_file_size }}"
-    data-max-filename-length="{{ max_filename_length }}"
-    data-max-plate-count="{{ max_plate_count }}"
-    data-current-plate-count="{{ plate_count }}"
-    data-plate-width-na="{{ plate_width_na }}"
-    data-plate-height-na="{{ plate_height_na }}"
-    data-plate-width-eu="{{ plate_width_eu }}"
-    data-plate-height-eu="{{ plate_height_eu }}"
->
-    {% include "media_hub_nav.html" %}
+<div class="container">
+    {% include 'media_hub_nav.html' %}
+    <h2>Custom License Plates</h2>
 
-{# Page header — plate count + redaction status at a glance (design system layer-1 glanceable). #}
-    <section class="plates-header" aria-label="License plates overview">
-        <div class="plates-header-row">
-            <div>
-                <h1 class="plates-title">License Plates</h1>
-                <p class="plates-subtitle">
-                    Upload custom PNG backgrounds and track known plates for
-                    the shared redaction pipeline.
-                </p>
-            </div>
-            <div class="plates-summary">
-                <span class="plates-summary-pill" aria-label="{{ plate_count }} tracked plates">
-                    <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-car-front"></use></svg>
-                    {{ plate_count }} tracked
-                </span>
-                <span class="plates-summary-pill" aria-label="Plate count {{ plate_files|length }} of {{ max_plate_count }}">
-                    <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-image"></use></svg>
-                    {{ plate_files|length }}/{{ max_plate_count }} photos
-                </span>
-                <span class="plates-summary-pill" aria-label="Redaction {{ 'enabled' if redaction_config.enabled else 'disabled' }}">
-                    <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-shield"></use></svg>
-                    Redaction {{ 'on' if redaction_config.enabled else 'off' }}
-                </span>
-            </div>
-        </div>
-    </section>
-
-{# Tesla spec requirements — shown upfront so the user knows the constraints before opening a file picker. #}
-    <div class="plates-info-box" role="note" aria-label="Tesla license-plate requirements">
+    {# iOS Safari Warning ΓÇö file uploads only work in mobile Safari on iOS #}
+    <div id="iosWarning" class="ios-warning" style="display: none;">
         <p>
-            <svg class="plates-inline-icon" aria-hidden="true" style="vertical-align: text-bottom;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
-            <strong>Tesla License-Plate PNG Requirements:</strong>
+            <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+            <strong>iOS Browser Limitation:</strong>
+            File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.
         </p>
-        <ul>
+        <p>Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
+    </div>
+
+    {# Tesla Requirements Info #}
+    <div class="info-box" style="margin-bottom: 20px;">
+        <p>
+            <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+            <strong>Tesla License-Plate Requirements:</strong>
+        </p>
+        <ul style="margin: 10px 0 0 20px; padding: 0; font-size: 13px; color: var(--text-secondary);">
             <li><strong>Format:</strong> PNG only</li>
-            <li><strong>Size:</strong> {{ (max_file_size / 1024)|round(0)|int }} KB maximum per file</li>
-            <li><strong>Dimensions:</strong> {{ plate_width_na }}&times;{{ plate_height_na }} px (North America) or {{ plate_width_eu }}&times;{{ plate_height_eu }} px (Europe / Italy)</li>
-            <li><strong>Filename:</strong> up to {{ max_filename_length }} characters, letters and numbers only (no spaces, dashes, or underscores)</li>
-            <li><strong>Count:</strong> up to {{ max_plate_count }} plates at a time (currently {{ plate_files|length }}/{{ max_plate_count }})</li>
+            <li><strong>Size:</strong> {{ (max_file_size / 1024)|round(0)|int }} KB maximum</li>
+            <li><strong>Dimensions:</strong> {{ plate_width_na }}x{{ plate_height_na }} (North America) or {{ plate_width_eu }}x{{ plate_height_eu }} (Europe / Italy)</li>
+            <li><strong>Filename:</strong> {{ max_filename_length }} characters max, letters and numbers only (no spaces, dashes, or underscores)</li>
+            <li><strong>Count:</strong> Up to {{ max_plate_count }} plates at a time (currently: {{ plate_count }}/{{ max_plate_count }})</li>
         </ul>
-        <p>
-            <strong>Usage:</strong> Plate backgrounds appear in the Tesla in-car Background &rarr; Image selector.
-            Drop any image here and the built-in cropper produces a spec-compliant PNG &mdash; no need to resize beforehand.
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            <strong>Usage:</strong> License plates appear in the in-car Background &rarr; Image selector under license plate config.
+            <a href="https://github.com/teslamotors/custom-wraps" target="_blank" rel="noopener" style="color: var(--text-link);">View Tesla's custom-wraps repository</a> (license-plate spec is documented in <a href="https://github.com/teslamotors/custom-wraps/issues/13" target="_blank" rel="noopener" style="color: var(--text-link);">issue #13</a>).
         </p>
-        <p>
-            <a href="https://github.com/teslamotors/custom-wraps" target="_blank" rel="noopener noreferrer">View Tesla's custom-wraps repository</a>
-            (plate spec in <a href="https://github.com/teslamotors/custom-wraps/issues/13" target="_blank" rel="noopener noreferrer">issue #13</a>).
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            Drop any image and we'll open a cropper to produce a Tesla-compliant PNG &mdash; no need to resize ahead of time.
         </p>
     </div>
 
-{# Photo upload section — iOS Safari warning, desktop drag-and-drop, mobile fallback form.
-       WHY separate IDs: JS feature-detects desktop multi-upload and shows the appropriate interface. #}
-    <section class="plates-upload-section" aria-label="Upload plate image">
-        <div class="plates-panel-head">
-            <h2 class="plates-panel-title">Upload custom plate image</h2>
-            <p class="plates-copy">
-                Any image format accepted &mdash; the built-in cropper resizes to
-                {{ plate_width_na }}&times;{{ plate_height_na }} (NA) or
-                {{ plate_width_eu }}&times;{{ plate_height_eu }} (EU) and exports PNG.
-            </p>
-        </div>
-
-        {# iOS Safari limitation warning — shown only by JS when required #}
-        <div id="iosWarning" class="plates-info-box" style="display: none;" role="alert">
-            <p>
-                <svg class="plates-inline-icon" aria-hidden="true" style="vertical-align: text-bottom;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
-                <strong>iOS Browser Limitation:</strong>
-                File uploading is only available through Safari on iOS. Please open this page
-                in Safari to upload files. Desktop browsers work normally with any browser.
-            </p>
-        </div>
-
-        <div id="plateUploadControls">
-            {# Desktop drag-and-drop interface — hidden until JS confirms support #}
-            <div id="desktopUploadInterface" style="display: none;">
-                <div
-                    class="plates-drop-zone"
-                    id="dragDropZone"
-                    role="button"
-                    tabindex="0"
-                    aria-label="Drag and drop image files here or click to browse"
-                >
-                    <svg class="plates-drop-zone-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-image"></use></svg>
-                    <p style="font-size: var(--text-base); font-weight: 600; margin-bottom: var(--space-2); color: var(--text-primary);">
-                        Drag &amp; drop image files here or click to browse
+    <div class="folder-controls" id="plateUploadControls">
+        {# Desktop drag-and-drop interface (hidden by default; JS shows it when supported) #}
+        <div id="desktopUploadInterface" style="display: none;">
+            <div class="drag-drop-zone" id="dragDropZone" style="border: 3px dashed var(--border-input); border-radius: 8px; padding: 40px; text-align: center; background: var(--form-input-bg); cursor: pointer; transition: all 0.3s; margin-bottom: 20px; min-height: 44px;">
+                <div style="pointer-events: none;">
+                    <svg class="drop-zone-icon" aria-hidden="true" style="width: 48px; height: 48px; color: var(--accent); display: block; margin: 0 auto 15px;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-image"></use></svg>
+                    <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Drag &amp; drop image files here or click to browse</p>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">
+                        Any image format &middot; we'll crop to {{ plate_width_na }}x{{ plate_height_na }} or {{ plate_width_eu }}x{{ plate_height_eu }} &middot; max {{ (max_file_size / 1024)|round(0)|int }} KB output
                     </p>
-                    <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0;">
-                        Any image format &middot; crops to {{ plate_width_na }}&times;{{ plate_height_na }} or {{ plate_width_eu }}&times;{{ plate_height_eu }} &middot; max {{ (max_file_size / 1024)|round(0)|int }} KB output
-                    </p>
-                </div>
-                <input
-                    type="file"
-                    id="plate_files_multi"
-                    accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
-                    multiple
-                    aria-label="Select image files"
-                    style="display: none;"
-                >
-                <div id="selectedFilesPreview" style="display: none; margin-bottom: var(--space-5);">
-                    <h3 style="margin: 0 0 var(--space-3); font-size: var(--text-base); font-weight: 600; color: var(--text-primary);">
-                        <svg class="plates-inline-icon" aria-hidden="true" style="vertical-align: text-bottom;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-list"></use></svg>
-                        Selected files
-                    </h3>
-                    <div id="filesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: var(--radius-md); padding: var(--space-3); max-height: 18rem; overflow-y: auto;" role="list" aria-label="Files staged for upload"></div>
-                    <div class="plates-actions" style="margin-top: var(--space-3);">
-                        <button type="button" class="plates-btn plates-btn-primary" id="uploadSelectedBtn" aria-label="Upload all staged files">
-                            <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use></svg>
-                            Upload all files
-                        </button>
-                        <button type="button" class="plates-btn plates-btn-secondary" id="clearSelectedBtn" aria-label="Clear staged files">
-                            <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-x"></use></svg>
-                            Clear all
-                        </button>
-                    </div>
                 </div>
             </div>
 
-            {# Mobile / fallback form — always rendered; JS hides it when desktop interface is active #}
-            <form
-                method="post"
-                action="{{ url_for('license_plates.upload_plate') }}"
-                enctype="multipart/form-data"
-                id="plateUploadForm"
-                style="margin-bottom: var(--space-5);"
-            >
-                <div class="plates-field">
-                    <label for="plate_file">Upload custom plate image</label>
-                    <p class="plates-field-copy">
-                        Any image &middot; crops to {{ plate_width_na }}&times;{{ plate_height_na }} (NA) or {{ plate_width_eu }}&times;{{ plate_height_eu }} (EU) &middot; max {{ (max_file_size / 1024)|round(0)|int }} KB output
-                    </p>
-                    <input
-                        type="file"
-                        name="plate_file"
-                        id="plate_file"
-                        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
-                        required
-                    >
-                </div>
-                <div class="plates-actions">
-                    <button type="submit" class="plates-btn plates-btn-primary" id="plateUploadBtn">
-                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use></svg>
-                        Upload
-                    </button>
-                </div>
-            </form>
+            <input type="file" id="plate_files_multi" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple style="display: none;">
 
-            {# Upload progress indicator — shown by JS during XHR upload #}
-            <div id="plateUploadProgress" style="display: none; margin-bottom: var(--space-5);" aria-live="polite" aria-label="Upload progress">
-                <div style="background: var(--form-input-bg); border-radius: var(--radius-md); padding: var(--space-4); border: 2px solid var(--accent-primary);">
-                    <h3 style="margin: 0 0 var(--space-3); color: var(--accent-primary); font-size: var(--text-base); font-weight: 600;">
-                        <svg class="plates-inline-icon" aria-hidden="true" style="vertical-align: text-bottom;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use></svg>
-                        Uploading license plate&hellip;
-                    </h3>
-                    <div class="plates-progress-bar-outer" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                        <div id="plateProgressBar" class="plates-progress-bar-inner">0%</div>
-                    </div>
-                    <p id="plateUploadStatus" class="plates-copy" style="font-size: var(--text-sm);">Preparing upload&hellip;</p>
+            <div id="selectedFilesPreview" style="display: none; margin-bottom: 20px;">
+                <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">
+                    <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-list"></use></svg>
+                    Selected Files
+                </h4>
+                <div id="filesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 300px; overflow-y: auto;"></div>
+                <div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">
+                    <button type="button" class="action-btn" id="uploadSelectedBtn" style="min-height: 44px;">Upload All Files</button>
+                    <button type="button" class="action-btn danger" id="clearSelectedBtn" style="min-height: 44px;">Clear All</button>
                 </div>
             </div>
         </div>
-    </section>
 
-{# Photo plate library — desktop table + mobile cards.
-       WHY table for desktop: fixed-layout columns align dimensions + compliance neatly. #}
+        {# Mobile / fallback simple form (always rendered; JS hides it when desktop interface is active) #}
+        <form method="post" action="{{ url_for('license_plates.upload_plate') }}" enctype="multipart/form-data" style="margin-bottom: 20px;" id="plateUploadForm">
+            <label for="plate_file" style="display: block; margin-bottom: 8px; font-weight: 600;">Upload Custom License Plate:</label>
+            <p style="margin: 0 0 10px 0; font-size: 13px; color: var(--text-secondary);">
+                Any image &middot; we'll crop to {{ plate_width_na }}x{{ plate_height_na }} or {{ plate_width_eu }}x{{ plate_height_eu }} &middot; max {{ (max_file_size / 1024)|round(0)|int }} KB output
+            </p>
+            <input type="file" name="plate_file" id="plate_file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" required
+                   style="display: block; margin-bottom: 10px; padding: 10px; border: 2px solid var(--border-input); border-radius: 4px; background: var(--form-input-bg); width: 100%; max-width: 400px; font-size: 14px; color: var(--text-primary); min-height: 44px;">
+            <button type="submit" class="action-btn" id="plateUploadBtn" style="min-height: 44px;">Upload</button>
+        </form>
+
+        <div id="plateUploadProgress" style="display: none; margin-bottom: 20px;">
+            <div style="background: var(--upload-progress-bg, var(--form-input-bg)); border-radius: 8px; padding: 15px; border: 2px solid var(--accent);">
+                <h4 style="margin: 0 0 10px 0; color: var(--accent);">
+                    <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use></svg>
+                    Uploading License Plate&hellip;
+                </h4>
+                <div style="background: var(--upload-progress-bar-bg, var(--bg-secondary)); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
+                    <div id="plateProgressBar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: var(--bg-primary); font-weight: bold; font-size: 14px;">
+                        0%
+                    </div>
+                </div>
+                <p id="plateUploadStatus" style="margin: 0; font-size: 13px; color: var(--text-secondary);">Preparing upload&hellip;</p>
+            </div>
+        </div>
+    </div>
+
     {% if plate_files %}
-    <section class="plates-photo-library" aria-label="Uploaded plate images">
-        <div class="plates-library-toolbar">
-            <div>
-                <h2 class="plates-section-title">Uploaded plate images</h2>
-                <p class="plates-copy">
-                    {{ plate_files|length }} of {{ max_plate_count }} slots used.
-                    Non-compliant entries are highlighted.
-                </p>
+    {# Desktop table layout #}
+    <div class="video-table-container">
+        <table class="video-table" style="table-layout: fixed;">
+            <thead>
+                <tr>
+                    <th style="width: 18%;">Preview</th>
+                    <th style="width: 28%;">Filename</th>
+                    <th style="width: 14%;">Dimensions</th>
+                    <th style="width: 12%;">Size</th>
+                    <th style="width: 28%;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for plate in plate_files %}
+                <tr{% if not plate.compliant %} style="background: var(--bg-warning, var(--form-input-bg));"{% endif %}>
+                    <td>
+                        {# User-uploaded PNG rendered as a thumbnail ΓÇö exempt from the SVG-only rule per design system #}
+                        <img src="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                             alt="License plate {{ plate.filename }}"
+                             style="max-width: 120px; max-height: 60px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);"
+                             loading="lazy">
+                    </td>
+                    <td style="word-wrap: break-word; overflow-wrap: break-word;">
+                        {{ plate.filename }}
+                        {% if not plate.compliant %}
+                        <div style="margin-top: 6px; font-size: 12px; color: var(--accent-danger, var(--text-secondary));">
+                            <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                            {% for issue in plate.issues %}
+                            {{ issue }}{% if not loop.last %}; {% endif %}
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </td>
+                    <td>{{ plate.dimensions }}</td>
+                    <td>{{ plate.size_str }}</td>
+                    <td>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                            <a href="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                               class="action-btn" style="min-height: 44px; display: inline-flex; align-items: center;">
+                                Download
+                            </a>
+                            <form method="post" action="{{ url_for('license_plates.delete_plate', partition=plate.partition_key, filename=plate.filename) }}" style="display: inline; margin: 0;"
+                                  onsubmit="return confirm('Are you sure you want to delete {{ plate.filename }}?');">
+                                <button type="submit" class="action-btn danger" style="min-height: 44px;">Delete</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {# Mobile card layout #}
+    <div class="mobile-card-container">
+        {% for plate in plate_files %}
+        <div class="mobile-card plate-card"{% if not plate.compliant %} style="border-color: var(--accent-danger, var(--border-input));"{% endif %}>
+            <div style="text-align: center; margin-bottom: 8px;">
+                <img src="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                     alt="License plate {{ plate.filename }}"
+                     style="max-width: 100%; max-height: 80px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);"
+                     loading="lazy">
+            </div>
+            <div class="mobile-card-title">
+                <strong>{{ plate.filename }}</strong>
+            </div>
+            {% if not plate.compliant %}
+            <div style="margin: 6px 0; padding: 6px 8px; background: var(--bg-warning, var(--form-input-bg)); border-radius: 4px; font-size: 12px; color: var(--accent-danger, var(--text-secondary));">
+                <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
+                {% for issue in plate.issues %}
+                {{ issue }}{% if not loop.last %}; {% endif %}
+                {% endfor %}
+            </div>
+            {% endif %}
+            <div class="mobile-card-info">
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Dimensions:</span>
+                    <span class="mobile-card-info-value">{{ plate.dimensions }}</span>
+                </div>
+                <div class="mobile-card-info-row">
+                    <span class="mobile-card-info-label">Size:</span>
+                    <span class="mobile-card-info-value">{{ plate.size_str }}</span>
+                </div>
+            </div>
+            <div class="mobile-card-actions" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                <a href="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                   class="action-btn" style="flex: 1; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;">
+                    Download
+                </a>
+                <form method="post" action="{{ url_for('license_plates.delete_plate', partition=plate.partition_key, filename=plate.filename) }}"
+                      onsubmit="return confirm('Are you sure you want to delete {{ plate.filename }}?');"
+                      style="flex: 1; margin: 0; display: flex;">
+                    <button type="submit" class="action-btn danger" style="width: 100%; min-height: 44px;">Delete</button>
+                </form>
             </div>
         </div>
-
-        {# Desktop table (hidden below 768 px via responsive CSS) #}
-        <div class="plates-photo-table-wrap">
-            <table class="plates-photo-table">
-                <thead>
-                    <tr>
-                        <th scope="col" style="width: 18%;">Preview</th>
-                        <th scope="col" style="width: 28%;">Filename</th>
-                        <th scope="col" style="width: 14%;">Dimensions</th>
-                        <th scope="col" style="width: 12%;">Size</th>
-                        <th scope="col" style="width: 28%;">Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for plate in plate_files %}
-                    <tr class="{% if not plate.compliant %}is-noncompliant{% endif %}">
-                        <td>
-                            {# User-uploaded PNG — img is appropriate here; the design system's
-                               SVG-only rule applies to UI icons, not user-supplied content. #}
-                            <img
-                                src="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
-                                alt="License plate {{ plate.filename }}"
-                                style="max-width: 7.5rem; max-height: 3.75rem; border: 1px solid var(--border-input); border-radius: var(--radius-sm); background: var(--bg-secondary);"
-                                loading="lazy"
-                            >
-                        </td>
-                        <td style="word-break: break-word;">
-                            {{ plate.filename }}
-                            {% if not plate.compliant %}
-                            <div class="plates-compliance-warn">
-                                <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
-                                <span>{% for issue in plate.issues %}{{ issue }}{% if not loop.last %}; {% endif %}{% endfor %}</span>
-                            </div>
-                            {% endif %}
-                        </td>
-                        <td>{{ plate.dimensions }}</td>
-                        <td>{{ plate.size_str }}</td>
-                        <td>
-                            <div class="plates-actions">
-                                <a
-                                    href="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
-                                    class="plates-btn plates-btn-secondary"
-                                    aria-label="Download {{ plate.filename }}"
-                                    download
-                                >
-                                    <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-download"></use></svg>
-                                    Download
-                                </a>
-                                <form
-                                    method="post"
-                                    action="{{ url_for('license_plates.delete_plate', partition=plate.partition_key, filename=plate.filename) }}"
-                                    class="js-plate-confirm"
-                                    data-confirm="Delete {{ plate.filename }}?"
-                                    style="margin: 0;"
-                                >
-                                    <button type="submit" class="plates-btn plates-btn-danger" aria-label="Delete {{ plate.filename }}">
-                                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
-                                        Delete
-                                    </button>
-                                </form>
-                            </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-
-        {# Mobile card list (shown only below 768 px) #}
-        <div class="plates-photo-cards" aria-label="Plate images list">
-            {% for plate in plate_files %}
-            <article class="plates-card {% if not plate.compliant %}js-plate-noncompliant{% endif %}" style="{% if not plate.compliant %}border-color: var(--accent-danger);{% endif %}">
-                <div style="text-align: center;">
-                    <img
-                        src="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
-                        alt="License plate {{ plate.filename }}"
-                        style="max-width: 100%; max-height: 5rem; border: 1px solid var(--border-input); border-radius: var(--radius-sm); background: var(--bg-secondary);"
-                        loading="lazy"
-                    >
-                </div>
-                {% if not plate.compliant %}
-                <div class="plates-compliance-warn" role="alert">
-                    <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
-                    <span>{% for issue in plate.issues %}{{ issue }}{% if not loop.last %}; {% endif %}{% endfor %}</span>
-                </div>
-                {% endif %}
-                <dl class="plates-card-meta">
-                    <div>
-                        <dt>Filename</dt>
-                        <dd>{{ plate.filename }}</dd>
-                    </div>
-                    <div>
-                        <dt>Dimensions</dt>
-                        <dd>{{ plate.dimensions }}</dd>
-                    </div>
-                    <div>
-                        <dt>Size</dt>
-                        <dd>{{ plate.size_str }}</dd>
-                    </div>
-                </dl>
-                <div class="plates-card-actions plates-actions">
-                    <a
-                        href="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
-                        class="plates-btn plates-btn-secondary"
-                        aria-label="Download {{ plate.filename }}"
-                        style="flex: 1; justify-content: center;"
-                        download
-                    >
-                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-download"></use></svg>
-                        Download
-                    </a>
-                    <form
-                        method="post"
-                        action="{{ url_for('license_plates.delete_plate', partition=plate.partition_key, filename=plate.filename) }}"
-                        class="js-plate-confirm"
-                        data-confirm="Delete {{ plate.filename }}?"
-                        style="flex: 1; margin: 0; display: flex;"
-                    >
-                        <button type="submit" class="plates-btn plates-btn-danger" style="width: 100%;" aria-label="Delete {{ plate.filename }}">
-                            <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
-                            Delete
-                        </button>
-                    </form>
-                </div>
-            </article>
-            {% endfor %}
-        </div>
-    </section>
+        {% endfor %}
+    </div>
     {% else %}
-    <div class="plates-empty" role="status">
-        <h2 class="plates-empty-title">No plate images uploaded yet</h2>
-        <p class="plates-empty-copy">
-            Upload a PNG above to set a custom background image behind the license
-            plate in your Tesla (Background &rarr; Image in-car).
+    <div class="info-box">
+        <p>No license-plate files found in the LicensePlate folder.</p>
+        <p style="margin-top: 10px; font-size: 13px; color: var(--text-secondary);">
+            Upload a PNG to set a custom background image behind the license plate in your Tesla.
         </p>
     </div>
     {% endif %}
-
-{# Tracked plate panels — two-column grid on desktop.
-       Left: add-plate form.  Right: redaction toggle + normalization preview.
-       WHY text records: feeds the shared redaction pipeline independent of the photo feature. #}
-    <div class="plates-grid">
-        <section class="plates-panel" aria-label="Add tracked plate">
-            <div class="plates-panel-head">
-                <h2 class="plates-panel-title">Add tracked plate</h2>
-                <p class="plates-copy">
-                    Normalization strips spaces and punctuation, then stores uppercase text.
-                    A tracked plate feeds the shared redaction lookup list.
-                </p>
-            </div>
-            <form method="post" action="{{ url_for('license_plates.add_license_plate') }}" class="plates-form">
-                <div class="plates-field">
-                    <label for="plateText">Plate text</label>
-                    <input
-                        id="plateText"
-                        name="plate_text"
-                        type="text"
-                        maxlength="{{ max_plate_length + 8 }}"
-                        required
-                        aria-describedby="plateTextHint"
-                    >
-                    <p id="plateTextHint" class="plates-field-copy">Up to {{ max_plate_length }} normalized characters.</p>
-                </div>
-                <div class="plates-field">
-                    <label for="plateLabel">Label</label>
-                    <input
-                        id="plateLabel"
-                        name="label"
-                        type="text"
-                        maxlength="{{ max_label_length }}"
-                        aria-label="Optional human-readable label for this plate"
-                    >
-                </div>
-                <div class="plates-field">
-                    <label for="plateNotes">Notes</label>
-                    <textarea
-                        id="plateNotes"
-                        name="notes"
-                        maxlength="{{ max_notes_length }}"
-                        aria-label="Optional notes about this plate"
-                    ></textarea>
-                </div>
-                <div class="plates-actions">
-                    <button class="plates-btn plates-btn-primary" type="submit">
-                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-plus"></use></svg>
-                        Save plate
-                    </button>
-                </div>
-            </form>
-        </section>
-
-        <section class="plates-panel" aria-label="Redaction and normalization">
-            <div class="plates-panel-head">
-                <h2 class="plates-panel-title">Default redaction</h2>
-                <p class="plates-copy">Applies to future pipeline jobs that consult the shared plate-redaction setting.</p>
-            </div>
-            <form method="post" action="{{ url_for('license_plates.update_redaction') }}" class="plates-form">
-                <label class="plates-switch" for="redactionEnabled">
-                    <input
-                        id="redactionEnabled"
-                        name="enabled"
-                        type="checkbox"
-                        value="true"
-                        {% if redaction_config.enabled %}checked{% endif %}
-                        aria-describedby="redactionTimestamp"
-                    >
-                    <span>
-                        <span class="plates-switch-copy">Enable redaction by default</span>
-                        <span id="redactionTimestamp" class="plates-copy">Last updated {{ redaction_config.updated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>
-                    </span>
-                </label>
-                <div class="plates-actions">
-                    <button class="plates-btn plates-btn-secondary" type="submit">
-                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-save"></use></svg>
-                        Save setting
-                    </button>
-                </div>
-            </form>
-
-            <div class="plates-panel-head" style="margin-top: var(--space-4);">
-                <h2 class="plates-panel-title">Normalization check</h2>
-                <p class="plates-copy">
-                    Preview how the pipeline normalizes a candidate plate and whether it is
-                    already in the tracked list.
-                </p>
-            </div>
-            <form id="plateMatchForm" class="plates-form" aria-label="Check plate normalization">
-                <div class="plates-field">
-                    <label for="plateCandidate">Candidate plate</label>
-                    <input
-                        id="plateCandidate"
-                        name="candidate"
-                        type="text"
-                        maxlength="{{ max_plate_length + 8 }}"
-                        aria-label="Enter a plate to preview normalization"
-                    >
-                </div>
-                <div class="plates-actions">
-                    <button id="plateMatchButton" class="plates-btn plates-btn-secondary" type="submit">
-                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-search"></use></svg>
-                        Check match
-                    </button>
-                </div>
-            </form>
-            <p id="plateMatchResult" class="plates-match-result" aria-live="polite" role="status">
-                Enter a plate to preview normalization.
-            </p>
-        </section>
-    </div>
-
-    {# Tracked plate library — searchable card list with inline edit and bulk delete. #}
-    <section class="plates-library" aria-label="Tracked plate library">
-        <div class="plates-library-toolbar">
-            <div>
-                <h2 class="plates-section-title">Tracked plate library</h2>
-                <p class="plates-copy">Use bulk delete for cleanup, or expand a card to edit metadata.</p>
-            </div>
-            <div class="plates-library-actions">
-                <div class="plates-filter">
-                    <label for="platesFilter">Filter plates</label>
-                    <input
-                        id="platesFilter"
-                        type="search"
-                        placeholder="Search by plate, label, or notes"
-                        aria-label="Filter tracked plates by text"
-                    >
-                </div>
-                {% if plates %}
-                <div class="plates-actions">
-                    <label class="plates-select-label" for="platesSelectAll">
-                        <input id="platesSelectAll" type="checkbox" aria-label="Select all visible plates">
-                        Select all
-                    </label>
-                    <span id="platesSelectedCount" class="plates-summary-pill" aria-live="polite" aria-atomic="true">0 selected</span>
-                    <button
-                        class="plates-btn plates-btn-danger"
-                        type="submit"
-                        form="platesBulkDeleteForm"
-                        id="platesBulkDeleteButton"
-                        disabled
-                        aria-label="Delete selected tracked plates"
-                    >
-                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
-                        Delete selected
-                    </button>
-                </div>
-                {% endif %}
-            </div>
-        </div>
-
-        {% if plates %}
-        <form id="platesBulkDeleteForm" method="post" action="{{ url_for('license_plates.bulk_delete_license_plates') }}" aria-label="Bulk delete tracked plates">
-            <div class="plates-cards" role="list" aria-label="Tracked plates">
-                {% for plate in plates %}
-                <article
-                    class="plates-card js-plate-card"
-                    data-filter-text="{{ [plate.plate_text, plate.label, plate.notes]|join(' ')|lower }}"
-                    role="listitem"
-                >
-                    <div class="plates-card-head">
-                        <div>
-                            <h3 class="plates-card-title">{{ plate.plate_text }}</h3>
-                            <p class="plates-card-copy">{{ plate.label if plate.label else 'No label yet.' }}</p>
-                        </div>
-                        <div class="plates-card-actions">
-                            <label class="plates-select-label" aria-label="Select tracked plate {{ plate.plate_text }}">
-                                <input class="js-plate-select" type="checkbox" name="plate_ids" value="{{ plate.id }}">
-                                <span>Select</span>
-                            </label>
-                            <span class="plates-badge {% if redaction_config.enabled %}is-enabled{% else %}is-disabled{% endif %}" aria-label="Redaction status: {{ 'enabled' if redaction_config.enabled else 'manual review' }}">
-                                <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#{% if redaction_config.enabled %}icon-eye-off{% else %}icon-eye{% endif %}"></use></svg>
-                                {{ 'Redact by default' if redaction_config.enabled else 'Manual review' }}
-                            </span>
-                        </div>
-                    </div>
-                    <dl class="plates-card-meta">
-                        <div>
-                            <dt>Normalized</dt>
-                            <dd>{{ plate.normalized_plate }}</dd>
-                        </div>
-                        <div>
-                            <dt>Added</dt>
-                            <dd>{{ plate.created_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
-                        </div>
-                        <div>
-                            <dt>Updated</dt>
-                            <dd>{{ plate.updated_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
-                        </div>
-                        <div>
-                            <dt>Notes</dt>
-                            <dd>{{ plate.notes if plate.notes else 'No notes.' }}</dd>
-                        </div>
-                    </dl>
-                    <details class="plates-edit-panel">
-                        <summary style="cursor: pointer; font-weight: 600; color: var(--text-primary);" aria-label="Edit tracked plate {{ plate.plate_text }}">
-                            Edit tracked plate
-                        </summary>
-                        <form
-                            method="post"
-                            action="{{ url_for('license_plates.update_license_plate', plate_id=plate.id) }}"
-                            class="plates-form js-plate-confirm"
-                            data-confirm="Save changes to {{ plate.plate_text }}?"
-                        >
-                            <div class="plates-field">
-                                <label for="plateText{{ plate.id }}">Plate text</label>
-                                <input
-                                    id="plateText{{ plate.id }}"
-                                    name="plate_text"
-                                    type="text"
-                                    value="{{ plate.plate_text }}"
-                                    maxlength="{{ max_plate_length + 8 }}"
-                                    required
-                                >
-                            </div>
-                            <div class="plates-field">
-                                <label for="plateLabel{{ plate.id }}">Label</label>
-                                <input
-                                    id="plateLabel{{ plate.id }}"
-                                    name="label"
-                                    type="text"
-                                    value="{{ plate.label }}"
-                                    maxlength="{{ max_label_length }}"
-                                >
-                            </div>
-                            <div class="plates-field">
-                                <label for="plateNotes{{ plate.id }}">Notes</label>
-                                <textarea
-                                    id="plateNotes{{ plate.id }}"
-                                    name="notes"
-                                    maxlength="{{ max_notes_length }}"
-                                >{{ plate.notes }}</textarea>
-                            </div>
-                            <div class="plates-actions">
-                                <button class="plates-btn plates-btn-secondary" type="submit">
-                                    <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-save"></use></svg>
-                                    Save changes
-                                </button>
-                            </div>
-                        </form>
-                    </details>
-                    <form
-                        method="post"
-                        action="{{ url_for('license_plates.delete_license_plate', partition=default_partition, plate_id=plate.id) }}"
-                        class="js-plate-confirm"
-                        data-confirm="Delete tracked plate {{ plate.plate_text }}?"
-                    >
-                        <button class="plates-btn plates-btn-danger" type="submit" aria-label="Delete tracked plate {{ plate.plate_text }}">
-                            <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
-                            Delete plate
-                        </button>
-                    </form>
-                </article>
-                {% endfor %}
-            </div>
-        </form>
-        {% else %}
-        <div class="plates-empty" role="status">
-            <h3 class="plates-empty-title">No tracked plates yet</h3>
-            <p class="plates-empty-copy">Add a known plate above to seed the shared redaction lookup list.</p>
-        </div>
-        {% endif %}
-    </section>
 </div>
 
-{# Cropper modal — vanilla canvas, pointer-events, no framework dependency. #}
-<div
-    id="cropperModal"
-    class="plates-cropper-modal"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="cropperTitle"
-    style="display: none;"
->
-    <div class="plates-cropper-content">
-        <header class="plates-cropper-header">
-            <h2 id="cropperTitle" style="margin: 0; font-size: var(--text-xl); color: var(--text-primary);">
-                <svg class="plates-inline-icon" aria-hidden="true" style="vertical-align: text-bottom;"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-image"></use></svg>
+{# ============================================================== #}
+{# Smart-resize cropper modal ΓÇö pure vanilla JS / canvas / pointer #}
+{# ============================================================== #}
+<div id="cropperModal" class="cropper-modal" role="dialog" aria-modal="true" aria-labelledby="cropperTitle" style="display: none;">
+    <div class="cropper-content">
+        <header class="cropper-header">
+            <h3 id="cropperTitle" style="margin: 0;">
+                <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-image"></use></svg>
                 Crop License Plate Image
-            </h2>
-            <button
-                type="button"
-                id="cropperCloseBtn"
-                class="plates-btn plates-btn-secondary"
-                aria-label="Close cropper"
-            >
-                <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-x"></use></svg>
+            </h3>
+            <button type="button" id="cropperCloseBtn" class="action-btn" aria-label="Close cropper" style="min-width: 44px; min-height: 44px;">
+                <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-x"></use></svg>
             </button>
         </header>
 
-        <div class="plates-cropper-body">
-            <p id="cropperFileInfo" class="plates-copy" style="font-size: var(--text-sm);"></p>
+        <div class="cropper-body">
+            <div id="cropperFileInfo" style="margin-bottom: 10px; font-size: 13px; color: var(--text-secondary);"></div>
 
-            {# Region selector — required before the crop rect can be drawn because
-               NA and EU plates have different aspect ratios. #}
-            <fieldset style="border: 1px solid var(--border-input); border-radius: var(--radius-md); padding: var(--space-3);">
-                <legend style="font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); padding: 0 var(--space-2);">Region</legend>
-                <label style="display: inline-flex; align-items: center; gap: var(--space-2); margin-right: var(--space-4); min-height: 44px; cursor: pointer;">
-                    <input type="radio" name="plateRegion" value="na" id="cropperRegionNa" checked style="width: 1.125rem; height: 1.125rem;">
+            <fieldset style="border: 1px solid var(--border-input); border-radius: 4px; padding: 10px 14px; margin-bottom: 12px;">
+                <legend style="font-size: 13px; font-weight: 600; padding: 0 6px;">Region</legend>
+                <label style="display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; min-height: 44px; cursor: pointer;">
+                    <input type="radio" name="plateRegion" value="na" id="cropperRegionNa" checked style="width: 18px; height: 18px;">
                     <span>North America ({{ plate_width_na }}&times;{{ plate_height_na }})</span>
                 </label>
-                <label style="display: inline-flex; align-items: center; gap: var(--space-2); min-height: 44px; cursor: pointer;">
-                    <input type="radio" name="plateRegion" value="eu" id="cropperRegionEu" style="width: 1.125rem; height: 1.125rem;">
+                <label style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; cursor: pointer;">
+                    <input type="radio" name="plateRegion" value="eu" id="cropperRegionEu" style="width: 18px; height: 18px;">
                     <span>Europe / Italy ({{ plate_width_eu }}&times;{{ plate_height_eu }})</span>
                 </label>
             </fieldset>
 
-            {# Canvas wrapper — touch-action: none prevents the browser's
-               built-in pan gesture from fighting the crop drag handlers. #}
-            <div style="position: relative; max-width: 100%; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border-input); border-radius: var(--radius-md); touch-action: none;">
-                <canvas id="cropperCanvas" style="display: block; max-width: 100%; touch-action: none;" aria-label="Crop canvas — drag corners to resize crop area"></canvas>
+            <div class="cropper-canvas-wrapper" style="position: relative; max-width: 100%; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border-input); border-radius: 4px; touch-action: none;">
+                <canvas id="cropperCanvas" style="display: block; max-width: 100%; touch-action: none;"></canvas>
             </div>
 
-            <div class="plates-actions">
-                <button type="button" id="cropperResetBtn" class="plates-btn plates-btn-secondary" aria-label="Reset crop area to default">Reset crop</button>
-                <button type="button" id="cropperMaximizeBtn" class="plates-btn plates-btn-secondary" aria-label="Maximize crop area">Maximize crop</button>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
+                <button type="button" id="cropperResetBtn" class="action-btn" style="min-height: 44px;">Reset crop</button>
+                <button type="button" id="cropperMaximizeBtn" class="action-btn" style="min-height: 44px;">Maximize crop</button>
             </div>
 
-            <div>
-                <p style="margin: 0 0 var(--space-2); font-size: var(--text-sm); font-weight: 600; color: var(--text-primary);">Live preview (actual size):</p>
-                <div style="background: var(--bg-secondary); padding: var(--space-2); border-radius: var(--radius-md); border: 1px solid var(--border-input); display: inline-block;">
-                    <canvas id="cropperPreview" style="display: block; image-rendering: auto; background: var(--bg-primary);" aria-label="Preview of cropped plate at actual output size"></canvas>
+            <div style="margin-top: 14px;">
+                <p style="margin: 0 0 6px 0; font-size: 13px; font-weight: 600; color: var(--text-primary);">Live preview (actual size):</p>
+                <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; border: 1px solid var(--border-input); display: inline-block;">
+                    <canvas id="cropperPreview" style="display: block; image-rendering: auto; background: var(--bg-primary);"></canvas>
                 </div>
-                <p id="cropperOutputInfo" class="plates-copy" style="margin-top: var(--space-2); font-size: var(--text-xs);"></p>
+                <p id="cropperOutputInfo" style="margin: 6px 0 0 0; font-size: 12px; color: var(--text-secondary);"></p>
             </div>
         </div>
 
-        <footer class="plates-cropper-footer">
-            <button type="button" id="cropperCancelBtn" class="plates-btn plates-btn-secondary" aria-label="Cancel crop and discard image">Cancel</button>
-            <button type="button" id="cropperConfirmBtn" class="plates-btn plates-btn-primary" aria-label="Confirm crop and stage image for upload">Use this image</button>
+        <footer class="cropper-footer" style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 16px;">
+            <button type="button" id="cropperCancelBtn" class="action-btn" style="min-height: 44px;">Cancel</button>
+            <button type="button" id="cropperConfirmBtn" class="action-btn" style="min-height: 44px;">Use this image</button>
         </footer>
     </div>
 </div>
 
-<script type="module" src="{{ url_for('static', filename='js/license_plates.js') }}"></script>
-{% endblock %}
+<style>
+.cropper-modal {
+    position: fixed; inset: 0; z-index: 9999;
+    background: var(--modal-overlay-bg, rgba(0, 0, 0, 0.65));
+    display: flex; align-items: center; justify-content: center;
+    padding: 12px;
+    overflow-y: auto;
+}
+.cropper-content {
+    background: var(--bg-modal, var(--bg-primary));
+    color: var(--text-primary);
+    border: 1px solid var(--border-input);
+    border-radius: 8px;
+    padding: 16px;
+    width: 100%;
+    max-width: 720px;
+    max-height: 95vh;
+    overflow-y: auto;
+}
+.cropper-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; gap: 8px;
+}
+.cropper-body {
+    display: flex; flex-direction: column;
+}
+.inline-icon {
+    width: 16px; height: 16px;
+    display: inline-block; vertical-align: text-bottom;
+}
+.drop-zone-icon { display: block; }
+@media (max-width: 480px) {
+    .cropper-content { padding: 12px; }
+}
+[data-theme="dark"] .cropper-modal {
+    background: var(--modal-overlay-bg, rgba(0, 0, 0, 0.8));
+}
+</style>
 
+<script>
+// ---------------------------------------------------------------
+// Server-supplied limits & target dimensions
+// ---------------------------------------------------------------
+const MAX_FILE_SIZE = {{ max_file_size }};
+const MAX_FILENAME_LENGTH = {{ max_filename_length }};
+const MAX_PLATE_COUNT = {{ max_plate_count }};
+const CURRENT_PLATE_COUNT = {{ plate_count }};
+const PLATE_NA = { width: {{ plate_width_na }}, height: {{ plate_height_na }} };
+const PLATE_EU = { width: {{ plate_width_eu }}, height: {{ plate_height_eu }} };
+const VALID_FILENAME_RE = /^[A-Za-z0-9]+$/;
+
+function isMobileDevice() {
+    return /(iPad|iPhone|iPod|Android|Mobile)/i.test(navigator.userAgent) ||
+           window.matchMedia("(max-width: 768px)").matches;
+}
+function isIOS() {
+    return /(iPad|iPhone|iPod)/i.test(navigator.userAgent) && !window.MSStream;
+}
+function isSafari() {
+    var ua = navigator.userAgent;
+    return /Safari/i.test(ua) && !/Chrome|CriOS|EdgiOS|FxiOS|OPiOS/i.test(ua);
+}
+function supportsMultipleUpload() {
+    const input = document.createElement('input');
+    return 'multiple' in input && !isIOS();
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const isMobile = isMobileDevice();
+    const supportsMulti = supportsMultipleUpload();
+
+    const desktopInterface = document.getElementById('desktopUploadInterface');
+    const mobileForm = document.getElementById('plateUploadForm');
+    const iosWarning = document.getElementById('iosWarning');
+    const uploadControls = document.getElementById('plateUploadControls');
+
+    if (isIOS() && !isSafari()) {
+        if (iosWarning) iosWarning.style.display = 'block';
+        if (uploadControls) uploadControls.style.display = 'none';
+        return;
+    }
+
+    if (!isMobile && supportsMulti) {
+        if (desktopInterface) desktopInterface.style.display = 'block';
+        if (mobileForm) mobileForm.style.display = 'none';
+        initializeDragDrop();
+    } else {
+        if (desktopInterface) desktopInterface.style.display = 'none';
+        if (mobileForm) mobileForm.style.display = 'block';
+        initializeSimpleUpload();
+    }
+});
+
+// ---------------------------------------------------------------
+// Multi-file selection state (post-cropper, validated PNG blobs)
+// ---------------------------------------------------------------
+let selectedFiles = [];          // Array of { name, blob, dimensions }
+let validationResults = new Map(); // name -> { valid, errors }
+
+function initializeDragDrop() {
+    const dropZone = document.getElementById('dragDropZone');
+    const fileInput = document.getElementById('plate_files_multi');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+    if (!dropZone || !fileInput) return;
+
+    dropZone.addEventListener('click', function() { fileInput.click(); });
+    fileInput.addEventListener('change', function(e) {
+        handleSelectedFiles(Array.from(e.target.files));
+        // Reset so selecting the same filename twice still triggers change.
+        fileInput.value = '';
+    });
+
+    dropZone.addEventListener('dragenter', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.style.borderColor = 'var(--accent)';
+        dropZone.style.background = 'var(--hover-bg, var(--form-input-bg))';
+    });
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault(); e.stopPropagation();
+    });
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+    });
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.style.borderColor = 'var(--border-input)';
+        dropZone.style.background = 'var(--form-input-bg)';
+        handleSelectedFiles(Array.from(e.dataTransfer.files));
+    });
+
+    if (uploadBtn) uploadBtn.addEventListener('click', uploadAllFiles);
+    if (clearBtn) clearBtn.addEventListener('click', function() {
+        selectedFiles = [];
+        validationResults.clear();
+        renderFilesList();
+    });
+}
+
+async function handleSelectedFiles(files) {
+    const remainingSlots = MAX_PLATE_COUNT - CURRENT_PLATE_COUNT - selectedFiles.length;
+    if (remainingSlots <= 0) {
+        alert('Maximum of ' + MAX_PLATE_COUNT + ' license plates allowed. ' +
+              'You already have ' + CURRENT_PLATE_COUNT + ' plates.');
+        return;
+    }
+
+    // Filter to images only.
+    const images = files.filter(f => f.type.startsWith('image/'));
+    if (images.length === 0) {
+        alert('Please select image files (PNG, JPEG, WebP, GIF, BMP).');
+        return;
+    }
+
+    let added = 0;
+    for (const file of images) {
+        if (added >= remainingSlots) {
+            alert('Only ' + remainingSlots + ' slot(s) remaining. ' +
+                  'Some files were not added.');
+            break;
+        }
+        // Each file goes through the cropper (or bypass if already exact dims).
+        const result = await processOneFile(file);
+        if (result) {
+            selectedFiles.push(result);
+            validationResults.set(result.name, validatePlateBlob(result));
+            added++;
+        }
+    }
+    renderFilesList();
+}
+
+function deriveBaseName(originalFilename) {
+    // Strip extension, then strip invalid characters so the user has
+    // a fighting chance of getting an alphanumeric default.
+    const noExt = originalFilename.replace(/\.[^.]+$/, '');
+    const cleaned = noExt.replace(/[^A-Za-z0-9]/g, '');
+    return cleaned.slice(0, MAX_FILENAME_LENGTH) || 'plate';
+}
+
+function loadImageFromFile(file) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = function() {
+            // Don't revoke yet ΓÇö the cropper still needs the image.
+            img._objectUrl = url;
+            resolve(img);
+        };
+        img.onerror = function() {
+            URL.revokeObjectURL(url);
+            reject(new Error('Failed to load image'));
+        };
+        img.src = url;
+    });
+}
+
+async function processOneFile(file) {
+    let img;
+    try {
+        img = await loadImageFromFile(file);
+    } catch (e) {
+        alert('Could not read ' + file.name + ': ' + e.message);
+        return null;
+    }
+
+    const isExactNa = (img.naturalWidth === PLATE_NA.width &&
+                       img.naturalHeight === PLATE_NA.height);
+    const isExactEu = (img.naturalWidth === PLATE_EU.width &&
+                       img.naturalHeight === PLATE_EU.height);
+
+    // Already-compliant PNGs bypass the cropper entirely.
+    if ((isExactNa || isExactEu) && file.type === 'image/png') {
+        if (img._objectUrl) URL.revokeObjectURL(img._objectUrl);
+        const baseName = deriveBaseName(file.name);
+        return {
+            name: baseName + '.png',
+            originalName: file.name,
+            blob: file,
+            dimensions: {
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+            },
+        };
+    }
+
+    // Otherwise open the cropper ΓÇö returns a Promise<{name, blob, dims}|null>
+    const cropResult = await openCropper(file, img);
+    if (img._objectUrl) URL.revokeObjectURL(img._objectUrl);
+    return cropResult;
+}
+
+function validatePlateBlob(item) {
+    const errors = [];
+    const baseName = item.name.replace(/\.png$/i, '');
+    if (baseName.length === 0) errors.push('Filename is empty');
+    if (baseName.length > MAX_FILENAME_LENGTH) {
+        errors.push('Filename too long (' + baseName.length + '/' +
+                    MAX_FILENAME_LENGTH + ')');
+    }
+    if (!VALID_FILENAME_RE.test(baseName)) {
+        errors.push('Filename must be letters and numbers only');
+    }
+    if (item.blob.size > MAX_FILE_SIZE) {
+        errors.push('Output is ' + (item.blob.size / 1024).toFixed(1) +
+                    ' KB (limit ' + (MAX_FILE_SIZE / 1024).toFixed(0) +
+                    ' KB) ΓÇö try a simpler image');
+    }
+    return { valid: errors.length === 0, errors: errors };
+}
+
+function renderFilesList() {
+    const preview = document.getElementById('selectedFilesPreview');
+    const filesList = document.getElementById('filesList');
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    if (!preview || !filesList) return;
+
+    if (selectedFiles.length === 0) {
+        preview.style.display = 'none';
+        return;
+    }
+    preview.style.display = 'block';
+
+    filesList.innerHTML = '';
+    let hasValid = false;
+
+    selectedFiles.forEach((item, index) => {
+        const v = validationResults.get(item.name) || { valid: false, errors: [] };
+        if (v.valid) hasValid = true;
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display: flex; flex-direction: column; padding: 10px; ' +
+            'border-bottom: 1px solid ' +
+            (v.valid ? 'var(--border-input)' : 'var(--accent-danger, var(--border-input))') +
+            '; color: var(--text-primary);';
+
+        const top = document.createElement('div');
+        top.style.cssText = 'display: flex; justify-content: space-between; align-items: center; gap: 8px;';
+
+        const left = document.createElement('div');
+        left.style.cssText = 'flex: 1; overflow: hidden; display: flex; align-items: center; gap: 8px;';
+
+        const icon = document.createElement('span');
+        icon.style.color = v.valid ? 'var(--accent-success, var(--text-primary))'
+                                   : 'var(--accent-danger, var(--text-primary))';
+        icon.innerHTML = v.valid
+            ? '<svg class="inline-icon" aria-hidden="true"><use href="{{ url_for("static", filename="icons/lucide-sprite.svg") }}#icon-check-circle"></use></svg>'
+            : '<svg class="inline-icon" aria-hidden="true"><use href="{{ url_for("static", filename="icons/lucide-sprite.svg") }}#icon-x-circle"></use></svg>';
+
+        const name = document.createElement('strong');
+        name.textContent = item.name;
+        name.style.wordBreak = 'break-word';
+
+        const meta = document.createElement('span');
+        meta.style.cssText = 'color: var(--text-secondary); font-size: 12px;';
+        meta.textContent = ' (' + (item.blob.size / 1024).toFixed(1) + ' KB' +
+            (item.dimensions ? ', ' + item.dimensions.width + 'x' + item.dimensions.height : '') +
+            ')';
+
+        left.appendChild(icon);
+        left.appendChild(name);
+        left.appendChild(meta);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.setAttribute('aria-label', 'Remove ' + item.name);
+        removeBtn.style.cssText = 'background: none; border: none; cursor: pointer; ' +
+            'color: var(--accent-danger, var(--text-primary)); padding: 8px; ' +
+            'min-width: 44px; min-height: 44px; flex-shrink: 0;';
+        removeBtn.innerHTML = '<svg class="inline-icon" aria-hidden="true"><use href="{{ url_for("static", filename="icons/lucide-sprite.svg") }}#icon-x"></use></svg>';
+        removeBtn.addEventListener('click', function() {
+            validationResults.delete(item.name);
+            selectedFiles.splice(index, 1);
+            renderFilesList();
+        });
+
+        top.appendChild(left);
+        top.appendChild(removeBtn);
+        row.appendChild(top);
+
+        if (!v.valid && v.errors.length > 0) {
+            const err = document.createElement('div');
+            err.style.cssText = 'margin-top: 5px; font-size: 12px; ' +
+                'color: var(--accent-danger, var(--text-secondary)); padding-left: 24px;';
+            err.textContent = v.errors.join('; ');
+            row.appendChild(err);
+        }
+        filesList.appendChild(row);
+    });
+
+    if (uploadBtn) uploadBtn.disabled = !hasValid;
+}
+
+async function uploadAllFiles() {
+    const valid = selectedFiles.filter(item =>
+        (validationResults.get(item.name) || {}).valid
+    );
+    if (valid.length === 0) {
+        alert('No valid files to upload. Please fix validation errors first.');
+        return;
+    }
+
+    const uploadBtn = document.getElementById('uploadSelectedBtn');
+    const clearBtn = document.getElementById('clearSelectedBtn');
+    const progressDiv = document.getElementById('plateUploadProgress');
+    const progressBar = document.getElementById('plateProgressBar');
+    const statusText = document.getElementById('plateUploadStatus');
+
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (clearBtn) clearBtn.disabled = true;
+
+    if (progressDiv) {
+        progressDiv.style.display = 'block';
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        statusText.textContent = 'Preparing upload...';
+    }
+
+    const formData = new FormData();
+    valid.forEach(item => {
+        formData.append('plate_files', item.blob, item.name);
+    });
+
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', function(e) {
+        if (!e.lengthComputable) return;
+        const pct = Math.round((e.loaded / e.total) * 100);
+        progressBar.style.width = pct + '%';
+        progressBar.textContent = pct + '%';
+        statusText.textContent = 'Uploading ' + valid.length + ' file(s)... (' +
+            (e.loaded / 1024).toFixed(1) + ' KB / ' +
+            (e.total / 1024).toFixed(1) + ' KB)';
+    });
+    xhr.addEventListener('load', function() {
+        if (xhr.status === 200) {
+            try {
+                const resp = JSON.parse(xhr.responseText);
+                progressBar.style.width = '100%';
+                progressBar.textContent = '100%';
+                progressBar.style.background = 'var(--accent-success, var(--accent))';
+                statusText.textContent = resp.summary || 'Upload complete';
+                statusText.style.color = 'var(--accent-success, var(--text-primary))';
+                setTimeout(function() { window.location.reload(); }, 1500);
+            } catch (e) {
+                statusText.textContent = 'Upload complete. Reloading...';
+                setTimeout(function() { window.location.reload(); }, 1000);
+            }
+        } else {
+            progressBar.style.background = 'var(--accent-danger, var(--accent))';
+            statusText.textContent = 'Upload failed: ' + xhr.statusText;
+            statusText.style.color = 'var(--accent-danger, var(--text-primary))';
+            if (uploadBtn) uploadBtn.disabled = false;
+            if (clearBtn) clearBtn.disabled = false;
+        }
+    });
+    xhr.addEventListener('error', function() {
+        progressBar.style.background = 'var(--accent-danger, var(--accent))';
+        statusText.textContent = 'Upload failed: network error';
+        statusText.style.color = 'var(--accent-danger, var(--text-primary))';
+        if (uploadBtn) uploadBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+    });
+    xhr.open('POST', '{{ url_for("license_plates.upload_multiple_plates") }}');
+    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+    xhr.send(formData);
+}
+
+function initializeSimpleUpload() {
+    // Mobile / fallback path ΓÇö intercept the form submit, run the
+    // cropper (or pass-through if already exact dims), then submit
+    // the resulting blob via fetch.
+    const form = document.getElementById('plateUploadForm');
+    const fileInput = document.getElementById('plate_file');
+    if (!form || !fileInput) return;
+
+    form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        if (!fileInput.files || !fileInput.files[0]) {
+            alert('Please select an image file.');
+            return;
+        }
+        const file = fileInput.files[0];
+        const item = await processOneFile(file);
+        if (!item) return;
+        const v = validatePlateBlob(item);
+        if (!v.valid) {
+            alert('Cannot upload: ' + v.errors.join('; '));
+            return;
+        }
+        // Build a one-file FormData and submit to the single-file endpoint.
+        const fd = new FormData();
+        fd.append('plate_file', item.blob, item.name);
+
+        const btn = document.getElementById('plateUploadBtn');
+        if (btn) btn.disabled = true;
+
+        try {
+            const resp = await fetch('{{ url_for("license_plates.upload_plate") }}', {
+                method: 'POST',
+                body: fd,
+            });
+            // Server redirects on success ΓÇö the response will be the
+            // re-rendered page. Easiest path: just reload to pick up
+            // the flash message.
+            window.location.reload();
+        } catch (err) {
+            alert('Upload failed: ' + err.message);
+            if (btn) btn.disabled = false;
+        }
+    });
+}
+
+// ---------------------------------------------------------------
+// Cropper modal ΓÇö vanilla canvas + pointer events
+// ---------------------------------------------------------------
+const cropperState = {
+    file: null,
+    img: null,
+    target: PLATE_NA,         // Active target dimensions
+    rect: { x: 0, y: 0, w: 0, h: 0 }, // Crop rect in source image coords
+    canvasScale: 1,           // Source-px per displayed-px
+    drag: null,               // { mode: 'move'|'resize-XX', anchor: ... }
+    resolve: null,            // Promise resolver for openCropper
+    fileBaseName: 'plate',
+};
+
+function openCropper(file, img) {
+    return new Promise((resolve) => {
+        cropperState.file = file;
+        cropperState.img = img;
+        cropperState.target = PLATE_NA;
+        cropperState.fileBaseName = deriveBaseName(file.name);
+        cropperState.resolve = resolve;
+
+        // Default region: pick the one whose aspect ratio is closer to
+        // the source image.
+        const srcAspect = img.naturalWidth / img.naturalHeight;
+        const naDiff = Math.abs(srcAspect - PLATE_NA.width / PLATE_NA.height);
+        const euDiff = Math.abs(srcAspect - PLATE_EU.width / PLATE_EU.height);
+        const useEu = euDiff < naDiff;
+        document.getElementById('cropperRegionNa').checked = !useEu;
+        document.getElementById('cropperRegionEu').checked = useEu;
+        cropperState.target = useEu ? PLATE_EU : PLATE_NA;
+
+        const info = document.getElementById('cropperFileInfo');
+        if (info) {
+            info.textContent = file.name + ' ΓÇö source ' + img.naturalWidth +
+                'x' + img.naturalHeight + ' (' +
+                (file.size / 1024).toFixed(1) + ' KB)';
+        }
+
+        setupCropperCanvas();
+        resetCropRect();
+        renderCropper();
+
+        const modal = document.getElementById('cropperModal');
+        modal.style.display = 'flex';
+    });
+}
+
+function closeCropper(result) {
+    document.getElementById('cropperModal').style.display = 'none';
+    const r = cropperState.resolve;
+    cropperState.resolve = null;
+    cropperState.img = null;
+    cropperState.file = null;
+    if (r) r(result);
+}
+
+function setupCropperCanvas() {
+    const canvas = document.getElementById('cropperCanvas');
+    const wrapper = canvas.parentElement;
+    // Fit the source image inside the available wrapper width while
+    // keeping a max display height for usability.
+    const maxW = Math.min(wrapper.clientWidth || 600, 720);
+    const maxH = Math.max(220, Math.min(window.innerHeight * 0.45, 500));
+    const img = cropperState.img;
+    let displayW = img.naturalWidth;
+    let displayH = img.naturalHeight;
+    const widthScale = maxW / displayW;
+    const heightScale = maxH / displayH;
+    const scale = Math.min(1, widthScale, heightScale);
+    displayW = Math.round(displayW * scale);
+    displayH = Math.round(displayH * scale);
+    canvas.width = displayW;
+    canvas.height = displayH;
+    canvas.style.width = displayW + 'px';
+    canvas.style.height = displayH + 'px';
+    cropperState.canvasScale = img.naturalWidth / displayW; // src px / display px
+}
+
+function resetCropRect() {
+    // Center a max-size aspect-locked crop inside the source image.
+    const img = cropperState.img;
+    const target = cropperState.target;
+    const targetAspect = target.width / target.height;
+    let cw = img.naturalWidth;
+    let ch = Math.round(cw / targetAspect);
+    if (ch > img.naturalHeight) {
+        ch = img.naturalHeight;
+        cw = Math.round(ch * targetAspect);
+    }
+    cropperState.rect = {
+        x: Math.round((img.naturalWidth - cw) / 2),
+        y: Math.round((img.naturalHeight - ch) / 2),
+        w: cw,
+        h: ch,
+    };
+}
+
+function maximizeCrop() {
+    resetCropRect();
+    renderCropper();
+}
+
+function renderCropper() {
+    const canvas = document.getElementById('cropperCanvas');
+    const ctx = canvas.getContext('2d');
+    const img = cropperState.img;
+    const scale = cropperState.canvasScale;
+
+    // Read theme-invariant cropper colours from CSS custom properties
+    // (defined in style.css :root and [data-theme="dark"] :root). The
+    // values are intentionally white/black for visibility against
+    // arbitrary user content; centralising them in CSS lets a future
+    // themer override them without touching this JS.
+    const styles = getComputedStyle(document.body);
+    const handleFill = styles.getPropertyValue('--cropper-handle-fill').trim() || '#ffffff';
+    const handleStroke = styles.getPropertyValue('--cropper-handle-stroke').trim() || '#000000';
+    const bgFallback = styles.getPropertyValue('--cropper-bg-fallback').trim() || '#000000';
+
+    ctx.fillStyle = styles.getPropertyValue('--bg-secondary').trim() || bgFallback;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const r = cropperState.rect;
+    const dx = r.x / scale, dy = r.y / scale;
+    const dw = r.w / scale, dh = r.h / scale;
+
+    // Dim the area outside the crop.
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.beginPath();
+    ctx.rect(0, 0, canvas.width, canvas.height);
+    ctx.rect(dx + dw, dy, -dw, dh); // counter-clockwise hole
+    ctx.fill('evenodd');
+    ctx.restore();
+
+    // Crop border + handles.
+    // White-with-black-halo is the standard cropper convention so the
+    // rectangle stays visible against arbitrary user image content.
+    // The hex values come from --cropper-handle-fill / --cropper-handle-stroke
+    // in style.css (theme-invariant by design ΓÇö see comment there).
+    ctx.strokeStyle = handleFill;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(dx + 1, dy + 1, dw - 2, dh - 2);
+    ctx.strokeStyle = handleStroke;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(dx + 0.5, dy + 0.5, dw - 1, dh - 1);
+
+    // Corner handles (drawn in display-space).
+    drawHandle(ctx, dx, dy, handleFill, handleStroke);
+    drawHandle(ctx, dx + dw, dy, handleFill, handleStroke);
+    drawHandle(ctx, dx, dy + dh, handleFill, handleStroke);
+    drawHandle(ctx, dx + dw, dy + dh, handleFill, handleStroke);
+
+    renderPreview();
+    updateOutputInfo();
+}
+
+function drawHandle(ctx, x, y, fill, stroke) {
+    const s = 12;
+    ctx.fillStyle = fill;
+    ctx.fillRect(x - s/2, y - s/2, s, s);
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - s/2 + 0.5, y - s/2 + 0.5, s - 1, s - 1);
+}
+
+function renderPreview() {
+    const preview = document.getElementById('cropperPreview');
+    preview.width = cropperState.target.width;
+    preview.height = cropperState.target.height;
+    // CSS size: clamp so a 420px canvas still fits on a 375px viewport.
+    const maxCssW = Math.min(cropperState.target.width, 320);
+    const cssScale = maxCssW / cropperState.target.width;
+    preview.style.width = Math.round(cropperState.target.width * cssScale) + 'px';
+    preview.style.height = Math.round(cropperState.target.height * cssScale) + 'px';
+
+    const ctx = preview.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.clearRect(0, 0, preview.width, preview.height);
+    const r = cropperState.rect;
+    ctx.drawImage(
+        cropperState.img,
+        r.x, r.y, r.w, r.h,
+        0, 0, preview.width, preview.height
+    );
+}
+
+function updateOutputInfo() {
+    const info = document.getElementById('cropperOutputInfo');
+    if (!info) return;
+    info.textContent = 'Output ' + cropperState.target.width + 'x' +
+        cropperState.target.height + ' PNG, filename ' +
+        cropperState.fileBaseName + '.png. Max ' +
+        (MAX_FILE_SIZE / 1024).toFixed(0) + ' KB.';
+}
+
+// ---------------------------------------------------------------
+// Pointer-based drag (works for mouse + touch + stylus)
+// ---------------------------------------------------------------
+function attachCropperPointerHandlers() {
+    const canvas = document.getElementById('cropperCanvas');
+    if (!canvas) return;
+
+    // 22px half-extent ΓåÆ 44├ù44px effective hit area, meeting the
+    // design system's minimum touch-target size for the corner handles.
+    // The visual handle (drawn in drawHandle()) stays smaller for
+    // aesthetic reasons; the larger hit area is invisible.
+    const HANDLE_HIT = 22; // px in display coords
+
+    canvas.addEventListener('pointerdown', function(e) {
+        e.preventDefault();
+        canvas.setPointerCapture(e.pointerId);
+        const pt = canvasPoint(e);
+        const r = cropperState.rect;
+        const scale = cropperState.canvasScale;
+        const dx = r.x / scale, dy = r.y / scale;
+        const dw = r.w / scale, dh = r.h / scale;
+        const corners = [
+            { name: 'tl', x: dx, y: dy },
+            { name: 'tr', x: dx + dw, y: dy },
+            { name: 'bl', x: dx, y: dy + dh },
+            { name: 'br', x: dx + dw, y: dy + dh },
+        ];
+        for (const c of corners) {
+            if (Math.abs(c.x - pt.x) <= HANDLE_HIT &&
+                Math.abs(c.y - pt.y) <= HANDLE_HIT) {
+                cropperState.drag = {
+                    mode: 'resize-' + c.name,
+                    startPt: pt,
+                    startRect: { ...r },
+                };
+                return;
+            }
+        }
+        if (pt.x >= dx && pt.x <= dx + dw &&
+            pt.y >= dy && pt.y <= dy + dh) {
+            cropperState.drag = {
+                mode: 'move',
+                startPt: pt,
+                startRect: { ...r },
+            };
+        }
+    });
+
+    canvas.addEventListener('pointermove', function(e) {
+        if (!cropperState.drag) return;
+        e.preventDefault();
+        const pt = canvasPoint(e);
+        const scale = cropperState.canvasScale;
+        const dxSrc = (pt.x - cropperState.drag.startPt.x) * scale;
+        const dySrc = (pt.y - cropperState.drag.startPt.y) * scale;
+        const sr = cropperState.drag.startRect;
+        const img = cropperState.img;
+        const targetAspect = cropperState.target.width / cropperState.target.height;
+
+        if (cropperState.drag.mode === 'move') {
+            let nx = sr.x + dxSrc;
+            let ny = sr.y + dySrc;
+            nx = Math.max(0, Math.min(img.naturalWidth - sr.w, nx));
+            ny = Math.max(0, Math.min(img.naturalHeight - sr.h, ny));
+            cropperState.rect = { x: Math.round(nx), y: Math.round(ny), w: sr.w, h: sr.h };
+        } else {
+            // Resize from a corner; keep aspect locked to target.
+            const corner = cropperState.drag.mode.split('-')[1];
+            // Anchor is the opposite corner.
+            const anchorX = (corner === 'tr' || corner === 'br') ? sr.x : sr.x + sr.w;
+            const anchorY = (corner === 'bl' || corner === 'br') ? sr.y : sr.y + sr.h;
+            // Pointer position in source coords.
+            const px = sr.x + (corner.endsWith('l') ? dxSrc : sr.w + dxSrc);
+            const py = sr.y + (corner.startsWith('t') ? dySrc : sr.h + dySrc);
+            // New width/height = distance from anchor; aspect-lock by
+            // snapping width to height * targetAspect.
+            let newW = Math.abs(px - anchorX);
+            let newH = Math.abs(py - anchorY);
+            if (newW / newH > targetAspect) {
+                newW = newH * targetAspect;
+            } else {
+                newH = newW / targetAspect;
+            }
+            // Compute new origin from anchor + sign.
+            const sx = (corner === 'tr' || corner === 'br') ? 1 : -1;
+            const sy = (corner === 'bl' || corner === 'br') ? 1 : -1;
+            let nx = sx > 0 ? anchorX : anchorX - newW;
+            let ny = sy > 0 ? anchorY : anchorY - newH;
+            // Clamp inside source.
+            if (nx < 0) { newW += nx; nx = 0; newH = newW / targetAspect; }
+            if (ny < 0) { newH += ny; ny = 0; newW = newH * targetAspect; }
+            if (nx + newW > img.naturalWidth) {
+                newW = img.naturalWidth - nx;
+                newH = newW / targetAspect;
+            }
+            if (ny + newH > img.naturalHeight) {
+                newH = img.naturalHeight - ny;
+                newW = newH * targetAspect;
+            }
+            // Floor a minimum size so the crop never collapses to 0.
+            if (newW < 16 || newH < 16) return;
+            cropperState.rect = {
+                x: Math.round(nx), y: Math.round(ny),
+                w: Math.round(newW), h: Math.round(newH),
+            };
+        }
+        renderCropper();
+    });
+
+    function endDrag(e) {
+        if (cropperState.drag) cropperState.drag = null;
+        try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+}
+
+function canvasPoint(e) {
+    const canvas = document.getElementById('cropperCanvas');
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: (e.clientX - rect.left) * (canvas.width / rect.width),
+        y: (e.clientY - rect.top) * (canvas.height / rect.height),
+    };
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    attachCropperPointerHandlers();
+
+    document.getElementById('cropperRegionNa').addEventListener('change', function() {
+        cropperState.target = PLATE_NA;
+        resetCropRect();
+        renderCropper();
+    });
+    document.getElementById('cropperRegionEu').addEventListener('change', function() {
+        cropperState.target = PLATE_EU;
+        resetCropRect();
+        renderCropper();
+    });
+    document.getElementById('cropperResetBtn').addEventListener('click', function() {
+        resetCropRect();
+        renderCropper();
+    });
+    document.getElementById('cropperMaximizeBtn').addEventListener('click', maximizeCrop);
+    document.getElementById('cropperCancelBtn').addEventListener('click', function() {
+        closeCropper(null);
+    });
+    document.getElementById('cropperCloseBtn').addEventListener('click', function() {
+        closeCropper(null);
+    });
+    document.getElementById('cropperConfirmBtn').addEventListener('click', confirmCrop);
+
+    // Re-fit the canvas if the viewport changes while the modal is open.
+    window.addEventListener('resize', function() {
+        if (document.getElementById('cropperModal').style.display !== 'none' &&
+            cropperState.img) {
+            setupCropperCanvas();
+            renderCropper();
+        }
+    });
+});
+
+function confirmCrop() {
+    const r = cropperState.rect;
+    const target = cropperState.target;
+    // Render to an offscreen canvas at exact target dimensions.
+    const out = document.createElement('canvas');
+    out.width = target.width;
+    out.height = target.height;
+    const ctx = out.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(
+        cropperState.img,
+        r.x, r.y, r.w, r.h,
+        0, 0, target.width, target.height
+    );
+    out.toBlob(function(blob) {
+        if (!blob) {
+            alert('Could not create the cropped PNG.');
+            return;
+        }
+        const finalName = cropperState.fileBaseName + '.png';
+        closeCropper({
+            name: finalName,
+            originalName: cropperState.file.name,
+            blob: blob,
+            dimensions: { width: target.width, height: target.height },
+        });
+    }, 'image/png');
+}
+</script>
+{% endblock %}

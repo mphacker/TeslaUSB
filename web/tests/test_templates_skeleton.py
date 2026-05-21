@@ -5,8 +5,8 @@ These tests verify that:
 1. The five scaffold blueprints (``mapping``, ``analytics``,
    ``media``, ``cloud_archive``, ``settings``) register and expose
    the endpoints that ``base.html`` references via ``url_for``.
-   Mapping now renders its real page; the remaining scaffold pages
-   still serve placeholder bodies.
+   Mapping and Cloud Archive now render their real pages; the
+   remaining scaffold pages still serve placeholder bodies.
 2. ``base.html`` renders to completion through Jinja — no
    ``BuildError`` from missing endpoints, no ``UndefinedError``
    from missing context vars (the context processor supplies
@@ -81,6 +81,14 @@ def test_mapping_scaffold_now_renders_real_page(app: Flask) -> None:
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
     assert '<h1 class="mapping-title">Mapping</h1>' in html
+
+
+def test_cloud_archive_scaffold_now_renders_real_page(app: Flask) -> None:
+    resp = app.test_client().get("/cloud/")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert '<h1 class="cloud-archive-title">Cloud Archive</h1>' in html
+    assert 'type="module" src="/static/js/cloud_archive.js"' in html
 
 
 @pytest.mark.parametrize(

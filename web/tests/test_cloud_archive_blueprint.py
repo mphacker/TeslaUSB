@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -277,13 +278,32 @@ def test_index_route_renders_with_stub_template(client: FlaskClient, app: Flask)
     assert response.get_data(as_text=True) == "none"
 
 
-@pytest.mark.skip(reason="template lands in 5.14e")
-def test_index_template_html_assertions_defer_until_template_phase(
-    client: FlaskClient, app: Flask
-) -> None:
-    _install_template(app, "<h1>Cloud Archive</h1>")
+def test_index_template_html_assertions(client: FlaskClient) -> None:
     response = client.get("/cloud/")
-    assert "Cloud Archive" in response.get_data(as_text=True)
+    html = response.get_data(as_text=True)
+    template_path = (
+        Path(cloud_archive_module.__file__).resolve().parent.parent
+        / "templates"
+        / "cloud_archive.html"
+    )
+    template_source = template_path.read_text(encoding="utf-8")
+
+    assert response.status_code == HTTPStatus.OK
+    assert "Cloud Archive" in html
+    assert "<title>Cloud Archive</title>" in html
+    for forbidden in ("Edit Mode", "Present Mode", "quick_edit", "current_mode"):
+        assert forbidden not in html
+        assert forbidden not in template_source
+    for forbidden in ("cdn.", "googleapis.com", "cdnjs.cloudflare.com"):
+        assert forbidden not in html
+        assert forbidden not in template_source
+    assert html.count("<svg") >= 10
+    assert 'script type="module" src="/static/js/cloud_archive.js"' in html
+    for module_name in ("provider.js", "sync_control.js", "queue.js", "browse.js", "archive.js"):
+        assert f"/static/js/cloud_archive/{module_name}" in html
+    assert html.count("data-confirm=") >= 4
+    assert html.count("aria-label=") >= 10
+    assert re.search(r"#[0-9a-fA-F]{3,6}\b", template_source) is None
 
 
 def test_index_route_degrades_when_services_raise(

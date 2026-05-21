@@ -23,7 +23,7 @@
     {% if auto_refresh %}
     <meta http-equiv="refresh" content="15">
     {% endif %}
-    <title>Tesla USB Gadget Control</title>
+    <title>{% block title %}Tesla USB Gadget Control{% endblock %}</title>
     <script>
         // Apply theme immediately before page renders to prevent flash
         (function() {

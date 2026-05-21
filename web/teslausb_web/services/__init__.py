@@ -62,6 +62,14 @@ from teslausb_web.services.lock_chime_service import (
     upload_chime_file,
     validate_tesla_wav,
 )
+from teslausb_web.services.wrap_service import (
+    ValidationResult,
+    WrapError,
+    WrapFileError,
+    WrapInfo,
+    WrapService,
+    make_wrap_service,
+)
 
 __all__ = (
     "ActiveChimeResolution",
@@ -87,14 +95,20 @@ __all__ = (
     "Schedule",
     "ScheduleOperationResult",
     "UploadResult",
+    "ValidationResult",
     "WavValidation",
     "WeeklySchedule",
+    "WrapError",
+    "WrapFileError",
+    "WrapInfo",
+    "WrapService",
     "delete_chime_file",
     "format_last_run",
     "format_schedule_display",
     "list_chime_files",
     "make_chime_group_manager",
     "make_chime_scheduler",
+    "make_wrap_service",
     "normalize_audio",
     "reencode_wav_for_tesla",
     "replace_lock_chime",

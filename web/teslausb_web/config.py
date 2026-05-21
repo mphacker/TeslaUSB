@@ -61,6 +61,13 @@ _DEFAULT_ACTIVE_SHOW_RELPATH: Final[str] = "lightshow_active.json"
 _DEFAULT_LIGHT_SHOW_MAX_UPLOAD_SIZE: Final[int] = 100 * 1024 * 1024
 _DEFAULT_LIGHT_SHOW_MAX_ZIP_SIZE: Final[int] = 500 * 1024 * 1024
 _DEFAULT_LIGHT_SHOW_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".fseq", ".mp3", ".wav")
+_DEFAULT_WRAPS_FOLDER: Final[str] = "Wraps"
+_DEFAULT_WRAP_MAX_SIZE: Final[int] = 1 * 1024 * 1024
+_DEFAULT_WRAP_MIN_DIMENSION: Final[int] = 512
+_DEFAULT_WRAP_MAX_DIMENSION: Final[int] = 1024
+_DEFAULT_WRAP_MAX_FILENAME_LENGTH: Final[int] = 30
+_DEFAULT_WRAP_MAX_UPLOAD_COUNT: Final[int] = 10
+_DEFAULT_WRAP_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".png",)
 
 # Highest valid TCP/UDP port number per RFC 793. Named to silence
 # the magic-value lint and document intent at the call site.
@@ -241,6 +248,50 @@ class LightShowsSection:
 
 
 @dataclass(frozen=True, slots=True)
+class WrapsSection:
+    """Tesla custom-wrap library paths and upload constraints."""
+
+    folder: str = _DEFAULT_WRAPS_FOLDER
+    max_size: int = _DEFAULT_WRAP_MAX_SIZE
+    min_dimension: int = _DEFAULT_WRAP_MIN_DIMENSION
+    max_dimension: int = _DEFAULT_WRAP_MAX_DIMENSION
+    max_filename_length: int = _DEFAULT_WRAP_MAX_FILENAME_LENGTH
+    max_upload_count: int = _DEFAULT_WRAP_MAX_UPLOAD_COUNT
+    allowed_extensions: tuple[str, ...] = _DEFAULT_WRAP_ALLOWED_EXTENSIONS
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        _validate_relpath_filename(self.folder, key="folder", section="wraps")
+        if self.max_size <= 0:
+            raise ConfigError(None, "[wraps] max_size must be > 0")
+        if self.min_dimension <= 0:
+            raise ConfigError(None, "[wraps] min_dimension must be > 0")
+        if self.max_dimension < self.min_dimension:
+            raise ConfigError(None, "[wraps] max_dimension must be >= min_dimension")
+        if self.max_filename_length <= 0:
+            raise ConfigError(None, "[wraps] max_filename_length must be > 0")
+        if self.max_upload_count <= 0:
+            raise ConfigError(None, "[wraps] max_upload_count must be > 0")
+        if not self.allowed_extensions:
+            raise ConfigError(None, "[wraps] allowed_extensions must be non-empty")
+        for extension in self.allowed_extensions:
+            if not extension.strip():
+                raise ConfigError(None, "[wraps] allowed_extensions must be non-empty")
+            if "/" in extension or "\\" in extension:
+                raise ConfigError(
+                    None,
+                    "[wraps] allowed_extensions must not contain path separators",
+                )
+            if not extension.startswith("."):
+                raise ConfigError(
+                    None,
+                    "[wraps] allowed_extensions entries must start with '.'",
+                )
+
+
+@dataclass(frozen=True, slots=True)
 class WebConfig:
     """Root config dataclass — what the rest of the app sees."""
 
@@ -249,6 +300,7 @@ class WebConfig:
     features: FeaturesSection = field(default_factory=FeaturesSection)
     chimes: ChimesSection = field(default_factory=ChimesSection)
     light_shows: LightShowsSection = field(default_factory=LightShowsSection)
+    wraps: WrapsSection = field(default_factory=WrapsSection)
     source_path: Path | None = None
 
     def validate(self) -> None:
@@ -258,6 +310,7 @@ class WebConfig:
             self.paths.validate()
             self.chimes.validate()
             self.light_shows.validate()
+            self.wraps.validate()
         except ConfigError as exc:
             raise ConfigError(self.source_path, str(exc).split(": ", 1)[-1]) from exc
 
@@ -373,6 +426,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     features_raw = _expect_section(raw, "features", source)
     chimes_raw = _expect_section(raw, "chimes", source)
     light_shows_raw = _expect_section(raw, "light_shows", source)
+    wraps_raw = _expect_section(raw, "wraps", source)
 
     web = WebSection(
         host=_coerce_str(web_raw, "host", _DEFAULT_HOST, source),
@@ -495,6 +549,40 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 source,
             ),
         )
+        wraps = WrapsSection(
+            folder=_coerce_str(wraps_raw, "folder", _DEFAULT_WRAPS_FOLDER, source),
+            max_size=_coerce_int(wraps_raw, "max_size", _DEFAULT_WRAP_MAX_SIZE, source),
+            min_dimension=_coerce_int(
+                wraps_raw,
+                "min_dimension",
+                _DEFAULT_WRAP_MIN_DIMENSION,
+                source,
+            ),
+            max_dimension=_coerce_int(
+                wraps_raw,
+                "max_dimension",
+                _DEFAULT_WRAP_MAX_DIMENSION,
+                source,
+            ),
+            max_filename_length=_coerce_int(
+                wraps_raw,
+                "max_filename_length",
+                _DEFAULT_WRAP_MAX_FILENAME_LENGTH,
+                source,
+            ),
+            max_upload_count=_coerce_int(
+                wraps_raw,
+                "max_upload_count",
+                _DEFAULT_WRAP_MAX_UPLOAD_COUNT,
+                source,
+            ),
+            allowed_extensions=_coerce_str_tuple(
+                wraps_raw,
+                "allowed_extensions",
+                _DEFAULT_WRAP_ALLOWED_EXTENSIONS,
+                source,
+            ),
+        )
     except ConfigError as exc:
         raise ConfigError(source, str(exc).split(": ", 1)[-1]) from exc
     cfg = WebConfig(
@@ -503,6 +591,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         features=features,
         chimes=chimes,
         light_shows=light_shows,
+        wraps=wraps,
         source_path=source,
     )
     cfg.validate()

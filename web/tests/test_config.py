@@ -14,6 +14,7 @@ from teslausb_web.config import (
     ConfigError,
     LightShowsSection,
     WebConfig,
+    WrapsSection,
     load_config,
 )
 
@@ -354,6 +355,72 @@ max_zip_size = 9
 """,
     )
     with pytest.raises(ConfigError, match="max_upload_size must be <= max_zip_size"):
+        load_config(cfg_file)
+
+
+def test_wraps_defaults_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "wraps_defaults.toml"
+    _write(cfg_file, "[wraps]\n")
+    cfg = load_config(cfg_file)
+    assert cfg.wraps == WrapsSection()
+    assert cfg.wraps.folder == "Wraps"
+    assert cfg.wraps.max_upload_count == 10
+    assert cfg.wraps.allowed_extensions == (".png",)
+
+
+def test_full_wraps_section_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "full_wraps.toml"
+    _write(
+        cfg_file,
+        """
+[wraps]
+folder = "CustomWraps"
+max_size = 1234
+min_dimension = 600
+max_dimension = 900
+max_filename_length = 20
+max_upload_count = 4
+allowed_extensions = [".png"]
+""",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.wraps == WrapsSection(
+        folder="CustomWraps",
+        max_size=1234,
+        min_dimension=600,
+        max_dimension=900,
+        max_filename_length=20,
+        max_upload_count=4,
+        allowed_extensions=(".png",),
+    )
+
+
+@pytest.mark.parametrize("key", ["folder"])
+def test_wrap_relpaths_reject_path_traversal(tmp_path: Path, key: str) -> None:
+    cfg_file = tmp_path / f"wrap_{key}.toml"
+    _write(cfg_file, f'[wraps]\n{key} = "../foo"\n')
+    with pytest.raises(ConfigError, match="must not contain path separators"):
+        load_config(cfg_file)
+
+
+def test_wrap_allowed_extensions_must_start_with_dot(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "wrap_bad_extension.toml"
+    _write(cfg_file, '[wraps]\nallowed_extensions = ["png"]\n')
+    with pytest.raises(ConfigError, match=r"entries must start with '\.'"):
+        load_config(cfg_file)
+
+
+def test_wrap_dimension_bounds_must_be_ordered(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "wrap_bad_bounds.toml"
+    _write(
+        cfg_file,
+        """
+[wraps]
+min_dimension = 1024
+max_dimension = 512
+""",
+    )
+    with pytest.raises(ConfigError, match="max_dimension must be >= min_dimension"):
         load_config(cfg_file)
 
 

@@ -19,6 +19,7 @@ from flask import (
     flash,
     jsonify,
     redirect,
+    render_template,
     request,
     url_for,
 )
@@ -621,16 +622,54 @@ def _handle_service_error(exc: Exception) -> ResponseReturnValue:
 
 @mapping_bp.route("/")
 def map_view() -> ResponseReturnValue:
-    return (
-        jsonify(
-            {
-                "page": "map",
-                "mapping_available": True,
-                "placeholder": True,
-                "message": "Mapping template pending Phase 5.13e",
-            }
-        ),
-        HTTPStatus.OK,
+    bootstrap = {
+        "api": {
+            "days": url_for("mapping.api_days"),
+            "day_routes_template": url_for("mapping.api_day_routes", date="__DATE__"),
+            "trips": url_for("mapping.api_trips"),
+            "playable_trips": url_for("mapping.api_trips_playable"),
+            "trip_route_template": url_for("mapping.api_trip_route", trip_id=0).replace(
+                "0", "__TRIP_ID__"
+            ),
+            "trip_telemetry_template": url_for("mapping.api_trip_telemetry", trip_id=0).replace(
+                "0", "__TRIP_ID__"
+            ),
+            "events": url_for("mapping.api_events"),
+            "all_routes": url_for("mapping.api_all_routes"),
+            "stats": url_for("mapping.api_stats"),
+            "driving_stats": url_for("mapping.api_driving_stats"),
+            "event_charts": url_for("mapping.api_event_charts"),
+            "sentry_events": url_for("mapping.api_sentry_events"),
+            "index_status": url_for("mapping.api_index_status"),
+            "index_trigger": url_for("mapping.api_index_trigger"),
+            "index_rebuild": url_for("mapping.api_index_rebuild"),
+            "index_cancel": url_for("mapping.api_index_cancel"),
+            "index_diagnose": url_for("mapping.api_index_diagnose"),
+            "waypoints_for_clip": url_for("mapping.api_waypoints_for_clip"),
+            "event_details_template": url_for(
+                "mapping.api_event_details", folder="__FOLDER__", event_name="__EVENT__"
+            ),
+            "event_clips_template": url_for(
+                "mapping.api_event_clips", folder="__FOLDER__", event_name="__EVENT__"
+            ),
+        },
+        "assets": {
+            "sprite": url_for("static", filename="icons/lucide-sprite.svg"),
+            "leaflet_icon_path": url_for("static", filename="vendor/leaflet/images/"),
+            "tile_cache_sw": url_for("_tile_cache_service_worker"),
+            "dashcam_proto": url_for("static", filename="vendor/dashcam-mp4/dashcam.proto"),
+        },
+        "view": {
+            "date": request.args.get("date", ""),
+            "mode": request.args.get("view", "day"),
+            "video_stream_template": "/videos/stream/__PATH__",
+        },
+    }
+    return render_template(
+        "mapping.html",
+        page="map",
+        expandable=True,
+        mapping_bootstrap=bootstrap,
     )
 
 

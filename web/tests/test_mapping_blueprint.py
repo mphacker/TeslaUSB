@@ -644,12 +644,20 @@ def test_helper_parse_bbox_from_request_context(app) -> None:
         assert _parse_bbox() is None
 
 
-def test_map_view_returns_json_placeholder(client) -> None:
+def test_map_view_renders_mapping_template(client) -> None:
     response = client.get("/mapping/")
-    payload = response.get_json()
+    html = response.get_data(as_text=True)
     assert response.status_code == HTTPStatus.OK
-    assert payload["placeholder"] is True
-    assert payload["page"] == "map"
+    assert '<h1 class="mapping-title">Mapping</h1>' in html
+    assert "Edit Mode" not in html
+    assert "Present Mode" not in html
+    assert "quick_edit" not in html
+    assert "cdn." not in html
+    assert "unpkg" not in html
+    assert "jsdelivr" not in html
+    assert "lucide-sprite.svg" in html
+    assert "vendor/leaflet/leaflet.css" in html
+    assert "js/mapping.js" in html
 
 
 def test_api_trips_returns_seeded_rows(client, seeded_data: SeededMappingData) -> None:

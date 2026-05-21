@@ -7,11 +7,26 @@ no internet — external CDN fetches would simply fail and break the UI.
 
 ## Vendored components
 
-| Library    | Version | Upstream                                              | License     | License file                |
-|------------|---------|-------------------------------------------------------|-------------|-----------------------------|
-| Leaflet    | 1.9.x   | https://leafletjs.com/                                | BSD-2-Clause| `leaflet/LICENSE`           |
-| Chart.js   | 4.x     | https://www.chartjs.org/                              | MIT         | (bundled UMD header)        |
-| lamejs     | 1.2.1   | https://github.com/zhuker/lamejs                      | LGPL-3.0    | `lamejs/LICENSE`            |
+| Library              | Version                        | Upstream                                              | License                               | License file                     |
+|----------------------|--------------------------------|-------------------------------------------------------|---------------------------------------|----------------------------------|
+| Leaflet              | 1.9.4                          | https://leafletjs.com/                                | BSD-2-Clause                          | `leaflet/LICENSE`                |
+| Leaflet.markercluster| 1.5.x                          | https://github.com/Leaflet/Leaflet.markercluster      | MIT                                   | `leaflet-markercluster/LICENSE`  |
+| protobuf.js          | 7.2.6                          | https://github.com/protobufjs/protobuf.js             | BSD-3-Clause                          | `protobuf/LICENSE`               |
+| dashcam-mp4          | Tesla dashcam snapshot         | https://github.com/teslamotors/dashcam                | Upstream license not published        | `dashcam-mp4/LICENSE`            |
+| Chart.js             | 4.x                            | https://www.chartjs.org/                              | MIT                                   | (bundled UMD header)             |
+| lamejs               | 1.2.1                          | https://github.com/zhuker/lamejs                      | LGPL-3.0                              | `lamejs/LICENSE`                 |
+
+## dashcam-mp4 — usage notes
+
+- `dashcam-mp4` is a Tesla-authored MP4 / SEI parser used by the B-1
+  mapping inspector for browser-side telemetry overlays. The vendored
+  directory also includes the upstream `dashcam.proto` schema because
+  `DashcamHelpers.initProtobuf()` loads it at runtime.
+- As of this port, the upstream `teslamotors/dashcam` repository does
+  **not** publish a canonical license file or GitHub license metadata.
+  We preserved the file to maintain mapping parity with v1 (which
+  already shipped the same snapshot in `main`), and recorded the
+  unresolved upstream-license gap in `dashcam-mp4/LICENSE` for follow-up.
 
 ## lamejs — usage notes
 

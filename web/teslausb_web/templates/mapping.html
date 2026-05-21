@@ -1,0 +1,910 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/MarkerCluster.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/MarkerCluster.Default.css') }}">
+<style>
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.mapping-page,
+.mapping-header,
+.mapping-layout,
+.mapping-sidebar,
+.mapping-map-shell,
+.mapping-inspector,
+.mapping-panel,
+.mapping-panel-head,
+.mapping-day-list,
+.mapping-trip-list,
+.mapping-stats-grid,
+.mapping-chart-grid,
+.mapping-sentry-list,
+.mapping-diagnose-list,
+.mapping-player-card,
+.mapping-player-stage,
+.mapping-player-hud,
+.mapping-hud-row,
+.mapping-chip-row,
+.mapping-summary-row,
+.mapping-meta-list,
+.mapping-map-summary,
+.mapping-filter-list {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.mapping-page {
+    gap: var(--space-6);
+    min-height: calc(100vh - var(--topbar-height) - var(--space-8));
+}
+
+.mapping-header,
+.mapping-panel,
+.mapping-map-shell,
+.mapping-inspector {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+}
+
+.mapping-header,
+.mapping-panel,
+.mapping-inspector {
+    padding: var(--space-5);
+}
+
+.mapping-header-row,
+.mapping-title-row,
+.mapping-actions,
+.mapping-toolbar,
+.mapping-day-nav,
+.mapping-trip-meta,
+.mapping-chip-row,
+.mapping-stat-value,
+.mapping-chart-row,
+.mapping-sentry-item-head,
+.mapping-sentry-actions,
+.mapping-player-head,
+.mapping-player-actions,
+.mapping-hud-row,
+.mapping-summary-row,
+.mapping-meta-list,
+.mapping-index-actions,
+.mapping-diagnose-actions,
+.mapping-empty-state {
+    display: flex;
+    gap: var(--space-3);
+}
+
+.mapping-header-row,
+.mapping-toolbar,
+.mapping-player-head,
+.mapping-sentry-item-head,
+.mapping-summary-row {
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.mapping-header-row,
+.mapping-actions,
+.mapping-toolbar,
+.mapping-chip-row,
+.mapping-index-actions,
+.mapping-diagnose-actions,
+.mapping-day-nav,
+.mapping-sentry-actions,
+.mapping-player-actions,
+.mapping-meta-list,
+.mapping-trip-meta,
+.mapping-empty-state {
+    flex-wrap: wrap;
+}
+
+.mapping-title,
+.mapping-panel-title,
+.mapping-map-title,
+.mapping-player-title,
+.mapping-sentry-title,
+.mapping-chart-title,
+.mapping-diagnose-title {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.mapping-title {
+    font-size: var(--text-3xl);
+}
+
+.mapping-panel-title,
+.mapping-map-title,
+.mapping-player-title,
+.mapping-sentry-title,
+.mapping-chart-title,
+.mapping-diagnose-title {
+    font-size: var(--text-xl);
+}
+
+.mapping-copy,
+.mapping-subtitle,
+.mapping-panel-copy,
+.mapping-map-copy,
+.mapping-chart-copy,
+.mapping-sentry-copy,
+.mapping-diagnose-copy,
+.mapping-trip-copy,
+.mapping-meta-value,
+.mapping-empty-copy,
+.mapping-status-copy,
+.mapping-diagnose-pre,
+.mapping-player-copy {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.mapping-layout {
+    align-items: start;
+}
+
+.mapping-sidebar,
+.mapping-inspector {
+    align-self: stretch;
+}
+
+.mapping-map-shell {
+    padding: var(--space-4);
+    min-height: min(72vh, calc(100vh - var(--topbar-height) - var(--space-10)));
+}
+
+.mapping-map-frame {
+    position: relative;
+    min-height: 100%;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+    background: var(--bg-primary);
+}
+
+.mapping-map-canvas {
+    min-height: min(68vh, calc(100vh - var(--topbar-height) - var(--space-12)));
+}
+
+.mapping-loading-bar {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline: 0;
+    block-size: var(--space-1);
+    background: transparent;
+    opacity: 0;
+    transition: opacity var(--transition-normal);
+    z-index: 500;
+}
+
+.mapping-map-frame.is-loading .mapping-loading-bar {
+    opacity: 1;
+}
+
+.mapping-loading-bar-fill {
+    block-size: 100%;
+    inline-size: 30%;
+    background: linear-gradient(90deg, var(--btn-primary-bg), var(--btn-info-bg));
+    animation: mapping-load-slide 1.2s linear infinite;
+}
+
+.mapping-summary-chip,
+.mapping-filter-chip,
+.mapping-stat-card,
+.mapping-day-button,
+.mapping-trip-button,
+.mapping-sentry-item,
+.mapping-index-status,
+.mapping-diagnose-pre,
+.mapping-map-summary,
+.mapping-empty-state,
+.mapping-chart {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--form-input-bg);
+}
+
+.mapping-summary-chip,
+.mapping-filter-chip,
+.mapping-map-button,
+.mapping-icon-button,
+.mapping-text-button,
+.mapping-day-button,
+.mapping-trip-button,
+.mapping-sentry-link,
+.mapping-camera-button,
+.mapping-player-button,
+.mapping-index-button,
+.mapping-diagnose-button {
+    min-height: 44px;
+}
+
+.mapping-map-button,
+.mapping-icon-button,
+.mapping-text-button,
+.mapping-day-button,
+.mapping-trip-button,
+.mapping-sentry-link,
+.mapping-camera-button,
+.mapping-player-button,
+.mapping-index-button,
+.mapping-diagnose-button,
+.mapping-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-input);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.mapping-map-button:hover,
+.mapping-icon-button:hover,
+.mapping-text-button:hover,
+.mapping-day-button:hover,
+.mapping-trip-button:hover,
+.mapping-sentry-link:hover,
+.mapping-camera-button:hover,
+.mapping-player-button:hover,
+.mapping-index-button:hover,
+.mapping-diagnose-button:hover,
+.mapping-filter-chip:hover,
+.mapping-map-button:focus-visible,
+.mapping-icon-button:focus-visible,
+.mapping-text-button:focus-visible,
+.mapping-day-button:focus-visible,
+.mapping-trip-button:focus-visible,
+.mapping-sentry-link:focus-visible,
+.mapping-camera-button:focus-visible,
+.mapping-player-button:focus-visible,
+.mapping-index-button:focus-visible,
+.mapping-diagnose-button:focus-visible,
+.mapping-filter-chip:focus-visible {
+    border-color: var(--text-link);
+    outline: none;
+}
+
+.mapping-map-button.is-primary,
+.mapping-index-button.is-primary,
+.mapping-diagnose-button.is-primary,
+.mapping-player-button.is-primary {
+    background: var(--btn-primary-bg);
+    border-color: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+.mapping-map-button.is-danger,
+.mapping-index-button.is-danger,
+.mapping-player-button.is-danger {
+    background: var(--btn-danger-bg);
+    border-color: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
+.mapping-map-button.is-secondary,
+.mapping-index-button.is-secondary,
+.mapping-diagnose-button.is-secondary,
+.mapping-player-button.is-secondary {
+    background: var(--btn-secondary-bg);
+    border-color: var(--btn-secondary-bg);
+    color: var(--btn-secondary-text);
+}
+
+.mapping-icon-button {
+    min-width: 44px;
+    padding-inline: var(--space-3);
+}
+
+.mapping-day-button,
+.mapping-trip-button,
+.mapping-sentry-link {
+    justify-content: flex-start;
+    inline-size: 100%;
+    text-align: left;
+}
+
+.mapping-day-button.is-active,
+.mapping-trip-button.is-active,
+.mapping-camera-button.is-active,
+.mapping-filter-chip.is-active,
+.mapping-map-button.is-active {
+    border-color: var(--btn-primary-bg);
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+.mapping-filter-chip {
+    --pill-accent: var(--border-color);
+    border-color: var(--pill-accent);
+}
+
+.mapping-filter-chip.is-active {
+    box-shadow: inset 0 0 0 1px var(--pill-accent);
+}
+
+.mapping-summary-chip,
+.mapping-map-summary,
+.mapping-index-status {
+    padding: var(--space-3) var(--space-4);
+}
+
+.mapping-map-toolbar {
+    position: absolute;
+    inset-block-start: var(--space-4);
+    inset-inline-start: var(--space-4);
+    inset-inline-end: var(--space-4);
+    z-index: 410;
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.mapping-map-chipbar {
+    position: absolute;
+    inset-block-start: calc(var(--space-4) + 52px);
+    inset-inline-start: var(--space-4);
+    inset-inline-end: var(--space-4);
+    z-index: 405;
+    pointer-events: none;
+}
+
+.mapping-map-chipbar .mapping-chip-row {
+    pointer-events: auto;
+}
+
+.mapping-map-summary {
+    position: absolute;
+    inset-block-end: var(--space-4);
+    inset-inline-start: var(--space-4);
+    inset-inline-end: var(--space-4);
+    z-index: 405;
+}
+
+.mapping-map-summary strong,
+.mapping-stat-number,
+.mapping-chart-value,
+.mapping-status-value,
+.mapping-trip-title,
+.mapping-sentry-item-title,
+.mapping-day-title {
+    color: var(--text-primary);
+}
+
+.mapping-day-list,
+.mapping-trip-list,
+.mapping-sentry-list,
+.mapping-chart-grid,
+.mapping-filter-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.mapping-day-list,
+.mapping-trip-list,
+.mapping-sentry-list {
+    max-height: 16rem;
+    overflow: auto;
+}
+
+.mapping-day-button,
+.mapping-trip-button,
+.mapping-sentry-link {
+    padding: var(--space-3);
+}
+
+.mapping-day-title,
+.mapping-trip-title,
+.mapping-sentry-item-title {
+    display: block;
+    font-weight: 700;
+}
+
+.mapping-day-meta,
+.mapping-trip-meta,
+.mapping-sentry-item-meta,
+.mapping-status-meta {
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
+
+.mapping-chart {
+    padding: var(--space-4);
+}
+
+.mapping-chart-list {
+    display: grid;
+    gap: var(--space-3);
+}
+
+.mapping-chart-row {
+    align-items: center;
+}
+
+.mapping-chart-label {
+    inline-size: 7rem;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
+
+.mapping-chart-bar-shell {
+    flex: 1 1 auto;
+    min-height: 0.875rem;
+    border-radius: var(--radius-full);
+    background: var(--upload-progress-bar-bg);
+    overflow: hidden;
+}
+
+.mapping-chart-bar {
+    display: block;
+    block-size: 100%;
+    inline-size: var(--bar-value, 0%);
+    background: var(--bar-color, var(--btn-primary-bg));
+}
+
+.mapping-chart-value {
+    min-inline-size: 3rem;
+    text-align: right;
+    font-weight: 700;
+}
+
+.mapping-stats-grid {
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+}
+
+.mapping-stat-card {
+    padding: var(--space-4);
+}
+
+.mapping-stat-label {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
+
+.mapping-stat-number {
+    margin: var(--space-2) 0 0;
+    font-size: var(--text-2xl);
+    font-weight: 700;
+}
+
+.mapping-sentry-item,
+.mapping-diagnose-pre,
+.mapping-player-card {
+    padding: var(--space-4);
+}
+
+.mapping-sentry-link,
+.mapping-camera-button,
+.mapping-player-button,
+.mapping-index-button,
+.mapping-diagnose-button {
+    justify-content: flex-start;
+}
+
+.mapping-sentry-link,
+.mapping-camera-button,
+.mapping-player-button {
+    inline-size: 100%;
+}
+
+.mapping-player-card[hidden],
+.mapping-empty-state[hidden] {
+    display: none;
+}
+
+.mapping-camera-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: var(--space-3);
+}
+
+.mapping-player-stage {
+    background: var(--bg-primary);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
+
+.mapping-player-video {
+    inline-size: 100%;
+    background: var(--bg-primary);
+}
+
+.mapping-player-hud {
+    padding: var(--space-4);
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-color);
+}
+
+.mapping-hud-key {
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
+
+.mapping-hud-value {
+    color: var(--text-primary);
+    font-weight: 700;
+}
+
+.mapping-diagnose-pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.mapping-empty-state {
+    padding: var(--space-4);
+}
+
+.mapping-empty-state svg,
+.mapping-title-row svg,
+.mapping-panel-head svg,
+.mapping-map-button svg,
+.mapping-icon-button svg,
+.mapping-filter-chip svg,
+.mapping-player-button svg,
+.mapping-index-button svg,
+.mapping-diagnose-button svg,
+.mapping-sentry-link svg,
+.mapping-camera-button svg,
+.mapping-day-button svg,
+.mapping-trip-button svg {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex: 0 0 auto;
+}
+
+.mapping-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-full);
+    background: var(--form-label-bg);
+    color: var(--text-primary);
+    font-weight: 700;
+}
+
+.mapping-status-pill[data-state="running"] {
+    background: var(--msg-info-bg);
+    color: var(--msg-info-text);
+}
+
+.mapping-status-pill[data-state="idle"] {
+    background: var(--msg-success-bg);
+    color: var(--msg-success-text);
+}
+
+.mapping-status-pill[data-state="error"] {
+    background: var(--msg-error-bg);
+    color: var(--msg-error-text);
+}
+
+@keyframes mapping-load-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+}
+
+@media (min-width: 72rem) {
+    .mapping-layout {
+        grid-template-columns: minmax(17rem, 20rem) minmax(0, 1fr) minmax(20rem, 24rem);
+    }
+
+    .mapping-inspector {
+        position: sticky;
+        inset-block-start: calc(var(--topbar-height) + var(--space-4));
+        max-height: calc(100vh - var(--topbar-height) - var(--space-8));
+        overflow: auto;
+    }
+}
+
+@media (max-width: 71.99rem) {
+    .mapping-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .mapping-sidebar,
+    .mapping-inspector {
+        order: 2;
+    }
+
+    .mapping-map-shell {
+        order: 1;
+        min-height: 60vh;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mapping-loading-bar-fill {
+        animation: none;
+        inline-size: 100%;
+    }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="mapping-page" id="mapping-page">
+    <header class="mapping-header">
+        <div class="mapping-header-row">
+            <div class="mapping-title-row">
+                <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-map"></use></svg>
+                <div>
+                    <h1 class="mapping-title">Mapping</h1>
+                    <p class="mapping-subtitle">Trips, sentry events, route history, index status, and dashcam inspection in one place.</p>
+                </div>
+            </div>
+            <div class="mapping-actions">
+                <button class="mapping-map-button is-primary" id="mappingRefreshButton" type="button">
+                    <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+                    Refresh data
+                </button>
+                <button class="mapping-map-button" id="mappingAllRoutesButton" type="button">
+                    <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-route"></use></svg>
+                    All routes
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <div class="mapping-layout">
+        <aside class="mapping-sidebar">
+            <section class="mapping-panel" aria-labelledby="mappingDaysTitle">
+                <div class="mapping-panel-head">
+                    <div>
+                        <h2 class="mapping-panel-title" id="mappingDaysTitle">Day picker</h2>
+                        <p class="mapping-panel-copy">Choose a driving day or jump through the timeline.</p>
+                    </div>
+                    <span class="mapping-summary-chip" id="mappingDayCountChip">0 days</span>
+                </div>
+                <div class="mapping-day-nav">
+                    <button class="mapping-icon-button" id="mappingPrevDayButton" type="button" aria-label="Older day">
+                        <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-left"></use></svg>
+                    </button>
+                    <button class="mapping-icon-button" id="mappingNextDayButton" type="button" aria-label="Newer day">
+                        <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-right"></use></svg>
+                    </button>
+                    <button class="mapping-text-button" id="mappingReturnToDayButton" type="button" hidden>
+                        Return to latest day
+                    </button>
+                </div>
+                <ul class="mapping-day-list" id="mappingDayList"></ul>
+                <div class="mapping-empty-state" id="mappingDaysEmpty" hidden>
+                    <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-calendar"></use></svg>
+                    <div>
+                        <p class="mapping-empty-copy">No indexed driving days yet.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="mapping-panel" aria-labelledby="mappingTripsTitle">
+                <div class="mapping-panel-head">
+                    <div>
+                        <h2 class="mapping-panel-title" id="mappingTripsTitle">Trips</h2>
+                        <p class="mapping-panel-copy">Tap a trip to focus the map and open its nearest playable clip.</p>
+                    </div>
+                    <span class="mapping-summary-chip" id="mappingTripCountChip">0 trips</span>
+                </div>
+                <ul class="mapping-trip-list" id="mappingTripList"></ul>
+                <div class="mapping-empty-state" id="mappingTripsEmpty" hidden>
+                    <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-route"></use></svg>
+                    <div>
+                        <p class="mapping-empty-copy">No trips match the current view.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="mapping-panel" aria-labelledby="mappingFiltersTitle">
+                <div class="mapping-panel-head">
+                    <div>
+                        <h2 class="mapping-panel-title" id="mappingFiltersTitle">Event filters</h2>
+                        <p class="mapping-panel-copy">Toggle marker types without leaving the map.</p>
+                    </div>
+                </div>
+                <div class="mapping-filter-list" id="mappingFilterList"></div>
+                <div class="mapping-empty-state" id="mappingFiltersEmpty" hidden>
+                    <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-filter"></use></svg>
+                    <div>
+                        <p class="mapping-empty-copy">No events are available for the current selection.</p>
+                    </div>
+                </div>
+            </section>
+        </aside>
+
+        <section class="mapping-map-shell" aria-labelledby="mappingMapTitle">
+            <div class="mapping-map-frame" id="mappingMapFrame">
+                <div class="mapping-loading-bar" id="mappingLoadingBar" aria-hidden="true">
+                    <div class="mapping-loading-bar-fill"></div>
+                </div>
+                <div class="mapping-map-toolbar">
+                    <div class="mapping-toolbar">
+                        <span class="mapping-status-pill" id="mappingModePill" data-state="idle">Loading</span>
+                        <button class="mapping-map-button" id="mappingToggleLegendButton" type="button">
+                            <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use></svg>
+                            Speed legend
+                        </button>
+                    </div>
+                    <div class="mapping-toolbar">
+                        <button class="mapping-icon-button" id="mappingZoomSelectedButton" type="button" aria-label="Zoom to selected route">
+                            <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-locate-fixed"></use></svg>
+                        </button>
+                        <button class="mapping-icon-button" id="mappingFitAllButton" type="button" aria-label="Fit map to current results">
+                            <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-expand"></use></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="mapping-map-chipbar">
+                    <div class="mapping-chip-row" id="mappingFilterPills"></div>
+                    <div class="mapping-chip-row" id="mappingSpeedLegend" hidden>
+                        <span class="mapping-summary-chip">0–25 mph</span>
+                        <span class="mapping-summary-chip">26–45 mph</span>
+                        <span class="mapping-summary-chip">46–65 mph</span>
+                        <span class="mapping-summary-chip">66+ mph</span>
+                    </div>
+                </div>
+                <div class="mapping-map-canvas" id="mappingMap"></div>
+                <article class="mapping-map-summary" id="mappingMapSummary">
+                    <div class="mapping-summary-row">
+                        <div>
+                            <h2 class="mapping-map-title" id="mappingMapTitle">Current selection</h2>
+                            <p class="mapping-map-copy" id="mappingMapSummaryText">Loading map data.</p>
+                        </div>
+                        <div class="mapping-chip-row">
+                            <span class="mapping-summary-chip" id="mappingRouteChip">0 routes</span>
+                            <span class="mapping-summary-chip" id="mappingEventChip">0 events</span>
+                        </div>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <aside class="mapping-inspector">
+            <section class="mapping-panel" aria-labelledby="mappingStatsTitle">
+                <div class="mapping-panel-head">
+                    <div>
+                        <h2 class="mapping-panel-title" id="mappingStatsTitle">Driving stats</h2>
+                        <p class="mapping-panel-copy">Fleet-style totals and event trends from the indexed mapping database.</p>
+                    </div>
+                </div>
+                <div class="mapping-stats-grid" id="mappingStatsGrid"></div>
+                <div class="mapping-chart-grid">
+                    <article class="mapping-chart">
+                        <h3 class="mapping-chart-title">Event types</h3>
+                        <p class="mapping-chart-copy">Counts by event type.</p>
+                        <div class="mapping-chart-list" id="mappingTypeChart"></div>
+                    </article>
+                    <article class="mapping-chart">
+                        <h3 class="mapping-chart-title">Severity</h3>
+                        <p class="mapping-chart-copy">Severity breakdown across indexed events.</p>
+                        <div class="mapping-chart-list" id="mappingSeverityChart"></div>
+                    </article>
+                    <article class="mapping-chart">
+                        <h3 class="mapping-chart-title">Over time</h3>
+                        <p class="mapping-chart-copy">Recent event counts per day.</p>
+                        <div class="mapping-chart-list" id="mappingTimelineChart"></div>
+                    </article>
+                    <article class="mapping-chart">
+                        <h3 class="mapping-chart-title">Autonomy trend</h3>
+                        <p class="mapping-chart-copy">Self-driving vs manual timeline.</p>
+                        <div class="mapping-chart-list" id="mappingFsdChart"></div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="mapping-panel" aria-labelledby="mappingIndexerTitle">
+                <div class="mapping-panel-head">
+                    <div>
+                        <h2 class="mapping-panel-title" id="mappingIndexerTitle">Indexer status</h2>
+                        <p class="mapping-panel-copy">Trigger a catch-up scan, rebuild the mapping index, or inspect video health.</p>
+                    </div>
+                </div>
+                <article class="mapping-index-status" id="mappingIndexStatus">
+                    <div class="mapping-summary-row">
+                        <strong class="mapping-status-value" id="mappingIndexStatusLabel">Idle</strong>
+                        <span class="mapping-status-pill" id="mappingIndexStatusPill" data-state="idle">Idle</span>
+                    </div>
+                    <p class="mapping-status-copy" id="mappingIndexStatusText">Waiting for status.</p>
+                    <div class="mapping-meta-list" id="mappingIndexMeta"></div>
+                </article>
+                <div class="mapping-index-actions">
+                    <button class="mapping-index-button is-primary" id="mappingIndexTriggerButton" type="button">
+                        <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+                        Scan for clips
+                    </button>
+                    <button class="mapping-index-button is-secondary" id="mappingIndexRebuildButton" type="button">
+                        <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-rotate-ccw"></use></svg>
+                        Rebuild index
+                    </button>
+                    <button class="mapping-index-button is-danger" id="mappingIndexCancelButton" type="button">
+                        <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-circle-x"></use></svg>
+                        Cancel queue
+                    </button>
+                </div>
+                <div class="mapping-diagnose-actions">
+                    <button class="mapping-diagnose-button is-secondary" id="mappingDiagnoseButton" type="button">
+                        <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-stethoscope"></use></svg>
+                        Diagnose videos
+                    </button>
+                </div>
+                <pre class="mapping-diagnose-pre" id="mappingDiagnoseOutput">Diagnose output will appear here.</pre>
+            </section>
+
+            <section class="mapping-panel" aria-labelledby="mappingSentryTitle">
+                <div class="mapping-panel-head">
+                    <div>
+                        <h2 class="mapping-panel-title" id="mappingSentryTitle">Sentry inspector</h2>
+                        <p class="mapping-panel-copy">Browse saved and sentry clips, open camera angles, and inspect telemetry overlays.</p>
+                    </div>
+                </div>
+                <ul class="mapping-sentry-list" id="mappingSentryList"></ul>
+                <div class="mapping-empty-state" id="mappingSentryEmpty" hidden>
+                    <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-shield-alert"></use></svg>
+                    <div>
+                        <p class="mapping-empty-copy">Sentry and saved events will appear here once clips are indexed.</p>
+                    </div>
+                </div>
+                <article class="mapping-player-card" id="mappingPlayerCard" hidden>
+                    <div class="mapping-player-head">
+                        <div>
+                            <h3 class="mapping-player-title" id="mappingPlayerTitle">Clip player</h3>
+                            <p class="mapping-player-copy" id="mappingPlayerSummary">Choose an event or trip clip to start playback.</p>
+                        </div>
+                        <div class="mapping-player-actions">
+                            <button class="mapping-player-button" id="mappingPrevClipButton" type="button">
+                                <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-left"></use></svg>
+                                Previous clip
+                            </button>
+                            <button class="mapping-player-button" id="mappingNextClipButton" type="button">
+                                <svg aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-right"></use></svg>
+                                Next clip
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mapping-camera-row" id="mappingCameraRow"></div>
+                    <div class="mapping-player-stage">
+                        <video class="mapping-player-video" id="mappingPlayerVideo" controls playsinline preload="metadata"></video>
+                        <div class="mapping-player-hud">
+                            <div class="mapping-hud-row"><span class="mapping-hud-key">Coordinates</span><span class="mapping-hud-value" id="mappingHudCoords">—</span></div>
+                            <div class="mapping-hud-row"><span class="mapping-hud-key">Speed</span><span class="mapping-hud-value" id="mappingHudSpeed">—</span></div>
+                            <div class="mapping-hud-row"><span class="mapping-hud-key">Gear</span><span class="mapping-hud-value" id="mappingHudGear">—</span></div>
+                            <div class="mapping-hud-row"><span class="mapping-hud-key">Autopilot</span><span class="mapping-hud-value" id="mappingHudAutopilot">—</span></div>
+                            <div class="mapping-hud-row"><span class="mapping-hud-key">Steering</span><span class="mapping-hud-value" id="mappingHudSteering">—</span></div>
+                            <div class="mapping-hud-row"><span class="mapping-hud-key">Brake</span><span class="mapping-hud-value" id="mappingHudBrake">—</span></div>
+                            <div class="mapping-hud-row"><span class="mapping-hud-key">Blinkers</span><span class="mapping-hud-value" id="mappingHudBlinkers">—</span></div>
+                            <div class="mapping-hud-row"><span class="mapping-hud-key">Telemetry source</span><span class="mapping-hud-value" id="mappingHudSource">Waiting</span></div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+        </aside>
+    </div>
+</section>
+<script>window.MAPPING_BOOTSTRAP = {{ mapping_bootstrap|tojson }};</script>
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.markercluster.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/protobuf/protobuf.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/dashcam-mp4/dashcam-mp4.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='js/mapping.js') }}"></script>
+{% endblock %}

@@ -3,9 +3,10 @@
 These tests verify that:
 
 1. The five scaffold blueprints (``mapping``, ``analytics``,
-   ``media``, ``cloud_archive``, ``settings``) register, expose
-   the endpoints that ``base.html`` references via ``url_for``,
-   and serve a placeholder body at the URL.
+   ``media``, ``cloud_archive``, ``settings``) register and expose
+   the endpoints that ``base.html`` references via ``url_for``.
+   Mapping now renders its real page; the remaining scaffold pages
+   still serve placeholder bodies.
 2. ``base.html`` renders to completion through Jinja — no
    ``BuildError`` from missing endpoints, no ``UndefinedError``
    from missing context vars (the context processor supplies
@@ -75,10 +76,16 @@ def test_scaffold_endpoints_match_base_html_url_for_calls(app: Flask) -> None:
         assert url_for("settings.index").endswith("/settings/")
 
 
+def test_mapping_scaffold_now_renders_real_page(app: Flask) -> None:
+    resp = app.test_client().get("/mapping/")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert '<h1 class="mapping-title">Mapping</h1>' in html
+
+
 @pytest.mark.parametrize(
     ("url", "marker"),
     [
-        ("/mapping/", '"placeholder"'),
         ("/analytics/", "scaffolding only"),
         ("/media/", "scaffolding only"),
         ("/cloud/", "scaffolding only"),

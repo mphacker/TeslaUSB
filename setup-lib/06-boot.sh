@@ -24,6 +24,13 @@
 #     `dtoverlay=dwc2…` line already exists with a different value
 #     we REPLACE it rather than duplicating.
 #
+#     Additionally, ANY model-specific section (`[cm4]`, `[cm5]`,
+#     `[pi4]`, `[pi5]`, `[pi02]`, …) whose `dtoverlay=dwc2…` line
+#     would OVERRIDE [all] with a non-peripheral mode is REWRITTEN
+#     to `dtoverlay=dwc2,dr_mode=peripheral`. v1 shipped a CM5 entry
+#     with `dr_mode=host` (correct for CM5 USB-host workloads but it
+#     breaks gadget mode); B-1 operates as a USB device on every Pi
+#     model we support, so the override must match.
 # Boot-path detection: Bookworm Pi OS uses `/boot/firmware/` (the
 # new firmware partition mount); Buster-era installs used `/boot/`
 # directly. We probe both and use whichever pair exists. If neither
@@ -186,6 +193,27 @@ _b1_render_cmdline() {
 #   target, not duplicate target).
 _b1_config_key_of() {
   printf '%s' "${1%%=*}="
+}
+
+# _b1_normalize_dwc2_overrides <file>
+#   Pre-pass over config.txt: rewrite any `dtoverlay=dwc2*` line in
+#   ANY section (including [cm4], [cm5], [pi4], [pi5], …) to
+#   `dtoverlay=dwc2,dr_mode=peripheral`. Pure (writes to stdout).
+#
+#   Rationale: model-specific sections override [all], so a stray
+#   `dtoverlay=dwc2,dr_mode=host` left over from a v1 install (which
+#   used CM5 IO Board USB hosting) would silently break gadget mode
+#   on that hardware variant. We normalize everywhere so the same SD
+#   card boots into peripheral mode on Pi Zero, Pi 4, Pi 5, CM4, CM5.
+_b1_normalize_dwc2_overrides() {
+  local file="$1"
+  awk '
+    /^[[:space:]]*dtoverlay=dwc2([[:space:]]|,|$)/ {
+      print "dtoverlay=dwc2,dr_mode=peripheral"
+      next
+    }
+    { print }
+  ' "${file}"
 }
 
 # _b1_render_config <file> <line...>
@@ -370,11 +398,14 @@ b1_step_06() {
   _b1_write_if_changed "${B1_BOOT_CMDLINE}" "${rendered_cmdline}" cmdline_changed
 
   # ------------------------------------------------------------------
-  # 2) config.txt — ensure each line under [all], replacing keys
-  #    that exist with a different value.
+  # 2) config.txt — first normalize ANY model-section dwc2 override
+  #    to peripheral, then ensure each [all] line is present/correct.
   # ------------------------------------------------------------------
-  local rendered_config
-  rendered_config="$(_b1_render_config "${B1_BOOT_CONFIG}" "${B1_CONFIG_LINES_ALL[@]}")"
+  local rendered_config normalized_tmp
+  normalized_tmp="$(mktemp)"
+  _b1_normalize_dwc2_overrides "${B1_BOOT_CONFIG}" > "${normalized_tmp}"
+  rendered_config="$(_b1_render_config "${normalized_tmp}" "${B1_CONFIG_LINES_ALL[@]}")"
+  rm -f -- "${normalized_tmp}"
   _b1_write_if_changed "${B1_BOOT_CONFIG}" "${rendered_config}" config_changed
 
   # ------------------------------------------------------------------

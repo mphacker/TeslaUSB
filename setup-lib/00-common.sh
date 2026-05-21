@@ -142,7 +142,17 @@ b1_pkg_install() {
 # --------------------------------------------------------------------
 
 b1_unit_exists() {
-  systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q "$1"
+  local unit="$1"
+  if systemctl list-unit-files "${unit}" --no-legend 2>/dev/null | grep -q "${unit}"; then
+    return 0
+  fi
+  # Template instance? `foo@N.service` matches the unit-file `foo@.service`.
+  if [[ "${unit}" =~ ^([^@]+@)[^.]*(\.[a-z]+)$ ]]; then
+    local template="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+    systemctl list-unit-files "${template}" --no-legend 2>/dev/null | grep -q "${template}"
+    return $?
+  fi
+  return 1
 }
 
 b1_unit_enabled() {

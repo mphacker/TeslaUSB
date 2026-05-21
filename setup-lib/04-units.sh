@@ -107,7 +107,15 @@ Wants=network-online.target
 [Service]
 Type=notify
 # TODO(phase-6.2): switch User/Group to `teslausb` once that account
-# exists and the web venv ownership has been migrated.
+# exists and the web venv ownership has been migrated. Until then
+# the process runs as `pi:pi`; the gunicorn-created Unix socket is
+# owned `pi:pi` (mode 0660 via the `umask = 0o007` line in
+# `config/gunicorn.conf.py`). Phase 6.2 adds `www-data` to the
+# `pi` group so nginx can connect to the socket without a
+# recursive `chown` after start. (Avoided changing `Group=` here
+# because teslafat@.service also declares `RuntimeDirectory=teslausb`
+# under User/Group=teslausb; competing owners on the shared dir
+# would race at startup.)
 User=pi
 Group=pi
 

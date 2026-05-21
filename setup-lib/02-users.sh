@@ -149,6 +149,23 @@ b1_step_02() {
     b1_run usermod -aG "${B1_TESLAUSB_GROUP}" pi
   fi
 
+  # ----- www-data → pi membership -----
+  # nginx runs as `www-data` and proxies to the gunicorn Unix
+  # socket at /run/teslausb/gunicorn.sock owned `pi:pi` mode 0660
+  # (see config/gunicorn.conf.py `umask = 0o007`). Adding www-data
+  # to the `pi` group lets nginx connect without changing the
+  # web service's User/Group (which would race with teslafat over
+  # /run/teslausb ownership). Phase 6.2 will revisit when the web
+  # service moves under the `teslausb` user.
+  if getent passwd www-data >/dev/null 2>&1 && getent passwd pi >/dev/null 2>&1; then
+    if id -nG www-data 2>/dev/null | tr ' ' '\n' | grep -qx pi; then
+      b1_log "www-data already in group pi"
+    else
+      b1_log "adding www-data to group pi (nginx → gunicorn.sock access)"
+      b1_run usermod -aG pi www-data
+    fi
+  fi
+
   # ----- sudoers fragment -----
   local content
   content="$(_b1_render_sudoers)"

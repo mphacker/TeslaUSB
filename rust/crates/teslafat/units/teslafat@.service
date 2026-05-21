@@ -58,13 +58,20 @@ NoNewPrivileges=yes
 
 # Filesystem isolation. `ProtectSystem=strict` makes `/usr`, `/boot`,
 # `/etc` read-only. `ProtectHome=yes` hides every other user's home
-# dir. `ReadWritePaths=` opens just `/run/teslausb` (socket file)
-# and `/var/teslacam` (default `backing_root`); a non-default
-# `backing_root` requires editing this line.
+# dir. `RuntimeDirectory=teslausb` makes systemd create
+# `/run/teslausb` (mode 0755, owned by the service's User/Group)
+# BEFORE the namespace is set up — necessary because the unit-level
+# `ReadWritePaths=/run/teslausb` would otherwise fail with ENOENT
+# when both teslafat instances start before any other consumer.
+# `ReadWritePaths=` opens `/run/teslausb` (socket file) and
+# `/srv/teslausb` (default `backing_root` parent — both LUNs);
+# a non-default `backing_root` requires editing this line.
+RuntimeDirectory=teslausb
+RuntimeDirectoryPreserve=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/run/teslausb /var/teslacam
+ReadWritePaths=/run/teslausb /srv/teslausb
 
 # Network isolation — the daemon is `AF_UNIX`-only.
 PrivateNetwork=yes

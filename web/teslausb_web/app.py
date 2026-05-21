@@ -41,8 +41,9 @@ from teslausb_web.services.boombox_service import make_boombox_service
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
+from teslausb_web.services.cloud_archive import make_cloud_archive_service
 from teslausb_web.services.cloud_oauth_service import CloudOAuthService, make_oauth_service
-from teslausb_web.services.cloud_rclone_service import make_rclone_service
+from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_rclone_service
 from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
 from teslausb_web.services.music_service import make_music_service
@@ -135,6 +136,13 @@ def create_app(
     _register_boombox_services(app, cfg)
     _register_cloud_oauth_services(app, cfg)
     _register_cloud_rclone_services(app, cfg)
+    oauth_service = app.extensions.get("cloud_oauth_service")
+    rclone_service = app.extensions.get("cloud_rclone_service")
+    if not isinstance(oauth_service, CloudOAuthService):
+        raise RuntimeError("cloud_oauth_service must be registered before cloud_archive_service")
+    if not isinstance(rclone_service, CloudRcloneService):
+        raise RuntimeError("cloud_rclone_service must be registered before cloud_archive_service")
+    _register_cloud_archive_services(app, cfg, rclone_service, oauth_service)
     _register_wrap_services(app, cfg)
     _register_mapping_services(app, cfg)
 
@@ -301,6 +309,29 @@ def _register_cloud_rclone_services(app: Flask, cfg: WebConfig) -> None:
     if not isinstance(oauth_service, CloudOAuthService):
         raise RuntimeError("cloud_oauth_service must be registered before cloud_rclone_service")
     app.extensions["cloud_rclone_service"] = make_rclone_service(cfg, oauth_service)
+
+
+def _register_cloud_archive_services(
+    app: Flask,
+    cfg: WebConfig,
+    rclone_svc: CloudRcloneService,
+    oauth_svc: CloudOAuthService,
+) -> None:
+    """Construct the cloud_archive service and register lifecycle hooks."""
+    archive_svc = make_cloud_archive_service(cfg, rclone_svc, oauth_svc)
+    app.extensions["cloud_archive_service"] = archive_svc
+    if cfg.features.cloud_archive_enabled:
+        archive_svc.start()
+
+    @app.teardown_appcontext
+    def _shutdown_cloud_archive(_exc: BaseException | None) -> None:
+        archive_svc.shutdown(timeout=5.0)
+
+    atexit.register(archive_svc.shutdown)
+    app.extensions["cloud_archive_service_finalizer"] = weakref.finalize(
+        app,
+        archive_svc.shutdown,
+    )
 
 
 def _register_wrap_services(app: Flask, cfg: WebConfig) -> None:

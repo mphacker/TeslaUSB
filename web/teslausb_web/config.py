@@ -99,6 +99,25 @@ _DEFAULT_CLOUD_RCLONE_CONFIG_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_RC
 _DEFAULT_CLOUD_RCLONE_LOG_PATH: Path = (
     _DEFAULT_CLOUD_RCLONE_CONFIG_PATH / _DEFAULT_CLOUD_RCLONE_LOG_FILENAME
 )
+_DEFAULT_CLOUD_ARCHIVE_DB_NAME: Final[str] = "cloud_sync.db"
+_DEFAULT_CLOUD_ARCHIVE_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_ARCHIVE_DB_NAME
+_DEFAULT_CLOUD_TESLACAM_PATH: Path = _DEFAULT_BACKING_ROOT
+_DEFAULT_CLOUD_WORKER_IDLE_SECONDS: Final[float] = 300.0
+_DEFAULT_CLOUD_BACKOFF_INITIAL_SECONDS: Final[float] = 60.0
+_DEFAULT_CLOUD_BACKOFF_MAX_SECONDS: Final[float] = 300.0
+_DEFAULT_CLOUD_MAX_RETRY_ATTEMPTS: Final[int] = 5
+_DEFAULT_CLOUD_WIFI_CHECK_REQUIRED: Final[bool] = True
+_DEFAULT_CLOUD_PRIORITY_FOLDERS: Final[tuple[str, ...]] = (
+    "SentryClips",
+    "SavedClips",
+    "ArchivedClips",
+)
+_DEFAULT_CLOUD_SYNC_FOLDERS: Final[tuple[str, ...]] = (
+    "SentryClips",
+    "SavedClips",
+    "ArchivedClips",
+)
+_DEFAULT_CLOUD_DEAD_LETTER_MAX_AGE_DAYS: Final[int] = 30
 _DEFAULT_MAPPING_DB_NAME: Final[str] = "mapping.db"
 _DEFAULT_MAPPING_BACKUP_DIRNAME: Final[str] = "mapping-backups"
 _DEFAULT_MAPPING_BACKUP_RETENTION: Final[int] = 3
@@ -425,7 +444,7 @@ class BoomboxSection:
 
 @dataclass(frozen=True, slots=True)
 class CloudSection:
-    """Cloud OAuth state plus the B-1 rclone working directory and defaults."""
+    """Cloud OAuth state plus cloud-archive runtime settings."""
 
     credentials_path: Path = _DEFAULT_CLOUD_CREDENTIALS_PATH
     oauth_state_path: Path = _DEFAULT_CLOUD_STATE_PATH
@@ -436,6 +455,16 @@ class CloudSection:
     bwlimit_kbps: int = _DEFAULT_CLOUD_BWLIMIT_KBPS
     retries: int = _DEFAULT_CLOUD_RETRIES
     rclone_binary: str = _DEFAULT_CLOUD_RCLONE_BINARY
+    db_path: Path = _DEFAULT_CLOUD_ARCHIVE_DB_PATH
+    teslacam_path: Path = _DEFAULT_CLOUD_TESLACAM_PATH
+    worker_idle_seconds: float = _DEFAULT_CLOUD_WORKER_IDLE_SECONDS
+    backoff_initial_seconds: float = _DEFAULT_CLOUD_BACKOFF_INITIAL_SECONDS
+    backoff_max_seconds: float = _DEFAULT_CLOUD_BACKOFF_MAX_SECONDS
+    max_retry_attempts: int = _DEFAULT_CLOUD_MAX_RETRY_ATTEMPTS
+    wifi_check_required: bool = _DEFAULT_CLOUD_WIFI_CHECK_REQUIRED
+    priority_folders: tuple[str, ...] = _DEFAULT_CLOUD_PRIORITY_FOLDERS
+    sync_folders: tuple[str, ...] = _DEFAULT_CLOUD_SYNC_FOLDERS
+    dead_letter_max_age_days: int = _DEFAULT_CLOUD_DEAD_LETTER_MAX_AGE_DAYS
 
     def __post_init__(self) -> None:
         self.validate()
@@ -446,6 +475,8 @@ class CloudSection:
             ("oauth_state_path", self.oauth_state_path),
             ("rclone_config_path", self.rclone_config_path),
             ("rclone_log_path", self.rclone_log_path),
+            ("db_path", self.db_path),
+            ("teslacam_path", self.teslacam_path),
         ):
             if not value.is_absolute() and not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[cloud] {name} must be absolute, got {value!r}")
@@ -459,6 +490,19 @@ class CloudSection:
             raise ConfigError(None, "[cloud] retries must be >= 0")
         if not self.rclone_binary.strip():
             raise ConfigError(None, "[cloud] rclone_binary must be non-empty")
+        if self.worker_idle_seconds <= 0:
+            raise ConfigError(None, "[cloud] worker_idle_seconds must be > 0")
+        if self.backoff_initial_seconds <= 0:
+            raise ConfigError(None, "[cloud] backoff_initial_seconds must be > 0")
+        if self.backoff_max_seconds < self.backoff_initial_seconds:
+            raise ConfigError(
+                None,
+                "[cloud] backoff_max_seconds must be >= backoff_initial_seconds",
+            )
+        if self.max_retry_attempts < 1:
+            raise ConfigError(None, "[cloud] max_retry_attempts must be >= 1")
+        if self.dead_letter_max_age_days < 1:
+            raise ConfigError(None, "[cloud] dead_letter_max_age_days must be >= 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -938,6 +982,66 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 cloud_raw,
                 "rclone_binary",
                 _DEFAULT_CLOUD_RCLONE_BINARY,
+                source,
+            ),
+            db_path=_coerce_path(
+                cloud_raw,
+                "db_path",
+                paths_section.state_dir / _DEFAULT_CLOUD_ARCHIVE_DB_NAME,
+                source,
+            ),
+            teslacam_path=_coerce_path(
+                cloud_raw,
+                "teslacam_path",
+                paths_section.backing_root,
+                source,
+            ),
+            worker_idle_seconds=_coerce_float(
+                cloud_raw,
+                "worker_idle_seconds",
+                _DEFAULT_CLOUD_WORKER_IDLE_SECONDS,
+                source,
+            ),
+            backoff_initial_seconds=_coerce_float(
+                cloud_raw,
+                "backoff_initial_seconds",
+                _DEFAULT_CLOUD_BACKOFF_INITIAL_SECONDS,
+                source,
+            ),
+            backoff_max_seconds=_coerce_float(
+                cloud_raw,
+                "backoff_max_seconds",
+                _DEFAULT_CLOUD_BACKOFF_MAX_SECONDS,
+                source,
+            ),
+            max_retry_attempts=_coerce_int(
+                cloud_raw,
+                "max_retry_attempts",
+                _DEFAULT_CLOUD_MAX_RETRY_ATTEMPTS,
+                source,
+            ),
+            wifi_check_required=_coerce_bool(
+                cloud_raw,
+                "wifi_check_required",
+                _DEFAULT_CLOUD_WIFI_CHECK_REQUIRED,
+                source,
+            ),
+            priority_folders=_coerce_str_tuple(
+                cloud_raw,
+                "priority_folders",
+                _DEFAULT_CLOUD_PRIORITY_FOLDERS,
+                source,
+            ),
+            sync_folders=_coerce_str_tuple(
+                cloud_raw,
+                "sync_folders",
+                _DEFAULT_CLOUD_SYNC_FOLDERS,
+                source,
+            ),
+            dead_letter_max_age_days=_coerce_int(
+                cloud_raw,
+                "dead_letter_max_age_days",
+                _DEFAULT_CLOUD_DEAD_LETTER_MAX_AGE_DAYS,
                 source,
             ),
         )

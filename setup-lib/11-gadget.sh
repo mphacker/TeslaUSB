@@ -30,8 +30,8 @@
 #
 #   * /etc/modprobe.d/teslausb-nbd.conf — `options nbd nbds_max=2 max_part=0`
 #   * /etc/modules-load.d/teslausb.conf — load `nbd` at boot
-#   * /etc/teslausb/teslafat-0.toml — TeslaCam LUN config (256 GiB FAT32)
-#   * /etc/teslausb/teslafat-1.toml — media LUN config (16 GiB FAT32)
+#   * /etc/teslausb/teslafat-0.toml — TeslaCam LUN config (FAT32, size chosen at install)
+#   * /etc/teslausb/teslafat-1.toml — media LUN config (FAT32, size chosen at install)
 #   * /etc/systemd/system/nbd-attach@.service — templated attach unit
 #   * /etc/systemd/system/usb-gadget.service — configfs gadget oneshot
 #   * /usr/local/bin/teslausb-gadget-up — configfs g1 builder script
@@ -119,10 +119,10 @@ B1_NBD_MODULES_BODY='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit
 nbd
 '
 
-B1_TESLAFAT_CONF_0_BODY='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
+B1_TESLAFAT_CONF_0_TEMPLATE='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
 # LUN 0 — TeslaCam (dashcam + sentry + saved clips).
 backing_root = "/srv/teslausb/teslacam"
-volume_size_gb = 256
+volume_size_gb = __SIZE_GB__
 volume_label = "TESLACAM"
 fs_type = "fat32"
 
@@ -137,10 +137,10 @@ socket_path = "/run/teslausb/teslafat-0.sock"
 handshake_timeout_seconds = 30
 '
 
-B1_TESLAFAT_CONF_1_BODY='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
+B1_TESLAFAT_CONF_1_TEMPLATE='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
 # LUN 1 — user-managed media (lock chimes, light shows, music, wraps).
 backing_root = "/srv/teslausb/media"
-volume_size_gb = 16
+volume_size_gb = __SIZE_GB__
 volume_label = "MEDIA"
 fs_type = "fat32"
 
@@ -390,6 +390,135 @@ echo "" > "${GADGET_DIR}/UDC"
 echo "teslausb-hide-usb: unbound from ${current}"
 '
 
+# _b1_data_root_free_gb  — best-effort: total bytes of the filesystem
+# hosting /srv/teslausb, expressed in whole GB. Falls back to 0 if the
+# path doesn't exist yet (caller handles).
+_b1_data_root_total_gb() {
+  local root="${B1_DATA_ROOT:-/srv/teslausb}"
+  if [[ ! -d "${root}" ]]; then
+    echo 0
+    return 0
+  fi
+  # df -B1G --output=size <path>  →  prints "1G-blocks\n<n>"
+  local total
+  total=$(df -B1G --output=size "${root}" 2>/dev/null | tail -n1 | tr -d ' ')
+  if [[ -z "${total}" || ! "${total}" =~ ^[0-9]+$ ]]; then
+    echo 0
+    return 0
+  fi
+  echo "${total}"
+}
+
+# _b1_recommend_sizes  — emits "TESLACAM_GB MEDIA_GB" on stdout based
+# on filesystem total. Strategy (per operator directive 2026-05-21):
+#   * Defaults are 256 / 32 (TeslaCam / Media).
+#   * Reserve ~16 GB for OS + swap + worker scratch + headroom.
+#   * If avail >= 288 (256+32), recommend the defaults verbatim.
+#   * If avail < 288, scale both DOWN proportionally:
+#       Media  = max(8,  round(avail * 32 / 288))
+#       TeslaCam = max(32, avail - Media)
+#   * If total is 0 (data root absent), return the static defaults.
+_b1_recommend_sizes() {
+  local total=$1
+  local default_teslacam=256
+  local default_media=32
+  if [[ "${total}" -eq 0 ]]; then
+    echo "${default_teslacam} ${default_media}"
+    return 0
+  fi
+  local reserve=16
+  local avail=$(( total - reserve ))
+  if [[ "${avail}" -ge $(( default_teslacam + default_media )) ]]; then
+    echo "${default_teslacam} ${default_media}"
+    return 0
+  fi
+  # Scale down. Ratio 256:32 = 8:1.
+  local media=$(( avail / 9 ))
+  if [[ "${media}" -lt 8 ]]; then media=8; fi
+  local teslacam=$(( avail - media ))
+  if [[ "${teslacam}" -lt 32 ]]; then teslacam=32; fi
+  echo "${teslacam} ${media}"
+}
+
+# _b1_existing_volume_size_gb <conf_file>  — extract the
+# `volume_size_gb = N` value from an existing TOML config, or empty.
+_b1_existing_volume_size_gb() {
+  local conf="$1"
+  if [[ ! -e "${conf}" ]]; then
+    return 0
+  fi
+  awk -F'=' '/^[[:space:]]*volume_size_gb[[:space:]]*=/ {
+    gsub(/[[:space:]]/,"",$2); print $2; exit
+  }' "${conf}"
+}
+
+# _b1_validate_size_gb <n>  — returns 0 if n is an integer in
+# teslafat'"'"'s [4, 2048] range, else 1.
+_b1_validate_size_gb() {
+  local n="$1"
+  [[ "${n}" =~ ^[0-9]+$ ]] || return 1
+  (( n >= 4 && n <= 2048 )) || return 1
+  return 0
+}
+
+# _b1_resolve_size_gb <lun_index> <label> <recommended> <env_var_name>
+#                     <existing_conf_path>
+# Returns chosen size on stdout. Priority:
+#   1. Env var (TESLAUSB_LUN0_SIZE_GB / TESLAUSB_LUN1_SIZE_GB) if set+valid
+#   2. Existing TOML config value (preserves operator choices on re-run)
+#   3. Interactive prompt if stdin is a TTY and not dry-run/non-interactive
+#   4. Recommended value
+_b1_resolve_size_gb() {
+  local idx="$1" label="$2" recommended="$3" env_var="$4" existing_conf="$5"
+  local env_val="${!env_var:-}"
+
+  if [[ -n "${env_val}" ]]; then
+    if _b1_validate_size_gb "${env_val}"; then
+      b1_log "  LUN ${idx} (${label}): using ${env_val} GB from ${env_var}" >&2
+      echo "${env_val}"
+      return 0
+    fi
+    b1_warn "  LUN ${idx} (${label}): ${env_var}=${env_val} invalid (must be int 4..2048); ignoring" >&2
+  fi
+
+  local existing
+  existing=$(_b1_existing_volume_size_gb "${existing_conf}")
+  if [[ -n "${existing}" ]] && _b1_validate_size_gb "${existing}"; then
+    b1_log "  LUN ${idx} (${label}): preserving existing ${existing} GB from ${existing_conf}" >&2
+    echo "${existing}"
+    return 0
+  fi
+
+  # Interactive prompt only if: stdin is TTY, not dry-run, not non-interactive.
+  if [[ -t 0 && "${TESLAUSB_DRY_RUN:-0}" != "1" && "${TESLAUSB_NON_INTERACTIVE:-0}" != "1" ]]; then
+    local input
+    while true; do
+      printf '  LUN %s (%s) size in GB [recommended %s, range 4..2048]: ' \
+        "${idx}" "${label}" "${recommended}" >&2
+      if ! IFS= read -r input; then
+        # EOF / Ctrl-D — fall through to recommended.
+        echo >&2
+        break
+      fi
+      input="${input// /}"
+      if [[ -z "${input}" ]]; then
+        b1_log "  LUN ${idx} (${label}): using recommended ${recommended} GB" >&2
+        echo "${recommended}"
+        return 0
+      fi
+      if _b1_validate_size_gb "${input}"; then
+        b1_log "  LUN ${idx} (${label}): using ${input} GB (operator entered)" >&2
+        echo "${input}"
+        return 0
+      fi
+      printf '  invalid: must be integer in 4..2048\n' >&2
+    done
+  fi
+
+  b1_log "  LUN ${idx} (${label}): using recommended ${recommended} GB" >&2
+  echo "${recommended}"
+}
+
 # ---- Helpers -------------------------------------------------------
 
 # _b1_install_file <dst> <mode> <body-string>
@@ -457,10 +586,30 @@ b1_step_11() {
   _b1_install_file "${B1_NBD_MODPROBE_CONF}" 0644 "${B1_NBD_MODPROBE_BODY}"
   _b1_install_file "${B1_NBD_MODULES_LOAD}"  0644 "${B1_NBD_MODULES_BODY}"
 
-  # 2. teslafat per-LUN configs.
+  # 2. teslafat per-LUN configs (with operator-chosen / recommended sizes).
+  b1_log "resolving LUN sizes"
+  local total_gb teslacam_rec media_rec teslacam_gb media_gb
+  total_gb=$(_b1_data_root_total_gb)
+  if [[ "${total_gb}" -gt 0 ]]; then
+    b1_log "  data root ${B1_DATA_ROOT:-/srv/teslausb} total: ${total_gb} GB"
+  else
+    b1_log "  data root absent — using static defaults"
+  fi
+  read -r teslacam_rec media_rec <<<"$(_b1_recommend_sizes "${total_gb}")"
+  b1_log "  recommended: TeslaCam=${teslacam_rec} GB, Media=${media_rec} GB"
+
+  teslacam_gb=$(_b1_resolve_size_gb 0 TESLACAM "${teslacam_rec}" \
+                  TESLAUSB_LUN0_SIZE_GB "${B1_TESLAFAT_CONF_0}")
+  media_gb=$(_b1_resolve_size_gb 1 MEDIA "${media_rec}" \
+              TESLAUSB_LUN1_SIZE_GB "${B1_TESLAFAT_CONF_1}")
+
+  local conf0_body conf1_body
+  conf0_body="${B1_TESLAFAT_CONF_0_TEMPLATE//__SIZE_GB__/${teslacam_gb}}"
+  conf1_body="${B1_TESLAFAT_CONF_1_TEMPLATE//__SIZE_GB__/${media_gb}}"
+
   b1_log "installing teslafat per-LUN configs"
-  _b1_install_file "${B1_TESLAFAT_CONF_0}" 0644 "${B1_TESLAFAT_CONF_0_BODY}"
-  _b1_install_file "${B1_TESLAFAT_CONF_1}" 0644 "${B1_TESLAFAT_CONF_1_BODY}"
+  _b1_install_file "${B1_TESLAFAT_CONF_0}" 0644 "${conf0_body}"
+  _b1_install_file "${B1_TESLAFAT_CONF_1}" 0644 "${conf1_body}"
 
   # 3. systemd units.
   b1_log "installing nbd-attach@ + usb-gadget systemd units"

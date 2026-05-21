@@ -78,7 +78,7 @@ class TestCascade:
         assert location is not None
         assert location.endswith("/lock_chimes/")
 
-    def test_music_drive_present_and_music_enabled_redirects_to_music(self, tmp_path: Path) -> None:
+    def test_music_drive_present_and_music_enabled_redirects_to_chimes(self, tmp_path: Path) -> None:
         cfg = _make_config(tmp_path, music_enabled=True, boombox_enabled=False)
         _ensure_music(cfg)
 
@@ -87,9 +87,9 @@ class TestCascade:
         assert response.status_code == HTTPStatus.FOUND
         location = response.headers.get("Location")
         assert location is not None
-        assert location.endswith("/music/")
+        assert location.endswith("/lock_chimes/")
 
-    def test_music_drive_present_boombox_only_redirects_to_boombox(self, tmp_path: Path) -> None:
+    def test_music_drive_present_boombox_only_redirects_to_chimes(self, tmp_path: Path) -> None:
         cfg = _make_config(tmp_path, music_enabled=False, boombox_enabled=True)
         _ensure_music(cfg)
 
@@ -98,7 +98,7 @@ class TestCascade:
         assert response.status_code == HTTPStatus.FOUND
         location = response.headers.get("Location")
         assert location is not None
-        assert location.endswith("/boombox/")
+        assert location.endswith("/lock_chimes/")
 
     def test_music_present_but_both_features_disabled_falls_back(self, tmp_path: Path) -> None:
         cfg = _make_config(tmp_path, music_enabled=False, boombox_enabled=False)
@@ -152,7 +152,7 @@ class TestPickTarget:
         )
         assert _pick_target(availability) == "lock_chimes.lock_chimes"
 
-    def test_pick_target_music_over_boombox(self) -> None:
+    def test_pick_target_music_enabled_still_picks_chimes(self) -> None:
         from teslausb_web.blueprints.media import _MediaAvailability, _pick_target
 
         availability = _MediaAvailability(
@@ -161,7 +161,7 @@ class TestPickTarget:
             music_enabled=True,
             boombox_enabled=True,
         )
-        assert _pick_target(availability) == "music.music_home"
+        assert _pick_target(availability) == "lock_chimes.lock_chimes"
 
     def test_pick_target_falls_back_when_nothing_available(self) -> None:
         from teslausb_web.blueprints.media import _MediaAvailability, _pick_target

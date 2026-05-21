@@ -6,24 +6,12 @@ button in ``base.html``; the actual media pages (lock chimes, light
 shows, wraps, music, boombox, license plates) live in their own
 blueprints (Phase 5.8 / 5.9 / 5.10 / 5.11 / 5.12 / 5.16a).
 
-## Cascade order — WHY LightShow → Music → Boombox
+## Landing target — ALWAYS lock chimes
 
-The order mirrors v1 (``scripts/web/blueprints/media.py``) so operator
-muscle-memory carries over:
-
-1. **LightShow drive present** → ``lock_chimes.lock_chimes``. The
-   LightShow partition hosts lock chimes, light shows, wraps, and
-   license-plate art; chimes is the v1-historical landing page for
-   that whole sub-area.
-2. **Music drive present + ``music_enabled``** → ``music.music_home``.
-3. **Music drive present + ``boombox_enabled`` (music disabled)** →
-   ``boombox.boombox_home``. Boombox lives on the music partition so
-   the partition gate is the same; the feature flag distinguishes the
-   two consumers.
-4. **Fallback** → ``lock_chimes.lock_chimes``. The lock-chimes page
-   renders a "no LightShow drive" empty state when the partition is
-   missing, so it doubles as the universal "no media drives mounted"
-   landing page. This matches v1 behaviour.
+Operator directive (2026-05-21): ``/media/`` must always redirect to
+``/lock_chimes/`` because chimes is the first pill in the media
+sub-nav. The cascade probe is retained so the decision is logged for
+diagnostics, but the chosen target no longer depends on drive state.
 
 ## B-1 adaptation — NO IMG files
 
@@ -89,20 +77,14 @@ def _probe_availability(cfg: WebConfig) -> _MediaAvailability:
 
 
 def _pick_target(availability: _MediaAvailability) -> str:
-    """Return the endpoint name for the highest-priority media page.
+    """Return the endpoint name for the media landing page.
 
-    See module docstring for WHY the cascade is ordered the way it
-    is. Returning the endpoint as a string (rather than calling
-    ``url_for`` here) keeps this function pure and trivially
-    unit-testable.
+    Operator directive (2026-05-21): always land on lock chimes because
+    it is the first pill in the media sub-nav, so muscle memory matches
+    the nav order. The ``_MediaAvailability`` snapshot is retained for
+    logging/diagnostics so the cascade decision is still observable.
     """
-    if availability.lightshow_present:
-        return "lock_chimes.lock_chimes"
-    if availability.music_drive_present:
-        if availability.music_enabled:
-            return "music.music_home"
-        if availability.boombox_enabled:
-            return "boombox.boombox_home"
+    del availability  # observability only; kept in caller's log line
     return "lock_chimes.lock_chimes"
 
 

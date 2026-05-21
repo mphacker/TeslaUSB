@@ -29,7 +29,7 @@
             <span class="status-dot status-edit"></span>
             <div class="device-status-info">
                 <strong>Network Sharing Active</strong>
-                <p>Tesla USB disconnected ΓÇö files accessible via network.</p>
+                <p>Tesla USB disconnected — files accessible via network.</p>
             </div>
         </div>
         {% if share_paths %}
@@ -55,10 +55,10 @@
     </div>
     {% endif %}
 
-    <!-- Files-Lost banner (Phase 4.3 ΓÇö issue #101).
+    <!-- Files-Lost banner (Phase 4.3 — issue #101).
          Hidden by default; shown by JS poller when archive.lost_24h > 0.
          This is the user-facing version of the worker's source_gone
-         counter ΓÇö clips Tesla rotated out of RecentClips before we
+         counter — clips Tesla rotated out of RecentClips before we
          could archive them. Lost dashcam footage is unrecoverable, so
          this banner is intentionally loud (red) and links to the
          Failed Jobs page for the full archive history. -->
@@ -68,7 +68,7 @@
            UA stylesheet's ``[hidden] { display:none }`` rule
            (specificity 0,0,1,0). Without this scoped !important rule,
            setting ``banner.hidden = true`` from JS leaves the banner
-           visible because the inline display wins ΓÇö exactly what the
+           visible because the inline display wins — exactly what the
            user reported when the Dismiss button "did not work" even
            though the POST to /api/system/clear_lost_clips returned
            200. Reproduced live with Playwright on
@@ -123,7 +123,7 @@
         </button>
     </div>
 
-    <!-- System Health (Phase 4.2 ΓÇö issue #101) -->
+    <!-- System Health (Phase 4.2 — issue #101) -->
     <details class="settings-section" id="system-health-section" open>
         <summary>System Health</summary>
         <div class="section-content">
@@ -143,7 +143,7 @@
                                  display:inline-block; flex-shrink:0;
                                  background:var(--text-secondary);"></span>
                     <span id="system-health-overall-text">
-                        LoadingΓÇª
+                        Loading…
                     </span>
                 </p>
                 <div id="system-health-rows"
@@ -156,7 +156,7 @@
                 <p id="system-health-error" hidden
                    style="font-size:0.85rem; color:var(--msg-error-text);
                           margin:6px 0 0;">
-                    System Health probe failed ΓÇö
+                    System Health probe failed —
                     <button type="button" class="btn btn-ghost"
                             id="system-health-retry-btn"
                             aria-label="Retry system health probe"
@@ -168,7 +168,7 @@
         </div>
     </details>
 
-    <!-- Live Metrics (Issue #208) ΓÇö near-realtime CPU / memory / I/O.
+    <!-- Live Metrics (Issue #208) — near-realtime CPU / memory / I/O.
          Auto-pauses when the tab is hidden so we never poll a backgrounded
          page. /api/system/metrics is /proc-only (no subprocesses, no DB
          writes), so a 5 s poll on the device itself is essentially free. -->
@@ -186,63 +186,63 @@
                     <!-- Tiles rendered by JS from /api/system/metrics -->
                     <div class="metric-tile" id="metric-load">
                         <div class="metric-label">Load (1m / 5m / 15m)</div>
-                        <div class="metric-value" data-field="load">ΓÇö</div>
+                        <div class="metric-value" data-field="load">—</div>
                         <div class="metric-detail" data-field="load-detail">
                             &nbsp;
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-cpu">
                         <div class="metric-label">CPU</div>
-                        <div class="metric-value" data-field="cpu">ΓÇö</div>
+                        <div class="metric-value" data-field="cpu">—</div>
                         <div class="metric-detail" data-field="cpu-detail">
                             &nbsp;
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-mem">
                         <div class="metric-label">Memory</div>
-                        <div class="metric-value" data-field="mem">ΓÇö</div>
+                        <div class="metric-value" data-field="mem">—</div>
                         <div class="metric-detail" data-field="mem-detail">
                             &nbsp;
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-swap">
                         <div class="metric-label">Swap</div>
-                        <div class="metric-value" data-field="swap">ΓÇö</div>
+                        <div class="metric-value" data-field="swap">—</div>
                         <div class="metric-detail" data-field="swap-detail">
                             &nbsp;
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-sd">
                         <div class="metric-label">SD Card I/O</div>
-                        <div class="metric-value" data-field="sd">ΓÇö</div>
+                        <div class="metric-value" data-field="sd">—</div>
                         <div class="metric-detail" data-field="sd-detail">
                             &nbsp;
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-loop">
                         <div class="metric-label">USB Image I/O</div>
-                        <div class="metric-value" data-field="loop">ΓÇö</div>
+                        <div class="metric-value" data-field="loop">—</div>
                         <div class="metric-detail" data-field="loop-detail">
                             &nbsp;
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-coord">
                         <div class="metric-label">Active Worker</div>
-                        <div class="metric-value" data-field="coord">ΓÇö</div>
+                        <div class="metric-value" data-field="coord">—</div>
                         <div class="metric-detail" data-field="coord-detail">
                             &nbsp;
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-queues">
                         <div class="metric-label">Queue Depths</div>
-                        <div class="metric-value" data-field="queues">ΓÇö</div>
+                        <div class="metric-value" data-field="queues">—</div>
                         <div class="metric-detail" data-field="queues-detail">
                             &nbsp;
                         </div>
                     </div>
                     <div class="metric-tile" id="metric-cache">
                         <div class="metric-label">Stationary Cache</div>
-                        <div class="metric-value" data-field="cache">ΓÇö</div>
+                        <div class="metric-value" data-field="cache">—</div>
                         <div class="metric-detail" data-field="cache-detail">
                             &nbsp;
                         </div>
@@ -251,8 +251,8 @@
                 <p id="live-metrics-foot"
                    style="margin:0; font-size:0.78rem;
                           color:var(--text-secondary);">
-                    Updated <span id="live-metrics-updated">ΓÇö</span>
-                    ┬╖ <span id="live-metrics-uptime">ΓÇö</span>
+                    Updated <span id="live-metrics-updated">—</span>
+                    · <span id="live-metrics-uptime">—</span>
                 </p>
             </div>
         </div>
@@ -314,11 +314,11 @@
                 <div style="padding-right: 30px;">
                     <strong>
                         {% if wifi_change_status.success %}
-                            Γ£ô WiFi Connection Updated
+                            ✓ WiFi Connection Updated
                         {% elif wifi_change_status.action == 'reverted' %}
-                            ΓÜá WiFi Connection Reverted
+                            ⚠ WiFi Connection Reverted
                         {% elif wifi_change_status.action == 'ap_started' %}
-                            WiFi Connection Failed ΓÇö AP Started
+                            WiFi Connection Failed — AP Started
                         {% else %}
                             WiFi Connection Failed
                         {% endif %}
@@ -431,13 +431,13 @@
         </div>
     </details>
 
-    <!-- Storage & Retention (Phase 3a.2 ΓÇö closes part of #98) -->
+    <!-- Storage & Retention (Phase 3a.2 — closes part of #98) -->
     <details class="settings-section" id="storage-retention-section">
         <summary>Storage &amp; Retention</summary>
         <div class="section-content">
             <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
                 Controls how long archived dashcam clips are kept on the Pi's SD card and how
-                aggressively the cleanup pass runs. Changes take effect on the next cleanup pass ΓÇö
+                aggressively the cleanup pass runs. Changes take effect on the next cleanup pass —
                 no service restart needed.
             </p>
 
@@ -530,7 +530,7 @@
                     <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 10px">
                         Deletes archived RecentClips with no GPS movement (parked Sentry-mode footage,
                         no driving, no events). Saved/Sentry event clips are preserved even if a
-                        RecentClips copy of the same recording exists. This can free a lot of space ΓÇö
+                        RecentClips copy of the same recording exists. This can free a lot of space —
                         on a typical install, RecentClips dominates the SD card.
                     </p>
                     <button type="button" id="sr-reclaim-stationary-btn" class="btn btn-secondary"
@@ -543,12 +543,12 @@
                     </div>
                     <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 10px">
                         The archive worker peeks at each new RecentClips file and skips
-                        copying it to the SD card if no GPS movement is detected ΓÇö this
+                        copying it to the SD card if no GPS movement is detected — this
                         keeps overnight Sentry-mode parking footage from filling the SD
                         card. Sentry/Saved event clips are <strong>never</strong> skipped.
                     </p>
                     <div id="sr-skip-stationary-status" style="font-size:0.85rem; color:var(--text-secondary)">
-                        Skipped in last 24 hours: <strong><span id="sr-skip-stationary-count">ΓÇö</span></strong>
+                        Skipped in last 24 hours: <strong><span id="sr-skip-stationary-count">—</span></strong>
                         <button type="button" id="sr-skip-stationary-clear-btn" class="btn btn-link"
                                 style="padding:0 6px; font-size:0.8rem; vertical-align:baseline" hidden>Clear tally</button>
                     </div>
@@ -558,11 +558,11 @@
 
             <div id="sr-last-run" style="margin-top:14px; padding:10px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary); font-size:0.85rem">
                 <strong>Last cleanup:</strong>
-                <span id="sr-last-run-text">ΓÇö</span>
+                <span id="sr-last-run-text">—</span>
             </div>
 
             <div id="sr-disk-usage" hidden style="margin-top:10px; font-size:0.8rem; color:var(--text-secondary)">
-                <strong>SD card:</strong> <span id="sr-disk-text">ΓÇö</span>
+                <strong>SD card:</strong> <span id="sr-disk-text">—</span>
             </div>
         </div>
     </details>
@@ -610,7 +610,7 @@
     </details>
 
     {% if videos_available %}
-    <!-- Archive Status (Phase 2c ΓÇö issue #76) -->
+    <!-- Archive Status (Phase 2c — issue #76) -->
     <details class="settings-section">
         <summary>Archive Status</summary>
         <div class="section-content">
@@ -621,27 +621,27 @@
             <div class="archive-status-grid" id="archive-status-chips">
                 <div class="archive-status-chip">
                     <span class="chip-label">Worker</span>
-                    <span class="chip-value" id="chip-worker">ΓÇö</span>
+                    <span class="chip-value" id="chip-worker">—</span>
                 </div>
                 <div class="archive-status-chip">
                     <span class="chip-label">Pending P1</span>
-                    <span class="chip-value" id="chip-p1">ΓÇö</span>
+                    <span class="chip-value" id="chip-p1">—</span>
                 </div>
                 <div class="archive-status-chip">
                     <span class="chip-label">Pending P2</span>
-                    <span class="chip-value" id="chip-p2">ΓÇö</span>
+                    <span class="chip-value" id="chip-p2">—</span>
                 </div>
                 <div class="archive-status-chip">
                     <span class="chip-label">Pending P3</span>
-                    <span class="chip-value" id="chip-p3">ΓÇö</span>
+                    <span class="chip-value" id="chip-p3">—</span>
                 </div>
                 <div class="archive-status-chip" id="chip-dl-wrap">
                     <span class="chip-label">Dead-letter</span>
-                    <span class="chip-value" id="chip-dl">ΓÇö</span>
+                    <span class="chip-value" id="chip-dl">—</span>
                 </div>
                 <div class="archive-status-chip">
                     <span class="chip-label">Last copy</span>
-                    <span class="chip-value" id="chip-lastcopy" style="font-size:0.95rem">ΓÇö</span>
+                    <span class="chip-value" id="chip-lastcopy" style="font-size:0.95rem">—</span>
                 </div>
                 <!-- Phase 4.4 (#101): drain-rate ETA chip. Hidden by
                      default; shown by JS when the worker has enough
@@ -649,7 +649,7 @@
                      has work pending. -->
                 <div class="archive-status-chip" id="chip-eta-wrap" hidden>
                     <span class="chip-label">Backlog ETA</span>
-                    <span class="chip-value" id="chip-eta" style="font-size:0.95rem">ΓÇö</span>
+                    <span class="chip-value" id="chip-eta" style="font-size:0.95rem">—</span>
                 </div>
             </div>
             <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 8px"
@@ -688,16 +688,16 @@
                     <strong>Dead-letter queue</strong>
                     <button type="button" class="btn btn-ghost"
                             id="archive-dl-close-btn"
-                            aria-label="Close dead-letter list">├ù</button>
+                            aria-label="Close dead-letter list">×</button>
                 </div>
                 <div id="archive-dl-content" style="font-size:0.85rem; max-height:300px; overflow:auto">
-                    LoadingΓÇª
+                    Loading…
                 </div>
             </div>
         </div>
     </details>
 
-    <!-- Storage (Phase 2c ΓÇö issue #76) -->
+    <!-- Storage (Phase 2c — issue #76) -->
     <details class="settings-section">
         <summary>Storage</summary>
         <div class="section-content">
@@ -715,27 +715,27 @@
                          style="width:0%"></div>
                 </div>
                 <div class="storage-progress-text">
-                    <span id="storage-used-text">ΓÇö used</span>
-                    <span id="storage-free-text">ΓÇö free</span>
+                    <span id="storage-used-text">— used</span>
+                    <span id="storage-free-text">— free</span>
                 </div>
             </div>
             <div class="archive-status-grid" style="margin-bottom:12px">
                 <div class="archive-status-chip">
                     <span class="chip-label">Retention</span>
-                    <span class="chip-value" id="chip-retention">ΓÇö</span>
+                    <span class="chip-value" id="chip-retention">—</span>
                 </div>
                 <div class="archive-status-chip">
                     <span class="chip-label">Last prune</span>
                     <span class="chip-value" id="chip-lastprune"
-                          style="font-size:0.95rem">ΓÇö</span>
+                          style="font-size:0.95rem">—</span>
                 </div>
                 <div class="archive-status-chip">
                     <span class="chip-label">Last freed</span>
                     <span class="chip-value" id="chip-lastfreed"
-                          style="font-size:0.95rem">ΓÇö</span>
+                          style="font-size:0.95rem">—</span>
                 </div>
             </div>
-            {# Phase 4.7 (#101) ΓÇö prominent one-line summary so users
+            {# Phase 4.7 (#101) — prominent one-line summary so users
                see what retention did without having to scan three chips.
                Hidden until the first /api/archive/status response arrives;
                JS sets textContent and toggles `hidden`. #}
@@ -749,7 +749,7 @@
                hidden></p>
             <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 8px">
                 Clips older than the retention window above are automatically deleted.
-                Trips, waypoints, and detected events are <strong>preserved</strong> ΓÇö
+                Trips, waypoints, and detected events are <strong>preserved</strong> —
                 only the dashcam clip is removed.
             </p>
             <button type="button" class="btn btn-secondary"
@@ -770,7 +770,7 @@
                 <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 16px">
                     Tesla embeds GPS coordinates and telemetry data (speed, braking, steering) inside each dashcam video.
                     The indexer extracts this data and builds a database of trips, routes, and driving events.
-                    This powers the map view ΓÇö showing where you drove, plotting routes, and detecting events
+                    This powers the map view — showing where you drove, plotting routes, and detecting events
                     like hard braking or sharp turns.
                 </p>
                 <div class="form-group" style="margin-bottom:14px">
@@ -841,7 +841,7 @@
 
             <div class="fsck-partitions">
                 <div class="fsck-partition-card">
-                    <h4>≡ƒô╣ TeslaCam Drive</h4>
+                    <h4>📹 TeslaCam Drive</h4>
                     <div id="part1-last-check" class="last-check-info">Loading...</div>
                     <div class="fsck-actions">
                         <button onclick="startFsck(1, 'quick')" class="btn btn-secondary" id="btn-fsck-part1-quick">Quick Check</button>
@@ -849,7 +849,7 @@
                     </div>
                 </div>
                 <div class="fsck-partition-card">
-                    <h4>≡ƒÆí LightShow Drive</h4>
+                    <h4>💡 LightShow Drive</h4>
                     <div id="part2-last-check" class="last-check-info">Loading...</div>
                     <div class="fsck-actions">
                         <button onclick="startFsck(2, 'quick')" class="btn btn-secondary" id="btn-fsck-part2-quick">Quick Check</button>
@@ -858,7 +858,7 @@
                 </div>
                 {% if music_available %}
                 <div class="fsck-partition-card">
-                    <h4>≡ƒÄ╡ Music Drive</h4>
+                    <h4>🎵 Music Drive</h4>
                     <div id="part3-last-check" class="last-check-info">Loading...</div>
                     <div class="fsck-actions">
                         <button onclick="startFsck(3, 'quick')" class="btn btn-secondary" id="btn-fsck-part3-quick">Quick Check</button>
@@ -893,7 +893,7 @@
                 <span>{{ system_info.uptime }}</span>
 
                 <span style="color:var(--text-secondary)">Platform</span>
-                <span>{{ system_info.platform }} ┬╖ Python {{ system_info.python }}</span>
+                <span>{{ system_info.platform }} · Python {{ system_info.python }}</span>
 
                 <span style="color:var(--text-secondary)">Memory</span>
                 <span>{{ system_info.mem_avail_mb }} MB free / {{ system_info.mem_total_mb }} MB total</span>
@@ -922,7 +922,7 @@
     </details>
 
     <!-- Phase 5.9 (#102): low-key link to the Advanced sub-page. NOT a
-         top-level nav item ΓÇö buried at the bottom of Settings so casual
+         top-level nav item — buried at the bottom of Settings so casual
          users don't see it but power users can find it. -->
     <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border-color); text-align:right;">
         <a href="{{ url_for('settings_advanced.advanced') }}"
@@ -978,7 +978,7 @@ function loadSavedNetworks() {
         }
         let html = '';
         networks.forEach((net, idx) => {
-            const dot = net.active ? '<span style="color:var(--success-text, #22c55e);margin-right:6px">ΓùÅ</span>' : '<span style="margin-right:14px"></span>';
+            const dot = net.active ? '<span style="color:var(--success-text, #22c55e);margin-right:6px">●</span>' : '<span style="margin-right:14px"></span>';
             const signal = net.in_range ? '<span style="font-size:0.8em;color:var(--text-secondary)">' + getSignalIcon(net.signal) + ' ' + net.signal + '%</span>' : '<span style="font-size:0.8em;color:var(--text-secondary)">Not in range</span>';
             const name = (net.ssid || net.name).replace(/</g, '&lt;').replace(/>/g, '&gt;');
             // Defence against XSS via SSID. The value is embedded inside
@@ -1006,9 +1006,9 @@ function loadSavedNetworks() {
                 const cantConnect = !net.in_range;
                 html += '<button class="edit-btn wifi-connect-btn" onclick="connectToNetwork(\'' + escapedName + '\')" title="' + (cantConnect ? 'Network not in range' : 'Connect to this network now') + '" style="padding:2px 8px;font-size:0.8em;min-height:auto"' + (cantConnect ? ' disabled' : '') + '>Connect</button>';
             }
-            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',-1)" title="Move up" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === 0 ? ' disabled' : '') + '>Γû▓</button>';
-            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',1)" title="Move down" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === networks.length - 1 ? ' disabled' : '') + '>Γû╝</button>';
-            html += '<button class="present-btn" onclick="forgetNetwork(\'' + escapedName + '\')" title="Forget" style="padding:2px 6px;font-size:0.8em;min-height:auto">Γ£ò</button>';
+            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',-1)" title="Move up" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === 0 ? ' disabled' : '') + '>▲</button>';
+            html += '<button class="edit-btn" onclick="moveNetwork(\'' + escapedName + '\',1)" title="Move down" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === networks.length - 1 ? ' disabled' : '') + '>▼</button>';
+            html += '<button class="present-btn" onclick="forgetNetwork(\'' + escapedName + '\')" title="Forget" style="padding:2px 6px;font-size:0.8em;min-height:auto">✕</button>';
             html += '</div>';
         });
         el.innerHTML = html;
@@ -1064,7 +1064,7 @@ function connectToNetwork(name) {
     document.querySelectorAll('.wifi-connect-btn').forEach(b => {
         b.disabled = true;
         if (b.getAttribute('onclick') && b.getAttribute('onclick').indexOf(name) !== -1) {
-            b.textContent = 'ConnectingΓÇª';
+            b.textContent = 'Connecting…';
         }
     });
 
@@ -1138,7 +1138,7 @@ function scanAndRefreshNetworks() {
         // Update datalist for add-network panel
         const dl = document.getElementById('wifiScanResults');
         if (dl && networks.length) {
-            dl.innerHTML = networks.map(n => '<option value="' + n.ssid.replace(/"/g, '&quot;') + '">' + n.signal + '% ' + (n.secured ? '≡ƒöÆ' : '') + '</option>').join('');
+            dl.innerHTML = networks.map(n => '<option value="' + n.ssid.replace(/"/g, '&quot;') + '">' + n.signal + '% ' + (n.secured ? '🔒' : '') + '</option>').join('');
         }
         // Refresh the saved networks list (now with updated signal info)
         loadSavedNetworks();
@@ -1157,14 +1157,14 @@ function confirmWifiUpdate() {
     let message = '';
 
     if (connectedViaWifi && !accessingViaAP && currentSSID) {
-        message = 'ΓÜá∩╕Å WARNING: You are currently connected via WiFi (network: ' + currentSSID + ').\n\n';
+        message = '⚠️ WARNING: You are currently connected via WiFi (network: ' + currentSSID + ').\n\n';
         message += 'If you change the WiFi credentials and they are incorrect, you will lose this connection.\n\n';
         message += 'HOWEVER: The fallback AP is ' + (apActive ? 'already running' : 'available') + '.\n';
         message += 'If the new WiFi fails, you can reconnect to the AP to fix it.\n\n';
         message += 'Recommended: Connect to the AP first for safer credential updates.\n\n';
         message += 'Continue anyway?';
     } else if (accessingViaAP || apActive) {
-        message = 'Γ£ô You are connected via the fallback AP.\n\n';
+        message = '✓ You are connected via the fallback AP.\n\n';
         message += 'The Pi will attempt to connect to the new WiFi network.\n';
         message += 'Your AP connection will remain active during the process.\n\n';
         message += 'Continue?';
@@ -1221,10 +1221,10 @@ setTimeout(function() { scanAndRefreshNetworks(); }, 500);
 
 function getSignalIcon(signal) {
     const signalNum = parseInt(signal) || 0;
-    if (signalNum >= 75) return 'ΓûéΓûäΓûåΓûê';
-    if (signalNum >= 50) return 'ΓûéΓûäΓûå_';
-    if (signalNum >= 25) return 'ΓûéΓûä__';
-    return 'Γûé___';
+    if (signalNum >= 75) return '▂▄▆█';
+    if (signalNum >= 50) return '▂▄▆_';
+    if (signalNum >= 25) return '▂▄__';
+    return '▂___';
 }
 
 function dismissWifiStatus() {
@@ -1347,7 +1347,7 @@ function updateLastChecks() {
             if (d.timestamp) {
                 const age = d.age_hours || 0;
                 const ageStr = age < 1 ? 'Less than 1 hour ago' : age < 24 ? `${Math.round(age)} hours ago` : `${Math.round(age / 24)} days ago`;
-                const icon = {healthy:'Γ£à',repaired:'≡ƒöº',recording:'≡ƒô╣',errors:'ΓÜá∩╕Å',failed:'Γ¥î',timeout:'ΓÅ▒∩╕Å'}[d.result] || 'Γ¥ô';
+                const icon = {healthy:'✅',repaired:'🔧',recording:'📹',errors:'⚠️',failed:'❌',timeout:'⏱️'}[d.result] || '❓';
                 const cls = {healthy:'status-healthy',repaired:'status-repaired',recording:'status-recording',errors:'status-errors'}[d.result] || 'status-warning';
                 c.innerHTML = `<div class="last-check-result ${cls}">${icon} Last checked: ${ageStr}<br><small>${d.details}</small></div>`;
             } else { c.innerHTML = '<div class="last-check-never">Never checked</div>'; }
@@ -1362,7 +1362,7 @@ function updateFsckHistory() {
         const recent = history.slice(-5).reverse();
         let html = '<table class="fsck-history-table"><thead><tr><th>Time</th><th>Drive</th><th>Mode</th><th>Result</th><th>Details</th></tr></thead><tbody>';
         recent.forEach(e => {
-            const icon = {healthy:'Γ£à',repaired:'≡ƒöº',recording:'≡ƒô╣',timeout:'ΓÅ▒∩╕Å',failed:'Γ¥î'}[e.result] || 'Γ¥ô';
+            const icon = {healthy:'✅',repaired:'🔧',recording:'📹',timeout:'⏱️',failed:'❌'}[e.result] || '❓';
             html += `<tr><td>${new Date(e.timestamp).toLocaleString()}</td><td>${getFriendlyPartitionName(e.partition)}</td><td>${e.mode}</td><td>${icon} ${e.result}</td><td><small>${e.details}</small></td></tr>`;
         });
         c.innerHTML = html + '</tbody></table>';
@@ -1375,7 +1375,7 @@ if (document.getElementById('fsck-status-container')) {
 }
 
 // =====================================================================
-// Phase 2c (issue #76) ΓÇö Archive Status & Storage panels
+// Phase 2c (issue #76) — Archive Status & Storage panels
 // =====================================================================
 (function() {
     const POLL_MS = 30000;
@@ -1402,7 +1402,7 @@ if (document.getElementById('fsck-status-container')) {
     }
 
     function fmtMb(mb) {
-        if (!mb && mb !== 0) return 'ΓÇö';
+        if (!mb && mb !== 0) return '—';
         if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
         return mb + ' MB';
     }
@@ -1412,7 +1412,7 @@ if (document.getElementById('fsck-status-container')) {
     // when the user has both panels open. Cap at 24 h matches the
     // backend cap; anything larger is suppressed at the source.
     function fmtEta(seconds) {
-        if (!seconds || seconds < 0) return 'ΓÇö';
+        if (!seconds || seconds < 0) return '—';
         if (seconds < 60) return '<1 min';
         if (seconds < 3600) return Math.floor(seconds / 60) + ' min';
         const hours = Math.floor(seconds / 3600);
@@ -1503,7 +1503,7 @@ if (document.getElementById('fsck-status-container')) {
         setText('chip-retention',
             data.retention_days
             ? data.retention_days + ' days'
-            : 'ΓÇö');
+            : '—');
         setText('chip-lastprune', fmtAgo(data.last_prune_at));
         setText('chip-lastfreed',
             data.last_prune_deleted
@@ -1511,7 +1511,7 @@ if (document.getElementById('fsck-status-container')) {
               fmtBytes(data.last_prune_freed_bytes) + ')'
             : 'no files');
 
-        // Phase 4.7 (#101) ΓÇö prominent retention summary line.
+        // Phase 4.7 (#101) — prominent retention summary line.
         // Reassures users that retention is keeping the SD card healthy
         // and tells them concretely what was deleted last time.
         const summaryEl = document.getElementById('storage-prune-summary');
@@ -1528,7 +1528,7 @@ if (document.getElementById('fsck-status-container')) {
 
     // Build a single-line human summary of the most recent retention
     // prune. Returns '' (caller hides the element) when no prune has
-    // ever run yet ΓÇö the chips already show 'ΓÇö' in that case.
+    // ever run yet — the chips already show '—' in that case.
     function composePruneSummary(data) {
         if (data.last_prune_error) {
             return 'Last retention prune failed: ' +
@@ -1559,7 +1559,7 @@ if (document.getElementById('fsck-status-container')) {
         return main;
     }
 
-    // "today" / "yesterday" / "N days ago" ΓÇö matches the friendly
+    // "today" / "yesterday" / "N days ago" — matches the friendly
     // tone of the rest of the Storage panel.
     function fmtPruneWhen(iso) {
         const t = Date.parse(iso);
@@ -1643,7 +1643,7 @@ if (document.getElementById('fsck-status-container')) {
     if (dlBtn && dlModal) {
         dlBtn.addEventListener('click', async function() {
             dlModal.hidden = false;
-            dlContent.textContent = 'LoadingΓÇª';
+            dlContent.textContent = 'Loading…';
             try {
                 const r = await fetch('/api/archive/dead_letters', {
                     credentials: 'same-origin'
@@ -1688,7 +1688,7 @@ if (document.getElementById('fsck-status-container')) {
 })();
 
 // ===========================================================================
-// Storage & Retention card (Phase 3a.2 ΓÇö closes part of #98)
+// Storage & Retention card (Phase 3a.2 — closes part of #98)
 // ===========================================================================
 (function () {
     var STORAGE_API = '/api/cleanup/status';
@@ -1701,7 +1701,7 @@ if (document.getElementById('fsck-status-container')) {
     function $(id) { return document.getElementById(id); }
 
     function fmtBytes(n) {
-        if (n == null || isNaN(n)) return 'ΓÇö';
+        if (n == null || isNaN(n)) return '—';
         if (n < 1024) return n + ' B';
         var units = ['KB', 'MB', 'GB', 'TB'];
         var i = -1;
@@ -1769,7 +1769,7 @@ if (document.getElementById('fsck-status-container')) {
         if (lr.freed_bytes != null) parts.push('freed ' + fmtBytes(lr.freed_bytes));
         if (lr.kept_unsynced_count) parts.push('kept ' + lr.kept_unsynced_count + ' un-synced');
         if (lr.error) parts.push('error: ' + lr.error);
-        el.textContent = parts.join(' ΓÇö ');
+        el.textContent = parts.join(' — ');
     }
 
     function renderDisk(snapshot) {
@@ -1848,7 +1848,7 @@ if (document.getElementById('fsck-status-container')) {
         if (!btn) return;
         var origText = btn.textContent;
         btn.disabled = true;
-        btn.textContent = 'SavingΓÇª';
+        btn.textContent = 'Saving…';
         setError(null);
         fetch(SAVE_API, {
             method: 'POST',
@@ -1864,7 +1864,7 @@ if (document.getElementById('fsck-status-container')) {
                     setError((res.data && res.data.message) || 'Failed to save retention settings');
                     return;
                 }
-                btn.textContent = 'Saved Γ£ô';
+                btn.textContent = 'Saved ✓';
                 loadStatus();
                 setTimeout(function () { btn.textContent = origText; }, 1500);
             })
@@ -1873,7 +1873,7 @@ if (document.getElementById('fsck-status-container')) {
             })
             .finally(function () {
                 btn.disabled = false;
-                if (btn.textContent === 'SavingΓÇª') btn.textContent = origText;
+                if (btn.textContent === 'Saving…') btn.textContent = origText;
             });
     }
 
@@ -1882,7 +1882,7 @@ if (document.getElementById('fsck-status-container')) {
         if (!btn) return;
         var origText = btn.textContent;
         btn.disabled = true;
-        btn.textContent = 'RunningΓÇª';
+        btn.textContent = 'Running…';
         setError(null);
         fetch(RUN_NOW_API, { method: 'POST', credentials: 'same-origin' })
             .then(function (r) {
@@ -1896,7 +1896,7 @@ if (document.getElementById('fsck-status-container')) {
                 } else if (res.status >= 200 && res.status < 300 && d.success !== false) {
                     var deleted = result.deleted_count || 0;
                     var freed = result.freed_bytes ? fmtBytes(result.freed_bytes) : '0 B';
-                    btn.textContent = 'Γ£ô ' + deleted + ' clips, ' + freed;
+                    btn.textContent = '✓ ' + deleted + ' clips, ' + freed;
                 } else {
                     setError(d.message || 'Cleanup failed');
                     btn.textContent = origText;
@@ -1924,7 +1924,7 @@ if (document.getElementById('fsck-status-container')) {
         if (!ok) return;
         var origText = btn.textContent;
         btn.disabled = true;
-        btn.textContent = 'ReclaimingΓÇª';
+        btn.textContent = 'Reclaiming…';
         setError(null);
         fetch(RECLAIM_STATIONARY_API, {
             method: 'POST',
@@ -1943,7 +1943,7 @@ if (document.getElementById('fsck-status-container')) {
                 } else if (res.status >= 200 && res.status < 300 && d.success !== false) {
                     var deleted = result.deleted_count || 0;
                     var freed = result.freed_bytes ? fmtBytes(result.freed_bytes) : '0 B';
-                    btn.textContent = 'Γ£ô ' + deleted + ' clips, ' + freed;
+                    btn.textContent = '✓ ' + deleted + ' clips, ' + freed;
                 } else {
                     setError(d.message || 'Reclaim failed');
                     btn.textContent = origText;
@@ -1962,7 +1962,7 @@ if (document.getElementById('fsck-status-container')) {
     if (!$('storage-retention-section')) return;
 
     // -----------------------------------------------------------------
-    // Skipped-stationary tally (issue #167 sub 2 ΓÇö issue #184 Wave 1
+    // Skipped-stationary tally (issue #167 sub 2 — issue #184 Wave 1
     // made the skip behavior unconditional; this just powers the badge).
     // -----------------------------------------------------------------
 
@@ -1993,7 +1993,7 @@ if (document.getElementById('fsck-status-container')) {
                 countEl.textContent = (data.skipped_24h != null) ? data.skipped_24h : '0';
                 if (clearBtn) clearBtn.hidden = !((data.skipped_24h | 0) > 0);
             })
-            .catch(function () { /* silent ΓÇö non-critical */ });
+            .catch(function () { /* silent — non-critical */ });
     }
 
     function onSkipStationaryClear() {
@@ -2001,7 +2001,7 @@ if (document.getElementById('fsck-status-container')) {
         if (!btn) return;
         btn.disabled = true;
         var orig = btn.textContent;
-        btn.textContent = 'ClearingΓÇª';
+        btn.textContent = 'Clearing…';
         fetch(SKIPPED_STATIONARY_CLEAR_API, {
             method: 'POST',
             credentials: 'same-origin',
@@ -2048,7 +2048,7 @@ if (document.getElementById('fsck-status-container')) {
     if (warnEl) warnEl.addEventListener('input', refreshWarning);
 
     loadStatus();
-    // Visibility-aware polling ΓÇö pause when the tab is hidden so a
+    // Visibility-aware polling — pause when the tab is hidden so a
     // backgrounded phone doesn't keep hitting the Pi every 30 s for
     // hours on end.
     var pollTimer = null;
@@ -2077,14 +2077,14 @@ if (document.getElementById('fsck-status-container')) {
 })();
 
 // ---------------------------------------------------------------------------
-// System Health card (Phase 4.2 ΓÇö issue #101)
+// System Health card (Phase 4.2 — issue #101)
 // ---------------------------------------------------------------------------
 (function() {
     var card = document.getElementById('system-health-card');
     if (!card) return;
     var pollUrl = card.getAttribute('data-poll-url');
     var jobsUrl = card.getAttribute('data-jobs-url');
-    var POLL_MS = 15000;  // 15 s ΓÇö far below the cached probe TTL
+    var POLL_MS = 15000;  // 15 s — far below the cached probe TTL
     var rowsBox = document.getElementById('system-health-rows');
     var overallText = document.getElementById('system-health-overall-text');
     var overallEl = document.getElementById('system-health-overall');
@@ -2151,7 +2151,7 @@ if (document.getElementById('fsck-status-container')) {
         var color = SEV_COLORS[sev] || SEV_COLORS.unknown;
         overallEl.querySelector('.health-dot').style.background = color;
         overallText.textContent = overall.message || 'Unknown';
-        // Toggle the click affordance to track the current severity ΓÇö
+        // Toggle the click affordance to track the current severity —
         // a system that recovers to 'ok' must shed both the listener
         // and the pointer cursor, otherwise it still looks clickable.
         var shouldLink = sev !== 'ok' && !!jobsUrl;
@@ -2185,7 +2185,7 @@ if (document.getElementById('fsck-status-container')) {
             });
     }
 
-    // Phase 4.3 (issue #101) ΓÇö files-lost banner. Surfaces the
+    // Phase 4.3 (issue #101) — files-lost banner. Surfaces the
     // archive worker's source_gone counter (clips Tesla rotated out
     // before we could copy them) when the 24 h count is non-zero.
     // Lost dashcam footage is unrecoverable, so the banner is
@@ -2200,7 +2200,7 @@ if (document.getElementById('fsck-status-container')) {
 
     if (lostDismiss) {
         lostDismiss.addEventListener('click', function() {
-            // Issue #163 ΓÇö let the operator acknowledge the banner.
+            // Issue #163 — let the operator acknowledge the banner.
             // Posts to /api/system/clear_lost_clips which:
             //   1. Writes a server-side dismissal tombstone (PR #169
             //      follow-up). Subsequent count_source_gone_recent
@@ -2223,7 +2223,7 @@ if (document.getElementById('fsck-status-container')) {
                     'Dismiss the lost-footage banner?\n\n' +
                     'This permanently deletes the records of clips ' +
                     'Tesla rotated out before they could be archived. ' +
-                    'The footage itself is already gone ΓÇö this only ' +
+                    'The footage itself is already gone — this only ' +
                     'clears the count from the banner.')) {
                 return;
             }
@@ -2242,7 +2242,7 @@ if (document.getElementById('fsck-status-container')) {
             .then(function() {
                 // Optimistically hide the banner now. Do this BEFORE
                 // loadHealth() so we never flash "still showing" for
-                // the ~50ΓÇô200 ms the GET takes to round-trip the Pi.
+                // the ~50–200 ms the GET takes to round-trip the Pi.
                 if (lostBanner) lostBanner.hidden = true;
                 // Force an immediate health re-poll so the System
                 // Health card reflects the cleared state.
@@ -2269,10 +2269,10 @@ if (document.getElementById('fsck-status-container')) {
         if (lostDetail) {
             lostDetail.textContent =
                 n === 1
-                ? '1 clip lost in the last 24 hours ΓÇö Tesla ' +
+                ? '1 clip lost in the last 24 hours — Tesla ' +
                   'rotated it out of RecentClips before it could ' +
                   'be archived. Device may be overloaded.'
-                : n + ' clips lost in the last 24 hours ΓÇö Tesla ' +
+                : n + ' clips lost in the last 24 hours — Tesla ' +
                   'rotated them out of RecentClips before they ' +
                   'could be archived. Device may be overloaded.';
         }
@@ -2303,8 +2303,8 @@ if (document.getElementById('fsck-status-container')) {
 // ---------------------------------------------------------------------------
 // Live Metrics card (Issue #208)
 // Polls /api/system/metrics every 5 s while the tab is visible. The endpoint
-// reads /proc files + in-memory counters only ΓÇö no subprocesses, no DB
-// writes, no SEI parses ΓÇö so this is essentially free even on a Pi Zero 2 W.
+// reads /proc files + in-memory counters only — no subprocesses, no DB
+// writes, no SEI parses — so this is essentially free even on a Pi Zero 2 W.
 // Stops polling on visibilitychange to avoid wasted cycles when the user has
 // the tab in the background.
 // ---------------------------------------------------------------------------
@@ -2319,19 +2319,19 @@ if (document.getElementById('fsck-status-container')) {
     var uptimeEl = document.getElementById('live-metrics-uptime');
 
     function fmtNum(n, digits) {
-        if (n == null || isNaN(n)) return 'ΓÇö';
+        if (n == null || isNaN(n)) return '—';
         if (digits == null) digits = 1;
         return Number(n).toFixed(digits);
     }
 
     function fmtBytes(kbs) {
-        if (kbs == null || isNaN(kbs)) return 'ΓÇö';
+        if (kbs == null || isNaN(kbs)) return '—';
         if (kbs >= 1024) return fmtNum(kbs / 1024, 1) + ' MB/s';
         return fmtNum(kbs, 1) + ' KB/s';
     }
 
     function fmtUptime(secs) {
-        if (secs == null || isNaN(secs)) return 'uptime ΓÇö';
+        if (secs == null || isNaN(secs)) return 'uptime —';
         var d = Math.floor(secs / 86400);
         var h = Math.floor((secs % 86400) / 3600);
         var m = Math.floor((secs % 3600) / 60);
@@ -2382,7 +2382,7 @@ if (document.getElementById('fsck-status-container')) {
 
         var cpuPct = p.cpu_pct;
         setTile('metric-cpu',
-                cpuPct != null ? fmtNum(cpuPct, 1) + '%' : 'ΓÇö',
+                cpuPct != null ? fmtNum(cpuPct, 1) + '%' : '—',
                 'across ' + cpuCount + ' cores',
                 severityFromPct(cpuPct, 70, 90));
 
@@ -2390,21 +2390,21 @@ if (document.getElementById('fsck-status-container')) {
         setTile('metric-mem',
                 mem.mem_used_pct != null
                     ? fmtNum(mem.mem_used_pct, 0) + '%'
-                    : 'ΓÇö',
+                    : '—',
                 mem.mem_total_mb != null
                     ? (mem.mem_total_mb - (mem.mem_available_mb || 0)) +
                       ' / ' + mem.mem_total_mb + ' MB used'
-                    : 'ΓÇö',
+                    : '—',
                 severityFromPct(mem.mem_used_pct, 80, 95));
 
         setTile('metric-swap',
                 mem.swap_used_pct != null
                     ? fmtNum(mem.swap_used_pct, 0) + '%'
-                    : 'ΓÇö',
+                    : '—',
                 mem.swap_total_mb != null
                     ? (mem.swap_used_mb || 0) + ' / ' +
                       mem.swap_total_mb + ' MB used'
-                    : 'ΓÇö',
+                    : '—',
                 severityFromPct(mem.swap_used_pct, 30, 60));
 
         var io = p.io || {};
@@ -2417,7 +2417,7 @@ if (document.getElementById('fsck-status-container')) {
         var loop = io.loop0 || {};
         // Loop reads are the producer SEI peeks (Issue #208). Sustained
         // reads above ~3 MB/s with no driving means the cache isn't
-        // catching ΓÇö surface as warn so the operator notices.
+        // catching — surface as warn so the operator notices.
         var loopTotal = (loop.read_kbs || 0) + (loop.write_kbs || 0);
         var loopSev = loopTotal > 6144
             ? 'error'
@@ -2445,7 +2445,7 @@ if (document.getElementById('fsck-status-container')) {
         setTile('metric-coord', coordVal, coordDetail, coordSev);
 
         var q = p.queues || {};
-        function qStr(n) { return n == null ? 'ΓÇö' : String(n); }
+        function qStr(n) { return n == null ? '—' : String(n); }
         setTile('metric-queues',
                 qStr(q.archive_pending) + ' / ' +
                 qStr(q.index_pending) + ' / ' +
@@ -2461,7 +2461,7 @@ if (document.getElementById('fsck-status-container')) {
         setTile('metric-cache',
                 hitRate != null
                     ? fmtNum(hitRate, 0) + '% hit'
-                    : 'ΓÇö',
+                    : '—',
                 (pc.size || 0) + ' / ' + (pc.capacity || 0) +
                 ' entries, ' + hits + ' hits / ' + misses + ' misses',
                 'ok');

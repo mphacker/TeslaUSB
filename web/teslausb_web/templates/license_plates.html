@@ -4,7 +4,7 @@
     {% include 'media_hub_nav.html' %}
     <h2>Custom License Plates</h2>
 
-    {# iOS Safari Warning ΓÇö file uploads only work in mobile Safari on iOS #}
+    {# iOS Safari Warning — file uploads only work in mobile Safari on iOS #}
     <div id="iosWarning" class="ios-warning" style="display: none;">
         <p>
             <svg class="inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
@@ -108,7 +108,7 @@
                 {% for plate in plate_files %}
                 <tr{% if not plate.compliant %} style="background: var(--bg-warning, var(--form-input-bg));"{% endif %}>
                     <td>
-                        {# User-uploaded PNG rendered as a thumbnail ΓÇö exempt from the SVG-only rule per design system #}
+                        {# User-uploaded PNG rendered as a thumbnail — exempt from the SVG-only rule per design system #}
                         <img src="{{ url_for('license_plates.download_plate', partition=plate.partition_key, filename=plate.filename) }}"
                              alt="License plate {{ plate.filename }}"
                              style="max-width: 120px; max-height: 60px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--bg-secondary);"
@@ -201,7 +201,7 @@
 </div>
 
 {# ============================================================== #}
-{# Smart-resize cropper modal ΓÇö pure vanilla JS / canvas / pointer #}
+{# Smart-resize cropper modal — pure vanilla JS / canvas / pointer #}
 {# ============================================================== #}
 <div id="cropperModal" class="cropper-modal" role="dialog" aria-modal="true" aria-labelledby="cropperTitle" style="display: none;">
     <div class="cropper-content">
@@ -442,7 +442,7 @@ function loadImageFromFile(file) {
         const url = URL.createObjectURL(file);
         const img = new Image();
         img.onload = function() {
-            // Don't revoke yet ΓÇö the cropper still needs the image.
+            // Don't revoke yet — the cropper still needs the image.
             img._objectUrl = url;
             resolve(img);
         };
@@ -483,7 +483,7 @@ async function processOneFile(file) {
         };
     }
 
-    // Otherwise open the cropper ΓÇö returns a Promise<{name, blob, dims}|null>
+    // Otherwise open the cropper — returns a Promise<{name, blob, dims}|null>
     const cropResult = await openCropper(file, img);
     if (img._objectUrl) URL.revokeObjectURL(img._objectUrl);
     return cropResult;
@@ -503,7 +503,7 @@ function validatePlateBlob(item) {
     if (item.blob.size > MAX_FILE_SIZE) {
         errors.push('Output is ' + (item.blob.size / 1024).toFixed(1) +
                     ' KB (limit ' + (MAX_FILE_SIZE / 1024).toFixed(0) +
-                    ' KB) ΓÇö try a simpler image');
+                    ' KB) — try a simpler image');
     }
     return { valid: errors.length === 0, errors: errors };
 }
@@ -665,7 +665,7 @@ async function uploadAllFiles() {
 }
 
 function initializeSimpleUpload() {
-    // Mobile / fallback path ΓÇö intercept the form submit, run the
+    // Mobile / fallback path — intercept the form submit, run the
     // cropper (or pass-through if already exact dims), then submit
     // the resulting blob via fetch.
     const form = document.getElementById('plateUploadForm');
@@ -698,7 +698,7 @@ function initializeSimpleUpload() {
                 method: 'POST',
                 body: fd,
             });
-            // Server redirects on success ΓÇö the response will be the
+            // Server redirects on success — the response will be the
             // re-rendered page. Easiest path: just reload to pick up
             // the flash message.
             window.location.reload();
@@ -710,7 +710,7 @@ function initializeSimpleUpload() {
 }
 
 // ---------------------------------------------------------------
-// Cropper modal ΓÇö vanilla canvas + pointer events
+// Cropper modal — vanilla canvas + pointer events
 // ---------------------------------------------------------------
 const cropperState = {
     file: null,
@@ -743,7 +743,7 @@ function openCropper(file, img) {
 
         const info = document.getElementById('cropperFileInfo');
         if (info) {
-            info.textContent = file.name + ' ΓÇö source ' + img.naturalWidth +
+            info.textContent = file.name + ' — source ' + img.naturalWidth +
                 'x' + img.naturalHeight + ' (' +
                 (file.size / 1024).toFixed(1) + ' KB)';
         }
@@ -849,7 +849,7 @@ function renderCropper() {
     // White-with-black-halo is the standard cropper convention so the
     // rectangle stays visible against arbitrary user image content.
     // The hex values come from --cropper-handle-fill / --cropper-handle-stroke
-    // in style.css (theme-invariant by design ΓÇö see comment there).
+    // in style.css (theme-invariant by design — see comment there).
     ctx.strokeStyle = handleFill;
     ctx.lineWidth = 2;
     ctx.strokeRect(dx + 1, dy + 1, dw - 2, dh - 2);
@@ -914,7 +914,7 @@ function attachCropperPointerHandlers() {
     const canvas = document.getElementById('cropperCanvas');
     if (!canvas) return;
 
-    // 22px half-extent ΓåÆ 44├ù44px effective hit area, meeting the
+    // 22px half-extent → 44×44px effective hit area, meeting the
     // design system's minimum touch-target size for the corner handles.
     // The visual handle (drawn in drawHandle()) stays smaller for
     // aesthetic reasons; the larger hit area is invisible.

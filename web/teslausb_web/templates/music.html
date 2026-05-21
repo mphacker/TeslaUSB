@@ -390,7 +390,7 @@
             </div>
 
             <div class="music-breadcrumb">
-                <span style="color: var(--text-secondary);">≡ƒôé /Music{% if current_path %}/{% endif %}</span>
+                <span style="color: var(--text-secondary);">📂 /Music{% if current_path %}/{% endif %}</span>
                 {% if current_path %}
                 {% set parts = current_path.split('/') %}
                 {% set accum = [] %}
@@ -408,7 +408,7 @@
 
             <h3 style="margin-top: 10px;">
                 {% if current_path %}
-                <a href="{{ url_for('music.music_home', path=(current_path.rsplit('/', 1)[0] if '/' in current_path else '')) }}" style="text-decoration: none; color: var(--text-link); font-size: 14px; margin-right: 8px;">Γ¼å∩╕Å Up</a>
+                <a href="{{ url_for('music.music_home', path=(current_path.rsplit('/', 1)[0] if '/' in current_path else '')) }}" style="text-decoration: none; color: var(--text-link); font-size: 14px; margin-right: 8px;">⬆️ Up</a>
                 {% endif %}
                 Files
             </h3>
@@ -424,7 +424,7 @@
                     <tbody>
                         {% for d in dirs %}
                         <tr class="music-folder-row" data-dir="{{ d.path }}">
-                            <td style="color: var(--text-link);">≡ƒôü {{ d.name }}</td>
+                            <td style="color: var(--text-link);">📁 {{ d.name }}</td>
                             <td style="text-align: right;">
                                 <button class="action-btn danger" data-delete-dir="{{ d.path }}">Delete</button>
                             </td>
@@ -437,7 +437,7 @@
             <div class="music-mobile-folders" id="mobileFolderList">
                 {% for d in dirs %}
                 <div class="music-mobile-folder" data-dir="{{ d.path }}">
-                    <span class="music-mobile-folder-name">≡ƒôü {{ d.name }}</span>
+                    <span class="music-mobile-folder-name">📁 {{ d.name }}</span>
                     <span class="music-mobile-folder-actions">
                         <button class="action-btn danger" data-delete-dir="{{ d.path }}">Delete</button>
                     </span>
@@ -479,7 +479,7 @@
             <div class="music-mobile-files" id="mobileFileList">
                 {% for file in files %}
                 <div class="music-mobile-file" data-filename="{{ file.path }}">
-                    <div class="music-mobile-file-name">≡ƒÄ╡ {{ file.name }}</div>
+                    <div class="music-mobile-file-name">🎵 {{ file.name }}</div>
                     <div class="music-mobile-file-size">{{ format_file_size(file.size) }}</div>
                     <audio controls preload="none">
                         {% set ext = file.name.lower().rsplit('.', 1)[-1] %}
@@ -506,7 +506,7 @@
                 <strong id="currentPathLabel" style="color: var(--text-primary);">/{{ current_path }}</strong>
             </p>
             <div id="dropZone" class="music-drop-zone">
-                <div class="drop-icon">≡ƒÄ╡</div>
+                <div class="drop-icon">🎵</div>
                 <div class="drop-label">Drop files here or click to choose</div>
                 <div class="drop-hint">Allowed: mp3, flac, wav, aac, m4a. Max {{ max_upload_size_mb }} MiB per file.</div>
                 <input id="fileInput" type="file" name="music_files" multiple webkitdirectory directory

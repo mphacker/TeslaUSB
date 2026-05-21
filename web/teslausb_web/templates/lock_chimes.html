@@ -17,7 +17,7 @@
     
     <!-- iOS Safari Warning -->
     <div id="iosWarning" class="ios-warning">
-        <p><strong>ΓÜá∩╕Å iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
+        <p><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
         <p>Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
     </div>
     
@@ -37,7 +37,7 @@
     </div>
     {% else %}
     <div class="info-box" style="background-color: var(--msg-error-bg); border-left: 4px solid var(--error-text); margin-bottom: 20px; border-radius: 8px; padding: 15px;">
-        <p style="margin: 0; color: var(--msg-error-text);">ΓÜá∩╕Å No active lock chime set. Select a chime from the library below.</p>
+        <p style="margin: 0; color: var(--msg-error-text);">⚠️ No active lock chime set. Select a chime from the library below.</p>
     </div>
     {% endif %}
     
@@ -74,12 +74,12 @@
             <!-- Bulk Upload Mode (validation only, no processing) -->
             <div id="bulkUploadMode" style="display: none;">
                 <div class="bulk-upload-info" style="background: var(--ios-warning-bg); border: 2px solid var(--ios-warning-border); border-radius: 8px; padding: 12px; margin-bottom: 15px;">
-                    <p style="margin: 0 0 8px 0; font-weight: 600; color: var(--text-primary);">ΓÜá∩╕Å Bulk Upload Requirements:</p>
+                    <p style="margin: 0 0 8px 0; font-weight: 600; color: var(--text-primary);">⚠️ Bulk Upload Requirements:</p>
                     <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-secondary);">
                         <li>Only WAV files accepted (no MP3)</li>
                         <li>Files must already meet Tesla requirements:</li>
-                        <li style="list-style: none; padding-left: 15px;">ΓÇó PCM 16-bit, 44.1 or 48 kHz, mono or stereo</li>
-                        <li style="list-style: none; padding-left: 15px;">ΓÇó Under 1 MB file size</li>
+                        <li style="list-style: none; padding-left: 15px;">• PCM 16-bit, 44.1 or 48 kHz, mono or stereo</li>
+                        <li style="list-style: none; padding-left: 15px;">• Under 1 MB file size</li>
                         <li>No audio processing or conversion will be performed</li>
                         <li>Invalid files will be rejected with detailed reasons</li>
                     </ul>
@@ -101,7 +101,7 @@
                     
                     <!-- Selected Files Preview -->
                     <div id="selectedChimesPreview" style="display: none; margin-bottom: 20px;">
-                        <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">≡ƒôï Selected Files:</h4>
+                        <h4 style="margin: 0 0 10px 0; font-size: 15px; color: var(--text-primary);">📋 Selected Files:</h4>
                         <div id="chimeFilesList" style="background: var(--form-input-bg); border: 1px solid var(--border-input); border-radius: 4px; padding: 10px; max-height: 200px; overflow-y: auto;"></div>
                         <div style="display: flex; gap: 10px; margin-top: 10px;">
                             <button type="button" class="action-btn" id="uploadSelectedChimesBtn">Upload All Files</button>
@@ -122,7 +122,7 @@
             <!-- Upload Progress Bar -->
             <div id="chimeUploadProgress" style="display: none; margin-top: 15px;">
                 <div style="background: var(--upload-progress-bg); border-radius: 8px; padding: 15px; border: 2px solid var(--btn-primary-bg);">
-                    <h4 style="margin: 0 0 10px 0; color: var(--btn-primary-bg);">≡ƒôñ Uploading Chime...</h4>
+                    <h4 style="margin: 0 0 10px 0; color: var(--btn-primary-bg);">📤 Uploading Chime...</h4>
                     <div style="background: var(--upload-progress-bar-bg); border-radius: 4px; height: 30px; overflow: hidden; margin-bottom: 10px;">
                         <div id="chimeProgressBar" style="background: linear-gradient(90deg, #007bff, #0056b3); height: 100%; width: 0%; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 14px;">
                             0%
@@ -138,7 +138,7 @@
     <!-- Audio Trim Editor -->
     <div id="trimEditorSection" class="trim-editor-section" style="display: none;">
         <div class="trim-editor-header">
-            <span id="trimEditorTitle">Γ£é∩╕Å Trim & Adjust Audio</span>
+            <span id="trimEditorTitle">✂️ Trim & Adjust Audio</span>
             <span id="trimEditorBadge" class="trim-editor-badge" style="display: none;">Editing</span>
         </div>
         
@@ -191,7 +191,7 @@
                 <div class="trim-control-group" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border-input);">
                     <label class="trim-control-label" style="display: flex; align-items: center; cursor: pointer; user-select: none;">
                         <input type="checkbox" id="trimNormalizeVolume" checked style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;">
-                        <span>≡ƒöè Normalize Volume</span>
+                        <span>🔊 Normalize Volume</span>
                     </label>
                     <div id="trimNormalizationSettings" style="margin-top: 12px;">
                         <div style="margin-bottom: 8px;">
@@ -228,7 +228,7 @@
                     </div>
                     <div class="trim-stat">
                         <span class="trim-stat-label">Status</span>
-                        <span class="trim-stat-value success" id="statStatus">Γ£ô Ready</span>
+                        <span class="trim-stat-value success" id="statStatus">✓ Ready</span>
                     </div>
                 </div>
             </div>
@@ -236,7 +236,7 @@
             <!-- Filename Editor -->
             <div style="margin: 15px 0; padding: 15px; background: var(--form-input-bg); border-radius: 8px; border: 2px solid var(--border-input);">
                 <label for="trimFilename" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">
-                    ≡ƒô¥ Output Filename:
+                    📝 Output Filename:
                 </label>
                 <div style="display: flex; gap: 10px; align-items: center;">
                     <input type="text" id="trimFilename" 
@@ -253,20 +253,20 @@
                     <i class="bi bi-play-fill"></i>
                 </button>
                 <button id="autoFitBtn" class="trim-btn trim-btn-purple">
-                    ≡ƒÄ» Auto-Fit to Limits
+                    🎯 Auto-Fit to Limits
                 </button>
                 <button id="resetBtn" class="trim-btn trim-btn-secondary">
-                    Γå║ Reset
+                    ↺ Reset
                 </button>
             </div>
             
             <!-- Action Buttons -->
             <div class="trim-actions">
                 <button id="uploadTrimmedBtn" class="trim-btn trim-btn-success">
-                    ≡ƒôñ Upload Trimmed Audio
+                    📤 Upload Trimmed Audio
                 </button>
                 <button id="cancelTrimBtn" class="trim-btn trim-btn-secondary">
-                    Γ£û Cancel
+                    ✖ Cancel
                 </button>
             </div>
         </div>
@@ -279,7 +279,7 @@
             <!-- Add New Schedule Form -->
             <details {% if not schedules %}open{% endif %} style="margin-bottom: 15px;" id="schedule-form-details">
                 <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: var(--form-input-bg); border-radius: 4px; list-style: none; border: 1px solid var(--border-input);">
-                    <span style="display: inline-block; margin-right: 5px;">Γû╢</span> <span id="form-title">Γ₧ò Add New Schedule</span>
+                    <span style="display: inline-block; margin-right: 5px;">▶</span> <span id="form-title">➕ Add New Schedule</span>
                 </summary>
             
             <form id="schedule-form" method="post" action="{{ url_for('lock_chimes.add_schedule') }}" style="background: var(--form-input-bg); padding: 15px; border-radius: 4px; margin-top: 10px; border: 1px solid var(--border-input);">
@@ -297,7 +297,7 @@
                         <select id="chime-select" name="chime_filename" required
                                 style="width: 100%; padding: 8px; border: 2px solid var(--border-input); border-radius: 4px; font-size: 14px; background: var(--bg-secondary); color: var(--text-primary);">
                             <option value="">-- Select a chime --</option>
-                            <option value="RANDOM">≡ƒÄ▓ Random Chime</option>
+                            <option value="RANDOM">🎲 Random Chime</option>
                             {% for chime in chime_files %}
                                 {% if chime.is_valid %}
                                 <option value="{{ chime.filename }}">{{ chime.filename }}</option>
@@ -312,19 +312,19 @@
                         <div style="display: flex; flex-wrap: wrap; gap: 10px;">
                             <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="radio" name="schedule_type" value="weekly" class="schedule-type-radio" checked style="margin-right: 6px;">
-                                <span>≡ƒôà Days of Week</span>
+                                <span>📅 Days of Week</span>
                             </label>
                             <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="radio" name="schedule_type" value="date" class="schedule-type-radio" style="margin-right: 6px;">
-                                <span>≡ƒôå Specific Date</span>
+                                <span>📆 Specific Date</span>
                             </label>
                             <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="radio" name="schedule_type" value="holiday" class="schedule-type-radio" style="margin-right: 6px;">
-                                <span>≡ƒÄë US Holiday</span>
+                                <span>🎉 US Holiday</span>
                             </label>
                             <label style="display: flex; align-items: center; padding: 8px 12px; background: var(--form-label-bg); border-radius: 4px; cursor: pointer; user-select: none; border: 1px solid var(--border-input);">
                                 <input type="radio" name="schedule_type" value="recurring" class="schedule-type-radio" style="margin-right: 6px;">
-                                <span>≡ƒöä Recurring Rotation</span>
+                                <span>🔄 Recurring Rotation</span>
                             </label>
                         </div>
                     </div>
@@ -339,7 +339,7 @@
                             {% endfor %}
                         </select>
                         <p style="margin: 5px 0 0 0; font-size: 12px; color: var(--text-secondary);">
-                            Γä╣∩╕Å Recurring schedules always use <strong>Random Chime</strong> and automatically avoid repeating the currently active chime
+                            ℹ️ Recurring schedules always use <strong>Random Chime</strong> and automatically avoid repeating the currently active chime
                         </p>
                     </div>
                     
@@ -452,11 +452,11 @@
                             {% endif %}
                         </div>
                         <div style="font-size: 13px; color: var(--text-secondary);">
-                            <div>≡ƒöö {% if schedule.chime_filename == 'RANDOM' %}≡ƒÄ▓ Random Chime{% else %}{{ schedule.chime_filename }}{% endif %}</div>
-                            <div>ΓÅ░ {{ format_schedule(schedule) }}</div>
+                            <div>🔔 {% if schedule.chime_filename == 'RANDOM' %}🎲 Random Chime{% else %}{{ schedule.chime_filename }}{% endif %}</div>
+                            <div>⏰ {{ format_schedule(schedule) }}</div>
                             {% if schedule.last_run %}
                             <div style="color: var(--text-muted); font-size: 12px; margin-top: 2px;">
-                                ≡ƒôè Last run: {{ format_last_run(schedule.last_run) }}
+                                📊 Last run: {{ format_last_run(schedule.last_run) }}
                             </div>
                             {% endif %}
                         </div>
@@ -482,7 +482,7 @@
         {% endif %}
         
         <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--border-color); color: var(--msg-info-text);">
-            <strong>Γä╣∩╕Å How it works:</strong> Schedules run automatically every minute. The most recent schedule for each day will be active. Chimes change without interrupting Tesla recording!
+            <strong>ℹ️ How it works:</strong> Schedules run automatically every minute. The most recent schedule for each day will be active. Chimes change without interrupting Tesla recording!
         </div>
         </div>
     </details>
@@ -498,7 +498,7 @@
                     <div class="random-mode-info">
                         <h3>Random Mode on Boot</h3>
                         <span class="random-mode-status {% if random_config.enabled %}enabled{% else %}disabled{% endif %}" id="randomModeStatus">
-                            {{ 'Γ£ô Enabled' if random_config.enabled else 'Γùï Disabled' }}
+                            {{ '✓ Enabled' if random_config.enabled else '○ Disabled' }}
                         </span>
                     </div>
                     <div class="random-mode-controls">
@@ -511,12 +511,12 @@
                             {% endfor %}
                         </select>
                         <button class="group-btn group-btn-edit" id="toggleRandomMode">
-                            {{ 'Γ£ô Enabled' if random_config.enabled else 'Enable' }}
+                            {{ '✓ Enabled' if random_config.enabled else 'Enable' }}
                         </button>
                     </div>
                 </div>
                 <div class="random-mode-description">
-                    <strong>≡ƒÆí How it works:</strong> When enabled, a random chime from the selected group will be chosen each time your device boots up. The system uses high-resolution time seeding for true randomness and avoids repeating the previously selected chime.
+                    <strong>💡 How it works:</strong> When enabled, a random chime from the selected group will be chosen each time your device boots up. The system uses high-resolution time seeding for true randomness and avoids repeating the previously selected chime.
                 </div>
             </div>
             
@@ -549,10 +549,10 @@
                             </div>
                             <div class="group-actions">
                                 <button class="group-btn group-btn-edit edit-group-btn" data-group-id="{{ group.id }}">
-                                    Γ£Å∩╕Å Edit
+                                    ✏️ Edit
                                 </button>
                                 <button class="group-btn group-btn-delete delete-group-btn" data-group-id="{{ group.id }}">
-                                    ≡ƒùæ∩╕Å Delete
+                                    🗑️ Delete
                                 </button>
                             </div>
                         </div>
@@ -563,8 +563,8 @@
                             <div class="group-chimes">
                                 {% for chime in group.chimes %}
                                 <span class="chime-tag">
-                                    ≡ƒöö {{ chime }}
-                                    <span class="chime-tag-remove" data-group-id="{{ group.id }}" data-chime="{{ chime }}">Γ£ò</span>
+                                    🔔 {{ chime }}
+                                    <span class="chime-tag-remove" data-group-id="{{ group.id }}" data-chime="{{ chime }}">✕</span>
                                 </span>
                                 {% endfor %}
                             </div>
@@ -574,14 +574,14 @@
                     {% endfor %}
                 {% else %}
                     <div class="group-empty-state">
-                        <div style="font-size: 48px; margin-bottom: 15px;">≡ƒôü</div>
+                        <div style="font-size: 48px; margin-bottom: 15px;">📁</div>
                         <p>No chime groups yet. Create a group to organize your lock chimes!</p>
                     </div>
                 {% endif %}
             </div>
             
             <div style="background: var(--msg-info-bg); padding: 10px; border-radius: 4px; margin-top: 15px; font-size: 13px; border: 1px solid var(--border-color); color: var(--msg-info-text);">
-                <strong>Γä╣∩╕Å About Groups:</strong> Create groups to organize your chimes by theme (Holidays, Funny, Seasonal, etc.). Enable random mode to have the system automatically pick a different chime from your selected group each time the device boots.
+                <strong>ℹ️ About Groups:</strong> Create groups to organize your chimes by theme (Holidays, Funny, Seasonal, etc.). Enable random mode to have the system automatically pick a different chime from your selected group each time the device boots.
             </div>
         </div>
     </details>
@@ -656,9 +656,9 @@
                     <td>{{ chime.size_str }}</td>
                     <td>
                         {% if chime.is_valid %}
-                        <span style="color: #4caf50;">Γ£ô Valid</span>
+                        <span style="color: #4caf50;">✓ Valid</span>
                         {% else %}
-                        <span style="color: #f44336;" title="{{ chime.validation_msg }}">Γ£ù {{ chime.validation_msg[:30] }}...</span>
+                        <span style="color: #f44336;" title="{{ chime.validation_msg }}">✗ {{ chime.validation_msg[:30] }}...</span>
                         {% endif %}
                     </td>
                     <td>
@@ -703,9 +703,9 @@
                     <span class="mobile-card-info-label">Status:</span>
                     <span class="mobile-card-info-value">
                         {% if chime.is_valid %}
-                        <span class="mobile-card-status valid">Γ£ô Valid</span>
+                        <span class="mobile-card-status valid">✓ Valid</span>
                         {% else %}
-                        <span class="mobile-card-status invalid" title="{{ chime.validation_msg }}">Γ£ù Invalid</span>
+                        <span class="mobile-card-status invalid" title="{{ chime.validation_msg }}">✗ Invalid</span>
                         {% endif %}
                     </span>
                 </div>
@@ -969,7 +969,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     if (data.needs_confirmation) {
                         // Show confirmation dialog
-                        const schedulesText = data.schedules_to_disable.map(s => `  ΓÇó ${s.name}`).join('\n');
+                        const schedulesText = data.schedules_to_disable.map(s => `  • ${s.name}`).join('\n');
                         const confirmed = confirm(
                             `${data.message}\n\nSchedules that will be disabled:\n${schedulesText}`
                         );
@@ -1031,7 +1031,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Disable upload button and show progress
         uploadBtn.disabled = true;
-        uploadBtn.textContent = 'ΓÅ│ Uploading...';
+        uploadBtn.textContent = '⏳ Uploading...';
         progressDiv.style.display = 'block';
         
         // Create AJAX request with progress tracking
@@ -1051,7 +1051,7 @@ document.addEventListener('DOMContentLoaded', function() {
         xhr.upload.addEventListener('loadend', function() {
             if (xhr.readyState !== 4) {  // If request not complete yet
                 progressBar.style.width = '100%';
-                progressBar.textContent = '≡ƒöä Processing...';
+                progressBar.textContent = '🔄 Processing...';
                 progressBar.style.background = '#ffc107';
                 statusText.textContent = 'Upload complete! Processing and validating file...';
                 statusText.style.color = '#856404';
@@ -1069,7 +1069,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             if (xhr.status === 200 && response && response.success) {
                 progressBar.style.width = '100%';
-                progressBar.textContent = 'Γ£ô Complete';
+                progressBar.textContent = '✓ Complete';
                 progressBar.style.background = '#28a745';
                 
                 // Show re-encoding info if present
@@ -1092,7 +1092,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 statusText.textContent = 'Upload failed: ' + errorMsg;
                 statusText.style.color = '#dc3545';
                 uploadBtn.disabled = false;
-                uploadBtn.textContent = '≡ƒôñ Upload';
+                uploadBtn.textContent = '📤 Upload';
             }
         });
         
@@ -1102,7 +1102,7 @@ document.addEventListener('DOMContentLoaded', function() {
             statusText.textContent = 'Upload failed: Network error';
             statusText.style.color = '#dc3545';
             uploadBtn.disabled = false;
-            uploadBtn.textContent = '≡ƒôñ Upload';
+            uploadBtn.textContent = '📤 Upload';
         });
         
         // Send the request
@@ -1198,8 +1198,8 @@ async function editSchedule(scheduleId) {
         form.dataset.editingId = scheduleId;
         
         // Update UI
-        document.getElementById('form-title').textContent = 'Γ£Å∩╕Å Edit Schedule';
-        document.getElementById('submit-btn').textContent = '≡ƒÆ╛ Update Schedule';
+        document.getElementById('form-title').textContent = '✏️ Edit Schedule';
+        document.getElementById('submit-btn').textContent = '💾 Update Schedule';
         document.getElementById('cancel-btn').style.display = 'inline-block';
         
         // Open the form
@@ -1229,8 +1229,8 @@ function cancelEdit() {
     }
     
     // Reset UI
-    document.getElementById('form-title').textContent = 'Γ₧ò Add New Schedule';
-    document.getElementById('submit-btn').textContent = '≡ƒÆ╛ Save Schedule';
+    document.getElementById('form-title').textContent = '➕ Add New Schedule';
+    document.getElementById('submit-btn').textContent = '💾 Save Schedule';
     document.getElementById('cancel-btn').style.display = 'none';
     
     // Close the form
@@ -1456,7 +1456,7 @@ function setupTrimEditorUI() {
         // Check for invalid characters
         const invalidChars = /[<>:"|?*\/\\]/;
         if (invalidChars.test(value)) {
-            filenameValidation.textContent = 'Γ¥î Filename contains invalid characters';
+            filenameValidation.textContent = '❌ Filename contains invalid characters';
             filenameValidation.style.color = '#f44336';
             filenameValidation.style.display = 'block';
             return false;
@@ -1464,13 +1464,13 @@ function setupTrimEditorUI() {
         
         // Check if it already exists
         if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
-            filenameValidation.textContent = 'Γ¥î This filename already exists';
+            filenameValidation.textContent = '❌ This filename already exists';
             filenameValidation.style.color = '#f44336';
             filenameValidation.style.display = 'block';
             return false;
         }
         
-        filenameValidation.textContent = 'Γ£à Filename available';
+        filenameValidation.textContent = '✅ Filename available';
         filenameValidation.style.color = '#4CAF50';
         filenameValidation.style.display = 'block';
         return true;
@@ -1528,7 +1528,7 @@ function setupTrimEditorUI() {
         
         try {
             uploadBtn.disabled = true;
-            uploadBtn.textContent = 'ΓÅ│ Processing...';
+            uploadBtn.textContent = '⏳ Processing...';
             
             // Refresh filename list to check for collisions
             await fetchExistingFilenames();
@@ -1548,7 +1548,7 @@ function setupTrimEditorUI() {
                 if (invalidChars.test(customName)) {
                     showTrimMessage('Filename contains invalid characters. Please use only letters, numbers, spaces, hyphens, and underscores.', 'error');
                     uploadBtn.disabled = false;
-                    uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
                     return;
                 }
                 
@@ -1557,12 +1557,12 @@ function setupTrimEditorUI() {
                 if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
                     showTrimMessage(`Filename "${newFilename}" already exists. Please choose a different name.`, 'error');
                     uploadBtn.disabled = false;
-                    uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
                     return;
                 }
                 
                 // Perform rename via API
-                uploadBtn.textContent = '≡ƒô¥ Renaming...';
+                uploadBtn.textContent = '📝 Renaming...';
                 const response = await fetch(`/api/rename_chime/${encodeURIComponent(audioTrimmer.originalFileName)}/${encodeURIComponent(newFilename)}`, {
                     method: 'POST',
                     headers: {
@@ -1580,7 +1580,7 @@ function setupTrimEditorUI() {
                 } else {
                     showTrimMessage('Rename failed: ' + (result.error || 'Unknown error'), 'error');
                     uploadBtn.disabled = false;
-                    uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
                 }
                 return;
             }
@@ -1594,7 +1594,7 @@ function setupTrimEditorUI() {
                 const actualSizeMB = (wavBlob.size / 1024 / 1024).toFixed(2);
                 showTrimMessage(`Pre-trimmed file validation failed: File is ${actualSizeMB} MB. Tesla requires lock chimes to be under 1 MB. ['success':false]`, 'error');
                 uploadBtn.disabled = false;
-                uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+                uploadBtn.textContent = '📤 Upload Trimmed Audio';
                 return;
             }
             
@@ -1613,7 +1613,7 @@ function setupTrimEditorUI() {
                 if (invalidChars.test(customName)) {
                     showTrimMessage('Filename contains invalid characters. Please use only letters, numbers, spaces, hyphens, and underscores.', 'error');
                     uploadBtn.disabled = false;
-                    uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
                     return;
                 }
                 
@@ -1624,7 +1624,7 @@ function setupTrimEditorUI() {
                 if (existingChimeFilenames.some(f => f.toLowerCase() === lowerFileName)) {
                     showTrimMessage(`Filename "${fileName}" already exists. Please choose a different name.`, 'error');
                     uploadBtn.disabled = false;
-                    uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
                     return;
                 }
             } else {
@@ -1660,19 +1660,19 @@ function setupTrimEditorUI() {
                 } else {
                     showTrimMessage('Upload failed: ' + (result.error || 'Unknown error'), 'error');
                     uploadBtn.disabled = false;
-                    uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+                    uploadBtn.textContent = '📤 Upload Trimmed Audio';
                 }
             } else {
                 const text = await response.text();
                 showTrimMessage('Upload failed: ' + text, 'error');
                 uploadBtn.disabled = false;
-                uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+                uploadBtn.textContent = '📤 Upload Trimmed Audio';
             }
         } catch (error) {
             console.error('Upload error:', error);
             showTrimMessage('Upload failed: ' + error.message, 'error');
             uploadBtn.disabled = false;
-            uploadBtn.textContent = '≡ƒôñ Upload Trimmed Audio';
+            uploadBtn.textContent = '📤 Upload Trimmed Audio';
         }
     });
     
@@ -1871,15 +1871,15 @@ function updateTrimUI() {
     if (!withinLimit) {
         statusEl.classList.add('error');
         statusTextEl.classList.add('error');
-        statusTextEl.textContent = 'Γ£ù Too Large';
+        statusTextEl.textContent = '✗ Too Large';
     } else if (fileSize > {{ MAX_LOCK_CHIME_SIZE }} * 0.9) {
         statusEl.classList.add('warning');
         statusTextEl.classList.add('warning');
-        statusTextEl.textContent = 'ΓÜá Close to Limit';
+        statusTextEl.textContent = '⚠ Close to Limit';
     } else {
         statusEl.classList.add('success');
         statusTextEl.classList.add('success');
-        statusTextEl.textContent = 'Γ£ô Ready';
+        statusTextEl.textContent = '✓ Ready';
     }
     
     // Recalculate actual size periodically to update UI (debounced)
@@ -1904,15 +1904,15 @@ function updateTrimUI() {
                 if (!withinActualLimit) {
                     statusEl.classList.add('error');
                     statusTextEl.classList.add('error');
-                    statusTextEl.textContent = 'Γ£ù Too Large';
+                    statusTextEl.textContent = '✗ Too Large';
                 } else if (actualFileSize > {{ MAX_LOCK_CHIME_SIZE }} * 0.9) {
                     statusEl.classList.add('warning');
                     statusTextEl.classList.add('warning');
-                    statusTextEl.textContent = 'ΓÜá Close to Limit';
+                    statusTextEl.textContent = '⚠ Close to Limit';
                 } else {
                     statusEl.classList.add('success');
                     statusTextEl.classList.add('success');
-                    statusTextEl.textContent = 'Γ£ô Ready';
+                    statusTextEl.textContent = '✓ Ready';
                 }
             }
         } catch (error) {
@@ -2158,7 +2158,7 @@ function handleChimeFiles(files) {
     if (oversizedFiles.length > 0) {
         const fileList = oversizedFiles.map(f => {
             const sizeMB = (f.size / 1024 / 1024).toFixed(2);
-            return `  ΓÇó ${f.name} (${sizeMB} MB)`;
+            return `  • ${f.name} (${sizeMB} MB)`;
         }).join('\n');
         const maxSizeMB = (maxSize / 1024 / 1024).toFixed(2);
         alert(`The following files are too large (max ${maxSizeMB} MB):\n\n${fileList}\n\nBulk upload requires files to already meet Tesla requirements. To upload these files, use the Single Upload mode and the Audio Trimmer tool to reduce their size.`);
@@ -2205,7 +2205,7 @@ function updateChimeFilesList() {
                     <strong>${escapeHtml(file.name)}</strong>
                     <span${sizeWarning} style="font-size: 12px; margin-left: 8px;">${sizeStr}</span>
                 </div>
-                <button type="button" onclick="removeChimeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px;" title="Remove">Γ£û</button>
+                <button type="button" onclick="removeChimeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px;" title="Remove">✖</button>
             </div>
         `;
     });
@@ -2355,7 +2355,7 @@ function showChimeUploadResults(results, overallSuccess) {
     
     let html = '<div style="margin-top: 15px; padding: 15px; background: var(--bg-info); border: 2px solid var(--border-color); border-radius: 8px; max-height: 400px; overflow-y: auto;">';
     html += '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">';
-    html += '<h4 style="margin: 0; color: var(--text-primary);">≡ƒôï Upload Results</h4>';
+    html += '<h4 style="margin: 0; color: var(--text-primary);">📋 Upload Results</h4>';
     html += '<button type="button" onclick="document.getElementById(\'chimeUploadResults\').style.display=\'none\';document.getElementById(\'chimeUploadProgress\').style.display=\'none\'" style="background: var(--btn-secondary-bg); color: var(--btn-secondary-text); border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer;">Close</button>';
     html += '</div>';
     html += '<ul style="margin: 10px 0 0 0; padding: 0; list-style: none;">';
@@ -2364,13 +2364,13 @@ function showChimeUploadResults(results, overallSuccess) {
         if (result.success) {
             successCount++;
             html += `<li style="padding: 8px; margin: 5px 0; background: var(--msg-success-bg); border-left: 4px solid var(--success-border); border-radius: 4px; color: var(--text-primary);">
-                <strong style="color: var(--success-text);">Γ£ô ${escapeHtml(result.filename)}</strong><br>
+                <strong style="color: var(--success-text);">✓ ${escapeHtml(result.filename)}</strong><br>
                 <span style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(result.message)}</span>
             </li>`;
         } else {
             failCount++;
             html += `<li style="padding: 8px; margin: 5px 0; background: var(--msg-error-bg); border-left: 4px solid var(--error-text); border-radius: 4px; color: var(--text-primary);">
-                <strong style="color: var(--error-text);">Γ£ù ${escapeHtml(result.filename)}</strong><br>
+                <strong style="color: var(--error-text);">✗ ${escapeHtml(result.filename)}</strong><br>
                 <span style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(result.message)}</span>
             </li>`;
         }
@@ -2383,7 +2383,7 @@ function showChimeUploadResults(results, overallSuccess) {
     
     if (successCount > 0) {
         html += '<div style="margin-top: 10px; text-align: center;">';
-        html += '<button type="button" onclick="window.location.reload()" style="background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">≡ƒöä Refresh to See New Files</button>';
+        html += '<button type="button" onclick="window.location.reload()" style="background: var(--btn-primary-bg); color: var(--btn-primary-text); border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">🔄 Refresh to See New Files</button>';
         html += '</div>';
     }
     
@@ -2409,7 +2409,7 @@ async function checkGadgetState() {
             indicator.style.borderLeft = '4px solid var(--warning-border, #ffc107)';
             indicator.style.color = 'var(--text-primary)';
             
-            title.textContent = 'ΓÜá∩╕Å Gadget State Issues Detected';
+            title.textContent = '⚠️ Gadget State Issues Detected';
             title.style.color = 'var(--text-primary)';
             
             let detailsHtml = '<ul style="margin: 5px 0 0 20px; padding: 0; color: var(--text-primary);">';
@@ -2419,11 +2419,11 @@ async function checkGadgetState() {
             detailsHtml += '</ul>';
             
             if (state.fixes_applied.length > 0) {
-                detailsHtml += '<div style="margin-top: 5px; color: var(--success-text, #28a745); font-weight: 600;">Γ£ô Auto-fixed: ' + state.fixes_applied.join(', ') + '</div>';
+                detailsHtml += '<div style="margin-top: 5px; color: var(--success-text, #28a745); font-weight: 600;">✓ Auto-fixed: ' + state.fixes_applied.join(', ') + '</div>';
             }
             
             if (state.errors.length > 0) {
-                detailsHtml += '<div style="margin-top: 5px; color: var(--error-text, #dc3545); font-weight: 600;">Γ£ù Errors: ' + state.errors.join(', ') + '</div>';
+                detailsHtml += '<div style="margin-top: 5px; color: var(--error-text, #dc3545); font-weight: 600;">✗ Errors: ' + state.errors.join(', ') + '</div>';
                 detailsHtml += '<div style="margin-top: 5px; font-size: 12px; color: var(--text-secondary);">Tip: Switch to Edit mode and back to Present mode to reset gadget state.</div>';
             }
             
@@ -2436,7 +2436,7 @@ async function checkGadgetState() {
             indicator.style.borderLeft = '4px solid var(--success-border, #28a745)';
             indicator.style.color = 'var(--text-primary)';
             
-            title.textContent = 'Γ£ô Gadget State Recovered';
+            title.textContent = '✓ Gadget State Recovered';
             details.innerHTML = '<div style="color: var(--success-text, #28a745);">Fixed: ' + state.fixes_applied.join(', ') + '</div>';
             
             // Auto-hide after 10 seconds

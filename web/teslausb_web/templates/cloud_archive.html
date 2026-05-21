@@ -195,7 +195,7 @@
                                onchange="toggleSyncEnabled(this.checked)"
                                style="width: 18px; height: 18px; accent-color: var(--accent-success);">
                         <span id="syncEnabledLabel" style="font-size: var(--text-sm); color: var(--text-secondary);">
-                            {{ 'Enabled ΓÇö syncs automatically when WiFi connects' if sync_enabled else 'Disabled ΓÇö provider stays connected, no auto-sync' }}
+                            {{ 'Enabled — syncs automatically when WiFi connects' if sync_enabled else 'Disabled — provider stays connected, no auto-sync' }}
                         </span>
                     </label>
                 </div>
@@ -259,7 +259,7 @@
                 </select>
             </div>
 
-            {# rclone-based providers ΓÇö Token paste wizard #}
+            {# rclone-based providers — Token paste wizard #}
             <div id="rcloneSetup" style="display: none;">
                 <div class="info-box" style="margin-bottom: var(--space-3);">
                     <strong>How to connect <span id="rcloneProviderName">your cloud storage</span>:</strong>
@@ -334,7 +334,7 @@
             </div>
 
             {# ---------------------------------------------------------- #}
-            {# Generic rclone remote (issue #165) ΓÇö NAS / SFTP / WebDAV   #}
+            {# Generic rclone remote (issue #165) — NAS / SFTP / WebDAV   #}
             {# / SMB / FTP / S3 / B2 / Wasabi / Azure Blob / Swift.       #}
             {# Two input modes: Form (guided fields) or Paste             #}
             {# (an entire ``rclone.conf`` block).                         #}
@@ -373,8 +373,8 @@
                             <option value="smb">SMB / CIFS (Windows share)</option>
                             <option value="ftp">FTP</option>
                             <option value="s3">S3-compatible (custom endpoint, MinIO, ...)</option>
-                            <option value="b2">Backblaze B2 (advanced ΓÇö keys-based)</option>
-                            <option value="wasabi">Wasabi (advanced ΓÇö keys-based)</option>
+                            <option value="b2">Backblaze B2 (advanced — keys-based)</option>
+                            <option value="wasabi">Wasabi (advanced — keys-based)</option>
                             <option value="azureblob">Azure Blob Storage</option>
                             <option value="swift">OpenStack Swift</option>
                         </select>
@@ -404,7 +404,7 @@
                     <p style="font-size: var(--text-sm); color: var(--text-secondary); margin: 0 0 var(--space-2);">
                         Paste a complete <code>[remote]</code> block from your existing
                         <code>~/.config/rclone/rclone.conf</code>. The remote name (in
-                        brackets) is ignored ΓÇö TeslaUSB always stores it as
+                        brackets) is ignored — TeslaUSB always stores it as
                         <code>teslausb</code>.
                     </p>
                     <textarea id="genericPasteInput" rows="8"
@@ -529,10 +529,10 @@
                     </label>
                     <input type="number" name="cloud_reserve_gb" value="{{ cloud_reserve_gb }}" min="0" max="100" step="0.5"
                            style="width:120px; padding:6px 10px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary);">
-                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Keep this much free on cloud ΓÇö sync stops before filling to 100%.</p>
+                    <p style="font-size: var(--text-xs); color: var(--text-muted); margin:4px 0 0">Keep this much free on cloud — sync stops before filling to 100%.</p>
                 </div>
 
-                {# Phase 2.6 ΓÇö bulk cloud sync retry cap. Default 5,
+                {# Phase 2.6 — bulk cloud sync retry cap. Default 5,
                    range 1-20. Setting writes to
                    cloud_archive.retry_max_attempts; the worker
                    re-reads it on every failure so the change takes
@@ -563,13 +563,13 @@
                     </label>
                 </div>
 
-                {# Phase 1 item 1.3 ΓÇö retention-respects-cloud toggle.
+                {# Phase 1 item 1.3 — retention-respects-cloud toggle.
                    "Keep clips until backed up to cloud" is the
                    positive-framed UI for the backend
                    ``cloud_archive.delete_unsynced`` boolean (inverted).
                    When ON, the local SD-card retention prune will not
                    delete clips past their retention age until they have
-                   been confirmed uploaded to the cloud ΓÇö protecting
+                   been confirmed uploaded to the cloud — protecting
                    un-uploaded footage during long WiFi outages. #}
                 <div style="margin-bottom: var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-bottom:8px {% if not provider_connected %}opacity: 0.55; cursor: not-allowed{% endif %}">
@@ -876,7 +876,7 @@
                     stopPolling();
                 }
             } catch (e) {
-                /* network error ΓÇö keep polling */
+                /* network error — keep polling */
             }
         }, 10000);
     }
@@ -926,12 +926,12 @@
     async function resetSyncStats() {
         if (!confirm("Reset the Synced and Transferred counters?\n\n" +
                      "This only clears the displayed totals. Files already " +
-                     "uploaded to the cloud will NOT be re-uploaded ΓÇö the " +
+                     "uploaded to the cloud will NOT be re-uploaded — the " +
                      "sync history that prevents duplicates is preserved.")) {
             return;
         }
         var btn = document.getElementById('resetStatsBtn');
-        if (btn) { btn.disabled = true; btn.textContent = 'ResettingΓÇª'; }
+        if (btn) { btn.disabled = true; btn.textContent = 'Resetting…'; }
         try {
             var resp = await fetch(
                 '{{ url_for("cloud_archive.api_reset_stats") }}',
@@ -1348,7 +1348,7 @@
                 var sel = window.getSelection();
                 sel.removeAllRanges();
                 sel.addRange(range);
-                showToast('Command selected ΓÇö press Ctrl+C to copy.', 'info');
+                showToast('Command selected — press Ctrl+C to copy.', 'info');
             });
         }
     };
@@ -1407,7 +1407,7 @@
      * silently dropped ``credentials``. They now route through the
      * generic ``/api/connect`` path so the keys actually reach
      * rclone.conf. ``credBucket`` is collected for the user's
-     * benefit but stored as a private metadata note (``_bucket``) ΓÇö
+     * benefit but stored as a private metadata note (``_bucket``) —
      * rclone S3 backends don't take a bucket in the conf file
      * itself; the bucket is the first path segment of the remote
      * (and TeslaUSB sets that via the existing remote-path setting). */
@@ -1417,7 +1417,7 @@
         if (!provider) { showToast('Please select a provider.', 'warning'); return; }
 
         if (keyProviders.indexOf(provider) === -1) {
-            /* Should not happen ΓÇö keySetup div is hidden ΓÇö but be defensive. */
+            /* Should not happen — keySetup div is hidden — but be defensive. */
             showToast('Unsupported provider for this form.', 'warning');
             return;
         }
@@ -1488,7 +1488,7 @@
     };
 
     /* ===================================================================
-       Generic rclone remote (issue #165) ΓÇö Form + Paste tabs
+       Generic rclone remote (issue #165) — Form + Paste tabs
        =================================================================== */
 
     window.switchGenericTab = function(which) {
@@ -2062,7 +2062,7 @@
 
     /* All three Sync Queue helpers below MUST be assigned to ``window`` so
        inline ``onclick="..."`` handlers in the HTML (and in the row markup
-       generated by ``refreshQueue`` itself) can resolve them ΓÇö the
+       generated by ``refreshQueue`` itself) can resolve them — the
        surrounding script is wrapped in an IIFE, so plain ``async function
        foo()`` declarations would be trapped in the IIFE scope and the
        buttons would silently no-op (#159). */
@@ -2171,9 +2171,9 @@ async function runBandwidthTest() {
     var btn = document.getElementById('bwTestBtn');
     var results = document.getElementById('bwTestResults');
     btn.disabled = true;
-    btn.textContent = 'TestingΓÇª';
+    btn.textContent = 'Testing…';
     results.style.display = 'block';
-    results.innerHTML = '<p>Starting bandwidth test ΓÇö this takes 1-2 minutesΓÇª</p>';
+    results.innerHTML = '<p>Starting bandwidth test — this takes 1-2 minutes…</p>';
 
     try {
         var resp = await fetch('{{ url_for("cloud_archive.api_bandwidth_test") }}', {method: 'POST'});
@@ -2190,7 +2190,7 @@ async function runBandwidthTest() {
                 var r = await fetch('{{ url_for("cloud_archive.api_bandwidth_test_status") }}');
                 var s = await r.json();
                 if (s.running) {
-                    results.innerHTML = '<p>' + _bwEscape(s.progress || 'TestingΓÇª') + '</p>';
+                    results.innerHTML = '<p>' + _bwEscape(s.progress || 'Testing…') + '</p>';
                 } else {
                     clearInterval(pollTimer);
                     btn.disabled = false;
@@ -2206,10 +2206,10 @@ async function runBandwidthTest() {
                         var color = r.status === 'ok' ? 'var(--accent-success)' : 'var(--error-text)';
                         html += '<tr style="border-bottom:1px solid var(--border);">';
                         html += '<td style="padding:4px;">' + r.mbps + ' Mbps</td>';
-                        html += '<td style="padding:4px;text-align:center;">' + (r.actual_mbps || 'ΓÇö') + '</td>';
-                        html += '<td style="padding:4px;text-align:center;">' + (r.web_latency ? r.web_latency + 's' : 'ΓÇö') + '</td>';
-                        html += '<td style="padding:4px;text-align:center;">' + (r.free_memory_mb ? Math.round(r.free_memory_mb) + ' MB' : 'ΓÇö') + '</td>';
-                        html += '<td style="padding:4px;text-align:center;">' + (r.load_avg || 'ΓÇö') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.actual_mbps || '—') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.web_latency ? r.web_latency + 's' : '—') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.free_memory_mb ? Math.round(r.free_memory_mb) + ' MB' : '—') + '</td>';
+                        html += '<td style="padding:4px;text-align:center;">' + (r.load_avg || '—') + '</td>';
                         html += '<td style="padding:4px;text-align:center;color:' + color + ';">' + r.status + '</td>';
                         html += '</tr>';
                     });

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block head %}
 <style>
-    /* NHTSA safety banner ΓÇö uses ios-warning tokens which are the
+    /* NHTSA safety banner — uses ios-warning tokens which are the
        project's amber callout palette. The banner is the most important
        UI element on this page; it must sit above the upload zone on
        both desktop and 375px-wide mobile (no max-width hiding it under
@@ -88,7 +88,7 @@
         border-color: var(--ios-warning-border);
     }
 
-    /* Upload drop zone ΓÇö uses a <label> (inline by default), so we
+    /* Upload drop zone — uses a <label> (inline by default), so we
        must explicitly set display: block to get the full-width centered
        card layout that other upload pages get from their <div> wrappers. */
     .boombox-drop-zone {
@@ -308,7 +308,7 @@
         <ul>
             <li><strong>Folder:</strong> <code>/{{ boombox_folder }}</code> at the root of the Music drive (managed for you)</li>
             <li><strong>Format:</strong> MP3 or WAV only</li>
-            <li><strong>Size:</strong> {{ max_file_size_mb }} MB maximum (Γëñ 5 seconds recommended)</li>
+            <li><strong>Size:</strong> {{ max_file_size_mb }} MB maximum (≤ 5 seconds recommended)</li>
             <li><strong>Filename:</strong> {{ max_filename_length }} characters max (letters, numbers, spaces, underscores, dashes, dots)</li>
             <li><strong>Count:</strong> Up to {{ max_file_count }} sounds (Tesla loads the first {{ max_file_count }} alphabetically)</li>
         </ul>

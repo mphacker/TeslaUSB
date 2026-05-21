@@ -6,7 +6,7 @@
     
     <!-- iOS Safari Warning -->
     <div id="iosWarning" class="ios-warning">
-        <p><strong>ΓÜá∩╕Å iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
+        <p><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
         <p>Note: Desktop browsers (Windows/Mac/Linux) work normally regardless of browser choice.</p>
     </div>
     
@@ -343,7 +343,7 @@ function updateFilesList() {
                     <strong>${escapeHtml(file.name)}</strong>
                     <span style="color: var(--text-secondary); font-size: 12px; margin-left: 8px;">${sizeStr}</span>
                 </div>
-                <button type="button" onclick="removeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px;" title="Remove">Γ£û</button>
+                <button type="button" onclick="removeFile(${index})" style="background: none; border: none; color: var(--error-text, #dc3545); cursor: pointer; padding: 4px 8px; font-size: 18px;" title="Remove">✖</button>
             </div>
         `;
     });
@@ -483,7 +483,7 @@ function showUploadResults(results) {
     let html = '<div style="margin-top: 15px; padding: 10px; background: var(--form-input-bg); border-radius: 4px;"><strong>Upload Results:</strong><ul style="margin: 10px 0 0 20px; padding: 0;">';
     
     results.forEach(result => {
-        const icon = result.success ? 'Γ£ô' : 'Γ£ù';
+        const icon = result.success ? '✓' : '✗';
         const color = result.success ? '#28a745' : '#dc3545';
         const fileInfo = result.file_count > 1 ? ` (${result.file_count} files)` : '';
         html += `<li style="color: ${color}; margin: 5px 0;">${icon} ${escapeHtml(result.filename)}${fileInfo}: ${escapeHtml(result.message)}</li>`;
@@ -522,7 +522,7 @@ function initializeSimpleUpload() {
         
         // Disable upload button and show progress
         uploadBtn.disabled = true;
-        uploadBtn.textContent = 'ΓÅ│ Uploading...';
+        uploadBtn.textContent = '⏳ Uploading...';
         progressDiv.style.display = 'block';
         
         // Create AJAX request with progress tracking
@@ -567,7 +567,7 @@ function initializeSimpleUpload() {
                 statusText.textContent = 'Upload failed: ' + xhr.statusText;
                 statusText.style.color = '#dc3545';
                 uploadBtn.disabled = false;
-                uploadBtn.textContent = '≡ƒôñ Upload';
+                uploadBtn.textContent = '📤 Upload';
             }
         });
         
@@ -577,7 +577,7 @@ function initializeSimpleUpload() {
             statusText.textContent = 'Upload failed: Network error';
             statusText.style.color = '#dc3545';
             uploadBtn.disabled = false;
-            uploadBtn.textContent = '≡ƒôñ Upload';
+            uploadBtn.textContent = '📤 Upload';
         });
         
         // Send the request

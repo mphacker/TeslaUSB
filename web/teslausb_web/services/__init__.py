@@ -18,6 +18,21 @@ per file).
 
 from __future__ import annotations
 
+from teslausb_web.services.boombox_service import (
+    BoomboxConfig,
+    BoomboxError,
+    BoomboxFile,
+    BoomboxFileError,
+    BoomboxListing,
+    BoomboxService,
+    make_boombox_service,
+)
+from teslausb_web.services.boombox_service import (
+    DeleteResult as BoomboxDeleteResult,
+)
+from teslausb_web.services.boombox_service import (
+    UploadResult as BoomboxUploadResult,
+)
 from teslausb_web.services.chime_group_service import (
     ChimeGroup,
     ChimeGroupError,
@@ -73,6 +88,14 @@ from teslausb_web.services.wrap_service import (
 
 __all__ = (
     "ActiveChimeResolution",
+    "BoomboxConfig",
+    "BoomboxDeleteResult",
+    "BoomboxError",
+    "BoomboxFile",
+    "BoomboxFileError",
+    "BoomboxListing",
+    "BoomboxService",
+    "BoomboxUploadResult",
     "ChimeGroup",
     "ChimeGroupError",
     "ChimeGroupManager",
@@ -106,6 +129,7 @@ __all__ = (
     "format_last_run",
     "format_schedule_display",
     "list_chime_files",
+    "make_boombox_service",
     "make_chime_group_manager",
     "make_chime_scheduler",
     "make_wrap_service",

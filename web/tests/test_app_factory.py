@@ -247,6 +247,13 @@ def test_cache_invalidator_registered_on_app(app: Flask) -> None:
     assert isinstance(invalidator, CacheInvalidator)
 
 
+def test_boombox_service_registered_on_app(app: Flask) -> None:
+    from teslausb_web.services.boombox_service import BoomboxService
+
+    boombox_service = app.extensions["boombox_service"]
+    assert isinstance(boombox_service, BoomboxService)
+
+
 def test_cache_invalidator_uses_configured_script_path() -> None:
     cfg = WebConfig(
         web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),

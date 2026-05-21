@@ -34,6 +34,7 @@ from teslausb_web.blueprints.music import music_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.blueprints.wraps import wraps_bp
 from teslausb_web.config import WebConfig, load_config
+from teslausb_web.services.boombox_service import make_boombox_service
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
@@ -125,6 +126,7 @@ def create_app(
     _register_chime_services(app, cfg)
     _register_light_show_services(app, cfg)
     _register_music_services(app, cfg)
+    _register_boombox_services(app, cfg)
     _register_wrap_services(app, cfg)
 
     logger.info(
@@ -246,6 +248,13 @@ def _register_cache_invalidator(app: Flask, cfg: WebConfig) -> None:
     atexit.register(invalidator.shutdown)
 
 
+def _get_cache_invalidator(app: Flask) -> CacheInvalidator:
+    invalidator = app.extensions.get("cache_invalidator")
+    if not isinstance(invalidator, CacheInvalidator):
+        raise RuntimeError("cache_invalidator extension is not configured")
+    return invalidator
+
+
 def _register_chime_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the chime group manager and scheduler once at app startup."""
     app.extensions["chime_group_manager"] = make_chime_group_manager(cfg)
@@ -260,6 +269,14 @@ def _register_light_show_services(app: Flask, cfg: WebConfig) -> None:
 def _register_music_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the music service once at app startup."""
     app.extensions["music_service"] = make_music_service(cfg)
+
+
+def _register_boombox_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the boombox service once at app startup."""
+    app.extensions["boombox_service"] = make_boombox_service(
+        cfg,
+        schedule_cache_invalidation=_get_cache_invalidator(app).schedule,
+    )
 
 
 def _register_wrap_services(app: Flask, cfg: WebConfig) -> None:

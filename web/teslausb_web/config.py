@@ -80,6 +80,10 @@ _DEFAULT_MUSIC_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (
     ".aac",
     ".m4a",
 )
+_DEFAULT_BOOMBOX_BASE_DIR: Final[str] = "Boombox"
+_DEFAULT_BOOMBOX_MAX_FILE_BYTES: Final[int] = 1 * 1024 * 1024
+_DEFAULT_BOOMBOX_MAX_FILES: Final[int] = 5
+_DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".mp3", ".wav")
 
 # Highest valid TCP/UDP port number per RFC 793. Named to silence
 # the magic-value lint and document intent at the call site.
@@ -347,6 +351,41 @@ class MusicSection:
 
 
 @dataclass(frozen=True, slots=True)
+class BoomboxSection:
+    """Tesla Boombox library paths and upload constraints."""
+
+    base_dir: str = _DEFAULT_BOOMBOX_BASE_DIR
+    max_file_bytes: int = _DEFAULT_BOOMBOX_MAX_FILE_BYTES
+    max_files: int = _DEFAULT_BOOMBOX_MAX_FILES
+    allowed_extensions: tuple[str, ...] = _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        _validate_relpath_filename(self.base_dir, key="base_dir", section="boombox")
+        if self.max_file_bytes <= 0:
+            raise ConfigError(None, "[boombox] max_file_bytes must be > 0")
+        if self.max_files <= 0:
+            raise ConfigError(None, "[boombox] max_files must be > 0")
+        if not self.allowed_extensions:
+            raise ConfigError(None, "[boombox] allowed_extensions must be non-empty")
+        for extension in self.allowed_extensions:
+            if not extension.strip():
+                raise ConfigError(None, "[boombox] allowed_extensions must be non-empty")
+            if "/" in extension or "\\" in extension:
+                raise ConfigError(
+                    None,
+                    "[boombox] allowed_extensions must not contain path separators",
+                )
+            if not extension.startswith("."):
+                raise ConfigError(
+                    None,
+                    "[boombox] allowed_extensions entries must start with '.'",
+                )
+
+
+@dataclass(frozen=True, slots=True)
 class WebConfig:
     """Root config dataclass — what the rest of the app sees."""
 
@@ -357,6 +396,7 @@ class WebConfig:
     light_shows: LightShowsSection = field(default_factory=LightShowsSection)
     wraps: WrapsSection = field(default_factory=WrapsSection)
     music: MusicSection = field(default_factory=MusicSection)
+    boombox: BoomboxSection = field(default_factory=BoomboxSection)
     source_path: Path | None = None
 
     def validate(self) -> None:
@@ -368,6 +408,7 @@ class WebConfig:
             self.light_shows.validate()
             self.wraps.validate()
             self.music.validate()
+            self.boombox.validate()
         except ConfigError as exc:
             raise ConfigError(self.source_path, str(exc).split(": ", 1)[-1]) from exc
 
@@ -485,6 +526,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     light_shows_raw = _expect_section(raw, "light_shows", source)
     wraps_raw = _expect_section(raw, "wraps", source)
     music_raw = _expect_section(raw, "music", source)
+    boombox_raw = _expect_section(raw, "boombox", source)
 
     web = WebSection(
         host=_coerce_str(web_raw, "host", _DEFAULT_HOST, source),
@@ -674,6 +716,27 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 source,
             ),
         )
+        boombox = BoomboxSection(
+            base_dir=_coerce_str(boombox_raw, "base_dir", _DEFAULT_BOOMBOX_BASE_DIR, source),
+            max_file_bytes=_coerce_int(
+                boombox_raw,
+                "max_file_bytes",
+                _DEFAULT_BOOMBOX_MAX_FILE_BYTES,
+                source,
+            ),
+            max_files=_coerce_int(
+                boombox_raw,
+                "max_files",
+                _DEFAULT_BOOMBOX_MAX_FILES,
+                source,
+            ),
+            allowed_extensions=_coerce_str_tuple(
+                boombox_raw,
+                "allowed_extensions",
+                _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS,
+                source,
+            ),
+        )
     except ConfigError as exc:
         raise ConfigError(source, str(exc).split(": ", 1)[-1]) from exc
     cfg = WebConfig(
@@ -684,6 +747,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         light_shows=light_shows,
         wraps=wraps,
         music=music,
+        boombox=boombox,
         source_path=source,
     )
     cfg.validate()

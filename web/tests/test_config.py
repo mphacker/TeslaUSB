@@ -10,6 +10,7 @@ import pytest
 from teslausb_web.config import (
     DEFAULT_CONFIG_PATH,
     ENV_CONFIG_PATH,
+    BoomboxSection,
     ChimesSection,
     ConfigError,
     LightShowsSection,
@@ -479,6 +480,59 @@ chunk_size = 11
 """,
     )
     with pytest.raises(ConfigError, match="chunk_size must be <= max_file_size"):
+        load_config(cfg_file)
+
+
+def test_boombox_defaults_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "boombox_defaults.toml"
+    _write(cfg_file, "[boombox]\n")
+    cfg = load_config(cfg_file)
+    assert cfg.boombox == BoomboxSection()
+    assert cfg.boombox.base_dir == "Boombox"
+    assert cfg.boombox.max_file_bytes == 1 * 1024 * 1024
+    assert cfg.boombox.max_files == 5
+    assert cfg.boombox.allowed_extensions == (".mp3", ".wav")
+
+
+def test_full_boombox_section_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "full_boombox.toml"
+    _write(
+        cfg_file,
+        """
+[boombox]
+base_dir = "CustomBoom"
+max_file_bytes = 2048
+max_files = 7
+allowed_extensions = [".wav"]
+""",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.boombox == BoomboxSection(
+        base_dir="CustomBoom",
+        max_file_bytes=2048,
+        max_files=7,
+        allowed_extensions=(".wav",),
+    )
+
+
+def test_boombox_base_dir_rejects_path_traversal(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "boombox_base_dir.toml"
+    _write(cfg_file, '[boombox]\nbase_dir = "../foo"\n')
+    with pytest.raises(ConfigError, match="must not contain path separators"):
+        load_config(cfg_file)
+
+
+def test_boombox_max_files_must_be_positive(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "boombox_max_files.toml"
+    _write(cfg_file, "[boombox]\nmax_files = 0\n")
+    with pytest.raises(ConfigError, match="max_files must be > 0"):
+        load_config(cfg_file)
+
+
+def test_boombox_allowed_extensions_must_start_with_dot(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "boombox_extension.toml"
+    _write(cfg_file, '[boombox]\nallowed_extensions = ["wav"]\n')
+    with pytest.raises(ConfigError, match=r"entries must start with '\.'"):
         load_config(cfg_file)
 
 

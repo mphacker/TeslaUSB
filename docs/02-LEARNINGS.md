@@ -486,3 +486,242 @@ From v1's history, things we will deliberately avoid in B-1:
    support for LFN edge cases.** Use a well-tested encoder or
    write one with exhaustive unit tests against `mtools`
    reference output.
+
+
+---
+
+## Phase 6 — live bring-up on cybertruckusb.local (2026-05-21)
+
+These were paid for in real outages during Phase 6 hardware bring-up.
+Every entry corresponds to a specific failure mode observed on the
+live Pi.
+
+### Two systemd units MUST NOT share `RuntimeDirectory=`
+
+**Symptom:** After a few `teslausb-web` restarts the gadget chain
+silently broke — `nbd-attach@{0,1}` failed with `CONNECT failed`,
+`usb-gadget` failed its dependency, the UDC was unbound, and the
+Tesla saw no USB drive. SSH and the web UI still worked, so it
+was easy to miss.
+
+**Root cause:** Both `teslafat@.service` (User=teslausb) and
+`teslausb-web.service` (User=pi) declared `RuntimeDirectory=teslausb`.
+systemd treats RuntimeDirectory per-unit: every restart of one unit
+recreates `/run/teslausb` with that unit's User/Group AND wipes any
+file inside it that the unit doesn't own. A `teslausb-web` restart
+therefore deleted `/run/teslausb/teslafat-{0,1}.sock` — the NBD
+sockets — and there is no service that recreates them except a full
+`teslafat` restart.
+
+**Rule:** Each systemd unit gets its own `RuntimeDirectory=` name.
+Production layout:
+
+| Unit | RuntimeDirectory | Contents |
+|---|---|---|
+| `teslafat@.service` | `teslausb` | `teslafat-N.sock` (NBD server sockets), `worker.sock` (future IPC) |
+| `teslausb-web.service` | `teslausb-web` | `gunicorn.sock` (only) |
+
+Update `config/gunicorn.conf.py` and `config/nginx-teslausb.conf`
+together when the socket path changes — they must agree.
+
+### Don't share `/var/lib/teslausb` between the Rust worker and the Flask app without g+w
+
+**Symptom:** gunicorn worker failed to boot with
+`sqlite3.OperationalError: attempt to write a readonly database`,
+returning 502 on every page.
+
+**Root cause:** `teslausb-worker` (User=teslausb) needs to own
+`/var/lib/teslausb/index.sqlite3`. `teslausb-web` (User=pi, until
+phase 6.2) also opens `mapping.db` and `cloud_sync.db` in the same
+dir. The dir was created `0750 teslausb:teslausb` so pi could not
+open the .db files for write.
+
+**Rule:** `/var/lib/teslausb` is mode `0770 teslausb:teslausb`.
+`setup-lib/02-users.sh` already adds `pi` to the `teslausb` group,
+so both users have group-write. Don't tighten to 0750 until the
+web app's `User=` migrates to `teslausb` (phase 6.2 TODO).
+
+### Phase-7 IPC daemon doesn't exist yet — gate the health probe
+
+**Symptom:** Web UI showed a permanent red "Daemon socket missing"
+dot in the header and in the System Health card.
+
+**Root cause:** `system_health._daemon_block` unconditionally tries
+to connect to `cfg.paths.ipc_socket` (`/run/teslausb/worker.sock`).
+The wire types exist in `teslausb-core::ipc::messages` but no
+in-tree binary binds that socket — `teslausb-worker` is purely
+indexer/cleanup with no `UnixListener`, and `teslafat`'s
+`UnixListener` speaks binary NBD, not JSON envelope.
+
+**Rule:** All health probes that depend on optional/future
+subsystems must be gated by an explicit `features.*_enabled` flag
+(matching how `samba_enabled` and `cloud_archive_enabled` already
+work). Added `features.ipc_daemon_enabled` (default false). Flip
+true the day the daemon ships.
+
+### Dashboard "Connected to Tesla" must reflect live kernel state
+
+**Symptom:** During the runtime-dir outage above, the dashboard
+still showed the green "Connected to Tesla" card while the gadget
+was actually unbound. The status was a lie because the template
+branched on a pinned `mode_token='present'` constant.
+
+**Rule:** The status card MUST probe configfs at request time.
+`teslausb_web.services.gadget_state.gadget_mode_token()` returns
+`'present'` only when `/sys/kernel/config/usb_gadget/g1/UDC` is
+non-empty AND both `lun.{0,1}/file` point at real backing devices.
+Anything else returns `'unknown'` (orange card). The probe is
+filesystem-only (no IPC, no sudo) so it's cheap enough to call on
+every page render.
+
+### Worker `backing_root` is the LUN root, not the data parent
+
+**Symptom:** `teslausb-worker` failed at startup looking for
+`/srv/teslausb/RecentClips` — wrong path for B-1's 2-LUN layout.
+
+**Rule:** B-1 layout is
+`/srv/teslausb/teslacam/TeslaCam/{Recent,Sentry,Saved}Clips` for
+LUN 0 (Tesla writes) and `/srv/teslausb/media/{LightShow,Boombox}`
+for LUN 1 (user populates). The worker only walks the TeslaCam
+LUN, so `worker.toml` sets `backing_root = "/srv/teslausb/teslacam"`.
+The repo example matches; setup-lib step 04 should install this
+file from `rust/crates/teslausb-worker/examples/worker.toml` — not
+yet wired (gap noted in 01-PROGRESS).
+
+### Boot-time order: nbd-attach races teslafat socket creation
+
+**Symptom:** On a cold boot, `nbd-attach@0/1` would race and fail
+because the teslafat sockets weren't bound yet. `usb-gadget` then
+failed its dependency. Manual `systemctl restart` of nbd-attach +
+usb-gadget after teslafat was up resolved it.
+
+**Rule:** `nbd-attach@.service` needs `After=teslafat@%i.service`
+AND `Requires=teslafat@%i.service`, plus a short `ExecStartPre`
+that waits for the socket file to exist (e.g.,
+`/bin/bash -c 'for i in $(seq 1 30); do test -S /run/teslausb/teslafat-%i.sock && exit 0; sleep 0.5; done; exit 1'`).
+This is a Phase 6.11 follow-up; cold-boot still depends on
+systemd-managed restart-on-failure to converge.
+
+### `ping cybertruckusb.local` may resolve to public IPv6 first
+
+**Symptom:** Operator reported "can't ping the device but SSH and
+web work."
+
+**Root cause:** Windows mDNS resolves `.local` to three addresses
+including two public IPv6 (Comcast prefix) and the LAN IPv4. `ping`
+picks the first answer (IPv6) and ICMPv6 to that public address is
+filtered upstream. TCP (SSH, HTTP) falls back through the address
+list.
+
+**Rule:** When debugging Pi reachability, use `ping -4` or pin to
+the LAN address. The Pi itself has zero firewall rules — never
+chase a phantom ICMP block on the device when the real problem is
+the operator's resolver picking the wrong address family.
+
+### Always cancel the dead-man inside the SAME ssh command that arms it
+
+**Symptom:** Pi spontaneously rebooted ~4 min after a manual H-test
+completed successfully.
+
+**Root cause:** I armed `b1-deadman.timer` (180s reboot) in one ssh
+session and ran the test in another. The test succeeded but I
+forgot to cancel the timer.
+
+**Rule:** Arm + run + cancel in ONE command:
+
+```bash
+ssh pi@host 'sudo systemd-run --on-active=180 --unit=b1-deadman /sbin/reboot; <do thing>; sudo systemctl stop b1-deadman.timer'
+```
+
+Never two separate ssh calls. The cancel must be tied to the same
+shell exit as the dangerous operation.
+
+
+## Phase 6 — Tesla requires exFAT on the TeslaCam LUN
+
+**Symptom.** With LUN 0 (256 GiB) configured as `fs_type = "fat32"`:
+
+- gadget enumerates fine (`configured`, `high-speed`);
+- Linux mounts the volume read-only fine (sees
+  `TeslaCam/{Recent,Sentry,Saved}Clips`);
+- Tesla performs the initial scan (hundreds of reads, a handful
+  of metadata writes to BootSector / FsInfo) and then **stops
+  writing entirely** — RecentClips stays empty even in active
+  sentry mode that should write a new 6-camera + thumbnail
+  bundle every minute;
+- `ep1 is stalled` floods `dmesg` whenever Tesla retries the
+  scan.
+
+**Root cause.** Tesla's USB-storage stack rejects FAT32 volumes
+larger than the Microsoft format limit (~32 GiB). Windows
+refuses to `mkfs.vfat` past that boundary; Tesla adopted the
+same rule. teslafat `synth` happily produces a 256 GiB FAT32
+image, the Linux kernel mounts it (Linux's FAT driver tolerates
+oversized FAT32), but Tesla treats it as malformed and silently
+aborts the write path. Tesla's own docs recommend exFAT for any
+USB drive >= 32 GiB.
+
+**Fix.** Flip the TeslaCam LUN to exFAT in
+`/etc/teslausb/teslafat-0.toml`:
+
+```toml
+fs_type = "exfat"
+```
+
+then restart `teslafat@0` -> `nbd-attach@0` -> `usb-gadget`.
+teslafat already supports exFAT (Phase 3.5e). After the flip,
+Tesla started writing within 60 s; in the next 100 s it shipped
+13 files / ~270 MiB into
+`/srv/teslausb/teslacam/TeslaCam/RecentClips/` with zero
+endpoint stalls.
+
+The MEDIA LUN (32 GiB) stays FAT32 — well within the Microsoft /
+Tesla limit, and FAT32 is what the Tesla music player prefers.
+
+Source change: `setup-lib/11-gadget.sh` template for LUN 0 now
+ships `fs_type = "exfat"` by default, with a header comment
+explaining why a future `setup.sh` run cannot silently regress
+this to FAT32.
+
+## Phase 6 — NBD logical block size must match the synthesized FAT BPB
+
+**Symptom.** With `nbd-attach@.service` using `-block-size 4096`
+and teslafat synthesizing a FAT32 BPB with `BPB_BytsPerSec =
+0x0200` (512 bytes/sector), the kernel rejects mount with:
+
+```
+FAT-fs (nbd0): logical sector size too small for device
+```
+
+Linux refuses, Tesla refuses, the drive is unusable even though
+enumeration succeeds.
+
+**Fix.** Drop `nbd-attach@.service` to `-block-size 512` so the
+NBD client advertises a 512-byte logical block, matching the BPB
+exactly. `blockdev --report` after the change shows `SSZ=512
+BSZ=512`; mount succeeds.
+
+This applies to **both** FAT32 and exFAT, because teslafat also
+synthesizes exFAT with 512-byte `BytesPerSectorShift` by default
+and a 4096-byte NBD block would create the same mismatch.
+
+The earlier comment in `B1_NBD_ATTACH_UNIT_BODY` claimed
+`-block-size 4096` matches teslafat's "4 KiB sector emulation" —
+that was incorrect. The unit body now ships `-block-size 512`
+and the comment is replaced with a pointer to this learning plus
+a warning that changing it will break BOTH the kernel mount AND
+Tesla writes.
+
+## Phase 6 — nbd-attach@ must wait for teslafat's socket
+
+teslafat is `Type=simple`: systemd considers it "started" the
+moment exec() returns, well before the daemon has bound
+`/run/teslausb/teslafat-N.sock`. Without an explicit poll,
+`nbd-attach@N` races, `nbd-client` fails CONNECT, the service
+`Requires=` propagates the failure up to `usb-gadget`, and at
+boot we end up with no gadget.
+
+Fix: add an `ExecStartPre` to `nbd-attach@.service` that polls
+for `/run/teslausb/teslafat-%i.sock` (30 attempts at 0.5 s each,
+total ~15 s) before calling `nbd-client`. This eliminates the
+previously manual unbind/rebind UDC workaround on cold boot.

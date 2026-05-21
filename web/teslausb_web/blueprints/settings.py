@@ -32,6 +32,7 @@ from flask import (
     url_for,
 )
 
+from teslausb_web.services.gadget_state import gadget_mode_token
 from teslausb_web.services.system_settings_service import (
     SystemSettingsConfigError,
     SystemSettingsService,
@@ -232,11 +233,15 @@ def _index_context() -> dict[str, object]:
         "cfg_network": {"samba_password": ""},
         "system_info": _system_info(),
         "samba_on": _samba_on(),
-        # B-1 has no v1-style mode switching — the gadget is always
-        # presenting both LUNs to Tesla while files remain accessible
-        # over SMB. Pin to 'present' so the dashboard renders the green
-        # "Connected to Tesla" card instead of v1's "Status Unknown".
-        "mode_token": "present",
+        # Probe the live USB-gadget state (configfs UDC + both LUN
+        # backing files). Returns 'present' only when the gadget is
+        # actually bound to a UDC and both LUNs have backing block
+        # devices — the green "Connected to Tesla" card promises Tesla
+        # can use the drives, so it must reflect kernel state, not a
+        # static value. Any failure in the teslafat → nbd-attach →
+        # usb-gadget chain drops to 'unknown' and shows the orange
+        # "Status Unknown" card.
+        "mode_token": gadget_mode_token(),
         "share_paths": [],
     }
 

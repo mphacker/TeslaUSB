@@ -119,9 +119,20 @@ Type=notify
 User=pi
 Group=pi
 
-# Create /run/teslausb (mode 0755) at service start; systemd cleans
+# Create /run/teslausb-web (mode 0755) at service start; systemd cleans
 # it up on stop. Gunicorn binds the socket inside this directory.
-RuntimeDirectory=teslausb
+#
+# CRITICAL — must NOT be the same name as teslafat@.service's
+# `RuntimeDirectory=teslausb`. When two units share a RuntimeDirectory,
+# every restart of one unit makes systemd recreate the dir with that
+# unit's User/Group and wipe files it doesn't track — silently
+# deleting the OTHER unit's sockets. We hit this live on
+# cybertruckusb.local: a teslausb-web restart erased
+# `/run/teslausb/teslafat-{0,1}.sock`, which then broke
+# nbd-attach@{0,1} (CONNECT failed) and cascaded to usb-gadget
+# (dependency failed) — the Pi was no longer presenting USB to the
+# Tesla until teslafat was restarted.
+RuntimeDirectory=teslausb-web
 RuntimeDirectoryMode=0755
 
 Environment=TESLAUSB_WEB_CONFIG=/etc/teslausb/teslausb-web.toml

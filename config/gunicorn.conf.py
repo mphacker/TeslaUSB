@@ -26,10 +26,12 @@ from __future__ import annotations
 # --- Bind ---------------------------------------------------------------
 
 # Unix socket. nginx (the only upstream) talks to this; the socket
-# lives in a tmpfs-backed dir created by setup.sh with mode 0770 and
-# group www-data so the nginx worker can connect without the gunicorn
-# worker needing to chown the socket itself.
-bind = "unix:/run/teslausb/gunicorn.sock"
+# lives in a tmpfs-backed dir created by systemd (`RuntimeDirectory=
+# teslausb-web` in `teslausb-web.service`). The dir name is
+# DELIBERATELY DISTINCT from teslafat's `RuntimeDirectory=teslausb`
+# — see the comment in setup-lib/04-units.sh for the bug we hit
+# when they shared a directory.
+bind = "unix:/run/teslausb-web/gunicorn.sock"
 
 # Socket permissions. nginx runs as www-data; gunicorn runs as the
 # teslausb user (also a member of www-data). 0660 = owner+group rw.

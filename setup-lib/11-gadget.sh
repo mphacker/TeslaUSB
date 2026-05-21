@@ -30,7 +30,7 @@
 #
 #   * /etc/modprobe.d/teslausb-nbd.conf — `options nbd nbds_max=2 max_part=0`
 #   * /etc/modules-load.d/teslausb.conf — load `nbd` at boot
-#   * /etc/teslausb/teslafat-0.toml — TeslaCam LUN config (FAT32, size chosen at install)
+#   * /etc/teslausb/teslafat-0.toml — TeslaCam LUN config (exFAT, size chosen at install)
 #   * /etc/teslausb/teslafat-1.toml — media LUN config (FAT32, size chosen at install)
 #   * /etc/systemd/system/nbd-attach@.service — templated attach unit
 #   * /etc/systemd/system/usb-gadget.service — configfs gadget oneshot
@@ -124,10 +124,17 @@ nbd
 
 B1_TESLAFAT_CONF_0_TEMPLATE='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
 # LUN 0 — TeslaCam (dashcam + sentry + saved clips).
+#
+# fs_type=exfat is REQUIRED here. Tesla refuses to write to a
+# FAT32 volume larger than ~32 GiB (its mass-storage stack
+# treats them as malformed) and the TeslaCam LUN is sized for
+# the operator-chosen drive size, which is always well above
+# that threshold in practice. See docs/02-LEARNINGS.md
+# "Phase 6 — Tesla requires exFAT on the TeslaCam LUN".
 backing_root = "/srv/teslausb/teslacam"
 volume_size_gb = __SIZE_GB__
 volume_label = "TESLACAM"
-fs_type = "fat32"
+fs_type = "exfat"
 
 [retention]
 # Hide RecentClips entries older than 1 hour from Tesla. Matches
@@ -169,10 +176,24 @@ PartOf=teslafat@%i.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Wait up to 15s for teslafat'"'"'s NBD socket to appear before connecting.
+# teslafat@%i.service is `Type=simple` so systemd considers it "started"
+# the moment exec() returns — well before the daemon has bound its
+# socket. Without this poll, nbd-attach races and fails CONNECT,
+# which then cascades to usb-gadget failing its `Requires=`.
+ExecStartPre=/bin/sh -c '"'"'for i in $(seq 1 30); do [ -S /run/teslausb/teslafat-%i.sock ] && exit 0; sleep 0.5; done; echo "teslafat-%i.sock did not appear within 15s" >&2; exit 1'"'"'
 # nbd-client uses a unix socket: -unix <path> instead of -h/-p.
 # -persist keeps the kernel side alive across brief daemon restarts.
-# -block-size 4096 matches teslafat'"'"'s 4 KiB sector emulation.
-ExecStart=/usr/sbin/nbd-client -unix /run/teslausb/teslafat-%i.sock /dev/nbd%i -persist -block-size 4096 -nofork
+# -block-size 512 MUST match teslafat'"'"'s synthesized FAT32 BPB
+# (BPB_BytsPerSec = 0x0200 / 512). If these disagree the kernel
+# refuses to mount the volume with
+# `FAT-fs (nbdN): logical sector size too small for device`
+# and Tesla refuses to enumerate it as a usable USB drive (this
+# was the smoking gun for the "Tesla sees the drive but never
+# writes to RecentClips" bug in Phase 6 hardware bring-up — see
+# docs/02-LEARNINGS.md "FAT logical sector size must match NBD
+# logical block size" for the full diagnosis).
+ExecStart=/usr/sbin/nbd-client -unix /run/teslausb/teslafat-%i.sock /dev/nbd%i -persist -block-size 512 -nofork
 ExecStop=/usr/sbin/nbd-client -d /dev/nbd%i
 
 [Install]

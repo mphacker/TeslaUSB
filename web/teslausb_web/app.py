@@ -31,6 +31,7 @@ from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
 
 from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
 from teslausb_web.blueprints.analytics import analytics_bp
+from teslausb_web.blueprints.api import api_bp
 from teslausb_web.blueprints.boombox import boombox_bp
 from teslausb_web.blueprints.captive_portal import captive_portal_bp
 from teslausb_web.blueprints.cleanup import cleanup_bp
@@ -284,6 +285,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         analytics_bp,
         videos_bp,
         jobs_bp,
+        api_bp,
     )
     for bp in real_blueprints:
         if bp.name in registered_names:

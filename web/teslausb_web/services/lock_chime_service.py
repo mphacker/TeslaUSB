@@ -772,6 +772,67 @@ def delete_chime_file(name: str, chimes_dir: str | Path, active_path: str | Path
     return DeleteResult(ok=True, message=f"Successfully deleted {name}", was_active=was_active)
 
 
+def rename_chime_file(
+    old_name: str,
+    new_name: str,
+    chimes_dir: str | Path,
+) -> Path:
+    """Rename a library chime in place without re-encoding audio.
+
+    Used by the legacy-compat ``/api/rename_chime/<old>/<new>`` shim so
+    external Tesla phone-home scripts can update a chime's filename
+    without re-uploading the audio bytes (charter §"avoid useless
+    work"). The audio file itself is byte-identical after the move.
+
+    Args:
+        old_name: Current library filename. Must be a bare ``.wav``
+            filename — path separators / traversal tokens are
+            rejected by :func:`_validate_library_name`.
+        new_name: Desired new filename. Same constraints as
+            ``old_name``; additionally the basename produced by
+            :func:`werkzeug.utils.secure_filename` must equal
+            ``new_name`` so a caller cannot smuggle a different
+            destination through the sanitiser.
+        chimes_dir: Library directory holding the chime files.
+
+    Returns:
+        Absolute path to the renamed file.
+
+    Raises:
+        ValueError: If either filename is unsafe, missing, or fails
+            the secure-filename round-trip.
+        FileNotFoundError: If ``old_name`` does not exist in the
+            library or is not a regular file.
+        FileExistsError: If ``new_name`` already exists in the
+            library (callers should delete first if overwrite was
+            intended).
+        LockChimeFileError: If the underlying ``os.rename`` fails
+            for an I/O reason.
+    """
+    _validate_library_name(old_name)
+    _validate_library_name(new_name)
+    if not new_name.lower().endswith(_WAV_SUFFIX):
+        msg = "New filename must end with .wav"
+        raise ValueError(msg)
+    if _safe_name(new_name) != new_name:
+        msg = f"Unsafe destination filename: {new_name!r}"
+        raise ValueError(msg)
+    library_dir = Path(chimes_dir)
+    src = library_dir / old_name
+    dst = library_dir / new_name
+    if not src.exists() or src.is_symlink() or not src.is_file():
+        msg = f"Source chime not found: {old_name}"
+        raise FileNotFoundError(msg)
+    if dst.exists():
+        msg = f"Destination already exists: {new_name}"
+        raise FileExistsError(msg)
+    try:
+        src.rename(dst)
+    except OSError as exc:
+        raise LockChimeFileError(f"Failed to rename chime: {exc}") from exc
+    return dst
+
+
 def list_chime_files(chimes_dir: str | Path) -> tuple[ChimeInfo, ...]:
     """List uploaded ``.wav`` chimes sorted alphabetically.
 
@@ -828,6 +889,7 @@ __all__ = (
     "list_chime_files",
     "normalize_audio",
     "reencode_wav_for_tesla",
+    "rename_chime_file",
     "replace_lock_chime",
     "save_pretrimmed_wav",
     "set_active_chime",

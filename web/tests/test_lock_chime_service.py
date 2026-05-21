@@ -19,6 +19,7 @@ from teslausb_web.services.lock_chime_service import (
     list_chime_files,
     normalize_audio,
     reencode_wav_for_tesla,
+    rename_chime_file,
     replace_lock_chime,
     save_pretrimmed_wav,
     set_active_chime,
@@ -495,3 +496,50 @@ def test_reencode_wav_for_tesla_real_ffmpeg_smoke(tmp_path: Path) -> None:
     assert result.ok is True
     validation = validate_tesla_wav(output)
     assert validation.ok is True
+
+
+def test_rename_chime_file_moves_file_in_place(chimes_dir: Path) -> None:
+    src = _write(chimes_dir / "old.wav", _wav_bytes())
+    payload = src.read_bytes()
+    result = rename_chime_file("old.wav", "new.wav", chimes_dir)
+    assert result == chimes_dir / "new.wav"
+    assert result.read_bytes() == payload
+    assert not src.exists()
+
+
+def test_rename_chime_file_missing_source_raises(chimes_dir: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        rename_chime_file("nope.wav", "other.wav", chimes_dir)
+
+
+def test_rename_chime_file_destination_exists_raises(chimes_dir: Path) -> None:
+    _write(chimes_dir / "a.wav", _wav_bytes())
+    _write(chimes_dir / "b.wav", _wav_bytes())
+    with pytest.raises(FileExistsError):
+        rename_chime_file("a.wav", "b.wav", chimes_dir)
+
+
+def test_rename_chime_file_rejects_path_traversal(chimes_dir: Path) -> None:
+    _write(chimes_dir / "a.wav", _wav_bytes())
+    with pytest.raises(ValueError, match="Invalid chime filename"):
+        rename_chime_file("a.wav", "../evil.wav", chimes_dir)
+
+
+def test_rename_chime_file_rejects_non_wav_destination(chimes_dir: Path) -> None:
+    _write(chimes_dir / "a.wav", _wav_bytes())
+    with pytest.raises(ValueError, match=r"must end with \.wav"):
+        rename_chime_file("a.wav", "b.mp3", chimes_dir)
+
+
+def test_rename_chime_file_wraps_os_error_as_lock_chime_file_error(
+    chimes_dir: Path,
+) -> None:
+    _write(chimes_dir / "a.wav", _wav_bytes())
+    with (
+        patch(
+            "teslausb_web.services.lock_chime_service.Path.rename",
+            side_effect=OSError("disk full"),
+        ),
+        pytest.raises(LockChimeFileError, match="Failed to rename chime"),
+    ):
+        rename_chime_file("a.wav", "b.wav", chimes_dir)

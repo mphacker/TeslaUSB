@@ -84,6 +84,17 @@ _DEFAULT_BOOMBOX_BASE_DIR: Final[str] = "Boombox"
 _DEFAULT_BOOMBOX_MAX_FILE_BYTES: Final[int] = 1 * 1024 * 1024
 _DEFAULT_BOOMBOX_MAX_FILES: Final[int] = 5
 _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".mp3", ".wav")
+_DEFAULT_WIFI_CREDENTIALS_FILENAME: Final[str] = "wifi_credentials.json"
+_DEFAULT_WIFI_CREDENTIALS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_WIFI_CREDENTIALS_FILENAME
+_DEFAULT_WIFI_AP_SSID: Final[str] = "TeslaUSB-Setup"
+_DEFAULT_WIFI_AP_PASSPHRASE: Final[str] = ""
+_DEFAULT_WIFI_AP_IDLE_TIMEOUT_SECONDS: Final[int] = 600
+_WIFI_PASSPHRASE_MIN_LENGTH: Final[int] = 8
+_WIFI_PASSPHRASE_MAX_LENGTH: Final[int] = 63
+_DEFAULT_WIFI_NMCLI_BINARY: Final[str] = "nmcli"
+_DEFAULT_WIFI_IWLIST_BINARY: Final[str] = "iwlist"
+_DEFAULT_WIFI_IWCONFIG_BINARY: Final[str] = "iwconfig"
+_DEFAULT_WIFI_WPA_CLI_BINARY: Final[str] = "wpa_cli"
 _DEFAULT_CLOUD_CREDENTIALS_FILENAME: Final[str] = "cloud_oauth_credentials.json"
 _DEFAULT_CLOUD_STATE_FILENAME: Final[str] = "cloud_oauth_state.json"
 _DEFAULT_CLOUD_RCLONE_CONFIG_DIRNAME: Final[str] = "rclone"
@@ -443,6 +454,62 @@ class BoomboxSection:
 
 
 @dataclass(frozen=True, slots=True)
+class WifiBinaryPaths:
+    """Binary names or absolute paths for the Wi-Fi control surface."""
+
+    nmcli: str = _DEFAULT_WIFI_NMCLI_BINARY
+    iwlist: str = _DEFAULT_WIFI_IWLIST_BINARY
+    iwconfig: str = _DEFAULT_WIFI_IWCONFIG_BINARY
+    wpa_cli: str = _DEFAULT_WIFI_WPA_CLI_BINARY
+
+    def validate(self) -> None:
+        for name, value in (
+            ("nmcli", self.nmcli),
+            ("iwlist", self.iwlist),
+            ("iwconfig", self.iwconfig),
+            ("wpa_cli", self.wpa_cli),
+        ):
+            if not value.strip():
+                raise ConfigError(None, f"[wifi.binary_paths] {name} must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
+class WifiSection:
+    """Wi-Fi credentials, AP defaults, and binary resolution hints."""
+
+    credentials_path: Path = _DEFAULT_WIFI_CREDENTIALS_PATH
+    ap_ssid: str = _DEFAULT_WIFI_AP_SSID
+    ap_passphrase: str = _DEFAULT_WIFI_AP_PASSPHRASE
+    ap_idle_timeout_seconds: int = _DEFAULT_WIFI_AP_IDLE_TIMEOUT_SECONDS
+    binary_paths: WifiBinaryPaths = field(default_factory=WifiBinaryPaths)
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            not self.credentials_path.is_absolute()
+            and not PurePosixPath(self.credentials_path.as_posix()).is_absolute()
+        ):
+            raise ConfigError(
+                None,
+                f"[wifi] credentials_path must be absolute, got {self.credentials_path!r}",
+            )
+        if not self.ap_ssid.strip():
+            raise ConfigError(None, "[wifi] ap_ssid must be non-empty")
+        if self.ap_passphrase and not (
+            _WIFI_PASSPHRASE_MIN_LENGTH <= len(self.ap_passphrase) <= _WIFI_PASSPHRASE_MAX_LENGTH
+        ):
+            raise ConfigError(
+                None,
+                "[wifi] ap_passphrase must be 8-63 characters or empty",
+            )
+        if self.ap_idle_timeout_seconds <= 0:
+            raise ConfigError(None, "[wifi] ap_idle_timeout_seconds must be > 0")
+        self.binary_paths.validate()
+
+
+@dataclass(frozen=True, slots=True)
 class CloudSection:
     """Cloud OAuth state plus cloud-archive runtime settings."""
 
@@ -581,6 +648,7 @@ class WebConfig:
     wraps: WrapsSection = field(default_factory=WrapsSection)
     music: MusicSection = field(default_factory=MusicSection)
     boombox: BoomboxSection = field(default_factory=BoomboxSection)
+    wifi: WifiSection = field(default_factory=WifiSection)
     cloud: CloudSection = field(default_factory=CloudSection)
     mapping: MappingSection = field(default_factory=MappingSection)
     source_path: Path | None = None
@@ -595,6 +663,7 @@ class WebConfig:
             self.wraps.validate()
             self.music.validate()
             self.boombox.validate()
+            self.wifi.validate()
             self.cloud.validate()
             self.mapping.validate()
         except ConfigError as exc:
@@ -715,6 +784,8 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     wraps_raw = _expect_section(raw, "wraps", source)
     music_raw = _expect_section(raw, "music", source)
     boombox_raw = _expect_section(raw, "boombox", source)
+    wifi_raw = _expect_section(raw, "wifi", source)
+    wifi_binary_paths_raw = _expect_section(wifi_raw, "binary_paths", source)
     cloud_raw = _expect_section(raw, "cloud", source)
     mapping_raw = _expect_section(raw, "mapping", source)
 
@@ -925,6 +996,53 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 "allowed_extensions",
                 _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS,
                 source,
+            ),
+        )
+        wifi = WifiSection(
+            credentials_path=_coerce_path(
+                wifi_raw,
+                "credentials_path",
+                paths_section.state_dir / _DEFAULT_WIFI_CREDENTIALS_FILENAME,
+                source,
+            ),
+            ap_ssid=_coerce_str(wifi_raw, "ap_ssid", _DEFAULT_WIFI_AP_SSID, source),
+            ap_passphrase=_coerce_str(
+                wifi_raw,
+                "ap_passphrase",
+                _DEFAULT_WIFI_AP_PASSPHRASE,
+                source,
+            ),
+            ap_idle_timeout_seconds=_coerce_int(
+                wifi_raw,
+                "ap_idle_timeout_seconds",
+                _DEFAULT_WIFI_AP_IDLE_TIMEOUT_SECONDS,
+                source,
+            ),
+            binary_paths=WifiBinaryPaths(
+                nmcli=_coerce_str(
+                    wifi_binary_paths_raw,
+                    "nmcli",
+                    _DEFAULT_WIFI_NMCLI_BINARY,
+                    source,
+                ),
+                iwlist=_coerce_str(
+                    wifi_binary_paths_raw,
+                    "iwlist",
+                    _DEFAULT_WIFI_IWLIST_BINARY,
+                    source,
+                ),
+                iwconfig=_coerce_str(
+                    wifi_binary_paths_raw,
+                    "iwconfig",
+                    _DEFAULT_WIFI_IWCONFIG_BINARY,
+                    source,
+                ),
+                wpa_cli=_coerce_str(
+                    wifi_binary_paths_raw,
+                    "wpa_cli",
+                    _DEFAULT_WIFI_WPA_CLI_BINARY,
+                    source,
+                ),
             ),
         )
         cloud = CloudSection(
@@ -1172,6 +1290,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         wraps=wraps,
         music=music,
         boombox=boombox,
+        wifi=wifi,
         cloud=cloud,
         mapping=mapping,
         source_path=source,

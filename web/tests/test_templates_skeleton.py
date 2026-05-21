@@ -174,6 +174,18 @@ def test_context_processor_supplies_base_html_defaults(app: Flask) -> None:
     assert "operation-banner" not in html
 
 
+def test_captive_portal_template_renders(app: Flask) -> None:
+    response = app.test_client().get("/settings/wifi")
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Connect TeslaUSB to Wi-Fi" in html
+    assert "current_mode" not in html
+    assert "quick_edit" not in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "unpkg.com" not in html
+    assert "#" not in html.split("<style>", 1)[1].split("</style>", 1)[0]
+
+
 def test_healthz_still_works_with_scaffolds_registered(app: Flask) -> None:
     """Sanity: 5.2's /healthz route is unaffected by 5.4's blueprints."""
     resp = app.test_client().get("/healthz")

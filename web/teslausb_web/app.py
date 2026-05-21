@@ -30,6 +30,7 @@ from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
 
 from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
 from teslausb_web.blueprints.boombox import boombox_bp
+from teslausb_web.blueprints.captive_portal import captive_portal_bp
 from teslausb_web.blueprints.cloud_archive import cloud_archive_bp
 from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
@@ -48,6 +49,7 @@ from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_
 from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
 from teslausb_web.services.music_service import make_music_service
+from teslausb_web.services.wifi_service import make_wifi_service
 from teslausb_web.services.wrap_service import make_wrap_service
 
 if TYPE_CHECKING:
@@ -135,6 +137,7 @@ def create_app(
     _register_light_show_services(app, cfg)
     _register_music_services(app, cfg)
     _register_boombox_services(app, cfg)
+    _register_wifi_services(app, cfg)
     _register_cloud_oauth_services(app, cfg)
     _register_cloud_rclone_services(app, cfg)
     oauth_service = app.extensions.get("cloud_oauth_service")
@@ -233,6 +236,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         light_shows_bp,
         music_bp,
         boombox_bp,
+        captive_portal_bp,
         wraps_bp,
         mapping_bp,
     )
@@ -301,6 +305,11 @@ def _register_boombox_services(app: Flask, cfg: WebConfig) -> None:
         cfg,
         schedule_cache_invalidation=_get_cache_invalidator(app).schedule,
     )
+
+
+def _register_wifi_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the Wi-Fi / captive-portal service once at app startup."""
+    app.extensions["wifi_service"] = make_wifi_service(cfg)
 
 
 def _register_cloud_oauth_services(app: Flask, cfg: WebConfig) -> None:

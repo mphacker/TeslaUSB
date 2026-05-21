@@ -13,6 +13,7 @@ from teslausb_web.config import (
     ChimesSection,
     ConfigError,
     LightShowsSection,
+    MusicSection,
     WebConfig,
     WrapsSection,
     load_config,
@@ -421,6 +422,63 @@ max_dimension = 512
 """,
     )
     with pytest.raises(ConfigError, match="max_dimension must be >= min_dimension"):
+        load_config(cfg_file)
+
+
+def test_music_defaults_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "music_defaults.toml"
+    _write(cfg_file, "[music]\n")
+    cfg = load_config(cfg_file)
+    assert cfg.music == MusicSection()
+    assert cfg.music.folder == "Music"
+    assert cfg.music.chunk_size == 16 * 1024 * 1024
+    assert cfg.music.allowed_extensions == (".mp3", ".flac", ".wav", ".aac", ".m4a")
+
+
+def test_full_music_section_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "full_music.toml"
+    _write(
+        cfg_file,
+        """
+[music]
+folder = "Audio"
+max_file_size = 999
+chunk_size = 111
+free_space_reserve = 222
+stale_chunk_age = 333
+allowed_extensions = [".mp3", ".wav"]
+""",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.music == MusicSection(
+        folder="Audio",
+        max_file_size=999,
+        chunk_size=111,
+        free_space_reserve=222,
+        stale_chunk_age=333,
+        allowed_extensions=(".mp3", ".wav"),
+    )
+
+
+@pytest.mark.parametrize("key", ["folder"])
+def test_music_relpaths_reject_path_traversal(tmp_path: Path, key: str) -> None:
+    cfg_file = tmp_path / f"music_{key}.toml"
+    _write(cfg_file, f'[music]\n{key} = "../foo"\n')
+    with pytest.raises(ConfigError, match="must not contain path separators"):
+        load_config(cfg_file)
+
+
+def test_music_chunk_size_must_not_exceed_max_file_size(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "music_bad_limits.toml"
+    _write(
+        cfg_file,
+        """
+[music]
+max_file_size = 10
+chunk_size = 11
+""",
+    )
+    with pytest.raises(ConfigError, match="chunk_size must be <= max_file_size"):
         load_config(cfg_file)
 
 

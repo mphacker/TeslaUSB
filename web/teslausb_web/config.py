@@ -68,6 +68,18 @@ _DEFAULT_WRAP_MAX_DIMENSION: Final[int] = 1024
 _DEFAULT_WRAP_MAX_FILENAME_LENGTH: Final[int] = 30
 _DEFAULT_WRAP_MAX_UPLOAD_COUNT: Final[int] = 10
 _DEFAULT_WRAP_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".png",)
+_DEFAULT_MUSIC_FOLDER: Final[str] = "Music"
+_DEFAULT_MUSIC_MAX_FILE_SIZE: Final[int] = 2_048 * 1_024 * 1_024
+_DEFAULT_MUSIC_CHUNK_SIZE: Final[int] = 16 * 1_024 * 1_024
+_DEFAULT_MUSIC_FREE_SPACE_RESERVE: Final[int] = 4 * 1_024 * 1_024
+_DEFAULT_MUSIC_STALE_CHUNK_AGE: Final[int] = 3_600
+_DEFAULT_MUSIC_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (
+    ".mp3",
+    ".flac",
+    ".wav",
+    ".aac",
+    ".m4a",
+)
 
 # Highest valid TCP/UDP port number per RFC 793. Named to silence
 # the magic-value lint and document intent at the call site.
@@ -292,6 +304,49 @@ class WrapsSection:
 
 
 @dataclass(frozen=True, slots=True)
+class MusicSection:
+    """Tesla music library paths and upload constraints."""
+
+    folder: str = _DEFAULT_MUSIC_FOLDER
+    max_file_size: int = _DEFAULT_MUSIC_MAX_FILE_SIZE
+    chunk_size: int = _DEFAULT_MUSIC_CHUNK_SIZE
+    free_space_reserve: int = _DEFAULT_MUSIC_FREE_SPACE_RESERVE
+    stale_chunk_age: int = _DEFAULT_MUSIC_STALE_CHUNK_AGE
+    allowed_extensions: tuple[str, ...] = _DEFAULT_MUSIC_ALLOWED_EXTENSIONS
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        _validate_relpath_filename(self.folder, key="folder", section="music")
+        if self.max_file_size <= 0:
+            raise ConfigError(None, "[music] max_file_size must be > 0")
+        if self.chunk_size <= 0:
+            raise ConfigError(None, "[music] chunk_size must be > 0")
+        if self.chunk_size > self.max_file_size:
+            raise ConfigError(None, "[music] chunk_size must be <= max_file_size")
+        if self.free_space_reserve < 0:
+            raise ConfigError(None, "[music] free_space_reserve must be >= 0")
+        if self.stale_chunk_age <= 0:
+            raise ConfigError(None, "[music] stale_chunk_age must be > 0")
+        if not self.allowed_extensions:
+            raise ConfigError(None, "[music] allowed_extensions must be non-empty")
+        for extension in self.allowed_extensions:
+            if not extension.strip():
+                raise ConfigError(None, "[music] allowed_extensions must be non-empty")
+            if "/" in extension or "\\" in extension:
+                raise ConfigError(
+                    None,
+                    "[music] allowed_extensions must not contain path separators",
+                )
+            if not extension.startswith("."):
+                raise ConfigError(
+                    None,
+                    "[music] allowed_extensions entries must start with '.'",
+                )
+
+
+@dataclass(frozen=True, slots=True)
 class WebConfig:
     """Root config dataclass — what the rest of the app sees."""
 
@@ -301,6 +356,7 @@ class WebConfig:
     chimes: ChimesSection = field(default_factory=ChimesSection)
     light_shows: LightShowsSection = field(default_factory=LightShowsSection)
     wraps: WrapsSection = field(default_factory=WrapsSection)
+    music: MusicSection = field(default_factory=MusicSection)
     source_path: Path | None = None
 
     def validate(self) -> None:
@@ -311,6 +367,7 @@ class WebConfig:
             self.chimes.validate()
             self.light_shows.validate()
             self.wraps.validate()
+            self.music.validate()
         except ConfigError as exc:
             raise ConfigError(self.source_path, str(exc).split(": ", 1)[-1]) from exc
 
@@ -427,6 +484,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     chimes_raw = _expect_section(raw, "chimes", source)
     light_shows_raw = _expect_section(raw, "light_shows", source)
     wraps_raw = _expect_section(raw, "wraps", source)
+    music_raw = _expect_section(raw, "music", source)
 
     web = WebSection(
         host=_coerce_str(web_raw, "host", _DEFAULT_HOST, source),
@@ -583,6 +641,39 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 source,
             ),
         )
+        music = MusicSection(
+            folder=_coerce_str(music_raw, "folder", _DEFAULT_MUSIC_FOLDER, source),
+            max_file_size=_coerce_int(
+                music_raw,
+                "max_file_size",
+                _DEFAULT_MUSIC_MAX_FILE_SIZE,
+                source,
+            ),
+            chunk_size=_coerce_int(
+                music_raw,
+                "chunk_size",
+                _DEFAULT_MUSIC_CHUNK_SIZE,
+                source,
+            ),
+            free_space_reserve=_coerce_int(
+                music_raw,
+                "free_space_reserve",
+                _DEFAULT_MUSIC_FREE_SPACE_RESERVE,
+                source,
+            ),
+            stale_chunk_age=_coerce_int(
+                music_raw,
+                "stale_chunk_age",
+                _DEFAULT_MUSIC_STALE_CHUNK_AGE,
+                source,
+            ),
+            allowed_extensions=_coerce_str_tuple(
+                music_raw,
+                "allowed_extensions",
+                _DEFAULT_MUSIC_ALLOWED_EXTENSIONS,
+                source,
+            ),
+        )
     except ConfigError as exc:
         raise ConfigError(source, str(exc).split(": ", 1)[-1]) from exc
     cfg = WebConfig(
@@ -592,6 +683,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         chimes=chimes,
         light_shows=light_shows,
         wraps=wraps,
+        music=music,
         source_path=source,
     )
     cfg.validate()

@@ -1,0 +1,623 @@
+{% extends "base.html" %}
+{% block content %}
+{# Phase 5.27 — B-1 Failed Jobs UI.
+
+   v1 unified three subsystems: archive, indexer, cloud_sync. B-1 ships
+   only indexer + cloud_sync because the v1 archive queue has no
+   B-1 equivalent (cleanup is a fire-and-forget filesystem move with no
+   dead-letter layer; see docs/00-PLAN.md). The Indexer pill currently
+   maps to a stub adapter — see https://github.com/mphacker/TeslaUSB/issues/222 —
+   so the count stays at 0 until B-1 grows a mapping dead-letter store.
+
+   Page polls /api/jobs/counts and /api/jobs/failed after load — no
+   server-side data fetch in the handler, so the shell renders even when
+   a subsystem DB is slow or unavailable. #}
+<div class="container" style="max-width: 1100px;">
+
+    <header class="jobs-header">
+        <div>
+            <h1 class="jobs-title">Failed Jobs</h1>
+            <p class="jobs-subtitle">
+                Tasks that hit their retry cap. Review the error, fix the cause, then retry.
+            </p>
+        </div>
+        <div class="jobs-header-actions">
+            <button type="button" id="refreshBtn" class="btn btn-secondary"
+                    aria-label="Refresh failed jobs list">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+                <span>Refresh</span>
+            </button>
+        </div>
+    </header>
+
+    <details id="jobsHelp" class="jobs-help">
+        <summary class="jobs-help-summary">
+            <svg class="nav-icon jobs-help-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+            <span>What does this mean?</span>
+        </summary>
+        <div class="jobs-help-body">
+            <p>A <strong>failed job</strong> is a background task — video index or cloud upload — that retried multiple times and gave up. Each card shows what failed and a recommendation for what to do.</p>
+            <p><strong>Retry</strong> resets the row so the worker picks it up again. <strong>Delete</strong> removes the queue row only — it never deletes the underlying video file from disk. Producers (file watcher, boot scan) may legitimately re-enqueue the same file later if it still exists.</p>
+            <p><strong>Clip value</strong> badge: <span class="job-value job-value-event">Event clip</span> = irreplaceable. <span class="job-value job-value-recent">Rolling buffer</span> = rotated hourly. <span class="job-value job-value-index">Map / trip data</span> = re-derivable.</p>
+        </div>
+    </details>
+
+    <nav aria-label="Filter by subsystem" class="jobs-pill-row">
+        <button type="button" class="failed-pill" data-subsystem="all" aria-pressed="true">
+            <span class="pill-label">All</span>
+            <span class="pill-count" id="count-all">0</span>
+        </button>
+        <button type="button" class="failed-pill" data-subsystem="indexer" aria-pressed="false">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-map-pin"></use></svg>
+            <span class="pill-label">Indexer</span>
+            <span class="pill-count" id="count-indexer">0</span>
+        </button>
+        <button type="button" class="failed-pill" data-subsystem="cloud_sync" aria-pressed="false">
+            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-cloud-upload"></use></svg>
+            <span class="pill-label">Cloud</span>
+            <span class="pill-count" id="count-cloud_sync">0</span>
+        </button>
+    </nav>
+
+    <div id="retryAllBar" class="jobs-bulk-bar">
+        <span id="retryAllLabel" class="jobs-bulk-label"></span>
+        <div class="jobs-bulk-actions">
+            <button type="button" id="retryAllBtn" class="btn btn-primary"
+                    aria-label="Retry all failed jobs">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+                <span>Retry all</span>
+            </button>
+            <button type="button" id="deleteAllBtn" class="btn btn-danger"
+                    aria-label="Permanently delete all failed jobs">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                <span>Delete all</span>
+            </button>
+        </div>
+    </div>
+
+    <div id="emptyState" class="jobs-empty-state" style="display: none;">
+        <svg aria-hidden="true" class="jobs-empty-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-check-circle"></use></svg>
+        <h2 class="jobs-empty-title">No failed jobs</h2>
+        <p class="jobs-empty-text">Every background task is healthy.</p>
+    </div>
+
+    <div id="loadingState" class="jobs-loading-state" style="display: none;">Loading…</div>
+
+    <div id="errorState" class="jobs-error-state" style="display: none;"></div>
+
+    <div id="jobList" role="list" class="jobs-card-list"></div>
+
+    <div id="confirmModal" class="jobs-modal" role="dialog" aria-modal="true"
+         aria-labelledby="confirmModalTitle" hidden>
+        <div class="jobs-modal-backdrop" id="confirmModalBackdrop"></div>
+        <div class="jobs-modal-card">
+            <h2 id="confirmModalTitle" class="jobs-modal-title">Confirm</h2>
+            <p id="confirmModalBody" class="jobs-modal-body"></p>
+            <div class="jobs-modal-actions">
+                <button type="button" id="confirmModalCancel" class="btn btn-secondary">Cancel</button>
+                <button type="button" id="confirmModalOk" class="btn btn-danger">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+/* Phase 5.27 — Failed Jobs page styles. CSS custom properties only;
+   accent colours route through the existing `--ds-accent-*` design
+   tokens with the soft-fallback aliases the `.btn-*` rules already
+   use in style.css. Badge tints reuse the defined `--msg-*-bg`
+   semantic tokens so light + dark themes stay in parity automatically. */
+.jobs-header { display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.jobs-title { margin: 0 0 4px; font-size: 1.5rem; }
+.jobs-subtitle { margin: 0; color: var(--text-secondary); font-size: 0.875rem; }
+.jobs-header-actions { display: flex; gap: 8px; }
+
+.jobs-help { margin-bottom: 16px; background: var(--bg-secondary);
+    border: 1px solid var(--border-color); border-radius: 8px; }
+.jobs-help-summary { cursor: pointer; padding: 12px 14px; font-weight: 600;
+    font-size: 0.9375rem; display: flex; align-items: center; gap: 8px;
+    min-height: 44px; }
+.jobs-help-icon { width: 16px; height: 16px; }
+.jobs-help-body { padding: 0 14px 14px; font-size: 0.875rem;
+    color: var(--text-primary); line-height: 1.5; }
+.jobs-help-body p { margin: 8px 0; }
+.jobs-help-body .job-value { display: inline-flex; vertical-align: middle; }
+
+.jobs-pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.failed-pill { display: inline-flex; align-items: center; gap: 6px;
+    min-height: 44px; padding: 8px 14px; border-radius: 999px;
+    background: var(--bg-secondary); color: var(--text-primary);
+    border: 1px solid var(--border-color); cursor: pointer;
+    font-size: 0.875rem;
+    transition: background 150ms ease, border-color 150ms ease, color 150ms ease; }
+.failed-pill[aria-pressed="true"] {
+    background: var(--ds-accent-primary); border-color: var(--ds-accent-primary);
+    color: var(--btn-primary-text); }
+.failed-pill .nav-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.failed-pill .pill-count { display: inline-flex; justify-content: center;
+    align-items: center; min-width: 22px; padding: 0 6px; height: 20px;
+    border-radius: 999px; background: var(--bg-primary);
+    font-size: 0.75rem; font-weight: 600; }
+.failed-pill[aria-pressed="true"] .pill-count {
+    background: var(--bg-active); color: var(--btn-primary-text); }
+
+.jobs-bulk-bar { display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 10px 14px; margin-bottom: 12px;
+    background: var(--bg-secondary); border: 1px solid var(--border-color);
+    border-radius: 8px; flex-wrap: wrap; }
+.jobs-bulk-label { font-size: 0.875rem; color: var(--text-secondary); }
+.jobs-bulk-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.jobs-empty-state { padding: 40px 20px; text-align: center;
+    background: var(--bg-secondary); border: 1px dashed var(--border-color);
+    border-radius: 8px; }
+.jobs-empty-icon { width: 48px; height: 48px; color: var(--ds-accent-success);
+    margin: 0 auto 12px; display: block; }
+.jobs-empty-title { margin: 0 0 4px; font-size: 1.125rem; }
+.jobs-empty-text { margin: 0; color: var(--text-secondary); font-size: 0.875rem; }
+
+.jobs-loading-state { padding: 40px 20px; text-align: center;
+    color: var(--text-secondary); font-size: 0.875rem; }
+.jobs-error-state { padding: 16px; background: var(--msg-error-bg);
+    color: var(--msg-error-text); border-left: 4px solid var(--error-text);
+    border-radius: 4px; margin-bottom: 12px; font-size: 0.875rem; }
+
+.jobs-card-list { display: flex; flex-direction: column; gap: 10px; }
+
+.job-card { background: var(--bg-secondary); border: 1px solid var(--border-color);
+    border-radius: 8px; padding: 14px; display: grid; gap: 8px; }
+.job-card-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.job-subsystem-badge { display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+    background: var(--bg-primary); color: var(--text-secondary);
+    border: 1px solid var(--border-color); }
+.job-subsystem-badge .nav-icon { width: 12px; height: 12px; }
+.job-attempts { color: var(--error-text); font-size: 0.75rem; font-weight: 600; }
+
+.job-value { display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+    border: 1px solid var(--border-color); }
+.job-value-event { background: var(--msg-error-bg); color: var(--msg-error-text); }
+.job-value-recent { background: var(--msg-warning-bg); color: var(--msg-warning-text); }
+.job-value-archived { background: var(--msg-success-bg); color: var(--msg-success-text); }
+.job-value-cloud, .job-value-index { background: var(--msg-info-bg); color: var(--msg-info-text); }
+.job-value-unknown { background: var(--bg-primary); color: var(--text-secondary); }
+
+.job-identifier { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8125rem; word-break: break-all; color: var(--text-primary); }
+.job-error { color: var(--text-secondary); font-size: 0.8125rem;
+    background: var(--bg-primary); padding: 8px 10px; border-radius: 6px;
+    white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto; }
+
+.job-recommendation { display: flex; align-items: flex-start; gap: 8px;
+    padding: 8px 10px; border-radius: 6px; font-size: 0.8125rem; line-height: 1.4;
+    border-left: 3px solid var(--border-color);
+    background: var(--bg-primary); color: var(--text-primary); }
+.job-recommendation-retry { border-left-color: var(--ds-accent-primary); }
+.job-recommendation-delete { border-left-color: var(--error-text); }
+.job-recommendation .nav-icon { width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px; }
+.job-recommendation-action { font-weight: 600; text-transform: uppercase;
+    font-size: 0.6875rem; letter-spacing: 0.04em; margin-right: 6px; }
+.job-recommendation-retry .job-recommendation-action { color: var(--ds-accent-primary); }
+.job-recommendation-delete .job-recommendation-action { color: var(--error-text); }
+
+.job-prev-toggle { display: inline-flex; align-items: center; gap: 4px;
+    margin: 0; padding: 8px 12px; background: transparent;
+    border: 1px solid var(--border-color); border-radius: 6px;
+    color: var(--text-secondary); font-size: 0.75rem; font-weight: 500;
+    cursor: pointer; align-self: flex-start; min-height: 44px; min-width: 44px;
+    transition: background 150ms ease, color 150ms ease; }
+.job-prev-toggle:hover { background: var(--bg-primary); color: var(--text-primary); }
+.job-prev-toggle .nav-icon { width: 12px; height: 12px;
+    transition: transform 150ms ease; }
+.job-prev-toggle[aria-expanded="true"] .nav-icon { transform: rotate(180deg); }
+.job-prev-error { color: var(--text-secondary); font-size: 0.75rem;
+    background: var(--bg-primary); padding: 6px 10px; border-radius: 6px;
+    border-left: 3px solid var(--border-color); white-space: pre-wrap;
+    word-break: break-word; max-height: 160px; overflow: auto; opacity: 0.85; }
+.job-prev-error-label { display: block; font-size: 0.6875rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-secondary); margin-bottom: 4px; }
+
+.job-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.jobs-modal[hidden] { display: none; }
+.jobs-modal { position: fixed; inset: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: center; padding: 16px; }
+.jobs-modal-backdrop { position: absolute; inset: 0; background: var(--bg-overlay); }
+.jobs-modal-card { position: relative; background: var(--bg-secondary);
+    border: 1px solid var(--border-color); border-radius: 12px;
+    padding: 20px; max-width: 480px; width: 100%;
+    box-shadow: 0 12px 32px var(--shadow-hover); }
+.jobs-modal-title { margin: 0 0 8px; font-size: 1.125rem; }
+.jobs-modal-body { margin: 0 0 16px; font-size: 0.9375rem;
+    color: var(--text-primary); line-height: 1.5; white-space: pre-wrap; }
+.jobs-modal-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+@media (max-width: 480px) {
+    .job-card-header { gap: 6px; }
+    .job-actions .btn { flex: 1; justify-content: center; }
+    .jobs-modal-actions .btn { flex: 1; justify-content: center; }
+}
+</style>
+
+<script>
+(function () {
+    'use strict';
+
+    var state = {
+        subsystem: 'all',
+        rows: [],
+        counts: { indexer: 0, cloud_sync: 0, total: 0 }
+    };
+
+    var SUBSYSTEM_META = {
+        indexer:    { label: 'Indexer', icon: 'icon-map-pin' },
+        cloud_sync: { label: 'Cloud',   icon: 'icon-cloud-upload' }
+    };
+
+    var SPRITE_URL = {{ url_for('static', filename='icons/lucide-sprite.svg')|tojson }};
+
+    function $(id) { return document.getElementById(id); }
+
+    function showLoading(on) {
+        $('loadingState').style.display = on ? '' : 'none';
+        if (on) {
+            $('emptyState').style.display = 'none';
+            $('errorState').style.display = 'none';
+        }
+    }
+
+    function showError(msg) {
+        $('errorState').textContent = msg;
+        $('errorState').style.display = '';
+    }
+
+    function clearError() {
+        $('errorState').style.display = 'none';
+        $('errorState').textContent = '';
+    }
+
+    function setPills() {
+        document.querySelectorAll('.failed-pill').forEach(function (b) {
+            b.setAttribute('aria-pressed',
+                b.dataset.subsystem === state.subsystem ? 'true' : 'false');
+        });
+        if (state.subsystem === 'all') {
+            var total = state.counts.total || 0;
+            $('retryAllLabel').textContent =
+                total + ' job' + (total === 1 ? '' : 's') +
+                ' failed across all subsystems';
+            $('retryAllBtn').disabled = total === 0;
+            $('deleteAllBtn').disabled = total === 0;
+        } else {
+            var meta = SUBSYSTEM_META[state.subsystem];
+            var n = state.counts[state.subsystem] || 0;
+            $('retryAllLabel').textContent =
+                n + ' ' + (meta ? meta.label : state.subsystem) +
+                ' job' + (n === 1 ? '' : 's') + ' failed';
+            $('retryAllBtn').disabled = n === 0;
+            $('deleteAllBtn').disabled = n === 0;
+        }
+    }
+
+    function setCounts(counts) {
+        state.counts = counts;
+        ['indexer', 'cloud_sync'].forEach(function (k) {
+            var el = $('count-' + k);
+            if (el) el.textContent = counts[k] || 0;
+        });
+        $('count-all').textContent = counts.total || 0;
+    }
+
+    function fmtAttempts(n) {
+        n = Number(n) || 0;
+        return n + ' attempt' + (n === 1 ? '' : 's');
+    }
+
+    var RECOMMENDATION_ICON = {
+        retry:  'icon-refresh-cw',
+        delete: 'icon-trash-2',
+        either: 'icon-alert-circle'
+    };
+    var RECOMMENDATION_LABEL = {
+        retry:  'Try retry',
+        delete: 'Delete is OK',
+        either: 'Your call'
+    };
+
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function buildHeader(r, meta) {
+        var value = r.value
+            || { tier: 'unknown', label: 'Background task', description: '' };
+        var valueClass = 'job-value job-value-' + (value.tier || 'unknown');
+        var header = document.createElement('div');
+        header.className = 'job-card-header';
+        header.innerHTML =
+            '<span class="job-subsystem-badge">' +
+              '<svg class="nav-icon" aria-hidden="true"><use href="' +
+                SPRITE_URL + '#' + meta.icon + '"></use></svg>' +
+              escapeHtml(meta.label) +
+            '</span>' +
+            '<span class="' + valueClass + '" title="' +
+              escapeHtml(value.description || '') + '">' +
+              escapeHtml(value.label || '') +
+            '</span>' +
+            '<span class="job-attempts">' + fmtAttempts(r.attempts) + '</span>';
+        return header;
+    }
+
+    function buildRecommendation(rec) {
+        if (!rec || !rec.action) return null;
+        var recClass = 'job-recommendation job-recommendation-' + rec.action;
+        var recIcon = RECOMMENDATION_ICON[rec.action] || 'icon-alert-circle';
+        var recLabel = RECOMMENDATION_LABEL[rec.action] || 'Suggested';
+        var node = document.createElement('div');
+        node.className = recClass;
+        node.setAttribute('role', 'note');
+        node.innerHTML =
+            '<svg class="nav-icon" aria-hidden="true"><use href="' +
+              SPRITE_URL + '#' + recIcon + '"></use></svg>' +
+            '<div><span class="job-recommendation-action">' +
+              escapeHtml(recLabel) + '</span>' +
+              '<span>' + escapeHtml(rec.reason || '') + '</span></div>';
+        return node;
+    }
+
+    function buildPrevError(previousLastError) {
+        if (!previousLastError) return null;
+        var toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'job-prev-toggle';
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.setAttribute('aria-label', 'Show previous failure');
+        toggle.innerHTML = '<span>Previous failure</span>' +
+            '<svg class="nav-icon" aria-hidden="true"><use href="' +
+              SPRITE_URL + '#icon-chevron-down"></use></svg>';
+        var body = document.createElement('div');
+        body.className = 'job-prev-error';
+        body.style.display = 'none';
+        var label = document.createElement('span');
+        label.className = 'job-prev-error-label';
+        label.textContent = 'Before last retry';
+        var text = document.createElement('div');
+        text.textContent = previousLastError;
+        body.appendChild(label);
+        body.appendChild(text);
+        toggle.addEventListener('click', function () {
+            var open = toggle.getAttribute('aria-expanded') === 'true';
+            toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+            toggle.setAttribute('aria-label',
+                open ? 'Show previous failure' : 'Hide previous failure');
+            body.style.display = open ? 'none' : '';
+        });
+        return { toggle: toggle, body: body };
+    }
+
+    function buildActions(r) {
+        var actions = document.createElement('div');
+        actions.className = 'job-actions';
+        var retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'btn btn-primary';
+        retryBtn.setAttribute('aria-label', 'Retry this job');
+        retryBtn.innerHTML = '<svg class="nav-icon" aria-hidden="true"><use href="' +
+            SPRITE_URL + '#icon-refresh-cw"></use></svg><span>Retry</span>';
+        retryBtn.addEventListener('click', function () { retryRow(r); });
+        var deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'btn btn-danger';
+        deleteBtn.setAttribute('aria-label', 'Permanently delete this failed job');
+        deleteBtn.innerHTML = '<svg class="nav-icon" aria-hidden="true"><use href="' +
+            SPRITE_URL + '#icon-trash-2"></use></svg><span>Delete</span>';
+        deleteBtn.addEventListener('click', function () { deleteRow(r); });
+        actions.appendChild(retryBtn);
+        actions.appendChild(deleteBtn);
+        return actions;
+    }
+
+    function renderRows() {
+        var list = $('jobList');
+        list.innerHTML = '';
+        var empty = state.rows.length === 0;
+        $('emptyState').style.display = empty ? '' : 'none';
+        if (empty) return;
+        state.rows.forEach(function (r) {
+            var meta = SUBSYSTEM_META[r.subsystem]
+                || { label: r.subsystem, icon: 'icon-alert-triangle' };
+            var card = document.createElement('article');
+            card.className = 'job-card';
+            card.setAttribute('role', 'listitem');
+            card.appendChild(buildHeader(r, meta));
+            var ident = document.createElement('div');
+            ident.className = 'job-identifier';
+            ident.textContent = r.identifier || '(no identifier)';
+            card.appendChild(ident);
+            var error = document.createElement('div');
+            error.className = 'job-error';
+            error.textContent = r.last_error || '(no error message)';
+            card.appendChild(error);
+            var rec = buildRecommendation(r.recommendation);
+            if (rec) card.appendChild(rec);
+            var prev = buildPrevError(r.previous_last_error);
+            if (prev) { card.appendChild(prev.toggle); card.appendChild(prev.body); }
+            card.appendChild(buildActions(r));
+            list.appendChild(card);
+        });
+    }
+
+    function loadCounts() {
+        return fetch('/api/jobs/counts',
+                     { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function (r) {
+                if (!r.ok) throw new Error('counts ' + r.status);
+                return r.json();
+            })
+            .then(function (counts) { setCounts(counts); setPills(); });
+    }
+
+    function loadRows() {
+        showLoading(true);
+        clearError();
+        var url = '/api/jobs/failed?subsystem=' +
+                  encodeURIComponent(state.subsystem) + '&limit=200';
+        return fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function (r) {
+                if (!r.ok) throw new Error('failed ' + r.status);
+                return r.json();
+            })
+            .then(function (data) { state.rows = data.rows || []; renderRows(); })
+            .catch(function (err) {
+                showError('Could not load failed jobs: ' + err.message);
+                state.rows = [];
+                renderRows();
+            })
+            .then(function () { showLoading(false); });
+    }
+
+    function refresh() { return loadCounts().then(loadRows); }
+
+    /* Modal-confirm replaces v1's window.confirm() so the bulk actions
+       match the rest of the B-1 UI (theme-aware, keyboard-dismissible). */
+    function confirmModal(title, body) {
+        return new Promise(function (resolve) {
+            var modal = $('confirmModal');
+            $('confirmModalTitle').textContent = title;
+            $('confirmModalBody').textContent = body;
+            modal.hidden = false;
+            function cleanup(result) {
+                modal.hidden = true;
+                $('confirmModalOk').removeEventListener('click', onOk);
+                $('confirmModalCancel').removeEventListener('click', onCancel);
+                $('confirmModalBackdrop').removeEventListener('click', onCancel);
+                document.removeEventListener('keydown', onKey);
+                resolve(result);
+            }
+            function onOk() { cleanup(true); }
+            function onCancel() { cleanup(false); }
+            function onKey(ev) {
+                if (ev.key === 'Escape') onCancel();
+                else if (ev.key === 'Enter') onOk();
+            }
+            $('confirmModalOk').addEventListener('click', onOk);
+            $('confirmModalCancel').addEventListener('click', onCancel);
+            $('confirmModalBackdrop').addEventListener('click', onCancel);
+            document.addEventListener('keydown', onKey);
+        });
+    }
+
+    function postJson(url, payload) {
+        return fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json',
+                       'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify(payload)
+        }).then(function (r) {
+            return r.json().then(function (j) { return { ok: r.ok, body: j }; });
+        });
+    }
+
+    function retryRow(row) {
+        if (row.subsystem === 'all') return;
+        postJson('/api/jobs/retry', { subsystem: row.subsystem, row_id: row.row_id })
+            .then(function (res) {
+                if (!res.ok) {
+                    showError('Retry failed: ' +
+                        (res.body && res.body.error ? res.body.error : 'unknown'));
+                    return null;
+                }
+                return refresh();
+            });
+    }
+
+    function deleteRow(row) {
+        if (row.subsystem === 'all') return;
+        confirmModal('Delete this failed job?',
+            'The row will be removed from the queue. The underlying source file is NOT deleted from disk; if a watcher re-discovers it later it may be re-enqueued automatically.')
+            .then(function (ok) {
+                if (!ok) return null;
+                return postJson('/api/jobs/delete',
+                    { subsystem: row.subsystem, row_id: row.row_id })
+                    .then(function (res) {
+                        if (!res.ok) {
+                            showError('Delete failed: ' +
+                                (res.body && res.body.error
+                                    ? res.body.error : 'unknown'));
+                            return null;
+                        }
+                        return refresh();
+                    });
+            });
+    }
+
+    function bulkSubsystems() {
+        return state.subsystem === 'all'
+            ? Object.keys(SUBSYSTEM_META) : [state.subsystem];
+    }
+
+    function bulkMutate(url, label, total) {
+        var subs = bulkSubsystems();
+        var calls = subs.map(function (s) {
+            return postJson(url, { subsystem: s, row_id: null });
+        });
+        return Promise.all(calls).then(function (results) {
+            var anyError = results.some(function (r) { return !r.ok; });
+            if (anyError) showError('One or more ' + label + ' calls failed.');
+            return refresh();
+        });
+    }
+
+    function retryAll() {
+        var total = state.subsystem === 'all'
+            ? (state.counts.total || 0)
+            : (state.counts[state.subsystem] || 0);
+        if (total === 0) return;
+        var label = state.subsystem === 'all'
+            ? 'every failed job across every subsystem'
+            : ((SUBSYSTEM_META[state.subsystem]
+                ? SUBSYSTEM_META[state.subsystem].label
+                : state.subsystem) + ' jobs');
+        confirmModal('Retry all ' + total + ' failed jobs?',
+            'Retry all ' + total + ' ' + label + '?')
+            .then(function (ok) { if (ok) bulkMutate('/api/jobs/retry', 'retry', total); });
+    }
+
+    function deleteAll() {
+        var total = state.subsystem === 'all'
+            ? (state.counts.total || 0)
+            : (state.counts[state.subsystem] || 0);
+        if (total === 0) return;
+        var label = state.subsystem === 'all'
+            ? 'failed job' + (total === 1 ? '' : 's') + ' across every subsystem'
+            : 'failed ' + (SUBSYSTEM_META[state.subsystem]
+                ? SUBSYSTEM_META[state.subsystem].label
+                : state.subsystem) + ' job' + (total === 1 ? '' : 's');
+        var body = 'Permanently delete all ' + total + ' ' + label + '?\n\n' +
+                   'The rows will be removed from the queue. Underlying source files are NOT deleted from disk.';
+        confirmModal('Delete all ' + total + ' failed jobs?', body)
+            .then(function (ok) { if (ok) bulkMutate('/api/jobs/delete', 'delete', total); });
+    }
+
+    document.querySelectorAll('.failed-pill').forEach(function (b) {
+        b.addEventListener('click', function () {
+            state.subsystem = b.dataset.subsystem;
+            setPills();
+            loadRows();
+        });
+    });
+    $('refreshBtn').addEventListener('click', refresh);
+    $('retryAllBtn').addEventListener('click', retryAll);
+    $('deleteAllBtn').addEventListener('click', deleteAll);
+
+    document.addEventListener('DOMContentLoaded', function () { refresh(); });
+})();
+</script>
+{% endblock %}

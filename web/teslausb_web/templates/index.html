@@ -93,6 +93,7 @@
         <div class="section-content">
             <div id="system-health-card"
                  data-poll-url="{{ url_for('system_health.api_system_health') }}"
+                 data-jobs-url="{{ url_for('jobs.failed_jobs_page') }}"
                                   style="display:flex; flex-direction:column; gap:6px;">
                 <p id="system-health-overall"
                    style="margin:0 0 6px; padding:8px 12px;
@@ -637,10 +638,10 @@
                     <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
                     Run archive now
                 </button>
-                <a href="#" onclick="return false;" aria-disabled="true"
+                <a href="{{ url_for('jobs.failed_jobs_page') }}"
                    class="btn btn-secondary"
                    style="min-height:44px; text-decoration:none;">
-                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-alert-triangle"></use></svg>
                     Failed jobs
                 </a>
                 <button type="button" class="btn btn-secondary"

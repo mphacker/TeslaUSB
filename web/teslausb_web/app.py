@@ -25,7 +25,7 @@ import logging
 import secrets
 import threading
 import weakref
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
 
@@ -35,6 +35,7 @@ from teslausb_web.blueprints.boombox import boombox_bp
 from teslausb_web.blueprints.captive_portal import captive_portal_bp
 from teslausb_web.blueprints.cleanup import cleanup_bp
 from teslausb_web.blueprints.cloud_archive import cloud_archive_bp
+from teslausb_web.blueprints.jobs import jobs_bp
 from teslausb_web.blueprints.license_plates import license_plates_bp
 from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
@@ -57,6 +58,7 @@ from teslausb_web.services.cleanup import make_cleanup_service
 from teslausb_web.services.cloud_archive import make_cloud_archive_service
 from teslausb_web.services.cloud_oauth_service import CloudOAuthService, make_oauth_service
 from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_rclone_service
+from teslausb_web.services.jobs_service import CloudSyncAdapterProtocol, make_jobs_service
 from teslausb_web.services.license_plate_service import make_license_plate_service
 from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
@@ -184,6 +186,7 @@ def create_app(
     _register_cleanup_services(app, cfg)
     _register_analytics_service(app, cfg)
     _register_video_service(app, cfg)
+    _register_jobs_service(app)
 
     logger.info(
         "teslausb_web app created (port=%d, max_upload_mb=%d, samba=%s, source=%s)",
@@ -280,6 +283,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         cleanup_bp,
         analytics_bp,
         videos_bp,
+        jobs_bp,
     )
     for bp in real_blueprints:
         if bp.name in registered_names:
@@ -520,6 +524,28 @@ def _register_analytics_service(app: Flask, cfg: WebConfig) -> None:
 def _register_video_service(app: Flask, cfg: WebConfig) -> None:
     """Construct the videos service once at app startup."""
     app.extensions["video_service"] = make_video_service(cfg)
+
+
+def _register_jobs_service(app: Flask) -> None:
+    """Construct the unified Failed Jobs facade.
+
+    Depends on mapping_service (indexer adapter) and
+    cloud_archive_service (cloud_sync adapter) — both are already
+    registered by the time we get here.
+    """
+    mapping_service = app.extensions.get("mapping_service")
+    cloud_archive_service = app.extensions.get("cloud_archive_service")
+    typed_mapping = mapping_service if isinstance(mapping_service, MappingService) else None
+    # CloudArchiveService satisfies CloudSyncAdapterProtocol structurally.
+    typed_cloud = (
+        cast("CloudSyncAdapterProtocol", cloud_archive_service)
+        if cloud_archive_service is not None
+        else None
+    )
+    app.extensions["jobs_service"] = make_jobs_service(
+        mapping_service=typed_mapping,
+        cloud_archive_service=typed_cloud,
+    )
 
 
 def _register_template_globals(app: Flask) -> None:

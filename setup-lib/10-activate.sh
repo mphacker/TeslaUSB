@@ -68,6 +68,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 # defensive re-enable (idempotent no-op via the b1_unit_enabled probe).
 B1_ENABLE_UNITS=(
   teslausb-web.service
+  teslausb-worker.service
   teslafat@0.service
   teslafat@1.service
   nbd-attach@0.service
@@ -98,6 +99,7 @@ B1_START_ORDER=(
   nbd-attach@0.service
   nbd-attach@1.service
   usb-gadget.service
+  teslausb-worker.service
   teslausb-web.service
   cloud-archive.service
   gadget-recovery.service

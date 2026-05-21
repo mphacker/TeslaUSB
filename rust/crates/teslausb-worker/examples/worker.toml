@@ -7,7 +7,7 @@
 # be readable+writable by the `teslausb` user that systemd runs
 # the worker as.
 
-backing_root = "/srv/teslausb"
+backing_root = "/srv/teslausb/teslacam"
 db_path = "/var/lib/teslausb/index.sqlite3"
 
 [indexer]

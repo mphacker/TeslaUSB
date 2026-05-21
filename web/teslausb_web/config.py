@@ -301,6 +301,15 @@ class FeaturesSection:
     boombox_enabled: bool = False
     samba_enabled: bool = False
     cloud_archive_enabled: bool = True
+    # IPC management daemon (envelope-protocol over AF_UNIX). Defaults
+    # to OFF because no in-tree daemon currently binds the configured
+    # `paths.ipc_socket`; the wire types live in `teslausb-core::ipc`
+    # but the server-side accept loop is a phase-7 deliverable. When
+    # OFF, the System Health card reports "Disabled" instead of the
+    # noisy "Daemon socket missing" red dot; when ON, a missing
+    # socket is a real ERROR. Flip to true ONLY after a daemon
+    # actually listens on `paths.ipc_socket`.
+    ipc_daemon_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1160,6 +1169,12 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             features_raw,
             "cloud_archive_enabled",
             default=True,
+            source=source,
+        ),
+        ipc_daemon_enabled=_coerce_bool(
+            features_raw,
+            "ipc_daemon_enabled",
+            default=False,
             source=source,
         ),
     )

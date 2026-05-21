@@ -42,6 +42,13 @@ B1_DATA_OWNER="teslausb"
 B1_DATA_GROUP="teslausb"
 B1_DATA_MODE="775"
 
+# teslausb-worker (Phase 4b) writes its SQLite index + cache here.
+# Created at step 03 so step 10 can start the worker without a
+# manual mkdir. Owner = the data owner (the worker runs as that
+# user). Mode 0750 — operator and group can read, world cannot.
+B1_STATE_DIR="/var/lib/teslausb"
+B1_STATE_DIR_MODE="0750"
+
 # Tesla-canonical subdirectories created inside each LUN backing root so
 # the FAT32 volume teslafat synthesizes for the car already has the
 # directory structure Tesla expects. Tesla creates these on first write
@@ -65,7 +72,7 @@ B1_MEDIA_SUBDIRS=(
   "Boombox"
 )
 export B1_DATA_ROOT B1_DATA_DIRS B1_DATA_OWNER B1_DATA_GROUP B1_DATA_MODE \
-  B1_TESLACAM_SUBDIRS B1_MEDIA_SUBDIRS
+  B1_TESLACAM_SUBDIRS B1_MEDIA_SUBDIRS B1_STATE_DIR B1_STATE_DIR_MODE
 
 # Backwards-compat aliases (older docs / commits reference B1_BTRFS_*).
 # shellcheck disable=SC2034  # exported for downstream consumers
@@ -220,5 +227,17 @@ b1_step_03() {
     for sub in "${B1_MEDIA_SUBDIRS[@]}"; do
       _b1_ensure_tesla_subdir "${sub}" "${B1_DATA_ROOT}/media" || return 1
     done
+  fi
+
+  # Worker state directory (SQLite index + caches). Step 10 starts
+  # teslausb-worker which fails with SQLITE_READONLY_DIRECTORY if
+  # this dir does not exist owned by the worker's User=.
+  if (( have_group )); then
+    if [[ ! -d "${B1_STATE_DIR}" ]]; then
+      b1_log "creating worker state dir ${B1_STATE_DIR} (mode ${B1_STATE_DIR_MODE})"
+      b1_run mkdir -p "${B1_STATE_DIR}"
+      b1_run chmod "${B1_STATE_DIR_MODE}" "${B1_STATE_DIR}"
+    fi
+    _b1_fix_ownership "${B1_STATE_DIR}" || return 1
   fi
 }

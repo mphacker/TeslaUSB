@@ -83,3 +83,12 @@ samba_enabled = false
 # matches v1. Set to false on devices that should never push
 # clips offsite.
 cloud_archive_enabled = true
+
+# Backend IPC management daemon. When true, the System Health card
+# expects a daemon listening on `paths.ipc_socket` and flags a
+# missing/unreachable socket as RED. When false (the B-1 default
+# today — the in-tree IPC server is a phase-7 deliverable), the
+# daemon block reports a green "Disabled" so the nav-bar dot is
+# not noisy. Flip to true ONLY after deploying a daemon that
+# actually serves the JSON envelope protocol on `paths.ipc_socket`.
+ipc_daemon_enabled = false

@@ -122,7 +122,20 @@ def _disk_block(cfg: WebConfig) -> dict[str, object]:
 
 
 def _daemon_block(cfg: WebConfig) -> dict[str, object]:
-    """``teslafat`` daemon snapshot via the Unix-socket IPC client."""
+    """``teslafat`` daemon snapshot via the Unix-socket IPC client.
+
+    When ``features.ipc_daemon_enabled`` is false (the default in B-1
+    today — the IPC server is a phase-7 deliverable, only the wire
+    types ship today), this short-circuits to a green "Disabled"
+    block. That prevents the System Health card + nav-bar dot from
+    flagging the inherent absence of a not-yet-built daemon as a
+    red error. Operators wiring up the daemon flip the flag in
+    ``/etc/teslausb/teslausb-web.toml`` and the strict probe path
+    below resumes.
+    """
+    if not cfg.features.ipc_daemon_enabled:
+        return {"severity": SEV_OK, "message": "Disabled"}
+
     client = TeslaFatClient(cfg.paths.ipc_socket)
     try:
         body = client.status()

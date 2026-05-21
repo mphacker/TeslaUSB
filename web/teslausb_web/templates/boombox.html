@@ -1,0 +1,700 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.boombox-page,
+.boombox-header,
+.boombox-grid,
+.boombox-panel,
+.boombox-panel-head,
+.boombox-summary,
+.boombox-guidance,
+.boombox-guidance-card,
+.boombox-library,
+.boombox-list,
+.boombox-card,
+.boombox-card-body,
+.boombox-card-top,
+.boombox-card-meta,
+.boombox-upload-form,
+.boombox-selection,
+.boombox-empty,
+.boombox-status-list {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.boombox-page {
+    gap: var(--space-6);
+}
+
+.boombox-header,
+.boombox-panel,
+.boombox-library {
+    padding: var(--space-6);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+}
+
+.boombox-header-row,
+.boombox-summary,
+.boombox-guidance-strip,
+.boombox-library-toolbar,
+.boombox-library-actions,
+.boombox-selection-row,
+.boombox-selection-meta,
+.boombox-drop-copy,
+.boombox-card-header,
+.boombox-card-badges,
+.boombox-card-actions,
+.boombox-select-all,
+.boombox-select-file,
+.boombox-empty-copy,
+.boombox-rule-list {
+    display: flex;
+    gap: var(--space-3);
+}
+
+.boombox-header-row,
+.boombox-library-toolbar,
+.boombox-card-header,
+.boombox-selection-row {
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.boombox-header-row,
+.boombox-summary,
+.boombox-guidance-strip,
+.boombox-library-actions,
+.boombox-card-badges,
+.boombox-card-actions,
+.boombox-selection-row,
+.boombox-rule-list {
+    flex-wrap: wrap;
+}
+
+.boombox-title,
+.boombox-panel-title,
+.boombox-section-title,
+.boombox-empty-title,
+.boombox-guidance-card h3 {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.boombox-title {
+    font-size: var(--text-3xl);
+}
+
+.boombox-panel-title,
+.boombox-section-title,
+.boombox-empty-title,
+.boombox-guidance-card h3 {
+    font-size: var(--text-xl);
+}
+
+.boombox-copy,
+.boombox-subtitle,
+.boombox-selection-copy,
+.boombox-status,
+.boombox-empty-copy,
+.boombox-guidance-card p,
+.boombox-rule-list,
+.boombox-card-copy,
+.boombox-card-detail {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.boombox-summary-pill,
+.boombox-badge,
+.boombox-order-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-full);
+    background: var(--form-label-bg);
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.boombox-badge.is-active {
+    background: var(--msg-info-bg);
+    color: var(--msg-info-text);
+}
+
+.boombox-badge.is-overflow {
+    background: var(--msg-warning-bg);
+    color: var(--msg-warning-text);
+}
+
+.boombox-guidance-strip {
+    align-items: stretch;
+}
+
+.boombox-guidance-card {
+    min-width: min(100%, 18rem);
+    flex: 1 1 0;
+    padding: var(--space-4);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+}
+
+.boombox-guidance-card.is-warning {
+    background: var(--msg-warning-bg);
+    border-color: var(--warning-border);
+}
+
+.boombox-guidance-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-primary);
+}
+
+.boombox-guidance-card.is-warning .boombox-guidance-title,
+.boombox-guidance-card.is-warning p,
+.boombox-guidance-card.is-warning .boombox-rule-list {
+    color: var(--msg-warning-text);
+}
+
+.boombox-icon,
+.boombox-inline-icon {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex: 0 0 auto;
+}
+
+.boombox-grid {
+    align-items: start;
+}
+
+.boombox-drop-zone {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-3);
+    min-height: 44px;
+    padding: var(--space-6);
+    border: 2px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+    color: var(--text-primary);
+    text-align: center;
+    transition: border-color var(--transition-normal), background var(--transition-normal);
+}
+
+.boombox-drop-zone:hover,
+.boombox-drop-zone:focus-visible,
+.boombox-drop-zone.is-dragover {
+    border-color: var(--btn-primary-bg);
+    background: var(--bg-hover);
+}
+
+.boombox-drop-zone.is-disabled {
+    opacity: var(--opacity-disabled);
+    cursor: not-allowed;
+}
+
+.boombox-drop-zone svg {
+    width: 1.75rem;
+    height: 1.75rem;
+}
+
+.boombox-drop-title {
+    font-size: var(--text-lg);
+    font-weight: 700;
+}
+
+.boombox-drop-copy {
+    justify-content: center;
+    color: var(--text-secondary);
+}
+
+.boombox-selection {
+    padding: var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--form-input-bg);
+}
+
+.boombox-selection.is-invalid {
+    border-color: var(--warning-border);
+    background: var(--msg-warning-bg);
+}
+
+.boombox-selection.is-invalid .boombox-selection-copy,
+.boombox-selection.is-invalid .boombox-card-detail {
+    color: var(--msg-warning-text);
+}
+
+.boombox-status {
+    min-height: 44px;
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-input);
+    background: var(--form-input-bg);
+}
+
+.boombox-status.is-error {
+    border-color: var(--warning-border);
+    background: var(--msg-warning-bg);
+    color: var(--msg-warning-text);
+}
+
+.boombox-status.is-success {
+    border-color: var(--success-border);
+    background: var(--msg-success-bg);
+    color: var(--msg-success-text);
+}
+
+.boombox-actions,
+.boombox-card-actions {
+    display: grid;
+    gap: var(--space-3);
+}
+
+.boombox-btn,
+.boombox-select-all,
+.boombox-select-file {
+    min-height: 44px;
+}
+
+.boombox-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    background: var(--form-input-bg);
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.boombox-btn:hover,
+.boombox-btn:focus-visible {
+    border-color: var(--border-input);
+}
+
+.boombox-btn:disabled {
+    opacity: var(--opacity-disabled);
+    cursor: not-allowed;
+}
+
+.boombox-btn-primary {
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+.boombox-btn-primary:hover,
+.boombox-btn-primary:focus-visible {
+    background: var(--btn-primary-hover);
+    border-color: var(--btn-primary-hover);
+}
+
+.boombox-btn-secondary {
+    border-color: var(--border-input);
+}
+
+.boombox-btn-danger {
+    background: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
+.boombox-btn-danger:hover,
+.boombox-btn-danger:focus-visible {
+    background: var(--btn-danger-hover);
+    border-color: var(--btn-danger-hover);
+}
+
+.boombox-library {
+    gap: var(--space-4);
+}
+
+.boombox-select-all,
+.boombox-select-file {
+    align-items: center;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.boombox-select-all input,
+.boombox-select-file input {
+    width: 1.125rem;
+    height: 1.125rem;
+    margin: 0;
+}
+
+.boombox-selected-count {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.boombox-card {
+    padding: var(--space-4);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+}
+
+.boombox-card-copy,
+.boombox-card-detail {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.boombox-card-meta {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+}
+
+.boombox-card-meta > div {
+    display: grid;
+    gap: var(--space-1);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-input);
+}
+
+.boombox-card-meta dt {
+    margin: 0;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.boombox-card-meta dd {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.boombox-card audio {
+    width: 100%;
+}
+
+.boombox-empty {
+    justify-items: center;
+    padding: var(--space-6);
+    border: 1px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+    text-align: center;
+}
+
+.boombox-empty svg {
+    width: 2rem;
+    height: 2rem;
+    color: var(--text-secondary);
+}
+
+@media (min-width: 1024px) {
+    .boombox-grid {
+        grid-template-columns: minmax(20rem, 22rem) minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 767px) {
+    .boombox-header,
+    .boombox-panel,
+    .boombox-library {
+        padding: var(--space-4);
+    }
+
+    .boombox-actions,
+    .boombox-card-actions,
+    .boombox-library-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .boombox-btn {
+        width: 100%;
+    }
+}
+</style>
+{% endblock %}
+{% block content %}
+<div class="container">
+    {% include "media_hub_nav.html" %}
+    {% set sprite = url_for('static', filename='icons/lucide-sprite.svg') %}
+    {% set tesla_used_count = max_files if file_count > max_files else file_count %}
+    {% set overflow_count = file_count - max_files if file_count > max_files else 0 %}
+    {% set remaining_slots = (max_files - file_count) if file_count < max_files else 0 %}
+    <div
+        class="boombox-page"
+        id="boomboxPage"
+        data-max-files="{{ max_files }}"
+        data-current-count="{{ file_count }}"
+        data-max-file-bytes="{{ max_file_bytes }}"
+    >
+        <section class="boombox-header" aria-labelledby="boombox-title">
+            <div class="boombox-header-row">
+                <div class="boombox-panel-head">
+                    <h2 class="boombox-title" id="boombox-title">Boombox</h2>
+                    <p class="boombox-subtitle">
+                        Upload one MP3 or WAV clip, preview sounds inline, and manage the alphabetical list Tesla scans for the external speaker.
+                    </p>
+                </div>
+                <div class="boombox-summary" aria-label="Boombox summary">
+                    <span class="boombox-summary-pill">
+                        <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-megaphone"></use></svg>
+                        {{ file_count }} sound{{ '' if file_count == 1 else 's' }} saved
+                    </span>
+                    <span class="boombox-summary-pill">
+                        <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-check-circle"></use></svg>
+                        {{ tesla_used_count }} in Tesla rotation
+                    </span>
+                    <span class="boombox-summary-pill">
+                        <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-hard-drive"></use></svg>
+                        {{ remaining_slots }} slot{{ '' if remaining_slots == 1 else 's' }} remaining
+                    </span>
+                    {% if overflow_count > 0 %}
+                    <span class="boombox-summary-pill">
+                        <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-alert-triangle"></use></svg>
+                        {{ overflow_count }} stored after slot {{ max_files }}
+                    </span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="boombox-guidance-strip" aria-label="Boombox guidance">
+                <article class="boombox-guidance-card is-warning">
+                    <h3 class="boombox-guidance-title">
+                        <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-alert-triangle"></use></svg>
+                        Park-only playback
+                    </h3>
+                    <p>Boombox sounds only play while the vehicle is in Park because of the February 2022 NHTSA safety restriction.</p>
+                    <p>Vehicles also need the external pedestrian-warning speaker hardware to play custom sounds.</p>
+                </article>
+                <article class="boombox-guidance-card">
+                    <h3 class="boombox-guidance-title">
+                        <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-info"></use></svg>
+                        Tesla clip limits
+                    </h3>
+                    <p>Tesla uses the first {{ max_files }} files alphabetically, typically expects clips near 1 MB, and works best with sounds around 5 seconds long.</p>
+                    <p>This page enforces the configured upload ceiling of {{ max_file_size_str }} per file and stores clips in <code>{{ boombox_folder }}</code>.</p>
+                </article>
+            </div>
+        </section>
+
+        <div class="boombox-grid">
+            <section class="boombox-panel" aria-labelledby="boombox-upload-title">
+                <div class="boombox-panel-head">
+                    <h3 class="boombox-panel-title" id="boombox-upload-title">Upload sound</h3>
+                    <p class="boombox-copy">Choose one MP3 or WAV file. Tesla reads the library alphabetically, so rename clips if you want a different order in the first {{ max_files }} slots.</p>
+                </div>
+
+                <div class="boombox-guidance">
+                    <article class="boombox-guidance-card">
+                        <h3 class="boombox-guidance-title">
+                            <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-music"></use></svg>
+                            Upload checklist
+                        </h3>
+                        <ul class="boombox-rule-list">
+                            <li>Formats: MP3 or WAV</li>
+                            <li>Configured limit: {{ max_file_size_str }}</li>
+                            <li>Tesla guidance: about 5 seconds per clip</li>
+                            <li>Bulk cleanup is available below the library</li>
+                        </ul>
+                    </article>
+                </div>
+
+                <form
+                    class="boombox-upload-form"
+                    id="boomboxUploadForm"
+                    action="{{ url_for('boombox.upload_boombox') }}"
+                    method="post"
+                    enctype="multipart/form-data"
+                >
+                    <button
+                        class="boombox-drop-zone{% if file_count >= max_files %} is-disabled{% endif %}"
+                        id="boomboxBrowseButton"
+                        type="button"
+                        {% if file_count >= max_files %}disabled{% endif %}
+                    >
+                        <svg aria-hidden="true"><use href="{{ sprite }}#icon-upload"></use></svg>
+                        <span class="boombox-drop-title">
+                            {% if file_count >= max_files %}
+                            Remove a sound before uploading another one
+                            {% else %}
+                            Drop one MP3 or WAV file here, or tap to browse
+                            {% endif %}
+                        </span>
+                        <span class="boombox-drop-copy">
+                            <span>{{ max_file_size_str }} maximum</span>
+                            <span>&middot;</span>
+                            <span>{{ max_files }} Tesla slot{{ '' if max_files == 1 else 's' }}</span>
+                        </span>
+                    </button>
+                    <input
+                        class="sr-only"
+                        id="boomboxFileInput"
+                        type="file"
+                        name="boombox_file"
+                        accept=".mp3,.wav,audio/mpeg,audio/wav,audio/x-wav"
+                        {% if file_count >= max_files %}disabled{% endif %}
+                    >
+                    <div class="boombox-selection" id="boomboxSelection" hidden>
+                        <div class="boombox-selection-row">
+                            <div class="boombox-selection-meta">
+                                <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-music"></use></svg>
+                                <div>
+                                    <strong id="boomboxSelectionName">No file selected</strong>
+                                    <p class="boombox-selection-copy" id="boomboxSelectionMeta">Choose one file to upload.</p>
+                                </div>
+                            </div>
+                            <span class="boombox-order-pill" id="boomboxSelectionBadge">Ready for review</span>
+                        </div>
+                    </div>
+                    <p class="boombox-status" id="boomboxUploadStatus" role="status" aria-live="polite">
+                        {% if file_count >= max_files %}
+                        The library already has {{ file_count }} sound{{ '' if file_count == 1 else 's' }}. Delete one before uploading a replacement.
+                        {% else %}
+                        Select a file to review its name and size before upload.
+                        {% endif %}
+                    </p>
+                    <div class="boombox-actions">
+                        <button class="boombox-btn boombox-btn-primary" id="boomboxUploadButton" type="submit" {% if file_count >= max_files %}disabled{% else %}disabled{% endif %}>
+                            <svg class="boombox-icon" aria-hidden="true"><use href="{{ sprite }}#icon-upload"></use></svg>
+                            Upload sound
+                        </button>
+                        <button class="boombox-btn boombox-btn-secondary" id="boomboxClearSelection" type="button" disabled>
+                            <svg class="boombox-icon" aria-hidden="true"><use href="{{ sprite }}#icon-x"></use></svg>
+                            Clear selection
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="boombox-library" aria-labelledby="boombox-library-title">
+                <div class="boombox-library-toolbar">
+                    <div class="boombox-panel-head">
+                        <h3 class="boombox-panel-title" id="boombox-library-title">Sound library</h3>
+                        <p class="boombox-copy">Files are listed alphabetically. Tesla uses the first {{ max_files }} slots and ignores anything after that until filenames or counts change.</p>
+                    </div>
+                    <div class="boombox-library-actions">
+                        <label class="boombox-select-all" for="boomboxSelectAll">
+                            <input type="checkbox" id="boomboxSelectAll" {% if not files %}disabled{% endif %}>
+                            Select all sounds
+                        </label>
+                        <span class="boombox-selected-count" id="boomboxSelectedCount">0 selected</span>
+                        <form id="boomboxBulkDeleteForm" action="{{ url_for('boombox.bulk_delete_boombox') }}" method="post"></form>
+                        <button class="boombox-btn boombox-btn-danger" id="boomboxBulkDeleteButton" type="submit" form="boomboxBulkDeleteForm" disabled>
+                            <svg class="boombox-icon" aria-hidden="true"><use href="{{ sprite }}#icon-trash-2"></use></svg>
+                            Delete selected
+                        </button>
+                    </div>
+                </div>
+
+                {% if files %}
+                <div class="boombox-list" aria-label="Boombox sounds">
+                    {% for file in files %}
+                    {% set is_tesla_slot = loop.index <= max_files %}
+                    <article class="boombox-card" data-boombox-card>
+                        <div class="boombox-card-body">
+                            <div class="boombox-card-top">
+                                <div class="boombox-card-header">
+                                    <label class="boombox-select-file" for="boombox-file-{{ loop.index }}">
+                                        <input
+                                            type="checkbox"
+                                            id="boombox-file-{{ loop.index }}"
+                                            class="js-boombox-select"
+                                            form="boomboxBulkDeleteForm"
+                                            name="filenames"
+                                            value="{{ file.filename }}"
+                                        >
+                                        <span>{{ file.filename }}</span>
+                                    </label>
+                                    <div class="boombox-card-badges">
+                                        <span class="boombox-order-pill">
+                                            <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-chevron-right"></use></svg>
+                                            Slot {{ loop.index }}
+                                        </span>
+                                        <span class="boombox-badge {{ 'is-active' if is_tesla_slot else 'is-overflow' }}">
+                                            <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-{{ 'check-circle' if is_tesla_slot else 'alert-triangle' }}"></use></svg>
+                                            {{ 'Used by Tesla' if is_tesla_slot else 'Stored only' }}
+                                        </span>
+                                    </div>
+                                </div>
+                                <p class="boombox-card-copy">
+                                    <svg class="boombox-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-info"></use></svg>
+                                    {{ 'Within the first ' ~ max_files ~ ' alphabetical files Tesla loads.' if is_tesla_slot else 'Alphabetically after slot ' ~ max_files ~ '; keep it for backup or rename it higher.' }}
+                                </p>
+                            </div>
+
+                            <dl class="boombox-card-meta">
+                                <div>
+                                    <dt>Size</dt>
+                                    <dd>{{ file.size_str }}</dd>
+                                </div>
+                                <div>
+                                    <dt>Updated</dt>
+                                    <dd>{{ file.modified_at[:19].replace('T', ' ') }}</dd>
+                                </div>
+                                <div>
+                                    <dt>Playback source</dt>
+                                    <dd><code>/boombox/play/{{ file.filename }}</code></dd>
+                                </div>
+                            </dl>
+
+                            <audio controls preload="none">
+                                <source
+                                    src="{{ url_for('boombox.play_boombox', filename=file.filename) }}"
+                                    type="{{ 'audio/mpeg' if file.filename.lower().endswith('.mp3') else 'audio/wav' }}"
+                                >
+                                Your browser does not support HTML5 audio playback.
+                            </audio>
+
+                            <div class="boombox-card-actions">
+                                <form
+                                    class="js-boombox-confirm"
+                                    action="{{ url_for('boombox.delete_boombox', filename=file.filename) }}"
+                                    method="post"
+                                    data-confirm="Delete {{ file.filename }}?"
+                                >
+                                    <button class="boombox-btn boombox-btn-danger" type="submit">
+                                        <svg class="boombox-icon" aria-hidden="true"><use href="{{ sprite }}#icon-trash-2"></use></svg>
+                                        Delete sound
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    </article>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="boombox-empty">
+                    <svg aria-hidden="true"><use href="{{ sprite }}#icon-megaphone"></use></svg>
+                    <h3 class="boombox-empty-title">No Boombox sounds yet</h3>
+                    <p class="boombox-empty-copy">Upload one MP3 or WAV file to build your Park-only Boombox library.</p>
+                </div>
+                {% endif %}
+            </section>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/boombox.js') }}"></script>
+{% endblock %}

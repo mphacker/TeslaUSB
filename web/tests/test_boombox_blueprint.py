@@ -221,15 +221,23 @@ def test_helper_resolve_path_rejects_symlink(app: Flask, boombox_dir: Path) -> N
         _resolve_boombox_path("linked.mp3")
 
 
-def test_index_route_returns_placeholder_json(client: FlaskClient, boombox_dir: Path) -> None:
+def test_index_route_renders_boombox_template(client: FlaskClient, boombox_dir: Path) -> None:
     (boombox_dir / "sound.mp3").write_bytes(b"payload")
 
     response = client.get("/boombox/")
+    html = response.get_data(as_text=True)
 
     assert response.status_code == HTTPStatus.OK
-    assert response.get_json()["max_files"] == 5
-    assert response.get_json()["file_count"] == 1
-    assert response.get_json()["files"][0]["filename"] == "sound.mp3"
+    assert "<title>" in html
+    assert "Boombox" in html
+    assert "Edit Mode" not in html
+    assert "Present Mode" not in html
+    assert "quick_edit" not in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "unpkg.com" not in html
+    assert "<svg" in html
+    assert "boombox.js" in html
+    assert "sound.mp3" in html
 
 
 def test_index_route_does_not_schedule_cache(

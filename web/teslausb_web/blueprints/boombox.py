@@ -15,6 +15,7 @@ from flask import (
     flash,
     jsonify,
     redirect,
+    render_template,
     request,
     send_file,
     url_for,
@@ -41,6 +42,7 @@ _BYTES_PER_KIB: Final[int] = 1024
 _PATH_TRAVERSAL_TOKENS: Final[frozenset[str]] = frozenset({"/", "\\", "..", "\x00"})
 _XHR_HEADER_VALUE: Final[str] = "XMLHttpRequest"
 _MIME_TYPES: Final[dict[str, str]] = {".mp3": "audio/mpeg", ".wav": "audio/wav"}
+_TESLA_GUIDANCE_MAX_SECONDS: Final[int] = 5
 
 
 def _invalidate_caches(app: Flask) -> None:
@@ -152,6 +154,23 @@ def _index_payload(listing: BoomboxListing) -> dict[str, object]:
     }
 
 
+def _index_context(listing: BoomboxListing) -> dict[str, object]:
+    context = _index_payload(listing)
+    context.update(
+        {
+            "page": "media",
+            "media_tab": "boombox",
+            "boombox_available": True,
+            "auto_refresh": False,
+            "operation_in_progress": False,
+            "boombox_folder": _cfg().boombox.base_dir,
+            "max_file_size_str": _format_size_bytes(_cfg().boombox.max_file_bytes),
+            "tesla_guidance_max_seconds": _TESLA_GUIDANCE_MAX_SECONDS,
+        }
+    )
+    return context
+
+
 def _request_list(*names: str) -> list[str]:
     payload = request.get_json(silent=True)
     if isinstance(payload, dict):
@@ -211,7 +230,7 @@ def _delete_boombox_files(filenames: list[str]) -> int:
 @boombox_bp.route("/")
 def boombox_home() -> ResponseReturnValue:
     try:
-        return jsonify(_index_payload(_get_service().list_files()))
+        return render_template("boombox.html", **_index_context(_get_service().list_files()))
     except (BoomboxError, BoomboxFileError, ValueError) as exc:
         return _boundary_error(exc, json_only=True)
     except Exception:

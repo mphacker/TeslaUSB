@@ -42,12 +42,16 @@ B1_DATA_OWNER="teslausb"
 B1_DATA_GROUP="teslausb"
 B1_DATA_MODE="775"
 
-# teslausb-worker (Phase 4b) writes its SQLite index + cache here.
-# Created at step 03 so step 10 can start the worker without a
-# manual mkdir. Owner = the data owner (the worker runs as that
-# user). Mode 0750 — operator and group can read, world cannot.
+# teslausb-worker (Phase 4b) writes its SQLite index + cache here,
+# and the Flask web app (currently runs as pi:pi until phase-6.2 user
+# switch) also reads/writes its own mapping.db / cloud_sync.db
+# alongside the worker's index. Both processes need write access:
+#   * worker runs as B1_DATA_OWNER (teslausb) — file owner.
+#   * web app runs as pi — only reachable via the teslausb GROUP.
+# Mode 0770 — owner + group writable, world none. pi is added to the
+# teslausb group in setup-lib/02-users.sh, so this grants both.
 B1_STATE_DIR="/var/lib/teslausb"
-B1_STATE_DIR_MODE="0750"
+B1_STATE_DIR_MODE="0770"
 
 # Tesla-canonical subdirectories created inside each LUN backing root so
 # the FAT32 volume teslafat synthesizes for the car already has the

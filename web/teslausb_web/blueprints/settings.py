@@ -232,6 +232,12 @@ def _index_context() -> dict[str, object]:
         "cfg_network": {"samba_password": ""},
         "system_info": _system_info(),
         "samba_on": _samba_on(),
+        # B-1 has no v1-style mode switching — the gadget is always
+        # presenting both LUNs to Tesla while files remain accessible
+        # over SMB. Pin to 'present' so the dashboard renders the green
+        # "Connected to Tesla" card instead of v1's "Status Unknown".
+        "mode_token": "present",
+        "share_paths": [],
     }
 
 

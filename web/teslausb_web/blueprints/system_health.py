@@ -31,13 +31,18 @@ Design rules (from v1):
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import sqlite3
+import subprocess
 import time
 from http import HTTPStatus
+from threading import Lock
 from typing import TYPE_CHECKING, Final
 
 from flask import Blueprint, current_app, jsonify
 
+from teslausb_web.services.gadget_state import gadget_mode_token
 from teslausb_web.services.system_metrics import (
     collect_metrics,
     metrics_to_dict,
@@ -180,12 +185,340 @@ def _samba_block(cfg: WebConfig) -> dict[str, object]:
     return {"severity": SEV_OK, "message": "Disabled"}
 
 
+# Cheap kernel/configfs/systemd probes that backstop the structured
+# subsystem probes above. The point: *any* error anywhere in the
+# B-1 stack must show up here, so the operator never has to SSH
+# in to discover that the indexer DB was readonly for six hours
+# (the bug that motivated this whole block — see LEARNINGS Phase 6).
+
+
+def _gadget_block(cfg: WebConfig) -> dict[str, object]:
+    """USB gadget presentation to the Tesla.
+
+    "Present" means the UDC is bound AND both mass-storage LUNs have
+    non-empty backing files. Anything less is reported as ERROR — the
+    Tesla cannot see the drive in that state, which is the worst
+    user-visible outcome we can have.
+    """
+    del cfg
+    try:
+        token = gadget_mode_token()
+    except Exception as exc:  # noqa: BLE001 — must never raise
+        return {
+            "severity": SEV_UNKNOWN,
+            "message": _truncate(f"Gadget probe failed: {exc}"),
+        }
+    if token == "present":
+        return {
+            "severity": SEV_OK,
+            "message": "USB drives presented to Tesla",
+            "token": token,
+        }
+    return {
+        "severity": SEV_ERROR,
+        "message": "Tesla cannot see USB drives (gadget unbound or LUN missing)",
+        "token": token,
+    }
+
+
+def _indexer_block(cfg: WebConfig) -> dict[str, object]:
+    """Worker SQLite index: writable + has recent rows.
+
+    Opens the DB read-write and runs a no-op write inside a rolled-back
+    transaction. Catches:
+
+    * file ownership / permission drift (e.g. DB owned by ``pi`` when
+      the worker runs as ``teslausb`` — the bug that triggered this
+      probe);
+    * read-only remount of /var/lib;
+    * SQLite WAL lock-file ownership mismatch;
+    * outright DB corruption (``PRAGMA quick_check``).
+
+    Also reports last-indexed-clip timestamp + total clip count so the
+    operator can spot a silent indexer stall ("DB is fine but nothing
+    new has landed in 30 minutes").
+    """
+    db_path = cfg.paths.db_path
+    if not db_path.exists():
+        return {
+            "severity": SEV_WARN,
+            "message": "Index database not yet created",
+        }
+    try:
+        # ``uri=true`` is intentional — keeps options explicit. ``mode=rw``
+        # forces a writable open so a readonly mount surfaces immediately
+        # rather than silently downgrading.
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=rw",
+            uri=True,
+            timeout=2.0,
+        )
+    except sqlite3.OperationalError as exc:
+        return {
+            "severity": SEV_ERROR,
+            "message": _truncate(f"Index DB not writable: {exc}"),
+        }
+    try:
+        with conn:
+            check = conn.execute("PRAGMA quick_check").fetchone()
+            if check is None or check[0] != "ok":
+                return {
+                    "severity": SEV_ERROR,
+                    "message": _truncate(f"Index DB corrupt: {check}"),
+                }
+            # Probe write capability without leaving a trace.
+            conn.execute("CREATE TEMP TABLE _health_probe(x INTEGER)")
+            conn.execute("INSERT INTO _health_probe VALUES (1)")
+            conn.execute("DROP TABLE _health_probe")
+            # Read indexer metrics — these tables exist after the first
+            # migration so missing-table is itself a signal.
+            try:
+                count_row = conn.execute("SELECT COUNT(*) FROM clips").fetchone()
+                clip_count = int(count_row[0]) if count_row else 0
+            except sqlite3.OperationalError:
+                clip_count = 0
+            try:
+                last_row = conn.execute(
+                    "SELECT MAX(indexed_at_utc) FROM clips",
+                ).fetchone()
+                last_indexed = int(last_row[0]) if last_row and last_row[0] else 0
+            except sqlite3.OperationalError:
+                last_indexed = 0
+    except sqlite3.DatabaseError as exc:
+        return {
+            "severity": SEV_ERROR,
+            "message": _truncate(f"Index DB error: {exc}"),
+        }
+    finally:
+        conn.close()
+
+    now = int(time.time())
+    age_s = (now - last_indexed) if last_indexed else None
+
+    if clip_count == 0:
+        return {
+            "severity": SEV_WARN,
+            "message": "Index is empty — no clips indexed yet",
+            "clip_count": 0,
+            "last_indexed_utc": 0,
+        }
+    if age_s is not None and age_s > 30 * 60:
+        return {
+            "severity": SEV_WARN,
+            "message": f"{clip_count:,} clips indexed; newest is {age_s // 60} min old",
+            "clip_count": clip_count,
+            "last_indexed_utc": last_indexed,
+        }
+    return {
+        "severity": SEV_OK,
+        "message": f"{clip_count:,} clips indexed",
+        "clip_count": clip_count,
+        "last_indexed_utc": last_indexed,
+    }
+
+
+def _systemctl_is_active(unit: str) -> str | None:
+    """Return ``systemctl is-active <unit>`` output or ``None`` on error.
+
+    Used to probe worker / network / gadget units. We deliberately do
+    not require sudo — ``is-active`` is unprivileged and runs in <50 ms
+    on the Pi.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", unit],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() or None
+
+
+def _worker_block(cfg: WebConfig) -> dict[str, object]:
+    """``teslausb-worker`` systemd unit health."""
+    del cfg
+    state = _systemctl_is_active("teslausb-worker.service")
+    if state is None:
+        return {
+            "severity": SEV_UNKNOWN,
+            "message": "Cannot reach systemd to probe worker",
+        }
+    if state == "active":
+        return {"severity": SEV_OK, "message": "Worker active", "state": state}
+    if state == "activating":
+        return {"severity": SEV_WARN, "message": "Worker starting", "state": state}
+    return {
+        "severity": SEV_ERROR,
+        "message": f"Worker {state}",
+        "state": state,
+    }
+
+
+def _network_block(cfg: WebConfig) -> dict[str, object]:
+    """WiFi connectivity via NetworkManager.
+
+    ``nmcli -t -f STATE general`` returns ``connected`` /
+    ``connecting`` / ``disconnected``. We mirror that to severity.
+    AP-mode (captive portal) reports as ``warn`` because the Tesla
+    can't reach upstream cloud destinations in that mode.
+    """
+    del cfg
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "STATE", "general"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return {
+            "severity": SEV_UNKNOWN,
+            "message": _truncate(f"Network probe failed: {exc}"),
+        }
+    state = result.stdout.strip()
+    if state == "connected":
+        return {"severity": SEV_OK, "message": "WiFi connected", "state": state}
+    if state in {"connecting", "connecting (prepare)", "connecting (configuring)"}:
+        return {"severity": SEV_WARN, "message": "WiFi connecting", "state": state}
+    if state in {"connected (local only)", "connected (site only)"}:
+        return {
+            "severity": SEV_WARN,
+            "message": f"WiFi {state} — captive portal or no upstream",
+            "state": state,
+        }
+    return {
+        "severity": SEV_ERROR,
+        "message": f"WiFi {state or 'unreachable'}",
+        "state": state,
+    }
+
+
+def _storage_writable_block(cfg: WebConfig) -> dict[str, object]:
+    """Touch-probe every directory we depend on for writes.
+
+    Even if `_disk_block` says there's free space and `_indexer_block`
+    says the DB is fine, a stale ACL or RO-bind-mount on one of the
+    other roots can silently break archiving or the cleanup pass.
+    Catches that class of bug by writing (and immediately removing)
+    a marker file in each one.
+    """
+    targets = (
+        ("backing_root", cfg.paths.backing_root),
+        ("state_dir", cfg.paths.state_dir),
+    )
+    bad: list[str] = []
+    for name, target in targets:
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / f".health-probe.{os.getpid()}"
+            probe.write_bytes(b"")
+            probe.unlink()
+        except OSError as exc:
+            bad.append(f"{name}: {exc.strerror or exc}")
+    if not bad:
+        return {"severity": SEV_OK, "message": "All write roots OK"}
+    return {
+        "severity": SEV_ERROR,
+        "message": _truncate("; ".join(bad)),
+    }
+
+
+# Module-level cache for the journal probe. journalctl is the most
+# expensive thing in this file (~200-400 ms cold). Health card polls
+# every 30 s and the dot polls in parallel, so caching for 15 s keeps
+# the endpoint well under its 100 ms budget without ever masking a
+# fresh error for more than one poll cycle.
+_JOURNAL_TTL_SECONDS: Final[float] = 15.0
+_JOURNAL_LOOKBACK_SECONDS: Final[int] = 600  # 10 min
+_JOURNAL_UNITS: Final[tuple[str, ...]] = (
+    "teslafat@0.service",
+    "teslafat@1.service",
+    "nbd-attach@0.service",
+    "nbd-attach@1.service",
+    "usb-gadget.service",
+    "teslausb-worker.service",
+    "teslausb-web.service",
+    "nginx.service",
+)
+
+_journal_cache: dict[str, object] = {"at": 0.0, "result": None}
+_journal_lock = Lock()
+
+
+def _scan_journal_uncached() -> dict[str, object]:
+    """Tail journalctl for recent error-priority lines across our units."""
+    args = [
+        "journalctl",
+        "-p",
+        "err",
+        "--no-pager",
+        "--since",
+        f"{_JOURNAL_LOOKBACK_SECONDS} seconds ago",
+        "--output",
+        "short-iso",
+    ]
+    for unit in _JOURNAL_UNITS:
+        args.extend(["-u", unit])
+    try:
+        result = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return {
+            "severity": SEV_UNKNOWN,
+            "message": _truncate(f"Journal probe failed: {exc}"),
+        }
+    lines = [ln for ln in result.stdout.splitlines() if ln and "-- No entries --" not in ln]
+    if not lines:
+        return {
+            "severity": SEV_OK,
+            "message": f"No errors in last {_JOURNAL_LOOKBACK_SECONDS // 60} min",
+            "count": 0,
+        }
+    last = lines[-1]
+    return {
+        "severity": SEV_WARN,
+        "message": _truncate(f"{len(lines)} recent error(s); latest: {last}"),
+        "count": len(lines),
+        "latest": _truncate(last),
+    }
+
+
+def _journal_block(cfg: WebConfig) -> dict[str, object]:
+    """Cached journal-error scan; see ``_JOURNAL_TTL_SECONDS``."""
+    del cfg
+    now = time.monotonic()
+    with _journal_lock:
+        cached_at = float(_journal_cache["at"])
+        if now - cached_at < _JOURNAL_TTL_SECONDS and _journal_cache["result"] is not None:
+            return dict(_journal_cache["result"])  # type: ignore[arg-type]
+    result = _scan_journal_uncached()
+    with _journal_lock:
+        _journal_cache["at"] = now
+        _journal_cache["result"] = result
+    return dict(result)
+
+
 def _build_health(cfg: WebConfig) -> dict[str, object]:
     """Compose the full payload, isolating per-subsystem crashes."""
     blocks: tuple[tuple[str, Callable[[WebConfig], dict[str, object]]], ...] = (
         ("disk", _disk_block),
         ("daemon", _daemon_block),
         ("samba", _samba_block),
+        ("gadget", _gadget_block),
+        ("indexer", _indexer_block),
+        ("worker", _worker_block),
+        ("network", _network_block),
+        ("storage_writable", _storage_writable_block),
+        ("journal", _journal_block),
     )
 
     payload: dict[str, object] = {}

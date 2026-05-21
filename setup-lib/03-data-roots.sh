@@ -243,5 +243,27 @@ b1_step_03() {
       b1_run chmod "${B1_STATE_DIR_MODE}" "${B1_STATE_DIR}"
     fi
     _b1_fix_ownership "${B1_STATE_DIR}" || return 1
+
+    # Worker-owned SQLite files. If the index DB was created by an
+    # earlier bootstrap run (e.g. by pi during manual testing or an
+    # ad-hoc sqlite3 invocation), the worker — which runs as
+    # teslausb — will see SQLite return "attempt to write a readonly
+    # database" even though the bytes are readable. The fix is to
+    # match ownership to the worker user. See LEARNINGS Phase 6.
+    local _wf
+    for _wf in \
+        "${B1_STATE_DIR}/index.sqlite3" \
+        "${B1_STATE_DIR}/index.sqlite3-wal" \
+        "${B1_STATE_DIR}/index.sqlite3-shm"; do
+      if [[ -f "${_wf}" ]]; then
+        local _curr
+        _curr="$(stat -c '%U:%G' "${_wf}" 2>/dev/null || echo ':')"
+        if [[ "${_curr}" != "${B1_DATA_OWNER}:${B1_DATA_GROUP}" ]]; then
+          b1_log "fixing worker DB ownership: ${_wf} ${_curr} → ${B1_DATA_OWNER}:${B1_DATA_GROUP}"
+          b1_run chown "${B1_DATA_OWNER}:${B1_DATA_GROUP}" "${_wf}"
+          b1_run chmod 0664 "${_wf}"
+        fi
+      fi
+    done
   fi
 }

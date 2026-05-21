@@ -725,3 +725,70 @@ Fix: add an `ExecStartPre` to `nbd-attach@.service` that polls
 for `/run/teslausb/teslafat-%i.sock` (30 attempts at 0.5 s each,
 total ~15 s) before calling `nbd-client`. This eliminates the
 previously manual unbind/rebind UDC workaround on cold boot.
+
+
+---
+
+## Phase 6 (live bring-up, cont'd): every subsystem must self-report to System Health
+
+### The bug
+
+After Tesla started writing RecentClips successfully, `teslausb-worker`
+silently emitted hundreds of:
+
+```
+SEI walk failed; clip not indexed ...
+error: "sqlite error: attempt to write a readonly database"
+```
+
+The DB file (`/var/lib/teslausb/index.sqlite3`) and its directory
+were both group-rw and the worker had write capability — yet SQLite
+returned `SQLITE_READONLY`. Root cause: the DB file was created by
+`pi` (an ad-hoc `sqlite3 …` invocation during earlier debugging) and
+was never re-chowned to the worker's `User=teslausb`. SQLite's WAL
+implementation requires the journal/shm files to be **owned** by
+the connecting user — group-write is not sufficient.
+
+### The deeper lesson
+
+This bug ran undetected for hours because **nothing in the web UI
+surfaced it**. The Settings → System Health card showed everything
+green: gadget bound, daemon happy, disk fine, samba disabled. The
+indexer was silently producing zero clip records the whole time.
+
+**Rule (binding):** every B-1 background subsystem MUST have a
+probe wired into `/api/system/health` that returns ERROR (not OK,
+not UNKNOWN) when that subsystem cannot do its job. The card is
+the operator's *only* feedback loop short of `ssh + journalctl`.
+
+Probes added in this pass:
+
+| Subsystem | What the probe catches |
+|---|---|
+| `gadget` | UDC unbound, LUN backing file missing — "Tesla can't see drives" |
+| `indexer` | DB readonly / corrupt / missing / stale (>30 min since last clip) |
+| `worker` | `teslausb-worker.service` not active |
+| `network` | `nmcli STATE general` ≠ `connected` |
+| `storage_writable` | touch-test of every write root (catches RO remount) |
+| `journal` | tails `journalctl -p err` for our units (10 min lookback, cached 15 s) |
+
+### The persistent fix
+
+`setup-lib/03-data-roots.sh` now sweeps `${B1_STATE_DIR}/index.sqlite3*`
+on every run and chowns to `teslausb:teslausb` mode 0664 if it
+doesn't already match. Idempotent. The next operator who pokes the
+DB with a one-off `sqlite3` won't reintroduce this bug because
+the next `setup.sh` run heals it.
+
+### When adding a new background service in the future
+
+Mandatory checklist before merging:
+
+1. New probe block in `web/teslausb_web/blueprints/system_health.py`.
+2. Probe returns `SEV_ERROR` on the actual failure mode (not just
+   "process gone" — also "process running but doing nothing useful",
+   like our stale-DB check).
+3. Test in `web/tests/test_system_health.py` covering both healthy
+   and degraded paths.
+4. If the new service writes files, add it to `setup-lib/03-data-roots.sh`
+   ownership sweep.

@@ -1009,7 +1009,7 @@ before Phase 7 soak.
 |---|---|---|
 | 6.1 | `setup.sh` package install (`nbd-client`, `btrfs-progs`, `nginx`, `python3-venv`, `network-manager`, `watchdog`, `dnsmasq-base`, `hostapd`, kernel headers if needed) + idempotency check + `--dry-run` flag. **DO NOT install `rustup` / `cargo` / `gcc` / `build-essential`** — building Rust on a Pi Zero 2 W is forbidden by ADR-0008; the device runs cross-compiled binaries only. | ~200 |
 | 6.2 | `setup.sh` user/group creation (`teslausb` system user, sudoers fragment install) | ~100 |
-| 6.3 | `setup.sh` btrfs subvolume creation at `/srv/teslausb/teslacam/` + `/srv/teslausb/media/`, idempotent (skip if already a subvolume) | ~150 |
+| 6.3 | `setup.sh` per-LUN data root creation at `/srv/teslausb/teslacam/` + `/srv/teslausb/media/`, idempotent. Uses btrfs subvolumes if `/srv` is on btrfs; falls back to plain directories on ext4 / other filesystems (revised 2026-05-21: live device had no btrfs partition; teslafat + worker only need POSIX I/O, so the FS underneath is opaque). | ~200 |
 | 6.4 | `setup.sh` systemd unit install (teslafat@0, teslafat@1, teslausb-worker, teslausb-web, nginx, watchdog) | ~150 |
 | 6.5 | `setup.sh` NetworkManager + AP config — IDEMPOTENT, never overwrites without `.b1-backup` siblings | ~250 |
 | 6.6 | `setup.sh` boot cmdline + config.txt edits — IDEMPOTENT, always with backup siblings, dry-run shows diff before apply | ~200 |

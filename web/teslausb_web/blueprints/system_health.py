@@ -4,12 +4,13 @@ Ports the v1 ``/api/system/health`` JSON contract so the existing
 client-side card + nav-bar status dot work unchanged after the B-1
 cutover. The subsystems probed here are the B-1 set:
 
-* ``disk`` — free / total bytes on the btrfs backing root that holds
-  the TeslaCam + LightShow subvolumes.
+* ``disk`` — free / total bytes on the data root that holds the
+  TeslaCam + media trees. The root may be a btrfs subvolume parent
+  (when the SD layout is btrfs) or a plain ext4 directory (when it
+  isn't); ``os.statvfs`` answers either way.
 * ``daemon`` — ``teslafat`` daemon state via the Unix-socket IPC client
-  built in Phase 5.5 (replaces v1's fsck/IMG widget; the corresponding
-  btrfs-scrub widget will be wired in Phase 5.18 once the cleanup
-  service exposes it).
+  built in Phase 5.5 (replaces v1's fsck/IMG widget; when the data
+  root is btrfs an additional scrub widget may be wired in later).
 * ``samba`` — whether the Samba feature is enabled in config. Full
   service-up probe lands in Phase 5.17 alongside ``samba_service``.
 
@@ -87,7 +88,7 @@ def _truncate(message: str) -> str:
 
 
 def _disk_block(cfg: WebConfig) -> dict[str, object]:
-    """Free-space probe on the btrfs backing root."""
+    """Free-space probe on the data root (filesystem-agnostic)."""
     target = cfg.paths.backing_root
     try:
         usage = shutil.disk_usage(target)

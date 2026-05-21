@@ -92,8 +92,9 @@ order so dependencies are torn down before what depends on them):
   05  network         Remove AP profile + dnsmasq/hostapd configs.
   04  units           Remove every B-1 systemd unit + nginx drop-in;
                       daemon-reload.
-  03  btrfs           No-op by default (data is sacred); --purge unmounts
-                      and `btrfs subvolume delete`s the data subvolumes.
+  03  data-roots      No-op by default (data is sacred); --purge deletes the
+                      data roots — `btrfs subvolume delete` if subvolumes,
+                      `rm -rf` if plain directories.
   02  users           Remove sudoers fragment + drop pi from teslausb group
                       (the teslausb user itself stays unless --purge).
   01  packages        No-op by default; --purge runs `apt-get purge

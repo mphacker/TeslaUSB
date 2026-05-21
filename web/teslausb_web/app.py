@@ -37,6 +37,7 @@ from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
 from teslausb_web.blueprints.mapping import mapping_bp
 from teslausb_web.blueprints.music import music_bp
+from teslausb_web.blueprints.settings_advanced import settings_bp
 from teslausb_web.blueprints.storage_retention import storage_retention_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.blueprints.wraps import wraps_bp
@@ -53,6 +54,8 @@ from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
 from teslausb_web.services.music_service import make_music_service
 from teslausb_web.services.storage_retention_service import make_storage_retention_service
+from teslausb_web.services.system_settings_service import make_system_settings_service
+from teslausb_web.services.teslafat_client import TeslaFatClient
 from teslausb_web.services.wifi_service import make_wifi_service
 from teslausb_web.services.wrap_service import make_wrap_service
 
@@ -143,6 +146,7 @@ def create_app(
     _register_boombox_services(app, cfg)
     _register_license_plate_services(app, cfg)
     _register_storage_retention_services(app, cfg)
+    _register_system_settings_services(app, cfg)
     _register_wifi_services(app, cfg)
     _register_cloud_oauth_services(app, cfg)
     _register_cloud_rclone_services(app, cfg)
@@ -244,6 +248,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         boombox_bp,
         license_plates_bp,
         storage_retention_bp,
+        settings_bp,
         captive_portal_bp,
         wraps_bp,
         mapping_bp,
@@ -323,6 +328,12 @@ def _register_license_plate_services(app: Flask, cfg: WebConfig) -> None:
 def _register_storage_retention_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the storage-retention service once at app startup."""
     app.extensions["storage_retention_service"] = make_storage_retention_service(cfg)
+
+
+def _register_system_settings_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the advanced-settings service and shared IPC client once."""
+    app.extensions["system_settings_service"] = make_system_settings_service(cfg)
+    app.extensions["teslafat_client"] = TeslaFatClient(cfg.paths.ipc_socket)
 
 
 def _register_wifi_services(app: Flask, cfg: WebConfig) -> None:

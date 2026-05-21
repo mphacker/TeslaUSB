@@ -98,6 +98,9 @@ _DEFAULT_RETENTION_TARGET_FREE_PCT_MIN: Final[int] = 5
 _DEFAULT_RETENTION_TARGET_FREE_PCT_MAX: Final[int] = 50
 _DEFAULT_RETENTION_MAX_ARCHIVE_SIZE_GB: Final[int] = 0
 _DEFAULT_RETENTION_WARNING_DAYS: Final[int] = 7
+_DEFAULT_SYSTEM_SETTINGS_FILENAME: Final[str] = "system_settings.json"
+_DEFAULT_SYSTEM_SETTINGS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_SYSTEM_SETTINGS_FILENAME
+_DEFAULT_SYSTEM_SETTINGS_LOG_LEVEL: Final[str] = "INFO"
 _DEFAULT_WIFI_CREDENTIALS_FILENAME: Final[str] = "wifi_credentials.json"
 _DEFAULT_WIFI_CREDENTIALS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_WIFI_CREDENTIALS_FILENAME
 _DEFAULT_WIFI_AP_SSID: Final[str] = "TeslaUSB-Setup"
@@ -544,6 +547,34 @@ class StorageRetentionSection:
 
 
 @dataclass(frozen=True, slots=True)
+class SystemSettingsSection:
+    """Advanced-settings persistence and default expert toggles."""
+
+    state_path: Path = _DEFAULT_SYSTEM_SETTINGS_PATH
+    default_log_level: str = _DEFAULT_SYSTEM_SETTINGS_LOG_LEVEL
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            not self.state_path.is_absolute()
+            and not PurePosixPath(self.state_path.as_posix()).is_absolute()
+        ):
+            raise ConfigError(
+                None,
+                f"[system_settings] state_path must be absolute, got {self.state_path!r}",
+            )
+        normalized_log_level = self.default_log_level.strip().upper()
+        if normalized_log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ConfigError(
+                None,
+                "[system_settings] default_log_level must be one of "
+                "DEBUG, INFO, WARNING, ERROR, CRITICAL",
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class WifiBinaryPaths:
     """Binary names or absolute paths for the Wi-Fi control surface."""
 
@@ -740,6 +771,7 @@ class WebConfig:
     boombox: BoomboxSection = field(default_factory=BoomboxSection)
     license_plates: LicensePlateSection = field(default_factory=LicensePlateSection)
     storage_retention: StorageRetentionSection = field(default_factory=StorageRetentionSection)
+    system_settings: SystemSettingsSection = field(default_factory=SystemSettingsSection)
     wifi: WifiSection = field(default_factory=WifiSection)
     cloud: CloudSection = field(default_factory=CloudSection)
     mapping: MappingSection = field(default_factory=MappingSection)
@@ -757,6 +789,7 @@ class WebConfig:
             self.boombox.validate()
             self.license_plates.validate()
             self.storage_retention.validate()
+            self.system_settings.validate()
             self.wifi.validate()
             self.cloud.validate()
             self.mapping.validate()
@@ -880,6 +913,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     boombox_raw = _expect_section(raw, "boombox", source)
     license_plates_raw = _expect_section(raw, "license_plates", source)
     storage_retention_raw = _expect_section(raw, "storage_retention", source)
+    system_settings_raw = _expect_section(raw, "system_settings", source)
     wifi_raw = _expect_section(raw, "wifi", source)
     wifi_binary_paths_raw = _expect_section(wifi_raw, "binary_paths", source)
     cloud_raw = _expect_section(raw, "cloud", source)
@@ -1155,6 +1189,20 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 storage_retention_raw,
                 "default_short_retention_warning_days",
                 _DEFAULT_RETENTION_WARNING_DAYS,
+                source,
+            ),
+        )
+        system_settings = SystemSettingsSection(
+            state_path=_coerce_path(
+                system_settings_raw,
+                "state_path",
+                paths_section.state_dir / _DEFAULT_SYSTEM_SETTINGS_FILENAME,
+                source,
+            ),
+            default_log_level=_coerce_str(
+                system_settings_raw,
+                "default_log_level",
+                _DEFAULT_SYSTEM_SETTINGS_LOG_LEVEL,
                 source,
             ),
         )
@@ -1452,6 +1500,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         boombox=boombox,
         license_plates=license_plates,
         storage_retention=storage_retention,
+        system_settings=system_settings,
         wifi=wifi,
         cloud=cloud,
         mapping=mapping,

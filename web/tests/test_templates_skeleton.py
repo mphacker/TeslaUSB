@@ -31,6 +31,7 @@ from teslausb_web.config import (
     LicensePlateSection,
     PathsSection,
     StorageRetentionSection,
+    SystemSettingsSection,
     WebConfig,
     WebSection,
 )
@@ -138,12 +139,38 @@ def test_cleanup_settings_page_renders_real_template(tmp_path: Path) -> None:
     assert "#" not in html.split("<style>", 1)[1].split("</style>", 1)[0]
 
 
+def test_advanced_settings_page_renders_real_template(tmp_path: Path) -> None:
+    cfg = WebConfig(
+        web=WebSection(secret_key="t" * 32),
+        paths=PathsSection(
+            backing_root=tmp_path / "backing",
+            state_dir=tmp_path / "state",
+            cache_invalidate_script=tmp_path / "invalidate.sh",
+            ipc_socket=tmp_path / "ipc" / "worker.sock",
+        ),
+        features=FeaturesSection(),
+        system_settings=SystemSettingsSection(
+            state_path=tmp_path / "state" / "system_settings.json"
+        ),
+    )
+    app = create_app(cfg)
+    resp = app.test_client().get("/settings/")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "Advanced Settings" in html
+    assert "Network sharing stub" in html
+    for forbidden in ("mode_control", "current_mode", "quick_edit", "fsck", "loopback"):
+        assert forbidden not in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "unpkg.com" not in html
+    assert "#" not in html.split("<style>", 1)[1].split("</style>", 1)[0]
+
+
 @pytest.mark.parametrize(
     ("url", "marker"),
     [
         ("/analytics/", "scaffolding only"),
         ("/media/", "scaffolding only"),
-        ("/settings/", "scaffolding only"),
     ],
 )
 def test_scaffold_serves_placeholder(app: Flask, url: str, marker: str) -> None:

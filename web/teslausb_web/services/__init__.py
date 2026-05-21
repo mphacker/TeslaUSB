@@ -172,6 +172,14 @@ from teslausb_web.services.storage_retention_service import (
     StorageRetentionService,
     make_storage_retention_service,
 )
+from teslausb_web.services.system_settings_service import (
+    SystemSettings,
+    SystemSettingsConfig,
+    SystemSettingsConfigError,
+    SystemSettingsService,
+    SystemSettingsStateError,
+    make_system_settings_service,
+)
 from teslausb_web.services.wifi_service import (
     ApMode,
     SavedWifiNetwork,
@@ -299,6 +307,11 @@ __all__ = (
     "Stats",
     "StorageRetentionConfig",
     "StorageRetentionService",
+    "SystemSettings",
+    "SystemSettingsConfig",
+    "SystemSettingsConfigError",
+    "SystemSettingsService",
+    "SystemSettingsStateError",
     "TokenRefreshError",
     "TripRow",
     "UploadResult",
@@ -335,6 +348,7 @@ __all__ = (
     "make_oauth_service",
     "make_rclone_service",
     "make_storage_retention_service",
+    "make_system_settings_service",
     "make_wifi_service",
     "make_wrap_service",
     "normalize_audio",

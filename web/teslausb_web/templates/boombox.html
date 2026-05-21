@@ -326,7 +326,7 @@
         </span>
     </div>
 
-    <form method="post" action="{{ url_for('boombox.upload') }}"
+    <form method="post" action="{{ url_for('boombox.upload_boombox') }}"
           enctype="multipart/form-data" id="boomboxUploadForm">
         <label for="boomboxFileInput" class="boombox-drop-zone {% if file_count >= max_file_count %}is-disabled{% endif %}"
                id="boomboxDropZone">
@@ -393,14 +393,14 @@
 
             <audio controls preload="none">
                 {% set ext = file.filename.lower().rsplit('.', 1)[-1] %}
-                <source src="{{ url_for('boombox.play', filename=file.filename) }}"
+                <source src="{{ url_for('boombox.play_boombox', filename=file.filename) }}"
                         type="{{ 'audio/mpeg' if ext == 'mp3' else 'audio/wav' }}">
                 Your browser does not support the audio element.
             </audio>
 
             <div class="boombox-file-actions">
                 <form method="post"
-                      action="{{ url_for('boombox.delete', filename=file.filename) }}"
+                      action="{{ url_for('boombox.delete_boombox', filename=file.filename) }}"
                       style="display: inline; margin: 0;"
                       onsubmit="return confirm('Delete {{ file.filename|e }}?');">
                     <button type="submit" class="action-btn danger" aria-label="Delete {{ file.filename|e }}">

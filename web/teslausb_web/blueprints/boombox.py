@@ -150,6 +150,7 @@ def _index_payload(listing: BoomboxListing) -> dict[str, object]:
         "files": [_serialize_boombox_file(file_info) for file_info in listing.files],
         "file_count": len(listing.files),
         "max_files": listing.max_files,
+        "max_file_count": listing.max_files,
         "max_file_bytes": _cfg().boombox.max_file_bytes,
     }
 

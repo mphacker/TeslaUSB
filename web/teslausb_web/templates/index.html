@@ -420,7 +420,7 @@
     <details class="settings-section">
         <summary>Auto-Cleanup Settings</summary>
         <div class="section-content">
-            <a href="{{ url_for('cleanup.settings') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
+            <a href="{{ url_for('cleanup.preview') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
                 <svg class="inline-icon" width="24" height="24" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-sparkles"></use></svg>
                 <div style="flex:1">
                     <strong>Configure Auto-Cleanup</strong>
@@ -925,7 +925,7 @@
          top-level nav item ΓÇö buried at the bottom of Settings so casual
          users don't see it but power users can find it. -->
     <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border-color); text-align:right;">
-        <a href="{{ url_for('settings_advanced.index') }}"
+        <a href="{{ url_for('settings_advanced.advanced') }}"
            style="color:var(--text-secondary); font-size:0.85rem; text-decoration:none;">
             Advanced settings &rarr;
         </a>
@@ -968,7 +968,7 @@ function toggleWifiPassword(btn) {
 
 // --- WiFi Network Management ---
 function loadSavedNetworks() {
-    fetch('{{ url_for("mode_control.api_wifi_saved") }}')
+    fetch('{{ url_for("captive_portal.api_wifi_saved") }}')
     .then(r => r.json())
     .then(networks => {
         const el = document.getElementById('savedNetworksList');
@@ -1028,7 +1028,7 @@ function moveNetwork(name, direction) {
     if (newIdx < 0 || newIdx >= nets.length) return;
     [nets[idx], nets[newIdx]] = [nets[newIdx], nets[idx]];
     const ordered = nets.map(n => n.name);
-    fetch('{{ url_for("mode_control.api_wifi_reorder") }}', {
+    fetch('{{ url_for("captive_portal.api_wifi_reorder") }}', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({networks: ordered})
@@ -1040,7 +1040,7 @@ function moveNetwork(name, direction) {
 
 function forgetNetwork(name) {
     if (!confirm('Forget network "' + name + '"?')) return;
-    fetch('{{ url_for("mode_control.api_wifi_forget") }}', {
+    fetch('{{ url_for("captive_portal.forget_wifi") }}', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name})
@@ -1068,7 +1068,7 @@ function connectToNetwork(name) {
         }
     });
 
-    fetch('{{ url_for("mode_control.api_wifi_connect") }}', {
+    fetch('{{ url_for("captive_portal.connect_wifi") }}', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name})
@@ -1109,7 +1109,7 @@ function addWifiNetwork() {
     formData.append('wifi_ssid', ssid);
     formData.append('wifi_password', password);
 
-    fetch('{{ url_for("mode_control.configure_wifi") }}', {
+    fetch('{{ url_for("captive_portal.wifi_setup") }}', {
         method: 'POST',
         body: formData
     }).then(response => {
@@ -1131,7 +1131,7 @@ function addWifiNetwork() {
 function scanAndRefreshNetworks() {
     const btn = document.getElementById('btnWifiScan');
     btn.disabled = true; btn.textContent = 'Scanning...';
-    fetch('{{ url_for("mode_control.api_wifi_scan") }}')
+    fetch('{{ url_for("captive_portal.wifi_networks") }}')
     .then(r => r.json())
     .then(networks => {
         btn.disabled = false; btn.textContent = 'Scan';
@@ -1232,7 +1232,7 @@ function dismissWifiStatus() {
     if (alert) {
         alert.style.display = 'none';
     }
-    fetch('{{ url_for("mode_control.dismiss_wifi_status") }}', {
+    fetch('{{ url_for("captive_portal.dismiss_wifi_status") }}', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',

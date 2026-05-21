@@ -568,32 +568,24 @@ def _register_template_globals(app: Flask) -> None:
     win over context-processor defaults, so this is purely a
     safety net — not a behaviour shift.
 
-    The media ``*_available`` flags are NOT static defaults — they
-    drive ``media_hub_nav.html``'s pill bar, which v1 populated via
-    ``utils.get_base_context`` + ``get_feature_availability`` on
-    every render. Without this, each media page only showed its own
-    pill (operator-flagged during H5 hardware test). We probe the
-    backing-root mounts here so every page sees a consistent
-    pill-bar — same model as v1, minus the IMG gate.
+    The media ``*_available`` flags are hard-set to True per operator
+    directive (H5 fixes 2): "media pill bar on every media-area page
+    must show all six pills". B-1 has no IMG/loopback layer, so
+    individual file presence is handled inside per-feature pages.
     """
-    from teslausb_web.services.media_availability import probe_media_availability  # noqa: PLC0415
 
     @app.context_processor
     def _inject_base_defaults() -> dict[str, object]:
         cfg = app.config.get("teslausb_config")
+        _ = cfg  # B-1 has no IMG/loopback layer; all media areas are always available
         media_flags: dict[str, bool] = {
-            "chimes_available": False,
-            "music_available": False,
-            "shows_available": False,
-            "wraps_available": False,
-            "boombox_available": False,
-            "license_plates_available": False,
+            "chimes_available": True,
+            "music_available": True,
+            "shows_available": True,
+            "wraps_available": True,
+            "boombox_available": True,
+            "license_plates_available": True,
         }
-        if cfg is not None:
-            try:
-                media_flags.update(probe_media_availability(cast("WebConfig", cfg)))
-            except (AttributeError, OSError) as exc:
-                logger.warning("media availability probe failed: %s", exc)
         defaults: dict[str, object] = {
             "page": "",
             "samba_on": False,

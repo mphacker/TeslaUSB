@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+# setup-lib/05-network.sh — Phase 6.5
+#
+# Lays down the NetworkManager + AP-mode config that the B-1 web app
+# (captive_portal blueprint) expects to exist:
+#
+#   * /etc/NetworkManager/system-connections/teslausb-ap.nmconnection
+#       AP-mode WiFi profile (autoconnect=false, mode=ap, band=bg,
+#       channel=6) with a SECRET placeholder PSK that the operator
+#       rewrites via the web UI / teslausb-web.toml.
+#   * /etc/NetworkManager/dispatcher.d/95-teslausb-ap
+#       Safety-net dispatcher: brings the AP up if STA wlan0 drops
+#       so we never lose access to the device.
+#   * /etc/NetworkManager/dnsmasq-shared.d/teslausb-captive.conf
+#       Captive-portal dnsmasq drop-in (DHCP 192.168.4.2-50, 1h lease,
+#       wildcard DNS → 192.168.4.1).
+#
+# HARD SAFETY RAILS (the operator is browsing the Pi over wifi when
+# this runs — losing wlan0 is not acceptable):
+#   * NEVER `nmcli connection delete` an existing profile.
+#   * NEVER edit /etc/wpa_supplicant/wpa_supplicant.conf (legacy dhcpcd).
+#   * NEVER bring wlan0 down. NEVER `systemctl restart NetworkManager`.
+#   * NEVER `nmcli connection up teslausb-ap` — activation is Phase 6.10.
+#   * The AP profile has `autoconnect=false` so dropping it on disk
+#     cannot fight the operator's primary STA connection on next boot.
+#
+# Co-existence with v1's dhcpcd stack: IF both NetworkManager AND
+# dhcpcd are active right now, we back up /etc/dhcpcd.conf to a
+# .b1-backup-<ISO> sibling and `systemctl disable --now dhcpcd && mask`
+# so NM wins on next boot. If only one (or neither) is active, this
+# step is a no-op on the netstack front.
+#
+# Idempotency: every install compares sha256(rendered) vs sha256(on-disk)
+# and is a no-op on match. A `b1_backup` sibling is created the FIRST
+# time a target is overwritten; subsequent re-runs do NOT pile up
+# backups (b1_backup is itself idempotent).
+#
+# Dry-run: every mutation goes through `b1_run`; probes (systemctl
+# is-active, stat, sha256sum) run even under TESLAUSB_DRY_RUN so the
+# dry-run report accurately predicts what WOULD change.
+
+# Re-source common in case this file is invoked via --only.
+# shellcheck source=00-common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
+
+# --------------------------------------------------------------------
+# Constants — exported so 6.11 (uninstall.sh) can reuse them verbatim.
+# --------------------------------------------------------------------
+
+B1_AP_SSID="TeslaUSB-AP"
+B1_AP_CONNECTION_NAME="teslausb-ap"
+B1_AP_CONNECTION_FILE="/etc/NetworkManager/system-connections/teslausb-ap.nmconnection"
+B1_AP_DISPATCHER_FILE="/etc/NetworkManager/dispatcher.d/95-teslausb-ap"
+B1_AP_DNSMASQ_FILE="/etc/NetworkManager/dnsmasq-shared.d/teslausb-captive.conf"
+B1_DHCPCD_CONF="/etc/dhcpcd.conf"
+
+# Files we may write — tracked so 6.11 (uninstall.sh) knows exactly
+# what to remove. Order doesn't matter to the uninstaller.
+B1_NETWORK_TARGETS=(
+  "${B1_AP_CONNECTION_FILE}"
+  "${B1_AP_DISPATCHER_FILE}"
+  "${B1_AP_DNSMASQ_FILE}"
+)
+
+# Placeholder PSK. The operator/setup edits
+# /etc/teslausb/teslausb-web.toml `[wifi].ap_passphrase` and reloads
+# via the web UI; this nmconnection file just bootstraps a valid
+# parse. The captive-portal "Apply AP config" action rewrites the
+# `psk=` line in place (mode 0600, root:root) before any AP-up.
+B1_AP_PSK_PLACEHOLDER="__SET_VIA_TESLAUSB_WEB_TOML__"
+
+export B1_AP_SSID B1_AP_CONNECTION_NAME B1_AP_CONNECTION_FILE \
+       B1_AP_DISPATCHER_FILE B1_AP_DNSMASQ_FILE B1_DHCPCD_CONF \
+       B1_NETWORK_TARGETS B1_AP_PSK_PLACEHOLDER
+
+# --------------------------------------------------------------------
+# File bodies — constant heredocs at file scope so reviewers + the
+# 6.11 uninstaller can read them without executing the script.
+# --------------------------------------------------------------------
+#
+# AP nmconnection format reference: `man 5 nm-settings-keyfile`.
+# NetworkManager REFUSES to load any file under system-connections/
+# whose mode is not 0600 root:root — we enforce that on install.
+
+read -r -d '' B1_AP_CONNECTION_BODY <<AP_CONN || true
+# TeslaUSB B-1 access-point profile.
+#
+# Managed by setup-lib/05-network.sh (Phase 6.5). DO NOT edit this
+# file in-place — re-run \`setup.sh --only 05\` after editing the
+# heredoc in setup-lib/05-network.sh. setup.sh backs up any local
+# divergence as \`.b1-backup-<timestamp>\` before overwriting.
+#
+# The \`psk=\` line below is a PLACEHOLDER. The real passphrase is
+# kept in /etc/teslausb/teslausb-web.toml under [wifi].ap_passphrase
+# and the captive_portal blueprint rewrites this file (preserving
+# 0600 root:root) when the operator saves a new passphrase via the
+# web UI. NM will refuse to activate the AP while psk= is still the
+# placeholder — that's intentional.
+#
+# Mode locked to 2.4 GHz (band=bg) because the Pi Zero 2 W radio has
+# no 5 GHz support. autoconnect=false so this profile never fights
+# the operator's primary STA connection on boot — Phase 6.10 owns
+# explicit activation decisions.
+
+[connection]
+id=${B1_AP_CONNECTION_NAME}
+type=wifi
+interface-name=wlan0
+autoconnect=false
+
+[wifi]
+mode=ap
+ssid=${B1_AP_SSID}
+band=bg
+channel=6
+hidden=false
+
+[wifi-security]
+key-mgmt=wpa-psk
+proto=rsn
+group=ccmp
+pairwise=ccmp
+psk=${B1_AP_PSK_PLACEHOLDER}
+
+[ipv4]
+method=shared
+address1=192.168.4.1/24
+
+[ipv6]
+method=ignore
+
+[proxy]
+AP_CONN
+
+read -r -d '' B1_AP_DISPATCHER_BODY <<'AP_DISP' || true
+#!/bin/sh
+# TeslaUSB B-1 AP safety-net dispatcher (Phase 6.5).
+#
+# NetworkManager invokes dispatcher.d scripts with:
+#   $1 = interface name   (e.g. wlan0)
+#   $2 = action           (e.g. up, down, pre-up, pre-down, ...)
+# plus a pile of CONNECTION_* / DEVICE_* env vars (see
+# `man 8 NetworkManager-dispatcher`).
+#
+# Behaviour:
+#   * If wlan0 goes DOWN and the AP profile is not already active,
+#     bring it up so the operator can still reach the device.
+#   * If a NON-AP profile comes UP on wlan0, tear the AP back down
+#     (it would just be wasting RAM and confusing clients).
+# Everything else is a no-op.
+#
+# Failures are intentionally swallowed (|| true): a flapping AP must
+# never wedge an unrelated NM dispatch — and the worst case (AP
+# fails to come up) leaves the operator no worse off than before.
+set -eu
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+AP_CONNECTION="teslausb-ap"
+
+[ "$IFACE" = "wlan0" ] || exit 0
+
+case "$ACTION" in
+  down)
+    if nmcli -t -f NAME connection show --active 2>/dev/null \
+         | grep -qx "$AP_CONNECTION"; then
+      exit 0
+    fi
+    nmcli connection up "$AP_CONNECTION" ifname wlan0 >/dev/null 2>&1 || true
+    ;;
+  up)
+    # Don't tear ourselves down when WE were the one that came up.
+    if [ "${CONNECTION_ID:-}" = "$AP_CONNECTION" ]; then
+      exit 0
+    fi
+    nmcli connection down "$AP_CONNECTION" >/dev/null 2>&1 || true
+    ;;
+esac
+
+exit 0
+AP_DISP
+
+read -r -d '' B1_AP_DNSMASQ_BODY <<'AP_DNSMASQ' || true
+# TeslaUSB B-1 captive-portal dnsmasq drop-in (Phase 6.5).
+#
+# Loaded by NetworkManager's bundled dnsmasq when the AP profile
+# (ipv4.method=shared) is active. Effects:
+#   * Wildcard DNS A record: every name resolves to the AP gateway
+#     192.168.4.1, so iOS/Android/Windows captive-portal probes hit
+#     the Flask /portal endpoint and the OS pops the sign-in sheet.
+#   * DHCP pool 192.168.4.2-192.168.4.50, /24, 1-hour leases — small
+#     on purpose; the AP is for one phone at a time, not a public
+#     hotspot.
+#
+# Managed by setup-lib/05-network.sh. DO NOT edit by hand — re-run
+# `setup.sh --only 05` after editing the heredoc instead.
+
+address=/#/192.168.4.1
+dhcp-range=192.168.4.2,192.168.4.50,255.255.255.0,1h
+AP_DNSMASQ
+
+# --------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------
+
+# _b1_sha256 <path> — sha256 hex of <path>, empty if missing.
+_b1_sha256() {
+  local path="$1"
+  if [[ ! -e "${path}" ]]; then
+    printf ''
+    return 0
+  fi
+  sha256sum -- "${path}" 2>/dev/null | awk '{print $1}'
+}
+
+# _b1_sha256_string <content> — sha256 hex of a string.
+_b1_sha256_string() {
+  printf '%s' "$1" | sha256sum | awk '{print $1}'
+}
+
+# _b1_install_string <content> <dst> <mode>
+#   Idempotent install of an in-memory string to <dst> at <mode>,
+#   owner root:root. Backs up the existing target (one-shot) on first
+#   divergence. Returns 0 unchanged-or-installed, 1 on hard error.
+_b1_install_string() {
+  local content="$1"
+  local dst="$2"
+  local mode="$3"
+
+  local src_sum dst_sum
+  src_sum="$(_b1_sha256_string "${content}")"
+  dst_sum="$(_b1_sha256 "${dst}")"
+
+  # Even when content matches, fix mode/owner if they drifted — NM
+  # silently refuses to load nmconnection files with the wrong mode.
+  local need_write=1
+  if [[ -n "${dst_sum}" && "${src_sum}" == "${dst_sum}" ]]; then
+    local cur_mode cur_owner
+    cur_mode="$(stat -c '%a' "${dst}" 2>/dev/null || echo '')"
+    cur_owner="$(stat -c '%U:%G' "${dst}" 2>/dev/null || echo '')"
+    if [[ "${cur_mode}" == "${mode#0}" && "${cur_owner}" == "root:root" ]]; then
+      b1_log "unchanged: ${dst} (sha256=${dst_sum:0:12}…, mode=${cur_mode})"
+      return 0
+    fi
+    b1_log "content ok but mode/owner drift on ${dst} (mode=${cur_mode} owner=${cur_owner}) — re-installing"
+    need_write=1
+  fi
+
+  if [[ -e "${dst}" ]]; then
+    b1_log "differs: ${dst} (target=${dst_sum:0:12}…, source=${src_sum:0:12}…) — backing up"
+    b1_backup "${dst}"
+  else
+    b1_log "new: ${dst} (sha256=${src_sum:0:12}…, mode=${mode})"
+  fi
+
+  # Ensure the parent directory exists (dispatcher.d / dnsmasq-shared.d
+  # are created by the network-manager package; we don't depend on it).
+  local parent
+  parent="$(dirname "${dst}")"
+  if [[ ! -d "${parent}" ]]; then
+    b1_log "creating parent dir: ${parent}"
+    b1_run install -d -m 0755 -o root -g root "${parent}"
+  fi
+
+  # Stage in a unique repo-local file (NEVER /tmp — runtime policy);
+  # cleaned up via trap on return.
+  local stage
+  stage="$(dirname "${BASH_SOURCE[0]}")/.b1-stage-05-$$-${RANDOM}"
+  if [[ "${TESLAUSB_DRY_RUN:-0}" != "1" ]]; then
+    printf '%s' "${content}" > "${stage}"
+  fi
+  # shellcheck disable=SC2064
+  trap "rm -f -- '${stage}'" RETURN
+
+  b1_run install -o root -g root -m "${mode}" -- "${stage}" "${dst}"
+
+  # Used by callers' has-changed bookkeeping (currently informational
+  # only — 6.5 has no daemon-reload to gate). Returning 0 keeps the
+  # pipeline simple.
+  : "${need_write}"
+  return 0
+}
+
+# _b1_validate_ap_connection — post-install sanity check: file exists,
+# mode is 0600 root:root, and the three mandatory keyfile sections
+# are present. Warn (do not fail) under dry-run since the file may
+# not have been written.
+_b1_validate_ap_connection() {
+  local f="${B1_AP_CONNECTION_FILE}"
+  if [[ "${TESLAUSB_DRY_RUN:-0}" == "1" && ! -e "${f}" ]]; then
+    b1_log "validate skipped (dry-run, file not written): ${f}"
+    return 0
+  fi
+  if [[ ! -e "${f}" ]]; then
+    b1_err "AP connection file missing after install: ${f}"
+    return 1
+  fi
+  local mode owner
+  mode="$(stat -c '%a' "${f}" 2>/dev/null || echo '')"
+  owner="$(stat -c '%U:%G' "${f}" 2>/dev/null || echo '')"
+  if [[ "${mode}" != "600" || "${owner}" != "root:root" ]]; then
+    b1_err "AP connection file has wrong perms (got ${owner} ${mode}, want root:root 600): ${f}"
+    return 1
+  fi
+  local key
+  for key in '^\[connection\]' '^\[wifi\]' '^\[wifi-security\]'; do
+    if ! grep -qE "${key}" "${f}"; then
+      b1_err "AP connection file missing section ${key}: ${f}"
+      return 1
+    fi
+  done
+  b1_log "AP connection file validated: ${f} (mode=${mode} owner=${owner})"
+}
+
+# _b1_handle_dhcpcd — if BOTH NetworkManager and dhcpcd are currently
+# active, this is the v1 stack still in charge. Back up the dhcpcd
+# config (one-shot) and disable+mask the unit so NM owns wlan0 on
+# next boot. NEVER touches wlan0 itself.
+_b1_handle_dhcpcd() {
+  local nm_active=0 dhcpcd_active=0
+  if b1_unit_active NetworkManager; then nm_active=1; fi
+  if b1_unit_active dhcpcd;        then dhcpcd_active=1; fi
+
+  b1_log "netstack: NetworkManager active=${nm_active}, dhcpcd active=${dhcpcd_active}"
+
+  if (( nm_active == 0 && dhcpcd_active == 0 )); then
+    b1_warn "neither NetworkManager nor dhcpcd is active — leaving netstack alone"
+    return 0
+  fi
+
+  if (( dhcpcd_active == 0 )); then
+    # Pure NM (or pure dhcpcd-less) host — nothing to do here.
+    b1_log "dhcpcd not active — no netstack handoff needed"
+    return 0
+  fi
+
+  if (( nm_active == 0 )); then
+    # dhcpcd-only host (v1, before 6.1 installs network-manager). NM
+    # comes up after 6.1; we'll do the handoff on the NEXT setup run.
+    # Refuse to disable dhcpcd here — that would briefly leave wlan0
+    # unmanaged and is the exact scenario that drops the operator's
+    # SSH session.
+    b1_warn "dhcpcd active but NetworkManager NOT active — refusing to disable dhcpcd"
+    b1_warn "  (re-run setup.sh after NetworkManager is active to complete the handoff)"
+    return 0
+  fi
+
+  # Both active — safe handoff: back up the dhcpcd config (idempotent),
+  # then disable+mask the unit. NetworkManager continues to own wlan0
+  # for the rest of this boot; on next boot dhcpcd stays down.
+  if [[ -f "${B1_DHCPCD_CONF}" ]]; then
+    b1_log "backing up ${B1_DHCPCD_CONF} before dhcpcd handoff"
+    b1_backup "${B1_DHCPCD_CONF}"
+  fi
+
+  # `disable --now` stops the unit gracefully; mask prevents any
+  # downstream package upgrade from re-enabling it. We do this
+  # AFTER the backup so even a failure mid-disable leaves the
+  # operator's original config recoverable.
+  b1_log "dhcpcd handoff: disable --now + mask"
+  b1_run systemctl disable --now dhcpcd
+  b1_run systemctl mask dhcpcd
+}
+
+# --------------------------------------------------------------------
+# Step
+# --------------------------------------------------------------------
+
+b1_step_05() {
+  # 1) netstack handoff (only if BOTH are active — see helper).
+  _b1_handle_dhcpcd || return 1
+
+  # 2) confirm nm-online tool is available; it's the only NM-shipped
+  #    binary we'd lean on for any future probing. We do NOT actually
+  #    probe — that would block on slow STA scans. Tool absence is a
+  #    warning, not a hard fail, so the dry-run still works on a dev
+  #    box without network-manager installed.
+  if command -v nm-online >/dev/null 2>&1; then
+    b1_log "nm-online available (offline check only — no probe issued)"
+  else
+    b1_warn "nm-online not found — install network-manager (step 01) before activation (6.10)"
+  fi
+
+  # 3) install AP connection profile (0600 root:root or NM refuses).
+  _b1_install_string "${B1_AP_CONNECTION_BODY}" "${B1_AP_CONNECTION_FILE}" 0600 \
+    || return 1
+  _b1_validate_ap_connection || return 1
+
+  # 4) install dispatcher script (0755 root:root — NM dispatcher will
+  #    silently skip files that aren't executable).
+  _b1_install_string "${B1_AP_DISPATCHER_BODY}" "${B1_AP_DISPATCHER_FILE}" 0755 \
+    || return 1
+
+  # 5) install dnsmasq-shared drop-in (0644 — read by NM's bundled
+  #    dnsmasq which runs as root, no secret content here).
+  _b1_install_string "${B1_AP_DNSMASQ_BODY}" "${B1_AP_DNSMASQ_FILE}" 0644 \
+    || return 1
+
+  # We deliberately do NOT:
+  #   * nmcli connection reload         (Phase 6.10)
+  #   * nmcli connection up teslausb-ap (Phase 6.10)
+  #   * systemctl restart NetworkManager (would drop wlan0)
+  # Dropping the files on disk with autoconnect=false is safe — they
+  # take effect at the next explicit `connection reload` or NM restart.
+  b1_log "network config staged; activation deferred to Phase 6.10"
+  return 0
+}

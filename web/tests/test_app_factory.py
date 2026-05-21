@@ -8,13 +8,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 from flask import Blueprint, abort
+from teslausb_web import app as app_module
 from teslausb_web.app import create_app
 from teslausb_web.config import (
     FeaturesSection,
     PathsSection,
+    SystemSettingsSection,
     WebConfig,
     WebSection,
 )
+from teslausb_web.services.system_settings_service import SystemSettingsService
 
 if TYPE_CHECKING:
     from flask import Flask
@@ -281,3 +284,76 @@ def test_cache_invalidator_shutdown_registered_at_atexit(monkeypatch: pytest.Mon
     assert any(
         getattr(fn, "__self__", None) is app.extensions["cache_invalidator"] for fn in registered
     )
+
+
+class _FakeSambaService:
+    def __init__(self) -> None:
+        self.starts = 0
+        self.stops = 0
+
+    def start(self) -> None:
+        self.starts += 1
+
+    def stop(self, timeout: float = 5.0) -> None:
+        _ = timeout
+        self.stops += 1
+
+
+class _FakeSambaWatcher:
+    def __init__(self) -> None:
+        self.starts = 0
+        self.shutdowns = 0
+
+    def start(self) -> bool:
+        self.starts += 1
+        return True
+
+    def shutdown(self, timeout: float = 5.0) -> bool:
+        _ = timeout
+        self.shutdowns += 1
+        return True
+
+
+def _make_runtime_config(tmp_path: Path, *, samba_enabled: bool) -> WebConfig:
+    return WebConfig(
+        web=WebSection(secret_key="x" * 32),
+        paths=PathsSection(
+            backing_root=tmp_path / "backing",
+            state_dir=tmp_path / "state",
+            ipc_socket=tmp_path / "ipc" / "worker.sock",
+            cache_invalidate_script=tmp_path / "invalidate.sh",
+        ),
+        features=FeaturesSection(samba_enabled=samba_enabled),
+        system_settings=SystemSettingsSection(state_path=tmp_path / "state" / "settings.json"),
+    )
+
+
+def test_factory_starts_samba_pair_when_settings_enable_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_service = _FakeSambaService()
+    fake_watcher = _FakeSambaWatcher()
+    monkeypatch.setattr(app_module, "make_samba_service", lambda _cfg: fake_service)
+    monkeypatch.setattr(app_module, "make_samba_watcher", lambda _cfg, _invalidator: fake_watcher)
+    create_app(_make_runtime_config(tmp_path, samba_enabled=True))
+    assert fake_service.starts == 1
+    assert fake_watcher.starts == 1
+
+
+def test_system_settings_toggle_drives_samba_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_service = _FakeSambaService()
+    fake_watcher = _FakeSambaWatcher()
+    monkeypatch.setattr(app_module, "make_samba_service", lambda _cfg: fake_service)
+    monkeypatch.setattr(app_module, "make_samba_watcher", lambda _cfg, _invalidator: fake_watcher)
+    app = create_app(_make_runtime_config(tmp_path, samba_enabled=False))
+    settings_service = app.extensions["system_settings_service"]
+    assert isinstance(settings_service, SystemSettingsService)
+    settings_service.update_settings({"samba_enabled": True})
+    settings_service.update_settings({"samba_enabled": False})
+    assert fake_service.starts == 1
+    assert fake_watcher.starts == 1
+    assert fake_watcher.shutdowns >= 1
+    assert fake_service.stops >= 1

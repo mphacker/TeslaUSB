@@ -101,6 +101,18 @@ _DEFAULT_RETENTION_WARNING_DAYS: Final[int] = 7
 _DEFAULT_SYSTEM_SETTINGS_FILENAME: Final[str] = "system_settings.json"
 _DEFAULT_SYSTEM_SETTINGS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_SYSTEM_SETTINGS_FILENAME
 _DEFAULT_SYSTEM_SETTINGS_LOG_LEVEL: Final[str] = "INFO"
+_DEFAULT_SAMBA_CONFIG_PATH: Path = Path("/etc/samba/smb.conf")
+_DEFAULT_SAMBA_BINARY_SMBD: Final[str] = "smbd"
+_DEFAULT_SAMBA_BINARY_SMBCONTROL: Final[str] = "smbcontrol"
+_DEFAULT_SAMBA_BINARY_SYSTEMCTL: Final[str] = "systemctl"
+_DEFAULT_SAMBA_INVALIDATE_DEBOUNCE_MS: Final[int] = 500
+_DEFAULT_SAMBA_WATCHER_POLL_INTERVAL_SECONDS: Final[float] = 1.0
+_DEFAULT_SAMBA_IGNORE_EXTENSIONS: Final[tuple[str, ...]] = (
+    ".tmp",
+    ".part",
+    ".swp",
+    ".crdownload",
+)
 _DEFAULT_WIFI_CREDENTIALS_FILENAME: Final[str] = "wifi_credentials.json"
 _DEFAULT_WIFI_CREDENTIALS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_WIFI_CREDENTIALS_FILENAME
 _DEFAULT_WIFI_AP_SSID: Final[str] = "TeslaUSB-Setup"
@@ -575,6 +587,83 @@ class SystemSettingsSection:
 
 
 @dataclass(frozen=True, slots=True)
+class SambaShareConfig:
+    """Declarative Samba share rooted inside the managed TeslaUSB trees."""
+
+    name: str
+    path: Path
+    read_only: bool = False
+    guest_ok: bool = False
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if not self.name.strip():
+            raise ConfigError(None, "[samba.shares] name must be non-empty")
+        if "/" in self.name or "\\" in self.name:
+            raise ConfigError(None, "[samba.shares] name must not contain path separators")
+        if not self.path.is_absolute() and not PurePosixPath(self.path.as_posix()).is_absolute():
+            raise ConfigError(None, f"[samba.shares] path must be absolute, got {self.path!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class SambaSection:
+    """Samba daemon + watcher settings."""
+
+    config_path: Path = _DEFAULT_SAMBA_CONFIG_PATH
+    shares: tuple[SambaShareConfig, ...] = field(default_factory=tuple)
+    binary_smbd: str = _DEFAULT_SAMBA_BINARY_SMBD
+    binary_smbcontrol: str = _DEFAULT_SAMBA_BINARY_SMBCONTROL
+    binary_systemctl: str = _DEFAULT_SAMBA_BINARY_SYSTEMCTL
+    invalidate_debounce_ms: int = _DEFAULT_SAMBA_INVALIDATE_DEBOUNCE_MS
+    watcher_poll_interval_seconds: float = _DEFAULT_SAMBA_WATCHER_POLL_INTERVAL_SECONDS
+    ignore_extensions: tuple[str, ...] = field(
+        default_factory=lambda: _DEFAULT_SAMBA_IGNORE_EXTENSIONS
+    )
+    ignore_dotfiles: bool = True
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            not self.config_path.is_absolute()
+            and not PurePosixPath(self.config_path.as_posix()).is_absolute()
+        ):
+            raise ConfigError(
+                None,
+                f"[samba] config_path must be absolute, got {self.config_path!r}",
+            )
+        for field_name, value in (
+            ("binary_smbd", self.binary_smbd),
+            ("binary_smbcontrol", self.binary_smbcontrol),
+            ("binary_systemctl", self.binary_systemctl),
+        ):
+            if not value.strip():
+                raise ConfigError(None, f"[samba] {field_name} must be non-empty")
+        if self.invalidate_debounce_ms < 0:
+            raise ConfigError(None, "[samba] invalidate_debounce_ms must be >= 0")
+        if self.watcher_poll_interval_seconds <= 0:
+            raise ConfigError(None, "[samba] watcher_poll_interval_seconds must be > 0")
+        for extension in self.ignore_extensions:
+            if not extension.strip():
+                raise ConfigError(None, "[samba] ignore_extensions entries must be non-empty")
+            if "/" in extension or "\\" in extension:
+                raise ConfigError(
+                    None,
+                    "[samba] ignore_extensions entries must not contain path separators",
+                )
+            if not extension.startswith("."):
+                raise ConfigError(
+                    None,
+                    "[samba] ignore_extensions entries must start with '.'",
+                )
+        for share in self.shares:
+            share.validate()
+
+
+@dataclass(frozen=True, slots=True)
 class WifiBinaryPaths:
     """Binary names or absolute paths for the Wi-Fi control surface."""
 
@@ -772,6 +861,7 @@ class WebConfig:
     license_plates: LicensePlateSection = field(default_factory=LicensePlateSection)
     storage_retention: StorageRetentionSection = field(default_factory=StorageRetentionSection)
     system_settings: SystemSettingsSection = field(default_factory=SystemSettingsSection)
+    samba: SambaSection = field(default_factory=SambaSection)
     wifi: WifiSection = field(default_factory=WifiSection)
     cloud: CloudSection = field(default_factory=CloudSection)
     mapping: MappingSection = field(default_factory=MappingSection)
@@ -790,6 +880,7 @@ class WebConfig:
             self.license_plates.validate()
             self.storage_retention.validate()
             self.system_settings.validate()
+            self.samba.validate()
             self.wifi.validate()
             self.cloud.validate()
             self.mapping.validate()
@@ -878,6 +969,21 @@ def _coerce_path(section: dict[str, object], key: str, default: Path, source: Pa
     return Path(value)
 
 
+def _coerce_table_array(
+    section: dict[str, object],
+    key: str,
+    source: Path | None,
+) -> tuple[dict[str, object], ...]:
+    if key not in section:
+        return ()
+    value = section[key]
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ConfigError(source, f"{key} must be an array of tables")
+    return tuple(
+        {str(item_key): item_value for item_key, item_value in item.items()} for item in value
+    )
+
+
 def _coerce_str_tuple(
     section: dict[str, object],
     key: str,
@@ -914,6 +1020,8 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     license_plates_raw = _expect_section(raw, "license_plates", source)
     storage_retention_raw = _expect_section(raw, "storage_retention", source)
     system_settings_raw = _expect_section(raw, "system_settings", source)
+    samba_raw = _expect_section(raw, "samba", source)
+    samba_shares_raw = _coerce_table_array(samba_raw, "shares", source)
     wifi_raw = _expect_section(raw, "wifi", source)
     wifi_binary_paths_raw = _expect_section(wifi_raw, "binary_paths", source)
     cloud_raw = _expect_section(raw, "cloud", source)
@@ -1204,6 +1312,65 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 "default_log_level",
                 _DEFAULT_SYSTEM_SETTINGS_LOG_LEVEL,
                 source,
+            ),
+        )
+        samba = SambaSection(
+            config_path=_coerce_path(
+                samba_raw,
+                "config_path",
+                _DEFAULT_SAMBA_CONFIG_PATH,
+                source,
+            ),
+            shares=tuple(
+                SambaShareConfig(
+                    name=_coerce_str(share_raw, "name", "", source),
+                    path=_coerce_path(share_raw, "path", paths_section.backing_root, source),
+                    read_only=_coerce_bool(share_raw, "read_only", default=False, source=source),
+                    guest_ok=_coerce_bool(share_raw, "guest_ok", default=False, source=source),
+                )
+                for share_raw in samba_shares_raw
+            ),
+            binary_smbd=_coerce_str(
+                samba_raw,
+                "binary_smbd",
+                _DEFAULT_SAMBA_BINARY_SMBD,
+                source,
+            ),
+            binary_smbcontrol=_coerce_str(
+                samba_raw,
+                "binary_smbcontrol",
+                _DEFAULT_SAMBA_BINARY_SMBCONTROL,
+                source,
+            ),
+            binary_systemctl=_coerce_str(
+                samba_raw,
+                "binary_systemctl",
+                _DEFAULT_SAMBA_BINARY_SYSTEMCTL,
+                source,
+            ),
+            invalidate_debounce_ms=_coerce_int(
+                samba_raw,
+                "invalidate_debounce_ms",
+                _DEFAULT_SAMBA_INVALIDATE_DEBOUNCE_MS,
+                source,
+            ),
+            watcher_poll_interval_seconds=_coerce_float(
+                samba_raw,
+                "watcher_poll_interval_seconds",
+                _DEFAULT_SAMBA_WATCHER_POLL_INTERVAL_SECONDS,
+                source,
+            ),
+            ignore_extensions=_coerce_str_tuple(
+                samba_raw,
+                "ignore_extensions",
+                _DEFAULT_SAMBA_IGNORE_EXTENSIONS,
+                source,
+            ),
+            ignore_dotfiles=_coerce_bool(
+                samba_raw,
+                "ignore_dotfiles",
+                default=True,
+                source=source,
             ),
         )
         wifi = WifiSection(
@@ -1501,6 +1668,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         license_plates=license_plates,
         storage_retention=storage_retention,
         system_settings=system_settings,
+        samba=samba,
         wifi=wifi,
         cloud=cloud,
         mapping=mapping,

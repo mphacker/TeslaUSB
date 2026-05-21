@@ -237,7 +237,9 @@ class TestHelpers:
         payload = service.serialize_settings(service.default_settings())
         assert payload["samba_enabled"] is False
         assert payload["log_level"] == "WARNING"
-        assert payload["state_path"].endswith("system_settings.json")
+        state_path = payload["state_path"]
+        assert isinstance(state_path, str)
+        assert state_path.endswith("system_settings.json")
 
     def test_config_snapshot_is_sanitized(self, service: SystemSettingsService) -> None:
         snapshot = service.config_snapshot(service.default_settings())
@@ -246,3 +248,18 @@ class TestHelpers:
 
     def test_log_levels_returns_supported_choices(self, service: SystemSettingsService) -> None:
         assert service.log_levels() == ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+    def test_subscribe_receives_saved_settings(self, service: SystemSettingsService) -> None:
+        observed: list[SystemSettings] = []
+        unsubscribe = service.subscribe(observed.append)
+        service.update_settings({"samba_enabled": True, "log_level": "ERROR"})
+        unsubscribe()
+        assert observed[-1].samba_enabled is True
+        assert observed[-1].log_level == "ERROR"
+
+    def test_unsubscribe_removes_callback(self, service: SystemSettingsService) -> None:
+        observed: list[SystemSettings] = []
+        unsubscribe = service.subscribe(observed.append)
+        unsubscribe()
+        service.update_settings({"samba_enabled": True})
+        assert observed == []

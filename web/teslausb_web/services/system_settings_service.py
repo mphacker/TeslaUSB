@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from teslausb_web.config import WebConfig
 
@@ -70,6 +70,7 @@ class SystemSettingsService:
         self._config = config
         self._ipc_socket_path = str(ipc_socket_path)
         self._lock = threading.RLock()
+        self._callbacks: list[Callable[[SystemSettings], None]] = []
 
     @property
     def config(self) -> SystemSettingsConfig:
@@ -104,7 +105,13 @@ class SystemSettingsService:
                 "log_level": settings.log_level,
             }
             _write_json_atomically(self._config.state_path, payload)
+            callbacks = tuple(self._callbacks)
         logger.info("Saved system settings to %s", self._config.state_path)
+        for callback in callbacks:
+            try:
+                callback(settings)
+            except Exception:
+                logger.exception("System settings callback failed")
         return settings
 
     def update_settings(self, payload: Mapping[str, object]) -> SystemSettings:
@@ -134,6 +141,18 @@ class SystemSettingsService:
             "samba_enabled": settings.samba_enabled,
             "state_path": str(self._config.state_path),
         }
+
+    def subscribe(self, callback: Callable[[SystemSettings], None]) -> Callable[[], None]:
+        with self._lock:
+            self._callbacks.append(callback)
+
+        def _unsubscribe() -> None:
+            with self._lock:
+                self._callbacks = [
+                    registered for registered in self._callbacks if registered is not callback
+                ]
+
+        return _unsubscribe
 
     def _settings_from_mapping(
         self,

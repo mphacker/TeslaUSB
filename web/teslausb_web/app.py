@@ -23,6 +23,7 @@ import atexit
 import errno
 import logging
 import secrets
+import threading
 import weakref
 from typing import TYPE_CHECKING
 
@@ -53,8 +54,14 @@ from teslausb_web.services.license_plate_service import make_license_plate_servi
 from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
 from teslausb_web.services.music_service import make_music_service
+from teslausb_web.services.samba_service import SambaError, make_samba_service
+from teslausb_web.services.samba_watcher import make_samba_watcher
 from teslausb_web.services.storage_retention_service import make_storage_retention_service
-from teslausb_web.services.system_settings_service import make_system_settings_service
+from teslausb_web.services.system_settings_service import (
+    SystemSettings,
+    SystemSettingsService,
+    make_system_settings_service,
+)
 from teslausb_web.services.teslafat_client import TeslaFatClient
 from teslausb_web.services.wifi_service import make_wifi_service
 from teslausb_web.services.wrap_service import make_wrap_service
@@ -147,6 +154,10 @@ def create_app(
     _register_license_plate_services(app, cfg)
     _register_storage_retention_services(app, cfg)
     _register_system_settings_services(app, cfg)
+    system_settings = app.extensions.get("system_settings_service")
+    if not isinstance(system_settings, SystemSettingsService):
+        raise RuntimeError("system_settings_service must be registered before samba services")
+    _register_samba_services(app, cfg, _get_cache_invalidator(app), system_settings)
     _register_wifi_services(app, cfg)
     _register_cloud_oauth_services(app, cfg)
     _register_cloud_rclone_services(app, cfg)
@@ -334,6 +345,72 @@ def _register_system_settings_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the advanced-settings service and shared IPC client once."""
     app.extensions["system_settings_service"] = make_system_settings_service(cfg)
     app.extensions["teslafat_client"] = TeslaFatClient(cfg.paths.ipc_socket)
+
+
+def _register_samba_services(
+    app: Flask,
+    cfg: WebConfig,
+    cache_invalidator: CacheInvalidator,
+    system_settings: SystemSettingsService,
+) -> None:
+    """Construct the Samba daemon + watcher pair and bind them to settings changes."""
+    samba_service = make_samba_service(cfg)
+    samba_watcher = make_samba_watcher(cfg, cache_invalidator)
+    app.extensions["samba_service"] = samba_service
+    app.extensions["samba_watcher"] = samba_watcher
+
+    state_lock = threading.RLock()
+    active_enabled = False
+
+    def _disable() -> None:
+        nonlocal active_enabled
+        with state_lock:
+            if not active_enabled:
+                return
+        watcher_stopped = samba_watcher.shutdown(timeout=5.0)
+        if not watcher_stopped:
+            logger.warning("Samba watcher did not stop cleanly within timeout")
+        try:
+            samba_service.stop(timeout=5.0)
+        except SambaError:
+            logger.exception("Failed to stop Samba service")
+        with state_lock:
+            active_enabled = False
+
+    def _enable() -> None:
+        nonlocal active_enabled
+        with state_lock:
+            if active_enabled:
+                return
+        try:
+            samba_service.start()
+            samba_watcher.start()
+        except SambaError:
+            logger.exception("Failed to start Samba service")
+            samba_watcher.shutdown(timeout=1.0)
+            try:
+                samba_service.stop(timeout=1.0)
+            except SambaError:
+                logger.exception("Failed to roll back Samba service startup")
+            return
+        with state_lock:
+            active_enabled = True
+
+    def _apply(settings: SystemSettings) -> None:
+        if settings.samba_enabled:
+            _enable()
+        else:
+            _disable()
+
+    unsubscribe = system_settings.subscribe(_apply)
+    _apply(system_settings.get_settings())
+
+    def _shutdown() -> None:
+        unsubscribe()
+        _disable()
+
+    atexit.register(_shutdown)
+    app.extensions["samba_service_finalizer"] = weakref.finalize(app, _shutdown)
 
 
 def _register_wifi_services(app: Flask, cfg: WebConfig) -> None:

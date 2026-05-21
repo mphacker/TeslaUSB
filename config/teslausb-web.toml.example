@@ -18,10 +18,13 @@
 # reach gunicorn directly from another host.
 host = "127.0.0.1"
 
-# Port gunicorn listens on. nginx in front terminates 80/443 and
-# proxies to this port. Default 8080 matches the v1 web_port so
-# existing bookmarks and screenshots continue to work.
-port = 8080
+# Port the Flask app listens on **when nginx is not in front**
+# (developer-laptop / pytest scenarios). The production layout
+# uses gunicorn on a Unix socket (see config/gunicorn.conf.py)
+# and nginx terminates port 80 publicly — so this value is not
+# used in a normal Pi install. Default 80 keeps direct-bind
+# parity with v1 (which ran Flask as root on port 80).
+port = 80
 
 # Flask session signing key. MUST be set in production — leave
 # empty for tests only. setup.sh writes a fresh 64-char hex key

@@ -1048,7 +1048,7 @@ a screenshot diff vs. v1 baseline.
 ## Phase H5 — Web app on hardware
 
 H5.a, H5.b, H5.c, ... — run after every 3 phase-5 increments.
-Each does the rsync + venv + test-gunicorn-on-8080 + screenshot
+Each does the rsync + venv + nginx-on-80 + gunicorn-on-unix-socket + screenshot
 diff dance per `00-PLAN.md`. All ⏳.
 
 ## Phase 6 — setup.sh + uninstall.sh

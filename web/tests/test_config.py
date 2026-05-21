@@ -39,7 +39,7 @@ def test_defaults_when_no_file_and_allow_defaults(monkeypatch: MonkeyPatch) -> N
         pytest.skip("dev box has a real /etc/teslausb/teslausb-web.toml; skipping")
     cfg = load_config(allow_defaults=True)
     assert cfg.source_path is None
-    assert cfg.web.port == 8080
+    assert cfg.web.port == 80
     assert cfg.web.max_upload_mb > 0
     # On Windows the WindowsPath form of a POSIX absolute path returns
     # False from .is_absolute() because it lacks a drive letter — the
@@ -228,7 +228,7 @@ def test_empty_file_uses_all_defaults(tmp_path: Path) -> None:
     _write(cfg_file, "")
     cfg = load_config(cfg_file)
     assert cfg.source_path == cfg_file
-    assert cfg.web.port == 8080
+    assert cfg.web.port == 80
     assert cfg.paths.backing_root == Path("/srv/teslausb")
 
 
@@ -604,7 +604,7 @@ def test_os_environ_not_mutated(monkeypatch: MonkeyPatch, tmp_path: Path) -> Non
     """Loader must not write to ``os.environ``."""
     monkeypatch.delenv(ENV_CONFIG_PATH, raising=False)
     cfg_file = tmp_path / "no_env_writes.toml"
-    _write(cfg_file, "[web]\nport = 8080\n")
+    _write(cfg_file, "[web]\nport = 80\n")
     before = dict(os.environ)
     load_config(cfg_file)
     assert dict(os.environ) == before

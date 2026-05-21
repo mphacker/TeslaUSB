@@ -35,8 +35,13 @@ DEFAULT_CONFIG_PATH: Path = Path("/etc/teslausb/teslausb-web.toml")
 
 # Match v1's defaults so the screenshot-diff acceptance gate has a
 # fighting chance: a freshly installed B-1 device serves the same
-# port and accepts the same upload sizes a v1 device did.
-_DEFAULT_PORT: int = 8080
+# port and accepts the same upload sizes a v1 device did. Port 80
+# matches v1's "Flask as root on port 80" topology; in B-1 the
+# production layout puts gunicorn on a Unix socket behind nginx
+# (see config/gunicorn.conf.py + config/nginx-teslausb.conf), so
+# this default is only consulted when the Flask app binds TCP
+# directly (developer laptop / pytest scenarios).
+_DEFAULT_PORT: int = 80
 _DEFAULT_HOST: str = "127.0.0.1"
 _DEFAULT_MAX_UPLOAD_MB: int = 512
 _DEFAULT_MAX_CHUNK_MB: int = 64

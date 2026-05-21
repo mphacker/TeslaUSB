@@ -977,7 +977,7 @@ script:
 |---|---|
 | H5.x.1 | Rsync `web/teslausb_web/` to `/home/pi/teslausb-b1/web/`. |
 | H5.x.2 | `pip install -e .` inside a venv at `/home/pi/teslausb-b1/venv/`. |
-| H5.x.3 | Start gunicorn under a test-only systemd unit on port 8080 (not 80 — v1's gadget_web is masked but we don't take its port until cutover). |
+| H5.x.3 | Start gunicorn under a test-only systemd unit bound to the Unix socket at `/run/teslausb/gunicorn.sock`; bring up nginx on port 80 in front. v1's `gadget_web.service` is masked (per H0), so port 80 is free. |
 | H5.x.4 | Curl every new endpoint added in the batch. Verify 200 + expected JSON / HTML. |
 | H5.x.5 | Take screenshots via `chromium --headless` at 375×667 and 1280×800, both `prefers-color-scheme: dark` and light. |
 | H5.x.6 | Diff against the v1 baseline screenshots taken in Phase 0. Any non-trivial visual delta requires charter-review approval (Pillar 1: UI parity is non-negotiable). |
@@ -1358,7 +1358,7 @@ flock owner, one DB connection pool, one supervisor pattern.
 | 21 | Cleanup worker implementation? | **Rust, inside `teslausb-worker`.** GPS-aware retention, `.partial` reaping, capacity pressure. | (new, 2026-05-19) |
 | 22 | Cloud uploader implementation? | **Rust, inside `teslausb-worker`.** Queue management + rclone subprocess driver. Python web UI only reads upload state, never schedules work. | (new, 2026-05-19) |
 | 23 | Config format? | **TOML, not YAML.** Rust-native (`serde`+`toml` crate), Python stdlib (`tomllib`, no PyYAML dep), much less foot-gunny than YAML (no significant whitespace, no octal-vs-int, no `Norway problem`). Single file: `/etc/teslausb/teslausb.toml`. | (new, 2026-05-19) |
-| 24 | Web framework? | **Flask + Jinja, behind gunicorn behind nginx.** UI parity is binding (templates port verbatim). Flask is not a hot path — runs as `teslausb` user on `127.0.0.1:5000`. nginx on port 80 (binds privileged, drops to www-data) handles captive portal regex + reverse proxy + static asset serving. No Python service ever runs as root. | (new, 2026-05-19) |
+| 24 | Web framework? | **Flask + Jinja, behind gunicorn behind nginx.** UI parity is binding (templates port verbatim). Flask is not a hot path — gunicorn runs as the `teslausb` user and binds the Unix socket at `/run/teslausb/gunicorn.sock` (no TCP port, no privileged bind). nginx on port 80 (binds privileged, drops to www-data) handles captive portal regex + reverse proxy + static asset serving. No Python service ever runs as root. | (new, 2026-05-19; updated 2026-05-21 to drop the legacy `127.0.0.1:8080` reference — production uses the Unix socket, port 80 is the only public port) |
 | 25 | USB gadget setup? | **Pure configfs / `usb_f_mass_storage` module.** NO `g_mass_storage` module load. Configfs is more flexible and is required anyway for cache invalidation. v1's hybrid approach is dropped. | (new, 2026-05-19) |
 | 26 | Filesystem paths? | **FHS standard.** `/etc/teslausb/`, `/srv/teslausb/`, `/var/lib/teslausb/`, `/run/teslausb/`, `/usr/local/bin/teslausb-*`. No `/home/pi/TeslaUSB`. No `~/ArchivedClips`. | (new, 2026-05-19) |
 | 27 | SDIO write coordination? | **`fcntl(LOCK_EX)` on `/run/teslausb/sd-write.lock`.** Crash-safe (kernel releases on process death), language-agnostic (Rust + Python both have first-class flock), no in-process state to corrupt. Replaces v1's Python `task_coordinator`. | (new, 2026-05-19) |

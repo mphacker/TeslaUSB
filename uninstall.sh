@@ -82,6 +82,8 @@ Options:
 
 Undo steps (sourced from uninstall-lib/<NN>-<name>.sh in REVERSE numeric
 order so dependencies are torn down before what depends on them):
+  11  gadget          Stop + disable usb-gadget + nbd-attach@; tear down
+                      configfs g1; remove gadget scripts, units, configs.
   10  activate        Disable + stop every B-1 unit; daemon-reload.
   09  mask-services   Unmask the desktop/print/modem services step 09 hid.
   08  memory          Remove vm.* sysctl drop-in (swap kept unless --purge).

@@ -90,6 +90,10 @@ Steps (sourced from setup-lib/<NN>-<name>.sh in numeric order):
                       B-1 (avahi-daemon is INTENTIONALLY left running).
   10  activate        Final daemon-reload, enable + start B-1 units in
                       dependency order, run post-start health check.
+  11  gadget          Install USB gadget pipeline: nbd module config,
+                      teslafat-{0,1}.toml configs, nbd-attach@.service,
+                      usb-gadget.service, teslausb-{gadget-up,gadget-down,
+                      present-usb,hide-usb} wrapper scripts.
 
 Exit codes:
   0  success (or dry-run completed)

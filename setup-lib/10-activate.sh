@@ -68,7 +68,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 # defensive re-enable (idempotent no-op via the b1_unit_enabled probe).
 B1_ENABLE_UNITS=(
   teslausb-web.service
-  teslafat.service
+  teslafat@0.service
+  teslafat@1.service
+  nbd-attach@0.service
+  nbd-attach@1.service
+  usb-gadget.service
   cloud-archive.service
   gadget-recovery.service
   nginx.service
@@ -79,13 +83,21 @@ export B1_ENABLE_UNITS
 
 # Units to `systemctl start`, in dependency order. NetworkManager must
 # be up before nginx binds port 80; teslafat (block backend) must be
-# up before teslausb-web (which talks to the worker which depends on
-# teslafat being mountable); watchdog goes last so its priority drop-in
-# from 6.7 doesn't starve anything still racing to start.
+# up before nbd-attach (which connects to its socket); nbd-attach
+# must be up before usb-gadget (which uses /dev/nbd{0,1} as LUN
+# backings); usb-gadget LAST in the storage chain — once UDC is bound
+# Tesla sees drives, so we want every layer below it healthy first.
+# teslausb-web depends on the worker which depends on teslafat being
+# attachable. watchdog goes last so its priority drop-in from 6.7
+# doesn't starve anything still racing to start.
 B1_START_ORDER=(
   NetworkManager.service
   nginx.service
-  teslafat.service
+  teslafat@0.service
+  teslafat@1.service
+  nbd-attach@0.service
+  nbd-attach@1.service
+  usb-gadget.service
   teslausb-web.service
   cloud-archive.service
   gadget-recovery.service

@@ -68,7 +68,7 @@ def test_scaffold_endpoints_match_base_html_url_for_calls(app: Flask) -> None:
         # These mirror the exact `url_for` calls in
         # `teslausb_web/templates/base.html`. If any of them
         # raises BuildError, the template won't render.
-        assert url_for("mapping.map_view").endswith("/map/")
+        assert url_for("mapping.map_view").endswith("/mapping/")
         assert url_for("analytics.dashboard").endswith("/analytics/")
         assert url_for("media.media_home").endswith("/media/")
         assert url_for("cloud_archive.index").endswith("/cloud/")
@@ -78,7 +78,7 @@ def test_scaffold_endpoints_match_base_html_url_for_calls(app: Flask) -> None:
 @pytest.mark.parametrize(
     ("url", "marker"),
     [
-        ("/map/", "scaffolding only"),
+        ("/mapping/", '"placeholder"'),
         ("/analytics/", "scaffolding only"),
         ("/media/", "scaffolding only"),
         ("/cloud/", "scaffolding only"),
@@ -88,7 +88,7 @@ def test_scaffold_endpoints_match_base_html_url_for_calls(app: Flask) -> None:
 def test_scaffold_serves_placeholder(app: Flask, url: str, marker: str) -> None:
     resp = app.test_client().get(url)
     assert resp.status_code == 200
-    assert marker in resp.get_data(as_text=True)
+    assert marker in resp.get_data(as_text=True).lower()
 
 
 def test_base_template_renders_without_error(app: Flask) -> None:

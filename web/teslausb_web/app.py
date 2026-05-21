@@ -32,6 +32,7 @@ from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
 from teslausb_web.blueprints.boombox import boombox_bp
 from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
+from teslausb_web.blueprints.mapping import mapping_bp
 from teslausb_web.blueprints.music import music_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.blueprints.wraps import wraps_bp
@@ -218,6 +219,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         music_bp,
         boombox_bp,
         wraps_bp,
+        mapping_bp,
     )
     for bp in real_blueprints:
         if bp.name in registered_names:

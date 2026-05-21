@@ -212,6 +212,14 @@ b1_step_03() {
   fi
 
   local name
+  # Fix the top-level B1_DATA_ROOT itself first. Without this the
+  # web app (running as `pi` with secondary group `teslausb`) cannot
+  # touch-probe `backing_root` (mode 0755 blocks group writes), which
+  # makes the System Health "storage_writable" probe report ERROR
+  # even when both `teslacam/` and `media/` subdirs are writable.
+  if (( have_group )); then
+    _b1_fix_ownership "${B1_DATA_ROOT}" || return 1
+  fi
   for name in "${B1_DATA_DIRS[@]}"; do
     _b1_create_root "${name}" || return 1
     if (( have_group )); then

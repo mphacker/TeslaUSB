@@ -469,7 +469,7 @@ def _scan_journal_uncached() -> dict[str, object]:
             check=False,
             capture_output=True,
             text=True,
-            timeout=4.0,
+            timeout=8.0,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return {

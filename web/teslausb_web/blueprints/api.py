@@ -252,8 +252,8 @@ def gadget_state() -> ResponseReturnValue:
 
     v1 probed configfs directly. In B-1 the Rust ``teslafat`` daemon
     owns the gadget lifecycle (ADR-0007), but the daemon does not
-    yet expose a ``GetGadgetState`` IPC method — that wiring lands
-    in Phase 6 once the worker side stabilises. The URL is kept so
+    yet expose a ``GetGadgetState`` IPC method — see
+    https://github.com/mphacker/TeslaUSB/issues/226 (Phase 6). The URL is kept so
     callers see an explicit ``not_implemented`` token rather than a
     404, but the status code is 503 to signal "try again later".
     """

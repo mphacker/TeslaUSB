@@ -494,7 +494,7 @@
             Upload Schedule
         </summary>
         <div class="section-content">
-            {# TODO: rewire to the B-1 schedule API once the cloud archive scheduler blueprint lands. #}
+            {# TODO(#223): rewire to the B-1 schedule API once the cloud archive scheduler blueprint lands. #}
             <div class="info-box" style="margin-bottom: var(--space-3);">
                 <strong>Schedule editor</strong>
                 <p style="margin: 8px 0 0; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.6;">
@@ -556,7 +556,7 @@
             WiFi Conditional Rules
         </summary>
         <div class="section-content">
-            {# TODO: rewire to a B-1 endpoint that persists per-SSID archive rules. #}
+            {# TODO(#224): rewire to a B-1 endpoint that persists per-SSID archive rules. #}
             <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
                 Control when uploads are allowed based on WiFi state. The parity UI preserves trusted-network, hotspot, and metered-link affordances even though Phase 5.22 does not yet expose the save route.
             </p>
@@ -636,7 +636,7 @@ GarageMesh</textarea>
             Reconcile Remote State
         </summary>
         <div class="section-content">
-            {# TODO: rewire to a B-1 reconcile endpoint that exposes services.cloud_archive.reconcile._reconcile_with_remote. #}
+            {# TODO(#225): rewire to a B-1 reconcile endpoint that exposes services.cloud_archive.reconcile._reconcile_with_remote. #}
             <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
                 Reconcile compares remote cloud folders with the local SQLite mirror so manually uploaded or backfilled files can be marked synced without re-uploading them.
             </p>

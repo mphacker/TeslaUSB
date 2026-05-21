@@ -490,11 +490,8 @@ def test_get_event_chart_data_formats_chart_payload(sample_fixture: SampleFixtur
 
 
 def test_get_db_connection_can_read_current_schema(sample_fixture: SampleFixture) -> None:
-    connection = sample_fixture.service.get_db_connection()
-    try:
+    with sample_fixture.service.open_db() as connection:
         row = connection.execute("SELECT COUNT(*) FROM trips").fetchone()
-    finally:
-        connection.close()
 
     assert row is not None
     assert int(row[0]) == 4
@@ -506,8 +503,7 @@ def _seed_sample_database(service: MappingQueries, media_root: Path) -> SampleDa
     day_b = (now - timedelta(days=2)).date().isoformat()
     day_c = (now - timedelta(days=1)).date().isoformat()
     _create_media_tree(media_root)
-    connection = service.get_db_connection()
-    try:
+    with service.open_db() as connection:
         connection.executemany(
             """
             INSERT INTO trips (
@@ -808,8 +804,6 @@ def _seed_sample_database(service: MappingQueries, media_root: Path) -> SampleDa
             ),
         )
         connection.commit()
-    finally:
-        connection.close()
     return SampleDays(day_a=day_a, day_b=day_b, day_c=day_c)
 
 

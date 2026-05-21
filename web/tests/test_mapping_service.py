@@ -244,7 +244,7 @@ def test_read_event_json_and_infer_sentry_event(service_fixture: MappingService)
     )
 
     assert payload is not None
-    with service_fixture.get_db_connection() as connection:
+    with service_fixture.open_db() as connection:
         created = _infer_sentry_event(
             connection,
             "SentryClips/2026-01-02_00-00-00/2026-01-02_00-00-00-front.mp4",
@@ -305,7 +305,7 @@ def test_index_single_file_upgrades_recent_to_archived_path(
 
     first = service_fixture.index_single_file(recent)
     second = service_fixture.index_single_file(archived)
-    with service_fixture.get_db_connection() as connection:
+    with service_fixture.open_db() as connection:
         row = connection.execute("SELECT DISTINCT video_path FROM waypoints").fetchone()
 
     assert first.outcome.value == "indexed"
@@ -353,7 +353,7 @@ def test_purge_deleted_videos_nulls_paths_but_keeps_trip(service_fixture: Mappin
     video.unlink()
 
     result = service_fixture.purge_deleted_videos(deleted_paths=(video,))
-    with service_fixture.get_db_connection() as connection:
+    with service_fixture.open_db() as connection:
         trip_count = connection.execute("SELECT COUNT(*) AS count FROM trips").fetchone()["count"]
         row = connection.execute("SELECT video_path FROM waypoints").fetchone()
 
@@ -369,7 +369,7 @@ def test_boot_catchup_scan_enqueues_new_archived_files(service_fixture: MappingS
 
     first = service_fixture.boot_catchup_scan()
     second = service_fixture.boot_catchup_scan()
-    with service_fixture.get_db_connection() as connection:
+    with service_fixture.open_db() as connection:
         row = connection.execute("SELECT COUNT(*) AS count FROM indexing_queue").fetchone()
 
     assert first["enqueued"] == 1
@@ -390,16 +390,19 @@ def test_retry_and_kv_helpers() -> None:
         return "ok"
 
     connection = sqlite3.connect(":memory:")
-    connection.execute("CREATE TABLE kv_meta (key TEXT PRIMARY KEY, value TEXT)")
-    _kv_set(connection, "status", "ready")
+    try:
+        connection.execute("CREATE TABLE kv_meta (key TEXT PRIMARY KEY, value TEXT)")
+        _kv_set(connection, "status", "ready")
 
-    assert _is_transient_db_error(sqlite3.OperationalError("disk i/o error")) is True
-    assert flaky() == "ok"
-    assert _kv_get(connection, "status") == "ready"
+        assert _is_transient_db_error(sqlite3.OperationalError("disk i/o error")) is True
+        assert flaky() == "ok"
+        assert _kv_get(connection, "status") == "ready"
+    finally:
+        connection.close()
 
 
 def test_trip_merge_and_recompute_stats(service_fixture: MappingService) -> None:
-    with service_fixture.get_db_connection() as connection:
+    with service_fixture.open_db() as connection:
         connection.execute(
             "INSERT INTO trips (id, start_time, end_time, source_folder, indexed_at) "
             "VALUES (1, '2026-01-01T00:00:00', '2026-01-01T00:00:01', "

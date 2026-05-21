@@ -30,7 +30,7 @@ def _purge_targeted_paths(
     deleted_paths: tuple[Path, ...],
 ) -> dict[str, int]:
     result = _purge_result()
-    with service.get_db_connection() as connection:
+    with service.open_db() as connection:
         for deleted_path in deleted_paths:
             if _has_surviving_copy(service, deleted_path):
                 continue
@@ -63,7 +63,7 @@ def _purge_result() -> dict[str, int]:
 
 
 def _missing_indexed_files(service: MappingService) -> tuple[Path, ...]:
-    with service.get_db_connection() as connection:
+    with service.open_db() as connection:
         rows = connection.execute(
             "SELECT file_path FROM indexed_files ORDER BY file_path"
         ).fetchall()

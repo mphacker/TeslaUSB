@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from numbers import Real
@@ -21,7 +22,7 @@ from teslausb_web.services.mapping_queries import MappingQueries, MappingQueries
 from .kv import _kv_get, _kv_set
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from teslausb_web.config import WebConfig
 
@@ -219,6 +220,11 @@ class MappingService:
     def get_db_connection(self) -> sqlite3.Connection:
         return self._migrations_runner.init_db()
 
+    @contextmanager
+    def open_db(self) -> Iterator[sqlite3.Connection]:
+        with self._migrations_runner.open_db() as connection:
+            yield connection
+
     def get_indexer_status(self) -> dict[str, object]:
         state = self._status_dict()
         state["queue_depth"] = self._queue_depth()
@@ -320,7 +326,7 @@ class MappingService:
 
     def _queue_depth(self) -> int:
         try:
-            with self.get_db_connection() as connection:
+            with self.open_db() as connection:
                 row = connection.execute(
                     "SELECT COUNT(*) AS count FROM indexing_queue WHERE claimed_by IS NULL"
                 ).fetchone()
@@ -334,14 +340,14 @@ class MappingService:
     def _persist_status_locked(self) -> None:
         payload = json.dumps(asdict(self._status), sort_keys=True)
         try:
-            with self.get_db_connection() as connection:
+            with self.open_db() as connection:
                 _kv_set(connection, _INDEXER_STATUS_KEY, payload)
         except sqlite3.Error as exc:
             logger.debug("Failed to persist indexer status: %s", exc)
 
     def _load_status_state(self) -> _IndexerStatusState:
         try:
-            with self.get_db_connection() as connection:
+            with self.open_db() as connection:
                 payload = _kv_get(connection, _INDEXER_STATUS_KEY)
         except sqlite3.Error:
             return _IndexerStatusState()

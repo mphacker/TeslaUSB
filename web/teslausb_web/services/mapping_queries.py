@@ -19,12 +19,12 @@ Porting notes:
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import math
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
@@ -40,7 +40,7 @@ from teslausb_web.services.mapping_migrations import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
     from teslausb_web.config import WebConfig
@@ -361,6 +361,14 @@ class MappingQueries:
         except (MappingDatabaseError, MappingMigrationError, sqlite3.Error) as exc:
             raise MappingQueryError(f"Failed to open mapping database: {exc}") from exc
 
+    @contextmanager
+    def open_db(self) -> Iterator[sqlite3.Connection]:
+        connection = self.get_db_connection()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
     def query_trips(  # noqa: PLR0913
         self,
         *,
@@ -575,7 +583,7 @@ class MappingQueries:
         sql: str,
         params: tuple[object, ...] = (),
     ) -> tuple[sqlite3.Row, ...]:
-        with contextlib.closing(self.get_db_connection()) as connection:
+        with self.open_db() as connection:
             return tuple(connection.execute(sql, params).fetchall())
 
     def _fetch_row(
@@ -583,7 +591,7 @@ class MappingQueries:
         sql: str,
         params: tuple[object, ...] = (),
     ) -> sqlite3.Row:
-        with contextlib.closing(self.get_db_connection()) as connection:
+        with self.open_db() as connection:
             row = connection.execute(sql, params).fetchone()
         if not isinstance(row, sqlite3.Row):
             raise MappingQueryError("Expected query row but got none")

@@ -31,7 +31,7 @@ def index_single_file(service: MappingService, video_path: Path) -> IndexResult:
     stat_result = video_path.stat()
     parser = get_sei_parser(service._parser_or_default())
     try:
-        with service.get_db_connection() as connection:
+        with service.open_db() as connection:
             row = connection.execute(
                 "SELECT waypoint_count FROM indexed_files WHERE file_path = ?",
                 (str(video_path),),

@@ -4,12 +4,13 @@ import logging
 import math
 import shutil
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from teslausb_web.config import WebConfig
@@ -274,6 +275,14 @@ class MigrationsRunner:
 
     def init_db(self) -> sqlite3.Connection:
         return _init_db(self.config)
+
+    @contextmanager
+    def open_db(self) -> Iterator[sqlite3.Connection]:
+        connection = self.init_db()
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def backup_db(self, *, target_version: int = _SCHEMA_VERSION) -> Path | None:
         return _backup_db(self.config, target_version)

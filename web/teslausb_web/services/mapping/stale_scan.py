@@ -38,7 +38,7 @@ def boot_catchup_scan(service: MappingService, *, source: str = "catchup") -> di
     if not new_files:
         _write_watermark(service, max_mtime)
         return result
-    with service.get_db_connection() as connection:
+    with service.open_db() as connection:
         indexed_keys = _indexed_keys(connection)
         queued_keys = _queued_keys(connection)
         enqueued_rows = _enqueue_missing_files(
@@ -144,7 +144,7 @@ def stop_daily_stale_scan(service: MappingService, *, timeout: float | None = No
 
 def _read_watermark(service: MappingService) -> float:
     try:
-        with service.get_db_connection() as connection:
+        with service.open_db() as connection:
             raw = _kv_get(connection, _BOOT_CATCHUP_WATERMARK_KEY)
     except sqlite3.Error:
         return 0.0
@@ -156,7 +156,7 @@ def _read_watermark(service: MappingService) -> float:
 
 def _write_watermark(service: MappingService, watermark: float) -> None:
     try:
-        with service.get_db_connection() as connection:
+        with service.open_db() as connection:
             _write_watermark_to_connection(connection, watermark)
     except sqlite3.Error:
         return

@@ -31,11 +31,13 @@ from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
 from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
 from teslausb_web.blueprints.system_health import system_health_bp
+from teslausb_web.blueprints.wraps import wraps_bp
 from teslausb_web.config import WebConfig, load_config
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
 from teslausb_web.services.light_show_service import make_light_show_service
+from teslausb_web.services.wrap_service import make_wrap_service
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -120,6 +122,7 @@ def create_app(
     _register_cache_invalidator(app, cfg)
     _register_chime_services(app, cfg)
     _register_light_show_services(app, cfg)
+    _register_wrap_services(app, cfg)
 
     logger.info(
         "teslausb_web app created (port=%d, max_upload_mb=%d, samba=%s, source=%s)",
@@ -203,6 +206,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         system_health_bp,
         lock_chimes_bp,
         light_shows_bp,
+        wraps_bp,
     )
     for bp in real_blueprints:
         if bp.name in registered_names:
@@ -247,6 +251,11 @@ def _register_chime_services(app: Flask, cfg: WebConfig) -> None:
 def _register_light_show_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the light-show service once at app startup."""
     app.extensions["light_show_service"] = make_light_show_service(cfg)
+
+
+def _register_wrap_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the wrap service once at app startup."""
+    app.extensions["wrap_service"] = make_wrap_service(cfg)
 
 
 def _register_template_globals(app: Flask) -> None:

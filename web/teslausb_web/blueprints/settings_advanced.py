@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-settings_bp = Blueprint("settings", __name__)
+settings_bp = Blueprint("settings_advanced", __name__)
 
 _XHR_HEADER_VALUE: Final[str] = "XMLHttpRequest"
 _MESSAGE_MAX_CHARS: Final[int] = 120
@@ -87,8 +87,8 @@ def _truncate(message: str) -> str:
 
 def _redirect_to_settings(*, cache_bust: str | None = None) -> Response:
     if cache_bust is None:
-        return cast("Response", redirect(url_for("settings.index")))
-    return cast("Response", redirect(url_for("settings.index", _=cache_bust)))
+        return cast("Response", redirect(url_for("settings_advanced.advanced")))
+    return cast("Response", redirect(url_for("settings_advanced.advanced", _=cache_bust)))
 
 
 def _settings_response(
@@ -178,8 +178,9 @@ def _index_context(settings: SystemSettings) -> dict[str, object]:
     }
 
 
-@settings_bp.route("/settings/")
-def index() -> ResponseReturnValue:
+@settings_bp.route("/settings/advanced")
+@settings_bp.route("/settings/advanced/")
+def advanced() -> ResponseReturnValue:
     try:
         return render_template(
             "settings_advanced.html",
@@ -190,12 +191,6 @@ def index() -> ResponseReturnValue:
     except Exception:
         logger.exception("Unhandled error while preparing advanced settings index")
         return _json_error_payload("Internal server error"), HTTPStatus.INTERNAL_SERVER_ERROR
-
-
-@settings_bp.route("/settings/advanced")
-@settings_bp.route("/settings/advanced/")
-def advanced_alias() -> ResponseReturnValue:
-    return index()
 
 
 @settings_bp.route("/settings/advanced/save", methods=["POST"])

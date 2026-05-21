@@ -39,6 +39,7 @@ from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
 from teslausb_web.blueprints.mapping import mapping_bp
 from teslausb_web.blueprints.music import music_bp
+from teslausb_web.blueprints.settings import settings_dashboard_bp
 from teslausb_web.blueprints.settings_advanced import settings_bp
 from teslausb_web.blueprints.storage_retention import storage_retention_bp
 from teslausb_web.blueprints.system_health import system_health_bp
@@ -262,6 +263,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         boombox_bp,
         license_plates_bp,
         storage_retention_bp,
+        settings_dashboard_bp,
         settings_bp,
         captive_portal_bp,
         wraps_bp,

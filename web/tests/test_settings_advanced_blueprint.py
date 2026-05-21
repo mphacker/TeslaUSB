@@ -87,7 +87,7 @@ class _FakeStatus:
 
 class TestHelpers:
     def test_app_registers_blueprint_and_services(self, app) -> None:
-        assert "settings" in app.blueprints
+        assert "settings_advanced" in app.blueprints
         assert isinstance(app.extensions["system_settings_service"], SystemSettingsService)
         assert isinstance(app.extensions["teslafat_client"], TeslaFatClient)
 
@@ -156,10 +156,10 @@ class TestHelpers:
             assert _request_text("log_level") == "7"
 
     def test_redirect_helper_defaults_to_settings_index(self, app) -> None:
-        with app.test_request_context("/settings/"):
+        with app.test_request_context("/settings/advanced/"):
             response = _redirect_to_settings()
         assert response.status_code == HTTPStatus.FOUND
-        assert response.location == "/settings/"
+        assert response.location == "/settings/advanced/"
 
     def test_json_error_payload_and_truncate_helpers(self, app) -> None:
         with app.app_context():
@@ -170,7 +170,7 @@ class TestHelpers:
 
 class TestIndexRoutes:
     def test_index_route_renders_template(self, client) -> None:
-        response = client.get("/settings/")
+        response = client.get("/settings/advanced/")
         html = response.get_data(as_text=True)
         assert response.status_code == HTTPStatus.OK
         assert "Advanced Settings" in html
@@ -197,12 +197,12 @@ class TestIndexRoutes:
 
     def test_index_route_returns_json_on_unhandled_exception(self, client, service) -> None:
         with patch.object(service, "get_settings", side_effect=RuntimeError("boom")):
-            response = client.get("/settings/")
+            response = client.get("/settings/advanced/")
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
         assert response.get_json() == {"success": False, "error": "Internal server error"}
 
     def test_index_sweep_has_zero_removed_feature_references(self, client) -> None:
-        html = client.get("/settings/").get_data(as_text=True).lower()
+        html = client.get("/settings/advanced/").get_data(as_text=True).lower()
         assert html.count("mode_control") == 0
         assert html.count("current_mode") == 0
         assert html.count("quick_edit") == 0
@@ -210,7 +210,7 @@ class TestIndexRoutes:
         assert html.count("loopback") == 0
 
     def test_index_sweep_has_zero_removed_storage_terms(self, client) -> None:
-        html = client.get("/settings/").get_data(as_text=True).lower()
+        html = client.get("/settings/advanced/").get_data(as_text=True).lower()
         assert html.count("img") == 0
         assert html.count("format partition") == 0
         assert html.count("loopback") == 0
@@ -246,7 +246,7 @@ class TestSettingsApi:
                 data={"samba_enabled": "on", "log_level": "ERROR", "<partition>": "part1"},
             )
         assert response.status_code == HTTPStatus.FOUND
-        assert response.headers["Location"] == "/settings/?_=9"
+        assert response.headers["Location"] == "/settings/advanced/?_=9"
         assert service.get_settings().samba_enabled is True
         assert service.get_settings().log_level == "ERROR"
         schedule_mock.assert_called_once()
@@ -453,7 +453,7 @@ class TestIpcActions:
         ):
             response = client.post("/settings/advanced/ipc/status?_=5")
         assert response.status_code == HTTPStatus.FOUND
-        assert response.headers["Location"] == "/settings/?_=5"
+        assert response.headers["Location"] == "/settings/advanced/?_=5"
         schedule_mock.assert_called_once()
 
 

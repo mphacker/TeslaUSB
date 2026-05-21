@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Final
 
 from flask import Blueprint, current_app, jsonify
@@ -214,6 +215,24 @@ def api_system_health() -> ResponseReturnValue:
     """
     cfg: WebConfig = current_app.config["teslausb_config"]
     return jsonify(_build_health(cfg))
+
+
+@system_health_bp.route("/api/system/metrics")
+def api_system_metrics() -> ResponseReturnValue:
+    """Live system metrics stub.
+
+    # TODO(#issue-needed): wire /api/system/metrics — placeholder for full v1
+    parity, Phase 5.x. Returns an empty payload so the Live Metrics tiles show
+    an em dash rather than throwing a JS error on first poll.
+    """
+    return jsonify({}), HTTPStatus.OK
+
+
+@system_health_bp.route("/api/system/clear_lost_clips", methods=["POST"])
+def api_clear_lost_clips() -> ResponseReturnValue:
+    """Clear lost-clips counter. Stub — B-1 source_gone tracking TBD."""
+    # TODO(#issue-needed): wire lost-clips counter to B-1 archive worker, Phase 5.x
+    return jsonify({"success": True, "deleted": 0}), HTTPStatus.OK
 
 
 __all__ = ("system_health_bp",)

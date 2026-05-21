@@ -56,7 +56,6 @@ _SCAFFOLDS: tuple[_Scaffold, ...] = (
     _Scaffold("analytics", "/analytics", "dashboard", "Phase 5.7"),
     _Scaffold("media", "/media", "media_home", "Phase 5.8 onward"),
     _Scaffold("cloud_archive", "/cloud", "index", "Phase 5.14"),
-    _Scaffold("settings", "/settings", "index", "Phase 5.16"),
 )
 
 

@@ -1,0 +1,2303 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+    <div id="apLoadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <div class="loading-text">Updating AP settings, please wait...</div>
+    </div>
+
+    <!-- B-1 keeps the dashboard entry point but drops v1's present/edit mode
+         toggles. The device is always Tesla-facing, so this is now a
+         passive status banner instead of an action card. -->
+    <div class="device-status-card device-status-present">
+        <div class="device-status-header">
+            <span class="status-dot status-present"></span>
+            <div class="device-status-info">
+                <strong>Connected to Tesla</strong>
+                <p>USB drive stays attached to the vehicle in B-1.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Files-Lost banner (Phase 4.3 ΓÇö issue #101).
+         Hidden by default; shown by JS poller when archive.lost_24h > 0.
+         This is the user-facing version of the worker's source_gone
+         counter ΓÇö clips Tesla rotated out of RecentClips before we
+         could archive them. Lost dashcam footage is unrecoverable, so
+         this banner is intentionally loud (red) and links to the
+         Failed Jobs page for the full archive history. -->
+    <style>
+        /* Issue 170 follow-up: the banner div carries an inline
+           ``display:flex`` (specificity 1,0,0,0) which overrides the
+           UA stylesheet's ``[hidden] { display:none }`` rule
+           (specificity 0,0,1,0). Without this scoped !important rule,
+           setting ``banner.hidden = true`` from JS leaves the banner
+           visible because the inline display wins ΓÇö exactly what the
+           user reported when the Dismiss button "did not work" even
+           though the POST to /api/system/clear_lost_clips returned
+           200. Reproduced live with Playwright on
+           cybertruckusb.local: ``element.hidden === true`` but
+           ``getComputedStyle(el).display === "flex"``. The
+           !important + the [hidden] selector match exactly what the
+           UA rule would do, just with enough specificity to defeat
+           the inline style. */
+        .files-lost-banner[hidden] { display: none !important; }
+    </style>
+    <div id="files-lost-banner" class="files-lost-banner" hidden
+         style="margin:12px 0; padding:12px 14px;
+                border-radius:8px;
+                background:var(--msg-error-bg);
+                color:var(--msg-error-text);
+                border:1px solid var(--accent-error);
+                display:flex; align-items:center; gap:10px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" style="flex-shrink:0;">
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <div style="flex:1;">
+            <strong id="files-lost-title">
+                Footage may have been lost
+            </strong>
+            <div id="files-lost-detail"
+                 style="font-size:0.9rem; margin-top:2px;
+                        opacity:0.92;">
+                Tesla rotated clips out of RecentClips before
+                we could copy them. Check Failed Jobs for details.
+            </div>
+        </div>
+        <a id="files-lost-link" href="#"
+           style="color:inherit; text-decoration:underline;
+                  font-size:0.9rem; min-height:44px; min-width:44px;
+                  display:inline-flex; align-items:center;
+                  padding:0 10px;">
+            Details
+        </a>
+        <button id="files-lost-dismiss" type="button"
+                aria-label="Dismiss footage-lost banner"
+                style="background:transparent; color:inherit;
+                       border:1px solid currentColor; border-radius:6px;
+                       cursor:pointer; font-size:0.9rem;
+                       min-height:44px; min-width:44px;
+                       padding:0 12px;">
+            Dismiss
+        </button>
+    </div>
+
+    <!-- System Health (Phase 4.2 ΓÇö issue #101) -->
+    <details class="settings-section" id="system-health-section" open>
+        <summary>System Health</summary>
+        <div class="section-content">
+            <div id="system-health-card"
+                 data-poll-url="{{ url_for('system_health.api_system_health') }}"
+                                  style="display:flex; flex-direction:column; gap:6px;">
+                <p id="system-health-overall"
+                   style="margin:0 0 6px; padding:8px 12px;
+                          border-radius:8px; font-size:0.95rem;
+                          display:flex; align-items:center; gap:8px;
+                          background:var(--bg-secondary);
+                          border:1px solid var(--border-color);">
+                    <span class="health-dot health-dot-unknown"
+                          aria-hidden="true"
+                          style="width:10px; height:10px; border-radius:50%;
+                                 display:inline-block; flex-shrink:0;
+                                 background:var(--text-secondary);"></span>
+                    <span id="system-health-overall-text">
+                        LoadingΓÇª
+                    </span>
+                </p>
+                <div id="system-health-rows"
+                     style="display:grid;
+                            grid-template-columns:auto auto 1fr;
+                            gap:6px 12px; align-items:center;
+                            font-size:0.9rem;">
+                    <!-- Rows rendered by JS from /api/system/health -->
+                </div>
+                <p id="system-health-error" hidden
+                   style="font-size:0.85rem; color:var(--msg-error-text);
+                          margin:6px 0 0;">
+                    System Health probe failed ΓÇö
+                    <button type="button" class="btn btn-ghost"
+                            id="system-health-retry-btn"
+                            aria-label="Retry system health probe"
+                            style="min-height:44px; min-width:44px;
+                                   padding:0 14px; margin-left:6px;
+                                   font-size:0.9rem;">Retry</button>
+                </p>
+            </div>
+        </div>
+    </details>
+
+    <!-- Live Metrics (Issue #208) ΓÇö near-realtime CPU / memory / I/O.
+         Auto-pauses when the tab is hidden so we never poll a backgrounded
+         page. /api/system/metrics is /proc-only (no subprocesses, no DB
+         writes), so a 5 s poll on the device itself is essentially free. -->
+    <details class="settings-section" id="live-metrics-section" open>
+        <summary>Live Metrics</summary>
+        <div class="section-content">
+            <div id="live-metrics-card"
+                 data-poll-url="{{ url_for('system_health.api_system_metrics') }}"
+                 style="display:flex; flex-direction:column; gap:8px;">
+                <div id="live-metrics-grid"
+                     style="display:grid;
+                            grid-template-columns:repeat(auto-fit,
+                                                  minmax(200px, 1fr));
+                            gap:10px;">
+                    <!-- Tiles rendered by JS from /api/system/metrics -->
+                    <div class="metric-tile" id="metric-load">
+                        <div class="metric-label">Load (1m / 5m / 15m)</div>
+                        <div class="metric-value" data-field="load">ΓÇö</div>
+                        <div class="metric-detail" data-field="load-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-cpu">
+                        <div class="metric-label">CPU</div>
+                        <div class="metric-value" data-field="cpu">ΓÇö</div>
+                        <div class="metric-detail" data-field="cpu-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-mem">
+                        <div class="metric-label">Memory</div>
+                        <div class="metric-value" data-field="mem">ΓÇö</div>
+                        <div class="metric-detail" data-field="mem-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-swap">
+                        <div class="metric-label">Swap</div>
+                        <div class="metric-value" data-field="swap">ΓÇö</div>
+                        <div class="metric-detail" data-field="swap-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-sd">
+                        <div class="metric-label">SD Card I/O</div>
+                        <div class="metric-value" data-field="sd">ΓÇö</div>
+                        <div class="metric-detail" data-field="sd-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-loop">
+                        <div class="metric-label">USB Image I/O</div>
+                        <div class="metric-value" data-field="loop">ΓÇö</div>
+                        <div class="metric-detail" data-field="loop-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-coord">
+                        <div class="metric-label">Active Worker</div>
+                        <div class="metric-value" data-field="coord">ΓÇö</div>
+                        <div class="metric-detail" data-field="coord-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-queues">
+                        <div class="metric-label">Queue Depths</div>
+                        <div class="metric-value" data-field="queues">ΓÇö</div>
+                        <div class="metric-detail" data-field="queues-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                    <div class="metric-tile" id="metric-cache">
+                        <div class="metric-label">Stationary Cache</div>
+                        <div class="metric-value" data-field="cache">ΓÇö</div>
+                        <div class="metric-detail" data-field="cache-detail">
+                            &nbsp;
+                        </div>
+                    </div>
+                </div>
+                <p id="live-metrics-foot"
+                   style="margin:0; font-size:0.78rem;
+                          color:var(--text-secondary);">
+                    Updated <span id="live-metrics-updated">ΓÇö</span>
+                    ┬╖ <span id="live-metrics-uptime">ΓÇö</span>
+                </p>
+            </div>
+        </div>
+    </details>
+    <style>
+        #live-metrics-card .metric-tile {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-height: 72px;
+        }
+        #live-metrics-card .metric-label {
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        #live-metrics-card .metric-value {
+            font-size: 1.15rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            font-variant-numeric: tabular-nums;
+        }
+        #live-metrics-card .metric-detail {
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+        }
+        #live-metrics-card .metric-tile.warn {
+            border-color: var(--accent-warning);
+        }
+        #live-metrics-card .metric-tile.error {
+            border-color: var(--accent-error);
+        }
+    </style>
+
+    <!-- WiFi Networks -->
+    <details class="settings-section">
+        <summary>WiFi Networks</summary>
+        <div class="section-content">
+            {% if wifi_change_status %}
+            <div id="wifiStatusAlert" style="margin: 0 0 12px; padding: 12px; border-radius: 6px; position: relative;
+                {% if wifi_change_status.success %}
+                    background-color: var(--msg-success-bg); border: 1px solid var(--success-border); color: var(--msg-success-text);
+                {% elif wifi_change_status.action == 'reverted' %}
+                    background-color: var(--msg-warning-bg); border: 1px solid var(--warning-border); color: var(--msg-warning-text);
+                {% elif wifi_change_status.action == 'ap_started' %}
+                    background-color: var(--msg-error-bg); border: 1px solid var(--error-text); color: var(--msg-error-text);
+                {% else %}
+                    background-color: var(--msg-error-bg); border: 1px solid var(--error-text); color: var(--msg-error-text);
+                {% endif %}">
+                <button type="button" onclick="dismissWifiStatus()" aria-label="Dismiss Wi-Fi status"
+                        style="position: absolute; top: 8px; right: 8px; background: none; border: 1px solid currentColor; border-radius: 6px; cursor: pointer; opacity: 0.9; color: inherit; min-height: 44px; min-width: 44px; padding: 0 12px;"
+                        title="Dismiss">Close</button>
+                <div style="padding-right: 30px;">
+                    <strong>
+                        {% if wifi_change_status.success %}
+                            WiFi Connection Updated
+                        {% elif wifi_change_status.action == 'reverted' %}
+                            WiFi Connection Reverted
+                        {% elif wifi_change_status.action == 'ap_started' %}
+                            WiFi Connection Failed - AP Started
+                        {% else %}
+                            WiFi Connection Failed
+                        {% endif %}
+                    </strong>
+                    <div style="margin-top: 4px; font-size: 0.95em;">{{ wifi_change_status.message }}</div>
+                    {% if wifi_change_status.timestamp %}
+                    <div style="margin-top: 6px; font-size: 0.85em; opacity: 0.8;">{{ wifi_change_status.timestamp }}</div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                <p style="font-size:0.85em;color:var(--text-secondary);margin:0">Networks higher in the list are preferred when multiple are in range.</p>
+                <button class="edit-btn" onclick="scanAndRefreshNetworks()" id="btnWifiScan" style="padding:4px 10px;font-size:0.85em;white-space:nowrap">Scan</button>
+            </div>
+            <div id="savedNetworksList">
+                <div style="text-align:center;padding:12px;color:var(--text-secondary)">Loading...</div>
+            </div>
+            <div style="margin-top:12px">
+                <button class="edit-btn" onclick="toggleAddNetwork()" id="btnAddNetwork" style="padding:4px 10px;font-size:0.85em">Add Network</button>
+            </div>
+            <div id="addNetworkPanel" style="display:none;margin-top:12px;padding:12px;background-color:var(--bg-info);border:1px solid var(--border-color);border-radius:var(--radius-md,8px)">
+                <div style="margin-bottom:8px">
+                    <label for="newWifiSSID" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">SSID</label>
+                    <input type="text" id="newWifiSSID" maxlength="32" placeholder="Network name" list="wifiScanResults"
+                           class="settings-form-input" style="max-width:300px">
+                    <datalist id="wifiScanResults"></datalist>
+                </div>
+                <div style="margin-bottom:8px">
+                    <label for="newWifiPassword" style="display:block;font-size:0.85em;font-weight:500;color:var(--text-primary);margin-bottom:4px">Password</label>
+                    <input type="password" id="newWifiPassword" minlength="8" maxlength="63" placeholder="Password (empty for open)"
+                           class="settings-form-input" style="max-width:300px">
+                </div>
+                <button class="edit-btn" onclick="addWifiNetwork()" id="addWifiBtn" style="padding:4px 10px;font-size:0.85em">Connect</button>
+            </div>
+
+            <div style="margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);">
+                <strong>How it works:</strong> The Pi will attempt to connect to the new network. Thanks to concurrent AP mode, you can remain connected to the fallback AP during the transition. If the new WiFi network is unreachable or credentials are incorrect, you'll maintain access via the AP.
+            </div>
+        </div>
+    </details>
+
+    <!-- Access Point -->
+    <details class="settings-section">
+        <summary>Access Point</summary>
+        <div class="section-content">
+            {% if ap_status.error %}
+                <div style="color: var(--error-text);">AP status unavailable ({{ ap_status.error }})</div>
+            {% else %}
+                <div style="margin-bottom: 12px;">
+                    <div>Status: <strong>{{ 'Active' if ap_status.ap_active else 'Inactive' }}</strong> | Mode: <strong>{{ 'AP On' if ap_status.force_mode == 'force_on' else 'Auto' }}</strong></div>
+                    <div style="margin-top: 4px;">SSID: <code>{{ ap_status.ssid }}</code> | IP: <code>{{ ap_status.static_ip }}</code> | DHCP: <code>{{ ap_status.dhcp_range_start }} - {{ ap_status.dhcp_range_end }}</code></div>
+                    {% if ap_status.allow_concurrent %}
+                        <div style="font-size: 0.9em; color: var(--text-secondary); margin-top: 4px;">The AP runs on a virtual interface, allowing simultaneous WiFi and AP access.</div>
+                    {% endif %}
+                </div>
+
+                <div style="padding: 12px; background-color: var(--bg-info); border: 1px solid var(--border-color); border-radius: var(--radius-md, 8px); margin-bottom: 12px;">
+                    <strong style="color: var(--text-primary);">AP Configuration:</strong>
+                    <form method="post" action="{{ url_for('captive_portal.configure_ap') }}" id="apConfigForm" style="margin-top: 8px;">
+                        <div style="margin-bottom: 8px;">
+                            <label for="ap_ssid" style="display: inline-block; width: 100px; color: var(--text-primary);">SSID:</label>
+                            <input type="text" id="ap_ssid" name="ssid" value="{{ ap_config.ssid }}" maxlength="32" required
+                                   class="settings-form-input" style="max-width:300px">
+                            <span style="font-size: 0.85em; color: var(--text-secondary);">(1-32 chars)</span>
+                        </div>
+                        <div style="margin-bottom: 8px;">
+                            <label for="ap_passphrase" style="display: inline-block; width: 100px; color: var(--text-primary);">Password:</label>
+                            <input type="password" id="ap_passphrase" name="passphrase" value="{{ ap_config.passphrase }}" minlength="8" maxlength="63"
+                                   class="settings-form-input" style="max-width:300px">
+                            <button type="button" onclick="togglePassword(this)" style="min-height:44px; padding: 8px 12px; margin-left: 4px; background-color: var(--btn-info-bg); color: var(--btn-info-text); border: none; border-radius: 3px; cursor: pointer;">Show</button>
+                            <span style="font-size: 0.85em; color: var(--text-secondary);">(8-63 chars)</span>
+                        </div>
+                        <button type="submit" class="edit-btn" id="updateApBtn" onclick="return confirm('Changing AP credentials will disconnect all connected clients. Continue?')">Update AP Credentials</button>
+                    </form>
+                </div>
+
+                <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
+                    <form method="post" action="{{ url_for('captive_portal.force_ap') }}" id="startApForm" style="margin: 0;">
+                        <input type="hidden" name="mode" value="on">
+                        <button type="submit" class="edit-btn" id="startApBtn">Start AP Now</button>
+                    </form>
+                    <form method="post" action="{{ url_for('captive_portal.force_ap') }}" id="stopApForm" style="margin: 0;">
+                        <input type="hidden" name="mode" value="off">
+                        <button type="submit" class="present-btn" id="stopApBtn">Stop AP</button>
+                    </form>
+                </div>
+
+                <div style="font-size: 0.9em; color: var(--text-secondary);">
+                    <strong>Auto mode:</strong> AP automatically starts when WiFi is unavailable and stops when WiFi is restored.<br>
+                    <strong>AP On mode:</strong> AP stays on continuously regardless of WiFi status (activated by "Start AP Now" button).
+                </div>
+            {% endif %}
+        </div>
+    </details>
+
+    <!-- Storage Maintenance -->
+    <details class="settings-section">
+        <summary>Auto-Cleanup Settings</summary>
+        <div class="section-content">
+            <a href="{{ url_for('storage_retention.settings') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
+                <svg class="inline-icon" width="24" height="24" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-sparkles"></use></svg>
+                <div style="flex:1">
+                    <strong>Configure Auto-Cleanup</strong>
+                    <p style="margin:4px 0 0; font-size:0.85rem; color:var(--text-secondary)">Automatic deletion of old videos to free up space</p>
+                </div>
+                <svg class="inline-icon" width="20" height="20" aria-hidden="true" style="color:var(--text-secondary)"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-right"></use></svg>
+            </a>
+        </div>
+    </details>
+
+    <!-- Storage & Retention (Phase 3a.2 ΓÇö closes part of #98) -->
+    <details class="settings-section" id="storage-retention-section">
+        <summary>Storage &amp; Retention</summary>
+        <div class="section-content">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                Controls how long archived dashcam clips are kept on the Pi's SD card and how
+                aggressively the cleanup pass runs. Changes take effect on the next cleanup pass ΓÇö
+                no service restart needed.
+            </p>
+
+            <div id="sr-warning-banner" hidden
+                 style="margin:0 0 14px; padding:10px 14px; border-radius:8px;
+                        background:var(--msg-warning-bg); color:var(--msg-warning-text);
+                        border:1px solid var(--msg-warning-text); font-size:0.85rem;">
+                <strong>Heads up:</strong> short retention may delete footage of incidents that take time
+                to discover (e.g., scratches noticed days later).
+            </div>
+
+            <div id="sr-error-banner" hidden
+                 style="margin:0 0 14px; padding:10px 14px; border-radius:8px;
+                        background:var(--msg-error-bg); color:var(--msg-error-text);
+                        border:1px solid var(--msg-error-text); font-size:0.85rem;"></div>
+
+            <form id="storage-retention-form" onsubmit="return false;">
+                <div class="settings-form-grid">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Default retention (days)</strong></label>
+                        <input type="number" name="default_retention_days" id="sr-default-retention"
+                               min="1" max="3650" value="30"
+                               class="settings-form-input">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Applied to ArchivedClips and any folder without an override below.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Free-space target (% of SD card)</strong></label>
+                        <input type="number" name="free_space_target_pct" id="sr-free-space-target"
+                               min="0" max="50" value="10"
+                               class="settings-form-input">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            After the time-based pass, if SD-card free space drops below this
+                            percentage, the oldest archived clips are deleted (oldest first) until
+                            free space crosses back above the target. Cloud-pending clips are kept;
+                            disk image files are protected. Set to <strong>0</strong> to disable.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="settings-form-grid">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Maximum archive size (GB)</strong></label>
+                        <input type="number" name="max_archive_size_gb" id="sr-max-archive"
+                               min="0" max="10000" value="0"
+                               class="settings-form-input">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Hard cap on total archive size. After the time-based pass, if total
+                            <code>.mp4</code> bytes under the archive root exceed this cap, oldest
+                            clips are deleted until total is at or below the cap. Cloud-pending
+                            clips are kept; disk image files are protected. Leave at
+                            <strong>0</strong> to use only time-based retention.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Short-retention warning (days)</strong></label>
+                        <input type="number" name="short_retention_warning_days" id="sr-short-warning"
+                               min="1" max="365" value="7"
+                               class="settings-form-input">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Show the yellow warning banner when default retention drops below this.
+                        </p>
+                    </div>
+                </div>
+
+                <details style="margin-bottom:14px; border:1px solid var(--border-color); border-radius:8px; padding:10px 14px">
+                    <summary style="cursor:pointer; font-weight:600">Per-folder overrides (advanced)</summary>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:8px 0 12px">
+                        Override retention for individual Tesla folders. Leave a row disabled to inherit the default.
+                        ArchivedClips lives on the Pi's SD card; the others (SentryClips, SavedClips, RecentClips,
+                        EncryptedClips) are inside the USB image that Tesla writes to.
+                    </p>
+                    <div id="sr-policy-rows" style="display:flex; flex-direction:column; gap:10px">
+                        <!-- rows rendered by JS from /api/cleanup/status -->
+                    </div>
+                </details>
+
+                <div style="display:flex; gap:10px; flex-wrap:wrap">
+                    <button type="button" id="sr-save-btn" class="btn btn-primary"
+                            style="flex:1; min-width:160px">Save retention settings</button>
+                    <button type="button" id="sr-run-now-btn" class="btn btn-secondary"
+                            style="flex:1; min-width:160px">Run cleanup now</button>
+                </div>
+
+                <div style="margin-top:14px; padding:12px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary)">
+                    <div style="font-size:0.9rem; font-weight:600; margin-bottom:4px">
+                        Reclaim space from stationary RecentClips
+                    </div>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 10px">
+                        Deletes archived RecentClips with no GPS movement (parked Sentry-mode footage,
+                        no driving, no events). Saved/Sentry event clips are preserved even if a
+                        RecentClips copy of the same recording exists. This can free a lot of space ΓÇö
+                        on a typical install, RecentClips dominates the SD card.
+                    </p>
+                    <button type="button" id="sr-reclaim-stationary-btn" class="btn btn-secondary"
+                            style="width:100%; min-width:160px">Reclaim stationary RecentClips</button>
+                </div>
+
+                <div style="margin-top:14px; padding:12px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary)">
+                    <div style="font-size:0.9rem; font-weight:600; margin-bottom:4px">
+                        Stationary RecentClips skipped (last 24h)
+                    </div>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 10px">
+                        The archive worker peeks at each new RecentClips file and skips
+                        copying it to the SD card if no GPS movement is detected ΓÇö this
+                        keeps overnight Sentry-mode parking footage from filling the SD
+                        card. Sentry/Saved event clips are <strong>never</strong> skipped.
+                    </p>
+                    <div id="sr-skip-stationary-status" style="font-size:0.85rem; color:var(--text-secondary)">
+                        Skipped in last 24 hours: <strong><span id="sr-skip-stationary-count">ΓÇö</span></strong>
+                        <button type="button" id="sr-skip-stationary-clear-btn" class="btn btn-link"
+                                style="padding:0 6px; font-size:0.8rem; vertical-align:baseline" hidden>Clear tally</button>
+                    </div>
+                    <div id="sr-skip-stationary-msg" style="font-size:0.8rem; margin-top:6px" hidden></div>
+                </div>
+            </form>
+
+            <div id="sr-last-run" style="margin-top:14px; padding:10px 14px; border:1px solid var(--border-color); border-radius:8px; background:var(--bg-secondary); font-size:0.85rem">
+                <strong>Last cleanup:</strong>
+                <span id="sr-last-run-text">ΓÇö</span>
+            </div>
+
+            <div id="sr-disk-usage" hidden style="margin-top:10px; font-size:0.8rem; color:var(--text-secondary)">
+                <strong>SD card:</strong> <span id="sr-disk-text">ΓÇö</span>
+            </div>
+        </div>
+    </details>
+
+    <!-- Archive Settings -->
+    <details class="settings-section">
+        <summary>Archive Settings</summary>
+        <div class="section-content">
+            <form method="post" action="{{ url_for('settings.save_archive_settings') }}">
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 16px">
+                    Tesla records dashcam footage to the USB drive in a circular buffer called RecentClips.
+                    After about an hour, older clips are automatically overwritten by new ones.
+                    The archive service copies these clips to the Pi's SD card before they're lost,
+                    so you can browse and cloud-sync them later.
+                </p>
+                <div class="form-group" style="margin-bottom:14px">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+                        <input type="checkbox" name="enabled" {% if cfg_archive.enabled %}checked{% endif %}>
+                        <strong>Enable RecentClips archival</strong>
+                    </label>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">
+                        When enabled, clips are automatically copied from the USB drive to the SD card every 2 minutes.
+                        Disable this if you don't need local copies of your dashcam footage.
+                    </p>
+                </div>
+                <div class="settings-form-grid">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Retention (days)</strong></label>
+                        <input type="number" name="retention_days" value="{{ cfg_archive.retention_days }}" min="1" max="365" class="settings-form-input">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Archived clips older than this are automatically deleted to free up SD card space.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Min free space (GB)</strong></label>
+                        <input type="number" name="min_free_space_gb" value="{{ cfg_archive.min_free_space_gb }}" min="1" max="100" class="settings-form-input">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Archival stops when SD card free space drops below this. Protects the OS and other services from running out of disk.
+                        </p>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">Save Archive Settings</button>
+            </form>
+        </div>
+    </details>
+
+    {% if videos_available %}
+    <!-- Phase 5.20 keeps the v1 Archive Status shell visible so operators
+         can see where the legacy widgets will land once the B-1 archive
+         worker exports matching APIs. Leaving the cards in place avoids
+         reshuffling the page while the backend parity work finishes in
+         later Phase 5.x increments. -->
+    <!-- Archive Status (Phase 2c ΓÇö issue #76) -->
+    <details class="settings-section">
+        <summary>Archive Status</summary>
+        <div class="section-content">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                Live view of the RecentClips archive subsystem. Updates every 30 seconds.
+                If the worker stalls or dies, a banner appears at the top of every page.
+            </p>
+            <div class="archive-status-grid" id="archive-status-chips">
+                <div class="archive-status-chip">
+                    <span class="chip-label">Worker</span>
+                    <span class="chip-value" id="chip-worker">ΓÇö</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Pending P1</span>
+                    <span class="chip-value" id="chip-p1">ΓÇö</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Pending P2</span>
+                    <span class="chip-value" id="chip-p2">ΓÇö</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Pending P3</span>
+                    <span class="chip-value" id="chip-p3">ΓÇö</span>
+                </div>
+                <div class="archive-status-chip" id="chip-dl-wrap">
+                    <span class="chip-label">Dead-letter</span>
+                    <span class="chip-value" id="chip-dl">ΓÇö</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Last copy</span>
+                    <span class="chip-value" id="chip-lastcopy" style="font-size:0.95rem">ΓÇö</span>
+                </div>
+                <!-- Phase 4.4 (#101): drain-rate ETA chip. Hidden by
+                     default; shown by JS when the worker has enough
+                     fresh samples to estimate a rate AND the queue
+                     has work pending. -->
+                <div class="archive-status-chip" id="chip-eta-wrap" hidden>
+                    <span class="chip-label">Backlog ETA</span>
+                    <span class="chip-value" id="chip-eta" style="font-size:0.95rem">ΓÇö</span>
+                </div>
+            </div>
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 8px"
+               id="archive-active-file-row" hidden>
+                <strong>Currently copying:</strong>
+                <span id="archive-active-file" style="font-family:monospace"></span>
+            </p>
+            <p style="font-size:0.85rem; color:var(--msg-error-text); margin:0 0 8px"
+               id="archive-last-error-row" hidden>
+                <strong>Last error:</strong>
+                <span id="archive-last-error"></span>
+            </p>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px">
+                <button type="button" class="btn btn-primary"
+                        id="archive-run-now-btn"
+                        style="min-height:44px">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
+                    Run archive now
+                </button>
+                <a href="#" onclick="return false;" aria-disabled="true"
+                   class="btn btn-secondary"
+                   style="min-height:44px; text-decoration:none;">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+                    Failed jobs
+                </a>
+                <button type="button" class="btn btn-secondary"
+                        id="archive-view-dl-btn"
+                        style="min-height:44px">
+                    <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-info"></use></svg>
+                    Archive dead letters
+                </button>
+            </div>
+            <div id="archive-dl-modal" hidden
+                 style="margin-top:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
+                    <strong>Dead-letter queue</strong>
+                    <button type="button" class="btn btn-ghost"
+                            id="archive-dl-close-btn"
+                            aria-label="Close dead-letter list">Close</button>
+                </div>
+                <div id="archive-dl-content" style="font-size:0.85rem; max-height:300px; overflow:auto">
+                    LoadingΓÇª
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <!-- Storage (Phase 2c ΓÇö issue #76) -->
+    <details class="settings-section">
+        <summary>Storage &amp; Retention</summary>
+        <div class="section-content">
+            <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                SD card disk usage for ArchivedClips. Files older than the retention window
+                are automatically deleted once a day.
+            </p>
+            <div class="storage-progress" style="margin-bottom:14px">
+                <div class="storage-progress-bar"
+                     role="progressbar"
+                     aria-label="ArchivedClips disk usage"
+                     aria-valuemin="0" aria-valuemax="100"
+                     id="storage-progress-bar-aria">
+                    <div class="storage-progress-fill" id="storage-progress-fill"
+                         style="width:0%"></div>
+                </div>
+                <div class="storage-progress-text">
+                    <span id="storage-used-text">ΓÇö used</span>
+                    <span id="storage-free-text">ΓÇö free</span>
+                </div>
+            </div>
+            <div class="archive-status-grid" style="margin-bottom:12px">
+                <div class="archive-status-chip">
+                    <span class="chip-label">Retention</span>
+                    <span class="chip-value" id="chip-retention">ΓÇö</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Last prune</span>
+                    <span class="chip-value" id="chip-lastprune"
+                          style="font-size:0.95rem">ΓÇö</span>
+                </div>
+                <div class="archive-status-chip">
+                    <span class="chip-label">Last freed</span>
+                    <span class="chip-value" id="chip-lastfreed"
+                          style="font-size:0.95rem">ΓÇö</span>
+                </div>
+            </div>
+            {# Phase 4.7 (#101) ΓÇö prominent one-line summary so users
+               see what retention did without having to scan three chips.
+               Hidden until the first /api/archive/status response arrives;
+               JS sets textContent and toggles `hidden`. #}
+            <p id="storage-prune-summary"
+               class="storage-prune-summary"
+               style="margin:0 0 12px; padding:10px 12px;
+                      background:var(--bg-secondary);
+                      border-left:3px solid var(--accent-info);
+                      border-radius:4px; font-size:0.9rem;
+                      color:var(--text-primary);"
+               hidden></p>
+            <p style="font-size:0.8rem; color:var(--text-secondary); margin:0 0 8px">
+                Clips older than the retention window above are automatically deleted.
+                Trips, waypoints, and detected events are <strong>preserved</strong> ΓÇö
+                only the dashcam clip is removed.
+            </p>
+            <button type="button" class="btn btn-secondary"
+                    id="storage-prune-now-btn"
+                    style="min-height:44px">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                Prune now
+            </button>
+        </div>
+    </details>
+    {% endif %}
+
+    <!-- Mapping & Indexing Settings -->
+    <details class="settings-section">
+        <summary>Mapping & Indexing</summary>
+        <div class="section-content">
+            <form method="post" action="{{ url_for('settings.save_mapping_settings') }}">
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 16px">
+                    Tesla embeds GPS coordinates and telemetry data (speed, braking, steering) inside each dashcam video.
+                    The indexer extracts this data and builds a database of trips, routes, and driving events.
+                    This powers the map view ΓÇö showing where you drove, plotting routes, and detecting events
+                    like hard braking or sharp turns.
+                </p>
+                <div class="form-group" style="margin-bottom:14px">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+                        <input type="checkbox" name="enabled" {% if cfg_mapping.enabled %}checked{% endif %}>
+                        <strong>Enable GPS indexing</strong>
+                    </label>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0 26px">
+                        Scans dashcam videos to extract GPS waypoints and build trip routes.
+                        When disabled, the map page won't show any trips or routes. Videos can still be browsed by folder.
+                    </p>
+                </div>
+                <div class="settings-form-grid">
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Trip gap (minutes)</strong></label>
+                        <input type="number" name="trip_gap_minutes" value="{{ cfg_mapping.trip_gap_minutes }}" min="1" max="60" class="settings-form-input">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            If there's a gap longer than this between GPS waypoints, a new trip is started.
+                            Lower values split stops (gas station, drive-through) into separate trips.
+                            Higher values keep them as one continuous trip.
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label style="font-size:0.85rem"><strong>Speed alert (mph)</strong></label>
+                        <input type="number" name="speed_limit_mph" value="{{ cfg_mapping.speed_limit_mph|int }}" min="0" max="200" step="5" class="settings-form-input">
+                        <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">
+                            Marks a driving event on the map when your speed exceeds this threshold.
+                            Set to 0 to disable speed alerts entirely.
+                        </p>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">Save Mapping Settings</button>
+            </form>
+        </div>
+    </details>
+
+    <!-- Network Settings -->
+    <details class="settings-section">
+        <summary>Network File Sharing</summary>
+        <div class="section-content">
+            <form method="post" action="{{ url_for('settings.save_network_settings') }}">
+                <p style="font-size:0.85rem; color:var(--text-secondary); margin:0 0 12px">
+                    Samba (SMB) password used when connecting to shared drives from your computer.
+                </p>
+                <div class="form-group" style="margin-bottom:12px">
+                    <label style="font-size:0.85rem">Samba Password</label>
+                    <div style="display:flex; gap:8px">
+                        <input type="password" name="samba_password" id="samba_password" value="{{ cfg_network.samba_password }}" class="settings-form-input" style="flex:1">
+                        <button type="button" onclick="toggleSambaPassword(this)" class="btn btn-secondary" style="padding:10px 14px; font-size:0.85rem; min-height:44px">Show</button>
+                    </div>
+                    <p style="font-size:0.8rem; color:var(--text-secondary); margin:4px 0 0">Username: <code>pi</code></p>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%">Save Network Settings</button>
+            </form>
+        </div>
+    </details>
+
+    <!-- System -->
+    <details class="settings-section">
+        <summary>System</summary>
+        <div class="section-content">
+            {% if system_info %}
+            <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 16px; font-size:0.9rem;">
+                <span style="color:var(--text-secondary)">Hostname</span>
+                <strong>{{ system_info.hostname }}</strong>
+
+                <span style="color:var(--text-secondary)">IP Address</span>
+                <span>{{ system_info.ip_addresses | join(', ') if system_info.ip_addresses else 'N/A' }}</span>
+
+                <span style="color:var(--text-secondary)">Uptime</span>
+                <span>{{ system_info.uptime }}</span>
+
+                <span style="color:var(--text-secondary)">Platform</span>
+                <span>{{ system_info.platform }} ┬╖ Python {{ system_info.python }}</span>
+
+                <span style="color:var(--text-secondary)">Memory</span>
+                <span>{{ system_info.mem_avail_mb }} MB free / {{ system_info.mem_total_mb }} MB total</span>
+
+                <span style="color:var(--text-secondary)">Version</span>
+                <code style="font-size:0.8rem">{{ system_info.version }}</code>
+            </div>
+
+            {% if system_info.disk_images %}
+            <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border-color);">
+                <strong style="font-size:0.9rem">USB Drive Images</strong>
+                <div style="display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;">
+                    {% for img in system_info.disk_images %}
+                    <div style="padding:8px 14px; background:var(--bg-secondary); border-radius:8px; font-size:0.85rem;">
+                        <strong>{{ img.label }}</strong><br>
+                        <span style="color:var(--text-secondary)">{{ img.size_gb }} GB</span>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% else %}
+            <p style="color: var(--text-secondary); margin: 0;">System information unavailable.</p>
+            {% endif %}
+        </div>
+    </details>
+
+    <!-- Phase 5.9 (#102): low-key link to the Advanced sub-page. NOT a
+         top-level nav item ΓÇö buried at the bottom of Settings so casual
+         users don't see it but power users can find it. -->
+    <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border-color); text-align:right;">
+        <a href="{{ url_for('settings_advanced.advanced') }}"
+           style="color:var(--text-secondary); font-size:0.85rem; text-decoration:none;">
+            Advanced settings &rarr;
+        </a>
+    </div>
+</div>
+
+<script>
+function togglePassword(btn) {
+    const passField = document.getElementById('ap_passphrase');
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+function toggleSambaPassword(btn) {
+    const passField = document.getElementById('samba_password');
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+function toggleWifiPassword(btn) {
+    const passField = document.getElementById('newWifiPassword');
+    if (passField.type === 'password') {
+        passField.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        passField.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+// --- WiFi Network Management ---
+function loadSavedNetworks() {
+    fetch('/api/wifi/saved')
+    .then(r => r.json())
+    .then(networks => {
+        const el = document.getElementById('savedNetworksList');
+        if (!Array.isArray(networks) || !networks.length || networks.error) {
+            el.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text-secondary)">No saved networks</div>';
+            return;
+        }
+        let html = '';
+        networks.forEach((net, idx) => {
+            const rawName = String(net.ssid || net.name || '');
+            const name = rawName.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const escapedName = rawName
+                .replace(/\/g, '\\')
+                .replace(/'/g, "\'")
+                .replace(/&/g, '&amp;')
+                .replace(/"/g, '&quot;');
+            const status = net.active
+                ? '<span style="font-size:0.8em;color:var(--msg-success-text);font-weight:600">Active</span>'
+                : '<span style="font-size:0.8em;color:var(--text-secondary)">Saved</span>';
+            const signal = net.in_range
+                ? '<span style="font-size:0.8em;color:var(--text-secondary)">' + getSignalIcon(net.signal) + ' ' + (net.signal || 0) + '%</span>'
+                : '<span style="font-size:0.8em;color:var(--text-secondary)">Not in range</span>';
+            html += '<div style="display:flex;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border-color);gap:6px">';
+            html += status;
+            html += '<span style="flex:1;font-size:0.875rem;font-weight:' + (net.active ? '600' : '400') + '">' + name + '</span>';
+            html += signal;
+            if (!net.active) {
+                const cantConnect = !net.in_range;
+                html += '<button class="edit-btn wifi-connect-btn" onclick="connectToNetwork('' + escapedName + '')" title="' + (cantConnect ? 'Network not in range' : 'Connect to this network now') + '" style="padding:2px 8px;font-size:0.8em;min-height:auto"' + (cantConnect ? ' disabled' : '') + '>Connect</button>';
+            }
+            html += '<button class="edit-btn" aria-label="Move network up" onclick="moveNetwork('' + escapedName + '',-1)" title="Move up" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === 0 ? ' disabled' : '') + '>Up</button>';
+            html += '<button class="edit-btn" aria-label="Move network down" onclick="moveNetwork('' + escapedName + '',1)" title="Move down" style="padding:2px 6px;font-size:0.8em;min-height:auto"' + (idx === networks.length - 1 ? ' disabled' : '') + '>Down</button>';
+            html += '<button class="present-btn" aria-label="Forget network" onclick="forgetNetwork('' + escapedName + '')" title="Forget" style="padding:2px 6px;font-size:0.8em;min-height:auto">Forget</button>';
+            html += '</div>';
+        });
+        el.innerHTML = html;
+        el._networks = networks;
+    })
+    .catch(() => {
+        document.getElementById('savedNetworksList').innerHTML = '<div style="color:var(--msg-error-text)">Failed to load networks</div>';
+    });
+}
+
+
+function moveNetwork(name, direction) {
+    const el = document.getElementById('savedNetworksList');
+    const nets = el._networks;
+    if (!nets) return;
+    const idx = nets.findIndex(n => (n.ssid || n.name) === name);
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= nets.length) return;
+    [nets[idx], nets[newIdx]] = [nets[newIdx], nets[idx]];
+    const ordered = nets.map(n => n.ssid || n.name);
+    fetch('/api/wifi/reorder', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({networks: ordered})
+    }).then(r => r.json()).then(data => {
+        if (data.success) loadSavedNetworks();
+        else alert(data.message || 'Reorder failed');
+    });
+}
+
+
+function forgetNetwork(name) {
+    if (!confirm('Forget network "' + name + '"?')) return;
+    fetch('{{ url_for("captive_portal.forget_wifi") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ssid: name})
+    }).then(r => r.json()).then(data => {
+        if (data.message) alert(data.message);
+        loadSavedNetworks();
+    });
+}
+
+
+function connectToNetwork(name) {
+    const msg = 'Connect to "' + name + '" now?
+
+'
+        + 'If the offline access point is currently active, it will drop for about 30-60 seconds '
+        + 'while we attempt the connection. After about 60-90 seconds:
+
+'
+        + '  - If WiFi reconnect succeeds, the AP stays off. Reach the Pi at '
+        + 'http://cybertruckusb.local on your home WiFi.
+'
+        + '  - If WiFi reconnect fails, the AP comes back automatically. '
+        + 'Reconnect to the TeslaUSB AP and try again.';
+    if (!confirm(msg)) return;
+
+    document.querySelectorAll('.wifi-connect-btn').forEach(b => {
+        b.disabled = true;
+        if (b.getAttribute('onclick') && b.getAttribute('onclick').indexOf(name) !== -1) {
+            b.textContent = 'Connecting...';
+        }
+    });
+
+    fetch('{{ url_for("captive_portal.connect_wifi") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ssid: name})
+    }).then(r => r.json().then(data => ({status: r.status, data: data})))
+      .then(({status, data}) => {
+          if (status === 202 || (data && data.success)) {
+              alert((data && data.message) || 'Reconnect started.');
+          } else if (status === 409) {
+              alert('Another connect attempt is already in progress. Please wait.');
+              loadSavedNetworks();
+          } else {
+              alert((data && data.message) || ('Connect failed (HTTP ' + status + ')'));
+              loadSavedNetworks();
+          }
+      })
+      .catch(() => {
+          alert('Reconnect attempt sent. The AP may have dropped. Wait about 60-90 seconds, '
+              + 'then try http://cybertruckusb.local on your home WiFi, or '
+              + 'reconnect to the TeslaUSB AP if the attempt failed.');
+      });
+}
+
+
+function toggleAddNetwork() {
+    const panel = document.getElementById('addNetworkPanel');
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+function addWifiNetwork() {
+    const ssid = document.getElementById('newWifiSSID').value.trim();
+    const password = document.getElementById('newWifiPassword').value;
+    if (!ssid) { alert('Please enter an SSID'); return; }
+    const btn = document.getElementById('addWifiBtn');
+    btn.disabled = true; btn.textContent = 'Connecting...';
+
+    const formData = new FormData();
+    formData.append('ssid', ssid);
+    formData.append('passphrase', password);
+
+    fetch('{{ url_for("captive_portal.connect_wifi") }}', {
+        method: 'POST',
+        body: formData
+    }).then(response => {
+        if (response.redirected) {
+            window.location.href = response.url;
+        } else {
+            btn.disabled = false; btn.textContent = 'Connect';
+            loadSavedNetworks();
+            document.getElementById('newWifiSSID').value = '';
+            document.getElementById('newWifiPassword').value = '';
+            document.getElementById('addNetworkPanel').style.display = 'none';
+        }
+    }).catch(() => {
+        btn.disabled = false; btn.textContent = 'Connect';
+        alert('Error connecting to network');
+    });
+}
+
+
+function scanAndRefreshNetworks() {
+    const btn = document.getElementById('btnWifiScan');
+    btn.disabled = true; btn.textContent = 'Scanning...';
+    fetch('/settings/wifi/networks?rescan=1')
+    .then(r => r.json())
+    .then(payload => {
+        const networks = Array.isArray(payload.networks) ? payload.networks : [];
+        btn.disabled = false; btn.textContent = 'Scan';
+        const dl = document.getElementById('wifiScanResults');
+        if (dl) {
+            dl.innerHTML = networks.map(n => {
+                const ssid = String(n.ssid || '').replace(/"/g, '&quot;');
+                const signal = n.signal_strength == null ? 'Unknown signal' : String(n.signal_strength) + '%';
+                const security = n.secured ? ' Secured' : ' Open';
+                return '<option value="' + ssid + '">' + signal + security + '</option>';
+            }).join('');
+        }
+        loadSavedNetworks();
+    })
+    .catch(() => { btn.disabled = false; btn.textContent = 'Scan'; });
+}
+
+
+function confirmWifiUpdate() {
+    const connectedViaWifi = {{ 'true' if wifi_status.connected else 'false' }};
+    const currentSSID = {{ wifi_status.current_ssid | tojson if wifi_status.get('current_ssid') else 'null' }};
+    const apActive = {{ 'true' if ap_status.ap_active else 'false' }};
+    const apIP = {{ ap_status.static_ip | tojson if ap_status.get('static_ip') else 'null' }};
+
+    const accessingViaAP = apIP && (window.location.hostname === apIP || window.location.hostname === apIP.split('/')[0]);
+
+    let message = '';
+
+    if (connectedViaWifi && !accessingViaAP && currentSSID) {
+        message = 'WARNING: You are currently connected via WiFi (network: ' + currentSSID + ').\n\n';
+        message += 'If you change the WiFi credentials and they are incorrect, you will lose this connection.\n\n';
+        message += 'HOWEVER: The fallback AP is ' + (apActive ? 'already running' : 'available') + '.\n';
+        message += 'If the new WiFi fails, you can reconnect to the AP to fix it.\n\n';
+        message += 'Recommended: Connect to the AP first for safer credential updates.\n\n';
+        message += 'Continue anyway?';
+    } else if (accessingViaAP || apActive) {
+        message = 'You are connected via the fallback AP.\n\n';
+        message += 'The Pi will attempt to connect to the new WiFi network.\n';
+        message += 'Your AP connection will remain active during the process.\n\n';
+        message += 'Continue?';
+    } else {
+        message = 'The Pi will attempt to connect to the new WiFi network.\n';
+        message += 'The fallback AP will remain available if connection fails.\n\n';
+        message += 'Continue?';
+    }
+
+    return confirm(message);
+}
+
+// AP form elements
+const apConfigForm = document.getElementById('apConfigForm');
+const startApForm = document.getElementById('startApForm');
+const stopApForm = document.getElementById('stopApForm');
+const updateApBtn = document.getElementById('updateApBtn');
+const startApBtn = document.getElementById('startApBtn');
+const stopApBtn = document.getElementById('stopApBtn');
+const apLoadingOverlay = document.getElementById('apLoadingOverlay');
+
+function disableApButtons() {
+    if (updateApBtn) { updateApBtn.disabled = true; updateApBtn.style.opacity = '0.5'; updateApBtn.style.cursor = 'not-allowed'; }
+    if (startApBtn) { startApBtn.disabled = true; startApBtn.style.opacity = '0.5'; startApBtn.style.cursor = 'not-allowed'; }
+    if (stopApBtn) { stopApBtn.disabled = true; stopApBtn.style.opacity = '0.5'; stopApBtn.style.cursor = 'not-allowed'; }
+    if (apLoadingOverlay) apLoadingOverlay.style.display = 'flex';
+}
+
+if (apConfigForm) {
+    apConfigForm.addEventListener('submit', function(e) {
+        if (updateApBtn && updateApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
+if (startApForm) {
+    startApForm.addEventListener('submit', function(e) {
+        if (startApBtn && startApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
+if (stopApForm) {
+    stopApForm.addEventListener('submit', function(e) {
+        if (stopApBtn && stopApBtn.disabled) { e.preventDefault(); return false; }
+        disableApButtons();
+    });
+}
+
+// Load saved networks on page init
+loadSavedNetworks();
+// Auto-scan after short delay
+setTimeout(function() { scanAndRefreshNetworks(); }, 500);
+
+function getSignalIcon(signal) {
+    const signalNum = parseInt(signal) || 0;
+    if (signalNum >= 75) return 'Strong';
+    if (signalNum >= 50) return 'Good';
+    if (signalNum >= 25) return 'Fair';
+    return 'Weak';
+}
+
+function dismissWifiStatus() {
+    const alert = document.getElementById('wifiStatusAlert');
+    if (alert) {
+        alert.style.display = 'none';
+    }
+    fetch('/settings/wifi/dismiss-status', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    }).catch(error => {
+        console.error('Error dismissing WiFi status:', error);
+    });
+}
+
+// =====================================================================
+// Phase 2c (issue #76) ΓÇö Archive Status & Storage panels
+// =====================================================================
+(function() {
+    const POLL_MS = 30000;
+    if (!document.getElementById('archive-status-chips')) return;
+
+    function fmtAgo(iso) {
+        if (!iso) return 'never';
+        const t = Date.parse(iso);
+        if (isNaN(t)) return 'never';
+        const ageS = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        if (ageS < 60) return ageS + 's ago';
+        if (ageS < 3600) return Math.floor(ageS / 60) + ' min ago';
+        if (ageS < 86400) return Math.floor(ageS / 3600) + ' h ago';
+        return Math.floor(ageS / 86400) + ' d ago';
+    }
+
+    function fmtBytes(bytes) {
+        if (!bytes || bytes <= 0) return '0 B';
+        const u = ['B','KB','MB','GB','TB'];
+        let n = bytes;
+        let i = 0;
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
+    }
+
+    function fmtMb(mb) {
+        if (!mb && mb !== 0) return 'ΓÇö';
+        if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+        return mb + ' MB';
+    }
+
+    // Phase 4.4 (#101): mirror server-side ``_format_eta_human`` so the
+    // chip stays consistent with the System Health card message even
+    // when the user has both panels open. Cap at 24 h matches the
+    // backend cap; anything larger is suppressed at the source.
+    function fmtEta(seconds) {
+        if (!seconds || seconds < 0) return 'ΓÇö';
+        if (seconds < 60) return '<1 min';
+        if (seconds < 3600) return Math.floor(seconds / 60) + ' min';
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (minutes === 0) return hours + ' h';
+        return hours + ' h ' + minutes + ' min';
+    }
+
+    function setText(id, txt) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = txt;
+    }
+
+    function applyStatus(data) {
+        // Worker chip
+        const workerEl = document.getElementById('chip-worker');
+        if (workerEl) {
+            let label = 'Stopped';
+            if (data.paused) label = 'Paused';
+            else if (data.worker_running) label = 'Running';
+            workerEl.textContent = label;
+            workerEl.parentElement.classList.toggle(
+                'has-issue', !data.worker_running);
+        }
+        setText('chip-p1', data.queue_depth_p1);
+        setText('chip-p2', data.queue_depth_p2);
+        setText('chip-p3', data.queue_depth_p3);
+        setText('chip-dl', data.dead_letter_count);
+        const dlWrap = document.getElementById('chip-dl-wrap');
+        if (dlWrap) dlWrap.classList.toggle(
+            'has-issue', (data.dead_letter_count || 0) > 0);
+        setText('chip-lastcopy', fmtAgo(data.last_successful_copy_at));
+
+        // Phase 4.4 (#101): drain-rate ETA chip. Shown only when the
+        // backend reports a usable estimate AND the queue is non-empty.
+        // Backend already gates on freshness, sample count, and the
+        // 24-hour cap, so the UI just renders what it gets.
+        const etaWrap = document.getElementById('chip-eta-wrap');
+        const etaEl = document.getElementById('chip-eta');
+        if (etaWrap && etaEl) {
+            const eta = data.eta_seconds;
+            const queue = (data.queue_depth_p1 || 0)
+                        + (data.queue_depth_p2 || 0)
+                        + (data.queue_depth_p3 || 0);
+            if (eta && eta > 0 && queue > 0) {
+                etaEl.textContent = fmtEta(eta);
+                etaWrap.hidden = false;
+            } else {
+                etaWrap.hidden = true;
+            }
+        }
+
+        const activeRow = document.getElementById('archive-active-file-row');
+        if (activeRow) {
+            if (data.active_file) {
+                activeRow.hidden = false;
+                setText('archive-active-file', data.active_file);
+            } else {
+                activeRow.hidden = true;
+            }
+        }
+        const errRow = document.getElementById('archive-last-error-row');
+        if (errRow) {
+            if (data.last_error) {
+                errRow.hidden = false;
+                setText('archive-last-error', data.last_error);
+            } else {
+                errRow.hidden = true;
+            }
+        }
+
+        // Storage progress bar
+        const fill = document.getElementById('storage-progress-fill');
+        const aria = document.getElementById('storage-progress-bar-aria');
+        if (fill && aria && data.disk_total_mb > 0) {
+            const pct = Math.min(100,
+                Math.round(100 * data.disk_used_mb / data.disk_total_mb));
+            fill.style.width = pct + '%';
+            aria.setAttribute('aria-valuenow', pct);
+            fill.classList.remove('warning', 'critical');
+            if (pct >= 95) fill.classList.add('critical');
+            else if (pct >= 90) fill.classList.add('warning');
+        }
+        setText('storage-used-text',
+            fmtMb(data.disk_used_mb) + ' used (' +
+            fmtMb(data.disk_total_mb) + ' total)');
+        setText('storage-free-text', fmtMb(data.disk_free_mb) + ' free');
+        setText('chip-retention',
+            data.retention_days
+            ? data.retention_days + ' days'
+            : 'ΓÇö');
+        setText('chip-lastprune', fmtAgo(data.last_prune_at));
+        setText('chip-lastfreed',
+            data.last_prune_deleted
+            ? data.last_prune_deleted + ' files (' +
+              fmtBytes(data.last_prune_freed_bytes) + ')'
+            : 'no files');
+
+        // Phase 4.7 (#101) ΓÇö prominent retention summary line.
+        // Reassures users that retention is keeping the SD card healthy
+        // and tells them concretely what was deleted last time.
+        const summaryEl = document.getElementById('storage-prune-summary');
+        if (summaryEl) {
+            const summary = composePruneSummary(data);
+            if (summary) {
+                summaryEl.textContent = summary;
+                summaryEl.hidden = false;
+            } else {
+                summaryEl.hidden = true;
+            }
+        }
+    }
+
+    // Build a single-line human summary of the most recent retention
+    // prune. Returns '' (caller hides the element) when no prune has
+    // ever run yet ΓÇö the chips already show 'ΓÇö' in that case.
+    function composePruneSummary(data) {
+        if (data.last_prune_error) {
+            return 'Last retention prune failed: ' +
+                   String(data.last_prune_error);
+        }
+        if (!data.last_prune_at) {
+            return '';
+        }
+        const deleted = parseInt(data.last_prune_deleted, 10) || 0;
+        const freed = parseInt(data.last_prune_freed_bytes, 10) || 0;
+        const kept = parseInt(data.last_prune_kept_unsynced, 10) || 0;
+        const when = fmtPruneWhen(data.last_prune_at);
+
+        let main;
+        if (deleted > 0) {
+            const noun = deleted === 1 ? 'clip' : 'clips';
+            main = 'Retention pruned ' + deleted + ' ' + noun + ' ' +
+                   when + ', ' + fmtBytes(freed) + ' freed.';
+        } else {
+            main = 'Retention ran ' + when +
+                   '; no clips removed (all within retention window).';
+        }
+        if (kept > 0) {
+            const keptNoun = kept === 1 ? 'clip' : 'clips';
+            main += ' Kept ' + kept + ' ' + keptNoun +
+                    ' past retention awaiting cloud sync.';
+        }
+        return main;
+    }
+
+    // "today" / "yesterday" / "N days ago" ΓÇö matches the friendly
+    // tone of the rest of the Storage panel.
+    function fmtPruneWhen(iso) {
+        const t = Date.parse(iso);
+        if (isNaN(t)) return 'recently';
+        const ageS = Math.max(0, (Date.now() - t) / 1000);
+        if (ageS < 86400) return 'today';
+        if (ageS < 2 * 86400) return 'yesterday';
+        return Math.floor(ageS / 86400) + ' days ago';
+    }
+
+    async function poll() {
+        try {
+            const r = await fetch('/api/archive/status', {
+                credentials: 'same-origin',
+            });
+            if (!r.ok) return;
+            const data = await r.json();
+            applyStatus(data);
+        } catch (e) { /* network blip */ }
+    }
+
+    const runBtn = document.getElementById('archive-run-now-btn');
+    if (runBtn) {
+        runBtn.addEventListener('click', async function() {
+            runBtn.disabled = true;
+            try {
+                const r = await fetch('/api/recent_archive/trigger', {
+                    method: 'POST', credentials: 'same-origin'
+                });
+                if (typeof showToast === 'function') {
+                    showToast(
+                        r.ok ? 'Archive run triggered.'
+                             : 'Failed to trigger archive run.',
+                        r.ok ? 'success' : 'error');
+                }
+            } finally {
+                runBtn.disabled = false;
+                setTimeout(poll, 2000);
+            }
+        });
+    }
+
+    const pruneBtn = document.getElementById('storage-prune-now-btn');
+    if (pruneBtn) {
+        pruneBtn.addEventListener('click', async function() {
+            pruneBtn.disabled = true;
+            try {
+                const r = await fetch('/api/archive/prune_now', {
+                    method: 'POST', credentials: 'same-origin'
+                });
+                const data = await r.json().catch(() => ({}));
+                if (typeof showToast === 'function') {
+                    if (r.ok && data.started) {
+                        showToast(
+                            'Prune complete: ' +
+                            (data.deleted_count || 0) + ' files removed.',
+                            'success');
+                    } else if (r.ok && data.status === 'already_running') {
+                        // Issue #91: another prune (watchdog tick or
+                        // disk-critical cleanup) is in flight.
+                        showToast(
+                            data.message ||
+                            'A retention prune is already running.',
+                            'info');
+                    } else {
+                        showToast(
+                            data.message || 'Prune failed.', 'error');
+                    }
+                }
+            } finally {
+                pruneBtn.disabled = false;
+                setTimeout(poll, 1000);
+            }
+        });
+    }
+
+    const dlBtn = document.getElementById('archive-view-dl-btn');
+    const dlModal = document.getElementById('archive-dl-modal');
+    const dlContent = document.getElementById('archive-dl-content');
+    const dlClose = document.getElementById('archive-dl-close-btn');
+    if (dlBtn && dlModal) {
+        dlBtn.addEventListener('click', async function() {
+            dlModal.hidden = false;
+            dlContent.textContent = 'LoadingΓÇª';
+            try {
+                const r = await fetch('/api/archive/dead_letters', {
+                    credentials: 'same-origin'
+                });
+                const data = await r.json();
+                if (!data.rows || data.rows.length === 0) {
+                    dlContent.innerHTML = '<em>No dead-letter rows.</em>';
+                    return;
+                }
+                let html = '<table style="width:100%; border-collapse:collapse">';
+                html += '<thead><tr>'
+                     + '<th style="text-align:left; padding:4px">Source</th>'
+                     + '<th style="text-align:left; padding:4px">Attempts</th>'
+                     + '<th style="text-align:left; padding:4px">Error</th>'
+                     + '</tr></thead><tbody>';
+                for (const row of data.rows) {
+                    const src = String(row.source_path || '')
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    const err = String(row.last_error || '')
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    html += '<tr>'
+                         + '<td style="padding:4px; font-family:monospace">' + src + '</td>'
+                         + '<td style="padding:4px">' + (row.attempts || 0) + '</td>'
+                         + '<td style="padding:4px">' + err + '</td>'
+                         + '</tr>';
+                }
+                html += '</tbody></table>';
+                dlContent.innerHTML = html;
+            } catch (e) {
+                dlContent.innerHTML = '<em>Failed to load.</em>';
+            }
+        });
+    }
+    if (dlClose && dlModal) {
+        dlClose.addEventListener('click', function() {
+            dlModal.hidden = true;
+        });
+    }
+
+    poll();
+    setInterval(poll, POLL_MS);
+})();
+
+// ===========================================================================
+// Storage & Retention card (Phase 3a.2 ΓÇö closes part of #98)
+// ===========================================================================
+(function () {
+    var STORAGE_API = '/api/cleanup/status';
+    var SAVE_API = '/api/cleanup/policy';
+    var RUN_NOW_API = '/api/cleanup/run_now';
+    var RECLAIM_STATIONARY_API = '/api/cleanup/reclaim_stationary_recent';
+    var POLL_MS = 30000;
+    var FOLDER_NAMES = ['SentryClips', 'SavedClips', 'RecentClips', 'EncryptedClips', 'ArchivedClips'];
+
+    function $(id) { return document.getElementById(id); }
+
+    function fmtBytes(n) {
+        if (n == null || isNaN(n)) return 'ΓÇö';
+        if (n < 1024) return n + ' B';
+        var units = ['KB', 'MB', 'GB', 'TB'];
+        var i = -1;
+        do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+        return n.toFixed(n >= 10 ? 0 : 1) + ' ' + units[i];
+    }
+
+    function fmtRelative(iso) {
+        if (!iso) return 'never';
+        try {
+            var t = new Date(iso).getTime();
+            if (!t) return iso;
+            var diff = (Date.now() - t) / 1000;
+            if (diff < 60) return 'just now';
+            if (diff < 3600) return Math.floor(diff / 60) + ' min ago';
+            if (diff < 86400) return Math.floor(diff / 3600) + ' hr ago';
+            return Math.floor(diff / 86400) + ' days ago';
+        } catch (e) { return iso; }
+    }
+
+    function setError(msg) {
+        var el = $('sr-error-banner');
+        if (!el) return;
+        if (msg) {
+            el.textContent = msg;
+            el.hidden = false;
+        } else {
+            el.hidden = true;
+        }
+    }
+
+    function renderPolicyRows(policies, defaultDays) {
+        var container = $('sr-policy-rows');
+        if (!container) return;
+        container.innerHTML = '';
+        FOLDER_NAMES.forEach(function (name) {
+            var p = (policies && policies[name]) || {};
+            var enabled = !!p.enabled;
+            var days = (p.retention_days != null) ? p.retention_days : defaultDays;
+            var row = document.createElement('div');
+            row.className = 'settings-form-policy-row';
+            row.innerHTML =
+                '<label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.85rem; min-height:44px">' +
+                  '<input type="checkbox" name="policy_' + name + '_enabled" ' + (enabled ? 'checked' : '') + '>' +
+                  '<strong>' + name + '</strong>' +
+                '</label>' +
+                '<span style="font-size:0.8rem; color:var(--text-secondary)">Retention (days)</span>' +
+                '<input type="number" name="policy_' + name + '_days" value="' + days +
+                  '" min="1" max="3650" class="settings-form-input">';
+            container.appendChild(row);
+        });
+    }
+
+    function renderLastRun(snapshot) {
+        var el = $('sr-last-run-text');
+        if (!el) return;
+        var lr = snapshot.last_run || {};
+        if (!lr.at) {
+            el.textContent = 'never run yet';
+            return;
+        }
+        var parts = [];
+        parts.push(fmtRelative(lr.at));
+        if (lr.deleted_count != null) parts.push('pruned ' + lr.deleted_count + ' clips');
+        if (lr.freed_bytes != null) parts.push('freed ' + fmtBytes(lr.freed_bytes));
+        if (lr.kept_unsynced_count) parts.push('kept ' + lr.kept_unsynced_count + ' un-synced');
+        if (lr.error) parts.push('error: ' + lr.error);
+        el.textContent = parts.join(' ΓÇö ');
+    }
+
+    function renderDisk(snapshot) {
+        var disk = snapshot.disk || {};
+        var box = $('sr-disk-usage');
+        var txt = $('sr-disk-text');
+        if (!box || !txt) return;
+        if (!disk.total_bytes) {
+            box.hidden = true;
+            return;
+        }
+        txt.textContent =
+            fmtBytes(disk.free_bytes) + ' free of ' + fmtBytes(disk.total_bytes) +
+            ' (' + disk.free_pct + '% free)';
+        box.hidden = false;
+    }
+
+    function renderWarning(defaultDays, warnDays) {
+        var el = $('sr-warning-banner');
+        if (!el) return;
+        el.hidden = !(defaultDays && warnDays && defaultDays < warnDays);
+    }
+
+    function loadStatus() {
+        return fetch(STORAGE_API, { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+                if (!data || !data.success) return null;
+                var cfg = data.config || {};
+                // ``default_retention_days === 0`` in config.yaml means
+                // "inherit from legacy fallback chain". Show the resolved
+                // value the watchdog will actually use ONLY in that case;
+                // when the user has saved a concrete value, show THEIR value
+                // so subsequent saves don't accidentally write the cached
+                // resolved value back over the customization.
+                var resolvedDefault = (cfg.default_retention_days > 0)
+                    ? cfg.default_retention_days
+                    : ((data.resolved_retention_days != null)
+                        ? data.resolved_retention_days
+                        : 30);
+                $('sr-default-retention').value = resolvedDefault;
+                $('sr-free-space-target').value = cfg.free_space_target_pct || 10;
+                $('sr-max-archive').value = cfg.max_archive_size_gb || 0;
+                $('sr-short-warning').value = cfg.short_retention_warning_days || 7;
+                renderPolicyRows(cfg.policies || {}, resolvedDefault);
+                renderWarning(resolvedDefault, cfg.short_retention_warning_days);
+                renderLastRun(data);
+                renderDisk(data);
+                return data;
+            })
+            .catch(function (e) { console.warn('storage-retention load failed', e); return null; });
+    }
+
+    function collectPayload() {
+        var policies = {};
+        FOLDER_NAMES.forEach(function (name) {
+            var enabledEl = document.querySelector('input[name="policy_' + name + '_enabled"]');
+            var daysEl = document.querySelector('input[name="policy_' + name + '_days"]');
+            if (!enabledEl && !daysEl) return;
+            policies[name] = {
+                enabled: enabledEl ? enabledEl.checked : false,
+                retention_days: daysEl ? parseInt(daysEl.value, 10) : null,
+            };
+        });
+        return {
+            default_retention_days: parseInt($('sr-default-retention').value, 10),
+            free_space_target_pct: parseInt($('sr-free-space-target').value, 10),
+            max_archive_size_gb: parseInt($('sr-max-archive').value, 10),
+            short_retention_warning_days: parseInt($('sr-short-warning').value, 10),
+            policies: policies,
+        };
+    }
+
+    function onSave() {
+        var btn = $('sr-save-btn');
+        if (!btn) return;
+        var origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'SavingΓÇª';
+        setError(null);
+        fetch(SAVE_API, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(collectPayload()),
+        })
+            .then(function (r) {
+                return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+            })
+            .then(function (res) {
+                if (!res.ok || !res.data || res.data.success === false) {
+                    setError((res.data && res.data.message) || 'Failed to save retention settings');
+                    return;
+                }
+                btn.textContent = 'Saved Γ£ô';
+                loadStatus();
+                setTimeout(function () { btn.textContent = origText; }, 1500);
+            })
+            .catch(function (e) {
+                setError('Network error: ' + e.message);
+            })
+            .finally(function () {
+                btn.disabled = false;
+                if (btn.textContent === 'SavingΓÇª') btn.textContent = origText;
+            });
+    }
+
+    function onRunNow() {
+        var btn = $('sr-run-now-btn');
+        if (!btn) return;
+        var origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'RunningΓÇª';
+        setError(null);
+        fetch(RUN_NOW_API, { method: 'POST', credentials: 'same-origin' })
+            .then(function (r) {
+                return r.json().then(function (data) { return { status: r.status, data: data }; });
+            })
+            .then(function (res) {
+                var d = res.data || {};
+                var result = d.result || {};
+                if (result.status === 'already_running') {
+                    btn.textContent = 'Already running';
+                } else if (res.status >= 200 && res.status < 300 && d.success !== false) {
+                    var deleted = result.deleted_count || 0;
+                    var freed = result.freed_bytes ? fmtBytes(result.freed_bytes) : '0 B';
+                    btn.textContent = 'Γ£ô ' + deleted + ' clips, ' + freed;
+                } else {
+                    setError(d.message || 'Cleanup failed');
+                    btn.textContent = origText;
+                    return;
+                }
+                loadStatus();
+                setTimeout(function () { btn.textContent = origText; }, 4000);
+            })
+            .catch(function (e) {
+                setError('Network error: ' + e.message);
+                btn.textContent = origText;
+            })
+            .finally(function () { btn.disabled = false; });
+    }
+
+    function onReclaimStationary() {
+        var btn = $('sr-reclaim-stationary-btn');
+        if (!btn) return;
+        var ok = window.confirm(
+            'Delete all archived RecentClips with no GPS movement?\n\n' +
+            'This deletes parked-Sentry / stationary footage from the SD card. ' +
+            'Saved/Sentry event clips are preserved. Indexed driving footage is preserved. ' +
+            'This may free several GB.'
+        );
+        if (!ok) return;
+        var origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'ReclaimingΓÇª';
+        setError(null);
+        fetch(RECLAIM_STATIONARY_API, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        })
+            .then(function (r) {
+                return r.json().then(function (data) { return { status: r.status, data: data }; });
+            })
+            .then(function (res) {
+                var d = res.data || {};
+                var result = d.result || {};
+                if (result.status === 'already_running') {
+                    btn.textContent = 'Already running';
+                } else if (res.status >= 200 && res.status < 300 && d.success !== false) {
+                    var deleted = result.deleted_count || 0;
+                    var freed = result.freed_bytes ? fmtBytes(result.freed_bytes) : '0 B';
+                    btn.textContent = 'Γ£ô ' + deleted + ' clips, ' + freed;
+                } else {
+                    setError(d.message || 'Reclaim failed');
+                    btn.textContent = origText;
+                    return;
+                }
+                loadStatus();
+                setTimeout(function () { btn.textContent = origText; }, 6000);
+            })
+            .catch(function (e) {
+                setError('Network error: ' + e.message);
+                btn.textContent = origText;
+            })
+            .finally(function () { btn.disabled = false; });
+    }
+
+    if (!$('storage-retention-section')) return;
+
+    // -----------------------------------------------------------------
+    // Skipped-stationary tally (issue #167 sub 2 ΓÇö issue #184 Wave 1
+    // made the skip behavior unconditional; this just powers the badge).
+    // -----------------------------------------------------------------
+
+    var SKIPPED_STATIONARY_GET_API = '/api/archive/skipped_stationary';
+    var SKIPPED_STATIONARY_CLEAR_API = '/api/archive/skipped_stationary/clear';
+
+    function setSkipStationaryMsg(text, level) {
+        var box = $('sr-skip-stationary-msg');
+        if (!box) return;
+        if (!text) { box.hidden = true; box.textContent = ''; return; }
+        box.hidden = false;
+        box.textContent = text;
+        box.style.color = (level === 'error')
+            ? 'var(--accent-danger)'
+            : (level === 'success')
+                ? 'var(--accent-success)'
+                : 'var(--text-secondary)';
+    }
+
+    function loadSkipStationary() {
+        var countEl = $('sr-skip-stationary-count');
+        var clearBtn = $('sr-skip-stationary-clear-btn');
+        if (!countEl) return;
+        fetch(SKIPPED_STATIONARY_GET_API, { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+                if (!data) return;
+                countEl.textContent = (data.skipped_24h != null) ? data.skipped_24h : '0';
+                if (clearBtn) clearBtn.hidden = !((data.skipped_24h | 0) > 0);
+            })
+            .catch(function () { /* silent ΓÇö non-critical */ });
+    }
+
+    function onSkipStationaryClear() {
+        var btn = $('sr-skip-stationary-clear-btn');
+        if (!btn) return;
+        btn.disabled = true;
+        var orig = btn.textContent;
+        btn.textContent = 'ClearingΓÇª';
+        fetch(SKIPPED_STATIONARY_CLEAR_API, {
+            method: 'POST',
+            credentials: 'same-origin',
+        })
+            .then(function (r) {
+                return r.json().then(function (data) { return { status: r.status, data: data }; });
+            })
+            .then(function (res) {
+                var d = res.data || {};
+                if (res.status >= 200 && res.status < 300 && d.success) {
+                    var countEl = $('sr-skip-stationary-count');
+                    if (countEl) countEl.textContent = '0';
+                    btn.hidden = true;
+                    setSkipStationaryMsg('Cleared ' + (d.deleted | 0) + ' rows.', 'success');
+                } else {
+                    setSkipStationaryMsg(d.message || 'Clear failed.', 'error');
+                }
+            })
+            .catch(function (e) {
+                setSkipStationaryMsg('Network error: ' + e.message, 'error');
+            })
+            .finally(function () {
+                btn.disabled = false;
+                btn.textContent = orig;
+            });
+    }
+
+    var skipClearBtn = $('sr-skip-stationary-clear-btn');
+    if (skipClearBtn) skipClearBtn.addEventListener('click', onSkipStationaryClear);
+    loadSkipStationary();
+
+    var saveBtn = $('sr-save-btn');
+    var runBtn = $('sr-run-now-btn');
+    var reclaimBtn = $('sr-reclaim-stationary-btn');
+    if (saveBtn) saveBtn.addEventListener('click', onSave);
+    if (runBtn) runBtn.addEventListener('click', onRunNow);
+    if (reclaimBtn) reclaimBtn.addEventListener('click', onReclaimStationary);
+    var defEl = $('sr-default-retention');
+    var warnEl = $('sr-short-warning');
+    function refreshWarning() {
+        renderWarning(parseInt(defEl.value, 10), parseInt(warnEl.value, 10));
+    }
+    if (defEl) defEl.addEventListener('input', refreshWarning);
+    if (warnEl) warnEl.addEventListener('input', refreshWarning);
+
+    loadStatus();
+    // Visibility-aware polling ΓÇö pause when the tab is hidden so a
+    // backgrounded phone doesn't keep hitting the Pi every 30 s for
+    // hours on end.
+    var pollTimer = null;
+    function startPolling() {
+        if (pollTimer != null) return;
+        pollTimer = setInterval(loadStatus, POLL_MS);
+    }
+    function stopPolling() {
+        if (pollTimer == null) return;
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+    if (typeof document.visibilityState === 'string') {
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                stopPolling();
+            } else {
+                loadStatus();
+                startPolling();
+            }
+        });
+        if (!document.hidden) startPolling();
+    } else {
+        startPolling();
+    }
+})();
+
+// ---------------------------------------------------------------------------
+// System Health card (Phase 4.2 ΓÇö issue #101)
+// ---------------------------------------------------------------------------
+(function() {
+    var card = document.getElementById('system-health-card');
+    if (!card) return;
+    var pollUrl = card.getAttribute('data-poll-url');
+    var jobsUrl = card.getAttribute('data-jobs-url');
+    var POLL_MS = 15000;  // 15 s ΓÇö far below the cached probe TTL
+    var rowsBox = document.getElementById('system-health-rows');
+    var overallText = document.getElementById('system-health-overall-text');
+    var overallEl = document.getElementById('system-health-overall');
+    var errorEl = document.getElementById('system-health-error');
+    var retryBtn = document.getElementById('system-health-retry-btn');
+    var pollHandle = null;
+
+    var SUBSYSTEMS = [
+        { key: 'indexer',         label: 'Video Indexer' },
+        { key: 'archive',         label: 'Local Archive' },
+        { key: 'cloud',           label: 'Cloud Sync' },
+        { key: 'disk',            label: 'SD Card' },
+        { key: 'wifi',            label: 'WiFi' },
+    ];
+
+    var SEV_COLORS = {
+        ok:      'var(--accent-success)',
+        warn:    'var(--accent-warning)',
+        error:   'var(--accent-error)',
+        unknown: 'var(--text-secondary)',
+    };
+
+    function escapeText(s) {
+        if (s == null) return '';
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    function dotMarkup(severity) {
+        var color = SEV_COLORS[severity] || SEV_COLORS.unknown;
+        return '<span aria-label="' + escapeText(severity) + '" ' +
+               'style="width:10px; height:10px; border-radius:50%; ' +
+               'display:inline-block; flex-shrink:0; background:' + color +
+               ';"></span>';
+    }
+
+    function renderRows(payload) {
+        var html = '';
+        for (var i = 0; i < SUBSYSTEMS.length; i++) {
+            var sub = SUBSYSTEMS[i];
+            var block = payload[sub.key] || {};
+            var sev = block.severity || 'unknown';
+            var msg = escapeText(block.message || '\u2014');
+            html += '<div>' + dotMarkup(sev) + '</div>';
+            html += '<div style="color:var(--text-primary)">' +
+                    escapeText(sub.label) + '</div>';
+            html += '<div style="color:var(--text-secondary); ' +
+                    'overflow:hidden; text-overflow:ellipsis; ' +
+                    'white-space:nowrap;">' + msg + '</div>';
+        }
+        rowsBox.innerHTML = html;
+    }
+
+    function jumpToJobs() {
+        if (jobsUrl) window.location.href = jobsUrl;
+    }
+
+    function renderOverall(payload) {
+        var overall = payload.overall || { severity: 'unknown',
+                                            message: 'Unknown' };
+        var sev = overall.severity || 'unknown';
+        var color = SEV_COLORS[sev] || SEV_COLORS.unknown;
+        overallEl.querySelector('.health-dot').style.background = color;
+        overallText.textContent = overall.message || 'Unknown';
+        // Toggle the click affordance to track the current severity ΓÇö
+        // a system that recovers to 'ok' must shed both the listener
+        // and the pointer cursor, otherwise it still looks clickable.
+        var shouldLink = sev !== 'ok' && !!jobsUrl;
+        var isLinked = overallEl.classList.contains('linked');
+        if (shouldLink && !isLinked) {
+            overallEl.style.cursor = 'pointer';
+            overallEl.classList.add('linked');
+            overallEl.addEventListener('click', jumpToJobs);
+        } else if (!shouldLink && isLinked) {
+            overallEl.style.cursor = '';
+            overallEl.classList.remove('linked');
+            overallEl.removeEventListener('click', jumpToJobs);
+        }
+    }
+
+    function loadHealth() {
+        fetch(pollUrl, { cache: 'no-store' })
+            .then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function(payload) {
+                errorEl.hidden = true;
+                renderRows(payload);
+                renderOverall(payload);
+                renderFilesLostBanner(payload);
+            })
+            .catch(function(e) {
+                console.warn('system_health load failed:', e);
+                errorEl.hidden = false;
+            });
+    }
+
+    // Phase 4.3 (issue #101) ΓÇö files-lost banner. Surfaces the
+    // archive worker's source_gone counter (clips Tesla rotated out
+    // before we could copy them) when the 24 h count is non-zero.
+    // Lost dashcam footage is unrecoverable, so the banner is
+    // intentionally loud and persistent until the count drops back
+    // to zero (which happens automatically as old source_gone rows
+    // age past the 24 h window, or sooner if the user purges them).
+    var lostBanner   = document.getElementById('files-lost-banner');
+    var lostDetail   = document.getElementById('files-lost-detail');
+    var lostLink     = document.getElementById('files-lost-link');
+    var lostDismiss  = document.getElementById('files-lost-dismiss');
+    if (lostLink && jobsUrl) lostLink.href = jobsUrl;
+
+    if (lostDismiss) {
+        lostDismiss.addEventListener('click', function() {
+            // Issue #163 ΓÇö let the operator acknowledge the banner.
+            // Posts to /api/system/clear_lost_clips which:
+            //   1. Writes a server-side dismissal tombstone (PR #169
+            //      follow-up). Subsequent count_source_gone_recent
+            //      calls floor the 24-h window at this timestamp so a
+            //      worker burst on a heavily-backlogged device cannot
+            //      repopulate the banner with already-acknowledged
+            //      losses.
+            //   2. Deletes every existing source_gone row so the
+            //      Failed Jobs page's `source_gone_count` also clears.
+            // ``source_gone`` is terminal and has no downstream
+            // consumer, so this is safe.
+            //
+            // We optimistically hide the banner the instant the POST
+            // succeeds (instead of waiting for the next health poll
+            // to pick up the count change), so the user gets an
+            // immediate visual confirmation that "Dismiss worked".
+            // If a brand-new loss arrives later, the next poll will
+            // re-show the banner.
+            if (!window.confirm(
+                    'Dismiss the lost-footage banner?\n\n' +
+                    'This permanently deletes the records of clips ' +
+                    'Tesla rotated out before they could be archived. ' +
+                    'The footage itself is already gone ΓÇö this only ' +
+                    'clears the count from the banner.')) {
+                return;
+            }
+            lostDismiss.disabled = true;
+            fetch('/api/system/clear_lost_clips', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: '{}'
+            })
+            .then(function(resp) {
+                if (!resp.ok) {
+                    throw new Error('HTTP ' + resp.status);
+                }
+                return resp.json();
+            })
+            .then(function() {
+                // Optimistically hide the banner now. Do this BEFORE
+                // loadHealth() so we never flash "still showing" for
+                // the ~50ΓÇô200 ms the GET takes to round-trip the Pi.
+                if (lostBanner) lostBanner.hidden = true;
+                // Force an immediate health re-poll so the System
+                // Health card reflects the cleared state.
+                loadHealth();
+            })
+            .catch(function(e) {
+                console.warn('clear_lost_clips failed:', e);
+                window.alert('Could not dismiss banner: ' + e.message);
+            })
+            .finally(function() {
+                lostDismiss.disabled = false;
+            });
+        });
+    }
+
+    function renderFilesLostBanner(payload) {
+        if (!lostBanner) return;
+        var arc = payload.archive || {};
+        var n = parseInt(arc.lost_24h, 10) || 0;
+        if (n <= 0) {
+            lostBanner.hidden = true;
+            return;
+        }
+        if (lostDetail) {
+            lostDetail.textContent =
+                n === 1
+                ? '1 clip lost in the last 24 hours ΓÇö Tesla ' +
+                  'rotated it out of RecentClips before it could ' +
+                  'be archived. Device may be overloaded.'
+                : n + ' clips lost in the last 24 hours ΓÇö Tesla ' +
+                  'rotated them out of RecentClips before they ' +
+                  'could be archived. Device may be overloaded.';
+        }
+        lostBanner.hidden = false;
+    }
+
+    function startPoll() {
+        if (pollHandle) return;
+        loadHealth();
+        pollHandle = setInterval(loadHealth, POLL_MS);
+    }
+
+    function stopPoll() {
+        if (pollHandle) clearInterval(pollHandle);
+        pollHandle = null;
+    }
+
+    if (retryBtn) retryBtn.addEventListener('click', loadHealth);
+
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) stopPoll();
+        else startPoll();
+    });
+
+    if (!document.hidden) startPoll();
+})();
+
+// ---------------------------------------------------------------------------
+// Live Metrics card (Issue #208)
+// Polls /api/system/metrics every 5 s while the tab is visible. The endpoint
+// reads /proc files + in-memory counters only ΓÇö no subprocesses, no DB
+// writes, no SEI parses ΓÇö so this is essentially free even on a Pi Zero 2 W.
+// Stops polling on visibilitychange to avoid wasted cycles when the user has
+// the tab in the background.
+// ---------------------------------------------------------------------------
+(function() {
+    var card = document.getElementById('live-metrics-card');
+    if (!card) return;
+    var pollUrl = card.getAttribute('data-poll-url');
+    var POLL_MS = 5000;
+    var pollHandle = null;
+    var grid = document.getElementById('live-metrics-grid');
+    var updatedEl = document.getElementById('live-metrics-updated');
+    var uptimeEl = document.getElementById('live-metrics-uptime');
+
+    function fmtNum(n, digits) {
+        if (n == null || isNaN(n)) return 'ΓÇö';
+        if (digits == null) digits = 1;
+        return Number(n).toFixed(digits);
+    }
+
+    function fmtBytes(kbs) {
+        if (kbs == null || isNaN(kbs)) return 'ΓÇö';
+        if (kbs >= 1024) return fmtNum(kbs / 1024, 1) + ' MB/s';
+        return fmtNum(kbs, 1) + ' KB/s';
+    }
+
+    function fmtUptime(secs) {
+        if (secs == null || isNaN(secs)) return 'uptime ΓÇö';
+        var d = Math.floor(secs / 86400);
+        var h = Math.floor((secs % 86400) / 3600);
+        var m = Math.floor((secs % 3600) / 60);
+        if (d > 0) return 'uptime ' + d + 'd ' + h + 'h';
+        if (h > 0) return 'uptime ' + h + 'h ' + m + 'm';
+        return 'uptime ' + m + 'm';
+    }
+
+    function setTile(tileId, value, detail, severity) {
+        var tile = document.getElementById(tileId);
+        if (!tile) return;
+        var v = tile.querySelector('[data-field]:not([data-field$=detail])');
+        var d = tile.querySelector('[data-field$=detail]');
+        if (v) v.textContent = value;
+        if (d) d.textContent = detail || '\u00a0';
+        tile.classList.remove('warn', 'error');
+        if (severity === 'warn') tile.classList.add('warn');
+        else if (severity === 'error') tile.classList.add('error');
+    }
+
+    function severityFromLoad(loadOne, cpuCount) {
+        if (loadOne == null || cpuCount == null) return 'ok';
+        var ratio = loadOne / cpuCount;
+        if (ratio > 1.5) return 'error';
+        if (ratio > 1.0) return 'warn';
+        return 'ok';
+    }
+
+    function severityFromPct(pct, warn, err) {
+        if (pct == null) return 'ok';
+        if (pct >= err) return 'error';
+        if (pct >= warn) return 'warn';
+        return 'ok';
+    }
+
+    function renderMetrics(p) {
+        var load = p.loadavg || {};
+        var cpuCount = p.cpu_count || 1;
+        var loadStr = fmtNum(load.one, 2) + '  ' +
+                      fmtNum(load.five, 2) + '  ' +
+                      fmtNum(load.fifteen, 2);
+        var loadDetail = cpuCount > 0 && load.one != null
+            ? fmtNum(load.one / cpuCount * 100, 0) + '% of ' +
+              cpuCount + ' cores'
+            : cpuCount + ' cores';
+        setTile('metric-load', loadStr, loadDetail,
+                severityFromLoad(load.one, cpuCount));
+
+        var cpuPct = p.cpu_pct;
+        setTile('metric-cpu',
+                cpuPct != null ? fmtNum(cpuPct, 1) + '%' : 'ΓÇö',
+                'across ' + cpuCount + ' cores',
+                severityFromPct(cpuPct, 70, 90));
+
+        var mem = p.memory || {};
+        setTile('metric-mem',
+                mem.mem_used_pct != null
+                    ? fmtNum(mem.mem_used_pct, 0) + '%'
+                    : 'ΓÇö',
+                mem.mem_total_mb != null
+                    ? (mem.mem_total_mb - (mem.mem_available_mb || 0)) +
+                      ' / ' + mem.mem_total_mb + ' MB used'
+                    : 'ΓÇö',
+                severityFromPct(mem.mem_used_pct, 80, 95));
+
+        setTile('metric-swap',
+                mem.swap_used_pct != null
+                    ? fmtNum(mem.swap_used_pct, 0) + '%'
+                    : 'ΓÇö',
+                mem.swap_total_mb != null
+                    ? (mem.swap_used_mb || 0) + ' / ' +
+                      mem.swap_total_mb + ' MB used'
+                    : 'ΓÇö',
+                severityFromPct(mem.swap_used_pct, 30, 60));
+
+        var io = p.io || {};
+        var sd = io.mmcblk0 || {};
+        setTile('metric-sd',
+                fmtBytes((sd.read_kbs || 0) + (sd.write_kbs || 0)),
+                'r ' + fmtBytes(sd.read_kbs) + '  w ' + fmtBytes(sd.write_kbs),
+                'ok');
+
+        var loop = io.loop0 || {};
+        // Loop reads are the producer SEI peeks (Issue #208). Sustained
+        // reads above ~3 MB/s with no driving means the cache isn't
+        // catching ΓÇö surface as warn so the operator notices.
+        var loopTotal = (loop.read_kbs || 0) + (loop.write_kbs || 0);
+        var loopSev = loopTotal > 6144
+            ? 'error'
+            : (loopTotal > 3072 ? 'warn' : 'ok');
+        setTile('metric-loop',
+                fmtBytes(loopTotal),
+                'r ' + fmtBytes(loop.read_kbs) +
+                '  w ' + fmtBytes(loop.write_kbs),
+                loopSev);
+
+        var coord = p.task_coordinator || {};
+        var coordVal, coordDetail, coordSev;
+        if (coord.busy && coord.task) {
+            coordVal = coord.task;
+            coordDetail = 'held ' + fmtNum(coord.elapsed_seconds, 1) +
+                          's, ' + (coord.waiters || 0) + ' waiting';
+            coordSev = coord.elapsed_seconds > 60
+                ? 'error'
+                : (coord.elapsed_seconds > 30 ? 'warn' : 'ok');
+        } else {
+            coordVal = 'idle';
+            coordDetail = (coord.waiters || 0) + ' waiting';
+            coordSev = 'ok';
+        }
+        setTile('metric-coord', coordVal, coordDetail, coordSev);
+
+        var q = p.queues || {};
+        function qStr(n) { return n == null ? 'ΓÇö' : String(n); }
+        setTile('metric-queues',
+                qStr(q.archive_pending) + ' / ' +
+                qStr(q.index_pending) + ' / ' +
+                qStr(q.cloud_pending),
+                'archive / index / cloud',
+                'ok');
+
+        var pc = p.peek_cache || {};
+        var hits = pc.hits || 0;
+        var misses = pc.misses || 0;
+        var total = hits + misses;
+        var hitRate = total > 0 ? (hits / total * 100) : null;
+        setTile('metric-cache',
+                hitRate != null
+                    ? fmtNum(hitRate, 0) + '% hit'
+                    : 'ΓÇö',
+                (pc.size || 0) + ' / ' + (pc.capacity || 0) +
+                ' entries, ' + hits + ' hits / ' + misses + ' misses',
+                'ok');
+
+        var ts = p.generated_at
+            ? new Date(p.generated_at * 1000)
+            : new Date();
+        if (updatedEl) {
+            updatedEl.textContent = ts.toLocaleTimeString();
+        }
+        if (uptimeEl) {
+            uptimeEl.textContent = fmtUptime(p.uptime_seconds);
+        }
+    }
+
+    function loadMetrics() {
+        fetch(pollUrl, { cache: 'no-store' })
+            .then(function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(renderMetrics)
+            .catch(function(e) {
+                console.warn('live_metrics load failed:', e);
+            });
+    }
+
+    function startPoll() {
+        if (pollHandle) return;
+        loadMetrics();
+        pollHandle = setInterval(loadMetrics, POLL_MS);
+    }
+
+    function stopPoll() {
+        if (pollHandle) clearInterval(pollHandle);
+        pollHandle = null;
+    }
+
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) stopPoll();
+        else startPoll();
+    });
+
+    if (!document.hidden) startPoll();
+})();
+</script>
+{% endblock %}

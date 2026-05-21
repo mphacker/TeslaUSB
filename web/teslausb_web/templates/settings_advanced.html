@@ -289,7 +289,7 @@
                 </div>
             </div>
 
-            <form method="post" action="{{ url_for('settings.save_settings') }}" class="advanced-form">
+            <form method="post" action="{{ url_for('settings_advanced.save_settings') }}" class="advanced-form">
                 <div class="advanced-toggle-panel">
                     <div class="advanced-toggle-row">
                         <div>
@@ -334,7 +334,7 @@
                         <svg class="advanced-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-save"></use></svg>
                         Save advanced settings
                     </button>
-                    <a href="{{ url_for('settings.current_settings') }}" class="advanced-link">View JSON payload</a>
+                    <a href="{{ url_for('settings_advanced.current_settings') }}" class="advanced-link">View JSON payload</a>
                 </div>
             </form>
         </section>
@@ -349,13 +349,13 @@
             <div class="advanced-health-row">
                 <p class="advanced-help">Run a live daemon status probe or send a cache invalidation request through the shared IPC client.</p>
                 <div class="advanced-inline-actions">
-                    <form method="post" action="{{ url_for('settings.ipc_status') }}">
+                    <form method="post" action="{{ url_for('settings_advanced.ipc_status') }}">
                         <button type="submit" class="advanced-btn advanced-btn-secondary">
                             <svg class="advanced-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-activity"></use></svg>
                             Test IPC status
                         </button>
                     </form>
-                    <form method="post" action="{{ url_for('settings.ipc_invalidate_cache') }}">
+                    <form method="post" action="{{ url_for('settings_advanced.ipc_invalidate_cache') }}">
                         <button type="submit" class="advanced-btn advanced-btn-secondary">
                             <svg class="advanced-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
                             Invalidate daemon cache

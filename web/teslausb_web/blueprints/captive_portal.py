@@ -299,6 +299,60 @@ def captive_detection() -> ResponseReturnValue:
     return _render_wifi_page(source=route_label)
 
 
+@captive_portal_bp.route("/settings/wifi/configure-ap", methods=["POST"])
+def configure_ap() -> ResponseReturnValue:
+    """Update AP SSID/passphrase. Full implementation pending Phase 5.21."""
+    # TODO(#issue-needed): implement AP credential update via WifiService
+    ssid = _request_value("ssid")
+    passphrase = _request_value("passphrase")
+    _ = passphrase
+    if ssid:
+        logger.info("configure_ap stub called with ssid=%r (not persisted yet)", ssid)
+    flash("AP configuration update is not yet supported in B-1", "info")
+    return _wifi_redirect()
+
+
+@captive_portal_bp.route("/settings/wifi/force-ap", methods=["POST"])
+def force_ap() -> ResponseReturnValue:
+    """Force AP on/off. Maps to toggle_ap_mode."""
+    mode = _request_value("mode")
+    enabled = mode in {"on", "1", "true", "yes", "force_on"}
+    _get_service().set_ap_mode(enabled=enabled)
+    message = "Access Point enabled" if enabled else "Access Point disabled"
+    return _mutation_response(success=True, message=message, status=HTTPStatus.OK)
+
+
+@captive_portal_bp.route("/api/wifi/saved")
+def api_wifi_saved() -> ResponseReturnValue:
+    """Return saved Wi-Fi networks in v1 array format."""
+    status = _get_service().get_status()
+    networks = [
+        {
+            "name": network.ssid,
+            "ssid": network.ssid,
+            "active": network.active,
+            "in_range": False,
+            "signal": 0,
+        }
+        for network in status.saved_networks
+    ]
+    return jsonify(networks)
+
+
+@captive_portal_bp.route("/api/wifi/reorder", methods=["POST"])
+def api_wifi_reorder() -> ResponseReturnValue:
+    """Reorder saved Wi-Fi networks. Stub pending Phase 5.21."""
+    # TODO(#issue-needed): implement network reordering via WifiService
+    logger.info("api_wifi_reorder stub called (not yet implemented)")
+    return jsonify({"success": True, "message": "Network order saved (stub)"})
+
+
+@captive_portal_bp.route("/settings/wifi/dismiss-status", methods=["POST"])
+def dismiss_wifi_status() -> ResponseReturnValue:
+    """Dismiss the WiFi status alert. B-1 uses flash messages, so this is a no-op."""
+    return jsonify({"success": True})
+
+
 @captive_portal_bp.route("/favicon.ico")
 def favicon() -> ResponseReturnValue:
     return "", HTTPStatus.NO_CONTENT

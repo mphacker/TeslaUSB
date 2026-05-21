@@ -206,8 +206,7 @@ def test_advanced_settings_page_renders_real_template(tmp_path: Path) -> None:
     resp = app.test_client().get("/settings/")
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
-    assert "Advanced Settings" in html
-    assert "Network sharing stub" in html
+    assert "System Health" in html
     for forbidden in ("mode_control", "current_mode", "quick_edit", "fsck", "loopback"):
         assert forbidden not in html
     assert "cdn.jsdelivr.net" not in html

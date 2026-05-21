@@ -375,7 +375,7 @@ def _serialize_bulk_result(result: PlateBulkOperationResult) -> dict[str, object
 
 @license_plates_bp.route("/upload", methods=["POST"])
 def upload_plate() -> ResponseReturnValue:
-    # TODO(#photo-upload): implement single-file plate image upload and
+    # TODO(#227): implement single-file plate image upload and
     # conversion via PIL + the photo plate service.
     if _wants_json_response():
         return (
@@ -388,7 +388,7 @@ def upload_plate() -> ResponseReturnValue:
 
 @license_plates_bp.route("/upload_multiple", methods=["POST"])
 def upload_multiple_plates() -> ResponseReturnValue:
-    # TODO(#photo-upload): implement multi-file plate image upload.
+    # TODO(#227): implement multi-file plate image upload.
     if _wants_json_response():
         return (
             _json_error_payload("Photo plate upload is not yet implemented"),
@@ -400,7 +400,7 @@ def upload_multiple_plates() -> ResponseReturnValue:
 
 @license_plates_bp.route("/download/<partition>/<path:filename>")
 def download_plate(partition: str, filename: str) -> ResponseReturnValue:
-    # TODO(#photo-upload): serve the PNG from the backing store once the
+    # TODO(#227): serve the PNG from the backing store once the
     # photo plate service can resolve partition + filename to a file path.
     del partition, filename
     flash("Photo plate download is not yet implemented.", "error")
@@ -409,7 +409,7 @@ def download_plate(partition: str, filename: str) -> ResponseReturnValue:
 
 @license_plates_bp.route("/delete_image/<partition>/<path:filename>", methods=["POST"])
 def delete_plate(partition: str, filename: str) -> ResponseReturnValue:
-    # TODO(#photo-upload): delete the plate PNG from the backing store and
+    # TODO(#227): delete the plate PNG from the backing store and
     # schedule a cache invalidation after the photo plate service exists.
     del partition, filename
     if _wants_json_response():

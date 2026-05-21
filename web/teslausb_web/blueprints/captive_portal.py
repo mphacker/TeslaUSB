@@ -302,7 +302,7 @@ def captive_detection() -> ResponseReturnValue:
 @captive_portal_bp.route("/settings/wifi/configure-ap", methods=["POST"])
 def configure_ap() -> ResponseReturnValue:
     """Update AP SSID/passphrase. Full implementation pending Phase 5.21."""
-    # TODO(#issue-needed): implement AP credential update via WifiService
+    # TODO(#228): implement AP credential update via WifiService
     ssid = _request_value("ssid")
     passphrase = _request_value("passphrase")
     _ = passphrase
@@ -342,7 +342,7 @@ def api_wifi_saved() -> ResponseReturnValue:
 @captive_portal_bp.route("/api/wifi/reorder", methods=["POST"])
 def api_wifi_reorder() -> ResponseReturnValue:
     """Reorder saved Wi-Fi networks. Stub pending Phase 5.21."""
-    # TODO(#issue-needed): implement network reordering via WifiService
+    # TODO(#228): implement network reordering via WifiService
     logger.info("api_wifi_reorder stub called (not yet implemented)")
     return jsonify({"success": True, "message": "Network order saved (stub)"})
 

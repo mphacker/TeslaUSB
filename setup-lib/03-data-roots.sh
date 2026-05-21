@@ -41,7 +41,31 @@ B1_DATA_DIRS=(teslacam media)
 B1_DATA_OWNER="teslausb"
 B1_DATA_GROUP="teslausb"
 B1_DATA_MODE="775"
-export B1_DATA_ROOT B1_DATA_DIRS B1_DATA_OWNER B1_DATA_GROUP B1_DATA_MODE
+
+# Tesla-canonical subdirectories created inside each LUN backing root so
+# the FAT32 volume teslafat synthesizes for the car already has the
+# directory structure Tesla expects. Tesla creates these on first write
+# anyway, but pre-creating means:
+#   * the web app shows correct empty states from day one;
+#   * the operator can confirm via the web UI that the gadget is
+#     end-to-end alive *before* the car has written anything;
+#   * users dropping LightShow / Boombox content onto the media drive
+#     have a destination folder ready.
+#
+# TeslaCam LUN subdirs (Tesla writes here):
+B1_TESLACAM_SUBDIRS=(
+  "TeslaCam"
+  "TeslaCam/RecentClips"
+  "TeslaCam/SentryClips"
+  "TeslaCam/SavedClips"
+)
+# Media LUN subdirs (Tesla reads here; user populates):
+B1_MEDIA_SUBDIRS=(
+  "LightShow"
+  "Boombox"
+)
+export B1_DATA_ROOT B1_DATA_DIRS B1_DATA_OWNER B1_DATA_GROUP B1_DATA_MODE \
+  B1_TESLACAM_SUBDIRS B1_MEDIA_SUBDIRS
 
 # Backwards-compat aliases (older docs / commits reference B1_BTRFS_*).
 # shellcheck disable=SC2034  # exported for downstream consumers
@@ -142,6 +166,21 @@ _b1_fix_ownership() {
   b1_run chmod "0${B1_DATA_MODE}" "${path}"
 }
 
+# _b1_ensure_tesla_subdir <relative-path> <lun-root>
+# Idempotently create + chown a Tesla-canonical subdirectory inside
+# a LUN backing root.
+_b1_ensure_tesla_subdir() {
+  local rel="$1" lun_root="$2"
+  local path="${lun_root}/${rel}"
+  if [[ ! -d "${path}" ]]; then
+    b1_log "creating Tesla subdir: ${path}"
+    b1_run mkdir -p "${path}"
+  else
+    b1_log "Tesla subdir present: ${path}"
+  fi
+  _b1_fix_ownership "${path}"
+}
+
 b1_step_03() {
   _b1_ensure_root || return 1
 
@@ -168,4 +207,18 @@ b1_step_03() {
       _b1_fix_ownership "${B1_DATA_ROOT}/${name}" || return 1
     fi
   done
+
+  # Tesla-canonical subdirectories inside each LUN backing root.
+  # Created only when the group exists so ownership lands correctly.
+  if (( have_group )); then
+    local sub
+    b1_log "creating Tesla folder structure under ${B1_DATA_ROOT}/teslacam"
+    for sub in "${B1_TESLACAM_SUBDIRS[@]}"; do
+      _b1_ensure_tesla_subdir "${sub}" "${B1_DATA_ROOT}/teslacam" || return 1
+    done
+    b1_log "creating Tesla folder structure under ${B1_DATA_ROOT}/media"
+    for sub in "${B1_MEDIA_SUBDIRS[@]}"; do
+      _b1_ensure_tesla_subdir "${sub}" "${B1_DATA_ROOT}/media" || return 1
+    done
+  fi
 }

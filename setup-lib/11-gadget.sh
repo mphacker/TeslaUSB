@@ -38,6 +38,7 @@
 #   * /usr/local/bin/teslausb-gadget-down — configfs g1 teardown script
 #   * /usr/local/bin/teslausb-present-usb — UDC bind (Tesla "sees" drives)
 #   * /usr/local/bin/teslausb-hide-usb — UDC unbind (Tesla "ejects" drives)
+#   * /usr/local/bin/teslausb-watch — live inotify view of TeslaCam/media writes
 #
 # === Safety rails ===
 #
@@ -84,6 +85,7 @@ B1_GADGET_UP_BIN="/usr/local/bin/teslausb-gadget-up"
 B1_GADGET_DOWN_BIN="/usr/local/bin/teslausb-gadget-down"
 B1_PRESENT_USB_BIN="/usr/local/bin/teslausb-present-usb"
 B1_HIDE_USB_BIN="/usr/local/bin/teslausb-hide-usb"
+B1_WATCH_BIN="/usr/local/bin/teslausb-watch"
 
 B1_GADGET_TARGETS=(
   "${B1_NBD_MODPROBE_CONF}"
@@ -96,6 +98,7 @@ B1_GADGET_TARGETS=(
   "${B1_GADGET_DOWN_BIN}"
   "${B1_PRESENT_USB_BIN}"
   "${B1_HIDE_USB_BIN}"
+  "${B1_WATCH_BIN}"
 )
 
 export B1_GADGET_NAME B1_GADGET_VENDOR_ID B1_GADGET_PRODUCT_ID \
@@ -103,7 +106,7 @@ export B1_GADGET_NAME B1_GADGET_VENDOR_ID B1_GADGET_PRODUCT_ID \
   B1_NBD_MODPROBE_CONF B1_NBD_MODULES_LOAD B1_TESLAFAT_CONF_DIR \
   B1_TESLAFAT_CONF_0 B1_TESLAFAT_CONF_1 B1_NBD_ATTACH_UNIT \
   B1_USB_GADGET_UNIT B1_GADGET_UP_BIN B1_GADGET_DOWN_BIN \
-  B1_PRESENT_USB_BIN B1_HIDE_USB_BIN B1_GADGET_TARGETS
+  B1_PRESENT_USB_BIN B1_HIDE_USB_BIN B1_WATCH_BIN B1_GADGET_TARGETS
 
 # ---- Inline file body constants -----------------------------------
 
@@ -390,6 +393,56 @@ echo "" > "${GADGET_DIR}/UDC"
 echo "teslausb-hide-usb: unbound from ${current}"
 '
 
+B1_WATCH_BODY='#!/bin/sh
+# teslausb-watch — live view of Tesla writes to the TeslaCam backing
+# store. Streams inotify events (create/modify/close_write/move/delete)
+# with timestamps, and prints periodic size + file-count snapshots so
+# you can confirm Tesla is actually writing the SD card.
+#
+# Usage: teslausb-watch [path]   (default: /srv/teslausb/teslacam)
+# Optional: teslausb-watch media (alias for /srv/teslausb/media)
+set -eu
+
+case "${1:-teslacam}" in
+  teslacam) ROOT=/srv/teslausb/teslacam ;;
+  media)    ROOT=/srv/teslausb/media ;;
+  /*)       ROOT="$1" ;;
+  *)        echo "usage: teslausb-watch [teslacam|media|/abs/path]" >&2; exit 2 ;;
+esac
+
+if [ ! -d "$ROOT" ]; then
+  echo "teslausb-watch: $ROOT does not exist" >&2
+  exit 3
+fi
+
+if ! command -v inotifywait >/dev/null 2>&1; then
+  echo "teslausb-watch: install inotify-tools (apt install inotify-tools)" >&2
+  exit 4
+fi
+
+snapshot() {
+  files=$(find "$ROOT" -type f 2>/dev/null | wc -l)
+  size=$(du -sh "$ROOT" 2>/dev/null | awk "{print \$1}")
+  recent=$(find "$ROOT" -type f -mmin -1 2>/dev/null | wc -l)
+  printf "%s  SNAPSHOT  files=%s  size=%s  modified-in-last-60s=%s\n" \
+    "$(date +%H:%M:%S)" "$files" "$size" "$recent"
+}
+
+echo "teslausb-watch: streaming $ROOT (Ctrl-C to stop)"
+snapshot
+
+# Run snapshot every 30s in background; foreground = inotify stream.
+( while true; do sleep 30; snapshot; done ) &
+SNAP_PID=$!
+trap "kill $SNAP_PID 2>/dev/null; exit 0" INT TERM EXIT
+
+exec inotifywait -m -r --quiet \
+  --format "%T  %e  %w%f" \
+  --timefmt "%H:%M:%S" \
+  -e create -e close_write -e moved_to -e delete -e moved_from \
+  "$ROOT"
+'
+
 # _b1_data_root_free_gb  — best-effort: total bytes of the filesystem
 # hosting /srv/teslausb, expressed in whole GB. Falls back to 0 if the
 # path doesn't exist yet (caller handles).
@@ -622,6 +675,7 @@ b1_step_11() {
   _b1_install_file "${B1_GADGET_DOWN_BIN}" 0755 "${B1_GADGET_DOWN_BODY}"
   _b1_install_file "${B1_PRESENT_USB_BIN}" 0755 "${B1_PRESENT_USB_BODY}"
   _b1_install_file "${B1_HIDE_USB_BIN}"    0755 "${B1_HIDE_USB_BODY}"
+  _b1_install_file "${B1_WATCH_BIN}"       0755 "${B1_WATCH_BODY}"
 
   # 5. Reload systemd if any unit changed.
   if [[ "${TESLAUSB_DRY_RUN:-0}" != "1" ]]; then

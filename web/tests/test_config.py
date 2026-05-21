@@ -14,6 +14,7 @@ from teslausb_web.config import (
     ChimesSection,
     ConfigError,
     LightShowsSection,
+    MappingSection,
     MusicSection,
     WebConfig,
     WrapsSection,
@@ -533,6 +534,49 @@ def test_boombox_allowed_extensions_must_start_with_dot(tmp_path: Path) -> None:
     cfg_file = tmp_path / "boombox_extension.toml"
     _write(cfg_file, '[boombox]\nallowed_extensions = ["wav"]\n')
     with pytest.raises(ConfigError, match=r"entries must start with '\.'"):
+        load_config(cfg_file)
+
+
+def test_mapping_defaults_follow_state_dir(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "mapping_defaults.toml"
+    _write(
+        cfg_file,
+        """
+[paths]
+state_dir = "/var/lib/custom-teslausb"
+""",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.mapping == MappingSection(
+        db_path=Path("/var/lib/custom-teslausb/mapping.db"),
+        backup_retention=3,
+        backup_dir=Path("/var/lib/custom-teslausb/mapping-backups"),
+    )
+
+
+def test_mapping_section_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "mapping_explicit.toml"
+    _write(
+        cfg_file,
+        """
+[mapping]
+db_path = "/var/lib/teslausb/custom-mapping.db"
+backup_retention = 7
+backup_dir = "/var/lib/teslausb/mapping-history"
+""",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.mapping == MappingSection(
+        db_path=Path("/var/lib/teslausb/custom-mapping.db"),
+        backup_retention=7,
+        backup_dir=Path("/var/lib/teslausb/mapping-history"),
+    )
+
+
+def test_mapping_backup_retention_must_be_positive(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "mapping_invalid.toml"
+    _write(cfg_file, "[mapping]\nbackup_retention = 0\n")
+    with pytest.raises(ConfigError, match="backup_retention must be > 0"):
         load_config(cfg_file)
 
 

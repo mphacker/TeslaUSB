@@ -84,6 +84,11 @@ _DEFAULT_BOOMBOX_BASE_DIR: Final[str] = "Boombox"
 _DEFAULT_BOOMBOX_MAX_FILE_BYTES: Final[int] = 1 * 1024 * 1024
 _DEFAULT_BOOMBOX_MAX_FILES: Final[int] = 5
 _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".mp3", ".wav")
+_DEFAULT_MAPPING_DB_NAME: Final[str] = "mapping.db"
+_DEFAULT_MAPPING_BACKUP_DIRNAME: Final[str] = "mapping-backups"
+_DEFAULT_MAPPING_BACKUP_RETENTION: Final[int] = 3
+_DEFAULT_MAPPING_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_DB_NAME
+_DEFAULT_MAPPING_BACKUP_DIR: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_BACKUP_DIRNAME
 
 # Highest valid TCP/UDP port number per RFC 793. Named to silence
 # the magic-value lint and document intent at the call site.
@@ -386,6 +391,25 @@ class BoomboxSection:
 
 
 @dataclass(frozen=True, slots=True)
+class MappingSection:
+    """Mapping database paths and migration-backup retention."""
+
+    db_path: Path = _DEFAULT_MAPPING_DB_PATH
+    backup_retention: int = _DEFAULT_MAPPING_BACKUP_RETENTION
+    backup_dir: Path = _DEFAULT_MAPPING_BACKUP_DIR
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        for name, value in (("db_path", self.db_path), ("backup_dir", self.backup_dir)):
+            if not PurePosixPath(value.as_posix()).is_absolute():
+                raise ConfigError(None, f"[mapping] {name} must be absolute, got {value!r}")
+        if self.backup_retention <= 0:
+            raise ConfigError(None, "[mapping] backup_retention must be > 0")
+
+
+@dataclass(frozen=True, slots=True)
 class WebConfig:
     """Root config dataclass — what the rest of the app sees."""
 
@@ -397,6 +421,7 @@ class WebConfig:
     wraps: WrapsSection = field(default_factory=WrapsSection)
     music: MusicSection = field(default_factory=MusicSection)
     boombox: BoomboxSection = field(default_factory=BoomboxSection)
+    mapping: MappingSection = field(default_factory=MappingSection)
     source_path: Path | None = None
 
     def validate(self) -> None:
@@ -409,6 +434,7 @@ class WebConfig:
             self.wraps.validate()
             self.music.validate()
             self.boombox.validate()
+            self.mapping.validate()
         except ConfigError as exc:
             raise ConfigError(self.source_path, str(exc).split(": ", 1)[-1]) from exc
 
@@ -527,6 +553,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     wraps_raw = _expect_section(raw, "wraps", source)
     music_raw = _expect_section(raw, "music", source)
     boombox_raw = _expect_section(raw, "boombox", source)
+    mapping_raw = _expect_section(raw, "mapping", source)
 
     web = WebSection(
         host=_coerce_str(web_raw, "host", _DEFAULT_HOST, source),
@@ -737,6 +764,26 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 source,
             ),
         )
+        mapping = MappingSection(
+            db_path=_coerce_path(
+                mapping_raw,
+                "db_path",
+                paths_section.state_dir / _DEFAULT_MAPPING_DB_NAME,
+                source,
+            ),
+            backup_retention=_coerce_int(
+                mapping_raw,
+                "backup_retention",
+                _DEFAULT_MAPPING_BACKUP_RETENTION,
+                source,
+            ),
+            backup_dir=_coerce_path(
+                mapping_raw,
+                "backup_dir",
+                paths_section.state_dir / _DEFAULT_MAPPING_BACKUP_DIRNAME,
+                source,
+            ),
+        )
     except ConfigError as exc:
         raise ConfigError(source, str(exc).split(": ", 1)[-1]) from exc
     cfg = WebConfig(
@@ -748,6 +795,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         wraps=wraps,
         music=music,
         boombox=boombox,
+        mapping=mapping,
         source_path=source,
     )
     cfg.validate()

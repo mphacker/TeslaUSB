@@ -77,6 +77,17 @@ from teslausb_web.services.lock_chime_service import (
     upload_chime_file,
     validate_tesla_wav,
 )
+from teslausb_web.services.mapping_migrations import (
+    _BACKUP_RETENTION,
+    _SCHEMA_VERSION,
+    MappingDatabaseError,
+    MappingMigrationError,
+    MigrationsConfig,
+    MigrationsRunner,
+    _backup_db,
+    _init_db,
+    make_migrations_runner,
+)
 from teslausb_web.services.wrap_service import (
     ValidationResult,
     WrapError,
@@ -87,6 +98,8 @@ from teslausb_web.services.wrap_service import (
 )
 
 __all__ = (
+    "_BACKUP_RETENTION",
+    "_SCHEMA_VERSION",
     "ActiveChimeResolution",
     "BoomboxConfig",
     "BoomboxDeleteResult",
@@ -111,6 +124,10 @@ __all__ = (
     "HolidaySchedule",
     "LockChimeAudioError",
     "LockChimeFileError",
+    "MappingDatabaseError",
+    "MappingMigrationError",
+    "MigrationsConfig",
+    "MigrationsRunner",
     "RandomConfig",
     "RecurringSchedule",
     "ReencodeResult",
@@ -125,6 +142,8 @@ __all__ = (
     "WrapFileError",
     "WrapInfo",
     "WrapService",
+    "_backup_db",
+    "_init_db",
     "delete_chime_file",
     "format_last_run",
     "format_schedule_display",
@@ -132,6 +151,7 @@ __all__ = (
     "make_boombox_service",
     "make_chime_group_manager",
     "make_chime_scheduler",
+    "make_migrations_runner",
     "make_wrap_service",
     "normalize_audio",
     "reencode_wav_for_tesla",

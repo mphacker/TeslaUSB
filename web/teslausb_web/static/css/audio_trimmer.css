@@ -12,7 +12,7 @@
     margin-bottom: 20px;
 }
 
-.trim-editor-section.edit-mode {
+.trim-editor-section.editing-existing {
     border-color: var(--btn-success-bg);
 }
 
@@ -146,11 +146,11 @@
 }
 
 .trim-slider:focus::-webkit-slider-thumb {
-    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.3);
+    box-shadow: 0 0 0 3px var(--shadow-hover);
 }
 
 .trim-slider:focus::-moz-range-thumb {
-    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.3);
+    box-shadow: 0 0 0 3px var(--shadow-hover);
 }
 
 /* Speed slider styling */
@@ -242,7 +242,7 @@
 }
 
 .trim-stat-value.warning {
-    color: #ffc107;
+    color: var(--warning-border);
 }
 
 .trim-stat-value.error {
@@ -352,9 +352,9 @@
 }
 
 .trim-message.warning {
-    background: #fff3cd;
-    color: #856404;
-    border-color: #ffc107;
+    background: var(--warning-bg);
+    color: var(--ios-warning-text);
+    border-color: var(--warning-border);
 }
 
 .trim-message.error {
@@ -364,8 +364,8 @@
 }
 
 [data-theme="dark"] .trim-message.warning {
-    background: #5a4a1f;
-    color: #d29922;
+    background: var(--warning-bg);
+    color: var(--ios-warning-text);
 }
 
 /* Playback Controls */

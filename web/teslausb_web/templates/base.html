@@ -69,13 +69,13 @@
                       id="health-dot"
                       data-status-dot="health"></span>
             </a>
-            {# B-1: mode/quick_edit removed. The status dot now reflects
-               Samba state ONLY. When Samba is OFF (the default, which is
-               also v1's "present mode"), the dot is hidden — the USB is
-               always connected to the vehicle, there's no useful state
-               to communicate. When Samba is ON, the dot is amber and
-               reads "Network sharing active". See
-               docs/05-UI-UX-DESIGN-SYSTEM.md §"Status Indicator". #}
+            {# B-1: legacy mode switching was removed. The status dot now
+               reflects Samba state ONLY. When Samba is OFF, the dot is
+               hidden — the USB is always connected to the vehicle, so
+               there is no useful extra state to communicate. When Samba
+               is ON, the dot is amber and reads "Network sharing
+               active". See docs/05-UI-UX-DESIGN-SYSTEM.md
+               §"Status Indicator". #}
             {% if samba_on %}
             <span class="status-dot status-samba-on" title="Network sharing active"></span>
             {% endif %}
@@ -368,11 +368,11 @@
             const dot = document.getElementById('health-dot');
             if (!link || !dot) return;
 
-            // Map subsystem severity → CSS class + tooltip prefix.
+            // Map subsystem severity to the CSS class + tooltip prefix.
             // B-1: uses the design-system accent tokens for ok/warn/
             // error so dark/light mode work automatically. (v1's mode
             // status-dot vocabulary that this comment used to reference
-            // was removed when mode/quick_edit went away.)
+            // was removed when legacy mode switching went away.)
             const SEV_TO_CLASS = {
                 ok:      'health-dot-ok',
                 warn:    'health-dot-warn',

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Final
 from unittest.mock import patch
 
 import pytest
-from jinja2 import TemplateNotFound
 from teslausb_web.app import create_app
 from teslausb_web.blueprints.lock_chimes import (
     _get_group_manager,
@@ -238,14 +237,114 @@ def test_serialize_schedule_for_edit_supports_recurring() -> None:
     assert payload["enabled"] is False
 
 
-def test_get_index_skips_until_template_lands(client) -> None:
-    try:
-        response = client.get("/lock_chimes/")
-    except TemplateNotFound:
-        pytest.skip(reason="template in 5.8e")
-    if response.status_code == 500:
-        pytest.skip(reason="template in 5.8e")
+def test_get_index_renders_template(client) -> None:
+    response = client.get("/lock_chimes/")
     assert response.status_code == 200
+    html = response.data.decode("utf-8")
+    assert "Lock Chimes" in html
+    assert "/static/vendor/lamejs/lame.min.js" in html
+    assert "/static/js/audio_trimmer.js" in html
+
+
+def test_get_index_strips_removed_mode_terms(client) -> None:
+    response = client.get("/lock_chimes/")
+    html = response.data.decode("utf-8").casefold()
+    assert "edit mode" not in html
+    assert "present mode" not in html
+    assert "quick_edit" not in html
+    assert "cdn.jsdelivr" not in html
+
+
+def test_get_index_empty_state_renders_without_errors(client) -> None:
+    response = client.get("/lock_chimes/")
+    html = response.data.decode("utf-8")
+    assert response.status_code == 200
+    assert "No active lock chime set." in html
+    assert "No chimes found in the Chimes library." in html
+    assert "No schedules configured." in html
+    assert "No chime groups yet." in html
+
+
+def test_get_index_full_state_renders_all_sections(
+    client,
+    chimes_dir: Path,
+    active_path: Path,
+    group_manager: ChimeGroupManager,
+    scheduler: ChimeScheduler,
+) -> None:
+    for filename in ("alpha.wav", "bravo.wav", "charlie.wav"):
+        payload = _wav_bytes()
+        (chimes_dir / filename).write_bytes(payload)
+    active_path.write_bytes((chimes_dir / "alpha.wav").read_bytes())
+
+    holiday_group = group_manager.create_group("Holiday").group_id
+    assert holiday_group is not None
+    group_manager.add_chime_to_group(holiday_group, "alpha.wav")
+    group_manager.add_chime_to_group(holiday_group, "bravo.wav")
+
+    funny_group = group_manager.create_group("Funny").group_id
+    assert funny_group is not None
+    group_manager.add_chime_to_group(funny_group, "charlie.wav")
+    group_manager.set_random_mode(enabled=True, group_id=holiday_group)
+
+    scheduler.add_weekly((0, 2), "09:00", chime="alpha.wav")
+    scheduler.add_date(12, 25, "08:30", chime="bravo.wav")
+    scheduler.add_holiday("Christmas Day", "00:00", chime="charlie.wav")
+    scheduler.add_recurring("1hour", chime="RANDOM")
+
+    response = client.get("/lock_chimes/")
+    html = response.data.decode("utf-8")
+    assert response.status_code == 200
+    for token in (
+        "alpha.wav",
+        "bravo.wav",
+        "charlie.wav",
+        "Holiday",
+        "Funny",
+        "Christmas Day",
+        "Random Chime",
+        "Recurring Rotation",
+    ):
+        assert token in html
+
+
+def test_get_index_render_contains_no_emoji_icons(client) -> None:
+    response = client.get("/lock_chimes/")
+    html = response.data.decode("utf-8")
+    forbidden_codepoints = {
+        0x26A0,
+        0x2713,
+        0x2714,
+        0x2717,
+        0x2718,
+        0x2716,
+        0x1F3B5,
+        0x1F514,
+        0x1F4CB,
+        0x1F4E4,
+        0x2702,
+        0x1F50A,
+        0x1F4DD,
+        0x1F3AF,
+        0x21BA,
+        0x25B6,
+        0x2795,
+        0x1F4C5,
+        0x1F4C6,
+        0x1F389,
+        0x1F504,
+        0x2139,
+        0x23F0,
+        0x1F4CA,
+        0x1F4A1,
+        0x270F,
+        0x1F5D1,
+        0x1F4C1,
+        0x25CB,
+        0x1F3B2,
+        0x2022,
+    }
+    assert all(ord(char) not in forbidden_codepoints for char in html)
 
 
 def test_play_active_chime_returns_wav(client, active_path: Path) -> None:

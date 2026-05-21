@@ -25,7 +25,7 @@ class AudioTrimmer {
         this.playbackSpeed = 1.0;
         this.isPlaying = false;
         this.originalFileName = '';
-        this.editMode = false; // true when editing existing chime
+        this.editingExisting = false;
         this.lastActualFileSize = null; // Cache for actual encoded file size
         
         // Track initial state to detect changes
@@ -69,7 +69,7 @@ class AudioTrimmer {
             
             if (typeof fileOrUrl === 'string') {
                 // Loading from URL (editing existing chime)
-                this.editMode = true;
+                this.editingExisting = true;
                 const response = await fetch(fileOrUrl);
                 if (!response.ok) {
                     throw new Error(`Failed to fetch audio: ${response.statusText}`);
@@ -78,7 +78,7 @@ class AudioTrimmer {
                 this.originalFileName = fileName || 'chime.wav';
             } else {
                 // Loading from File object (new upload)
-                this.editMode = false;
+                this.editingExisting = false;
                 arrayBuffer = await this.readFileAsArrayBuffer(fileOrUrl);
                 this.originalFileName = fileOrUrl.name;
             }
@@ -175,7 +175,7 @@ class AudioTrimmer {
         const ctx = this.canvasContext;
         
         // Clear canvas
-        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg-secondary') || '#ffffff';
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg-secondary');
         ctx.fillRect(0, 0, width, height);
         
         // Calculate trim region in pixels based on ORIGINAL timeline
@@ -185,12 +185,12 @@ class AudioTrimmer {
         const endPixel = (this.endTime / duration) * width;
         
         // Draw excluded regions (gray)
-        ctx.fillStyle = 'rgba(128, 128, 128, 0.2)';
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg-hover');
         ctx.fillRect(0, 0, startPixel, height);
         ctx.fillRect(endPixel, 0, width - endPixel, height);
         
         // Draw selected region background (light blue)
-        ctx.fillStyle = 'rgba(33, 150, 243, 0.1)';
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg-active');
         ctx.fillRect(startPixel, 0, endPixel - startPixel, height);
         
         // Draw waveform
@@ -204,9 +204,9 @@ class AudioTrimmer {
             
             // Color based on whether in selected region
             if (x >= startPixel && x <= endPixel) {
-                ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--btn-primary-bg') || '#007bff';
+                ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--btn-primary-bg');
             } else {
-                ctx.fillStyle = 'rgba(128, 128, 128, 0.5)';
+                ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-muted');
             }
             
             // Draw bar from center
@@ -214,7 +214,7 @@ class AudioTrimmer {
         }
         
         // Draw trim markers
-        ctx.strokeStyle = '#f44336';
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--error-text');
         ctx.lineWidth = 2;
         
         // Start marker
@@ -248,9 +248,9 @@ class AudioTrimmer {
         const positionPixel = (this.currentPlaybackPosition / duration) * width;
         
         // Draw playback position line
-        ctx.strokeStyle = '#00ff00'; // Bright green
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--success-text');
         ctx.lineWidth = 3;
-        ctx.shadowColor = '#00ff00';
+        ctx.shadowColor = getComputedStyle(document.documentElement).getPropertyValue('--success-text');
         ctx.shadowBlur = 5;
         
         ctx.beginPath();

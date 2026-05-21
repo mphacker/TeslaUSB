@@ -320,12 +320,10 @@ document.addEventListener('DOMContentLoaded', function() {
             const modalTitle = document.getElementById('groupModalTitle');
             const groupFormId = document.getElementById('groupFormId');
             const groupName = document.getElementById('groupName');
-            const groupDescription = document.getElementById('groupDescription');
 
             if (modalTitle) modalTitle.textContent = 'Create New Group';
             if (groupFormId) groupFormId.value = '';
             if (groupName) groupName.value = '';
-            if (groupDescription) groupDescription.value = '';
 
             // Uncheck all chimes
             document.querySelectorAll('#chimeCheckboxes input[type="checkbox"]').forEach(cb => {
@@ -363,7 +361,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
             const groupId = document.getElementById('groupFormId').value;
             const groupName = document.getElementById('groupName').value.trim();
-            const groupDescription = document.getElementById('groupDescription').value.trim();
 
             // Collect selected chimes
             const selectedChimes = [];
@@ -384,19 +381,17 @@ document.addEventListener('DOMContentLoaded', function() {
                     url = `/lock_chimes/groups/${groupId}/update`;
                     method = 'POST';
                     data = {
-                        name: groupName,
-                        description: groupDescription
+                        name: groupName
                     };
 
                     // Note: For simplicity, we'll handle chime updates separately
-                    // in the edit functionality. This just updates name/description.
+                    // in the edit functionality. This just updates the group name.
                 } else {
                     // Create new group
                     url = '/lock_chimes/groups/create';
                     method = 'POST';
                     data = {
-                        name: groupName,
-                        description: groupDescription
+                        name: groupName
                     };
                 }
 
@@ -452,7 +447,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         document.getElementById('groupModalTitle').textContent = 'Edit Group';
                         document.getElementById('groupFormId').value = groupId;
                         document.getElementById('groupName').value = group.name;
-                        document.getElementById('groupDescription').value = group.description || '';
 
                         // Check chimes that are in this group
                         document.querySelectorAll('#chimeCheckboxes input[type="checkbox"]').forEach(cb => {
@@ -538,7 +532,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Handle random mode toggle
     if (toggleRandomMode) {
         toggleRandomMode.addEventListener('click', async function() {
-            const isCurrentlyEnabled = this.textContent.includes('✓ Enabled');
+            const isCurrentlyEnabled = this.dataset.randomEnabled === 'true';
             const selectedGroupId = randomGroupSelect.value;
 
             if (!isCurrentlyEnabled && !selectedGroupId) {
@@ -577,12 +571,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if (randomGroupSelect) {
         randomGroupSelect.addEventListener('change', function() {
             if (toggleRandomMode) {
-                const isEnabled = toggleRandomMode.textContent.includes('✓ Enabled');
-                if (isEnabled) {
-                    toggleRandomMode.textContent = 'Update';
-                } else {
-                    toggleRandomMode.textContent = 'Enable';
-                }
+                const isEnabled = toggleRandomMode.dataset.randomEnabled === 'true';
+                toggleRandomMode.textContent = isEnabled ? 'Disable' : 'Enable';
             }
         });
     }

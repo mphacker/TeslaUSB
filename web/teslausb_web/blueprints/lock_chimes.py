@@ -79,6 +79,7 @@ _ALLOWED_UPLOAD_EXTENSIONS: Final[frozenset[str]] = frozenset({".mp3", ".wav"})
 _ALLOWED_BULK_EXTENSIONS: Final[frozenset[str]] = frozenset({".wav"})
 _ALLOWED_LUFS_PRESETS: Final[frozenset[int]] = frozenset({-23, -16, -14, -12})
 _AUDIO_MIMETYPE: Final[str] = "audio/wav"
+_BYTES_PER_KIB: Final[int] = 1024
 _HOURS_PER_HALF_DAY: Final[int] = 12
 _LIGHTSHOW_DIRNAME: Final[str] = "lightshow"
 _RANDOM_DISABLED_MESSAGE: Final[str] = "Random mode disabled"
@@ -238,21 +239,37 @@ def _group_error_status(message: str) -> HTTPStatus:
     return HTTPStatus.BAD_REQUEST
 
 
+def _format_size_bytes(size_bytes: int) -> str:
+    if size_bytes < _BYTES_PER_KIB:
+        return f"{size_bytes} B"
+    kib = size_bytes / _BYTES_PER_KIB
+    if kib < _BYTES_PER_KIB:
+        return f"{kib:.1f} KB"
+    return f"{kib / _BYTES_PER_KIB:.2f} MB"
+
+
 def _serialize_chime(info: ChimeInfo) -> dict[str, object]:
     return {
         "filename": info.name,
         "size": info.size_bytes,
+        "size_str": _format_size_bytes(info.size_bytes),
         "mtime": info.mtime_iso,
         "md5": info.md5,
         "is_active": info.is_active,
+        "is_valid": True,
+        "validation_msg": "",
     }
 
 
 def _serialize_group(group: ChimeGroup) -> dict[str, object]:
+    chimes = list(group.chime_filenames)
     return {
         "id": group.id,
         "name": group.name,
-        "chime_filenames": list(group.chime_filenames),
+        "description": "",
+        "chime_filenames": chimes,
+        "chimes": chimes,
+        "chime_count": len(chimes),
         "created_at": group.created_at.isoformat(),
         "updated_at": group.updated_at.isoformat(),
     }
@@ -287,17 +304,24 @@ def _schedule_type_name(
     return "recurring"
 
 
+def _schedule_display_text(
+    schedule: WeeklySchedule | DateSchedule | HolidaySchedule | RecurringSchedule,
+) -> str:
+    return format_schedule_display(schedule).replace(" → ", " -> ")
+
+
 def _serialize_schedule(
     schedule: WeeklySchedule | DateSchedule | HolidaySchedule | RecurringSchedule,
 ) -> dict[str, object]:
     chime, group_id = _schedule_target(schedule)
     payload: dict[str, object] = {
         "id": schedule.id,
+        "name": _schedule_display_text(schedule),
         "enabled": schedule.enabled,
         "created_at": schedule.created_at.isoformat(),
         "updated_at": schedule.updated_at.isoformat(),
         "last_run": None if schedule.last_run is None else schedule.last_run.isoformat(),
-        "display": format_schedule_display(schedule),
+        "display": _schedule_display_text(schedule),
         "last_run_display": format_last_run(schedule.last_run),
         "chime_filename": chime,
         "group_id": group_id,
@@ -334,7 +358,7 @@ def _serialize_schedule_for_edit(
     if isinstance(schedule, RecurringSchedule):
         return {
             "id": schedule.id,
-            "name": format_schedule_display(schedule),
+            "name": _schedule_display_text(schedule),
             "schedule_type": "recurring",
             "interval": schedule.interval,
             "chime_filename": schedule.chime,
@@ -347,7 +371,7 @@ def _serialize_schedule_for_edit(
     hour_12 = hour_24 % _HOURS_PER_HALF_DAY or _HOURS_PER_HALF_DAY
     payload: dict[str, object] = {
         "id": schedule.id,
-        "name": format_schedule_display(schedule),
+        "name": _schedule_display_text(schedule),
         "time": schedule.time_hhmm,
         "hour_12": hour_12,
         "minute": minute_text,
@@ -376,8 +400,11 @@ def _active_chime_dict(chimes: tuple[ChimeInfo, ...]) -> dict[str, object] | Non
     return {
         "filename": active_path.name,
         "size": stat.st_size,
+        "size_str": _format_size_bytes(stat.st_size),
         "mtime": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
         "is_active": True,
+        "is_valid": True,
+        "validation_msg": "",
     }
 
 
@@ -500,15 +527,29 @@ def lock_chimes() -> ResponseReturnValue:
     schedules = scheduler.list_schedules()
     groups = manager.list_groups()
     random_config = manager.get_random_config()
+    serialized_schedules = [
+        {**_serialize_schedule(schedule), **_serialize_schedule_for_edit(schedule)}
+        for schedule in schedules
+    ]
+    serialized_holidays = [
+        {
+            "name": holiday_name,
+            "month": holiday_date.month,
+            "day": holiday_date.day,
+        }
+        for holiday_name, holiday_date in scheduler.get_holidays_with_dates(
+            datetime.now(tz=UTC).year
+        )
+    ]
     return render_template(
         "lock_chimes.html",
         page="media",
         media_tab="chimes",
         active_chime=_active_chime_dict(chimes),
         chime_files=[_serialize_chime(info) for info in chimes],
-        schedules=schedules,
-        schedules_json=[_serialize_schedule(schedule) for schedule in schedules],
-        holidays=scheduler.get_holidays_with_dates(datetime.now(tz=UTC).year),
+        schedules=serialized_schedules,
+        schedules_json=serialized_schedules,
+        holidays=serialized_holidays,
         recurring_intervals=dict(scheduler.get_recurring_intervals()),
         groups=[_serialize_group(group) for group in groups],
         random_config=_serialize_random_config(random_config),

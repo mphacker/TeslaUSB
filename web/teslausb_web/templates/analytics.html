@@ -1,0 +1,332 @@
+{% extends "base.html" %}
+
+{# B-1 Phase 5.24: ported from v1 main:scripts/web/templates/analytics.html
+   with the following edits per docs/00-PLAN.md + docs/05-UI-UX-DESIGN-SYSTEM.md:
+     1. v1's emoji icons replaced with Lucide SVG sprite references.
+     2. v1's per-partition fsck status section dropped — B-1 uses btrfs
+        scrub via the system_health card, not legacy fsck.
+     3. v1's three-partition (part1/part2/part3) loop replaced with a
+        purpose-named partitions tuple emitted by AnalyticsService.
+     4. Folder priority badges retained; descriptions come from the
+        service, not from template-side dictionaries.
+     5. ``mode_control.*`` url_for calls (there were none here) would
+        have been rewired to ``settings.index``.
+#}
+
+{% block title %}Storage Analytics — Tesla USB Gadget Control{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/analytics.css') }}">
+{% set sprite = url_for('static', filename='icons/lucide-sprite.svg') %}
+
+<div class="container" id="analyticsDashboard" data-page="analytics">
+    <h2>
+        <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-bar-chart-2"></use></svg>
+        Storage Analytics Dashboard
+    </h2>
+
+    {% if analytics is none %}
+    <div class="alert alert-warning" role="status">
+        <strong>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-alert-triangle"></use></svg>
+            Analytics temporarily unavailable
+        </strong>
+        <div>The mapping database could not be read. The dashboard will recover automatically once the indexer is healthy.</div>
+    </div>
+    {% else %}
+    {% set health = analytics.storage_health %}
+
+    {# Storage health banner — vocabulary matches v1 verbatim. #}
+    {% if health.status == 'critical' %}
+        <div class="alert alert-critical" role="alert" aria-live="assertive">
+            <strong>
+                <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-alert-circle"></use></svg>
+                Critical Storage Alert
+            </strong>
+            {% for alert in health.alerts %}
+                <div>{{ alert }}</div>
+            {% endfor %}
+        </div>
+    {% elif health.status == 'warning' %}
+        <div class="alert alert-warning" role="alert" aria-live="polite">
+            <strong>
+                <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-alert-triangle"></use></svg>
+                Storage Warning
+            </strong>
+            {% for alert in health.alerts %}
+                <div>{{ alert }}</div>
+            {% endfor %}
+        </div>
+    {% elif health.status == 'caution' %}
+        <div class="alert alert-warning" role="status">
+            <strong>
+                <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-alert-triangle"></use></svg>
+                Storage Approaching Capacity
+            </strong>
+            {% for alert in health.alerts %}
+                <div>{{ alert }}</div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="alert alert-success" role="status">
+            <strong>
+                <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-check-circle"></use></svg>
+                Storage Healthy
+            </strong>
+        </div>
+    {% endif %}
+
+    {# Drive usage cards — one card per probed root. #}
+    <div class="analytics-grid analytics-grid-scroll" id="partitionUsageGrid">
+        {% for partition in analytics.partitions %}
+        <div class="analytics-card" data-partition-key="{{ partition.key }}">
+            <h3>
+                <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-hard-drive"></use></svg>
+                {{ partition.label }}
+            </h3>
+
+            {% if partition.error %}
+                <div class="error-message" role="alert">{{ partition.error }}</div>
+            {% else %}
+                <div class="usage-stats">
+                    <div class="stat-row">
+                        <span class="stat-label">Total Space:</span>
+                        <span class="stat-value">{{ "%.2f"|format(partition.total_gb) }} GB</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Used:</span>
+                        <span class="stat-value">{{ "%.2f"|format(partition.used_gb) }} GB</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Free:</span>
+                        <span class="stat-value">{{ "%.2f"|format(partition.free_gb) }} GB</span>
+                    </div>
+                </div>
+
+                <div class="progress-container" role="progressbar"
+                     aria-valuenow="{{ partition.percent_used | round(1) }}"
+                     aria-valuemin="0" aria-valuemax="100"
+                     aria-label="{{ partition.label }} usage">
+                    <div class="progress-bar
+                        {% if partition.percent_used >= 95 %}progress-critical
+                        {% elif partition.percent_used >= 90 %}progress-warning
+                        {% elif partition.percent_used >= 80 %}progress-caution
+                        {% else %}progress-normal{% endif %}"
+                         data-percent="{{ partition.percent_used | round(1) }}"
+                         style="width: {{ partition.percent_used | round(1) }}%">
+                    </div>
+                </div>
+                <div class="progress-label">{{ "%.1f"|format(partition.percent_used) }}% Used</div>
+
+                <div class="partition-path">{{ partition.path }}</div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    {# Recording-time estimate — only shown when computable. #}
+    {% set estimate = analytics.recording_estimate %}
+    {% if estimate.hours_remaining is not none %}
+    <div class="info-card" id="recordingEstimateCard">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-clock"></use></svg>
+            Estimated Recording Time Remaining
+        </h3>
+        <div class="estimate-value" id="estimateValue">
+            {% if estimate.hours_remaining >= 24 %}
+                {{ "%.1f"|format(estimate.hours_remaining / 24) }} days
+            {% elif estimate.hours_remaining >= 1 %}
+                {{ "%.1f"|format(estimate.hours_remaining) }} hours
+            {% else %}
+                {{ "%.0f"|format(estimate.hours_remaining * 60) }} minutes
+            {% endif %}
+        </div>
+        <div class="estimate-method">{{ estimate.method }}</div>
+        <div class="estimate-confidence">Confidence: {{ estimate.confidence }}</div>
+    </div>
+    {% endif %}
+
+    {# Video Statistics totals. #}
+    <div class="analytics-section" id="videoStatsSection">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-video"></use></svg>
+            Video Statistics
+        </h3>
+
+        {% set video_stats = analytics.video_statistics %}
+        <div class="totals-row">
+            <div class="total-stat">
+                <div class="total-number">{{ video_stats.total_files }}</div>
+                <div class="total-label">Total Files</div>
+            </div>
+            <div class="total-stat">
+                <div class="total-number">{{ (video_stats.total_files / 6) | int }}</div>
+                <div class="total-label">Clips (~6 angles)</div>
+            </div>
+            <div class="total-stat">
+                <div class="total-number">{{ "%.2f"|format(video_stats.total_size_gb) }} GB</div>
+                <div class="total-label">Total Size</div>
+            </div>
+        </div>
+        {% if video_stats.oldest_iso %}
+        <div class="totals-row" id="videoStatsRange">
+            <div class="total-stat">
+                <div class="total-number">{{ video_stats.oldest_iso }}</div>
+                <div class="total-label">Oldest Clip</div>
+            </div>
+            <div class="total-stat">
+                <div class="total-number">{{ video_stats.newest_iso }}</div>
+                <div class="total-label">Newest Clip</div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    {# Folder Breakdown — table (desktop) + card stack (mobile). #}
+    {% if video_stats.folders %}
+    <div class="analytics-section" id="folderBreakdownSection">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-folder"></use></svg>
+            Folder Breakdown
+        </h3>
+
+        <div class="folder-table-container">
+            <table class="analytics-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Folder</th>
+                        <th scope="col">Videos</th>
+                        <th scope="col">Size</th>
+                        <th scope="col">% of Total</th>
+                        <th scope="col">Oldest</th>
+                        <th scope="col">Newest</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for folder in video_stats.folders %}
+                    {% set size_pct = (folder.size_gb / video_stats.total_size_gb * 100) if video_stats.total_size_gb > 0 else 0 %}
+                    <tr class="priority-{{ folder.priority }}">
+                        <td>
+                            <span class="folder-icon" aria-hidden="true">
+                                <svg class="nav-icon" focusable="false"><use href="{{ sprite }}#icon-folder"></use></svg>
+                            </span>
+                            <strong>{{ folder.name }}</strong>
+                            <div class="folder-description">{{ folder.description }}</div>
+                        </td>
+                        <td class="number-cell">{{ folder.count }}</td>
+                        <td class="number-cell">{{ "%.2f"|format(folder.size_gb) }} GB</td>
+                        <td class="number-cell">
+                            <div class="mini-progress-container">
+                                <div class="mini-progress-bar" data-percent="{{ size_pct | round(1) }}" style="width: {{ size_pct | round(1) }}%"></div>
+                            </div>
+                            {{ "%.1f"|format(size_pct) }}%
+                        </td>
+                        <td class="date-cell">{{ folder.oldest_iso or 'N/A' }}</td>
+                        <td class="date-cell">{{ folder.newest_iso or 'N/A' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="folder-cards-mobile">
+            {% for folder in video_stats.folders %}
+            {% set size_pct = (folder.size_gb / video_stats.total_size_gb * 100) if video_stats.total_size_gb > 0 else 0 %}
+            <div class="folder-card priority-{{ folder.priority }}">
+                <div class="folder-card-header">
+                    <span class="folder-icon-large" aria-hidden="true">
+                        <svg class="nav-icon" focusable="false"><use href="{{ sprite }}#icon-folder"></use></svg>
+                    </span>
+                    <div>
+                        <strong>{{ folder.name }}</strong>
+                        <div class="folder-description">{{ folder.description }}</div>
+                    </div>
+                </div>
+                <div class="folder-card-stats">
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Videos:</span>
+                        <span class="folder-stat-value">{{ folder.count }}</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">Size:</span>
+                        <span class="folder-stat-value">{{ "%.2f"|format(folder.size_gb) }} GB</span>
+                    </div>
+                    <div class="folder-stat">
+                        <span class="folder-stat-label">% of Total:</span>
+                        <span class="folder-stat-value">{{ "%.1f"|format(size_pct) }}%</span>
+                    </div>
+                </div>
+                <div class="mini-progress-container">
+                    <div class="mini-progress-bar" data-percent="{{ size_pct | round(1) }}" style="width: {{ size_pct | round(1) }}%"></div>
+                </div>
+                <div class="folder-card-dates">
+                    <div><small>Oldest: {{ folder.oldest_iso or 'N/A' }}</small></div>
+                    <div><small>Newest: {{ folder.newest_iso or 'N/A' }}</small></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {# Recommendations — only when the service produced any. #}
+    {% if health.recommendations %}
+    <div class="recommendations-section" id="recommendationsSection">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-info"></use></svg>
+            Recommendations
+        </h3>
+        <ul class="recommendations-list">
+            {% for recommendation in health.recommendations %}
+            <li>{{ recommendation }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {# Driving statistics + event charts — wired to the mapping API and
+       initialised by analytics.js (see static/js/analytics.js). Hidden
+       until the JSON probe confirms there is something to render. #}
+    {% if map_available %}
+    <div class="analytics-section" id="drivingStatsSection">
+        <h3>
+            <svg class="nav-icon" aria-hidden="true" focusable="false"><use href="{{ sprite }}#icon-map-pin"></use></svg>
+            Driving Statistics
+        </h3>
+        <p class="section-description">
+            GPS and telemetry derived from indexed dashcam clips.
+            <a href="{{ url_for('mapping.map_view') }}">Open Map →</a>
+        </p>
+        <div id="drivingStatsContent">
+            <div class="analytics-grid" id="drivingStatsGrid" hidden>
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Total Distance</span><span class="stat-value" id="dsTotalDist">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Total Drive Time</span><span class="stat-value" id="dsTotalTime">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Total Trips</span><span class="stat-value" id="dsTripCount">—</span></div>
+                </div>
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Avg Speed</span><span class="stat-value" id="dsAvgSpeed">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Max Speed</span><span class="stat-value" id="dsMaxSpeed">—</span></div>
+                    <div class="stat-row"><span class="stat-label">FSD Usage</span><span class="stat-value" id="dsFsdPct">—</span></div>
+                </div>
+                <div class="analytics-card">
+                    <div class="stat-row"><span class="stat-label">Total Events</span><span class="stat-value" id="dsEventCount">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Warnings/Critical</span><span class="stat-value" id="dsWarnCount">—</span></div>
+                    <div class="stat-row"><span class="stat-label">Events per 100 km</span><span class="stat-value" id="dsEvPer100">—</span></div>
+                </div>
+            </div>
+            <div id="drivingStatsEmpty" class="empty-stats">
+                No driving data indexed yet.
+                <a href="{{ url_for('mapping.map_view') }}">Go to Map</a>
+                and index your videos to populate this dashboard.
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% endif %}{# /analytics is not none #}
+</div>
+
+<script src="{{ url_for('static', filename='js/analytics.js') }}" defer></script>
+{% endblock %}
+

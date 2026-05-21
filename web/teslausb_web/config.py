@@ -192,6 +192,17 @@ _DEFAULT_MAPPING_ARCHIVE_ROOT: Path = (
     _DEFAULT_BACKING_ROOT / _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME
 )
 
+# Analytics dashboard thresholds. Percent-of-disk-used bands that
+# escalate the storage-health banner from healthy → caution → warning
+# → critical. Defaults mirror v1's hardcoded ladder (80 / 90 / 95).
+# ``theoretical_gb_per_hour`` is the dashcam record rate we fall back
+# to when the mapping DB has no clips yet (Tesla nominal: 4 cameras
+# at 1080p ~= 400 MB/hour = 0.4 GB/hour).
+_DEFAULT_ANALYTICS_CAUTION_PCT: Final[float] = 80.0
+_DEFAULT_ANALYTICS_WARNING_PCT: Final[float] = 90.0
+_DEFAULT_ANALYTICS_CRITICAL_PCT: Final[float] = 95.0
+_DEFAULT_ANALYTICS_THEORETICAL_GB_PER_HOUR: Final[float] = 0.4
+
 # Highest valid TCP/UDP port number per RFC 793. Named to silence
 # the magic-value lint and document intent at the call site.
 _TCP_PORT_MAX: int = 65_535
@@ -895,6 +906,37 @@ class MappingSection:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalyticsSection:
+    """Storage-analytics dashboard thresholds and recording-estimate fallback.
+
+    The percent-of-disk-used bands escalate the storage-health banner
+    from healthy → caution → warning → critical. The theoretical record
+    rate is used only when the mapping DB has no clips yet (fresh
+    install).
+    """
+
+    caution_pct_used: float = _DEFAULT_ANALYTICS_CAUTION_PCT
+    warning_pct_used: float = _DEFAULT_ANALYTICS_WARNING_PCT
+    critical_pct_used: float = _DEFAULT_ANALYTICS_CRITICAL_PCT
+    theoretical_gb_per_hour: float = _DEFAULT_ANALYTICS_THEORETICAL_GB_PER_HOUR
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        # Bands MUST stay ordered so the "first matching" classifier
+        # in analytics_service can rely on simple < comparisons.
+        if not 0 < self.caution_pct_used < self.warning_pct_used < self.critical_pct_used < 100:  # noqa: PLR2004
+            raise ConfigError(
+                None,
+                "[analytics] thresholds must satisfy "
+                "0 < caution_pct_used < warning_pct_used < critical_pct_used < 100",
+            )
+        if self.theoretical_gb_per_hour <= 0:
+            raise ConfigError(None, "[analytics] theoretical_gb_per_hour must be > 0")
+
+
+@dataclass(frozen=True, slots=True)
 class WebConfig:
     """Root config dataclass — what the rest of the app sees."""
 
@@ -914,6 +956,7 @@ class WebConfig:
     wifi: WifiSection = field(default_factory=WifiSection)
     cloud: CloudSection = field(default_factory=CloudSection)
     mapping: MappingSection = field(default_factory=MappingSection)
+    analytics: AnalyticsSection = field(default_factory=AnalyticsSection)
     source_path: Path | None = None
 
     def validate(self) -> None:
@@ -934,6 +977,7 @@ class WebConfig:
             self.wifi.validate()
             self.cloud.validate()
             self.mapping.validate()
+            self.analytics.validate()
         except ConfigError as exc:
             raise ConfigError(self.source_path, str(exc).split(": ", 1)[-1]) from exc
 
@@ -1077,6 +1121,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     wifi_binary_paths_raw = _expect_section(wifi_raw, "binary_paths", source)
     cloud_raw = _expect_section(raw, "cloud", source)
     mapping_raw = _expect_section(raw, "mapping", source)
+    analytics_raw = _expect_section(raw, "analytics", source)
 
     web = WebSection(
         host=_coerce_str(web_raw, "host", _DEFAULT_HOST, source),
@@ -1763,6 +1808,35 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         )
     except ConfigError as exc:
         raise ConfigError(source, str(exc).split(": ", 1)[-1]) from exc
+    try:
+        analytics = AnalyticsSection(
+            caution_pct_used=_coerce_float(
+                analytics_raw,
+                "caution_pct_used",
+                _DEFAULT_ANALYTICS_CAUTION_PCT,
+                source,
+            ),
+            warning_pct_used=_coerce_float(
+                analytics_raw,
+                "warning_pct_used",
+                _DEFAULT_ANALYTICS_WARNING_PCT,
+                source,
+            ),
+            critical_pct_used=_coerce_float(
+                analytics_raw,
+                "critical_pct_used",
+                _DEFAULT_ANALYTICS_CRITICAL_PCT,
+                source,
+            ),
+            theoretical_gb_per_hour=_coerce_float(
+                analytics_raw,
+                "theoretical_gb_per_hour",
+                _DEFAULT_ANALYTICS_THEORETICAL_GB_PER_HOUR,
+                source,
+            ),
+        )
+    except ConfigError as exc:
+        raise ConfigError(source, str(exc).split(": ", 1)[-1]) from exc
     cfg = WebConfig(
         web=web,
         paths=paths_section,
@@ -1780,6 +1854,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         wifi=wifi,
         cloud=cloud,
         mapping=mapping,
+        analytics=analytics,
         source_path=source,
     )
     cfg.validate()

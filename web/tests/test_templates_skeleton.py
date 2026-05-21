@@ -219,7 +219,6 @@ def test_advanced_settings_page_renders_real_template(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("url", "marker"),
     [
-        ("/analytics/", "scaffolding only"),
         ("/media/", "scaffolding only"),
     ],
 )

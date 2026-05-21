@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
 
 from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
+from teslausb_web.blueprints.analytics import analytics_bp
 from teslausb_web.blueprints.boombox import boombox_bp
 from teslausb_web.blueprints.captive_portal import captive_portal_bp
 from teslausb_web.blueprints.cleanup import cleanup_bp
@@ -45,6 +46,7 @@ from teslausb_web.blueprints.storage_retention import storage_retention_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.blueprints.wraps import wraps_bp
 from teslausb_web.config import WebConfig, load_config
+from teslausb_web.services.analytics_service import make_analytics_service
 from teslausb_web.services.boombox_service import make_boombox_service
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
@@ -56,6 +58,7 @@ from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_
 from teslausb_web.services.license_plate_service import make_license_plate_service
 from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
+from teslausb_web.services.mapping.service import MappingService
 from teslausb_web.services.music_service import make_music_service
 from teslausb_web.services.samba_service import SambaError, make_samba_service
 from teslausb_web.services.samba_watcher import make_samba_watcher
@@ -176,6 +179,7 @@ def create_app(
     _register_wrap_services(app, cfg)
     _register_mapping_services(app, cfg)
     _register_cleanup_services(app, cfg)
+    _register_analytics_service(app, cfg)
 
     logger.info(
         "teslausb_web app created (port=%d, max_upload_mb=%d, samba=%s, source=%s)",
@@ -269,6 +273,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         wraps_bp,
         mapping_bp,
         cleanup_bp,
+        analytics_bp,
     )
     for bp in real_blueprints:
         if bp.name in registered_names:
@@ -496,6 +501,14 @@ def _register_cleanup_services(app: Flask, cfg: WebConfig) -> None:
         app,
         cleanup_service.shutdown,
     )
+
+
+def _register_analytics_service(app: Flask, cfg: WebConfig) -> None:
+    """Construct the analytics service after the mapping service is ready."""
+    mapping_service = app.extensions.get("mapping_service")
+    if not isinstance(mapping_service, MappingService):
+        raise RuntimeError("analytics_service requires mapping_service")
+    app.extensions["analytics_service"] = make_analytics_service(cfg, mapping_service)
 
 
 def _register_template_globals(app: Flask) -> None:

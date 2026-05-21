@@ -37,6 +37,10 @@ from typing import TYPE_CHECKING, Final
 
 from flask import Blueprint, current_app, jsonify
 
+from teslausb_web.services.system_metrics import (
+    collect_metrics,
+    metrics_to_dict,
+)
 from teslausb_web.services.teslafat_client import (
     IpcDaemonError,
     IpcProtocolError,
@@ -219,13 +223,18 @@ def api_system_health() -> ResponseReturnValue:
 
 @system_health_bp.route("/api/system/metrics")
 def api_system_metrics() -> ResponseReturnValue:
-    """Live system metrics stub.
+    """Live system metrics — backs the dashboard "Live Metrics" card.
 
-    # TODO(#issue-needed): wire /api/system/metrics — placeholder for full v1
-    parity, Phase 5.x. Returns an empty payload so the Live Metrics tiles show
-    an em dash rather than throwing a JS error on first poll.
+    Cheap host counters (`psutil` + ``shutil.disk_usage`` only). The
+    JS at ``templates/index.html`` polls this on a 5 s interval while
+    the tab is visible. Per-subsystem fields the B-1 worker has not
+    yet exposed (``task_coordinator`` / ``queues`` / ``peek_cache``)
+    are omitted; the JS renders an em dash for those tiles. Wiring
+    them up is tracked under Phase 6 (Rust daemon IPC).
     """
-    return jsonify({}), HTTPStatus.OK
+    cfg: WebConfig = current_app.config["teslausb_config"]
+    metrics = collect_metrics(cfg.paths.backing_root)
+    return jsonify(metrics_to_dict(metrics)), HTTPStatus.OK
 
 
 @system_health_bp.route("/api/system/clear_lost_clips", methods=["POST"])

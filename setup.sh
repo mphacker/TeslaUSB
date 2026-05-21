@@ -67,9 +67,44 @@ Options:
   --skip NN[,NN...]    Skip the listed step numbers.
   --help               Show this message.
 
-Steps are sourced from setup-lib/<NN>-<name>.sh in numeric order.
+Steps (sourced from setup-lib/<NN>-<name>.sh in numeric order):
+  01  packages        apt-install B-1 runtime packages (nbd-client,
+                      btrfs-progs, nginx, python3-venv, network-manager,
+                      watchdog, dnsmasq-base, hostapd).
+  02  users           Create teslausb user/group, add pi to teslausb,
+                      install /etc/sudoers.d/teslausb-b1 fragment.
+  03  btrfs           Create btrfs subvolumes /srv/teslausb/{teslacam,media}
+                      owned teslausb:teslausb 0775.
+  04  units           Install systemd unit files + nginx site, daemon-reload
+                      (does NOT enable or start — that is step 10).
+  05  network         Lay down NetworkManager AP profile + dnsmasq/hostapd
+                      configs the captive_portal blueprint expects.
+  06  boot            Edit kernel cmdline + /boot/firmware/config.txt for
+                      USB OTG gadget mode (with .b1-backup-<ts> sidecars).
+  07  watchdog        Install watchdog.service drop-in + /etc/watchdog.conf
+                      for last-resort hang recovery.
+  08  memory          Provision /var/swap/b1.swap (1 GiB) + fstab entry +
+                      vm.* sysctl drop-in.
+  09  mask-services   Mask desktop/print/modem services unused on headless
+                      B-1 (avahi-daemon is INTENTIONALLY left running).
+  10  activate        Final daemon-reload, enable + start B-1 units in
+                      dependency order, run post-start health check.
+
+Exit codes:
+  0  success (or dry-run completed)
+  2  bad CLI flags / usage error
+  3  missing dependency or precondition (e.g. not root, no setup-lib/)
+  4  a step failed mid-way (script aborts under set -Eeuo pipefail)
+
+Examples:
+  sudo ./setup.sh                       # full install
+  ./setup.sh --dry-run                  # preview every command, mutate nothing
+  sudo ./setup.sh --only 04,10          # reinstall units, then reactivate
+  sudo ./setup.sh --skip 06             # full install but leave boot firmware alone
+
 Each step is independently idempotent; re-running setup.sh on an
-already-installed device must be a no-op.
+already-installed device must be a no-op. See docs/00-PLAN.md row 6
+and ADR-0008 for the design contract.
 USAGE
 }
 

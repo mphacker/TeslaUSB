@@ -80,9 +80,53 @@ Options:
                        `pi` user or /home/pi/.
   --help               Show this message.
 
-Inverse step files are sourced from uninstall-lib/<NN>-<name>.sh in
-REVERSE numeric order (10 -> 01). Each file defines b1_undo_NN(),
-which reverses setup-lib/NN-*.sh. Steps are idempotent.
+Undo steps (sourced from uninstall-lib/<NN>-<name>.sh in REVERSE numeric
+order so dependencies are torn down before what depends on them):
+  10  activate        Disable + stop every B-1 unit; daemon-reload.
+  09  mask-services   Unmask the desktop/print/modem services step 09 hid.
+  08  memory          Remove vm.* sysctl drop-in (swap kept unless --purge).
+  07  watchdog        Remove watchdog drop-in + restore /etc/watchdog.conf
+                      from its .b1-backup-<ts> sidecar.
+  06  boot            Restore /boot/firmware/{cmdline.txt,config.txt} from
+                      their .b1-backup-<ts> sidecars.
+  05  network         Remove AP profile + dnsmasq/hostapd configs.
+  04  units           Remove every B-1 systemd unit + nginx drop-in;
+                      daemon-reload.
+  03  btrfs           No-op by default (data is sacred); --purge unmounts
+                      and `btrfs subvolume delete`s the data subvolumes.
+  02  users           Remove sudoers fragment + drop pi from teslausb group
+                      (the teslausb user itself stays unless --purge).
+  01  packages        No-op by default; --purge runs `apt-get purge
+                      btrfs-progs` (the only package on the safe purge list).
+
+Default mode is CONSERVATIVE: removes unit files, drop-ins, sudoers
+fragment, sysctl drop-in, and AP profile, but PRESERVES user data,
+btrfs subvolumes, the swap file, every apt package, and /home/pi/.
+
+--purge additionally:
+  * btrfs subvolume delete each subvolume in /srv/teslausb
+  * swapoff + rm /var/swap/b1.swap (NOT /var/swap/fsck.swap — v1's stays)
+  * userdel -r teslausb (only if no running processes own it)
+  * apt-get purge btrfs-progs (the only package on the safe purge list)
+  * wipe /var/lib/teslausb-b1
+--purge NEVER touches /home/pi/, the `pi` user, /var/swap/fsck.swap, or
+any package v1 also installed (nginx, python3-venv, watchdog,
+dnsmasq-base, hostapd, network-manager, nbd-client).
+
+Exit codes (mirror setup.sh):
+  0  success (or dry-run completed)
+  2  bad CLI flags / usage error
+  3  missing dependency or precondition (not root, no B-1 install marker)
+  4  a step failed mid-way (script aborts under set -Eeuo pipefail)
+
+Examples:
+  sudo ./uninstall.sh                   # conservative reverse install
+  ./uninstall.sh --dry-run              # preview the teardown plan
+  sudo ./uninstall.sh --only 10         # just disable + stop units
+  sudo ./uninstall.sh --purge           # also wipe data + swap + safe packages
+
+Each undo step is idempotent; re-running uninstall.sh on an already
+uninstalled device must be a no-op.
 USAGE
 }
 

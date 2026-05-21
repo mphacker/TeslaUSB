@@ -87,8 +87,26 @@ _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".mp3", ".wav")
 _DEFAULT_MAPPING_DB_NAME: Final[str] = "mapping.db"
 _DEFAULT_MAPPING_BACKUP_DIRNAME: Final[str] = "mapping-backups"
 _DEFAULT_MAPPING_BACKUP_RETENTION: Final[int] = 3
+_DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME: Final[str] = "ArchivedClips"
+_DEFAULT_MAPPING_SAMPLE_RATE: Final[int] = 30
+_DEFAULT_MAPPING_TRIP_GAP_MINUTES: Final[int] = 5
+_DEFAULT_MAPPING_INDEX_TOO_NEW_SECONDS: Final[int] = 120
+_DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD: Final[float] = -4.0
+_DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD: Final[float] = -7.0
+_DEFAULT_MAPPING_HARD_ACCEL_THRESHOLD: Final[float] = 3.5
+_DEFAULT_MAPPING_SHARP_TURN_LATERAL_MPS2: Final[float] = 4.0
+_DEFAULT_MAPPING_SPEED_LIMIT_MPS: Final[float] = 35.76
+_DEFAULT_MAPPING_STALE_SCAN_INTERVAL_SECONDS: Final[int] = 30 * 24 * 60 * 60
+_DEFAULT_MAPPING_STALE_SCAN_JITTER_SECONDS: Final[int] = 24 * 60 * 60
+_DEFAULT_MAPPING_INITIAL_STALE_SCAN_BASE_SECONDS: Final[int] = 5 * 60
+_DEFAULT_MAPPING_INITIAL_STALE_SCAN_JITTER_SECONDS: Final[int] = 5 * 60
+_DEFAULT_MAPPING_STALE_SCAN_DEBOUNCE_SECONDS: Final[int] = 10 * 60
 _DEFAULT_MAPPING_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_DB_NAME
 _DEFAULT_MAPPING_BACKUP_DIR: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_BACKUP_DIRNAME
+_DEFAULT_MAPPING_MEDIA_ROOT: Path = _DEFAULT_BACKING_ROOT
+_DEFAULT_MAPPING_ARCHIVE_ROOT: Path = (
+    _DEFAULT_BACKING_ROOT / _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME
+)
 
 # Highest valid TCP/UDP port number per RFC 793. Named to silence
 # the magic-value lint and document intent at the call site.
@@ -392,21 +410,66 @@ class BoomboxSection:
 
 @dataclass(frozen=True, slots=True)
 class MappingSection:
-    """Mapping database paths and migration-backup retention."""
+    """Mapping DB, media roots, indexing thresholds, and stale-scan cadence."""
 
     db_path: Path = _DEFAULT_MAPPING_DB_PATH
     backup_retention: int = _DEFAULT_MAPPING_BACKUP_RETENTION
     backup_dir: Path = _DEFAULT_MAPPING_BACKUP_DIR
+    media_root: Path = _DEFAULT_MAPPING_MEDIA_ROOT
+    archive_root: Path = _DEFAULT_MAPPING_ARCHIVE_ROOT
+    archived_clips_dirname: str = _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME
+    sample_rate: int = _DEFAULT_MAPPING_SAMPLE_RATE
+    trip_gap_minutes: int = _DEFAULT_MAPPING_TRIP_GAP_MINUTES
+    index_too_new_seconds: int = _DEFAULT_MAPPING_INDEX_TOO_NEW_SECONDS
+    harsh_brake_threshold: float = _DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD
+    emergency_brake_threshold: float = _DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD
+    hard_accel_threshold: float = _DEFAULT_MAPPING_HARD_ACCEL_THRESHOLD
+    sharp_turn_lateral_mps2: float = _DEFAULT_MAPPING_SHARP_TURN_LATERAL_MPS2
+    speed_limit_mps: float = _DEFAULT_MAPPING_SPEED_LIMIT_MPS
+    stale_scan_interval_seconds: int = _DEFAULT_MAPPING_STALE_SCAN_INTERVAL_SECONDS
+    stale_scan_jitter_seconds: int = _DEFAULT_MAPPING_STALE_SCAN_JITTER_SECONDS
+    initial_stale_scan_base_seconds: int = _DEFAULT_MAPPING_INITIAL_STALE_SCAN_BASE_SECONDS
+    initial_stale_scan_jitter_seconds: int = _DEFAULT_MAPPING_INITIAL_STALE_SCAN_JITTER_SECONDS
+    stale_scan_debounce_seconds: int = _DEFAULT_MAPPING_STALE_SCAN_DEBOUNCE_SECONDS
 
     def __post_init__(self) -> None:
         self.validate()
 
     def validate(self) -> None:
-        for name, value in (("db_path", self.db_path), ("backup_dir", self.backup_dir)):
-            if not PurePosixPath(value.as_posix()).is_absolute():
+        for name, value in (
+            ("db_path", self.db_path),
+            ("backup_dir", self.backup_dir),
+            ("media_root", self.media_root),
+            ("archive_root", self.archive_root),
+        ):
+            if not value.is_absolute() and not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[mapping] {name} must be absolute, got {value!r}")
         if self.backup_retention <= 0:
             raise ConfigError(None, "[mapping] backup_retention must be > 0")
+        if self.sample_rate <= 0:
+            raise ConfigError(None, "[mapping] sample_rate must be > 0")
+        if self.trip_gap_minutes <= 0:
+            raise ConfigError(None, "[mapping] trip_gap_minutes must be > 0")
+        if self.index_too_new_seconds <= 0:
+            raise ConfigError(None, "[mapping] index_too_new_seconds must be > 0")
+        if self.speed_limit_mps < 0:
+            raise ConfigError(None, "[mapping] speed_limit_mps must be >= 0")
+        for int_name, int_value in (
+            ("stale_scan_interval_seconds", self.stale_scan_interval_seconds),
+            ("stale_scan_jitter_seconds", self.stale_scan_jitter_seconds),
+            ("initial_stale_scan_base_seconds", self.initial_stale_scan_base_seconds),
+            ("initial_stale_scan_jitter_seconds", self.initial_stale_scan_jitter_seconds),
+            ("stale_scan_debounce_seconds", self.stale_scan_debounce_seconds),
+        ):
+            if int_value <= 0:
+                raise ConfigError(None, f"[mapping] {int_name} must be > 0")
+        if not self.archived_clips_dirname.strip():
+            raise ConfigError(None, "[mapping] archived_clips_dirname must be non-empty")
+        if "/" in self.archived_clips_dirname or "\\" in self.archived_clips_dirname:
+            raise ConfigError(
+                None,
+                "[mapping] archived_clips_dirname must be a single path segment",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,6 +844,102 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 mapping_raw,
                 "backup_dir",
                 paths_section.state_dir / _DEFAULT_MAPPING_BACKUP_DIRNAME,
+                source,
+            ),
+            media_root=_coerce_path(
+                mapping_raw,
+                "media_root",
+                paths_section.backing_root,
+                source,
+            ),
+            archive_root=_coerce_path(
+                mapping_raw,
+                "archive_root",
+                paths_section.backing_root / _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME,
+                source,
+            ),
+            archived_clips_dirname=_coerce_str(
+                mapping_raw,
+                "archived_clips_dirname",
+                _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME,
+                source,
+            ),
+            sample_rate=_coerce_int(
+                mapping_raw,
+                "sample_rate",
+                _DEFAULT_MAPPING_SAMPLE_RATE,
+                source,
+            ),
+            trip_gap_minutes=_coerce_int(
+                mapping_raw,
+                "trip_gap_minutes",
+                _DEFAULT_MAPPING_TRIP_GAP_MINUTES,
+                source,
+            ),
+            index_too_new_seconds=_coerce_int(
+                mapping_raw,
+                "index_too_new_seconds",
+                _DEFAULT_MAPPING_INDEX_TOO_NEW_SECONDS,
+                source,
+            ),
+            harsh_brake_threshold=_coerce_float(
+                mapping_raw,
+                "harsh_brake_threshold",
+                _DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD,
+                source,
+            ),
+            emergency_brake_threshold=_coerce_float(
+                mapping_raw,
+                "emergency_brake_threshold",
+                _DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD,
+                source,
+            ),
+            hard_accel_threshold=_coerce_float(
+                mapping_raw,
+                "hard_accel_threshold",
+                _DEFAULT_MAPPING_HARD_ACCEL_THRESHOLD,
+                source,
+            ),
+            sharp_turn_lateral_mps2=_coerce_float(
+                mapping_raw,
+                "sharp_turn_lateral_mps2",
+                _DEFAULT_MAPPING_SHARP_TURN_LATERAL_MPS2,
+                source,
+            ),
+            speed_limit_mps=_coerce_float(
+                mapping_raw,
+                "speed_limit_mps",
+                _DEFAULT_MAPPING_SPEED_LIMIT_MPS,
+                source,
+            ),
+            stale_scan_interval_seconds=_coerce_int(
+                mapping_raw,
+                "stale_scan_interval_seconds",
+                _DEFAULT_MAPPING_STALE_SCAN_INTERVAL_SECONDS,
+                source,
+            ),
+            stale_scan_jitter_seconds=_coerce_int(
+                mapping_raw,
+                "stale_scan_jitter_seconds",
+                _DEFAULT_MAPPING_STALE_SCAN_JITTER_SECONDS,
+                source,
+            ),
+            initial_stale_scan_base_seconds=_coerce_int(
+                mapping_raw,
+                "initial_stale_scan_base_seconds",
+                _DEFAULT_MAPPING_INITIAL_STALE_SCAN_BASE_SECONDS,
+                source,
+            ),
+            initial_stale_scan_jitter_seconds=_coerce_int(
+                mapping_raw,
+                "initial_stale_scan_jitter_seconds",
+                _DEFAULT_MAPPING_INITIAL_STALE_SCAN_JITTER_SECONDS,
+                source,
+            ),
+            stale_scan_debounce_seconds=_coerce_int(
+                mapping_raw,
+                "stale_scan_debounce_seconds",
+                _DEFAULT_MAPPING_STALE_SCAN_DEBOUNCE_SECONDS,
                 source,
             ),
         )

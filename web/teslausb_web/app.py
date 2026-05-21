@@ -23,6 +23,7 @@ import atexit
 import errno
 import logging
 import secrets
+import weakref
 from typing import TYPE_CHECKING
 
 from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
@@ -40,6 +41,7 @@ from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
 from teslausb_web.services.light_show_service import make_light_show_service
+from teslausb_web.services.mapping import make_mapping_service
 from teslausb_web.services.music_service import make_music_service
 from teslausb_web.services.wrap_service import make_wrap_service
 
@@ -129,6 +131,7 @@ def create_app(
     _register_music_services(app, cfg)
     _register_boombox_services(app, cfg)
     _register_wrap_services(app, cfg)
+    _register_mapping_services(app, cfg)
 
     logger.info(
         "teslausb_web app created (port=%d, max_upload_mb=%d, samba=%s, source=%s)",
@@ -284,6 +287,17 @@ def _register_boombox_services(app: Flask, cfg: WebConfig) -> None:
 def _register_wrap_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the wrap service once at app startup."""
     app.extensions["wrap_service"] = make_wrap_service(cfg)
+
+
+def _register_mapping_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the mapping service once and register cleanup hooks."""
+    mapping_service = make_mapping_service(cfg)
+    app.extensions["mapping_service"] = mapping_service
+    atexit.register(mapping_service.shutdown)
+    app.extensions["mapping_service_finalizer"] = weakref.finalize(
+        app,
+        mapping_service.shutdown,
+    )
 
 
 def _register_template_globals(app: Flask) -> None:

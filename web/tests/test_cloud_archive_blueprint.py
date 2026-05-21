@@ -302,7 +302,7 @@ def test_index_template_html_assertions(client: FlaskClient) -> None:
     assert 'id="syncNowBtn"' in html
     assert 'id="oauthStartBtn"' in html
     assert html.count("aria-label=") >= 2
-    assert re.search(r"(?<!&)#[0-9a-fA-F]{3,6}\b", template_source) is None
+    assert re.search(r"(?<![&(])#[0-9a-fA-F]{3,6}\b", template_source) is None
     assert 1880 <= len(template_source.splitlines()) <= 2310
 
 

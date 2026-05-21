@@ -45,6 +45,7 @@ from teslausb_web.blueprints.settings import settings_dashboard_bp
 from teslausb_web.blueprints.settings_advanced import settings_bp
 from teslausb_web.blueprints.storage_retention import storage_retention_bp
 from teslausb_web.blueprints.system_health import system_health_bp
+from teslausb_web.blueprints.videos import videos_bp
 from teslausb_web.blueprints.wraps import wraps_bp
 from teslausb_web.config import WebConfig, load_config
 from teslausb_web.services.analytics_service import make_analytics_service
@@ -70,6 +71,7 @@ from teslausb_web.services.system_settings_service import (
     make_system_settings_service,
 )
 from teslausb_web.services.teslafat_client import TeslaFatClient
+from teslausb_web.services.video_service import make_video_service
 from teslausb_web.services.wifi_service import make_wifi_service
 from teslausb_web.services.wrap_service import make_wrap_service
 
@@ -181,6 +183,7 @@ def create_app(
     _register_mapping_services(app, cfg)
     _register_cleanup_services(app, cfg)
     _register_analytics_service(app, cfg)
+    _register_video_service(app, cfg)
 
     logger.info(
         "teslausb_web app created (port=%d, max_upload_mb=%d, samba=%s, source=%s)",
@@ -276,6 +279,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         mapping_bp,
         cleanup_bp,
         analytics_bp,
+        videos_bp,
     )
     for bp in real_blueprints:
         if bp.name in registered_names:
@@ -511,6 +515,11 @@ def _register_analytics_service(app: Flask, cfg: WebConfig) -> None:
     if not isinstance(mapping_service, MappingService):
         raise RuntimeError("analytics_service requires mapping_service")
     app.extensions["analytics_service"] = make_analytics_service(cfg, mapping_service)
+
+
+def _register_video_service(app: Flask, cfg: WebConfig) -> None:
+    """Construct the videos service once at app startup."""
+    app.extensions["video_service"] = make_video_service(cfg)
 
 
 def _register_template_globals(app: Flask) -> None:

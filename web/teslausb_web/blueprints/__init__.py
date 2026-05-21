@@ -20,3 +20,8 @@ Phase 5 (one per increment, with charter-review per file).
 """
 
 from __future__ import annotations
+
+from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
+from teslausb_web.blueprints.system_health import system_health_bp
+
+__all__ = ("lock_chimes_bp", "system_health_bp")

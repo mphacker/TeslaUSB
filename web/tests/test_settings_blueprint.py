@@ -80,12 +80,27 @@ class TestDashboardRoutes:
             "Live Metrics",
             "WiFi Networks",
             "Access Point",
-            "Storage &amp; Retention",
-            "Archive Settings",
             "Mapping & Indexing",
             "Network File Sharing",
         ):
             assert section in html
+
+    def test_local_archive_surfaces_removed(self, client) -> None:
+        """Phase 6: the v1 archive worker is gone in B-1. The Tesla writes
+        directly to the SD card via the USB gadget, so there is no
+        ``ArchivedClips`` folder and no "Local Archive" subsystem. Any
+        UI surface that referenced them must be gone."""
+        html = client.get("/settings/").get_data(as_text=True)
+        for absent in (
+            "Storage &amp; Retention",
+            "Archive Settings",
+            "Archive Status",
+            "ArchivedClips",
+            "Local Archive",
+            "Files-Lost banner",
+            "files-lost-banner",
+        ):
+            assert absent not in html, f"removed surface still present: {absent!r}"
 
     def test_no_hex_color_literals_in_style_blocks(self, client) -> None:
         html = client.get("/settings/").get_data(as_text=True)

@@ -438,7 +438,7 @@
                 <strong style="color: var(--text-primary);">How sync works:</strong>
                 <ul style="margin: 6px 0 0; padding-left: 18px;">
                     <li><strong>Automatic:</strong> Starts syncing whenever WiFi connects</li>
-                    <li><strong>Events &amp; archived clips:</strong> Syncs Sentry / Saved event folders and the SD-card-resident <em>ArchivedClips</em> snapshot (RecentClips itself is skipped because Tesla rotates it hourly)</li>
+                    <li><strong>Events:</strong> Syncs Sentry and Saved event folders (RecentClips itself is skipped because Tesla rotates it hourly)</li>
                     <li><strong>Oldest first:</strong> Within each folder, preserves the most at-risk clips first</li>
                     <li><strong>Skip existing:</strong> Files already on cloud storage are never re-uploaded</li>
                     <li><strong>Manual:</strong> Click &ldquo;Sync Now&rdquo; at any time</li>
@@ -458,7 +458,6 @@
                         {% set folder_options = [
                             ('SentryClips',   'Sentry-triggered events (impacts, intrusions)'),
                             ('SavedClips',    'Manually saved clips (horn-honk / on-screen save)'),
-                            ('ArchivedClips', 'SD-card snapshot of RecentClips (RecentClips itself rotates hourly)'),
                         ] %}
                         {% for folder, blurb in folder_options %}
                         <label style="display: flex; align-items: flex-start; gap: var(--space-2); padding: 8px; border-radius: var(--radius-md); cursor: pointer; transition: background var(--transition-fast);"

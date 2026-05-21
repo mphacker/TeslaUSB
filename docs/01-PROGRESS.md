@@ -1049,7 +1049,11 @@ a screenshot diff vs. v1 baseline.
 
 H5.a, H5.b, H5.c, ... — run after every 3 phase-5 increments.
 Each does the rsync + venv + nginx-on-80 + gunicorn-on-unix-socket + screenshot
-diff dance per `00-PLAN.md`. All ⏳.
+diff dance per `00-PLAN.md`.
+
+| Run | Date | Result | Notes |
+|---|---|---|---|
+| H5.smoke (full Phase 5 closeout) | 2026-05-21 | ✅ PASS | tar+scp/venv/nginx+chromium installed on cybertruckusb.local. gunicorn binds `/run/teslausb/gunicorn.sock`, nginx on port 80. **22/22 endpoints OK** (16 pages 200/302 + 6 APIs 200, including `/api/system/metrics` psutil JSON). Real static assets (style.css, lucide-sprite.svg, bootstrap-icons-subset.css) served 200. Captive-portal probe redirects fire (Apple/Android/MS 302 → /portal). **1 Major defect found:** nginx redirects to `/portal` but Flask blueprint binds `/captive-portal` → probe-follow 404 → filed [#230](https://github.com/mphacker/TeslaUSB/issues/230). Headless chromium screenshot diff deferred (chromium-on-Pi-Zero-2-W boots slower than dead-man window). Cleanup: gunicorn stopped, nginx default site restored, dead-man cancelled, SSH+WiFi alive. Report: `~/.copilot/session-state/.../files/hw-results.md` (H5 section). |
 
 ## Phase 6 — setup.sh + uninstall.sh
 

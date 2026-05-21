@@ -1258,10 +1258,9 @@ if (document.getElementById('fsck-status-container')) {
         var q = p.queues || {};
         function qStr(n) { return n == null ? '—' : String(n); }
         setTile('metric-queues',
-                qStr(q.archive_pending) + ' / ' +
                 qStr(q.index_pending) + ' / ' +
                 qStr(q.cloud_pending),
-                'archive / index / cloud',
+                'index / cloud',
                 'ok');
 
         var pc = p.peek_cache || {};

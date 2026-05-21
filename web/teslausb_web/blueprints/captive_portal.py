@@ -134,7 +134,6 @@ def _render_wifi_page(*, source: str | None = None) -> ResponseReturnValue:
         scan_error = scan_error or str(exc)
     context = {
         "page": "settings",
-        "videos_available": False,
         "cloud_archive_available": False,
         "music_available": False,
         "shows_available": False,

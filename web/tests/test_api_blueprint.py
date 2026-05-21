@@ -192,34 +192,3 @@ def test_gadget_state_returns_503_with_documented_body(client: FlaskClient) -> N
     assert "teslafat" in body["reason"].lower()
 
 
-# --- /api/recent_archive/* -----------------------------------------------------
-
-
-def test_recent_archive_trigger_returns_501_with_documented_body(
-    client: FlaskClient,
-) -> None:
-    response = client.post("/api/recent_archive/trigger")
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
-    body = response.get_json()
-    assert body["error"] == "not_implemented"
-    assert "cloud_archive" in body["reason"]
-
-
-def test_recent_archive_status_returns_501_with_documented_body(
-    client: FlaskClient,
-) -> None:
-    response = client.get("/api/recent_archive/status")
-    assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
-    body = response.get_json()
-    assert body["error"] == "not_implemented"
-
-
-# --- /api/recover_gadget -------------------------------------------------------
-
-
-def test_recover_gadget_returns_410_deprecated(client: FlaskClient) -> None:
-    response = client.post("/api/recover_gadget")
-    assert response.status_code == HTTPStatus.GONE
-    body = response.get_json()
-    assert body["error"] == "deprecated"
-    assert "rust worker" in body["reason"].lower()

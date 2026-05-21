@@ -274,9 +274,6 @@ def test_context_processor_supplies_base_html_defaults(app: Flask) -> None:
         # check by rendering base.html and confirming it didn't
         # raise on any missing variable.
         html = render_template("base.html")
-    # Defaults: videos_available=True so the archive-watchdog
-    # banner script block is rendered (hidden, but present).
-    assert "archive-watchdog-banner" in html
     # Defaults: operation_in_progress=False so the operation
     # banner block is NOT rendered.
     assert "operation-banner" not in html

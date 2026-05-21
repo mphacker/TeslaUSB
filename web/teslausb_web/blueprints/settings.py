@@ -227,8 +227,6 @@ def _index_context() -> dict[str, object]:
         "wifi_status": wifi_status,
         "ap_status": ap_status,
         "ap_config": ap_config,
-        "videos_available": True,
-        "cfg_archive": {"enabled": False, "retention_days": 30, "min_free_space_gb": 5},
         "cfg_mapping": {"enabled": False, "trip_gap_minutes": 15, "speed_limit_mph": 80},
         "cfg_network": {"samba_password": ""},
         "system_info": _system_info(),
@@ -272,11 +270,6 @@ def configure_ap() -> ResponseReturnValue:
 def force_ap() -> ResponseReturnValue:
     """Stub: v1 AP force on/off endpoint (B-1 AP managed via WiFi service)."""
     return _stub_save("AP force mode updated via WiFi service (B-1 stub)")
-
-
-@settings_dashboard_bp.route("/settings/save/archive", methods=["POST"])
-def save_archive_settings() -> ResponseReturnValue:
-    return _stub_save("Archive settings are not yet supported in B-1")
 
 
 @settings_dashboard_bp.route("/settings/save/mapping", methods=["POST"])

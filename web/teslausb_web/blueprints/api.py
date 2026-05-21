@@ -29,16 +29,6 @@ Per-route disposition (Phase 5.28 dedupe survey):
   lifecycle but has no IPC for "report current state" yet. Returns
   ``503 {"error":"not_implemented","phase":"6"}`` so the URL stays
   alive but callers see an explicit unavailable signal.
-* ``POST /api/recent_archive/trigger`` — **dropped**. v1's
-  one-shot "RecentClips → SD-card archive" subsystem does not
-  exist in B-1 — there is no IMG / loopback to archive into. The
-  cloud-archive worker (Phase 5.14 / 5.18) handles ongoing sync.
-  Returns ``501 {"error":"not_implemented","reason":"..."}``.
-* ``GET  /api/recent_archive/status`` — **dropped** (mirrors
-  trigger). Returns ``501``.
-* ``POST /api/recover_gadget`` — **dropped (deprecated)**. Gadget
-  recovery is the Rust worker's job in B-1. Returns ``410 Gone``
-  with ``{"error":"deprecated", ...}``.
 
 Charter posture:
 
@@ -263,65 +253,6 @@ def gadget_state() -> ResponseReturnValue:
         phase="6",
     )
     return jsonify(body), HTTPStatus.SERVICE_UNAVAILABLE
-
-
-@api_bp.route("/recent_archive/trigger", methods=["POST"])
-def recent_archive_trigger() -> ResponseReturnValue:
-    """Start a one-shot "RecentClips → SD-card archive" run.
-
-    **B-1 disposition: dropped → 501 Not Implemented.**
-
-    v1's recent-archive subsystem copied RecentClips into the
-    loopback IMG so a phone-home script could then ``rclone sync``
-    that IMG. B-1 has no IMG (``docs/00-PLAN.md``) and no
-    intermediate archive step — the ``cloud_archive`` worker
-    (Phase 5.14 / 5.18) syncs RecentClips directly. The trigger URL
-    is preserved so legacy dispatcher scripts see an explicit
-    ``not_implemented`` token.
-    """
-    body = _api_error(
-        error="not_implemented",
-        reason=(
-            "B-1 has no RecentClips→IMG archive step; cloud_archive worker "
-            "syncs RecentClips directly. Use /cloud_archive/sync_now instead."
-        ),
-    )
-    return jsonify(body), HTTPStatus.NOT_IMPLEMENTED
-
-
-@api_bp.route("/recent_archive/status", methods=["GET"])
-def recent_archive_status() -> ResponseReturnValue:
-    """Report the current recent-archive run status.
-
-    **B-1 disposition: dropped → 501 Not Implemented (mirrors
-    trigger).**
-    """
-    body = _api_error(
-        error="not_implemented",
-        reason="No recent-archive subsystem in B-1; see /api/recent_archive/trigger.",
-    )
-    return jsonify(body), HTTPStatus.NOT_IMPLEMENTED
-
-
-@api_bp.route("/recover_gadget", methods=["POST"])
-def recover_gadget() -> ResponseReturnValue:
-    """Manually attempt USB-gadget recovery.
-
-    **B-1 disposition: dropped → 410 Gone.**
-
-    v1 attempted to repair a hung configfs gadget from the web app.
-    In B-1 the Rust ``teslausb-worker`` owns the gadget supervisor
-    and the systemd unit restart policy handles recovery
-    autonomously (ADR-0006). A user-triggered web-side "recover"
-    button is not just unnecessary but actively harmful (could
-    race the supervisor). The URL is kept so external scripts
-    that still call it see an unambiguous ``deprecated`` signal.
-    """
-    body = _api_error(
-        error="deprecated",
-        reason="B-1 Rust worker owns gadget recovery; manual web-side trigger removed.",
-    )
-    return jsonify(body), HTTPStatus.GONE
 
 
 __all__ = ("api_bp",)

@@ -121,11 +121,6 @@ class TestDashboardRoutes:
 
 
 class TestStubRoutes:
-    def test_save_archive_stub_redirects(self, client) -> None:
-        response = client.post("/settings/save/archive")
-        assert response.status_code == HTTPStatus.FOUND
-        assert response.headers["Location"] == "/settings/"
-
     def test_save_mapping_stub_redirects(self, client) -> None:
         response = client.post("/settings/save/mapping")
         assert response.status_code == HTTPStatus.FOUND

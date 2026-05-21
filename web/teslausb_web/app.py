@@ -554,8 +554,8 @@ def _register_template_globals(app: Flask) -> None:
     """Inject defaults for the flags ``base.html`` reads.
 
     `base.html` references a number of context variables (`page`,
-    `samba_on`, `*_available`, `auto_refresh`, `operation_in_progress`,
-    `videos_available`, etc.) without setting them itself — they're
+    `samba_on`, `*_available`, `auto_refresh`, `operation_in_progress`)
+    without setting them itself — they're
     expected to be supplied by each view's `render_template` call or
     by a context processor. To keep `base.html` standalone-renderable
     (which we exploit in Phase 5.4 tests + the captive-portal page
@@ -596,7 +596,6 @@ def _register_template_globals(app: Flask) -> None:
             "lock_age": 0,
             "map_available": True,
             "analytics_available": True,
-            "videos_available": True,
             "cloud_archive_available": True,
             # Composite media-hub flag — `base.html` recomputes this
             # from the sub-flags below, but we ship a default in

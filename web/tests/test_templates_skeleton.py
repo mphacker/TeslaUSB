@@ -88,7 +88,6 @@ def test_mapping_scaffold_now_renders_real_page(app: Flask) -> None:
     [
         ("/analytics/", "scaffolding only"),
         ("/media/", "scaffolding only"),
-        ("/cloud/", "scaffolding only"),
         ("/settings/", "scaffolding only"),
     ],
 )

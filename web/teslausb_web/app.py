@@ -30,6 +30,7 @@ from flask import Blueprint, Flask, abort, jsonify, request, send_from_directory
 
 from teslausb_web.blueprints._scaffold import build_scaffold_blueprints
 from teslausb_web.blueprints.boombox import boombox_bp
+from teslausb_web.blueprints.cloud_archive import cloud_archive_bp
 from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
 from teslausb_web.blueprints.mapping import mapping_bp
@@ -143,6 +144,8 @@ def create_app(
     if not isinstance(rclone_service, CloudRcloneService):
         raise RuntimeError("cloud_rclone_service must be registered before cloud_archive_service")
     _register_cloud_archive_services(app, cfg, rclone_service, oauth_service)
+    if "cloud_archive" not in app.blueprints:
+        app.register_blueprint(cloud_archive_bp)
     _register_wrap_services(app, cfg)
     _register_mapping_services(app, cfg)
 
@@ -240,6 +243,8 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         registered_names.add(bp.name)
 
     for scaffold_bp in build_scaffold_blueprints():
+        if scaffold_bp.name == "cloud_archive":
+            continue
         if scaffold_bp.name in registered_names:
             continue
         app.register_blueprint(scaffold_bp)

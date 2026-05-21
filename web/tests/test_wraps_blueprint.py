@@ -127,8 +127,20 @@ def test_app_registers_wrap_blueprint_and_service(app: Flask) -> None:
     assert isinstance(app.extensions["wrap_service"], WrapService)
 
 
-def test_index_route_skipped_until_template_port() -> None:
-    pytest.skip(reason="template in 5.10c")
+def test_index_route_renders_template_charter_compliant(client, service: WrapService) -> None:
+    service.upload_files([_upload("cover.png", _png_bytes(512, 512))])
+
+    response = client.get("/wraps/")
+
+    assert response.status_code == HTTPStatus.OK
+    assert b"<title>" in response.data
+    assert b"Wraps" in response.data
+    assert b"Edit Mode" not in response.data
+    assert b"Present Mode" not in response.data
+    assert b"quick_edit" not in response.data
+    assert b"cdn.jsdelivr.net" not in response.data
+    assert b"unpkg.com" not in response.data
+    assert b"<svg" in response.data
 
 
 def test_helper_invalidate_caches_is_noop_without_extension(app: Flask) -> None:

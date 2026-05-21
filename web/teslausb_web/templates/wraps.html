@@ -1,0 +1,764 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.wraps-page {
+    display: grid;
+    gap: var(--space-6);
+}
+
+.wraps-header,
+.wraps-panel,
+.wraps-library {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 8px 24px var(--shadow);
+}
+
+.wraps-header,
+.wraps-panel,
+.wraps-library {
+    padding: var(--space-6);
+}
+
+.wraps-header,
+.wraps-panel,
+.wraps-library,
+.wraps-title-group,
+.wraps-panel-head,
+.wraps-constraints,
+.wraps-warning,
+.wraps-progress,
+.wraps-empty-state,
+.wraps-card,
+.wraps-meta,
+.wraps-preview,
+.wraps-preview-list,
+.wraps-results-list {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.wraps-header-row,
+.wraps-summary,
+.wraps-upload-grid,
+.wraps-actions,
+.wraps-library-toolbar,
+.wraps-library-actions,
+.wraps-card-header,
+.wraps-card-actions,
+.wraps-select-label,
+.wraps-drop-zone,
+.wraps-preview-head,
+.wraps-preview-item,
+.wraps-result-item,
+.wraps-preview-meta {
+    display: flex;
+    gap: var(--space-3);
+}
+
+.wraps-header-row,
+.wraps-library-toolbar,
+.wraps-card-header,
+.wraps-preview-head,
+.wraps-preview-item,
+.wraps-result-item,
+.wraps-preview-meta {
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.wraps-header-row,
+.wraps-library-toolbar,
+.wraps-summary,
+.wraps-library-actions,
+.wraps-actions,
+.wraps-card-actions,
+.wraps-upload-grid {
+    flex-wrap: wrap;
+}
+
+.wraps-title,
+.wraps-panel-title,
+.wraps-card-title,
+.wraps-empty-state h3,
+.wraps-upload-card h3,
+.wraps-preview-head h4,
+.wraps-progress-title {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.wraps-title {
+    font-size: var(--text-3xl);
+}
+
+.wraps-panel-title,
+.wraps-card-title,
+.wraps-upload-card h3,
+.wraps-empty-state h3 {
+    font-size: var(--text-xl);
+}
+
+.wraps-subtitle,
+.wraps-panel-copy,
+.wraps-constraint-copy,
+.wraps-warning-copy,
+.wraps-card-copy,
+.wraps-empty-copy,
+.wraps-preview-copy,
+.wraps-preview-errors,
+.wraps-meta dd,
+.wraps-result-text {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.wraps-summary-pill,
+.wraps-constraint-chip,
+.wraps-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-4);
+    border-radius: 999px;
+    border: 1px solid var(--border-input);
+    background: var(--form-label-bg);
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.wraps-badge.is-valid {
+    background: var(--msg-success-bg);
+    border-color: var(--success-border);
+    color: var(--msg-success-text);
+}
+
+.wraps-badge.is-invalid {
+    background: var(--msg-warning-bg);
+    border-color: var(--warning-border);
+    color: var(--text-primary);
+}
+
+.wraps-icon,
+.wraps-inline-icon {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex: 0 0 auto;
+}
+
+.wraps-upload-grid {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.wraps-upload-card,
+.wraps-constraint-card {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+}
+
+.wraps-field {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.wraps-field label,
+.wraps-select-label,
+.wraps-select-all {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.wraps-field input[type="file"] {
+    inline-size: 100%;
+    min-height: 44px;
+    padding: var(--space-3);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.wraps-btn,
+.wraps-link,
+.wraps-drop-zone,
+.wraps-select-label,
+.wraps-select-all {
+    min-height: 44px;
+}
+
+.wraps-btn,
+.wraps-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    border: 1px solid transparent;
+    font: inherit;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+
+.wraps-btn:hover,
+.wraps-link:hover,
+.wraps-drop-zone:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px var(--shadow-hover);
+}
+
+.wraps-btn:disabled,
+.wraps-link[aria-disabled="true"] {
+    cursor: not-allowed;
+    opacity: 0.7;
+    transform: none;
+    box-shadow: none;
+}
+
+.wraps-btn-primary {
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+.wraps-btn-secondary,
+.wraps-link-secondary {
+    background: var(--form-label-bg);
+    border-color: var(--border-input);
+    color: var(--text-primary);
+}
+
+.wraps-btn-danger {
+    background: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
+.wraps-drop-zone {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-3);
+    padding: var(--space-8);
+    border: 2px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--bg-secondary);
+    text-align: center;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.wraps-drop-zone.is-dragover {
+    border-color: var(--btn-primary-bg);
+    background: var(--msg-info-bg);
+}
+
+.wraps-drop-zone svg {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: var(--btn-primary-bg);
+}
+
+.wraps-drop-title {
+    margin: 0;
+    font-size: var(--text-lg);
+    font-weight: 700;
+}
+
+.wraps-drop-copy {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+.wraps-preview {
+    padding: var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+
+.wraps-preview[hidden],
+.wraps-warning[hidden] {
+    display: none;
+}
+
+.wraps-preview-item,
+.wraps-result-item {
+    padding: var(--space-3);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--form-label-bg);
+}
+
+.wraps-preview-name,
+.wraps-result-text {
+    min-width: 0;
+    word-break: break-word;
+    color: var(--text-primary);
+}
+
+.wraps-preview-meta {
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.wraps-preview-meta strong {
+    color: var(--text-primary);
+}
+
+.wraps-preview-errors {
+    padding-left: var(--space-4);
+    color: var(--msg-error-text);
+}
+
+.wraps-icon-only {
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+}
+
+.wraps-warning {
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--ios-warning-bg);
+    border: 1px solid var(--ios-warning-border);
+    color: var(--ios-warning-text);
+}
+
+.wraps-warning strong,
+.wraps-warning p {
+    color: inherit;
+}
+
+.wraps-progress {
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--upload-progress-bg);
+    border: 1px solid var(--border-input);
+}
+
+.wraps-progress-bar {
+    inline-size: 100%;
+    block-size: 2rem;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--upload-progress-bar-bg);
+    border: 1px solid var(--border-input);
+}
+
+.wraps-progress-fill {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    block-size: 100%;
+    inline-size: 0%;
+    background: linear-gradient(90deg, var(--btn-primary-bg), var(--btn-info-bg));
+    color: var(--btn-primary-text);
+    font-weight: 700;
+    transition: inline-size 0.2s ease;
+}
+
+.wraps-progress.is-success .wraps-progress-fill {
+    background: linear-gradient(90deg, var(--btn-success-bg), var(--success-border));
+}
+
+.wraps-progress.is-error .wraps-progress-fill {
+    background: linear-gradient(90deg, var(--btn-danger-bg), var(--msg-error-text));
+}
+
+.wraps-progress.is-warning .wraps-progress-fill {
+    background: linear-gradient(90deg, var(--warning-border), var(--status-unknown-text));
+}
+
+.wraps-library-select-count {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.wraps-select-label,
+.wraps-select-all {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.wraps-select-label input,
+.wraps-select-all input {
+    width: 1.125rem;
+    height: 1.125rem;
+    margin: 0;
+}
+
+.wraps-grid {
+    display: grid;
+    gap: var(--space-4);
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.wraps-card {
+    padding: var(--space-4);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    box-shadow: 0 8px 24px var(--shadow);
+}
+
+.wraps-card.is-selected {
+    border-color: var(--btn-primary-bg);
+}
+
+.wraps-thumb-shell {
+    overflow: hidden;
+    aspect-ratio: 1 / 1;
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+}
+
+.wraps-thumb {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.wraps-card-title {
+    word-break: break-word;
+}
+
+.wraps-meta {
+    margin: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wraps-meta div {
+    display: grid;
+    gap: var(--space-1);
+}
+
+.wraps-meta dt {
+    color: var(--text-primary);
+    font-weight: 700;
+}
+
+.wraps-meta dd {
+    margin: 0;
+}
+
+.wraps-empty-state {
+    justify-items: center;
+    padding: var(--space-8);
+    border: 1px dashed var(--border-input);
+    border-radius: var(--radius-lg);
+    background: var(--form-input-bg);
+    text-align: center;
+}
+
+.wraps-empty-state svg {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: var(--text-secondary);
+}
+
+.wraps-helper-link {
+    color: var(--text-link);
+}
+
+@media (min-width: 768px) {
+    .wraps-upload-grid {
+        grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    }
+
+    .wraps-constraints {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1024px) {
+    .wraps-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 767px) {
+    .wraps-header,
+    .wraps-panel,
+    .wraps-library {
+        padding: var(--space-4);
+    }
+
+    .wraps-actions,
+    .wraps-card-actions,
+    .wraps-library-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .wraps-btn,
+    .wraps-link {
+        width: 100%;
+    }
+
+    .wraps-meta {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+</style>
+{% endblock %}
+{% block content %}
+<div class="container">
+    {% include 'media_hub_nav.html' %}
+    {% set sprite = url_for('static', filename='icons/lucide-sprite.svg') %}
+    {% set max_mb = (max_file_size / 1024 / 1024)|round(0)|int %}
+
+    <div
+        class="wraps-page"
+        id="wrapsPage"
+        data-sprite-url="{{ sprite }}"
+        data-max-file-size="{{ max_file_size }}"
+        data-min-dimension="{{ min_dimension }}"
+        data-max-dimension="{{ max_dimension }}"
+        data-max-filename-length="{{ max_filename_length }}"
+        data-max-wrap-count="{{ max_wrap_count }}"
+        data-current-wrap-count="{{ wrap_count }}"
+    >
+        <section class="wraps-header" aria-labelledby="wraps-title">
+            <div class="wraps-header-row">
+                <div class="wraps-title-group">
+                    <h2 class="wraps-title" id="wraps-title">Wraps</h2>
+                    <p class="wraps-subtitle">
+                        Upload Tesla-ready PNG wraps, review the library, and remove one or many files when you need space.
+                    </p>
+                </div>
+                <div class="wraps-summary" aria-label="Wrap summary">
+                    <span class="wraps-summary-pill">
+                        <svg class="wraps-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-palette"></use></svg>
+                        {{ wrap_count }} saved wrap{{ '' if wrap_count == 1 else 's' }}
+                    </span>
+                    <span class="wraps-summary-pill">
+                        <svg class="wraps-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-folder"></use></svg>
+                        {{ max_wrap_count - wrap_count }} slot{{ '' if (max_wrap_count - wrap_count) == 1 else 's' }} remaining
+                    </span>
+                </div>
+            </div>
+        </section>
+
+        <section class="wraps-panel" aria-labelledby="wraps-upload-title">
+            <div class="wraps-panel-head">
+                <h3 class="wraps-panel-title" id="wraps-upload-title">Upload wraps</h3>
+                <p class="wraps-panel-copy">
+                    Use the drag-and-drop uploader for batches or the single-file form for quick changes. The library updates after each successful upload.
+                </p>
+            </div>
+
+            <div class="wraps-constraints" aria-label="Tesla wrap constraints">
+                <article class="wraps-constraint-card">
+                    <h3>Tesla constraints</h3>
+                    <p class="wraps-constraint-copy">Every file must satisfy Tesla's Paint Shop requirements before it can be used in the vehicle.</p>
+                    <div class="wraps-summary">
+                        <span class="wraps-constraint-chip">
+                            <svg class="wraps-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-image"></use></svg>
+                            PNG only
+                        </span>
+                        <span class="wraps-constraint-chip">
+                            <svg class="wraps-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-maximize-2"></use></svg>
+                            {{ min_dimension }}–{{ max_dimension }} px square
+                        </span>
+                        <span class="wraps-constraint-chip">
+                            <svg class="wraps-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-hard-drive"></use></svg>
+                            {{ max_mb }} MB max
+                        </span>
+                        <span class="wraps-constraint-chip">
+                            <svg class="wraps-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-pencil"></use></svg>
+                            {{ max_filename_length }} characters max
+                        </span>
+                    </div>
+                    <p class="wraps-constraint-copy">Allowed filename characters: letters, numbers, underscores, dashes, and spaces.</p>
+                </article>
+                <article class="wraps-constraint-card">
+                    <h3>Usage</h3>
+                    <p class="wraps-constraint-copy">Wraps appear in Toybox — Paint Shop — Wraps after upload.</p>
+                    <p class="wraps-constraint-copy">Keep filenames short so they remain readable in the Tesla UI and easy to manage from this library.</p>
+                    <p class="wraps-constraint-copy">
+                        <a class="wraps-helper-link" href="https://github.com/teslamotors/custom-wraps" target="_blank" rel="noreferrer noopener">Download Tesla wrap templates</a>
+                    </p>
+                </article>
+            </div>
+
+            <div class="wraps-warning" id="wrapsIosWarning" hidden>
+                <p class="wraps-warning-copy"><strong><svg class="wraps-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-alert-triangle"></use></svg> iOS browser limitation:</strong> Uploading works on iOS only when this page is opened in Safari.</p>
+                <p class="wraps-warning-copy">Desktop browsers continue to work normally.</p>
+            </div>
+
+            <div class="wraps-upload-grid" id="wrapsUploadControls">
+                <form class="wraps-upload-card js-wrap-upload-form" id="wrapsMultiForm" action="{{ url_for('wraps.upload_multiple_wraps') }}" method="post" enctype="multipart/form-data" data-upload-kind="multiple">
+                    <div>
+                        <h3>Drag and drop upload</h3>
+                        <p class="wraps-constraint-copy">Drop one or more PNG files here, or browse from storage.</p>
+                    </div>
+                    <button class="wraps-drop-zone" id="wrapsDropZone" type="button">
+                        <svg aria-hidden="true"><use href="{{ sprite }}#icon-cloud-upload"></use></svg>
+                        <span class="wraps-drop-title">Drop PNG files here or tap to browse</span>
+                        <span class="wraps-drop-copy">Batch uploads respect the same size, filename, and square-dimension rules as single uploads.</span>
+                    </button>
+                    <input type="file" id="wrapsMultiInput" name="wrap_files" accept=".png,image/png" multiple>
+                    <div class="wraps-preview" id="wrapsPreview" hidden>
+                        <div class="wraps-preview-head">
+                            <h4>Selected files</h4>
+                            <button class="wraps-btn wraps-btn-secondary" id="wrapsClearSelection" type="button">
+                                <svg class="wraps-icon" aria-hidden="true"><use href="{{ sprite }}#icon-x"></use></svg>
+                                Clear selection
+                            </button>
+                        </div>
+                        <p class="wraps-preview-copy" id="wrapsPreviewCount">No files selected yet.</p>
+                        <div class="wraps-preview-list" id="wrapsPreviewList"></div>
+                    </div>
+                    <div class="wraps-actions">
+                        <button class="wraps-btn wraps-btn-primary" type="submit" id="wrapsMultiSubmit">
+                            <svg class="wraps-icon" aria-hidden="true"><use href="{{ sprite }}#icon-upload"></use></svg>
+                            Upload selected files
+                        </button>
+                    </div>
+                </form>
+
+                <form class="wraps-upload-card js-wrap-upload-form" id="wrapsSingleForm" action="{{ url_for('wraps.upload_wrap') }}" method="post" enctype="multipart/form-data" data-upload-kind="single">
+                    <div>
+                        <h3>Single file upload</h3>
+                        <p class="wraps-constraint-copy">Use this when you only need to add one wrap.</p>
+                    </div>
+                    <div class="wraps-field">
+                        <label for="wrapsSingleInput">Choose one PNG file</label>
+                        <input type="file" id="wrapsSingleInput" name="wrap_file" accept=".png,image/png">
+                    </div>
+                    <div class="wraps-actions">
+                        <button class="wraps-btn wraps-btn-primary" type="submit" id="wrapsSingleSubmit">
+                            <svg class="wraps-icon" aria-hidden="true"><use href="{{ sprite }}#icon-upload"></use></svg>
+                            Upload file
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="wraps-progress" id="wrapsProgress" role="status" aria-live="polite">
+                <div class="wraps-panel-head">
+                    <h4 class="wraps-progress-title" id="wrapsProgressTitle">Ready to upload</h4>
+                    <p class="wraps-panel-copy" id="wrapsProgressMessage">Choose files above to start an upload.</p>
+                </div>
+                <div class="wraps-progress-bar" aria-hidden="true">
+                    <div class="wraps-progress-fill" id="wrapsProgressFill">0%</div>
+                </div>
+                <div class="wraps-results-list" id="wrapsResults"></div>
+            </div>
+        </section>
+
+        <section class="wraps-library" aria-labelledby="wraps-library-title">
+            <div class="wraps-library-toolbar">
+                <div class="wraps-panel-head">
+                    <h3 class="wraps-panel-title" id="wraps-library-title">Library</h3>
+                    <p class="wraps-panel-copy">Review thumbnails, filenames, dimensions, and file sizes before downloading or deleting wraps.</p>
+                </div>
+                <div class="wraps-library-actions">
+                    <label class="wraps-select-all" for="wrapsSelectAll">
+                        <input type="checkbox" id="wrapsSelectAll">
+                        Select all
+                    </label>
+                    <span class="wraps-library-select-count" id="wrapsSelectedCount">0 selected</span>
+                    <form id="wrapsBulkDeleteForm" action="{{ url_for('wraps.bulk_delete_wraps') }}" method="post"></form>
+                    <button class="wraps-btn wraps-btn-danger" id="wrapsBulkDeleteButton" type="submit" form="wrapsBulkDeleteForm" disabled>
+                        <svg class="wraps-icon" aria-hidden="true"><use href="{{ sprite }}#icon-trash-2"></use></svg>
+                        Delete selected
+                    </button>
+                </div>
+            </div>
+
+            {% if wrap_files %}
+            <div class="wraps-grid" aria-label="Wrap library grid">
+                {% for wrap in wrap_files %}
+                <article class="wraps-card" data-wrap-card>
+                    <div class="wraps-card-header">
+                        <label class="wraps-select-label" for="wrap-select-{{ loop.index }}">
+                            <input
+                                type="checkbox"
+                                id="wrap-select-{{ loop.index }}"
+                                class="js-wrap-bulk-checkbox"
+                                form="wrapsBulkDeleteForm"
+                                name="filenames"
+                                value="{{ wrap.filename }}"
+                            >
+                            Select
+                        </label>
+                        <span class="wraps-badge">
+                            <svg class="wraps-inline-icon" aria-hidden="true"><use href="{{ sprite }}#icon-image"></use></svg>
+                            {{ wrap.partition }}
+                        </span>
+                    </div>
+                    <div class="wraps-thumb-shell">
+                        <img
+                            class="wraps-thumb"
+                            src="{{ url_for('wraps.download_wrap', partition=wrap.partition_key, filename=wrap.filename) }}"
+                            alt="Preview of {{ wrap.filename }}"
+                            loading="lazy"
+                        >
+                    </div>
+                    <div class="wraps-title-group">
+                        <h3 class="wraps-card-title">{{ wrap.filename }}</h3>
+                        <p class="wraps-card-copy">Ready for Tesla Paint Shop if the upload succeeded.</p>
+                    </div>
+                    <dl class="wraps-meta">
+                        <div>
+                            <dt>Dimensions</dt>
+                            <dd>{{ wrap.dimensions }}</dd>
+                        </div>
+                        <div>
+                            <dt>Size</dt>
+                            <dd>{{ wrap.size_str }}</dd>
+                        </div>
+                    </dl>
+                    <div class="wraps-card-actions">
+                        <a class="wraps-link wraps-link-secondary" href="{{ url_for('wraps.download_wrap', partition=wrap.partition_key, filename=wrap.filename) }}">
+                            <svg class="wraps-icon" aria-hidden="true"><use href="{{ sprite }}#icon-download"></use></svg>
+                            Download
+                        </a>
+                        <form class="js-wrap-action-form" action="{{ url_for('wraps.delete_wrap', partition=wrap.partition_key, filename=wrap.filename) }}" method="post" data-confirm="Delete {{ wrap.filename }}?" data-action-label="Delete {{ wrap.filename }}">
+                            <button class="wraps-btn wraps-btn-danger" type="submit">
+                                <svg class="wraps-icon" aria-hidden="true"><use href="{{ sprite }}#icon-trash-2"></use></svg>
+                                Delete
+                            </button>
+                        </form>
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="wraps-empty-state">
+                <svg aria-hidden="true"><use href="{{ sprite }}#icon-folder"></use></svg>
+                <h3>No wraps uploaded yet</h3>
+                <p class="wraps-empty-copy">Upload one or more PNG files above to build your Paint Shop wrap library.</p>
+            </div>
+            {% endif %}
+        </section>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/wraps.js') }}"></script>
+{% endblock %}

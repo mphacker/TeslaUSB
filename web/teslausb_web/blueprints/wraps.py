@@ -218,7 +218,8 @@ def _wrap_dimensions(filename: str) -> str | None:
 @wraps_bp.route("/")
 def wraps() -> ResponseReturnValue:
     try:
-        return render_template("wraps.html", **_index_context())
+        context = _index_context()
+        return render_template("wraps.html", **context)
     except WrapError as exc:
         return _json_error_payload(str(exc)), HTTPStatus.BAD_REQUEST
     except WrapFileError as exc:

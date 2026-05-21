@@ -251,6 +251,18 @@ def index() -> ResponseReturnValue:
     return _render_dashboard()
 
 
+@settings_dashboard_bp.route("/settings/configure_ap", methods=["POST"])
+def configure_ap() -> ResponseReturnValue:
+    """Stub: v1 AP configuration endpoint (B-1 AP config managed via system_settings_service)."""
+    return _stub_save("AP configuration updated via system settings (B-1 stub)")
+
+
+@settings_dashboard_bp.route("/settings/force_ap", methods=["POST"])
+def force_ap() -> ResponseReturnValue:
+    """Stub: v1 AP force on/off endpoint (B-1 AP managed via WiFi service)."""
+    return _stub_save("AP force mode updated via WiFi service (B-1 stub)")
+
+
 @settings_dashboard_bp.route("/settings/save/archive", methods=["POST"])
 def save_archive_settings() -> ResponseReturnValue:
     return _stub_save("Archive settings are not yet supported in B-1")

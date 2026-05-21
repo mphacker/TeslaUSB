@@ -12,6 +12,7 @@ from teslausb_web.config import (
     ENV_CONFIG_PATH,
     ChimesSection,
     ConfigError,
+    LightShowsSection,
     WebConfig,
     load_config,
 )
@@ -285,6 +286,75 @@ speed_step = 0.2
         speed_range_max=1.7,
         speed_step=0.2,
     )
+
+
+def test_light_shows_defaults_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "light_shows_defaults.toml"
+    _write(cfg_file, "[light_shows]\n")
+    cfg = load_config(cfg_file)
+    assert cfg.light_shows == LightShowsSection()
+    assert cfg.light_shows.folder == "LightShow"
+    assert cfg.light_shows.active_show_relpath == "lightshow_active.json"
+    assert cfg.light_shows.allowed_extensions == (".fseq", ".mp3", ".wav")
+
+
+def test_full_light_shows_section_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "full_light_shows.toml"
+    _write(
+        cfg_file,
+        """
+[light_shows]
+folder = "CustomShows"
+active_show_relpath = "active_show.json"
+max_upload_size = 1234
+max_zip_size = 5678
+allowed_extensions = [".fseq", ".wav"]
+""",
+    )
+    cfg = load_config(cfg_file)
+    assert cfg.light_shows == LightShowsSection(
+        folder="CustomShows",
+        active_show_relpath="active_show.json",
+        max_upload_size=1234,
+        max_zip_size=5678,
+        allowed_extensions=(".fseq", ".wav"),
+    )
+
+
+@pytest.mark.parametrize("key", ["folder", "active_show_relpath"])
+def test_light_show_relpaths_reject_path_traversal(tmp_path: Path, key: str) -> None:
+    cfg_file = tmp_path / f"{key}.toml"
+    _write(cfg_file, f'[light_shows]\n{key} = "../foo"\n')
+    with pytest.raises(ConfigError, match="must not contain path separators"):
+        load_config(cfg_file)
+
+
+def test_light_show_allowed_extensions_must_be_string_array(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "light_show_allowed_extensions.toml"
+    _write(cfg_file, '[light_shows]\nallowed_extensions = [".fseq", 3]\n')
+    with pytest.raises(ConfigError, match="allowed_extensions must be an array of strings"):
+        load_config(cfg_file)
+
+
+def test_light_show_allowed_extensions_must_start_with_dot(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "light_show_bad_extension.toml"
+    _write(cfg_file, '[light_shows]\nallowed_extensions = ["fseq"]\n')
+    with pytest.raises(ConfigError, match=r"entries must start with '\.'"):
+        load_config(cfg_file)
+
+
+def test_light_show_upload_limit_must_not_exceed_zip_limit(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "light_show_bad_limits.toml"
+    _write(
+        cfg_file,
+        """
+[light_shows]
+max_upload_size = 10
+max_zip_size = 9
+""",
+    )
+    with pytest.raises(ConfigError, match="max_upload_size must be <= max_zip_size"):
+        load_config(cfg_file)
 
 
 def test_webconfig_dataclass_is_frozen() -> None:

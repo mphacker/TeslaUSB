@@ -56,6 +56,11 @@ _DEFAULT_MIN_LOCK_CHIME_DURATION: Final[int] = 1
 _DEFAULT_SPEED_RANGE_MIN: Final[float] = 0.5
 _DEFAULT_SPEED_RANGE_MAX: Final[float] = 2.0
 _DEFAULT_SPEED_STEP: Final[float] = 0.1
+_DEFAULT_LIGHT_SHOWS_FOLDER: Final[str] = "LightShow"
+_DEFAULT_ACTIVE_SHOW_RELPATH: Final[str] = "lightshow_active.json"
+_DEFAULT_LIGHT_SHOW_MAX_UPLOAD_SIZE: Final[int] = 100 * 1024 * 1024
+_DEFAULT_LIGHT_SHOW_MAX_ZIP_SIZE: Final[int] = 500 * 1024 * 1024
+_DEFAULT_LIGHT_SHOW_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".fseq", ".mp3", ".wav")
 
 # Highest valid TCP/UDP port number per RFC 793. Named to silence
 # the magic-value lint and document intent at the call site.
@@ -190,6 +195,52 @@ class ChimesSection:
 
 
 @dataclass(frozen=True, slots=True)
+class LightShowsSection:
+    """Light-show library paths and upload constraints."""
+
+    folder: str = _DEFAULT_LIGHT_SHOWS_FOLDER
+    active_show_relpath: str = _DEFAULT_ACTIVE_SHOW_RELPATH
+    max_upload_size: int = _DEFAULT_LIGHT_SHOW_MAX_UPLOAD_SIZE
+    max_zip_size: int = _DEFAULT_LIGHT_SHOW_MAX_ZIP_SIZE
+    allowed_extensions: tuple[str, ...] = _DEFAULT_LIGHT_SHOW_ALLOWED_EXTENSIONS
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        _validate_relpath_filename(self.folder, key="folder", section="light_shows")
+        _validate_relpath_filename(
+            self.active_show_relpath,
+            key="active_show_relpath",
+            section="light_shows",
+        )
+        if self.max_upload_size <= 0:
+            raise ConfigError(None, "[light_shows] max_upload_size must be > 0")
+        if self.max_zip_size <= 0:
+            raise ConfigError(None, "[light_shows] max_zip_size must be > 0")
+        if self.max_upload_size > self.max_zip_size:
+            raise ConfigError(
+                None,
+                "[light_shows] max_upload_size must be <= max_zip_size",
+            )
+        if not self.allowed_extensions:
+            raise ConfigError(None, "[light_shows] allowed_extensions must be non-empty")
+        for extension in self.allowed_extensions:
+            if not extension.strip():
+                raise ConfigError(None, "[light_shows] allowed_extensions must be non-empty")
+            if "/" in extension or "\\" in extension:
+                raise ConfigError(
+                    None,
+                    "[light_shows] allowed_extensions must not contain path separators",
+                )
+            if not extension.startswith("."):
+                raise ConfigError(
+                    None,
+                    "[light_shows] allowed_extensions entries must start with '.'",
+                )
+
+
+@dataclass(frozen=True, slots=True)
 class WebConfig:
     """Root config dataclass — what the rest of the app sees."""
 
@@ -197,6 +248,7 @@ class WebConfig:
     paths: PathsSection = field(default_factory=PathsSection)
     features: FeaturesSection = field(default_factory=FeaturesSection)
     chimes: ChimesSection = field(default_factory=ChimesSection)
+    light_shows: LightShowsSection = field(default_factory=LightShowsSection)
     source_path: Path | None = None
 
     def validate(self) -> None:
@@ -205,6 +257,7 @@ class WebConfig:
             self.web.validate()
             self.paths.validate()
             self.chimes.validate()
+            self.light_shows.validate()
         except ConfigError as exc:
             raise ConfigError(self.source_path, str(exc).split(": ", 1)[-1]) from exc
 
@@ -290,13 +343,27 @@ def _coerce_path(section: dict[str, object], key: str, default: Path, source: Pa
     return Path(value)
 
 
-def _validate_relpath_filename(value: str, *, key: str) -> None:
+def _coerce_str_tuple(
+    section: dict[str, object],
+    key: str,
+    default: tuple[str, ...],
+    source: Path | None,
+) -> tuple[str, ...]:
+    if key not in section:
+        return default
+    value = section[key]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(source, f"{key} must be an array of strings")
+    return tuple(value)
+
+
+def _validate_relpath_filename(value: str, *, key: str, section: str = "chimes") -> None:
     if not value.strip():
-        raise ConfigError(None, f"[chimes] {key} must be non-empty")
+        raise ConfigError(None, f"[{section}] {key} must be non-empty")
     if "/" in value or "\\" in value:
         raise ConfigError(
             None,
-            f"[chimes] {key} must not contain path separators",
+            f"[{section}] {key} must not contain path separators",
         )
 
 
@@ -305,6 +372,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     paths_raw = _expect_section(raw, "paths", source)
     features_raw = _expect_section(raw, "features", source)
     chimes_raw = _expect_section(raw, "chimes", source)
+    light_shows_raw = _expect_section(raw, "light_shows", source)
 
     web = WebSection(
         host=_coerce_str(web_raw, "host", _DEFAULT_HOST, source),
@@ -399,11 +467,42 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         ),
         speed_step=_coerce_float(chimes_raw, "speed_step", _DEFAULT_SPEED_STEP, source),
     )
+    try:
+        light_shows = LightShowsSection(
+            folder=_coerce_str(light_shows_raw, "folder", _DEFAULT_LIGHT_SHOWS_FOLDER, source),
+            active_show_relpath=_coerce_str(
+                light_shows_raw,
+                "active_show_relpath",
+                _DEFAULT_ACTIVE_SHOW_RELPATH,
+                source,
+            ),
+            max_upload_size=_coerce_int(
+                light_shows_raw,
+                "max_upload_size",
+                _DEFAULT_LIGHT_SHOW_MAX_UPLOAD_SIZE,
+                source,
+            ),
+            max_zip_size=_coerce_int(
+                light_shows_raw,
+                "max_zip_size",
+                _DEFAULT_LIGHT_SHOW_MAX_ZIP_SIZE,
+                source,
+            ),
+            allowed_extensions=_coerce_str_tuple(
+                light_shows_raw,
+                "allowed_extensions",
+                _DEFAULT_LIGHT_SHOW_ALLOWED_EXTENSIONS,
+                source,
+            ),
+        )
+    except ConfigError as exc:
+        raise ConfigError(source, str(exc).split(": ", 1)[-1]) from exc
     cfg = WebConfig(
         web=web,
         paths=paths_section,
         features=features,
         chimes=chimes,
+        light_shows=light_shows,
         source_path=source,
     )
     cfg.validate()

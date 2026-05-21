@@ -84,6 +84,13 @@ _DEFAULT_BOOMBOX_BASE_DIR: Final[str] = "Boombox"
 _DEFAULT_BOOMBOX_MAX_FILE_BYTES: Final[int] = 1 * 1024 * 1024
 _DEFAULT_BOOMBOX_MAX_FILES: Final[int] = 5
 _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".mp3", ".wav")
+_DEFAULT_CLOUD_CREDENTIALS_FILENAME: Final[str] = "cloud_oauth_credentials.json"
+_DEFAULT_CLOUD_STATE_FILENAME: Final[str] = "cloud_oauth_state.json"
+_DEFAULT_CLOUD_RCLONE_CONFIG_DIRNAME: Final[str] = "rclone"
+_DEFAULT_CLOUD_REFRESH_WINDOW_SECONDS: Final[int] = 300
+_DEFAULT_CLOUD_CREDENTIALS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_CREDENTIALS_FILENAME
+_DEFAULT_CLOUD_STATE_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_STATE_FILENAME
+_DEFAULT_CLOUD_RCLONE_CONFIG_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_CLOUD_RCLONE_CONFIG_DIRNAME
 _DEFAULT_MAPPING_DB_NAME: Final[str] = "mapping.db"
 _DEFAULT_MAPPING_BACKUP_DIRNAME: Final[str] = "mapping-backups"
 _DEFAULT_MAPPING_BACKUP_RETENTION: Final[int] = 3
@@ -409,6 +416,30 @@ class BoomboxSection:
 
 
 @dataclass(frozen=True, slots=True)
+class CloudSection:
+    """Cloud OAuth state, credentials, and rclone config locations."""
+
+    credentials_path: Path = _DEFAULT_CLOUD_CREDENTIALS_PATH
+    oauth_state_path: Path = _DEFAULT_CLOUD_STATE_PATH
+    rclone_config_path: Path = _DEFAULT_CLOUD_RCLONE_CONFIG_PATH
+    refresh_window_seconds: int = _DEFAULT_CLOUD_REFRESH_WINDOW_SECONDS
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        for name, value in (
+            ("credentials_path", self.credentials_path),
+            ("oauth_state_path", self.oauth_state_path),
+            ("rclone_config_path", self.rclone_config_path),
+        ):
+            if not value.is_absolute() and not PurePosixPath(value.as_posix()).is_absolute():
+                raise ConfigError(None, f"[cloud] {name} must be absolute, got {value!r}")
+        if self.refresh_window_seconds < 0:
+            raise ConfigError(None, "[cloud] refresh_window_seconds must be >= 0")
+
+
+@dataclass(frozen=True, slots=True)
 class MappingSection:
     """Mapping DB, media roots, indexing thresholds, and stale-scan cadence."""
 
@@ -484,6 +515,7 @@ class WebConfig:
     wraps: WrapsSection = field(default_factory=WrapsSection)
     music: MusicSection = field(default_factory=MusicSection)
     boombox: BoomboxSection = field(default_factory=BoomboxSection)
+    cloud: CloudSection = field(default_factory=CloudSection)
     mapping: MappingSection = field(default_factory=MappingSection)
     source_path: Path | None = None
 
@@ -497,6 +529,7 @@ class WebConfig:
             self.wraps.validate()
             self.music.validate()
             self.boombox.validate()
+            self.cloud.validate()
             self.mapping.validate()
         except ConfigError as exc:
             raise ConfigError(self.source_path, str(exc).split(": ", 1)[-1]) from exc
@@ -616,6 +649,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     wraps_raw = _expect_section(raw, "wraps", source)
     music_raw = _expect_section(raw, "music", source)
     boombox_raw = _expect_section(raw, "boombox", source)
+    cloud_raw = _expect_section(raw, "cloud", source)
     mapping_raw = _expect_section(raw, "mapping", source)
 
     web = WebSection(
@@ -827,6 +861,32 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 source,
             ),
         )
+        cloud = CloudSection(
+            credentials_path=_coerce_path(
+                cloud_raw,
+                "credentials_path",
+                paths_section.state_dir / _DEFAULT_CLOUD_CREDENTIALS_FILENAME,
+                source,
+            ),
+            oauth_state_path=_coerce_path(
+                cloud_raw,
+                "oauth_state_path",
+                paths_section.state_dir / _DEFAULT_CLOUD_STATE_FILENAME,
+                source,
+            ),
+            rclone_config_path=_coerce_path(
+                cloud_raw,
+                "rclone_config_path",
+                paths_section.state_dir / _DEFAULT_CLOUD_RCLONE_CONFIG_DIRNAME,
+                source,
+            ),
+            refresh_window_seconds=_coerce_int(
+                cloud_raw,
+                "refresh_window_seconds",
+                _DEFAULT_CLOUD_REFRESH_WINDOW_SECONDS,
+                source,
+            ),
+        )
         mapping = MappingSection(
             db_path=_coerce_path(
                 mapping_raw,
@@ -954,6 +1014,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         wraps=wraps,
         music=music,
         boombox=boombox,
+        cloud=cloud,
         mapping=mapping,
         source_path=source,
     )

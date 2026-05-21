@@ -52,10 +52,7 @@ def app() -> Flask:
 
 SCAFFOLD_NAMES: tuple[str, ...] = (
     "mapping",
-    "analytics",
-    "media",
     "cloud_archive",
-    "settings",
 )
 
 
@@ -214,18 +211,6 @@ def test_advanced_settings_page_renders_real_template(tmp_path: Path) -> None:
     assert "cdn.jsdelivr.net" not in html
     assert "unpkg.com" not in html
     assert "#" not in html.split("<style>", 1)[1].split("</style>", 1)[0]
-
-
-@pytest.mark.parametrize(
-    ("url", "marker"),
-    [
-        ("/media/", "scaffolding only"),
-    ],
-)
-def test_scaffold_serves_placeholder(app: Flask, url: str, marker: str) -> None:
-    resp = app.test_client().get(url)
-    assert resp.status_code == 200
-    assert marker in resp.get_data(as_text=True).lower()
 
 
 def test_base_template_renders_without_error(app: Flask) -> None:

@@ -37,6 +37,7 @@ from teslausb_web.blueprints.light_shows import light_shows_bp
 from teslausb_web.blueprints.lock_chimes import lock_chimes_bp
 from teslausb_web.blueprints.mapping import mapping_bp
 from teslausb_web.blueprints.music import music_bp
+from teslausb_web.blueprints.storage_retention import storage_retention_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.blueprints.wraps import wraps_bp
 from teslausb_web.config import WebConfig, load_config
@@ -51,6 +52,7 @@ from teslausb_web.services.license_plate_service import make_license_plate_servi
 from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
 from teslausb_web.services.music_service import make_music_service
+from teslausb_web.services.storage_retention_service import make_storage_retention_service
 from teslausb_web.services.wifi_service import make_wifi_service
 from teslausb_web.services.wrap_service import make_wrap_service
 
@@ -140,6 +142,7 @@ def create_app(
     _register_music_services(app, cfg)
     _register_boombox_services(app, cfg)
     _register_license_plate_services(app, cfg)
+    _register_storage_retention_services(app, cfg)
     _register_wifi_services(app, cfg)
     _register_cloud_oauth_services(app, cfg)
     _register_cloud_rclone_services(app, cfg)
@@ -240,6 +243,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         music_bp,
         boombox_bp,
         license_plates_bp,
+        storage_retention_bp,
         captive_portal_bp,
         wraps_bp,
         mapping_bp,
@@ -314,6 +318,11 @@ def _register_boombox_services(app: Flask, cfg: WebConfig) -> None:
 def _register_license_plate_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the tracked license-plate service once at app startup."""
     app.extensions["license_plate_service"] = make_license_plate_service(cfg)
+
+
+def _register_storage_retention_services(app: Flask, cfg: WebConfig) -> None:
+    """Construct the storage-retention service once at app startup."""
+    app.extensions["storage_retention_service"] = make_storage_retention_service(cfg)
 
 
 def _register_wifi_services(app: Flask, cfg: WebConfig) -> None:
@@ -416,4 +425,5 @@ def _register_template_globals(app: Flask) -> None:
             "wraps_available": False,
             "boombox_available": False,
             "license_plates_available": False,
+            "storage_retention_available": False,
         }

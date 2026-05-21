@@ -90,6 +90,14 @@ _DEFAULT_LICENSE_PLATES_REDACTION_ENABLED: Final[bool] = False
 _DEFAULT_LICENSE_PLATES_MAX_PLATE_LENGTH: Final[int] = 16
 _DEFAULT_LICENSE_PLATES_MAX_LABEL_LENGTH: Final[int] = 64
 _DEFAULT_LICENSE_PLATES_MAX_NOTES_LENGTH: Final[int] = 240
+_DEFAULT_RETENTION_POLICY_FILENAME: Final[str] = "retention_policy.json"
+_DEFAULT_RETENTION_POLICY_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_RETENTION_POLICY_FILENAME
+_DEFAULT_RETENTION_MAX_AGE_DAYS: Final[int] = 30
+_DEFAULT_RETENTION_TARGET_FREE_PCT: Final[int] = 10
+_DEFAULT_RETENTION_TARGET_FREE_PCT_MIN: Final[int] = 5
+_DEFAULT_RETENTION_TARGET_FREE_PCT_MAX: Final[int] = 50
+_DEFAULT_RETENTION_MAX_ARCHIVE_SIZE_GB: Final[int] = 0
+_DEFAULT_RETENTION_WARNING_DAYS: Final[int] = 7
 _DEFAULT_WIFI_CREDENTIALS_FILENAME: Final[str] = "wifi_credentials.json"
 _DEFAULT_WIFI_CREDENTIALS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_WIFI_CREDENTIALS_FILENAME
 _DEFAULT_WIFI_AP_SSID: Final[str] = "TeslaUSB-Setup"
@@ -491,6 +499,51 @@ class LicensePlateSection:
 
 
 @dataclass(frozen=True, slots=True)
+class StorageRetentionSection:
+    """Storage-retention policy persistence and default UI values."""
+
+    policy_path: Path = _DEFAULT_RETENTION_POLICY_PATH
+    default_max_age_days: int = _DEFAULT_RETENTION_MAX_AGE_DAYS
+    default_target_free_pct: int = _DEFAULT_RETENTION_TARGET_FREE_PCT
+    default_max_archive_size_gb: int = _DEFAULT_RETENTION_MAX_ARCHIVE_SIZE_GB
+    default_short_retention_warning_days: int = _DEFAULT_RETENTION_WARNING_DAYS
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            not self.policy_path.is_absolute()
+            and not PurePosixPath(self.policy_path.as_posix()).is_absolute()
+        ):
+            raise ConfigError(
+                None,
+                f"[storage_retention] policy_path must be absolute, got {self.policy_path!r}",
+            )
+        if self.default_max_age_days <= 0:
+            raise ConfigError(None, "[storage_retention] default_max_age_days must be > 0")
+        if not (
+            _DEFAULT_RETENTION_TARGET_FREE_PCT_MIN
+            <= self.default_target_free_pct
+            <= _DEFAULT_RETENTION_TARGET_FREE_PCT_MAX
+        ):
+            raise ConfigError(
+                None,
+                "[storage_retention] default_target_free_pct must be between 5 and 50",
+            )
+        if self.default_max_archive_size_gb < 0:
+            raise ConfigError(
+                None,
+                "[storage_retention] default_max_archive_size_gb must be >= 0",
+            )
+        if self.default_short_retention_warning_days <= 0:
+            raise ConfigError(
+                None,
+                "[storage_retention] default_short_retention_warning_days must be > 0",
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class WifiBinaryPaths:
     """Binary names or absolute paths for the Wi-Fi control surface."""
 
@@ -686,6 +739,7 @@ class WebConfig:
     music: MusicSection = field(default_factory=MusicSection)
     boombox: BoomboxSection = field(default_factory=BoomboxSection)
     license_plates: LicensePlateSection = field(default_factory=LicensePlateSection)
+    storage_retention: StorageRetentionSection = field(default_factory=StorageRetentionSection)
     wifi: WifiSection = field(default_factory=WifiSection)
     cloud: CloudSection = field(default_factory=CloudSection)
     mapping: MappingSection = field(default_factory=MappingSection)
@@ -702,6 +756,7 @@ class WebConfig:
             self.music.validate()
             self.boombox.validate()
             self.license_plates.validate()
+            self.storage_retention.validate()
             self.wifi.validate()
             self.cloud.validate()
             self.mapping.validate()
@@ -824,6 +879,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     music_raw = _expect_section(raw, "music", source)
     boombox_raw = _expect_section(raw, "boombox", source)
     license_plates_raw = _expect_section(raw, "license_plates", source)
+    storage_retention_raw = _expect_section(raw, "storage_retention", source)
     wifi_raw = _expect_section(raw, "wifi", source)
     wifi_binary_paths_raw = _expect_section(wifi_raw, "binary_paths", source)
     cloud_raw = _expect_section(raw, "cloud", source)
@@ -1067,6 +1123,38 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 license_plates_raw,
                 "max_notes_length",
                 _DEFAULT_LICENSE_PLATES_MAX_NOTES_LENGTH,
+                source,
+            ),
+        )
+        storage_retention = StorageRetentionSection(
+            policy_path=_coerce_path(
+                storage_retention_raw,
+                "policy_path",
+                paths_section.state_dir / _DEFAULT_RETENTION_POLICY_FILENAME,
+                source,
+            ),
+            default_max_age_days=_coerce_int(
+                storage_retention_raw,
+                "default_max_age_days",
+                _DEFAULT_RETENTION_MAX_AGE_DAYS,
+                source,
+            ),
+            default_target_free_pct=_coerce_int(
+                storage_retention_raw,
+                "default_target_free_pct",
+                _DEFAULT_RETENTION_TARGET_FREE_PCT,
+                source,
+            ),
+            default_max_archive_size_gb=_coerce_int(
+                storage_retention_raw,
+                "default_max_archive_size_gb",
+                _DEFAULT_RETENTION_MAX_ARCHIVE_SIZE_GB,
+                source,
+            ),
+            default_short_retention_warning_days=_coerce_int(
+                storage_retention_raw,
+                "default_short_retention_warning_days",
+                _DEFAULT_RETENTION_WARNING_DAYS,
                 source,
             ),
         )
@@ -1363,6 +1451,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         music=music,
         boombox=boombox,
         license_plates=license_plates,
+        storage_retention=storage_retention,
         wifi=wifi,
         cloud=cloud,
         mapping=mapping,

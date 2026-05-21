@@ -30,6 +30,7 @@ from teslausb_web.config import (
     FeaturesSection,
     LicensePlateSection,
     PathsSection,
+    StorageRetentionSection,
     WebConfig,
     WebSection,
 )
@@ -110,6 +111,31 @@ def test_license_plates_page_renders_real_template(tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert '<h1 class="plates-title">License Plates</h1>' in html
     assert 'type="module" src="/static/js/license_plates.js"' in html
+
+
+def test_cleanup_settings_page_renders_real_template(tmp_path: Path) -> None:
+    cfg = WebConfig(
+        web=WebSection(secret_key="t" * 32),
+        paths=PathsSection(
+            backing_root=tmp_path / "backing",
+            state_dir=tmp_path / "state",
+            cache_invalidate_script=tmp_path / "invalidate.sh",
+        ),
+        features=FeaturesSection(),
+        storage_retention=StorageRetentionSection(
+            policy_path=tmp_path / "state" / "retention_policy.json"
+        ),
+    )
+    app = create_app(cfg)
+    resp = app.test_client().get("/cleanup/settings")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "Storage &amp; Retention" in html
+    assert "Preview cleanup" in html
+    assert "mode_control" not in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "unpkg.com" not in html
+    assert "#" not in html.split("<style>", 1)[1].split("</style>", 1)[0]
 
 
 @pytest.mark.parametrize(

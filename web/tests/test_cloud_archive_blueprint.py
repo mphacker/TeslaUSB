@@ -313,9 +313,13 @@ def test_index_template_restores_v1_ui_sections(client: FlaskClient) -> None:
     assert "Provider authorization" in html
     assert "Bandwidth limit:" in html
     assert "Retry attempts before giving up" in html
-    assert "Upload Schedule" in html
     assert "Dead Letters" in html
-    assert "Reconcile now" in html
+    # Schedule editor + Reconcile placeholder sections were removed for
+    # v1 parity (operator H5 hardware test); the corresponding backend
+    # routes were never wired in Phase 5, so the placeholder UI was
+    # creating an Issue 2 visual regression versus v1.
+    assert "Upload Schedule" not in html
+    assert "Reconcile now" not in html
 
 
 def test_index_route_degrades_when_services_raise(

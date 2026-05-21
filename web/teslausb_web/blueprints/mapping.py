@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-mapping_bp = Blueprint("mapping", __name__, url_prefix="/mapping")
+mapping_bp = Blueprint("mapping", __name__, url_prefix="")
 
 _DATE_RE: Final[re.Pattern[str]] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _XHR_HEADER_VALUE: Final[str] = "XMLHttpRequest"

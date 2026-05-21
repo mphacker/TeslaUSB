@@ -89,15 +89,18 @@ def client(app: Flask) -> FlaskClient:
 
 
 # ---------------------------------------------------------------------------
-# GET / — XHR JSON vs browser 302.
+# GET / — XHR JSON vs browser 200 (renders map page).
 # ---------------------------------------------------------------------------
 
 
 class TestFileBrowser:
-    def test_browser_get_redirects_to_mapping(self, client: FlaskClient) -> None:
+    def test_browser_get_renders_map_page(self, client: FlaskClient) -> None:
+        """Non-XHR GET renders the map page (200) instead of redirecting."""
         resp = client.get("/videos/")
-        assert resp.status_code == HTTPStatus.FOUND
-        assert "/mapping" in (resp.headers.get("Location") or "")
+        assert resp.status_code == HTTPStatus.OK
+        html = resp.get_data(as_text=True)
+        assert 'class="map-container"' in html
+        assert 'id="videoPanel"' in html
 
     def test_xhr_returns_json(self, client: FlaskClient) -> None:
         resp = client.get(

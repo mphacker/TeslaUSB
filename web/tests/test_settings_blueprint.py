@@ -50,10 +50,12 @@ class TestDashboardRoutes:
         assert response.status_code == HTTPStatus.OK
         assert "System Health" in html
 
-    def test_root_renders_dashboard(self, client) -> None:
+    def test_root_renders_map_page(self, client) -> None:
+        """`/` is owned by mapping.map_view after Issue 1."""
         response = client.get("/")
         assert response.status_code == HTTPStatus.OK
-        assert "System Health" in response.get_data(as_text=True)
+        html = response.get_data(as_text=True)
+        assert 'id="map"' in html
 
     def test_no_mode_toggle_buttons(self, client) -> None:
         html = client.get("/settings/").get_data(as_text=True)

@@ -14,10 +14,11 @@ B-1 adaptation notes:
   edit-mode. In B-1 the partitions are always rw — the Delete
   button is rendered unconditionally and the route does the
   containment check on every call.
-* **Browser GET → 302 to mapping.** Mirrors v1: ``GET /videos/``
-  is consumed as an XHR by the right-rail video panel on the
-  mapping page; a non-XHR GET means the user typed the URL, so we
-  redirect them to the page that hosts the panel.
+* **Browser GET → render map page (200).** v1 redirected to
+  ``mapping.map_view`` because the right-rail video panel lives on
+  the map. B-1 renders the map directly so the operator-visible URL
+  stays ``/videos/`` and the response is 200 (not 302); the panel
+  still pulls JSON from this same route via the XHR branch below.
 """
 
 from __future__ import annotations
@@ -33,13 +34,12 @@ from flask import (
     after_this_request,
     current_app,
     jsonify,
-    redirect,
     render_template,
     request,
     send_file,
-    url_for,
 )
 
+from teslausb_web.blueprints.mapping import map_view as _mapping_map_view
 from teslausb_web.services.video_service import (
     DeletionError,
     EventSummary,
@@ -100,14 +100,17 @@ def _serialize_session(session: SessionGroup) -> dict[str, object]:
 
 @videos_bp.route("/", endpoint="file_browser")
 def file_browser() -> ResponseReturnValue:
-    """List clips for the mapping panel (XHR) or redirect (browser).
+    """List clips for the mapping panel (XHR) or render the map page.
 
-    The v1 contract is unchanged: ``X-Requested-With:
-    XMLHttpRequest`` returns the JSON payload the right-rail panel
-    consumes; a plain browser GET 302s to the mapping page.
+    ``X-Requested-With: XMLHttpRequest`` returns the JSON payload the
+    right-rail panel consumes. A plain browser GET renders the map
+    template directly (200) so operators who type ``/videos/`` see the
+    file-browser-bearing page instead of a 302 hop — v1 redirected here
+    because the panel only existed on the map, and we keep that
+    coupling but turn the hop into a 200 render.
     """
     if not _wants_json():
-        return redirect(url_for("mapping.map_view"))
+        return _mapping_map_view()
 
     svc = _get_service()
     folders = svc.list_folders()

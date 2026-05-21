@@ -2,8 +2,6 @@
 {% block content %}
 <div class="container">
 
-    <h1 class="cloud-archive-title" aria-label="Cloud Archive">Cloud Archive</h1>
-
     <!-- ================================================================
          Section 1: Sync Status Card
          ================================================================ -->
@@ -483,70 +481,6 @@
     </details>
 
 
-
-
-    <!-- ================================================================
-         Section 3.25: Schedule Editor
-         ================================================================ -->
-    <details class="settings-section" id="scheduleSection">
-        <summary>
-            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-clock-3"></use></svg>
-            Upload Schedule
-        </summary>
-        <div class="section-content">
-            {# TODO(#223): rewire to the B-1 schedule API once the cloud archive scheduler blueprint lands. #}
-            <div class="info-box" style="margin-bottom: var(--space-3);">
-                <strong>Schedule editor</strong>
-                <p style="margin: 8px 0 0; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.6;">
-                    Define when the archive worker should prefer uploads. The v1 UI allowed day-based rules, time windows, and cron-style review. B-1 keeps the editor visible for parity while the backend route is wired in a later increment.
-                </p>
-            </div>
-            <form style="display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border-input); border-radius: var(--radius-lg); background: var(--form-input-bg);">
-                <div style="display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
-                    <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
-                        <span>Rule name</span>
-                        <input type="text" value="Nightly WiFi upload" disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
-                    </label>
-                    <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
-                        <span>Schedule type</span>
-                        <select disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
-                            <option selected>Days of week</option>
-                            <option>Specific date</option>
-                            <option>Cron review</option>
-                        </select>
-                    </label>
-                    <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
-                        <span>Start time</span>
-                        <input type="time" value="22:00" disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
-                    </label>
-                    <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
-                        <span>End time</span>
-                        <input type="time" value="06:00" disabled style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
-                    </label>
-                </div>
-                <div>
-                    <span style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary);">Days</span>
-                    <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-                        {% for day in ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun') %}
-                        <label style="display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--bg-secondary); border-radius: 4px; border: 1px solid var(--border-input); color: var(--text-primary);">
-                            <input type="checkbox" {% if day in ('Mon', 'Tue', 'Wed', 'Thu', 'Fri') %}checked{% endif %} disabled>
-                            <span>{{ day }}</span>
-                        </label>
-                        {% endfor %}
-                    </div>
-                </div>
-                <label style="display: grid; gap: 6px; font-weight: 600; color: var(--text-primary);">
-                    <span>Cron preview</span>
-                    <input type="text" value="0 22 * * 1-5" readonly style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-input); background: var(--bg-secondary); color: var(--text-primary);">
-                </label>
-                <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
-                    <button type="button" class="edit-btn" disabled style="padding: 8px 16px; font-size: 14px;">Save schedule</button>
-                    <button type="button" class="action-btn" disabled style="padding: 8px 16px; font-size: 14px;">Add another rule</button>
-                </div>
-            </form>
-        </div>
-    </details>
-
     <!-- ================================================================
          Section 3.3: WiFi Conditional Rules
          ================================================================ -->
@@ -624,24 +558,6 @@ GarageMesh</textarea>
                 <button type="button" class="action-btn" onclick="retryDeadLetters()" id="retryDeadLettersBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Retry All</button>
                 <button type="button" class="action-btn danger" onclick="deleteDeadLetters()" id="deleteDeadLettersBtn" style="padding: 6px 14px; font-size: 13px; display: none;">Delete All</button>
             </div>
-        </div>
-    </details>
-
-    <!-- ================================================================
-         Section 3.9: Reconcile
-         ================================================================ -->
-    <details class="settings-section" id="reconcileSection">
-        <summary>
-            <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
-            Reconcile Remote State
-        </summary>
-        <div class="section-content">
-            {# TODO(#225): rewire to a B-1 reconcile endpoint that exposes services.cloud_archive.reconcile._reconcile_with_remote. #}
-            <p style="margin: 0 0 var(--space-3); color: var(--text-secondary);">
-                Reconcile compares remote cloud folders with the local SQLite mirror so manually uploaded or backfilled files can be marked synced without re-uploading them.
-            </p>
-            <button type="button" class="edit-btn" id="reconcileButton" disabled style="padding: 8px 16px; font-size: 14px;">Reconcile now</button>
-            <p style="margin: 8px 0 0; font-size: var(--text-xs); color: var(--text-muted);">UI restored for parity. Backend route remains to be exposed in B-1.</p>
         </div>
     </details>
 

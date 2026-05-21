@@ -567,11 +567,34 @@ def _register_template_globals(app: Flask) -> None:
     pass. The Jinja precedence rules ensure view-supplied kwargs
     win over context-processor defaults, so this is purely a
     safety net — not a behaviour shift.
+
+    The media ``*_available`` flags are NOT static defaults — they
+    drive ``media_hub_nav.html``'s pill bar, which v1 populated via
+    ``utils.get_base_context`` + ``get_feature_availability`` on
+    every render. Without this, each media page only showed its own
+    pill (operator-flagged during H5 hardware test). We probe the
+    backing-root mounts here so every page sees a consistent
+    pill-bar — same model as v1, minus the IMG gate.
     """
+    from teslausb_web.services.media_availability import probe_media_availability  # noqa: PLC0415
 
     @app.context_processor
     def _inject_base_defaults() -> dict[str, object]:
-        return {
+        cfg = app.config.get("teslausb_config")
+        media_flags: dict[str, bool] = {
+            "chimes_available": False,
+            "music_available": False,
+            "shows_available": False,
+            "wraps_available": False,
+            "boombox_available": False,
+            "license_plates_available": False,
+        }
+        if cfg is not None:
+            try:
+                media_flags.update(probe_media_availability(cast("WebConfig", cfg)))
+            except (AttributeError, OSError) as exc:
+                logger.warning("media availability probe failed: %s", exc)
+        defaults: dict[str, object] = {
             "page": "",
             "samba_on": False,
             "auto_refresh": False,
@@ -586,13 +609,9 @@ def _register_template_globals(app: Flask) -> None:
             # Composite media-hub flag — `base.html` recomputes this
             # from the sub-flags below, but we ship a default in
             # case the template is refactored.
-            "media_available": False,
-            "chimes_available": False,
-            "music_available": False,
-            "shows_available": False,
-            "wraps_available": False,
-            "boombox_available": False,
-            "license_plates_available": False,
+            "media_available": any(media_flags.values()),
             "storage_retention_available": False,
             "cleanup_available": False,
         }
+        defaults.update(media_flags)
+        return defaults

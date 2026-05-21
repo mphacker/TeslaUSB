@@ -32,21 +32,23 @@ drives were loopback-mounted IMG files. B-1 has no IMG layer
 (``docs/00-PLAN.md`` invariant): the LightShow and Music partitions
 are real directories under ``cfg.paths.backing_root`` exposed by the
 Rust ``teslafat`` worker. We probe their on-disk presence via
-``pathlib.Path.exists()`` — same operator-observable semantics, no
-IMG assumption.
+:func:`teslausb_web.services.media_availability.probe_media_availability`
+which the app-wide context processor also consumes — same
+operator-observable semantics, no IMG assumption, single source of
+truth for the pill-bar visibility flags.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, cast
 
 from flask import Blueprint, current_app, redirect, url_for
 
-if TYPE_CHECKING:
-    from pathlib import Path
+from teslausb_web.services.media_availability import probe_media_availability
 
+if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
 
     from teslausb_web.config import WebConfig
@@ -54,14 +56,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 media_bp = Blueprint("media", __name__, url_prefix="/media")
-
-_LIGHTSHOW_DIRNAME: Final[str] = "lightshow"
-"""LightShow partition mount directory under ``backing_root``.
-
-Mirrors ``blueprints/lock_chimes.py`` / ``light_shows.py`` /
-``wraps.py``; kept as a module constant rather than imported to
-preserve the layering rule (no blueprint→blueprint imports).
-"""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -81,29 +75,17 @@ def _cfg() -> WebConfig:
 def _probe_availability(cfg: WebConfig) -> _MediaAvailability:
     """Snapshot drive presence + feature flags for the cascade.
 
-    Filesystem probes are cheap (one ``stat`` each) and reflect what
-    the operator would see on the device. We deliberately do NOT
-    consult ``teslafat_client`` here — that daemon reports LUN
-    exposure state, which can lag the backing-mount state during
-    boot or recovery. ``Path.exists()`` is the right signal for "can
-    the user upload files here right now".
+    Defers the directory probes to
+    :func:`probe_media_availability` so the cascade and the pill-bar
+    context processor agree byte-for-byte.
     """
-    backing = cfg.paths.backing_root
+    flags = probe_media_availability(cfg)
     return _MediaAvailability(
-        lightshow_present=_dir_exists(backing / _LIGHTSHOW_DIRNAME),
-        music_drive_present=_dir_exists(backing / cfg.music.folder),
+        lightshow_present=flags["chimes_available"],
+        music_drive_present=flags["music_available"] or flags["boombox_available"],
         music_enabled=cfg.features.music_enabled,
         boombox_enabled=cfg.features.boombox_enabled,
     )
-
-
-def _dir_exists(path: Path) -> bool:
-    """Return ``True`` iff ``path`` is a directory we can stat."""
-    try:
-        return path.is_dir()
-    except OSError as exc:
-        logger.warning("media: could not stat %s: %s", path, exc)
-        return False
 
 
 def _pick_target(availability: _MediaAvailability) -> str:

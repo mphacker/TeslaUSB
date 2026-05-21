@@ -179,7 +179,7 @@ class TestDirExists:
     def test_returns_false_when_stat_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from teslausb_web.blueprints import media
+        from teslausb_web.services import media_availability
 
         target = tmp_path / "boom"
 
@@ -187,7 +187,7 @@ class TestDirExists:
             raise OSError("permission denied")
 
         monkeypatch.setattr("pathlib.Path.is_dir", _explode)
-        assert media._dir_exists(target) is False
+        assert media_availability._dir_exists(target) is False
 
 
 # ---------------------------------------------------------------------------

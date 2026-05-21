@@ -69,7 +69,7 @@ def test_scaffold_endpoints_match_base_html_url_for_calls(app: Flask) -> None:
         # These mirror the exact `url_for` calls in
         # `teslausb_web/templates/base.html`. If any of them
         # raises BuildError, the template won't render.
-        assert url_for("mapping.map_view").endswith("/mapping/")
+        assert url_for("mapping.map_view").endswith("/")
         assert url_for("analytics.dashboard").endswith("/analytics/")
         assert url_for("media.media_home").endswith("/media/")
         assert url_for("cloud_archive.index").endswith("/cloud/")
@@ -78,7 +78,7 @@ def test_scaffold_endpoints_match_base_html_url_for_calls(app: Flask) -> None:
 
 
 def test_mapping_scaffold_now_renders_real_page(app: Flask) -> None:
-    resp = app.test_client().get("/mapping/")
+    resp = app.test_client().get("/")
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
     assert 'class="map-container"' in html

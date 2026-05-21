@@ -626,27 +626,27 @@ def test_helper_get_queries_rejects_misconfigured_queries(app, tmp_path: Path) -
 
 
 def test_helper_redirect_and_mapping_response_redirect_for_non_xhr(app) -> None:
-    with app.test_request_context("/mapping/api/index/cancel?_=9", method="POST"):
-        assert _redirect_to_mapping().headers["Location"] == "/mapping/"
-        assert _redirect_to_mapping(cache_bust="9").headers["Location"] == "/mapping/?_=9"
+    with app.test_request_context("/api/index/cancel?_=9", method="POST"):
+        assert _redirect_to_mapping().headers["Location"] == "/"
+        assert _redirect_to_mapping(cache_bust="9").headers["Location"] == "/?_=9"
         response = _mapping_response(
             success=False,
             message="boom",
             status=HTTPStatus.BAD_REQUEST,
         )
     assert response.status_code == HTTPStatus.FOUND
-    assert response.headers["Location"] == "/mapping/?_=9"
+    assert response.headers["Location"] == "/?_=9"
 
 
 def test_helper_parse_bbox_from_request_context(app) -> None:
-    with app.test_request_context("/mapping/api/trips?min_lat=1&min_lon=2&max_lat=3&max_lon=4"):
+    with app.test_request_context("/api/trips?min_lat=1&min_lon=2&max_lat=3&max_lon=4"):
         assert _parse_bbox() == (1.0, 2.0, 3.0, 4.0)
-    with app.test_request_context("/mapping/api/trips?min_lat=x&min_lon=2&max_lat=3&max_lon=4"):
+    with app.test_request_context("/api/trips?min_lat=x&min_lon=2&max_lat=3&max_lon=4"):
         assert _parse_bbox() is None
 
 
 def test_map_view_renders_mapping_template(client) -> None:
-    response = client.get("/mapping/")
+    response = client.get("/")
     html = response.get_data(as_text=True)
     assert response.status_code == HTTPStatus.OK
     assert 'class="map-container"' in html
@@ -663,35 +663,35 @@ def test_map_view_renders_mapping_template(client) -> None:
 
 
 def test_mapping_template_has_video_panel(client) -> None:
-    response = client.get("/mapping/")
+    response = client.get("/")
     assert b"video-panel" in response.data
 
 
 def test_mapping_template_has_clip_list(client) -> None:
-    response = client.get("/mapping/")
+    response = client.get("/")
     assert b"vp-clip" in response.data or b"video-panel-list" in response.data
 
 
 def test_mapping_template_has_event_details(client) -> None:
-    response = client.get("/mapping/")
+    response = client.get("/")
     assert b"overlayHud" in response.data or b"overlay-hud" in response.data
 
 
 def test_mapping_template_no_mode_toggle(client) -> None:
-    response = client.get("/mapping/")
+    response = client.get("/")
     assert b"Enable Network Sharing" not in response.data
     assert b"Reconnect to Tesla" not in response.data
 
 
 def test_mapping_template_no_emoji(client) -> None:
-    response = client.get("/mapping/")
+    response = client.get("/")
     text = response.data.decode("utf-8", errors="replace")
     emoji_pattern = re.compile(r"[\U0001F300-\U0001FAFF]")
     assert not emoji_pattern.search(text), "Template contains emoji characters"
 
 
 def test_api_trips_returns_seeded_rows(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/trips")
+    response = client.get("/api/trips")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert [trip["id"] for trip in payload["trips"]] == [2, 1]
@@ -700,7 +700,7 @@ def test_api_trips_returns_seeded_rows(client, seeded_data: SeededMappingData) -
 
 def test_api_trips_honors_bbox_and_date_filters(client, seeded_data: SeededMappingData) -> None:
     response = client.get(
-        "/mapping/api/trips?min_lat=36.5&min_lon=-122.5&max_lat=37.5&max_lon=-121.5"
+        "/api/trips?min_lat=36.5&min_lon=-122.5&max_lat=37.5&max_lon=-121.5"
         f"&date_from={seeded_data.day_a}T00:00:00&date_to={seeded_data.day_a}T23:59:59&min_distance=0"
     )
     payload = response.get_json()
@@ -710,13 +710,13 @@ def test_api_trips_honors_bbox_and_date_filters(client, seeded_data: SeededMappi
 
 def test_api_trips_translates_query_error(client, queries: MappingQueries) -> None:
     with patch.object(queries, "query_trips", side_effect=MappingQueryError("boom")):
-        response = client.get("/mapping/api/trips")
+        response = client.get("/api/trips")
     assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
     assert response.get_json()["error"] == "boom"
 
 
 def test_api_trip_route_returns_geojson(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/trip/2/route")
+    response = client.get("/api/trip/2/route")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["geometry"]["type"] == "LineString"
@@ -727,13 +727,13 @@ def test_api_trip_route_returns_geojson(client, seeded_data: SeededMappingData) 
 
 
 def test_api_trip_route_returns_not_found_for_missing_trip(client) -> None:
-    response = client.get("/mapping/api/trip/999/route")
+    response = client.get("/api/trip/999/route")
     assert response.status_code == HTTPStatus.NOT_FOUND
     assert response.get_json()["error"] == "Trip not found"
 
 
 def test_api_trip_telemetry_returns_cold_columns(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/trip/1/telemetry")
+    response = client.get("/api/trip/1/telemetry")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["telemetry"]["10"]["gear"] == "DRIVE"
@@ -742,7 +742,7 @@ def test_api_trip_telemetry_returns_cold_columns(client, seeded_data: SeededMapp
 
 
 def test_api_trip_telemetry_returns_empty_payload_for_missing_trip(client) -> None:
-    response = client.get("/mapping/api/trip/404/telemetry")
+    response = client.get("/api/trip/404/telemetry")
     assert response.status_code == HTTPStatus.OK
     assert response.get_json()["telemetry"] == {}
 
@@ -751,7 +751,7 @@ def test_api_waypoints_for_clip_returns_trip_waypoints(
     client, seeded_data: SeededMappingData
 ) -> None:
     response = client.get(
-        f"/mapping/api/waypoints-for-clip?path=RecentClips/{seeded_data.recent_event}-front.mp4"
+        f"/api/waypoints-for-clip?path=RecentClips/{seeded_data.recent_event}-front.mp4"
     )
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
@@ -763,7 +763,7 @@ def test_api_waypoints_for_clip_falls_back_to_matching_base_name(
     client, seeded_data: SeededMappingData
 ) -> None:
     response = client.get(
-        f"/mapping/api/waypoints-for-clip?path=RecentClips/{seeded_data.recent_event}-back.mp4"
+        f"/api/waypoints-for-clip?path=RecentClips/{seeded_data.recent_event}-back.mp4"
     )
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
@@ -771,13 +771,13 @@ def test_api_waypoints_for_clip_falls_back_to_matching_base_name(
 
 
 def test_api_waypoints_for_clip_returns_empty_for_missing_path(client) -> None:
-    response = client.get("/mapping/api/waypoints-for-clip?path=")
+    response = client.get("/api/waypoints-for-clip?path=")
     assert response.status_code == HTTPStatus.OK
     assert response.get_json()["waypoints"] == []
 
 
 def test_api_events_returns_filtered_payload(client, seeded_data: SeededMappingData) -> None:
-    response = client.get(f"/mapping/api/events?date={seeded_data.day_b}")
+    response = client.get(f"/api/events?date={seeded_data.day_b}")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert len(payload["events"]) == 1
@@ -788,7 +788,7 @@ def test_api_events_returns_filtered_payload(client, seeded_data: SeededMappingD
 
 
 def test_api_events_rejects_malformed_date(client) -> None:
-    response = client.get("/mapping/api/events?date=2026-1-2")
+    response = client.get("/api/events?date=2026-1-2")
     assert response.status_code == HTTPStatus.BAD_REQUEST
     assert response.get_json()["error"] == "date must be YYYY-MM-DD"
 
@@ -797,15 +797,13 @@ def test_api_events_caps_large_limit_for_overview(
     client, queries: MappingQueries, seeded_data: SeededMappingData
 ) -> None:
     with patch.object(queries, "query_events", wraps=queries.query_events) as wrapped:
-        response = client.get(
-            f"/mapping/api/events?date={seeded_data.day_a}&overview=1&limit=99999"
-        )
+        response = client.get(f"/api/events?date={seeded_data.day_a}&overview=1&limit=99999")
     assert response.status_code == HTTPStatus.OK
     assert wrapped.call_args.kwargs["limit"] == 5000
 
 
 def test_api_days_returns_recent_days(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/days")
+    response = client.get("/api/days")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert [day["date"] for day in payload["days"]] == [
@@ -817,14 +815,14 @@ def test_api_days_returns_recent_days(client, seeded_data: SeededMappingData) ->
 
 def test_api_days_caps_limit_and_min_distance(client, queries: MappingQueries) -> None:
     with patch.object(queries, "query_days", wraps=queries.query_days) as wrapped:
-        response = client.get("/mapping/api/days?limit=999&min_distance=-1")
+        response = client.get("/api/days?limit=999&min_distance=-1")
     assert response.status_code == HTTPStatus.OK
     assert wrapped.call_args.kwargs["limit"] == 365
     assert wrapped.call_args.kwargs["min_distance_km"] == 0.05
 
 
 def test_api_day_routes_returns_expanded_trips(client, seeded_data: SeededMappingData) -> None:
-    response = client.get(f"/mapping/api/day/{seeded_data.day_a}/routes")
+    response = client.get(f"/api/day/{seeded_data.day_a}/routes")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["date"] == seeded_data.day_a
@@ -832,13 +830,13 @@ def test_api_day_routes_returns_expanded_trips(client, seeded_data: SeededMappin
 
 
 def test_api_day_routes_rejects_bad_date(client) -> None:
-    response = client.get("/mapping/api/day/not-a-date/routes")
+    response = client.get("/api/day/not-a-date/routes")
     assert response.status_code == HTTPStatus.BAD_REQUEST
     assert response.get_json()["error"] == "date must be YYYY-MM-DD"
 
 
 def test_api_trips_playable_returns_trip_map(client, seeded_data: SeededMappingData) -> None:
-    response = client.get(f"/mapping/api/trips/playable?date={seeded_data.day_a}")
+    response = client.get(f"/api/trips/playable?date={seeded_data.day_a}")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["trips"]["1"] is True
@@ -846,13 +844,13 @@ def test_api_trips_playable_returns_trip_map(client, seeded_data: SeededMappingD
 
 
 def test_api_trips_playable_rejects_missing_date(client) -> None:
-    response = client.get("/mapping/api/trips/playable")
+    response = client.get("/api/trips/playable")
     assert response.status_code == HTTPStatus.BAD_REQUEST
     assert response.get_json()["error"] == "date must be YYYY-MM-DD"
 
 
 def test_api_all_routes_returns_simplified_routes(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/all-routes")
+    response = client.get("/api/all-routes")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert [trip["trip_id"] for trip in payload["trips"]] == [2, 1]
@@ -867,14 +865,14 @@ def test_api_all_routes_caps_max_points_and_does_not_schedule_cache(
             queries, "query_all_routes_simplified", wraps=queries.query_all_routes_simplified
         ) as wrapped,
     ):
-        response = client.get("/mapping/api/all-routes?max_points=9999")
+        response = client.get("/api/all-routes?max_points=9999")
     assert response.status_code == HTTPStatus.OK
     assert wrapped.call_args.kwargs["max_points_per_trip"] == 1000
     schedule_mock.assert_not_called()
 
 
 def test_api_stats_returns_service_summary(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/stats")
+    response = client.get("/api/stats")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["trip_count"] == 3
@@ -883,7 +881,7 @@ def test_api_stats_returns_service_summary(client, seeded_data: SeededMappingDat
 
 
 def test_api_index_status_returns_service_state(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/index/status")
+    response = client.get("/api/index/status")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["queue_depth"] == 1
@@ -897,7 +895,7 @@ def test_api_index_trigger_uses_stub_service_and_schedules_cache(
     try:
         with patch.object(invalidator, "schedule") as schedule_mock:
             response = client.post(
-                "/mapping/api/index/trigger", headers={"X-Requested-With": "XMLHttpRequest"}
+                "/api/index/trigger", headers={"X-Requested-With": "XMLHttpRequest"}
             )
         payload = response.get_json()
         assert response.status_code == HTTPStatus.OK
@@ -913,9 +911,7 @@ def test_api_index_trigger_returns_service_unavailable_when_media_root_missing(c
         "teslausb_web.blueprints.mapping._require_mapping_media_root",
         side_effect=MappingFilesystemError("TeslaCam not accessible"),
     ):
-        response = client.post(
-            "/mapping/api/index/trigger", headers={"X-Requested-With": "XMLHttpRequest"}
-        )
+        response = client.post("/api/index/trigger", headers={"X-Requested-With": "XMLHttpRequest"})
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
     assert response.get_json()["error"] == "TeslaCam not accessible"
 
@@ -925,9 +921,7 @@ def test_api_index_trigger_translates_indexer_error(app, client, tmp_path: Path)
     stub.boot_error = IndexerError("boom")
     original = _install_stub_service(app, stub)
     try:
-        response = client.post(
-            "/mapping/api/index/trigger", headers={"X-Requested-With": "XMLHttpRequest"}
-        )
+        response = client.post("/api/index/trigger", headers={"X-Requested-With": "XMLHttpRequest"})
     finally:
         app.extensions["mapping_service"] = original
     assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
@@ -936,7 +930,7 @@ def test_api_index_trigger_translates_indexer_error(app, client, tmp_path: Path)
 
 def test_api_index_rebuild_requires_confirmation(client) -> None:
     response = client.post(
-        "/mapping/api/index/rebuild", json={}, headers={"X-Requested-With": "XMLHttpRequest"}
+        "/api/index/rebuild", json={}, headers={"X-Requested-With": "XMLHttpRequest"}
     )
     assert response.status_code == HTTPStatus.BAD_REQUEST
     assert response.get_json()["message"] == "Confirmation required (set confirm=true)."
@@ -968,7 +962,7 @@ def test_api_index_rebuild_clears_rows_and_schedules_cache(
             connection.commit()
         with patch.object(invalidator, "schedule") as schedule_mock:
             response = client.post(
-                "/mapping/api/index/rebuild",
+                "/api/index/rebuild",
                 json={"confirm": True},
                 headers={"X-Requested-With": "XMLHttpRequest"},
             )
@@ -989,7 +983,7 @@ def test_api_index_rebuild_translates_service_error(app, client, tmp_path: Path)
     original = _install_stub_service(app, stub)
     try:
         response = client.post(
-            "/mapping/api/index/rebuild",
+            "/api/index/rebuild",
             json={"confirm": True},
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
@@ -1021,7 +1015,7 @@ def test_api_index_cancel_clears_only_pending_rows(
             connection.commit()
         with patch.object(invalidator, "schedule") as schedule_mock:
             response = client.post(
-                "/mapping/api/index/cancel", headers={"X-Requested-With": "XMLHttpRequest"}
+                "/api/index/cancel", headers={"X-Requested-With": "XMLHttpRequest"}
             )
         with stub.open_db() as connection:
             rows = connection.execute(
@@ -1041,7 +1035,7 @@ def test_api_index_cancel_translates_database_error(app, client, tmp_path: Path)
     try:
         with patch.object(stub, "open_db", side_effect=sqlite3.Error("boom")):
             response = client.post(
-                "/mapping/api/index/cancel", headers={"X-Requested-With": "XMLHttpRequest"}
+                "/api/index/cancel", headers={"X-Requested-With": "XMLHttpRequest"}
             )
     finally:
         app.extensions["mapping_service"] = original
@@ -1053,7 +1047,7 @@ def test_api_index_diagnose_uses_stub_service(app, client, tmp_path: Path) -> No
     stub = StubMappingService(tmp_path / "state" / "diagnose.db")
     original = _install_stub_service(app, stub)
     try:
-        response = client.get("/mapping/api/index/diagnose?max=99")
+        response = client.get("/api/index/diagnose?max=99")
     finally:
         app.extensions["mapping_service"] = original
     assert response.status_code == HTTPStatus.OK
@@ -1066,7 +1060,7 @@ def test_api_index_diagnose_translates_diagnose_error(app, client, tmp_path: Pat
     stub.diagnose_error = DiagnoseError("boom")
     original = _install_stub_service(app, stub)
     try:
-        response = client.get("/mapping/api/index/diagnose")
+        response = client.get("/api/index/diagnose")
     finally:
         app.extensions["mapping_service"] = original
     assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
@@ -1074,7 +1068,7 @@ def test_api_index_diagnose_translates_diagnose_error(app, client, tmp_path: Pat
 
 
 def test_api_driving_stats_returns_summary(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/driving-stats")
+    response = client.get("/api/driving-stats")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["has_data"] is True
@@ -1082,7 +1076,7 @@ def test_api_driving_stats_returns_summary(client, seeded_data: SeededMappingDat
 
 
 def test_api_event_charts_returns_chart_payload(client, seeded_data: SeededMappingData) -> None:
-    response = client.get("/mapping/api/event-charts")
+    response = client.get("/api/event-charts")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert any(item["label"] == "Sentry" for item in payload["by_type"])
@@ -1091,7 +1085,7 @@ def test_api_event_charts_returns_chart_payload(client, seeded_data: SeededMappi
 def test_api_sentry_events_enriches_source_folder_and_event_folder(
     client, seeded_data: SeededMappingData
 ) -> None:
-    response = client.get("/mapping/api/sentry-events")
+    response = client.get("/api/sentry-events")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["events"][0]["timestamp"] >= payload["events"][-1]["timestamp"]
@@ -1103,7 +1097,7 @@ def test_api_sentry_events_enriches_source_folder_and_event_folder(
 
 def test_api_sentry_events_translates_query_error(client, queries: MappingQueries) -> None:
     with patch.object(queries, "query_events", side_effect=MappingQueryError("boom")):
-        response = client.get("/mapping/api/sentry-events")
+        response = client.get("/api/sentry-events")
     assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
     assert response.get_json()["error"] == "boom"
 
@@ -1111,7 +1105,7 @@ def test_api_sentry_events_translates_query_error(client, queries: MappingQuerie
 def test_api_event_details_returns_counts_for_event_folder(
     client, seeded_data: SeededMappingData
 ) -> None:
-    response = client.get(f"/mapping/api/event-details/SavedClips/{seeded_data.saved_event}")
+    response = client.get(f"/api/event-details/SavedClips/{seeded_data.saved_event}")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["clip_count"] == 2
@@ -1122,7 +1116,7 @@ def test_api_event_details_returns_counts_for_event_folder(
 def test_api_event_details_returns_counts_for_flat_archive(
     client, seeded_data: SeededMappingData
 ) -> None:
-    response = client.get(f"/mapping/api/event-details/ArchivedClips/{seeded_data.archived_event}")
+    response = client.get(f"/api/event-details/ArchivedClips/{seeded_data.archived_event}")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["clip_count"] == 1
@@ -1131,7 +1125,7 @@ def test_api_event_details_returns_counts_for_flat_archive(
 
 
 def test_api_event_details_returns_not_found_for_missing_folder(client) -> None:
-    response = client.get("/mapping/api/event-details/DoesNotExist/test")
+    response = client.get("/api/event-details/DoesNotExist/test")
     assert response.status_code == HTTPStatus.NOT_FOUND
     assert response.get_json()["error"] == "Folder not found: DoesNotExist"
 
@@ -1139,7 +1133,7 @@ def test_api_event_details_returns_not_found_for_missing_folder(client) -> None:
 def test_api_event_clips_returns_event_folder_listing(
     client, seeded_data: SeededMappingData
 ) -> None:
-    response = client.get(f"/mapping/api/event-clips/SavedClips/{seeded_data.saved_event}")
+    response = client.get(f"/api/event-clips/SavedClips/{seeded_data.saved_event}")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["structure"] == "events"
@@ -1151,9 +1145,7 @@ def test_api_event_clips_returns_event_folder_listing(
 def test_api_event_clips_falls_back_to_archived_flat_clip(
     client, seeded_data: SeededMappingData
 ) -> None:
-    response = client.get(
-        f"/mapping/api/event-clips/RecentClips/{seeded_data.archived_fallback_event}"
-    )
+    response = client.get(f"/api/event-clips/RecentClips/{seeded_data.archived_fallback_event}")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.OK
     assert payload["folder"] == "ArchivedClips"
@@ -1163,7 +1155,7 @@ def test_api_event_clips_falls_back_to_archived_flat_clip(
 
 
 def test_api_event_clips_returns_404_payload_for_missing_clip(client) -> None:
-    response = client.get("/mapping/api/event-clips/RecentClips/missing-event")
+    response = client.get("/api/event-clips/RecentClips/missing-event")
     payload = response.get_json()
     assert response.status_code == HTTPStatus.NOT_FOUND
     assert payload["front_clips"] == []
@@ -1171,7 +1163,7 @@ def test_api_event_clips_returns_404_payload_for_missing_clip(client) -> None:
 
 
 def test_api_event_clips_rejects_invalid_segment(client) -> None:
-    response = client.get("/mapping/api/event-clips/%2E%2E/test")
+    response = client.get("/api/event-clips/%2E%2E/test")
     assert response.status_code == HTTPStatus.BAD_REQUEST
 
 
@@ -1179,6 +1171,6 @@ def test_get_routes_do_not_schedule_cache_invalidation(
     client, invalidator, seeded_data: SeededMappingData
 ) -> None:
     with patch.object(invalidator, "schedule") as schedule_mock:
-        response = client.get(f"/mapping/api/day/{seeded_data.day_a}/routes")
+        response = client.get(f"/api/day/{seeded_data.day_a}/routes")
     assert response.status_code == HTTPStatus.OK
     schedule_mock.assert_not_called()

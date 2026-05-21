@@ -2,8 +2,9 @@
 
 Owns the ``settings`` Blueprint name and ``/settings/`` URL so that
 ``base.html``'s ``url_for("settings.index")`` resolves to the real dashboard
-instead of the Phase 5.4 scaffold. Also handles ``/`` so operators who visit
-``http://device/`` land on the dashboard.
+instead of the Phase 5.4 scaffold. ``/`` is owned by ``mapping.map_view``
+(the v1 home page) — operators visiting ``http://device/`` land on the
+Map, matching v1.
 
 Removed from v1 parity (per docs/00-PLAN.md invariants):
 * Mode-toggle button and all mode_control.* switch endpoints.
@@ -243,11 +244,6 @@ def _render_dashboard() -> ResponseReturnValue:
             jsonify({"success": False, "error": "Internal server error"}),
             HTTPStatus.INTERNAL_SERVER_ERROR,
         )
-
-
-@settings_dashboard_bp.route("/")
-def root() -> ResponseReturnValue:
-    return _render_dashboard()
 
 
 @settings_dashboard_bp.route("/settings/")

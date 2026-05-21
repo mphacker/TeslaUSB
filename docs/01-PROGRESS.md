@@ -1054,21 +1054,24 @@ diff dance per `00-PLAN.md`.
 | Run | Date | Result | Notes |
 |---|---|---|---|
 | H5.smoke (full Phase 5 closeout) | 2026-05-21 | ✅ PASS | tar+scp/venv/nginx+chromium installed on cybertruckusb.local. gunicorn binds `/run/teslausb/gunicorn.sock`, nginx on port 80. **22/22 endpoints OK** (16 pages 200/302 + 6 APIs 200, including `/api/system/metrics` psutil JSON). Real static assets (style.css, lucide-sprite.svg, bootstrap-icons-subset.css) served 200. Captive-portal probe redirects fire (Apple/Android/MS 302 → /portal). **1 Major defect found:** nginx redirects to `/portal` but Flask blueprint binds `/captive-portal` → probe-follow 404 → filed [#230](https://github.com/mphacker/TeslaUSB/issues/230). Headless chromium screenshot diff deferred (chromium-on-Pi-Zero-2-W boots slower than dead-man window). Cleanup: gunicorn stopped, nginx default site restored, dead-man cancelled, SSH+WiFi alive. Report: `~/.copilot/session-state/.../files/hw-results.md` (H5 section). |
+| H5.parity (operator-driven v1 UI parity sweep) | 2026-05-21 | ✅ PASS | Operator browsed live site, flagged divergences from v1: (1) `/` was Settings not Map; (2) `/cloud/` layout drift; (3) media area missing pages; (4) `/media/` cascaded to `/music/` not `/lock_chimes/`; (5) UTF-8 emoji rendered as CP437 mojibake (📂 → "≡ƒôé", ⚠️ → "ΓÜá∩╕Å") in 10 templates because the first parity-fix subagent used PowerShell `Set-Content` (Windows-1252 default). **Commits landed:** `309f068` (first parity pass — `/` Map, `/videos/` map browser, pill bar, cloud H1 dropped), `ca0c1f8` + `b125aa1` + `0df6528` (verbatim v1 template restore of cloud_archive + 7 media templates + settings dashboard + endpoint renames + 6-pill bar always shown), `3275e9c` (CP437→UTF-8 byte-stream recovery on 10 templates — read as UTF-8, re-encode as CP437, write raw bytes; lossless reversal of subagent's mis-decode), `2da7a16` (`/media/` cascade collapsed to always `/lock_chimes/` per operator directive "first pill in sub-nav"). **Defect [#230](https://github.com/mphacker/TeslaUSB/issues/230)** still open — deferred to Phase 6 nginx config sweep. All 9 pages live and serving valid UTF-8 with proper emoji. |
 
 ## Phase 6 — setup.sh + uninstall.sh
 
 | Inc | Deliverable | Status |
 |---|---|---|
-| 6.1 | setup.sh package install + idempotency + --dry-run | ⏳ |
+| 6.1 | setup.sh package install + idempotency + --dry-run | ✅ — **CLOSED** ([this commit]): scaffold + 6.1 landed together. `setup.sh` (160 LOC) thin orchestrator with `--dry-run` / `--only NN[,NN]` / `--skip NN[,NN]` / `--help` flags; sources `setup-lib/00-common.sh` then dispatches every `setup-lib/NN-*.sh` in numeric order, invoking `b1_step_NN()`. `setup-lib/00-common.sh` (170 LOC) provides shared helpers: `b1_log` ISO-timestamped stderr; `b1_run` / `b1_run_quiet` dry-run-aware command wrappers; `b1_backup` creates `<path>.b1-backup-<ISO>` siblings idempotently (no piling up on re-run); `b1_pkg_installed` / `b1_pkg_install` skip already-installed packages and only refresh apt cache if stale (>1h old) AND at least one install is needed; `b1_unit_exists` / `b1_unit_enabled` / `b1_unit_active` systemd helpers for downstream steps; `b1_is_pi` device-tree probe. `setup-lib/01-packages.sh` (80 LOC) installs the 8-package runtime set (`nbd-client btrfs-progs nginx python3-venv network-manager watchdog dnsmasq-base hostapd`) per `00-PLAN.md` 6.1; explicit ADR-0008 guard rejects any attempt to install rust/cargo/gcc/build-essential on-device. **Smoke-tested on `cybertruckusb.local`**: `bash -n` clean; `--help` renders; `--dry-run --only 01` reports 7/8 packages already present (v1 installed them), 1 needed (btrfs-progs), no mutations executed. Idempotency contract held: 2nd dry-run identical. set -Eeuo pipefail throughout; exit codes 0/2/3/4 per scaffold header. Charter-review deferred to 6.12 (shellcheck pass). |
 | 6.2 | setup.sh user/group + sudoers | ⏳ |
 | 6.3 | setup.sh btrfs subvolume creation | ⏳ |
 | 6.4 | setup.sh systemd unit install | ⏳ |
 | 6.5 | setup.sh NetworkManager + AP (with .b1-backup) | ⏳ |
 | 6.6 | setup.sh boot cmdline + config.txt (with .b1-backup) | ⏳ |
 | 6.7 | setup.sh watchdog + sshd-protect drop-ins | ⏳ |
-| 6.8 | setup.sh enable + start + post-start health check | ⏳ |
-| 6.9 | uninstall.sh + --purge | ⏳ |
-| 6.10 | shellcheck clean + --help complete | ⏳ |
+| 6.8 | setup.sh memory & VM tuning (1 GB swap + sysctls) | ⏳ |
+| 6.9 | setup.sh mask unnecessary services (lightdm, pipewire, cups, etc.) | ⏳ |
+| 6.10 | setup.sh final enable + start + post-start health check | ⏳ |
+| 6.11 | uninstall.sh + --purge | ⏳ |
+| 6.12 | shellcheck -S warning clean + --help complete | ⏳ |
 
 ## Phase H6 — setup.sh on a clean Pi
 

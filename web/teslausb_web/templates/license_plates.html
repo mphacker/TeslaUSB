@@ -1,0 +1,528 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+.plates-page,
+.plates-header,
+.plates-grid,
+.plates-panel,
+.plates-panel-head,
+.plates-form,
+.plates-field,
+.plates-library,
+.plates-library-toolbar,
+.plates-cards,
+.plates-card,
+.plates-card-head,
+.plates-card-copy,
+.plates-card-meta,
+.plates-actions,
+.plates-empty,
+.plates-switch,
+.plates-filter,
+.plates-match-result,
+.plates-select-row,
+.plates-select-label,
+.plates-edit-panel {
+    display: grid;
+    gap: var(--space-4);
+}
+
+.plates-page {
+    gap: var(--space-6);
+}
+
+.plates-header,
+.plates-panel,
+.plates-library {
+    padding: var(--space-6);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+}
+
+.plates-header-row,
+.plates-summary,
+.plates-library-toolbar,
+.plates-library-actions,
+.plates-card-head,
+.plates-card-actions,
+.plates-actions,
+.plates-select-row,
+.plates-switch {
+    display: flex;
+    gap: var(--space-3);
+}
+
+.plates-header-row,
+.plates-library-toolbar,
+.plates-card-head,
+.plates-select-row {
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.plates-header-row,
+.plates-summary,
+.plates-library-actions,
+.plates-card-actions,
+.plates-actions,
+.plates-select-row,
+.plates-switch {
+    flex-wrap: wrap;
+}
+
+.plates-title,
+.plates-panel-title,
+.plates-section-title,
+.plates-empty-title {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.plates-title {
+    font-size: var(--text-3xl);
+}
+
+.plates-panel-title,
+.plates-section-title,
+.plates-empty-title {
+    font-size: var(--text-xl);
+}
+
+.plates-copy,
+.plates-subtitle,
+.plates-field-copy,
+.plates-match-result,
+.plates-empty-copy,
+.plates-card-copy,
+.plates-card-meta dd {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.plates-summary-pill,
+.plates-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-full);
+    background: var(--form-label-bg);
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.plates-badge.is-enabled {
+    background: var(--msg-success-bg);
+    color: var(--msg-success-text);
+}
+
+.plates-badge.is-disabled {
+    background: var(--msg-warning-bg);
+    color: var(--msg-warning-text);
+}
+
+.plates-icon,
+.plates-inline-icon {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex: 0 0 auto;
+}
+
+.plates-grid {
+    align-items: start;
+}
+
+.plates-panel,
+.plates-card,
+.plates-edit-panel {
+    padding: var(--space-4);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+}
+
+.plates-field label,
+.plates-select-label,
+.plates-switch-copy {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.plates-field input,
+.plates-field textarea,
+.plates-filter input {
+    width: 100%;
+    min-height: 44px;
+    padding: var(--space-3);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font: inherit;
+}
+
+.plates-field textarea {
+    min-height: 8rem;
+    resize: vertical;
+}
+
+.plates-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    background: var(--form-label-bg);
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    transition: transform var(--transition-normal), box-shadow var(--transition-normal), background var(--transition-normal), border-color var(--transition-normal);
+}
+
+.plates-btn:hover,
+.plates-btn:focus-visible {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px var(--shadow-hover);
+}
+
+.plates-btn-primary {
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+}
+
+.plates-btn-danger {
+    background: var(--btn-danger-bg);
+    color: var(--btn-danger-text);
+}
+
+.plates-btn-secondary {
+    border-color: var(--border-input);
+}
+
+.plates-btn:disabled {
+    opacity: var(--opacity-disabled);
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.plates-filter {
+    min-width: min(100%, 18rem);
+}
+
+.plates-library-toolbar {
+    align-items: end;
+}
+
+.plates-cards {
+    grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+}
+
+.plates-card {
+    gap: var(--space-3);
+}
+
+.plates-card-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--text-xl);
+}
+
+.plates-card-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3);
+    margin: 0;
+}
+
+.plates-card-meta dt {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.plates-card-meta dd {
+    margin: 0;
+}
+
+.plates-card-actions {
+    align-items: center;
+}
+
+.plates-select-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+}
+
+.plates-switch {
+    align-items: flex-start;
+}
+
+.plates-switch input,
+.plates-select-label input {
+    width: 1.125rem;
+    height: 1.125rem;
+    margin-top: 0.25rem;
+}
+
+.plates-match-result {
+    min-height: 44px;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--form-input-bg);
+}
+
+.plates-match-result.is-success {
+    background: var(--msg-success-bg);
+    color: var(--msg-success-text);
+}
+
+.plates-match-result.is-warning {
+    background: var(--msg-warning-bg);
+    color: var(--msg-warning-text);
+}
+
+.plates-empty {
+    justify-items: start;
+}
+
+@media (min-width: 64rem) {
+    .plates-grid {
+        grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+    }
+}
+</style>
+{% endblock %}
+{% block content %}
+<div
+    id="licensePlatesPage"
+    class="plates-page"
+    data-match-url="{{ url_for('license_plates.match_license_plate') }}"
+>
+    {% include "media_hub_nav.html" %}
+
+    <section class="plates-header">
+        <div class="plates-header-row">
+            <div>
+                <h1 class="plates-title">License Plates</h1>
+                <p class="plates-subtitle">
+                    Track known plates and set the default redaction policy for future pipeline work.
+                </p>
+            </div>
+            <div class="plates-summary">
+                <span class="plates-summary-pill">
+                    <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-car-front"></use></svg>
+                    {{ plate_count }} tracked
+                </span>
+                <span class="plates-summary-pill">
+                    <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-shield"></use></svg>
+                    Redaction {{ 'on' if redaction_config.enabled else 'off' }}
+                </span>
+            </div>
+        </div>
+    </section>
+
+    <div class="plates-grid">
+        <section class="plates-panel">
+            <div class="plates-panel-head">
+                <h2 class="plates-panel-title">Add tracked plate</h2>
+                <p class="plates-copy">Normalization removes spaces and punctuation, then stores uppercase text.</p>
+            </div>
+            <form method="post" action="{{ url_for('license_plates.add_license_plate') }}" class="plates-form">
+                <div class="plates-field">
+                    <label for="plateText">Plate text</label>
+                    <input id="plateText" name="plate_text" type="text" maxlength="{{ max_plate_length + 8 }}" required>
+                    <p class="plates-field-copy">Up to {{ max_plate_length }} normalized characters.</p>
+                </div>
+                <div class="plates-field">
+                    <label for="plateLabel">Label</label>
+                    <input id="plateLabel" name="label" type="text" maxlength="{{ max_label_length }}">
+                </div>
+                <div class="plates-field">
+                    <label for="plateNotes">Notes</label>
+                    <textarea id="plateNotes" name="notes" maxlength="{{ max_notes_length }}"></textarea>
+                </div>
+                <div class="plates-actions">
+                    <button class="plates-btn plates-btn-primary" type="submit">
+                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-plus"></use></svg>
+                        Save plate
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <section class="plates-panel">
+            <div class="plates-panel-head">
+                <h2 class="plates-panel-title">Default redaction</h2>
+                <p class="plates-copy">Applies to future jobs that consult the shared plate-redaction setting.</p>
+            </div>
+            <form method="post" action="{{ url_for('license_plates.update_redaction') }}" class="plates-form">
+                <label class="plates-switch" for="redactionEnabled">
+                    <input
+                        id="redactionEnabled"
+                        name="enabled"
+                        type="checkbox"
+                        value="true"
+                        {% if redaction_config.enabled %}checked{% endif %}
+                    >
+                    <span>
+                        <span class="plates-switch-copy">Enable redaction by default</span>
+                        <span class="plates-copy">Last updated {{ redaction_config.updated_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>
+                    </span>
+                </label>
+                <div class="plates-actions">
+                    <button class="plates-btn plates-btn-secondary" type="submit">
+                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-save"></use></svg>
+                        Save setting
+                    </button>
+                </div>
+            </form>
+
+            <div class="plates-panel-head">
+                <h2 class="plates-panel-title">Normalization check</h2>
+                <p class="plates-copy">Preview how the service will normalize a candidate plate and whether it is already tracked.</p>
+            </div>
+            <form id="plateMatchForm" class="plates-form">
+                <div class="plates-field">
+                    <label for="plateCandidate">Candidate plate</label>
+                    <input id="plateCandidate" name="candidate" type="text" maxlength="{{ max_plate_length + 8 }}">
+                </div>
+                <div class="plates-actions">
+                    <button id="plateMatchButton" class="plates-btn plates-btn-secondary" type="submit">
+                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-search"></use></svg>
+                        Check match
+                    </button>
+                </div>
+            </form>
+            <p id="plateMatchResult" class="plates-match-result" aria-live="polite">
+                Enter a plate to preview normalization.
+            </p>
+        </section>
+    </div>
+
+    <section class="plates-library">
+        <div class="plates-library-toolbar">
+            <div>
+                <h2 class="plates-section-title">Tracked plate library</h2>
+                <p class="plates-copy">Use bulk delete for cleanup, or expand a card to edit metadata.</p>
+            </div>
+            <div class="plates-library-actions">
+                <div class="plates-filter">
+                    <label for="platesFilter">Filter plates</label>
+                    <input id="platesFilter" type="search" placeholder="Search by plate, label, or notes">
+                </div>
+                {% if plates %}
+                <div class="plates-actions">
+                    <label class="plates-select-label" for="platesSelectAll">
+                        <input id="platesSelectAll" type="checkbox">
+                        Select all
+                    </label>
+                    <span id="platesSelectedCount" class="plates-summary-pill">0 selected</span>
+                    <button class="plates-btn plates-btn-danger" type="submit" form="platesBulkDeleteForm" id="platesBulkDeleteButton" disabled>
+                        <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                        Delete selected
+                    </button>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if plates %}
+        <form id="platesBulkDeleteForm" method="post" action="{{ url_for('license_plates.bulk_delete_license_plates') }}">
+            <div class="plates-cards">
+                {% for plate in plates %}
+                <article
+                    class="plates-card js-plate-card"
+                    data-filter-text="{{ [plate.plate_text, plate.label, plate.notes]|join(' ')|lower }}"
+                >
+                    <div class="plates-card-head">
+                        <div>
+                            <h3 class="plates-card-title">{{ plate.plate_text }}</h3>
+                            <p class="plates-card-copy">{{ plate.label if plate.label else 'No label yet.' }}</p>
+                        </div>
+                        <div class="plates-card-actions">
+                            <label class="plates-select-label" aria-label="Select tracked plate {{ plate.plate_text }}">
+                                <input class="js-plate-select" type="checkbox" name="plate_ids" value="{{ plate.id }}">
+                                <span>Select</span>
+                            </label>
+                            <span class="plates-badge {% if redaction_config.enabled %}is-enabled{% else %}is-disabled{% endif %}">
+                                <svg class="plates-inline-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#{% if redaction_config.enabled %}icon-eye-off{% else %}icon-eye{% endif %}"></use></svg>
+                                {{ 'Redact by default' if redaction_config.enabled else 'Manual review' }}
+                            </span>
+                        </div>
+                    </div>
+                    <dl class="plates-card-meta">
+                        <div>
+                            <dt>Normalized</dt>
+                            <dd>{{ plate.normalized_plate }}</dd>
+                        </div>
+                        <div>
+                            <dt>Added</dt>
+                            <dd>{{ plate.created_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
+                        </div>
+                        <div>
+                            <dt>Updated</dt>
+                            <dd>{{ plate.updated_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
+                        </div>
+                        <div>
+                            <dt>Notes</dt>
+                            <dd>{{ plate.notes if plate.notes else 'No notes.' }}</dd>
+                        </div>
+                    </dl>
+                    <details class="plates-edit-panel">
+                        <summary>Edit tracked plate</summary>
+                        <form method="post" action="{{ url_for('license_plates.update_license_plate', plate_id=plate.id) }}" class="plates-form js-plate-confirm" data-confirm="Save changes to {{ plate.plate_text }}?">
+                            <div class="plates-field">
+                                <label for="plateText{{ plate.id }}">Plate text</label>
+                                <input id="plateText{{ plate.id }}" name="plate_text" type="text" value="{{ plate.plate_text }}" maxlength="{{ max_plate_length + 8 }}" required>
+                            </div>
+                            <div class="plates-field">
+                                <label for="plateLabel{{ plate.id }}">Label</label>
+                                <input id="plateLabel{{ plate.id }}" name="label" type="text" value="{{ plate.label }}" maxlength="{{ max_label_length }}">
+                            </div>
+                            <div class="plates-field">
+                                <label for="plateNotes{{ plate.id }}">Notes</label>
+                                <textarea id="plateNotes{{ plate.id }}" name="notes" maxlength="{{ max_notes_length }}">{{ plate.notes }}</textarea>
+                            </div>
+                            <div class="plates-actions">
+                                <button class="plates-btn plates-btn-secondary" type="submit">
+                                    <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-save"></use></svg>
+                                    Save changes
+                                </button>
+                            </div>
+                        </form>
+                    </details>
+                    <form method="post" action="{{ url_for('license_plates.delete_license_plate', partition=default_partition, plate_id=plate.id) }}" class="js-plate-confirm" data-confirm="Delete tracked plate {{ plate.plate_text }}?">
+                        <button class="plates-btn plates-btn-danger" type="submit">
+                            <svg class="plates-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-trash-2"></use></svg>
+                            Delete plate
+                        </button>
+                    </form>
+                </article>
+                {% endfor %}
+            </div>
+        </form>
+        {% else %}
+        <div class="plates-empty">
+            <h3 class="plates-empty-title">No tracked plates yet</h3>
+            <p class="plates-empty-copy">Add a known plate above to seed the shared lookup list.</p>
+        </div>
+        {% endif %}
+    </section>
+</div>
+<script type="module" src="{{ url_for('static', filename='js/license_plates.js') }}"></script>
+{% endblock %}

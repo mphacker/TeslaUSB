@@ -28,6 +28,7 @@ from flask import Blueprint, Flask, render_template
 from teslausb_web.app import create_app
 from teslausb_web.config import (
     FeaturesSection,
+    LicensePlateSection,
     PathsSection,
     WebConfig,
     WebSection,
@@ -73,6 +74,7 @@ def test_scaffold_endpoints_match_base_html_url_for_calls(app: Flask) -> None:
         assert url_for("analytics.dashboard").endswith("/analytics/")
         assert url_for("media.media_home").endswith("/media/")
         assert url_for("cloud_archive.index").endswith("/cloud/")
+        assert url_for("license_plates.license_plates").endswith("/license_plates/")
         assert url_for("settings.index").endswith("/settings/")
 
 
@@ -89,6 +91,25 @@ def test_cloud_archive_scaffold_now_renders_real_page(app: Flask) -> None:
     assert resp.status_code == 200
     assert '<h1 class="cloud-archive-title">Cloud Archive</h1>' in html
     assert 'type="module" src="/static/js/cloud_archive.js"' in html
+
+
+def test_license_plates_page_renders_real_template(tmp_path: Path) -> None:
+    cfg = WebConfig(
+        web=WebSection(secret_key="t" * 32),
+        paths=PathsSection(
+            backing_root=tmp_path / "backing",
+            state_dir=tmp_path / "state",
+            cache_invalidate_script=tmp_path / "invalidate.sh",
+        ),
+        features=FeaturesSection(),
+        license_plates=LicensePlateSection(db_path=tmp_path / "state" / "license_plates.db"),
+    )
+    app = create_app(cfg)
+    resp = app.test_client().get("/license_plates/")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert '<h1 class="plates-title">License Plates</h1>' in html
+    assert 'type="module" src="/static/js/license_plates.js"' in html
 
 
 @pytest.mark.parametrize(

@@ -84,6 +84,12 @@ _DEFAULT_BOOMBOX_BASE_DIR: Final[str] = "Boombox"
 _DEFAULT_BOOMBOX_MAX_FILE_BYTES: Final[int] = 1 * 1024 * 1024
 _DEFAULT_BOOMBOX_MAX_FILES: Final[int] = 5
 _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".mp3", ".wav")
+_DEFAULT_LICENSE_PLATES_DB_NAME: Final[str] = "license_plates.db"
+_DEFAULT_LICENSE_PLATES_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_LICENSE_PLATES_DB_NAME
+_DEFAULT_LICENSE_PLATES_REDACTION_ENABLED: Final[bool] = False
+_DEFAULT_LICENSE_PLATES_MAX_PLATE_LENGTH: Final[int] = 16
+_DEFAULT_LICENSE_PLATES_MAX_LABEL_LENGTH: Final[int] = 64
+_DEFAULT_LICENSE_PLATES_MAX_NOTES_LENGTH: Final[int] = 240
 _DEFAULT_WIFI_CREDENTIALS_FILENAME: Final[str] = "wifi_credentials.json"
 _DEFAULT_WIFI_CREDENTIALS_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_WIFI_CREDENTIALS_FILENAME
 _DEFAULT_WIFI_AP_SSID: Final[str] = "TeslaUSB-Setup"
@@ -454,6 +460,37 @@ class BoomboxSection:
 
 
 @dataclass(frozen=True, slots=True)
+class LicensePlateSection:
+    """Tracked license-plate storage and default redaction settings."""
+
+    db_path: Path = _DEFAULT_LICENSE_PLATES_DB_PATH
+    default_redaction_enabled: bool = _DEFAULT_LICENSE_PLATES_REDACTION_ENABLED
+    max_plate_length: int = _DEFAULT_LICENSE_PLATES_MAX_PLATE_LENGTH
+    max_label_length: int = _DEFAULT_LICENSE_PLATES_MAX_LABEL_LENGTH
+    max_notes_length: int = _DEFAULT_LICENSE_PLATES_MAX_NOTES_LENGTH
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            not self.db_path.is_absolute()
+            and not PurePosixPath(self.db_path.as_posix()).is_absolute()
+        ):
+            raise ConfigError(
+                None,
+                f"[license_plates] db_path must be absolute, got {self.db_path!r}",
+            )
+        for field_name, value in (
+            ("max_plate_length", self.max_plate_length),
+            ("max_label_length", self.max_label_length),
+            ("max_notes_length", self.max_notes_length),
+        ):
+            if value <= 0:
+                raise ConfigError(None, f"[license_plates] {field_name} must be > 0")
+
+
+@dataclass(frozen=True, slots=True)
 class WifiBinaryPaths:
     """Binary names or absolute paths for the Wi-Fi control surface."""
 
@@ -648,6 +685,7 @@ class WebConfig:
     wraps: WrapsSection = field(default_factory=WrapsSection)
     music: MusicSection = field(default_factory=MusicSection)
     boombox: BoomboxSection = field(default_factory=BoomboxSection)
+    license_plates: LicensePlateSection = field(default_factory=LicensePlateSection)
     wifi: WifiSection = field(default_factory=WifiSection)
     cloud: CloudSection = field(default_factory=CloudSection)
     mapping: MappingSection = field(default_factory=MappingSection)
@@ -663,6 +701,7 @@ class WebConfig:
             self.wraps.validate()
             self.music.validate()
             self.boombox.validate()
+            self.license_plates.validate()
             self.wifi.validate()
             self.cloud.validate()
             self.mapping.validate()
@@ -784,6 +823,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     wraps_raw = _expect_section(raw, "wraps", source)
     music_raw = _expect_section(raw, "music", source)
     boombox_raw = _expect_section(raw, "boombox", source)
+    license_plates_raw = _expect_section(raw, "license_plates", source)
     wifi_raw = _expect_section(raw, "wifi", source)
     wifi_binary_paths_raw = _expect_section(wifi_raw, "binary_paths", source)
     cloud_raw = _expect_section(raw, "cloud", source)
@@ -995,6 +1035,38 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 boombox_raw,
                 "allowed_extensions",
                 _DEFAULT_BOOMBOX_ALLOWED_EXTENSIONS,
+                source,
+            ),
+        )
+        license_plates = LicensePlateSection(
+            db_path=_coerce_path(
+                license_plates_raw,
+                "db_path",
+                paths_section.state_dir / _DEFAULT_LICENSE_PLATES_DB_NAME,
+                source,
+            ),
+            default_redaction_enabled=_coerce_bool(
+                license_plates_raw,
+                "default_redaction_enabled",
+                _DEFAULT_LICENSE_PLATES_REDACTION_ENABLED,
+                source,
+            ),
+            max_plate_length=_coerce_int(
+                license_plates_raw,
+                "max_plate_length",
+                _DEFAULT_LICENSE_PLATES_MAX_PLATE_LENGTH,
+                source,
+            ),
+            max_label_length=_coerce_int(
+                license_plates_raw,
+                "max_label_length",
+                _DEFAULT_LICENSE_PLATES_MAX_LABEL_LENGTH,
+                source,
+            ),
+            max_notes_length=_coerce_int(
+                license_plates_raw,
+                "max_notes_length",
+                _DEFAULT_LICENSE_PLATES_MAX_NOTES_LENGTH,
                 source,
             ),
         )
@@ -1290,6 +1362,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
         wraps=wraps,
         music=music,
         boombox=boombox,
+        license_plates=license_plates,
         wifi=wifi,
         cloud=cloud,
         mapping=mapping,

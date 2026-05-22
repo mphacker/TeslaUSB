@@ -139,6 +139,13 @@ def save(config: TeslausbConfig, path: Path | None = None) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text(body, encoding="utf-8")
+        # Mode 0664 so the file remains group-writable for the
+        # `teslausb` group after a subsequent atomic rename. The
+        # web service runs as a member of that group (see setup-lib
+        # `_install_storage_config_perms`); without this chmod the
+        # default umask would yield 0644 and the next save() would
+        # fail with EACCES.
+        tmp.chmod(0o664)
         tmp.replace(target)
     logger.info("storage_config: wrote %s", target)
 

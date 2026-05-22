@@ -926,7 +926,33 @@ b1_step_11() {
     teslausb_body="${teslausb_body//__TESLACAM_GB__/${teslacam_gb}}"
     teslausb_body="${teslausb_body//__MEDIA_GB__/${media_gb}}"
     b1_log "seeding ${B1_TESLAUSB_CONF}"
-    _b1_install_file "${B1_TESLAUSB_CONF}" 0644 "${teslausb_body}"
+    _b1_install_file "${B1_TESLAUSB_CONF}" 0664 "${teslausb_body}"
+  fi
+
+  # 2c. Web-writable perms on teslausb.toml + its dir. The Flask
+  # service (running as the AC.3 web user, member of the `teslausb`
+  # group) writes this file via atomic-rename when the operator
+  # mutates LUN sizes or cleanup knobs in /storage. Atomic rename
+  # requires write+exec on the directory AND write on the existing
+  # target file. We therefore:
+  #
+  #   * chgrp `teslausb` on /etc/teslausb so the group exists on
+  #     both the dir and the file.
+  #   * setgid (g+s) on the dir so any *new* file the web user
+  #     drops inherits the group (e.g. teslausb.toml.tmp).
+  #   * sticky bit (+t) on the dir so the web user can only
+  #     unlink/rename files they own — root-owned configs like
+  #     worker.toml and teslafat-*.toml stay safe.
+  #   * chown the file itself to the web user so the atomic rename
+  #     can replace it.
+  if getent group teslausb >/dev/null && id -u "${B1_WEB_USER:-pi}" >/dev/null 2>&1; then
+    b1_log "applying web-writable perms to ${B1_TESLAUSB_CONF}"
+    chgrp teslausb "${B1_TESLAFAT_CONF_DIR}" "${B1_TESLAUSB_CONF}" || true
+    chmod 03775 "${B1_TESLAFAT_CONF_DIR}" || true
+    chown "${B1_WEB_USER:-pi}:teslausb" "${B1_TESLAUSB_CONF}" || true
+    chmod 0664 "${B1_TESLAUSB_CONF}" || true
+  else
+    b1_log "skipping web-writable perms (group teslausb or B1_WEB_USER missing)"
   fi
 
   # 3. systemd units.

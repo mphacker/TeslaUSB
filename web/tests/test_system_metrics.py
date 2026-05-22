@@ -84,7 +84,11 @@ def _patched_psutil(monkeypatch: pytest.MonkeyPatch) -> None:
         psutil,
         "disk_io_counters",
         lambda perdisk=False: (  # noqa: ARG005
-            {"mmcblk0": _FakeIO(1_000_000, 500_000), "loop0": _FakeIO(2_000_000, 1_000_000)}
+            {
+                "mmcblk0": _FakeIO(1_000_000, 500_000),
+                "nbd0": _FakeIO(2_000_000, 1_000_000),
+                "nbd1": _FakeIO(500_000, 0),
+            }
         ),
     )
     monkeypatch.setattr(psutil, "boot_time", lambda: time.time() - 3600.0)
@@ -173,7 +177,11 @@ def test_io_rates_zero_on_first_call_then_populate(
         psutil,
         "disk_io_counters",
         lambda perdisk=False: (  # noqa: ARG005
-            {"mmcblk0": _FakeIO(2_000_000, 1_000_000), "loop0": _FakeIO(4_000_000, 2_000_000)}
+            {
+                "mmcblk0": _FakeIO(2_000_000, 1_000_000),
+                "nbd0": _FakeIO(4_000_000, 2_000_000),
+                "nbd1": _FakeIO(1_000_000, 0),
+            }
         ),
     )
     second = collect_metrics(tmp_path)
@@ -292,7 +300,8 @@ def test_metrics_to_dict_matches_js_wire_shape(tmp_path: Path) -> None:
     io = payload["io"]
     assert isinstance(io, dict)
     assert "mmcblk0" in io
-    assert "loop0" in io
+    assert "nbd0" in io
+    assert "nbd1" in io
     assert set(io["mmcblk0"].keys()) == {"read_kbs", "write_kbs"}
 
     assert isinstance(payload["generated_at"], int)

@@ -152,10 +152,10 @@
                             &nbsp;
                         </div>
                     </div>
-                    <div class="metric-tile" id="metric-loop">
-                        <div class="metric-label">USB Image I/O</div>
-                        <div class="metric-value" data-field="loop">—</div>
-                        <div class="metric-detail" data-field="loop-detail">
+                    <div class="metric-tile" id="metric-usb">
+                        <div class="metric-label">USB I/O (TeslaCam + Media)</div>
+                        <div class="metric-value" data-field="usb">—</div>
+                        <div class="metric-detail" data-field="usb-detail">
                             &nbsp;
                         </div>
                     </div>
@@ -1205,19 +1205,27 @@ if (document.getElementById('fsck-status-container')) {
                 'r ' + fmtBytes(sd.read_kbs) + '  w ' + fmtBytes(sd.write_kbs),
                 'ok');
 
-        var loop = io.loop0 || {};
-        // Loop reads are the producer SEI peeks (Issue #208). Sustained
-        // reads above ~3 MB/s with no driving means something is hot —
-        // surface as warn so the operator notices.
-        var loopTotal = (loop.read_kbs || 0) + (loop.write_kbs || 0);
-        var loopSev = loopTotal > 6144
+        // USB I/O = nbd0 (TESLACAM LUN) + nbd1 (MEDIA LUN). These
+        // are the two block devices the mass-storage gadget exposes
+        // to Tesla. The v1 build used loop0 for a loopback image
+        // file; B-1 does not have a loopback image (LUNs are NBD-
+        // backed by the teslafat daemon) so loop0 was always 0.
+        var nbd0 = io.nbd0 || {};
+        var nbd1 = io.nbd1 || {};
+        var usbRead = (nbd0.read_kbs || 0) + (nbd1.read_kbs || 0);
+        var usbWrite = (nbd0.write_kbs || 0) + (nbd1.write_kbs || 0);
+        var usbTotal = usbRead + usbWrite;
+        // Sustained USB throughput above ~6 MB/s warrants a glance
+        // (Tesla's normal write rate is ~1–3 MB/s); above 12 MB/s
+        // is suspicious on a Pi Zero 2 W and likely a runaway.
+        var usbSev = usbTotal > 12288
             ? 'error'
-            : (loopTotal > 3072 ? 'warn' : 'ok');
-        setTile('metric-loop',
-                fmtBytes(loopTotal),
-                'r ' + fmtBytes(loop.read_kbs) +
-                '  w ' + fmtBytes(loop.write_kbs),
-                loopSev);
+            : (usbTotal > 6144 ? 'warn' : 'ok');
+        setTile('metric-usb',
+                fmtBytes(usbTotal),
+                'r ' + fmtBytes(usbRead) +
+                '  w ' + fmtBytes(usbWrite),
+                usbSev);
 
         var ts = p.generated_at
             ? new Date(p.generated_at * 1000)

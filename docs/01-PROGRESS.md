@@ -2677,3 +2677,26 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
   be authored as a separate H1-prep step). Phase 2 (B-1
   `FileBackend` for real image-file storage) starts only
   after H1 passes.
+
+## 2026-05-22 — AC series: unified storage config + tier-aware cleanup ✅
+
+Operator-binding redesign of LUN sizing and TeslaCam auto-cleanup.
+Single shared TOML at `/etc/teslausb/teslausb.toml` (read by both
+Flask web UI and Rust worker); web UI replaces preview/report flow
+with a thin /storage settings page; Rust worker becomes the sole
+cleanup executor with tier-aware (RecentClips no-GPS -> with-GPS
+-> SavedClips/SentryClips-by-age -> last-resort) deletion ordering.
+
+| Inc | Commit | Notes |
+|---|---|---|
+| AC.1 | (config schema) | os_reserve_gb default 20 GB, hard min 8 GB; teslacam_gb + media_gb <= sd_total - os_reserve |
+| AC.2 | Rust storage_config | serde load() returns default on missing file |
+| AC.3 | `3d3b149` | teslausb-resize-lun helper + sudoers fragment |
+| AC.4 | `84ee82b` | web/services/storage_stats.py (9 unit tests) |
+| AC.5 | `290633c` | cleanup_sweep.rs additive tier-aware sweep |
+| AC.6 | `333eade` | Flask /storage settings page (6 tests) |
+| AC.7 | `04835a8` | Python cleanup blueprint/service deletion + supervisor wiring of cleanup_sweep |
+| AC.8 | (this commit) | docs/06-OPERATIONS.md + this entry |
+
+AC.9 (charter-review) and AC.H (hardware test) are tracked in
+the AC todo set and will be run as separate gated increments.

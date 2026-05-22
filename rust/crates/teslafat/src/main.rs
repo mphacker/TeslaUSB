@@ -152,6 +152,14 @@ mod unix_serve {
                 file_count = backend.file_count(),
                 "SynthBackend ready"
             );
+            // Tell systemd we are ready. Under `Type=notify` this is
+            // what gates `After=teslafat@N.service` consumers (e.g.
+            // `nbd-attach@N`) — they will not start until this
+            // notification arrives, eliminating the boot race where
+            // nbd-client connects before `bind()` has returned. Under
+            // any other unit type (or when run outside systemd) this
+            // is a no-op because `NOTIFY_SOCKET` is unset.
+            notify_systemd_ready();
             let result = server::serve(
                 listener,
                 &backend,
@@ -171,6 +179,50 @@ mod unix_serve {
             }
             result
         })
+    }
+
+    /// Send `READY=1` to the systemd notify socket if one is
+    /// configured via `$NOTIFY_SOCKET`. Best-effort: if the env var
+    /// is absent (manual invocation, dev box, `Type=simple` unit),
+    /// or the send fails for any reason, we log at warn level and
+    /// carry on serving — failing to notify must never take down a
+    /// working daemon.
+    ///
+    /// The implementation is deliberately inlined (no `sd-notify`
+    /// crate dependency) because the payload is one line and the
+    /// only OS abstraction we need is `UnixDatagram`. Linux abstract
+    /// namespace sockets (leading `@`) are not supported — systemd
+    /// uses a filesystem path (`/run/systemd/notify`) for ordinary
+    /// service units, which is the only case we care about.
+    fn notify_systemd_ready() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::net::UnixDatagram;
+
+        let Some(raw) = std::env::var_os("NOTIFY_SOCKET") else {
+            return;
+        };
+        let bytes = raw.as_bytes();
+        if bytes.is_empty() {
+            return;
+        }
+        if bytes[0] == b'@' {
+            warn!(
+                "sd_notify: abstract NOTIFY_SOCKET not supported; \
+                 set the unit to use a filesystem notify socket"
+            );
+            return;
+        }
+        let sock = match UnixDatagram::unbound() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = ?e, "sd_notify: could not create datagram socket");
+                return;
+            }
+        };
+        match sock.send_to(b"READY=1\n", Path::new(&raw)) {
+            Ok(_) => info!("sd_notify: READY=1 sent"),
+            Err(e) => warn!(error = ?e, "sd_notify: send failed"),
+        }
     }
 
     /// Ensure the socket's parent directory exists, remove any

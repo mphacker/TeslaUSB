@@ -36,6 +36,22 @@ After=local-fs.target
 Requires=local-fs.target
 
 [Service]
+# Type=notify so systemd holds the "Started" state — and any
+# consumer ordered `After=teslafat@%i.service` — until the daemon
+# has actually bound its NBD Unix socket AND opened the SynthBackend.
+# The daemon sends `READY=1` over `$NOTIFY_SOCKET` from
+# `unix_serve::notify_systemd_ready` after both steps complete.
+#
+# Without this, the unit defaulted to `Type=simple` (treated as
+# started the instant fork() returned), and `nbd-attach@%i.service`
+# raced the daemon: nbd-client connected before `bind()` finished,
+# got ECONNREFUSED, the oneshot failed, and `usb-gadget.service`
+# cascaded down via its `Requires=nbd-attach@{0,1}`. The Tesla then
+# saw no USB drives until the operator manually restarted the
+# chain. Verified live on cybertruckusb.local 2026-05-22 boot.
+Type=notify
+NotifyAccess=main
+
 # Validate the config first as a fast-fail gate, then exec into
 # serve mode. If the config is malformed the daemon never reaches
 # `bind`, and systemd surfaces the validation error in `journalctl`

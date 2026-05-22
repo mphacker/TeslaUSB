@@ -172,15 +172,21 @@ Documentation=https://github.com/mphacker/TeslaUSB
 Requires=teslafat@%i.service
 After=teslafat@%i.service
 PartOf=teslafat@%i.service
+# Cap automatic restart loops (paired with `Restart=on-failure`
+# below). Belongs in [Unit] per systemd.unit(5).
+StartLimitBurst=10
+StartLimitIntervalSec=120
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Wait up to 15s for teslafat'"'"'s NBD socket to appear before connecting.
-# teslafat@%i.service is `Type=simple` so systemd considers it "started"
-# the moment exec() returns — well before the daemon has bound its
-# socket. Without this poll, nbd-attach races and fails CONNECT,
-# which then cascades to usb-gadget failing its `Requires=`.
+# teslafat@%i.service is `Type=notify` (Phase H/boot-race fix), so
+# systemd already holds back this unit until teslafat has bound its
+# AF_UNIX socket and finished opening the SynthBackend. The poll
+# below is kept as a belt-and-suspenders safety net in case a
+# future change reverts teslafat to `Type=simple`, or systemd
+# evaluates the Requires= ordering on a kernel/systemd combo that
+# delivers the READY=1 datagram with surprising latency.
 ExecStartPre=/bin/sh -c '"'"'for i in $(seq 1 30); do [ -S /run/teslausb/teslafat-%i.sock ] && exit 0; sleep 0.5; done; echo "teslafat-%i.sock did not appear within 15s" >&2; exit 1'"'"'
 # nbd-client uses a unix socket: -unix <path> instead of -h/-p.
 # -persist keeps the kernel side alive across brief daemon restarts.
@@ -196,6 +202,15 @@ ExecStartPre=/bin/sh -c '"'"'for i in $(seq 1 30); do [ -S /run/teslausb/teslafa
 ExecStart=/usr/sbin/nbd-client -unix /run/teslausb/teslafat-%i.sock /dev/nbd%i -persist -block-size 512 -nofork
 ExecStop=/usr/sbin/nbd-client -d /dev/nbd%i
 
+# Self-heal a transient attach failure (e.g. teslafat restarted out
+# from under nbd-client during a config update). systemd will retry
+# up to StartLimitBurst times within StartLimitIntervalSec; if we
+# blow past that we genuinely need an operator. RestartSec is short
+# (2s) because the failure mode is usually "teslafat needs another
+# moment to be ready" rather than a permanent error.
+Restart=on-failure
+RestartSec=2s
+
 [Install]
 WantedBy=multi-user.target
 '
@@ -209,12 +224,25 @@ Description=TeslaUSB B-1 USB gadget (configfs, two mass_storage LUNs)
 Documentation=https://github.com/mphacker/TeslaUSB
 Requires=nbd-attach@0.service nbd-attach@1.service
 After=nbd-attach@0.service nbd-attach@1.service sys-kernel-config.mount
+# Cap automatic restart loops (paired with `Restart=on-failure`
+# below). Belongs in [Unit] per systemd.unit(5).
+StartLimitBurst=10
+StartLimitIntervalSec=180
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/teslausb-gadget-up
 ExecStop=/usr/local/bin/teslausb-gadget-down
+
+# Defence-in-depth: if the gadget composer trips for a transient
+# reason (e.g. dwc2 UDC not enumerated yet on a cold boot) we want
+# systemd to retry rather than leaving the Tesla recording-blind
+# until the operator intervenes. The teslausb-gadget-up script is
+# idempotent (it no-ops when g1 is already bound), so retries are
+# safe. StartLimit caps a true loop.
+Restart=on-failure
+RestartSec=3s
 
 [Install]
 WantedBy=multi-user.target

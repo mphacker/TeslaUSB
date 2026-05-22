@@ -792,3 +792,130 @@ Mandatory checklist before merging:
    and degraded paths.
 4. If the new service writes files, add it to `setup-lib/03-data-roots.sh`
    ownership sweep.
+
+
+## Phase 6 — web UI gotchas (live-debug session, 2026-05-22)
+
+These were paid for with real "it just doesn't work" bug reports
+from the operator. None were caught by the test suite because
+they're either browser-runtime behaviors (drag-and-drop, label
+semantics) or false-positive UI signals masquerading as real
+problems.
+
+### Drop zones must NOT be `<label for=hidden-input>`
+
+The boombox upload zone was a `<label for="boomboxFileInput">`
+wrapping a `display: none` `<input type="file">`. Click-to-pick
+worked (that's the label's native behavior). Drag-and-drop
+silently failed: dragover/drop events fired on the label, but
+the browser ALSO tries to forward the dropped FileList to the
+associated input element, and an input with no layout
+(`display: none`) silently swallows it. The result: drop
+handler ran but `e.dataTransfer.files` behavior was
+inconsistent and the upload never started.
+
+**Pattern (proven working in license_plates.html, light_shows.html,
+wraps.html):**
+
+- Use a `<div role="button" tabindex="0">` for the drop zone,
+  NOT a `<label>`.
+- Wire an explicit `dropZone.addEventListener('click', () => fileInput.click())`.
+- Add a keyboard handler for Enter/Space → `fileInput.click()`
+  to preserve keyboard accessibility (since we lost the label).
+- Keep the `<input type="file" style="display: none">` separate
+  (sibling, not child) — or as a child of the div is fine; the
+  point is it must not be the label's target.
+
+**Detection:** if click-to-pick works but drag-drop "does
+nothing", and the zone is a `<label>` containing the file
+input — that's the bug. There's no JS error in the console.
+
+### System Health probes must report OUR subsystem's health, not
+### external activity
+
+The indexer probe used to warn `{N} clips indexed; newest is
+{M} min old` when the newest clip was >30 min old. This fired
+constantly because **clip recency reflects Tesla activity, not
+indexer health**. When the car is parked on Sentry with no
+motion events, Tesla writes nothing and the newest clip
+naturally ages — the indexer is doing exactly what it should
+(nothing). The amber dot on System Health trained the operator
+to ignore it ("crying wolf"), which would mask real problems.
+
+**Rule:** A System Health probe must signal a state that the
+B-1 stack itself can act on. If the only fix for a probe's
+warning is "the operator drives the car", the probe is
+mis-scoped.
+
+**Specifics that violate this rule (avoid in future probes):**
+
+- Time-since-last-clip (depends on Tesla activity).
+- Time-since-last-archive-upload (depends on cloud sync activity
+  AND on having clips to archive).
+- Free-space-as-percent-of-rated (depends on user retention
+  settings).
+
+**Specifics that are good (keep this pattern):**
+
+- DB read/write probe (PRAGMA quick_check + create-temp-table).
+- `systemctl is-active` for each owned unit.
+- Mount-exists / socket-exists / configfs-node-exists.
+- Orphan rows in index vs files on disk (a delta the indexer
+  controls).
+
+### configfs gadget name is `g1`, NOT `teslausb`
+
+When triaging "is Tesla seeing the drives", the canonical path
+is:
+
+` 
+/sys/kernel/config/usb_gadget/g1/UDC
+`
+
+`g1` is the default name libcomposite assigns when you create
+a gadget via configfs and is what `teslausb-gadget-up` actually
+uses. The systemd unit and the documentation say "teslausb" in
+many places because that's the unit name, but the configfs
+directory is `g1`. Looking under `/sys/kernel/config/usb_gadget/teslausb/`
+returns ENOENT and looks like a catastrophic failure when
+nothing is wrong.
+
+**Concrete check:**
+
+` bash
+test -s /sys/kernel/config/usb_gadget/g1/UDC || echo "GADGET UNBOUND"
+`
+
+(An empty file means the gadget exists but isn't bound to a UDC.
+A missing file means the configfs node is gone entirely —
+usb-gadget.service has been stopped or torn down.)
+
+### Tesla writes ARE bursty even in Sentry mode
+
+Don't assume "Sentry on → continuous writes". Sentry mode only
+writes when an event triggers (motion in the camera view). A
+quiet garage / driveway can go 30+ minutes with zero new clips
+and the system is perfectly healthy. The mtime of existing
+files MAY update during that period due to FAT allocation-table
+flushes — these are filesystem-level writes, not new content.
+
+To distinguish "Tesla is writing" from "Tesla is bored":
+
+- Count fresh `.mp4` files in `/srv/teslausb/teslacam/TeslaCam/{RecentClips,SentryClips}` whose **filename** date is recent (not just mtime).
+- Filename pattern: `YYYY-MM-DD_HH-MM-SS-{camera}.mp4` — Tesla bakes the clip's start time into the filename when it creates the file. mtime updates from FAT flushes don't change that.
+
+### nginx ↔ gunicorn timeout invariant
+
+This was found chasing the lightshow "Bad Gateway after 100%
+upload" bug. Documented in passing in commit `8685a08` but
+worth restating:
+
+`gunicorn.timeout` MUST be `>= max(nginx.proxy_read_timeout,
+nginx.client_body_timeout, nginx.proxy_send_timeout)`. Otherwise
+gunicorn SIGKILLs the worker mid-write, nginx sees a partial
+response, and the user sees `502 Bad Gateway` after their
+upload progress bar already hit 100 percent.
+
+Both sides are now 300 s. When you bump one, bump the other in
+the same commit, and add a comment on both sides cross-
+referencing each other.

@@ -293,15 +293,28 @@ def test_indexer_block_empty_db_is_warn(tmp_path: Path) -> None:
     assert block["clip_count"] == 0
 
 
-def test_indexer_block_stale_db_is_warn(tmp_path: Path) -> None:
+def test_indexer_block_stale_db_is_ok_with_age_label(tmp_path: Path) -> None:
     import time as _t
+
     db = tmp_path / "index.sqlite3"
-    # Last index 1 h ago — over the 30 min threshold.
+    # Last index 1 h ago.  Indexer health is independent of Tesla write
+    # activity, so clip age is informational, not a warning.
     _seed_index_db(db, clip_count=3, last_indexed=int(_t.time()) - 3600)
     cfg = _bare_cfg(tmp_path, db_path=db)
     block = _indexer_block(cfg)
-    assert block["severity"] == SEV_WARN
-    assert "min old" in block["message"]
+    assert block["severity"] == SEV_OK
+    assert "1 h old" in block["message"]
+
+
+def test_indexer_block_very_old_clip_is_still_ok(tmp_path: Path) -> None:
+    import time as _t
+
+    db = tmp_path / "index.sqlite3"
+    _seed_index_db(db, clip_count=10, last_indexed=int(_t.time()) - 3 * 86_400)
+    cfg = _bare_cfg(tmp_path, db_path=db)
+    block = _indexer_block(cfg)
+    assert block["severity"] == SEV_OK
+    assert "3 d old" in block["message"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only permission semantics")

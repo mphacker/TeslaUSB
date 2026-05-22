@@ -352,16 +352,24 @@ def _indexer_block(cfg: WebConfig) -> dict[str, object]:
             "clip_count": 0,
             "last_indexed_utc": 0,
         }
-    if age_s is not None and age_s > 30 * 60:
-        return {
-            "severity": SEV_WARN,
-            "message": f"{clip_count:,} clips indexed; newest is {age_s // 60} min old",
-            "clip_count": clip_count,
-            "last_indexed_utc": last_indexed,
-        }
+    # Clip recency reflects Tesla activity (Sentry / dashcam events), not
+    # indexer health — when the car is parked with no events, the newest
+    # clip naturally ages.  Surface the age as informational only; the
+    # indexer's actual health is covered by the DB read/write probe above
+    # and by the worker/orphan probes below.
+    age_label = ""
+    if age_s is not None:
+        if age_s < 60:
+            age_label = "; newest is <1 min old"
+        elif age_s < 3600:
+            age_label = f"; newest is {age_s // 60} min old"
+        elif age_s < 86_400:
+            age_label = f"; newest is {age_s // 3600} h old"
+        else:
+            age_label = f"; newest is {age_s // 86_400} d old"
     return {
         "severity": SEV_OK,
-        "message": f"{clip_count:,} clips indexed",
+        "message": f"{clip_count:,} clips indexed{age_label}",
         "clip_count": clip_count,
         "last_indexed_utc": last_indexed,
     }

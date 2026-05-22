@@ -32,6 +32,7 @@ from teslausb_web.services.wifi_support import (
     current_connection_iwconfig,
     current_connection_nmcli,
     saved_connection_names,
+    saved_wifi_profile_ssids,
     scan_networks_iwlist,
     scan_networks_nmcli,
 )
@@ -286,6 +287,16 @@ class WifiService:
 
     def _saved_connection_names(self) -> set[str]:
         return saved_connection_names(self._run)
+
+    def saved_wifi_profile_ssids(self) -> dict[str, str]:
+        """Return `{profile_name: actual_ssid}` for every saved wifi profile.
+
+        Exposed so callers (notably the saved-networks API) can
+        cross-reference saved names against scan SSIDs even when the
+        connection profile id differs from the broadcast SSID.
+        """
+        with self._lock:
+            return saved_wifi_profile_ssids(self._run)
 
     @property
     def _ap_connection_name(self) -> str:

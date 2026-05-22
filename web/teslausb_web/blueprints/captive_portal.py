@@ -323,18 +323,76 @@ def force_ap() -> ResponseReturnValue:
 
 @captive_portal_bp.route("/api/wifi/saved")
 def api_wifi_saved() -> ResponseReturnValue:
-    """Return saved Wi-Fi networks in v1 array format."""
-    status = _get_service().get_status()
-    networks = [
-        {
-            "name": network.ssid,
-            "ssid": network.ssid,
-            "active": network.active,
-            "in_range": False,
-            "signal": 0,
-        }
-        for network in status.saved_networks
-    ]
+    """Return saved Wi-Fi networks in v1 array format.
+
+    Each saved network is annotated with `in_range` / `signal` by
+    cross-referencing the most recent scan against the profile's
+    actual 802-11 SSID — NetworkManager's connection profile id
+    (which we list as `name`/`ssid` in the payload) is user-editable
+    and may differ from the on-air SSID (e.g. profile "WiFi-Trez"
+    advertising SSID "Trez"). Without that map every non-active
+    saved network looked out-of-range, which is what Issue #228
+    surfaces. The currently-connected network is always considered
+    in-range with the live signal from the connection state.
+
+    We request a fresh `rescan=True` here because NetworkManager's
+    cached wifi list collapses to only the associated AP within a
+    minute or so of association. This page is not high-frequency,
+    so the ~3 s scan latency is acceptable.
+    """
+    service = _get_service()
+    status = service.get_status()
+    try:
+        available = service.list_available_networks(rescan=True)
+    except WifiError as exc:
+        # Don't poison the saved-networks panel just because a scan
+        # failed — fall back to "in_range unknown" (only the active
+        # network keeps its in-range flag below).
+        logger.warning("api_wifi_saved: scan unavailable: %s", exc)
+        available = ()
+    try:
+        profile_ssids = service.saved_wifi_profile_ssids()
+    except WifiError as exc:
+        logger.warning("api_wifi_saved: profile SSID lookup failed: %s", exc)
+        profile_ssids = {}
+    # Keep the strongest signal per on-air SSID (some APs broadcast
+    # on multiple bands and appear twice in the scan).
+    scan_by_ssid: dict[str, int] = {}
+    for network in available:
+        signal = network.signal_strength or 0
+        if network.ssid not in scan_by_ssid or signal > scan_by_ssid[network.ssid]:
+            scan_by_ssid[network.ssid] = signal
+    active_name = status.current_ssid if status.connected else None
+    active_signal = status.signal_strength or 0 if status.connected else 0
+    networks = []
+    for network in status.saved_networks:
+        # `network.ssid` is the NM profile name (e.g. "WiFi-Trez").
+        # Resolve to the on-air SSID for the scan cross-reference;
+        # fall back to the profile name if we can't read the SSID.
+        air_ssid = profile_ssids.get(network.ssid, network.ssid)
+        scan_signal = scan_by_ssid.get(air_ssid)
+        if scan_signal is None and air_ssid != network.ssid:
+            # Last-ditch: some legacy profiles do have matching name.
+            scan_signal = scan_by_ssid.get(network.ssid)
+        is_active = network.active or network.ssid == active_name
+        if is_active:
+            in_range = True
+            signal = scan_signal if scan_signal is not None else active_signal
+        elif scan_signal is not None:
+            in_range = True
+            signal = scan_signal
+        else:
+            in_range = False
+            signal = 0
+        networks.append(
+            {
+                "name": network.ssid,
+                "ssid": network.ssid,
+                "active": network.active,
+                "in_range": in_range,
+                "signal": signal,
+            }
+        )
     return jsonify(networks)
 
 

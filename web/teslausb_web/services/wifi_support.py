@@ -372,6 +372,36 @@ def saved_connection_names(run: RunCommand) -> set[str]:
     }
 
 
+def saved_wifi_profile_ssids(run: RunCommand) -> dict[str, str]:
+    """Map nmcli wifi-profile NAME → its actual 802-11 SSID.
+
+    The NM `connection.id` (the profile NAME we list in the UI and
+    pass to `nmcli connection up/delete`) is user-editable and is
+    not required to match the on-air SSID. A scan, however, only
+    ever returns the on-air SSID. To decide whether a saved network
+    is currently in range we therefore need the SSID, not the
+    profile name.
+
+    Profiles whose SSID cannot be read are mapped to their own name
+    as a safe fallback (matches pre-fix behaviour for them).
+    """
+    profiles: dict[str, str] = {}
+    for name in saved_connection_names(run):
+        result = run(
+            "nmcli",
+            ["-g", "802-11-wireless.ssid", "connection", "show", name],
+            timeout=_SHORT_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            profiles[name] = name
+            continue
+        # nmcli `-g` returns the bare value followed by a newline;
+        # if the field is unset it returns an empty line.
+        ssid = result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else ""
+        profiles[name] = ssid or name
+    return profiles
+
+
 def bring_ap_up(
     run: RunCommand,
     *,

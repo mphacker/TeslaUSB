@@ -17,7 +17,7 @@ from teslausb_web.blueprints.captive_portal import (
     _wants_json_response,
 )
 from teslausb_web.config import FeaturesSection, PathsSection, WebConfig, WebSection
-from teslausb_web.services.wifi_service import WifiService
+from teslausb_web.services.wifi_service import WifiError, WifiService
 
 _XHR = {"X-Requested-With": "XMLHttpRequest"}
 
@@ -222,6 +222,107 @@ def test_wifi_networks_endpoint_translates_error(client, service) -> None:
         response = client.get("/settings/wifi/networks")
     assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
     assert response.get_json()["error"] == "Internal server error"
+
+
+def test_api_wifi_saved_marks_in_range_from_scan(client, service) -> None:
+    saved = [
+        MagicMock(ssid="HomeNet", security="WPA2", has_passphrase=True, active=True),
+        MagicMock(ssid="GuestNet", security="WPA2", has_passphrase=True, active=False),
+        MagicMock(ssid="GoneNet", security="WPA2", has_passphrase=True, active=False),
+    ]
+    status = MagicMock(
+        connected=True,
+        current_ssid="HomeNet",
+        signal_strength=78,
+        ip_address="192.168.1.50",
+        ap_mode=MagicMock(active=False),
+        saved_networks=saved,
+    )
+    scan = [
+        MagicMock(ssid="HomeNet", signal_strength=70),
+        MagicMock(ssid="HomeNet", signal_strength=82),  # stronger band, should win
+        MagicMock(ssid="GuestNet", signal_strength=45),
+        MagicMock(ssid="StrangerNet", signal_strength=60),
+    ]
+    with (
+        patch.object(service, "get_status", return_value=status),
+        patch.object(service, "list_available_networks", return_value=scan),
+        patch.object(service, "saved_wifi_profile_ssids", return_value={}),
+    ):
+        response = client.get("/api/wifi/saved")
+    assert response.status_code == HTTPStatus.OK
+    payload = {row["ssid"]: row for row in response.get_json()}
+    # Active connection: in_range True, signal from strongest scan entry.
+    assert payload["HomeNet"]["in_range"] is True
+    assert payload["HomeNet"]["active"] is True
+    assert payload["HomeNet"]["signal"] == 82
+    # Saved + visible but not connected: in_range True with scan signal.
+    assert payload["GuestNet"]["in_range"] is True
+    assert payload["GuestNet"]["signal"] == 45
+    # Saved but not in scan: in_range False, signal 0.
+    assert payload["GoneNet"]["in_range"] is False
+    assert payload["GoneNet"]["signal"] == 0
+
+
+def test_api_wifi_saved_resolves_profile_name_to_air_ssid(client, service) -> None:
+    """NM profile id may differ from broadcast SSID (e.g. WiFi-Trez/Trez)."""
+    saved = [
+        MagicMock(ssid="WiFi-Trez", security="WPA2", has_passphrase=True, active=False),
+        MagicMock(ssid="WiFi-Trez_EXT", security="WPA2", has_passphrase=True, active=True),
+    ]
+    status = MagicMock(
+        connected=True,
+        current_ssid="WiFi-Trez_EXT",
+        signal_strength=78,
+        ip_address="192.168.1.50",
+        ap_mode=MagicMock(active=False),
+        saved_networks=saved,
+    )
+    # Scan returns the on-air SSIDs, not profile names.
+    scan = [
+        MagicMock(ssid="Trez", signal_strength=55),
+        MagicMock(ssid="Trez_EXT", signal_strength=82),
+    ]
+    profile_map = {
+        "WiFi-Trez": "Trez",
+        "WiFi-Trez_EXT": "Trez_EXT",
+    }
+    with (
+        patch.object(service, "get_status", return_value=status),
+        patch.object(service, "list_available_networks", return_value=scan),
+        patch.object(service, "saved_wifi_profile_ssids", return_value=profile_map),
+    ):
+        response = client.get("/api/wifi/saved")
+    payload = {row["ssid"]: row for row in response.get_json()}
+    assert payload["WiFi-Trez"]["in_range"] is True
+    assert payload["WiFi-Trez"]["signal"] == 55
+    assert payload["WiFi-Trez_EXT"]["in_range"] is True
+    assert payload["WiFi-Trez_EXT"]["signal"] == 82
+
+
+def test_api_wifi_saved_active_in_range_when_scan_unavailable(client, service) -> None:
+    saved = [MagicMock(ssid="HomeNet", security="WPA2", has_passphrase=True, active=True)]
+    status = MagicMock(
+        connected=True,
+        current_ssid="HomeNet",
+        signal_strength=78,
+        ip_address="192.168.1.50",
+        ap_mode=MagicMock(active=False),
+        saved_networks=saved,
+    )
+    with (
+        patch.object(service, "get_status", return_value=status),
+        patch.object(
+            service, "list_available_networks", side_effect=WifiError("scan unavailable")
+        ),
+        patch.object(service, "saved_wifi_profile_ssids", return_value={"HomeNet": "HomeNet"}),
+    ):
+        response = client.get("/api/wifi/saved")
+    payload = response.get_json()
+    assert response.status_code == HTTPStatus.OK
+    # Even with no scan, the actively connected SSID is in range.
+    assert payload[0]["in_range"] is True
+    assert payload[0]["signal"] == 78
 
 
 def test_connect_route_redirects_for_html(client, service) -> None:

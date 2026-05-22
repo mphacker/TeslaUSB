@@ -52,6 +52,7 @@ B1_AP_CONNECTION_NAME="teslausb-ap"
 B1_AP_CONNECTION_FILE="/etc/NetworkManager/system-connections/teslausb-ap.nmconnection"
 B1_AP_DISPATCHER_FILE="/etc/NetworkManager/dispatcher.d/95-teslausb-ap"
 B1_AP_DNSMASQ_FILE="/etc/NetworkManager/dnsmasq-shared.d/teslausb-captive.conf"
+B1_WIFI_SCAN_POLKIT_FILE="/etc/polkit-1/rules.d/50-teslausb-wifi-scan.rules"
 B1_DHCPCD_CONF="/etc/dhcpcd.conf"
 
 # Files we may write — tracked so 6.11 (uninstall.sh) knows exactly
@@ -60,6 +61,7 @@ B1_NETWORK_TARGETS=(
   "${B1_AP_CONNECTION_FILE}"
   "${B1_AP_DISPATCHER_FILE}"
   "${B1_AP_DNSMASQ_FILE}"
+  "${B1_WIFI_SCAN_POLKIT_FILE}"
 )
 
 # Placeholder PSK. The operator/setup edits
@@ -71,7 +73,7 @@ B1_AP_PSK_PLACEHOLDER="__SET_VIA_TESLAUSB_WEB_TOML__"
 
 export B1_AP_SSID B1_AP_CONNECTION_NAME B1_AP_CONNECTION_FILE \
        B1_AP_DISPATCHER_FILE B1_AP_DNSMASQ_FILE B1_DHCPCD_CONF \
-       B1_NETWORK_TARGETS B1_AP_PSK_PLACEHOLDER
+       B1_WIFI_SCAN_POLKIT_FILE B1_NETWORK_TARGETS B1_AP_PSK_PLACEHOLDER
 
 # --------------------------------------------------------------------
 # File bodies — constant heredocs at file scope so reviewers + the
@@ -198,6 +200,31 @@ read -r -d '' B1_AP_DNSMASQ_BODY <<'AP_DNSMASQ' || true
 address=/#/192.168.4.1
 dhcp-range=192.168.4.2,192.168.4.50,255.255.255.0,1h
 AP_DNSMASQ
+
+read -r -d '' B1_WIFI_SCAN_POLKIT_BODY <<'WIFI_POLKIT' || true
+// TeslaUSB B-1 polkit rule — allows the `pi` user (which the
+// teslausb-web Flask app runs as) to trigger Wi-Fi scans and toggle
+// the radio without an interactive polkit prompt. Without this rule
+// `nmcli device wifi rescan` fails with "not authorized" when run
+// by `pi`, NetworkManager's cached wifi list collapses to only the
+// associated AP within ~1 min of association, and the
+// /api/wifi/saved endpoint then reports every non-active saved
+// network as "Not in range" even when it's clearly visible.
+//
+// Limited to scan + radio-toggle actions; connection
+// create / modify / activate still flow through the existing nmcli
+// paths the captive_portal blueprint already uses (those operations
+// are infrequent and don't gate the dashboard rendering).
+//
+// Managed by setup-lib/05-network.sh — DO NOT edit in place.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "pi" &&
+        (action.id == "org.freedesktop.NetworkManager.wifi.scan" ||
+         action.id == "org.freedesktop.NetworkManager.enable-disable-wifi")) {
+        return polkit.Result.YES;
+    }
+});
+WIFI_POLKIT
 
 # --------------------------------------------------------------------
 # Helpers
@@ -394,6 +421,13 @@ b1_step_05() {
   # 5) install dnsmasq-shared drop-in (0644 — read by NM's bundled
   #    dnsmasq which runs as root, no secret content here).
   _b1_install_string "${B1_AP_DNSMASQ_BODY}" "${B1_AP_DNSMASQ_FILE}" 0644 \
+    || return 1
+
+  # 6) install polkit rule allowing `pi` to trigger wifi rescans
+  #    (0644 — polkitd reads as root; world-readable is fine and
+  #    matches the rest of /etc/polkit-1/rules.d/*.rules). Polkit
+  #    re-reads rules on file change, no daemon reload needed.
+  _b1_install_string "${B1_WIFI_SCAN_POLKIT_BODY}" "${B1_WIFI_SCAN_POLKIT_FILE}" 0644 \
     || return 1
 
   # We deliberately do NOT:

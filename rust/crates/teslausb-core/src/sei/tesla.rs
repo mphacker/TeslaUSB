@@ -83,6 +83,22 @@ impl From<u32> for Gear {
     }
 }
 
+impl Gear {
+    /// Stable lowercase identifier for persistence. The values
+    /// match the historical Python mapping enum so existing
+    /// queries / dashboards keep working.
+    #[must_use]
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Park => "PARK",
+            Self::Drive => "DRIVE",
+            Self::Reverse => "REVERSE",
+            Self::Neutral => "NEUTRAL",
+            Self::Unknown(_) => "UNKNOWN",
+        }
+    }
+}
+
 /// Tesla autopilot-state enum. Matches the four
 /// `AutopilotState` variants in `dashcam.proto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -108,6 +124,20 @@ impl From<u32> for AutopilotState {
             2 => Self::Autosteer,
             3 => Self::Tacc,
             other => Self::Unknown(other),
+        }
+    }
+}
+
+impl AutopilotState {
+    /// Stable lowercase identifier for persistence.
+    #[must_use]
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::None => "NONE",
+            Self::SelfDriving => "SELF_DRIVING",
+            Self::Autosteer => "AUTOSTEER",
+            Self::Tacc => "TACC",
+            Self::Unknown(_) => "UNKNOWN",
         }
     }
 }

@@ -479,3 +479,173 @@ fn waypoints_persist_with_correct_fields() {
     assert_eq!(speed, 27.0);
     assert_eq!(hdg, 180.5);
 }
+
+#[test]
+fn extended_telemetry_columns_round_trip() {
+    use teslausb_core::sei::tesla::{AutopilotState, Gear};
+    let mut store = Store::open_in_memory().unwrap();
+    let msg = SeiMessage {
+        latitude_deg: 1.0,
+        longitude_deg: 2.0,
+        vehicle_speed_mps: 30.0,
+        heading_deg: 90.0,
+        linear_acceleration_mps2_x: 0.1,
+        linear_acceleration_mps2_y: -4.5,
+        linear_acceleration_mps2_z: 9.8,
+        gear_state: Gear::Drive,
+        steering_wheel_angle: 0.5,
+        brake_applied: true,
+        blinker_on_left: false,
+        blinker_on_right: true,
+        autopilot_state: AutopilotState::Autosteer,
+        ..SeiMessage::default()
+    };
+    store
+        .record_clip(
+            Bucket::Recent,
+            Path::new("RecentClips/ext.mp4"),
+            &walk(None, vec![wp(0, 0.0, msg)]),
+        )
+        .unwrap();
+    #[allow(clippy::items_after_statements)]
+    type Row = (f64, f64, f64, String, f64, i64, i64, i64, String);
+    let row: Row = store
+        .conn
+        .query_row(
+            "SELECT acceleration_x, acceleration_y, acceleration_z,
+                    gear, steering_angle,
+                    brake_applied, blinker_on_left, blinker_on_right,
+                    autopilot_state
+             FROM waypoints",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, 0.1);
+    assert_eq!(row.1, -4.5);
+    assert_eq!(row.2, 9.8);
+    assert_eq!(row.3, "DRIVE");
+    assert!((row.4 - 0.5).abs() < 1e-6);
+    assert_eq!(row.5, 1);
+    assert_eq!(row.6, 0);
+    assert_eq!(row.7, 1);
+    assert_eq!(row.8, "AUTOSTEER");
+}
+
+#[test]
+fn multiple_waypoints_per_frame_index_are_persisted() {
+    // Regression: Tesla emits consecutive SEI NAL units between
+    // two slices, so the walker yields waypoints with the same
+    // frame_index. Before v2 the composite PK (clip_id,
+    // frame_index) caused the second INSERT to fail and the
+    // whole clip's waypoints were rolled back. Now both rows
+    // must persist (the synthetic `id` PK disambiguates).
+    let mut store = Store::open_in_memory().unwrap();
+    let msg1 = SeiMessage {
+        latitude_deg: 1.0,
+        longitude_deg: 2.0,
+        ..SeiMessage::default()
+    };
+    let msg2 = SeiMessage {
+        latitude_deg: 1.0,
+        longitude_deg: 2.000_01,
+        ..SeiMessage::default()
+    };
+    store
+        .record_clip(
+            Bucket::Recent,
+            Path::new("RecentClips/dup.mp4"),
+            &walk(None, vec![wp(7, 100.0, msg1), wp(7, 100.0, msg2)]),
+        )
+        .unwrap();
+    let n: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM waypoints WHERE frame_index = 7",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+}
+
+#[test]
+fn migration_from_v1_preserves_existing_waypoints() {
+    // Stand up a v1-shaped DB (composite PK on waypoints,
+    // 7 columns) with real rows, then replay the v1->v2
+    // migration SQL and assert: existing rows survive
+    // verbatim, the new columns exist and default to NULL,
+    // and `frame_index` collisions are now allowed.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         CREATE TABLE clips (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            relative_path TEXT NOT NULL UNIQUE,
+            bucket TEXT NOT NULL,
+            clip_started_utc INTEGER,
+            indexed_at_utc INTEGER NOT NULL,
+            waypoint_count INTEGER NOT NULL DEFAULT 0,
+            gps_waypoint_count INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE waypoints (
+            clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+            frame_index INTEGER NOT NULL,
+            timestamp_ms REAL NOT NULL,
+            latitude_deg REAL NOT NULL,
+            longitude_deg REAL NOT NULL,
+            speed_mps REAL NOT NULL,
+            heading_deg REAL NOT NULL,
+            PRIMARY KEY (clip_id, frame_index)
+         );
+         INSERT INTO clips (relative_path, bucket, indexed_at_utc)
+            VALUES ('a.mp4', 'recent', 100);
+         INSERT INTO waypoints (clip_id, frame_index, timestamp_ms,
+                                latitude_deg, longitude_deg, speed_mps, heading_deg)
+            VALUES (1, 5, 33.3, 1.0, 2.0, 12.0, 90.0);",
+    )
+    .unwrap();
+    conn.execute_batch(super::schema::MIGRATIONS[1]).unwrap();
+    let (clip_id, frame, lat): (i64, i64, f64) = conn
+        .query_row(
+            "SELECT clip_id, frame_index, latitude_deg FROM waypoints",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(clip_id, 1);
+    assert_eq!(frame, 5);
+    assert_eq!(lat, 1.0);
+    let acc_x: Option<f64> = conn
+        .query_row("SELECT acceleration_x FROM waypoints", [], |r| r.get(0))
+        .unwrap();
+    assert!(acc_x.is_none());
+    // Two rows with the same (clip_id, frame_index) are now legal.
+    conn.execute(
+        "INSERT INTO waypoints (clip_id, frame_index, timestamp_ms,
+            latitude_deg, longitude_deg, speed_mps, heading_deg)
+         VALUES (1, 5, 33.3, 1.0, 2.0, 12.0, 90.0)",
+        params![],
+    )
+    .unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM waypoints WHERE frame_index = 5",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+}

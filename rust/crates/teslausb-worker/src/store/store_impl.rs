@@ -219,18 +219,39 @@ impl Store {
             let mut stmt = tx.prepare(
                 "INSERT INTO waypoints (
                     clip_id, frame_index, timestamp_ms,
-                    latitude_deg, longitude_deg, speed_mps, heading_deg
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    latitude_deg, longitude_deg, speed_mps, heading_deg,
+                    acceleration_x, acceleration_y, acceleration_z,
+                    gear, steering_angle,
+                    brake_applied, blinker_on_left, blinker_on_right,
+                    autopilot_state
+                 ) VALUES (
+                    ?1, ?2, ?3,
+                    ?4, ?5, ?6, ?7,
+                    ?8, ?9, ?10,
+                    ?11, ?12,
+                    ?13, ?14, ?15,
+                    ?16
+                 )",
             )?;
             for w in &walk.waypoints {
+                let m = &w.message;
                 stmt.execute(params![
                     clip_id,
                     w.frame_index,
                     w.timestamp_ms,
-                    w.message.latitude_deg,
-                    w.message.longitude_deg,
-                    f64::from(w.message.vehicle_speed_mps),
-                    w.message.heading_deg,
+                    m.latitude_deg,
+                    m.longitude_deg,
+                    f64::from(m.vehicle_speed_mps),
+                    m.heading_deg,
+                    m.linear_acceleration_mps2_x,
+                    m.linear_acceleration_mps2_y,
+                    m.linear_acceleration_mps2_z,
+                    m.gear_state.as_db_str(),
+                    f64::from(m.steering_wheel_angle),
+                    i64::from(m.brake_applied),
+                    i64::from(m.blinker_on_left),
+                    i64::from(m.blinker_on_right),
+                    m.autopilot_state.as_db_str(),
                 ])?;
             }
         }

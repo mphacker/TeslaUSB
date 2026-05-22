@@ -40,8 +40,54 @@ CREATE TABLE waypoints (
 );
 CREATE INDEX waypoints_by_clip ON waypoints(clip_id);
 ",
+    // v1 -> v2: telemetry expansion + PK rebuild.
+    //
+    // Adds 8 SEI-derived columns (acceleration_x/y/z, gear,
+    // steering_angle, brake_applied, blinker_on_left/right,
+    // autopilot_state) so the mapping layer can derive harsh-
+    // brake / sharp-turn / blinker analytics directly from
+    // this DB — no second database, no second SEI parser.
+    //
+    // Also replaces the `(clip_id, frame_index)` primary key
+    // with a synthetic `id` so the walker can persist multiple
+    // SEI NAL units that share a frame_index (Tesla emits 2+
+    // consecutive SEI NALs without an intervening slice; the
+    // old PK collision caused the entire clip's waypoints to
+    // be rolled back). Existing rows are migrated verbatim.
+    "\
+CREATE TABLE waypoints_v2 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    frame_index INTEGER NOT NULL,
+    timestamp_ms REAL NOT NULL,
+    latitude_deg REAL NOT NULL,
+    longitude_deg REAL NOT NULL,
+    speed_mps REAL NOT NULL,
+    heading_deg REAL NOT NULL,
+    acceleration_x REAL,
+    acceleration_y REAL,
+    acceleration_z REAL,
+    gear TEXT,
+    steering_angle REAL,
+    brake_applied INTEGER NOT NULL DEFAULT 0,
+    blinker_on_left INTEGER NOT NULL DEFAULT 0,
+    blinker_on_right INTEGER NOT NULL DEFAULT 0,
+    autopilot_state TEXT
+);
+INSERT INTO waypoints_v2 (
+    clip_id, frame_index, timestamp_ms,
+    latitude_deg, longitude_deg, speed_mps, heading_deg
+)
+SELECT clip_id, frame_index, timestamp_ms,
+       latitude_deg, longitude_deg, speed_mps, heading_deg
+  FROM waypoints;
+DROP TABLE waypoints;
+ALTER TABLE waypoints_v2 RENAME TO waypoints;
+CREATE INDEX waypoints_by_clip ON waypoints(clip_id);
+CREATE INDEX waypoints_by_clip_frame ON waypoints(clip_id, frame_index);
+",
 ];
 
 /// Current schema version. Bump when appending to the
 /// `MIGRATIONS` constant.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;

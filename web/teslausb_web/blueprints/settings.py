@@ -292,8 +292,30 @@ def configure_ap() -> ResponseReturnValue:
 
 @settings_dashboard_bp.route("/settings/force_ap", methods=["POST"])
 def force_ap() -> ResponseReturnValue:
-    """Stub: v1 AP force on/off endpoint (B-1 AP managed via WiFi service)."""
-    return _stub_save("AP force mode updated via WiFi service (B-1 stub)")
+    """Start or stop the AP profile on demand.
+
+    The form ships `mode=on` (Start AP Now) or `mode=off` (Stop AP).
+    Any other value is treated as an error; we deliberately do not
+    invent a third state.
+    """
+    mode = (request.form.get("mode") or "").strip().lower()
+    if mode not in {"on", "off"}:
+        flash(f"Unsupported AP mode {mode!r}; expected 'on' or 'off'.", "error")
+        return _redirect_to_index()
+    try:
+        _get_wifi_service().set_ap_mode(enabled=(mode == "on"))
+    except WifiConfigError as exc:
+        flash(f"Invalid AP configuration: {exc}", "error")
+        return _redirect_to_index()
+    except WifiError as exc:
+        logger.warning("Failed to %s AP: %s", "start" if mode == "on" else "stop", exc)
+        flash(f"Failed to {'start' if mode == 'on' else 'stop'} AP: {exc}", "error")
+        return _redirect_to_index()
+    flash(
+        "Access point started." if mode == "on" else "Access point stopped.",
+        "success",
+    )
+    return _redirect_to_index()
 
 
 @settings_dashboard_bp.route("/settings/save/mapping", methods=["POST"])

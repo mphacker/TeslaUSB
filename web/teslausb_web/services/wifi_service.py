@@ -293,13 +293,9 @@ class WifiService:
         new_config.validate()
         with self._lock:
             try:
-                was_active = self._current_ap_mode(
-                    connection_name=self._current_connection_details()[0]
-                ).active
+                was_active = self._current_ap_mode(connection_name=None).active
             except WifiError as exc:
-                logger.warning(
-                    "Cannot probe live AP state before credential update: %s", exc
-                )
+                logger.warning("Cannot probe live AP state before credential update: %s", exc)
                 was_active = False
             self._state_store.save_ap_config(ssid=clean_ssid, passphrase=passphrase)
             self._config = new_config
@@ -312,13 +308,9 @@ class WifiService:
                     logger.warning("Failed to bring AP down for credential rotation: %s", exc)
                 self._bring_ap_up()
             try:
-                return self._current_ap_mode(
-                    connection_name=self._current_connection_details()[0]
-                )
+                return self._current_ap_mode(connection_name=None)
             except WifiError as exc:
-                logger.warning(
-                    "Saved AP credentials but cannot read live AP state: %s", exc
-                )
+                logger.warning("Saved AP credentials but cannot read live AP state: %s", exc)
                 return self._current_ap_mode(connection_name=None)
 
     def _saved_networks_snapshot(self, *, active_ssid: str | None) -> tuple[SavedWifiNetwork, ...]:
@@ -349,11 +341,17 @@ class WifiService:
         return current_connection_iwconfig(self._run, ap_connection_name=self._ap_connection_name)
 
     def _current_ap_mode(self, *, connection_name: str | None) -> ApMode:
+        # `connection_name` is retained for API stability (the NM-based
+        # AP path used it). The hostapd-based AP runs on a virtual
+        # interface and is detected via PID-file probe instead.
+        del connection_name
+        from teslausb_web.services import wifi_hostapd  # noqa: PLC0415
+
         state = self._load_ap_state()
         restore_deadline = _parse_datetime(state.get("restore_deadline"))
         return ApMode(
             requested_enabled=bool(state.get("requested_enabled", False)),
-            active=connection_name == self._ap_connection_name,
+            active=wifi_hostapd.is_ap_running(),
             ssid=self._config.ap_ssid,
             passphrase_configured=bool(self._config.ap_passphrase),
             restore_deadline=restore_deadline,
@@ -399,7 +397,7 @@ class WifiService:
             self._run,
             config=self._config,
             ap_connection_name=self._ap_connection_name,
-            existing_connections=self._saved_connection_names(),
+            existing_connections=set(),
         )
 
     def _bring_ap_down(self) -> None:

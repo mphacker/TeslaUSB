@@ -470,18 +470,18 @@ def test_set_ap_mode_disables_and_clears_timer(service: WifiService) -> None:
     schedule_mock.assert_called_once_with(None)
 
 
-def test_bring_ap_up_creates_profile_when_missing(service: WifiService) -> None:
-    with (
-        patch.object(service, "_saved_connection_names", return_value=set()),
-        patch.object(service, "_run", return_value=_completed()) as run_mock,
-    ):
+def test_bring_ap_up_invokes_hostapd_start(service: WifiService) -> None:
+    with patch("teslausb_web.services.wifi_hostapd.start_ap") as start_mock:
         service._bring_ap_up()
-    assert run_mock.call_count == 3
+    start_mock.assert_called_once_with(
+        ssid=service._config.ap_ssid, passphrase=service._config.ap_passphrase
+    )
 
 
-def test_bring_ap_down_allows_inactive_code(service: WifiService) -> None:
-    with patch.object(service, "_run", return_value=_completed(returncode=10)):
+def test_bring_ap_down_invokes_hostapd_stop(service: WifiService) -> None:
+    with patch("teslausb_web.services.wifi_hostapd.stop_ap") as stop_mock:
         service._bring_ap_down()
+    stop_mock.assert_called_once()
 
 
 def test_restore_ap_if_needed_enables_ap_when_offline(service: WifiService) -> None:
@@ -675,7 +675,8 @@ def test_current_ap_mode_uses_state_file(service: WifiService, config: WifiConfi
         '{"requested_enabled": true, "restore_deadline": "2025-01-01T00:00:00+00:00"}',
         encoding="utf-8",
     )
-    ap_mode = service._current_ap_mode(connection_name="TeslaUSB-Setup AP")
+    with patch("teslausb_web.services.wifi_hostapd.is_ap_running", return_value=True):
+        ap_mode = service._current_ap_mode(connection_name=None)
     assert ap_mode.requested_enabled is True
     assert ap_mode.active is True
     assert ap_mode.restore_deadline is not None
@@ -720,19 +721,33 @@ def test_saved_connection_names_raises_on_nmcli_failure(service: WifiService) ->
             service._saved_connection_names()
 
 
-def test_bring_ap_up_reuses_existing_profile_for_open_ap(service: WifiService) -> None:
-    with (
-        patch.object(service, "_saved_connection_names", return_value={"TeslaUSB-Setup AP"}),
-        patch.object(service, "_run", return_value=_completed()) as run_mock,
+def test_bring_ap_up_passes_persisted_credentials(config: WifiConfig, tmp_path: Path) -> None:
+    config.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    override_path = tmp_path / "wifi_credentials_ap_config.json"
+    override_path.write_text(
+        json.dumps({"ssid": "OverrideAP", "passphrase": "overridepass"}),
+        encoding="utf-8",
+    )
+    with patch.object(
+        WifiService,
+        "_load_ap_state",
+        return_value={"requested_enabled": False, "restore_deadline": None},
     ):
-        service._bring_ap_up()
-    assert run_mock.call_count == 2
+        svc = WifiService(config)
+    with patch("teslausb_web.services.wifi_hostapd.start_ap") as start_mock:
+        svc._bring_ap_up()
+    start_mock.assert_called_once_with(ssid="OverrideAP", passphrase="overridepass")
 
 
-def test_bring_ap_down_raises_when_nmcli_fails(service: WifiService) -> None:
-    with patch.object(service, "_run", return_value=_completed(returncode=4, stderr="busy")):
-        with pytest.raises(WifiCommandError, match="disable AP mode"):
-            service._bring_ap_down()
+def test_bring_ap_down_propagates_hostapd_errors(service: WifiService) -> None:
+    with (
+        patch(
+            "teslausb_web.services.wifi_hostapd.stop_ap",
+            side_effect=WifiCommandError("boom"),
+        ),
+        pytest.raises(WifiCommandError, match="boom"),
+    ):
+        service._bring_ap_down()
 
 
 def test_load_credentials_raises_for_non_list_payload(
@@ -796,9 +811,7 @@ def test_update_ap_credentials_persists_and_updates_config(
     ):
         svc.update_ap_credentials(ssid="MyNet", passphrase="hunter22")
     assert svc.ap_credentials_for_form() == ("MyNet", "hunter22")
-    saved = json.loads(
-        (tmp_path / "wifi_credentials_ap_config.json").read_text(encoding="utf-8")
-    )
+    saved = json.loads((tmp_path / "wifi_credentials_ap_config.json").read_text(encoding="utf-8"))
     assert saved == {"ssid": "MyNet", "passphrase": "hunter22"}
 
 
@@ -812,9 +825,7 @@ def test_update_ap_credentials_rejects_blank_ssid(service: WifiService) -> None:
         service.update_ap_credentials(ssid="   ", passphrase="hunter22")
 
 
-def test_update_ap_credentials_bounces_active_ap(
-    config: WifiConfig, tmp_path: Path
-) -> None:
+def test_update_ap_credentials_bounces_active_ap(config: WifiConfig, tmp_path: Path) -> None:
     config.credentials_path.parent.mkdir(parents=True, exist_ok=True)
     with patch.object(
         WifiService,
@@ -823,10 +834,9 @@ def test_update_ap_credentials_bounces_active_ap(
     ):
         svc = WifiService(config)
     with (
-        patch.object(
-            svc,
-            "_current_connection_details",
-            return_value=("TeslaUSB-Setup AP", "TeslaUSB-Setup", -50, "10.0.0.1", True),
+        patch(
+            "teslausb_web.services.wifi_hostapd.is_ap_running",
+            return_value=True,
         ),
         patch.object(svc, "_bring_ap_down") as down,
         patch.object(svc, "_bring_ap_up") as up,
@@ -836,9 +846,7 @@ def test_update_ap_credentials_bounces_active_ap(
     up.assert_called_once()
 
 
-def test_persisted_ap_override_applied_at_init(
-    config: WifiConfig, tmp_path: Path
-) -> None:
+def test_persisted_ap_override_applied_at_init(config: WifiConfig, tmp_path: Path) -> None:
     override_path = tmp_path / "wifi_credentials_ap_config.json"
     override_path.parent.mkdir(parents=True, exist_ok=True)
     override_path.write_text(

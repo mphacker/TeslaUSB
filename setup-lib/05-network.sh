@@ -53,6 +53,8 @@ B1_AP_CONNECTION_FILE="/etc/NetworkManager/system-connections/teslausb-ap.nmconn
 B1_AP_DISPATCHER_FILE="/etc/NetworkManager/dispatcher.d/95-teslausb-ap"
 B1_AP_DNSMASQ_FILE="/etc/NetworkManager/dnsmasq-shared.d/teslausb-captive.conf"
 B1_WIFI_SCAN_POLKIT_FILE="/etc/polkit-1/rules.d/50-teslausb-wifi-scan.rules"
+B1_AP_SUDOERS_FILE="/etc/sudoers.d/teslausb-ap"
+B1_AP_TMPFILES_FILE="/etc/tmpfiles.d/teslausb-ap.conf"
 B1_DHCPCD_CONF="/etc/dhcpcd.conf"
 
 # Files we may write — tracked so 6.11 (uninstall.sh) knows exactly
@@ -62,6 +64,8 @@ B1_NETWORK_TARGETS=(
   "${B1_AP_DISPATCHER_FILE}"
   "${B1_AP_DNSMASQ_FILE}"
   "${B1_WIFI_SCAN_POLKIT_FILE}"
+  "${B1_AP_SUDOERS_FILE}"
+  "${B1_AP_TMPFILES_FILE}"
 )
 
 # Placeholder PSK. The operator/setup edits
@@ -73,7 +77,8 @@ B1_AP_PSK_PLACEHOLDER="__SET_VIA_TESLAUSB_WEB_TOML__"
 
 export B1_AP_SSID B1_AP_CONNECTION_NAME B1_AP_CONNECTION_FILE \
        B1_AP_DISPATCHER_FILE B1_AP_DNSMASQ_FILE B1_DHCPCD_CONF \
-       B1_WIFI_SCAN_POLKIT_FILE B1_NETWORK_TARGETS B1_AP_PSK_PLACEHOLDER
+       B1_WIFI_SCAN_POLKIT_FILE B1_AP_SUDOERS_FILE B1_AP_TMPFILES_FILE \
+       B1_NETWORK_TARGETS B1_AP_PSK_PLACEHOLDER
 
 # --------------------------------------------------------------------
 # File bodies — constant heredocs at file scope so reviewers + the
@@ -211,10 +216,10 @@ read -r -d '' B1_WIFI_SCAN_POLKIT_BODY <<'WIFI_POLKIT' || true
 // /api/wifi/saved endpoint then reports every non-active saved
 // network as "Not in range" even when it's clearly visible.
 //
-// Limited to scan + radio-toggle actions; connection
-// create / modify / activate still flow through the existing nmcli
-// paths the captive_portal blueprint already uses (those operations
-// are infrequent and don't gate the dashboard rendering).
+// Limited to scan + radio-toggle actions; the on-board AP profile is
+// managed via hostapd + dnsmasq on a virtual wlan0_ap interface
+// (see /etc/sudoers.d/teslausb-ap and the wifi_hostapd service
+// module) so NetworkManager never touches it.
 //
 // Managed by setup-lib/05-network.sh — DO NOT edit in place.
 polkit.addRule(function(action, subject) {
@@ -225,6 +230,54 @@ polkit.addRule(function(action, subject) {
     }
 });
 WIFI_POLKIT
+
+# Sudoers allowlist for the hostapd-based on-board AP. Lets the `pi`
+# user (teslausb-web runs as pi) bring the virtual wlan0_ap interface
+# up, start hostapd + dnsmasq, and tear them back down — WITHOUT
+# granting blanket NOPASSWD. Mode MUST be 0440 (any other mode and
+# sudo refuses to load the file). visudo -c -f validates the syntax
+# before install; a malformed sudoers file under /etc/sudoers.d/ can
+# wedge ALL sudo on the host, including the dead-man reboot path, so
+# this is non-optional.
+read -r -d '' B1_AP_SUDOERS_BODY <<'AP_SUDO' || true
+# TeslaUSB B-1 — privileged commands for hostapd-based on-board AP.
+# Managed by setup-lib/05-network.sh. DO NOT edit in place — re-run
+# `setup.sh --only 05` after editing the heredoc.
+#
+# Single-radio Pi Zero 2 W: bringing the AP up via NetworkManager on
+# wlan0 deactivates the active WiFi client (and the SSH session
+# riding it). We instead run hostapd + dnsmasq on a virtual
+# wlan0_ap interface (see web/teslausb_web/services/wifi_hostapd.py).
+# Scope is intentionally narrow — no shell wildcards on commands,
+# only the precise binaries + arg shapes the service module emits.
+Defaults!TESLAUSB_AP !requiretty
+Cmnd_Alias TESLAUSB_AP = \
+    /sbin/iw dev wlan0 interface add wlan0_ap type __ap, \
+    /sbin/iw dev wlan0_ap del, \
+    /sbin/ip link set wlan0_ap up, \
+    /sbin/ip link set wlan0_ap down, \
+    /sbin/ip addr flush dev wlan0_ap, \
+    /sbin/ip addr add 192.168.4.1/24 dev wlan0_ap, \
+    /usr/bin/nmcli device set wlan0_ap managed no, \
+    /usr/bin/nmcli device set wlan0_ap managed yes, \
+    /usr/sbin/hostapd -B -P /run/teslausb-ap/hostapd.pid /run/teslausb-ap/hostapd.conf, \
+    /usr/sbin/dnsmasq --conf-file=/run/teslausb-ap/dnsmasq.conf --pid-file=/run/teslausb-ap/dnsmasq.pid, \
+    /usr/bin/kill [0-9]*, \
+    /usr/bin/kill -[0-9]* [0-9]*
+pi ALL=(root) NOPASSWD: TESLAUSB_AP
+AP_SUDO
+
+# Runtime dir for the hostapd + dnsmasq conf + pid files. systemd-
+# tmpfiles re-creates it on every boot (/run is tmpfs) so the
+# wifi_hostapd service module can write the rendered configs as `pi`
+# without needing sudo just to mkdir.
+read -r -d '' B1_AP_TMPFILES_BODY <<'AP_TMPF' || true
+# TeslaUSB B-1 — runtime dir for hostapd/dnsmasq used by the on-board
+# AP. Owned by pi:pi so the teslausb-web service can write rendered
+# configs without needing sudo for the mkdir. Managed by
+# setup-lib/05-network.sh.
+d /run/teslausb-ap 0755 pi pi -
+AP_TMPF
 
 # --------------------------------------------------------------------
 # Helpers
@@ -339,6 +392,36 @@ _b1_validate_ap_connection() {
   b1_log "AP connection file validated: ${f} (mode=${mode} owner=${owner})"
 }
 
+# _b1_install_sudoers <content> <dst>
+#   Install a sudoers fragment at <dst> with mode 0440 root:root,
+#   AFTER validating syntax via `visudo -c -f` on a staged copy. A
+#   malformed sudoers file under /etc/sudoers.d/ wedges ALL sudo on
+#   the host (including the dead-man reboot path), so the validation
+#   gate is non-optional.
+_b1_install_sudoers() {
+  local content="$1"
+  local dst="$2"
+
+  local stage
+  stage="$(dirname "${BASH_SOURCE[0]}")/.b1-stage-sudoers-$$-${RANDOM}"
+  printf '%s' "${content}" > "${stage}"
+  # shellcheck disable=SC2064
+  trap "rm -f -- '${stage}'" RETURN
+
+  if command -v visudo >/dev/null 2>&1; then
+    if ! visudo -c -f "${stage}" >/dev/null 2>&1; then
+      b1_err "sudoers fragment failed visudo -c validation: ${dst}"
+      visudo -c -f "${stage}" || true
+      return 1
+    fi
+    b1_log "sudoers fragment passed visudo -c validation: ${dst}"
+  else
+    b1_warn "visudo not found — skipping syntax validation for ${dst}"
+  fi
+
+  _b1_install_string "${content}" "${dst}" 0440 || return 1
+}
+
 # _b1_handle_dhcpcd — if BOTH NetworkManager and dhcpcd are currently
 # active, this is the v1 stack still in charge. Back up the dhcpcd
 # config (one-shot) and disable+mask the unit so NM owns wlan0 on
@@ -429,6 +512,24 @@ b1_step_05() {
   #    re-reads rules on file change, no daemon reload needed.
   _b1_install_string "${B1_WIFI_SCAN_POLKIT_BODY}" "${B1_WIFI_SCAN_POLKIT_FILE}" 0644 \
     || return 1
+
+  # 7) install sudoers allowlist for the hostapd-based AP. visudo
+  #    validates syntax on the staged copy before install — a
+  #    malformed sudoers file under /etc/sudoers.d/ would wedge all
+  #    sudo on the host.
+  _b1_install_sudoers "${B1_AP_SUDOERS_BODY}" "${B1_AP_SUDOERS_FILE}" \
+    || return 1
+
+  # 8) install tmpfiles.d fragment that re-creates /run/teslausb-ap
+  #    owned by pi:pi on every boot. Apply it immediately so the AP
+  #    can come up later this boot without waiting for reboot.
+  _b1_install_string "${B1_AP_TMPFILES_BODY}" "${B1_AP_TMPFILES_FILE}" 0644 \
+    || return 1
+  if command -v systemd-tmpfiles >/dev/null 2>&1; then
+    b1_run systemd-tmpfiles --create "${B1_AP_TMPFILES_FILE}"
+  else
+    b1_warn "systemd-tmpfiles not found — /run/teslausb-ap will be created on next boot"
+  fi
 
   # We deliberately do NOT:
   #   * nmcli connection reload         (Phase 6.10)

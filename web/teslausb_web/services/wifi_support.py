@@ -65,7 +65,7 @@ class WifiBinaryPaths:
 class WifiConfig:
     credentials_path: Path
     ap_ssid: str = "TeslaUSB"
-    ap_passphrase: str = "tesla1234"
+    ap_passphrase: str = "tesla1234"  # noqa: S105 - operator-overridable default, not a secret
     ap_idle_timeout_seconds: int = 600
     binary_paths: WifiBinaryPaths = field(default_factory=WifiBinaryPaths)
 
@@ -409,66 +409,29 @@ def bring_ap_up(
     ap_connection_name: str,
     existing_connections: set[str],
 ) -> None:
-    if ap_connection_name not in existing_connections:
-        create = run(
-            "nmcli",
-            [
-                "connection",
-                "add",
-                "type",
-                "wifi",
-                "ifname",
-                _DEFAULT_INTERFACE,
-                "con-name",
-                ap_connection_name,
-                "ssid",
-                config.ap_ssid,
-            ],
-            timeout=_SHORT_TIMEOUT_SECONDS,
-        )
-        if create.returncode != 0:
-            raise WifiCommandError(_command_message("create AP profile", create))
-    modify = [
-        "connection",
-        "modify",
-        ap_connection_name,
-        "802-11-wireless.mode",
-        "ap",
-        "connection.autoconnect",
-        "no",
-        "ipv4.method",
-        "shared",
-        "ipv6.method",
-        "ignore",
-    ]
-    if config.ap_passphrase:
-        modify.extend(
-            [
-                "wifi-sec.key-mgmt",
-                "wpa-psk",
-                "wifi-sec.psk",
-                config.ap_passphrase,
-            ]
-        )
-    else:
-        modify.extend(["wifi-sec.key-mgmt", "none"])
-    update = run("nmcli", modify, timeout=_SHORT_TIMEOUT_SECONDS)
-    if update.returncode != 0:
-        raise WifiCommandError(_command_message("configure AP profile", update))
-    up = run(
-        "nmcli",
-        ["connection", "up", ap_connection_name, "ifname", _DEFAULT_INTERFACE],
-        timeout=_CONNECT_TIMEOUT_SECONDS,
-    )
-    if up.returncode != 0:
-        raise WifiCommandError(_command_message("enable AP mode", up))
+    """Start the on-board AP via hostapd on a virtual wlan0_ap interface.
+
+    Single-radio Pi Zero 2 W: bringing the AP up via NetworkManager on
+    wlan0 would deactivate the WiFi client association (and the SSH
+    session riding it). Instead we use the same approach v1 shipped —
+    a virtual `__ap` interface plus hostapd + dnsmasq — so STA and AP
+    coexist. NetworkManager is told to ignore the virtual interface.
+
+    `run`, `ap_connection_name`, and `existing_connections` are kept
+    in the signature for API stability; the hostapd path doesn't use
+    them.
+    """
+    del run, ap_connection_name, existing_connections
+    # Imported inline to avoid wifi_support → wifi_hostapd cycles at
+    # module-load time (wifi_hostapd imports WifiError from here).
+    from teslausb_web.services import wifi_hostapd  # noqa: PLC0415
+
+    wifi_hostapd.start_ap(ssid=config.ap_ssid, passphrase=config.ap_passphrase)
 
 
 def bring_ap_down(run: RunCommand, *, ap_connection_name: str) -> None:
-    down = run(
-        "nmcli",
-        ["connection", "down", ap_connection_name],
-        timeout=_SHORT_TIMEOUT_SECONDS,
-    )
-    if down.returncode not in {0, _NMCLI_INACTIVE_CONNECTION_RETURNCODE}:
-        raise WifiCommandError(_command_message("disable AP mode", down))
+    """Stop the on-board AP (hostapd + dnsmasq) and drop wlan0_ap."""
+    del run, ap_connection_name
+    from teslausb_web.services import wifi_hostapd  # noqa: PLC0415
+
+    wifi_hostapd.stop_ap()

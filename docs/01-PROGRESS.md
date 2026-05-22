@@ -1105,6 +1105,56 @@ or a freshly-flashed SD card before this phase begins. All ⏳.
 
 ---
 
+## Phase M — Mapping consolidation onto worker DB
+
+Driver: operator-visible failure 2026-05-22 — drove ~90 min,
+`/mapping` showed "no mapped drives yet". Investigation proved
+the Rust worker correctly indexed every drive (10,020 GPS-fixed
+waypoints across 550 clips in `index.sqlite3`) but the parallel
+Python `mapping.db` indexer's queue drainer was never implemented
+in Phase 5.13 — 447 files sat enqueued, `mapping.db` was stale.
+Operator (binding): *"I want it simple with no duplication of
+data or code. So rethink this again."* + *"don't take shortcuts.
+remember that."* Architecture decision locked in via ADR-0017:
+worker DB is the single source of truth; Python becomes a pure
+read layer.
+
+| Inc | Deliverable | Status |
+|---|---|---|
+| M.1 | Schema v2: 8 telemetry columns (acc_x/y/z, gear, steering_angle, brake_applied, blinker_l/r, autopilot_state) + synthetic `id` PK fix for UNIQUE-rollback bug | ✅ `cc9d121` |
+| M.2 | `record_clip` 16-column INSERT (all SeiMessage fields) | ✅ `cc9d121` |
+| M.3 | Synthetic PK lets multiple SEI NALs / frame persist | ✅ `cc9d121` (combined with M.1) |
+| M.4 | Release cross-build + clippy `-D warnings` clean + 25/25 store tests green | ✅ verified |
+| M.5 | Rewrite `services/mapping_queries.py` against worker DB (SQL CTE trip gap-grouping, derived events from waypoint deltas, structural sentry classification) | ⏳ |
+| M.6 | Trim `blueprints/mapping.py` (delete queue endpoints) | ⏳ |
+| M.7 | Delete obsolete Python files (12 mapping/*, mapping_migrations.py) | ⏳ |
+| M.8 | Trim `config.py` mapping section | ⏳ |
+| M.9 | Rewrite 5 mapping test files against synthetic worker DB fixture | ⏳ |
+| M.10 | ADR-0017 single-source-of-truth | ✅ |
+| M.11 | Update PROGRESS (this entry) + PLAN | 🔄 |
+| M.12 | Hardware deploy (re-arm dead-man, scp binary, verify migration, restart web) | ⏳ |
+| M.13 | `sudo rm /var/lib/teslausb/mapping.db` on Pi | ⏳ |
+| M.14 | Charter-review skill on full Phase M diff | ⏳ |
+| M.15 | Per-increment commits + push | 🔄 (M.1-M.4 + M.10 done) |
+
+**Side-effect bug fixes shipped in M.1:**
+- Composite PK `(clip_id, frame_index)` on waypoints rolled back
+  the whole INSERT transaction whenever Tesla emitted ≥ 2 SEI
+  NALs between two slices (yielding duplicate `frame_index`),
+  resulting in zero waypoints stored for the whole clip. Real
+  on-the-road data loss. Fixed by synthetic `id PRIMARY KEY
+  AUTOINCREMENT` + secondary index on `(clip_id, frame_index)`.
+
+**Diagnostic finding stored in ADR-0017:**
+- The Rust SEI walker is **lossless** — it decodes 100% of every
+  SEI NAL unit Tesla writes (verified 742/742, 261/261, 4/4 on
+  sampled drive-window clips). Tesla writes SEI **intermittently**;
+  some clips have 0 SEI NALs, others have thousands. Operator may
+  legitimately see clips on disk without a GPS trail on the map.
+  This is correct behaviour, not a bug.
+
+---
+
 ## Session log
 
 ### 2026-05-19 — Session start

@@ -89,6 +89,9 @@ B1_GADGET_DOWN_BIN="/usr/local/bin/teslausb-gadget-down"
 B1_PRESENT_USB_BIN="/usr/local/bin/teslausb-present-usb"
 B1_HIDE_USB_BIN="/usr/local/bin/teslausb-hide-usb"
 B1_WATCH_BIN="/usr/local/bin/teslausb-watch"
+# AC.3 — operator-driven LUN resize helper + narrow sudoers.
+B1_RESIZE_LUN_BIN="/usr/local/bin/teslausb-resize-lun"
+B1_RESIZE_SUDOERS="/etc/sudoers.d/teslausb-resize"
 
 B1_GADGET_TARGETS=(
   "${B1_NBD_MODPROBE_CONF}"
@@ -103,6 +106,8 @@ B1_GADGET_TARGETS=(
   "${B1_PRESENT_USB_BIN}"
   "${B1_HIDE_USB_BIN}"
   "${B1_WATCH_BIN}"
+  "${B1_RESIZE_LUN_BIN}"
+  "${B1_RESIZE_SUDOERS}"
 )
 
 export B1_GADGET_NAME B1_GADGET_VENDOR_ID B1_GADGET_PRODUCT_ID \
@@ -110,7 +115,8 @@ export B1_GADGET_NAME B1_GADGET_VENDOR_ID B1_GADGET_PRODUCT_ID \
   B1_NBD_MODPROBE_CONF B1_NBD_MODULES_LOAD B1_TESLAFAT_CONF_DIR \
   B1_TESLAFAT_CONF_0 B1_TESLAFAT_CONF_1 B1_TESLAUSB_CONF B1_NBD_ATTACH_UNIT \
   B1_USB_GADGET_UNIT B1_GADGET_UP_BIN B1_GADGET_DOWN_BIN \
-  B1_PRESENT_USB_BIN B1_HIDE_USB_BIN B1_WATCH_BIN B1_GADGET_TARGETS
+  B1_PRESENT_USB_BIN B1_HIDE_USB_BIN B1_WATCH_BIN \
+  B1_RESIZE_LUN_BIN B1_RESIZE_SUDOERS B1_GADGET_TARGETS
 
 # ---- Inline file body constants -----------------------------------
 
@@ -521,6 +527,152 @@ exec inotifywait -m -r --quiet \
   "$ROOT"
 '
 
+# AC.3 — teslausb-resize-lun: operator-driven LUN size change.
+#
+# Usage: teslausb-resize-lun --lun {teslacam|media} --size-gb N
+#
+# Reads /etc/teslausb/teslausb.toml to enforce the operator's
+# storage caps (os_reserve_gb, total SD-card capacity), refuses
+# to shrink below currently-used bytes, atomically rewrites the
+# per-LUN teslafat config AND the unified teslausb.toml, then
+# bounces usb-gadget + teslafat units so Tesla re-enumerates
+# with the new advertised size.
+#
+# Exit codes:
+#   0 success
+#   2 usage error (missing/invalid args)
+#   3 validation failure (cap exceeded, shrink-with-used,
+#     unknown LUN)
+#   4 I/O error (config write / sed / systemctl)
+B1_RESIZE_LUN_BODY='#!/bin/bash
+# Managed by teslausb-b1 setup.sh. Do not edit by hand.
+set -euo pipefail
+
+CONF_DIR="/etc/teslausb"
+TESLAUSB_TOML="${CONF_DIR}/teslausb.toml"
+LUN0_TOML="${CONF_DIR}/teslafat-0.toml"
+LUN1_TOML="${CONF_DIR}/teslafat-1.toml"
+
+usage() {
+  echo "usage: teslausb-resize-lun --lun {teslacam|media} --size-gb N" >&2
+  exit 2
+}
+
+LUN=""
+SIZE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lun)     LUN="${2:-}";  shift 2 ;;
+    --size-gb) SIZE="${2:-}"; shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+[[ -n "${LUN}" && -n "${SIZE}" ]] || usage
+[[ "${SIZE}" =~ ^[0-9]+$ ]]       || { echo "size-gb must be integer" >&2; exit 2; }
+
+if (( SIZE < 4 || SIZE > 2048 )); then
+  echo "size-gb must be in [4, 2048]" >&2
+  exit 3
+fi
+
+case "${LUN}" in
+  teslacam) LUN_TOML="${LUN0_TOML}"; LUN_BACKING="/srv/teslausb/teslacam"; LUN_IDX=0; KEY="teslacam_gb" ;;
+  media)    LUN_TOML="${LUN1_TOML}"; LUN_BACKING="/srv/teslausb/media";    LUN_IDX=1; KEY="media_gb"    ;;
+  *)        echo "unknown LUN: ${LUN}" >&2; exit 3 ;;
+esac
+
+# Pure-bash TOML int reader (no awk, so the body needs no
+# single-quote escaping when embedded as a setup-lib heredoc).
+read_toml_int() {
+  local key="$1" file="$2" default="$3"
+  if [[ ! -e "${file}" ]]; then echo "${default}"; return; fi
+  local line val=""
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^[[:space:]]*${key}[[:space:]]*=[[:space:]]*([0-9]+) ]]; then
+      val="${BASH_REMATCH[1]}"; break
+    fi
+  done < "${file}"
+  if [[ -z "${val}" ]]; then echo "${default}"; else echo "${val}"; fi
+}
+
+OS_RESERVE_GB=$(read_toml_int os_reserve_gb "${TESLAUSB_TOML}" 20)
+CUR_TESLACAM_GB=$(read_toml_int teslacam_gb "${TESLAUSB_TOML}" 64)
+CUR_MEDIA_GB=$(read_toml_int    media_gb    "${TESLAUSB_TOML}" 32)
+
+SD_TOTAL_GB=$(df -B1G --output=size /srv/teslausb 2>/dev/null \
+  | tail -n1 | tr -d " " || echo 0)
+if [[ -z "${SD_TOTAL_GB}" || ! "${SD_TOTAL_GB}" =~ ^[0-9]+$ ]]; then
+  SD_TOTAL_GB=0
+fi
+
+if [[ "${LUN}" == "teslacam" ]]; then
+  NEW_TESLACAM=${SIZE}; NEW_MEDIA=${CUR_MEDIA_GB}
+else
+  NEW_TESLACAM=${CUR_TESLACAM_GB}; NEW_MEDIA=${SIZE}
+fi
+NEW_TOTAL=$(( NEW_TESLACAM + NEW_MEDIA + OS_RESERVE_GB ))
+
+if (( SD_TOTAL_GB > 0 && NEW_TOTAL > SD_TOTAL_GB )); then
+  echo "refusing: teslacam(${NEW_TESLACAM}) + media(${NEW_MEDIA}) + os_reserve(${OS_RESERVE_GB})" \
+       "= ${NEW_TOTAL} GB exceeds SD capacity ${SD_TOTAL_GB} GB" >&2
+  exit 3
+fi
+
+# Shrink guard: refuse if used > new size. du -sb prints bytes;
+# cut -f1 grabs the size column without invoking awk.
+USED_BYTES=$(du -sb "${LUN_BACKING}" 2>/dev/null | cut -f1 || echo 0)
+[[ "${USED_BYTES}" =~ ^[0-9]+$ ]] || USED_BYTES=0
+USED_GB=$(( (USED_BYTES + (1024*1024*1024) - 1) / (1024*1024*1024) ))
+if (( USED_GB > SIZE )); then
+  echo "refusing: ${LUN_BACKING} uses ${USED_GB} GB which exceeds requested ${SIZE} GB" >&2
+  exit 3
+fi
+
+OLD_SIZE=$(read_toml_int volume_size_gb "${LUN_TOML}" 0)
+echo "resize-lun: ${LUN} ${OLD_SIZE} -> ${SIZE} GB"
+
+# Atomically rewrite per-LUN teslafat config.
+TMP="${LUN_TOML}.tmp.$$"
+sed -E "s/^([[:space:]]*volume_size_gb[[:space:]]*=[[:space:]]*).*/\1${SIZE}/" \
+  "${LUN_TOML}" > "${TMP}"
+if ! grep -q "^volume_size_gb[[:space:]]*=[[:space:]]*${SIZE}\$" "${TMP}"; then
+  rm -f "${TMP}"
+  echo "resize-lun: sed failed to update ${LUN_TOML}" >&2
+  exit 4
+fi
+chmod 0644 "${TMP}"
+mv -f "${TMP}" "${LUN_TOML}"
+
+# Atomically rewrite the [storage] section of teslausb.toml.
+if [[ -e "${TESLAUSB_TOML}" ]]; then
+  TMP2="${TESLAUSB_TOML}.tmp.$$"
+  sed -E "s/^([[:space:]]*${KEY}[[:space:]]*=[[:space:]]*).*/\1${SIZE}/" \
+    "${TESLAUSB_TOML}" > "${TMP2}"
+  chmod 0644 "${TMP2}"
+  mv -f "${TMP2}" "${TESLAUSB_TOML}"
+fi
+
+# Bounce: unbind UDC (Tesla sees eject), restart teslafat, re-bind.
+/usr/local/bin/teslausb-hide-usb >/dev/null 2>&1 || true
+systemctl restart "teslafat@${LUN_IDX}" >/dev/null 2>&1 || true
+sleep 2
+/usr/local/bin/teslausb-present-usb >/dev/null 2>&1 || true
+
+echo "resize-lun: complete; ${LUN} now ${SIZE} GB"
+exit 0
+'
+
+# AC.3 — sudoers fragment so the Flask user (gadget_web) can call
+# the resize helper without a password. The fragment is intentionally
+# narrow: only the resize-lun binary, no shell escapes, no env.
+B1_RESIZE_SUDOERS_BODY='# Managed by teslausb-b1 setup.sh (AC.3). Do not edit.
+# Allow the Flask web user to drive LUN size changes without
+# unlocking sudo more broadly.
+gadget_web ALL=(root) NOPASSWD: /usr/local/bin/teslausb-resize-lun
+'
+
 # _b1_data_root_free_gb  — best-effort: total bytes of the filesystem
 # hosting /srv/teslausb, expressed in whole GB. Falls back to 0 if the
 # path doesn't exist yet (caller handles).
@@ -769,6 +921,10 @@ b1_step_11() {
   _b1_install_file "${B1_PRESENT_USB_BIN}" 0755 "${B1_PRESENT_USB_BODY}"
   _b1_install_file "${B1_HIDE_USB_BIN}"    0755 "${B1_HIDE_USB_BODY}"
   _b1_install_file "${B1_WATCH_BIN}"       0755 "${B1_WATCH_BODY}"
+  # AC.3 — resize helper + narrow sudoers fragment. Sudoers
+  # MUST be 0440 owned by root or visudo refuses to load it.
+  _b1_install_file "${B1_RESIZE_LUN_BIN}"  0755 "${B1_RESIZE_LUN_BODY}"
+  _b1_install_file "${B1_RESIZE_SUDOERS}"  0440 "${B1_RESIZE_SUDOERS_BODY}"
 
   # 5. Reload systemd if any unit changed.
   if [[ "${TESLAUSB_DRY_RUN:-0}" != "1" ]]; then

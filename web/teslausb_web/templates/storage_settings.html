@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}Storage — Tesla USB Gadget Control{% endblock %}
+{% block head %}
+<style>
+.storage-page { display: grid; gap: var(--space-6); }
+.storage-header,
+.storage-card {
+    padding: var(--space-6);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    display: grid;
+    gap: var(--space-4);
+}
+.storage-title { margin: 0; color: var(--text-primary); font-size: var(--text-3xl); }
+.storage-card-title { margin: 0; color: var(--text-primary); font-size: var(--text-xl); }
+.storage-copy, .storage-help {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
+.storage-pill-row {
+    display: flex; gap: var(--space-3); flex-wrap: wrap;
+}
+.storage-pill {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+}
+.storage-form { display: grid; gap: var(--space-4); }
+.storage-fields { display: grid; gap: var(--space-4); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.storage-field { display: grid; gap: var(--space-2); }
+.storage-field label { color: var(--text-primary); font-weight: 600; }
+.storage-field-copy { color: var(--text-secondary); font-size: var(--text-sm); font-weight: 400; }
+.storage-field input[type="number"] {
+    padding: var(--space-3);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--text-base);
+    min-height: 44px;
+}
+.storage-toggle-row {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    background: var(--form-input-bg);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+}
+.storage-actions { display: flex; gap: var(--space-3); flex-wrap: wrap; }
+.storage-btn {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-md);
+    background: var(--btn-primary-bg);
+    color: var(--btn-primary-text);
+    font-size: var(--text-base);
+    font-weight: 600;
+    cursor: pointer;
+    min-height: 44px;
+}
+.storage-lun-row {
+    display: grid; gap: var(--space-2);
+    grid-template-columns: 1fr 1fr 1fr;
+}
+.storage-lun-row .storage-pill { justify-content: center; }
+.storage-warn {
+    padding: var(--space-3);
+    background: var(--warning-bg, #3a2f10);
+    border: 1px solid var(--warning-border, #b58900);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+}
+@media (max-width: 48rem) {
+    .storage-header, .storage-card { padding: var(--space-4); }
+    .storage-lun-row { grid-template-columns: 1fr; }
+}
+</style>
+{% endblock %}
+{% block content %}
+<section class="storage-page">
+    <header class="storage-header">
+        <h1 class="storage-title">Storage</h1>
+        <p class="storage-copy">
+            Allocate how much of the SD card each USB drive presents to
+            Tesla, and tune the auto-cleanup that keeps the TeslaCam
+            drive from filling up. Changes to a drive's size briefly
+            disconnect the USB gadget (~30–60&nbsp;s) while Tesla
+            re-enumerates.
+        </p>
+        <div class="storage-pill-row">
+            <span class="storage-pill">SD total: {{ stats.sd_total_gb }} GB</span>
+            <span class="storage-pill">SD free: {{ stats.sd_free_gb }} GB</span>
+            <span class="storage-pill">Allocated: {{ stats.allocated_gb }} GB</span>
+            <span class="storage-pill">Remaining: {{ stats.remaining_alloc_gb }} GB</span>
+        </div>
+    </header>
+
+    <form method="post" action="{{ url_for('storage.save') }}" class="storage-form">
+        <section class="storage-card">
+            <h2 class="storage-card-title">Drive sizes</h2>
+            <p class="storage-help">
+                The sum of TeslaCam, Media, and OS reserve must not
+                exceed the SD card size. The OS reserve protects the
+                root filesystem and cannot drop below 8&nbsp;GB.
+            </p>
+
+            <div class="storage-fields">
+                <div class="storage-field">
+                    <label for="teslacam_gb">
+                        <span>TeslaCam (exFAT) — GB</span>
+                        <span class="storage-field-copy">Used: {{ (stats.teslacam.used_bytes // (1024*1024*1024)) }} GB</span>
+                    </label>
+                    <input id="teslacam_gb" name="teslacam_gb" type="number" min="1" value="{{ stats.teslacam.advertised_gb }}" required>
+                </div>
+                <div class="storage-field">
+                    <label for="media_gb">
+                        <span>Media (FAT32) — GB</span>
+                        <span class="storage-field-copy">Used: {{ (stats.media.used_bytes // (1024*1024*1024)) }} GB</span>
+                    </label>
+                    <input id="media_gb" name="media_gb" type="number" min="1" value="{{ stats.media.advertised_gb }}" required>
+                </div>
+                <div class="storage-field">
+                    <label for="os_reserve_gb">
+                        <span>OS reserve — GB</span>
+                        <span class="storage-field-copy">Minimum 8 GB. Default 20 GB.</span>
+                    </label>
+                    <input id="os_reserve_gb" name="os_reserve_gb" type="number" min="8" value="{{ stats.os_reserve_gb }}" required>
+                </div>
+            </div>
+
+            <p class="storage-warn">
+                Shrinking a drive below its current usage is refused.
+                If Tesla shows the drive as unformatted after a size
+                change, format it once from the touchscreen.
+            </p>
+        </section>
+
+        <section class="storage-card">
+            <h2 class="storage-card-title">Auto-cleanup (TeslaCam)</h2>
+            <p class="storage-help">
+                The worker continuously sweeps the TeslaCam drive when
+                free space dips below the target. Deletion priority:
+                <strong>Tier&nbsp;A</strong> — RecentClips with no GPS
+                or SEI data, then <strong>Tier&nbsp;B</strong> —
+                RecentClips with GPS/SEI, then <strong>Tier&nbsp;C</strong>
+                — SavedClips and SentryClips. SentryClips are only
+                touched when an age threshold is set.
+            </p>
+
+            <div class="storage-fields">
+                <div class="storage-field">
+                    <label for="target_free_pct">
+                        <span>Target free space — %</span>
+                        <span class="storage-field-copy">0 = auto-tune from recent clip size.</span>
+                    </label>
+                    <input id="target_free_pct" name="target_free_pct" type="number" min="0" max="95" value="{{ stats.target_free_pct }}" required>
+                </div>
+                <div class="storage-field">
+                    <label for="sentry_max_age_days">
+                        <span>Sentry max age — days</span>
+                        <span class="storage-field-copy">0 = never auto-delete Sentry clips.</span>
+                    </label>
+                    <input id="sentry_max_age_days" name="sentry_max_age_days" type="number" min="0" value="{{ stats.sentry_max_age_days }}" required>
+                </div>
+            </div>
+
+            <div class="storage-toggle-row">
+                <div>
+                    <p class="storage-card-title" style="font-size: var(--text-base);">Preserve clips with GPS/SEI</p>
+                    <p class="storage-help">When on, GPS/SEI clips move to Tier&nbsp;B and are deleted only after plain Tier&nbsp;A clips are exhausted.</p>
+                </div>
+                <label>
+                    <input type="hidden" name="_preserve_with_gps_present" value="1">
+                    <input type="checkbox" name="preserve_with_gps" value="on" {% if stats.preserve_with_gps %}checked{% endif %}>
+                </label>
+            </div>
+        </section>
+
+        <div class="storage-actions">
+            <button type="submit" class="storage-btn">
+                <svg class="nav-icon" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-save"></use></svg>
+                Save storage settings
+            </button>
+        </div>
+    </form>
+</section>
+{% endblock %}

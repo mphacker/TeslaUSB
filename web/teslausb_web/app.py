@@ -45,6 +45,7 @@ from teslausb_web.blueprints.media import media_bp
 from teslausb_web.blueprints.music import music_bp
 from teslausb_web.blueprints.settings import settings_dashboard_bp
 from teslausb_web.blueprints.settings_advanced import settings_bp
+from teslausb_web.blueprints.storage import storage_bp
 from teslausb_web.blueprints.storage_retention import storage_retention_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.blueprints.videos import videos_bp
@@ -277,6 +278,7 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         media_bp,
         license_plates_bp,
         storage_retention_bp,
+        storage_bp,
         settings_dashboard_bp,
         settings_bp,
         captive_portal_bp,

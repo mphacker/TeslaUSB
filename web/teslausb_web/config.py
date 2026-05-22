@@ -165,18 +165,15 @@ _DEFAULT_CLOUD_WIFI_CHECK_REQUIRED: Final[bool] = True
 _DEFAULT_CLOUD_PRIORITY_FOLDERS: Final[tuple[str, ...]] = (
     "SentryClips",
     "SavedClips",
-    "ArchivedClips",
 )
 _DEFAULT_CLOUD_SYNC_FOLDERS: Final[tuple[str, ...]] = (
     "SentryClips",
     "SavedClips",
-    "ArchivedClips",
 )
 _DEFAULT_CLOUD_DEAD_LETTER_MAX_AGE_DAYS: Final[int] = 30
 _DEFAULT_MAPPING_DB_NAME: Final[str] = "mapping.db"
 _DEFAULT_MAPPING_BACKUP_DIRNAME: Final[str] = "mapping-backups"
 _DEFAULT_MAPPING_BACKUP_RETENTION: Final[int] = 3
-_DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME: Final[str] = "ArchivedClips"
 _DEFAULT_MAPPING_SAMPLE_RATE: Final[int] = 30
 _DEFAULT_MAPPING_TRIP_GAP_MINUTES: Final[int] = 5
 _DEFAULT_MAPPING_INDEX_TOO_NEW_SECONDS: Final[int] = 120
@@ -193,9 +190,6 @@ _DEFAULT_MAPPING_STALE_SCAN_DEBOUNCE_SECONDS: Final[int] = 10 * 60
 _DEFAULT_MAPPING_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_DB_NAME
 _DEFAULT_MAPPING_BACKUP_DIR: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_BACKUP_DIRNAME
 _DEFAULT_MAPPING_MEDIA_ROOT: Path = _DEFAULT_BACKING_ROOT
-_DEFAULT_MAPPING_ARCHIVE_ROOT: Path = (
-    _DEFAULT_BACKING_ROOT / _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME
-)
 
 # Analytics dashboard thresholds. Percent-of-disk-used bands that
 # escalate the storage-health banner from healthy → caution → warning
@@ -863,8 +857,6 @@ class MappingSection:
     backup_retention: int = _DEFAULT_MAPPING_BACKUP_RETENTION
     backup_dir: Path = _DEFAULT_MAPPING_BACKUP_DIR
     media_root: Path = _DEFAULT_MAPPING_MEDIA_ROOT
-    archive_root: Path = _DEFAULT_MAPPING_ARCHIVE_ROOT
-    archived_clips_dirname: str = _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME
     sample_rate: int = _DEFAULT_MAPPING_SAMPLE_RATE
     trip_gap_minutes: int = _DEFAULT_MAPPING_TRIP_GAP_MINUTES
     index_too_new_seconds: int = _DEFAULT_MAPPING_INDEX_TOO_NEW_SECONDS
@@ -887,7 +879,6 @@ class MappingSection:
             ("db_path", self.db_path),
             ("backup_dir", self.backup_dir),
             ("media_root", self.media_root),
-            ("archive_root", self.archive_root),
         ):
             if not value.is_absolute() and not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[mapping] {name} must be absolute, got {value!r}")
@@ -910,13 +901,6 @@ class MappingSection:
         ):
             if int_value <= 0:
                 raise ConfigError(None, f"[mapping] {int_name} must be > 0")
-        if not self.archived_clips_dirname.strip():
-            raise ConfigError(None, "[mapping] archived_clips_dirname must be non-empty")
-        if "/" in self.archived_clips_dirname or "\\" in self.archived_clips_dirname:
-            raise ConfigError(
-                None,
-                "[mapping] archived_clips_dirname must be a single path segment",
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1733,18 +1717,6 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 mapping_raw,
                 "media_root",
                 paths_section.backing_root,
-                source,
-            ),
-            archive_root=_coerce_path(
-                mapping_raw,
-                "archive_root",
-                paths_section.backing_root / _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME,
-                source,
-            ),
-            archived_clips_dirname=_coerce_str(
-                mapping_raw,
-                "archived_clips_dirname",
-                _DEFAULT_MAPPING_ARCHIVED_CLIPS_DIRNAME,
                 source,
             ),
             sample_rate=_coerce_int(

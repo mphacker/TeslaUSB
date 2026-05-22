@@ -23,7 +23,6 @@ from teslausb_web.blueprints.mapping import (
     _get_service,
     _invalidate_caches,
     _mapping_response,
-    _normalize_video_path,
     _parse_bbox,
     _redirect_to_mapping,
     _require_iso_date,
@@ -125,8 +124,7 @@ class StubMappingService(MappingService):
 @pytest.fixture
 def app(tmp_path: Path):
     media_root = tmp_path / "TeslaCam"
-    archive_root = media_root / "ArchivedClips"
-    for folder in ("RecentClips", "SavedClips", "SentryClips", "ArchivedClips"):
+    for folder in ("RecentClips", "SavedClips", "SentryClips"):
         (media_root / folder).mkdir(parents=True, exist_ok=True)
     cfg = WebConfig(
         web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
@@ -139,7 +137,6 @@ def app(tmp_path: Path):
             db_path=tmp_path / "state" / "mapping.db",
             backup_dir=tmp_path / "state" / "mapping-backups",
             media_root=media_root,
-            archive_root=archive_root,
         ),
         source_path=None,
     )
@@ -190,16 +187,16 @@ def _seed_mapping_database(service: MappingService, data: SeededMappingData) -> 
     media_root = service.config.media_root
     recent_front = media_root / "RecentClips" / f"{data.recent_event}-front.mp4"
     recent_back = media_root / "RecentClips" / f"{data.recent_event}-back.mp4"
-    archived_front = media_root / "ArchivedClips" / f"{data.archived_event}-front.mp4"
-    archived_fallback = media_root / "ArchivedClips" / f"{data.archived_fallback_event}-front.mp4"
+    archived_front_path = f"ArchivedClips/{data.archived_event}-front.mp4"
     saved_dir = media_root / "SavedClips" / data.saved_event
     sentry_dir = media_root / "SentryClips" / data.sentry_event
     saved_dir.mkdir(parents=True, exist_ok=True)
     sentry_dir.mkdir(parents=True, exist_ok=True)
     recent_front.write_bytes(b"front-video")
     recent_back.write_bytes(b"back-video")
-    archived_front.write_bytes(b"archived-video")
-    archived_fallback.write_bytes(b"fallback-video")
+    (media_root / "RecentClips" / f"{data.archived_fallback_event}-front.mp4").write_bytes(
+        b"fallback-front"
+    )
     (saved_dir / f"{data.saved_event}-front.mp4").write_bytes(b"saved-front")
     (saved_dir / f"{data.saved_event}-back.mp4").write_bytes(b"saved-back")
     (sentry_dir / f"{data.sentry_event}-front.mp4").write_bytes(b"sentry-front")
@@ -319,7 +316,7 @@ def _seed_mapping_database(service: MappingService, data: SeededMappingData) -> 
                     0.0,
                     20.0,
                     "MANUAL",
-                    archived_front.relative_to(media_root).as_posix(),
+                    archived_front_path,
                     0,
                 ),
                 (
@@ -331,7 +328,7 @@ def _seed_mapping_database(service: MappingService, data: SeededMappingData) -> 
                     10.0,
                     21.0,
                     "MANUAL",
-                    archived_front.relative_to(media_root).as_posix(),
+                    archived_front_path,
                     30,
                 ),
                 (
@@ -343,7 +340,7 @@ def _seed_mapping_database(service: MappingService, data: SeededMappingData) -> 
                     20.0,
                     22.0,
                     "AUTOSTEER",
-                    archived_front.relative_to(media_root).as_posix(),
+                    archived_front_path,
                     60,
                 ),
                 (
@@ -355,7 +352,7 @@ def _seed_mapping_database(service: MappingService, data: SeededMappingData) -> 
                     30.0,
                     23.0,
                     "MANUAL",
-                    archived_front.relative_to(media_root).as_posix(),
+                    archived_front_path,
                     90,
                 ),
                 (
@@ -367,7 +364,7 @@ def _seed_mapping_database(service: MappingService, data: SeededMappingData) -> 
                     40.0,
                     24.0,
                     "MANUAL",
-                    archived_front.relative_to(media_root).as_posix(),
+                    archived_front_path,
                     120,
                 ),
                 (
@@ -451,7 +448,7 @@ def _seed_mapping_database(service: MappingService, data: SeededMappingData) -> 
                     "sentry",
                     "info",
                     "sentry event",
-                    archived_front.relative_to(media_root).as_posix(),
+                    archived_front_path,
                     45,
                     None,
                 ),
@@ -491,7 +488,7 @@ def _seed_mapping_database(service: MappingService, data: SeededMappingData) -> 
             """,
             (
                 (str(recent_front), 100, 1.0, f"{data.day_a}T10:05:00", 4, 3),
-                (str(archived_front), 100, 2.0, f"{data.day_b}T09:10:00", 5, 1),
+                (str(media_root / archived_front_path), 100, 2.0, f"{data.day_b}T09:10:00", 5, 1),
                 (
                     str(media_root / "RecentClips" / f"{data.archived_fallback_event}-front.mp4"),
                     100,
@@ -546,19 +543,6 @@ def _install_stub_service(app, stub: StubMappingService) -> MappingService:
 def test_app_registers_mapping_blueprint_and_service(app) -> None:
     assert "mapping" in app.blueprints
     assert isinstance(app.extensions["mapping_service"], MappingService)
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("ArchivedClips/clip.mp4", "ArchivedClips/clip.mp4"),
-        ("cache/ArchivedClips/clip.mp4", "ArchivedClips/clip.mp4"),
-        (None, None),
-        ("RecentClips/clip.mp4", "RecentClips/clip.mp4"),
-    ],
-)
-def test_helper_normalize_video_path(raw: str | None, expected: str | None) -> None:
-    assert _normalize_video_path(raw) == expected
 
 
 @pytest.mark.parametrize(
@@ -1113,17 +1097,6 @@ def test_api_event_details_returns_counts_for_event_folder(
     assert payload["size_mb"] > 0
 
 
-def test_api_event_details_returns_counts_for_flat_archive(
-    client, seeded_data: SeededMappingData
-) -> None:
-    response = client.get(f"/api/event-details/ArchivedClips/{seeded_data.archived_event}")
-    payload = response.get_json()
-    assert response.status_code == HTTPStatus.OK
-    assert payload["clip_count"] == 1
-    assert payload["camera_count"] == 1
-    assert payload["size_mb"] > 0
-
-
 def test_api_event_details_returns_not_found_for_missing_folder(client) -> None:
     response = client.get("/api/event-details/DoesNotExist/test")
     assert response.status_code == HTTPStatus.NOT_FOUND
@@ -1139,18 +1112,6 @@ def test_api_event_clips_returns_event_folder_listing(
     assert payload["structure"] == "events"
     assert payload["front_clips"] == [
         f"SavedClips/{seeded_data.saved_event}/{seeded_data.saved_event}-front.mp4"
-    ]
-
-
-def test_api_event_clips_falls_back_to_archived_flat_clip(
-    client, seeded_data: SeededMappingData
-) -> None:
-    response = client.get(f"/api/event-clips/RecentClips/{seeded_data.archived_fallback_event}")
-    payload = response.get_json()
-    assert response.status_code == HTTPStatus.OK
-    assert payload["folder"] == "ArchivedClips"
-    assert payload["front_clips"] == [
-        f"ArchivedClips/{seeded_data.archived_fallback_event}-front.mp4"
     ]
 
 

@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 from teslausb_web.services.analytics_service._models import (
     CLIPS_PER_HOUR,
-    FOLDER_ARCHIVED,
     FOLDER_DESCRIPTIONS,
     FOLDER_OTHER,
     FOLDER_PRIORITY,
@@ -125,7 +124,7 @@ def classify_folder(file_path: str) -> str:
     """Return the TeslaCam folder name a clip lives under."""
     normalized = file_path.replace("\\", "/")
     parts = [segment for segment in normalized.split("/") if segment]
-    for folder in (FOLDER_SAVED, FOLDER_SENTRY, FOLDER_ARCHIVED, FOLDER_RECENT):
+    for folder in (FOLDER_SAVED, FOLDER_SENTRY, FOLDER_RECENT):
         if folder in parts:
             return folder
     return FOLDER_OTHER

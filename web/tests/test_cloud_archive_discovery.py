@@ -20,8 +20,8 @@ def _make_config(tmp_path: Path, teslacam_path: Path, **overrides: object) -> Cl
         "db_path": tmp_path / "cloud.db",
         "teslacam_path": teslacam_path,
         "mapping_db_path": tmp_path / "mapping.db",
-        "sync_folders": ("SentryClips", "SavedClips", "ArchivedClips"),
-        "priority_folders": ("SentryClips", "SavedClips", "ArchivedClips"),
+        "sync_folders": ("SentryClips", "SavedClips"),
+        "priority_folders": ("SentryClips", "SavedClips"),
         "sync_non_event": True,
     }
     base.update(overrides)

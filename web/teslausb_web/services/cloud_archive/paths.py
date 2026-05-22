@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 _ROOT_AND_CHILD_SEGMENTS: Final[int] = 2
 
 KNOWN_CLOUD_ROOTS: Final[tuple[str, ...]] = (
-    "ArchivedClips",
     "RecentClips",
     "SentryClips",
     "SavedClips",
@@ -22,7 +21,6 @@ VALID_SYNC_FOLDERS: Final[tuple[str, ...]] = (
     "SavedClips",
     "SentryClips",
     "RecentClips",
-    "ArchivedClips",
 )
 
 
@@ -80,8 +78,6 @@ def _normalize_folder_list(values: object) -> tuple[str, ...]:
         if not isinstance(raw, str):
             continue
         folder = raw.strip()
-        if folder == "RecentClips":
-            folder = "ArchivedClips"
         if folder in VALID_SYNC_FOLDERS and folder not in ordered:
             ordered.append(folder)
     return tuple(ordered)

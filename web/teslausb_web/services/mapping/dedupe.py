@@ -15,16 +15,11 @@ def _dedupe_existing_rows(
     rel_path: str,
     video_path: Path,
 ) -> IndexResult | None:
+    del rel_path
     rel_candidates = candidate_db_paths(canonical_key(video_path))
     rows = _select_existing_paths(connection, rel_candidates)
     if not rows:
         return None
-    has_archived = any(_is_archived_path(row["video_path"]) for row in rows)
-    if _is_archived_path(rel_path) and not has_archived:
-        _update_waypoint_paths(connection, rel_path, rel_candidates)
-        _update_event_paths(connection, rel_path, rel_candidates)
-        connection.commit()
-        return IndexResult(IndexOutcome.DUPLICATE_UPGRADED)
     return IndexResult(IndexOutcome.ALREADY_INDEXED)
 
 
@@ -42,14 +37,9 @@ def _select_existing_paths(
     connection: sqlite3.Connection,
     rel_paths: tuple[str, ...],
 ) -> tuple[sqlite3.Row, ...]:
-    if len(rel_paths) == 1:
-        rows = connection.execute(
-            "SELECT DISTINCT video_path FROM waypoints WHERE video_path = ?",
-            rel_paths,
-        ).fetchall()
-        return tuple(rows)
+    placeholders = ", ".join("?" * len(rel_paths))
     rows = connection.execute(
-        "SELECT DISTINCT video_path FROM waypoints WHERE video_path IN (?, ?, ?)",
+        f"SELECT DISTINCT video_path FROM waypoints WHERE video_path IN ({placeholders})",
         rel_paths,
     ).fetchall()
     return tuple(rows)
@@ -60,13 +50,9 @@ def _update_waypoint_paths(
     new_path: str | None,
     rel_paths: tuple[str, ...],
 ) -> int:
-    if len(rel_paths) == 1:
-        return connection.execute(
-            "UPDATE waypoints SET video_path = ? WHERE video_path = ?",
-            (new_path, rel_paths[0]),
-        ).rowcount
+    placeholders = ", ".join("?" * len(rel_paths))
     return connection.execute(
-        "UPDATE waypoints SET video_path = ? WHERE video_path IN (?, ?, ?)",
+        f"UPDATE waypoints SET video_path = ? WHERE video_path IN ({placeholders})",
         (new_path, *rel_paths),
     ).rowcount
 
@@ -76,16 +62,8 @@ def _update_event_paths(
     new_path: str | None,
     rel_paths: tuple[str, ...],
 ) -> int:
-    if len(rel_paths) == 1:
-        return connection.execute(
-            "UPDATE detected_events SET video_path = ? WHERE video_path = ?",
-            (new_path, rel_paths[0]),
-        ).rowcount
+    placeholders = ", ".join("?" * len(rel_paths))
     return connection.execute(
-        "UPDATE detected_events SET video_path = ? WHERE video_path IN (?, ?, ?)",
+        f"UPDATE detected_events SET video_path = ? WHERE video_path IN ({placeholders})",
         (new_path, *rel_paths),
     ).rowcount
-
-
-def _is_archived_path(video_path: object) -> bool:
-    return isinstance(video_path, str) and video_path.startswith("ArchivedClips/")

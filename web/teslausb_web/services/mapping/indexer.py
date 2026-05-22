@@ -63,8 +63,6 @@ def _index_video(
     rel_path = relative_video_path(
         video_path,
         media_root=service.config.media_root,
-        archive_root=service.config.archive_root,
-        archived_clips_dirname=service.config.archived_clips_dirname,
     )
     file_timestamp = _resolve_recording_time(video_path, parser=parser, sidecar=sidecar)
     dedupe_result = _dedupe_existing_rows(connection, rel_path, video_path)

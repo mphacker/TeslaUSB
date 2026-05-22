@@ -22,7 +22,6 @@ from teslausb_web.services.mapping.diagnose import (
 )
 from teslausb_web.services.mapping.discovery import (
     _find_front_camera_videos,
-    _iter_archived_with_mtime,
 )
 from teslausb_web.services.mapping.indexer import (
     _base_datetime,
@@ -40,7 +39,7 @@ from teslausb_web.services.mapping.paths import (
     canonical_key,
     relative_video_path,
 )
-from teslausb_web.services.mapping.purge import _has_surviving_copy, purge_deleted_videos
+from teslausb_web.services.mapping.purge import purge_deleted_videos
 from teslausb_web.services.mapping.sei import (
     FallbackSeiParser,
     FallbackSeiSidecar,
@@ -103,8 +102,6 @@ class FakeParser:
 @pytest.fixture
 def mapping_service(tmp_path: Path) -> MappingService:
     media_root = tmp_path / "TeslaCam"
-    archive_root = media_root / "ArchivedClips"
-    archive_root.mkdir(parents=True)
     for folder in ("RecentClips", "SavedClips", "SentryClips"):
         (media_root / folder).mkdir(parents=True, exist_ok=True)
     parser = FakeParser(messages_by_path={}, mvhd_by_path={}, sidecar_by_path={})
@@ -113,7 +110,6 @@ def mapping_service(tmp_path: Path) -> MappingService:
             db_path=tmp_path / "state" / "mapping.db",
             backup_dir=tmp_path / "state" / "mapping-backups",
             media_root=media_root,
-            archive_root=archive_root,
             index_too_new_seconds=120.0,
         ),
         parser=parser,
@@ -319,20 +315,10 @@ def test_purge_deleted_videos_scans_missing_rows_and_checks_surviving_copies(
     )
     foldered_live.parent.mkdir(parents=True)
     foldered_live.write_bytes(b"x")
-    foldered_archive = (
-        mapping_service.config.archive_root
-        / "SavedClips"
-        / foldered_live.parent.name
-        / foldered_live.name
-    )
-    foldered_archive.parent.mkdir(parents=True)
-    foldered_archive.write_bytes(b"x")
     recent_live = (
         mapping_service.config.media_root / "RecentClips" / "2026-01-05_00-00-01-front.mp4"
     )
     recent_live.write_bytes(b"x")
-    flat_archive = mapping_service.config.archive_root / recent_live.name
-    flat_archive.write_bytes(b"x")
     missing = mapping_service.config.media_root / "RecentClips" / "2026-01-05_00-00-02-front.mp4"
 
     with mapping_service.open_db() as connection:
@@ -353,8 +339,6 @@ def test_purge_deleted_videos_scans_missing_rows_and_checks_surviving_copies(
 
     result = purge_deleted_videos(mapping_service)
 
-    assert _has_surviving_copy(mapping_service, foldered_archive) is True
-    assert _has_surviving_copy(mapping_service, flat_archive) is True
     assert result == {
         "purged_files": 1,
         "purged_waypoints": 1,
@@ -378,49 +362,27 @@ def test_purge_deleted_videos_scans_missing_rows_and_checks_surviving_copies(
     assert indexed["count"] == 0
 
 
-def test_discovery_walks_nested_archives_and_skips_stat_failures(
+def test_discovery_walks_and_skips_stat_failures(
     mapping_service: MappingService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    archived = (
-        mapping_service.config.archive_root
-        / "SavedClips"
-        / "2026-01-06_00-00-00"
-        / "2026-01-06_00-00-00-front.mp4"
-    )
     sentry = (
         mapping_service.config.media_root
         / "SentryClips"
         / "2026-01-06_00-00-00"
         / "2026-01-06_00-00-00-front.mp4"
     )
-    archived.parent.mkdir(parents=True)
     sentry.parent.mkdir(parents=True)
-    _write_sample_mp4(archived)
     _write_sample_mp4(sentry)
 
     discovered = list(
         _find_front_camera_videos(
-            mapping_service.config.media_root, mapping_service.config.archive_root
+            mapping_service.config.media_root
         )
     )
-    assert list(_find_front_camera_videos(Path("missing"), Path("missing") / "ArchivedClips")) == []
-    original_stat = Path.stat
+    assert list(_find_front_camera_videos(Path("missing"))) == []
 
-    def fake_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
-        if path == archived:
-            raise OSError("boom")
-        return original_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(
-        "teslausb_web.services.mapping.discovery._find_archived_videos", lambda _: iter((archived,))
-    )
-    monkeypatch.setattr(Path, "stat", fake_stat)
-    archived_with_mtime = list(_iter_archived_with_mtime(mapping_service.config.archive_root))
-
-    assert archived in discovered
     assert sentry in discovered
-    assert archived_with_mtime == []
 
 
 def test_paths_helpers_warn_on_clock_skew_and_resolve_relative_paths(
@@ -428,7 +390,6 @@ def test_paths_helpers_warn_on_clock_skew_and_resolve_relative_paths(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     video = mapping_service.config.media_root / "RecentClips" / "2026-01-07_00-00-00-front.mp4"
-    archive_video = mapping_service.config.archive_root / video.name
     other_video = mapping_service.config.media_root.parent / "loose-front.mp4"
     parser = FakeParser(
         messages_by_path={},
@@ -464,26 +425,13 @@ def test_paths_helpers_warn_on_clock_skew_and_resolve_relative_paths(
         relative_video_path(
             video,
             media_root=mapping_service.config.media_root,
-            archive_root=mapping_service.config.archive_root,
-            archived_clips_dirname=mapping_service.config.archived_clips_dirname,
         )
         == "RecentClips/2026-01-07_00-00-00-front.mp4"
     )
     assert (
         relative_video_path(
-            archive_video,
-            media_root=mapping_service.config.media_root,
-            archive_root=mapping_service.config.archive_root,
-            archived_clips_dirname=mapping_service.config.archived_clips_dirname,
-        )
-        == "ArchivedClips/2026-01-07_00-00-00-front.mp4"
-    )
-    assert (
-        relative_video_path(
             other_video,
             media_root=mapping_service.config.media_root,
-            archive_root=mapping_service.config.archive_root,
-            archived_clips_dirname=mapping_service.config.archived_clips_dirname,
         )
         == "loose-front.mp4"
     )

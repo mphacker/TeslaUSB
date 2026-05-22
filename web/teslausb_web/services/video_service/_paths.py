@@ -48,7 +48,7 @@ class ResolvedClip:
 
     ``allowed_root`` is the specific root that accepted the path —
     callers occasionally need to know which root in order to compute
-    archive-vs-camera-relative download names.
+    download names.
     """
 
     path: Path
@@ -60,7 +60,7 @@ def resolve_clip_path(filepath: str, allowed_roots: tuple[Path, ...]) -> Resolve
 
     ``filepath`` is the raw ``<path:filepath>`` segment from the URL
     (``"SentryClips/2025-01-01_00-00-00/front.mp4"`` or
-    ``"ArchivedClips/2024-12-25_12-00-00-front.mp4"``). Each path
+    ``"RecentClips/2024-12-25_12-00-00-front.mp4"``). Each path
     component is basenamed before joining so embedded ``..`` is
     neutralised at the syntactic level; the resolved real path is
     then checked against each allow-listed root with
@@ -87,19 +87,7 @@ def resolve_clip_path(filepath: str, allowed_roots: tuple[Path, ...]) -> Resolve
             continue
         if not root_resolved.exists():
             continue
-        # ArchivedClips path form: when the first segment is the
-        # archive-root's basename, drop it so the join works against
-        # an archive root that does not itself contain an
-        # ``ArchivedClips`` subdirectory. SentryClips/SavedClips
-        # paths stay verbatim because they are sub-folders of
-        # backing_root/TeslaCam.
-        leading = safe_parts[0]
-        join_parts: list[str]
-        if leading == root_resolved.name:
-            join_parts = safe_parts[1:] or [safe_parts[0]]
-        else:
-            join_parts = safe_parts
-        candidate = (root_resolved / Path(*join_parts)).resolve(strict=False)
+        candidate = (root_resolved / Path(*safe_parts)).resolve(strict=False)
         if not _is_relative_to(candidate, root_resolved):
             continue
         if candidate.exists():

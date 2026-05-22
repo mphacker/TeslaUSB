@@ -18,7 +18,6 @@ _CATEGORY_FOLDERS: dict[str, str] = {
     "saved": "SavedClips",
     "event": "SentryClips",
     "encrypted": "EncryptedClips",
-    "archived": "ArchivedClips",
 }
 _CAMERA_SUFFIXES: tuple[str, ...] = (
     "-front",
@@ -190,7 +189,6 @@ def _category_roots(config: CleanupConfig) -> dict[str, Path]:
         "saved": config.media_root / "SavedClips",
         "event": config.media_root / "SentryClips",
         "encrypted": config.media_root / "EncryptedClips",
-        "archived": config.archive_root,
     }
 
 
@@ -199,10 +197,7 @@ def _is_clip_file(path: Path) -> bool:
 
 
 def _relative_display_path(path: Path, *, category: str, config: CleanupConfig) -> str:
-    if category == "archived":
-        relative = path.relative_to(config.archive_root).as_posix()
-        prefix = config.archived_clips_dirname
-        return relative if not relative else f"{prefix}/{relative}"
+    del category
     return path.relative_to(config.media_root).as_posix()
 
 

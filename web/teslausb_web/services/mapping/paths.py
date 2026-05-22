@@ -105,7 +105,6 @@ def candidate_db_paths(canonical_key_value: str) -> tuple[str, ...]:
     return (
         canonical_key_value,
         f"RecentClips/{canonical_key_value}",
-        f"ArchivedClips/{canonical_key_value}",
     )
 
 
@@ -113,17 +112,8 @@ def relative_video_path(
     video_path: Path,
     *,
     media_root: Path,
-    archive_root: Path,
-    archived_clips_dirname: str,
 ) -> str:
     try:
         return video_path.relative_to(media_root).as_posix()
     except ValueError:
-        pass
-    try:
-        relative_archive = video_path.relative_to(archive_root).as_posix()
-    except ValueError:
         return video_path.name
-    if not relative_archive:
-        return archived_clips_dirname
-    return f"{archived_clips_dirname}/{relative_archive}"

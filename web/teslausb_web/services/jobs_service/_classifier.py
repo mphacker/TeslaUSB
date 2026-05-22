@@ -36,14 +36,6 @@ _VALUE_TIERS: Final[dict[str, ValueTier]] = {
             "them out automatically. Losing one row is usually fine."
         ),
     ),
-    "archived": ValueTier(
-        tier="archived",
-        label="Already on SD card",
-        description=(
-            "This clip is in ArchivedClips, so the source file is already "
-            "preserved on the Pi even if the queue row is dropped."
-        ),
-    ),
     "cloud": ValueTier(
         tier="cloud",
         label="Cloud upload",
@@ -82,8 +74,6 @@ def classify_clip_value(subsystem: SubsystemKey, identifier: str) -> ValueTier:
         return _VALUE_TIERS["event"]
     if "/recentclips/" in ident:
         return _VALUE_TIERS["recent"]
-    if "/archivedclips/" in ident:
-        return _VALUE_TIERS["archived"]
     if subsystem is SubsystemKey.INDEXER:
         return _VALUE_TIERS["index"]
     # SubsystemKey.CLOUD_SYNC is the only remaining enum value; the

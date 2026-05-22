@@ -414,16 +414,6 @@ def test_playable_trips_for_date_cache_expires(
     ]
 
 
-def test_resolve_video_path_on_disk_supports_archive_fallback(
-    sample_fixture: SampleFixture,
-) -> None:
-    archived_copy = sample_fixture.config.media_root / "ArchivedClips" / "fallback-only.mp4"
-    archived_copy.write_text("video", encoding="utf-8")
-
-    assert (
-        sample_fixture.service._resolve_video_path_on_disk("RecentClips/fallback-only.mp4") is True
-    )
-
 
 def test_resolve_video_path_on_disk_rejects_parent_segments(sample_fixture: SampleFixture) -> None:
     assert sample_fixture.service._resolve_video_path_on_disk("../escape.mp4") is False

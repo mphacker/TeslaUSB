@@ -83,10 +83,7 @@ def _has_surviving_copy(service: MappingService, deleted_path: Path) -> bool:
     if "/" in key:
         candidate = service.config.media_root / key
         return candidate.is_file() and candidate != deleted_path
-    candidates = (
-        service.config.media_root / "RecentClips" / basename,
-        service.config.archive_root / basename,
-    )
+    candidates = (service.config.media_root / "RecentClips" / basename,)
     return any(path.is_file() and path != deleted_path for path in candidates)
 
 

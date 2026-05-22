@@ -5,8 +5,8 @@ Ports v1's ``services/analytics_service.py`` to B-1's data sources:
 * Partition usage comes from :func:`shutil.disk_usage` on the
   configured filesystem roots — there is no IMG/loopback layer in
   B-1, so the v1 ``iter_all_partitions`` helper is gone and we
-  probe ``backing_root`` (always) plus ``mapping.media_root`` and
-  ``mapping.archive_root`` when they resolve to distinct mounts.
+  probe ``backing_root`` (always) plus ``mapping.media_root`` when
+  it resolves to a distinct mount.
 * Video statistics come from the mapping DB ``indexed_files``
   table (Phase 5.13b) rather than walking the SD card.
 * Storage-health thresholds and the recording-rate fallback come
@@ -30,7 +30,6 @@ from teslausb_web.services.analytics_service._compute import (
     utc_now,
 )
 from teslausb_web.services.analytics_service._models import (
-    LABEL_ARCHIVE,
     LABEL_BACKING,
     LABEL_MEDIA,
     STATUS_CAUTION,
@@ -156,10 +155,10 @@ def make_analytics_service(
 ) -> AnalyticsService:
     """Build the analytics service from a :class:`WebConfig`.
 
-    ``backing_root`` is always probed first. ``media_root`` and
-    ``archive_root`` are added only when they resolve to a distinct
-    filesystem — otherwise the duplicate ``shutil.disk_usage``
-    results would mislead the operator.
+    ``backing_root`` is always probed first. ``media_root`` is
+    added only when it resolves to a distinct filesystem —
+    otherwise the duplicate ``shutil.disk_usage`` results would
+    mislead the operator.
     """
     seen_devs: set[object] = set()
     probes: list[Probe] = []
@@ -174,12 +173,6 @@ def make_analytics_service(
     media_dev = device_id(media)
     if media != backing and media_dev is not None and media_dev not in seen_devs:
         probes.append(Probe(key="media", label=LABEL_MEDIA, path=media))
-        seen_devs.add(media_dev)
-
-    archive = cfg.mapping.archive_root
-    archive_dev = device_id(archive)
-    if archive not in {backing, media} and archive_dev is not None and archive_dev not in seen_devs:
-        probes.append(Probe(key="archive", label=LABEL_ARCHIVE, path=archive))
 
     return AnalyticsService(
         analytics_cfg=cfg.analytics,

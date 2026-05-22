@@ -60,7 +60,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TESLACAM_DIRNAME = "TeslaCam"
-_ARCHIVE_FOLDER_NAME = "ArchivedClips"
 _RECENT_CLIPS_NAME = "RecentClips"
 _DEFAULT_PER_PAGE = 12
 _ZIP_CACHE_SUBDIR = ".cache/zip_temp"
@@ -71,25 +70,18 @@ _STREAM_CHUNK_SIZE = 256 * 1024
 class VideoService:
     """Read-only operations over the on-disk TeslaCam tree.
 
-    All paths are absolute. The service holds two roots:
-    ``teslacam_root`` (e.g. ``backing_root/TeslaCam``) and
-    ``archive_root`` (e.g. ``backing_root/ArchivedClips``). Either
-    may be missing on disk — every method handles that case.
+    All paths are absolute. The service holds a single root
+    ``teslacam_root`` (e.g. ``backing_root/TeslaCam``) which may be
+    missing on disk — every method handles that case.
     """
 
     teslacam_root: Path
-    archive_root: Path
-    archive_enabled: bool
 
     # ------------------------------------------------------------------
     # Folder + event listings.
 
     def list_folders(self) -> list[EventFolder]:
-        """List top-level folders the UI can browse.
-
-        Includes the special ``ArchivedClips`` virtual folder (whose
-        path is the configured archive root, NOT under TeslaCam).
-        """
+        """List top-level folders the UI can browse."""
         folders: list[EventFolder] = []
         if self.teslacam_root.is_dir():
             try:
@@ -106,14 +98,6 @@ class VideoService:
                     )
             except OSError as exc:
                 logger.warning("list_folders: %s: %s", self.teslacam_root, exc)
-        if self.archive_enabled and self.archive_root.is_dir():
-            folders.append(
-                EventFolder(
-                    name=_ARCHIVE_FOLDER_NAME,
-                    path=str(self.archive_root),
-                    structure="flat",
-                )
-            )
         folders.sort(key=lambda f: f.name)
         return folders
 
@@ -156,7 +140,7 @@ class VideoService:
         page: int = 1,
         per_page: int = _DEFAULT_PER_PAGE,
     ) -> tuple[list[SessionGroup], int]:
-        """Flat-folder grouping for RecentClips / ArchivedClips."""
+        """Flat-folder grouping for RecentClips."""
         folder_path = self._folder_path(folder)
         if folder_path is None or not folder_path.is_dir():
             return [], 0
@@ -171,7 +155,7 @@ class VideoService:
 
     def get_folder_structure(self, folder: str) -> str:
         """Return ``"flat"`` or ``"events"`` for ``folder``."""
-        if folder in {_ARCHIVE_FOLDER_NAME, _RECENT_CLIPS_NAME}:
+        if folder == _RECENT_CLIPS_NAME:
             return "flat"
         return "events"
 
@@ -219,7 +203,7 @@ class VideoService:
         files = self._collect_event_files(folder_path, sanitized_event, structure)
         if not files:
             raise FileNotFoundError(f"no videos for {folder}/{event_name}")
-        cache_dir = self.archive_root.parent / _ZIP_CACHE_SUBDIR
+        cache_dir = self.teslacam_root.parent / _ZIP_CACHE_SUBDIR
         zip_path = build_event_zip(tuple(files), cache_dir)
         return zip_path, f"{sanitized_event}.zip"
 
@@ -279,8 +263,6 @@ class VideoService:
         roots: list[Path] = []
         if self.teslacam_root.exists():
             roots.append(self.teslacam_root)
-        if self.archive_enabled and self.archive_root.exists():
-            roots.append(self.archive_root)
         return tuple(roots)
 
     def _folder_path(self, folder: str) -> Path | None:
@@ -288,10 +270,6 @@ class VideoService:
         sanitized = Path(folder).name
         if not sanitized:
             return None
-        if sanitized == _ARCHIVE_FOLDER_NAME:
-            if not self.archive_enabled:
-                return None
-            return self.archive_root
         return self.teslacam_root / sanitized
 
     def _collect_event_files(
@@ -324,8 +302,6 @@ def make_video_service(cfg: WebConfig) -> VideoService:
     """
     return VideoService(
         teslacam_root=cfg.paths.backing_root / _TESLACAM_DIRNAME,
-        archive_root=cfg.mapping.archive_root,
-        archive_enabled=True,
     )
 
 

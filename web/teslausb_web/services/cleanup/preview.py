@@ -17,9 +17,8 @@ _CATEGORY_POLICY_FIELDS: dict[str, tuple[str, str]] = {
     "saved": ("keep_saved_clips", "saved_clips_days"),
     "event": ("keep_event_clips", "event_clips_days"),
     "encrypted": ("keep_encrypted_clips", "encrypted_clips_days"),
-    "archived": ("keep_archived_clips", "archived_clips_days"),
 }
-_BYTES_PER_GIB = 1024**3
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,29 +48,14 @@ def build_preview_plan(
     protected_count = 0
     age_selected: list[ClipGroup] = []
     eligible: list[ClipGroup] = []
-    archived_eligible: list[ClipGroup] = []
-    archive_total_bytes = 0
     for group in groups:
         if _protection_reason(config, policy, group, now) is not None:
             protected_count += 1
             continue
         eligible.append(group)
-        if group.category == "archived":
-            archived_eligible.append(group)
-            archive_total_bytes += group.total_bytes
         if _is_age_eligible(policy, group, now):
             age_selected.append(group)
     selected_map = {group_key(group): group for group in age_selected}
-    max_archive_bytes = policy.max_archive_size_gb * _BYTES_PER_GIB
-    if max_archive_bytes > 0 and archive_total_bytes > max_archive_bytes:
-        for group in sorted(archived_eligible, key=lambda item: item.oldest_modified_at):
-            if archive_total_bytes <= max_archive_bytes:
-                break
-            key = group_key(group)
-            if key in selected_map:
-                continue
-            selected_map[key] = group
-            archive_total_bytes -= group.total_bytes
     selected_bytes = sum(group.total_bytes for group in selected_map.values())
     target_free_bytes = int(usage.total * policy.target_free_pct / 100)
     if usage.total > 0 and usage.free < target_free_bytes:
@@ -135,7 +119,7 @@ def _disk_usage(config: CleanupConfig) -> _UsageSnapshot:
 
 
 def _existing_probe_root(config: CleanupConfig) -> Path | None:
-    for candidate in (config.media_root, config.archive_root, config.media_root.parent):
+    for candidate in (config.media_root, config.media_root.parent):
         if candidate.exists():
             return candidate
     return None

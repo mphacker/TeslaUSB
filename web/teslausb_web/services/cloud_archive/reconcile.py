@@ -172,8 +172,6 @@ def _list_remote_tree(rclone_service: CloudRcloneService) -> dict[str, set[str]]
             f"{entry.name.rstrip('/')}/" if entry.is_dir else entry.name.rstrip("/")
             for entry in listing.entries
         }
-    archived_listing = rclone_service.list_files("ArchivedClips")
-    tree["ArchivedClips"] = {entry.name.rstrip("/") for entry in archived_listing.entries}
     return tree
 
 
@@ -213,32 +211,6 @@ def _reconcile_with_remote(
                     (relative_path, now, relative_path),
                 )
                 inserted += 1
-    for file_name in tree.get("ArchivedClips", set()):
-        relative_path = canonical_cloud_path(f"ArchivedClips/{file_name}")
-        rowcount = connection.execute(
-            (
-                "UPDATE cloud_synced_files SET status = 'synced', synced_at = ?, "
-                "remote_path = ?, last_error = NULL WHERE file_path = ? "
-                "AND status IN ('pending', 'queued', 'failed', 'uploading')"
-            ),
-            (now, relative_path, relative_path),
-        ).rowcount
-        if rowcount > 0:
-            updated += rowcount
-            continue
-        existing = connection.execute(
-            "SELECT 1 FROM cloud_synced_files WHERE file_path = ?",
-            (relative_path,),
-        ).fetchone()
-        if existing is None:
-            connection.execute(
-                (
-                    "INSERT INTO cloud_synced_files (file_path, status, synced_at, remote_path) "
-                    "VALUES (?, 'synced', ?, ?)"
-                ),
-                (relative_path, now, relative_path),
-            )
-            inserted += 1
     connection.commit()
     return ReconcileSummary(reconciled=inserted + updated, inserted=inserted, updated=updated)
 

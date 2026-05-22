@@ -41,18 +41,3 @@ def test_reconcile_marks_pending_rows_synced(tmp_path: Path) -> None:
     assert summary.reconciled == 1
     assert row["status"] == "synced"
 
-
-def test_reconcile_inserts_missing_remote_archived_rows(tmp_path: Path) -> None:
-    db_path = tmp_path / "cloud.db"
-    with open_db(db_path) as connection:
-        rclone = MagicMock()
-        rclone.list_directory.side_effect = [_listing(), _listing()]
-        rclone.list_files.return_value = _listing(("clip.mp4", False))
-
-        summary = _reconcile_with_remote(connection, rclone)
-        row = connection.execute(
-            "SELECT status FROM cloud_synced_files WHERE file_path = 'ArchivedClips/clip.mp4'"
-        ).fetchone()
-
-    assert summary.inserted == 1
-    assert row["status"] == "synced"

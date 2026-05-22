@@ -50,7 +50,6 @@ logger = logging.getLogger(__name__)
 _GAP_MAX_SECONDS_DEFAULT: Final[float] = 60.0
 _GAP_MAX_METERS_DEFAULT: Final[float] = 250.0
 _PLAYABLE_TRIPS_TTL_SECONDS: Final[float] = 60.0
-_ARCHIVED_CLIPS_DIRNAME: Final[str] = "ArchivedClips"
 _DEFAULT_TRIP_LIMIT: Final[int] = 50
 _DEFAULT_EVENT_LIMIT: Final[int] = 100
 _DEFAULT_DAY_LIMIT: Final[int] = 60
@@ -75,17 +74,12 @@ class MappingQueriesConfig:
     media_root: Path
     backup_retention: int = _BACKUP_RETENTION
     playable_trips_ttl_seconds: float = _PLAYABLE_TRIPS_TTL_SECONDS
-    archived_clips_dirname: str = _ARCHIVED_CLIPS_DIRNAME
 
     def __post_init__(self) -> None:
         if self.backup_retention <= 0:
             raise ValueError("backup_retention must be > 0")
         if self.playable_trips_ttl_seconds <= 0:
             raise ValueError("playable_trips_ttl_seconds must be > 0")
-        if not self.archived_clips_dirname.strip():
-            raise ValueError("archived_clips_dirname must be non-empty")
-        if "/" in self.archived_clips_dirname or "\\" in self.archived_clips_dirname:
-            raise ValueError("archived_clips_dirname must be a single path segment")
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,13 +595,7 @@ class MappingQueries:
         parts = _normalized_relative_parts(video_path)
         if not parts:
             return False
-        media_root = self._config.media_root
-        archived_root = media_root / self._config.archived_clips_dirname
-        if parts[0] == self._config.archived_clips_dirname:
-            return _path_exists(media_root.joinpath(*parts))
-        if _path_exists(media_root.joinpath(*parts)):
-            return True
-        return _path_exists(archived_root / parts[-1])
+        return _path_exists(self._config.media_root.joinpath(*parts))
 
     def _get_playable_trips_cache(self, date_str: str) -> tuple[PlayableTrip, ...] | None:
         with self._playable_trips_cache_lock:

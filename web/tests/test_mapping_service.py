@@ -21,9 +21,7 @@ from teslausb_web.services.mapping import (
 )
 from teslausb_web.services.mapping.diagnose import _diagnose_nal_structure
 from teslausb_web.services.mapping.discovery import (
-    _find_archived_videos,
     _find_front_camera_videos,
-    _iter_archived_with_mtime,
 )
 from teslausb_web.services.mapping.events import (
     WaypointSample,
@@ -77,8 +75,6 @@ class FakeParser:
 @pytest.fixture
 def service_fixture(tmp_path: Path) -> MappingService:
     media_root = tmp_path / "TeslaCam"
-    archive_root = media_root / "ArchivedClips"
-    archive_root.mkdir(parents=True)
     for folder in ("RecentClips", "SavedClips", "SentryClips"):
         (media_root / folder).mkdir(parents=True, exist_ok=True)
     parser = FakeParser(messages_by_path={}, mvhd_by_path={}, sidecar_by_path={})
@@ -87,7 +83,6 @@ def service_fixture(tmp_path: Path) -> MappingService:
             db_path=tmp_path / "state" / "mapping.db",
             backup_dir=tmp_path / "state" / "mapping-backups",
             media_root=media_root,
-            archive_root=archive_root,
             stale_scan_interval_seconds=0.05,
             stale_scan_jitter_seconds=0.01,
             initial_stale_scan_base_seconds=0.01,
@@ -106,7 +101,6 @@ def test_make_mapping_service_from_web_config(tmp_path: Path) -> None:
             db_path=tmp_path / "state" / "mapping.db",
             backup_dir=tmp_path / "state" / "mapping-backups",
             media_root=tmp_path / "media",
-            archive_root=tmp_path / "media" / "ArchivedClips",
             sample_rate=15,
         ),
     )
@@ -126,7 +120,6 @@ def test_app_factory_registers_mapping_service(tmp_path: Path) -> None:
             db_path=tmp_path / "state" / "mapping.db",
             backup_dir=tmp_path / "state" / "mapping-backups",
             media_root=tmp_path / "backing",
-            archive_root=tmp_path / "backing" / "ArchivedClips",
         ),
     )
 
@@ -145,7 +138,6 @@ def test_path_helpers_round_trip_timestamp_and_keys(service_fixture: MappingServ
     assert candidate_db_paths("clip-front.mp4") == (
         "clip-front.mp4",
         "RecentClips/clip-front.mp4",
-        "ArchivedClips/clip-front.mp4",
     )
 
     parser = FakeParser(
@@ -204,32 +196,6 @@ def test_event_detection_and_debounce() -> None:
     assert len(debounced) == 1
 
 
-def test_discovery_prefers_archive_over_recent(service_fixture: MappingService) -> None:
-    archive_file = service_fixture.config.archive_root / "2026-01-02_00-00-00-front.mp4"
-    recent_file = service_fixture.config.media_root / "RecentClips" / archive_file.name
-    saved_file = (
-        service_fixture.config.media_root
-        / "SavedClips"
-        / "2026-01-02_00-00-00"
-        / "2026-01-02_00-00-00-front.mp4"
-    )
-    saved_file.parent.mkdir(parents=True)
-    for path in (archive_file, recent_file, saved_file):
-        _write_sample_mp4(path)
-
-    discovered = list(
-        _find_front_camera_videos(
-            service_fixture.config.media_root, service_fixture.config.archive_root
-        )
-    )
-
-    assert archive_file in discovered
-    assert saved_file in discovered
-    assert recent_file not in discovered
-    assert list(_find_archived_videos(service_fixture.config.archive_root)) == [archive_file]
-    assert len(list(_iter_archived_with_mtime(service_fixture.config.archive_root))) == 1
-
-
 def test_read_event_json_and_infer_sentry_event(service_fixture: MappingService) -> None:
     event_dir = service_fixture.config.media_root / "SentryClips" / "2026-01-02_00-00-00"
     event_dir.mkdir(parents=True)
@@ -286,34 +252,6 @@ def test_index_single_file_indexes_waypoints_and_events(service_fixture: Mapping
     assert stats.indexer_status is not None
 
 
-def test_index_single_file_upgrades_recent_to_archived_path(
-    service_fixture: MappingService,
-) -> None:
-    recent = service_fixture.config.media_root / "RecentClips" / "2026-01-02_00-00-00-front.mp4"
-    archived = service_fixture.config.archive_root / recent.name
-    _write_sample_mp4(recent)
-    _write_sample_mp4(archived)
-    messages = (_message(0, lat=37.0, lon=-122.0, speed=20.0, accel_x=0.0, autopilot="NONE"),)
-    service_fixture._parser = FakeParser(
-        messages_by_path={str(recent): messages, str(archived): messages},
-        mvhd_by_path={
-            str(recent): datetime(2026, 1, 2, 0, 0, 0, tzinfo=UTC),
-            str(archived): datetime(2026, 1, 2, 0, 0, 0, tzinfo=UTC),
-        },
-        sidecar_by_path={},
-    )
-
-    first = service_fixture.index_single_file(recent)
-    second = service_fixture.index_single_file(archived)
-    with service_fixture.open_db() as connection:
-        row = connection.execute("SELECT DISTINCT video_path FROM waypoints").fetchone()
-
-    assert first.outcome.value == "indexed"
-    assert second.outcome.value == "duplicate_upgraded"
-    assert row is not None
-    assert row["video_path"] == "ArchivedClips/2026-01-02_00-00-00-front.mp4"
-
-
 def test_index_single_file_creates_sentry_event_when_no_gps(
     service_fixture: MappingService,
 ) -> None:
@@ -361,21 +299,6 @@ def test_purge_deleted_videos_nulls_paths_but_keeps_trip(service_fixture: Mappin
     assert trip_count == 1
     assert row is not None
     assert row["video_path"] is None
-
-
-def test_boot_catchup_scan_enqueues_new_archived_files(service_fixture: MappingService) -> None:
-    archived = service_fixture.config.archive_root / "2026-01-02_00-00-00-front.mp4"
-    _write_sample_mp4(archived)
-
-    first = service_fixture.boot_catchup_scan()
-    second = service_fixture.boot_catchup_scan()
-    with service_fixture.open_db() as connection:
-        row = connection.execute("SELECT COUNT(*) AS count FROM indexing_queue").fetchone()
-
-    assert first["enqueued"] == 1
-    assert second["skipped_by_watermark"] >= 1
-    assert row is not None
-    assert row["count"] == 1
 
 
 def test_retry_and_kv_helpers() -> None:

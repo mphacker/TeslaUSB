@@ -156,14 +156,6 @@ _TARGET_ROWS: Final[tuple[tuple[str, str, str, str, str, str | None], ...]] = (
         "Cybertruck encrypted footage. Keep protected by default.",
         "Disabled by default so encrypted clips stay on disk.",
     ),
-    (
-        "archived",
-        "ArchivedClips",
-        "keep_archived_clips",
-        "archived_clips_days",
-        "Locally-archived clips. Cleanup can reclaim space when needed.",
-        None,
-    ),
 )
 
 

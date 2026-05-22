@@ -60,8 +60,7 @@ def app(tmp_path: Path) -> Flask:
     backing_root = tmp_path / "backing"
     state_dir = tmp_path / "state"
     teslacam_root = backing_root / "TeslaCam"
-    archive_root = teslacam_root / "ArchivedClips"
-    for folder in ("RecentClips", "SavedClips", "SentryClips", "ArchivedClips"):
+    for folder in ("RecentClips", "SavedClips", "SentryClips"):
         (teslacam_root / folder).mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
     cfg = WebConfig(
@@ -87,7 +86,6 @@ def app(tmp_path: Path) -> Flask:
             db_path=state_dir / "mapping.db",
             backup_dir=state_dir / "mapping-backups",
             media_root=teslacam_root,
-            archive_root=archive_root,
         ),
         source_path=None,
     )

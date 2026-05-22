@@ -28,9 +28,7 @@ _VALID_MP4 = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 2048
 def _make_cfg(tmp_path: Path) -> WebConfig:
     backing = tmp_path / "backing"
     teslacam = backing / "TeslaCam"
-    archive = backing / "ArchivedClips"
     teslacam.mkdir(parents=True)
-    archive.mkdir(parents=True)
     return WebConfig(
         web=WebSection(secret_key="v" * 32),
         paths=PathsSection(
@@ -42,7 +40,6 @@ def _make_cfg(tmp_path: Path) -> WebConfig:
             db_path=tmp_path / "state" / "mapping.db",
             backup_dir=tmp_path / "state" / "mapping-backups",
             media_root=teslacam,
-            archive_root=archive,
         ),
         source_path=None,
     )
@@ -285,7 +282,6 @@ class TestExtraCoverage:
                 db_path=tmp_path / "state" / "m.db",
                 backup_dir=tmp_path / "state" / "mb",
                 media_root=backing / "TeslaCam",
-                archive_root=backing / "absent",
             ),
             source_path=None,
         )

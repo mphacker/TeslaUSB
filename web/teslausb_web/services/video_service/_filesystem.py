@@ -168,7 +168,7 @@ def parse_event_full(event_path: Path, event_name: str) -> EventDetails | None:
 def group_flat_sessions(
     folder_path: Path, page: int, per_page: int
 ) -> tuple[list[SessionGroup], int]:
-    """Group flat-folder clips by session (RecentClips / ArchivedClips).
+    """Group flat-folder clips by session (RecentClips).
 
     Two passes:
 

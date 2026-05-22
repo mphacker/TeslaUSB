@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 # B-1 has no partitions so we use purpose-named labels instead.
 LABEL_BACKING: Final[str] = "TeslaCam Storage"
 LABEL_MEDIA: Final[str] = "Media Library"
-LABEL_ARCHIVE: Final[str] = "Archive"
 
 # Status tokens — string enum sentinels. v1 used the same vocabulary
 # verbatim; preserved so the template's ``health.status`` branches
@@ -30,13 +29,11 @@ CLIPS_PER_HOUR: Final[float] = 60.0
 FOLDER_SAVED: Final[str] = "SavedClips"
 FOLDER_SENTRY: Final[str] = "SentryClips"
 FOLDER_RECENT: Final[str] = "RecentClips"
-FOLDER_ARCHIVED: Final[str] = "ArchivedClips"
 FOLDER_OTHER: Final[str] = "Other"
 
 FOLDER_PRIORITY: Final[Mapping[str, str]] = {
     FOLDER_SAVED: "high",
     FOLDER_SENTRY: "high",
-    FOLDER_ARCHIVED: "medium",
     FOLDER_RECENT: "low",
     FOLDER_OTHER: "medium",
 }
@@ -44,7 +41,6 @@ FOLDER_PRIORITY: Final[Mapping[str, str]] = {
 FOLDER_DESCRIPTIONS: Final[Mapping[str, str]] = {
     FOLDER_SAVED: "Manually saved clips",
     FOLDER_SENTRY: "Sentry mode recordings",
-    FOLDER_ARCHIVED: "Archived clips (cloud uploaded)",
     FOLDER_RECENT: "Recent driving footage",
     FOLDER_OTHER: "Unclassified clips",
 }

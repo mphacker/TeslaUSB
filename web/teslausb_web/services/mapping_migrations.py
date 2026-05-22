@@ -534,8 +534,6 @@ def _repair_bad_source_folders(connection: sqlite3.Connection) -> int:
 
 def _infer_source_folder(video_path: str) -> str:
     normalized = video_path.replace("\\", "/")
-    if "ArchivedClips" in normalized:
-        return "ArchivedClips"
     if "/" in normalized:
         return normalized.split("/", 1)[0]
     return "Unknown"
@@ -604,7 +602,7 @@ def _dedupe_trip_waypoints(connection: sqlite3.Connection) -> int:
         rows = connection.execute(
             """SELECT id, video_path FROM waypoints
                WHERE trip_id = ? AND timestamp = ? AND lat = ? AND lon = ?
-               ORDER BY CASE WHEN video_path LIKE '%ArchivedClips%' THEN 0 ELSE 1 END, id""",
+               ORDER BY id""",
             (
                 duplicate["trip_id"],
                 duplicate["timestamp"],

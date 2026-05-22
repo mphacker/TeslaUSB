@@ -32,11 +32,11 @@ CAMERA_KEYS: Final[tuple[str, ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class EventFolder:
-    """A top-level folder under ``TeslaCam/`` (or the archive root).
+    """A top-level folder under ``TeslaCam/``.
 
     ``structure`` is one of ``"flat"`` (one mp4 per camera per
-    timestamp, all in the folder root — RecentClips, ArchivedClips)
-    or ``"events"`` (one subdirectory per event, each containing the
+    timestamp, all in the folder root — RecentClips) or
+    ``"events"`` (one subdirectory per event, each containing the
     six camera angles — SavedClips, SentryClips).
     """
 
@@ -166,7 +166,7 @@ class EventDetails:
 
 @dataclass(frozen=True, slots=True)
 class SessionGroup:
-    """A flat-folder (RecentClips/ArchivedClips) session group."""
+    """A flat-folder (RecentClips) session group."""
 
     name: str
     timestamp: float

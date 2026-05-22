@@ -36,7 +36,7 @@ def diagnose_video(
     if not teslacam_path.is_dir():
         result["summary"] = f"TeslaCam path does not exist: {teslacam_path}"
         return result
-    videos = list(_find_front_camera_videos(teslacam_path, service.config.archive_root))
+    videos = list(_find_front_camera_videos(teslacam_path))
     result["total_front_videos"] = len(videos)
     diagnostics = [_diagnose_single_video(path, parser) for path in videos[:max_videos]]
     result["videos"] = diagnostics

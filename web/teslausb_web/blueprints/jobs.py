@@ -9,11 +9,11 @@ B-1 deviation from v1
 
 v1 unified three subsystems: ``archive``, ``indexer``, ``cloud_sync``.
 B-1 ships **only** ``indexer`` and ``cloud_sync`` — the v1
-``archive`` queue (move-to-ArchivedClips dead-letter) does not exist
-in B-1 because the cleanup pipeline is a fire-and-forget filesystem
-move with no queue layer (see ``docs/00-PLAN.md`` "no IMG/loopback"
-invariant). The Failed Jobs UI never shows an ``archive`` filter
-pill on B-1.
+``archive`` queue does not exist in B-1 because Tesla writes
+RecentClips/SentryClips/SavedClips straight to the SD card via the
+USB gadget; there is no archive worker and no ``ArchivedClips``
+folder (see ``docs/00-PLAN.md`` "no IMG/loopback" invariant). The
+Failed Jobs UI never shows an ``archive`` filter pill on B-1.
 
 Routes (URLs match v1 exactly so existing links resolve):
     * ``GET  /jobs``                  — HTML shell, JS fills the rest.

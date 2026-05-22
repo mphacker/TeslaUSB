@@ -73,8 +73,7 @@ def execute_groups(
 
 
 def _allowed_roots(config: CleanupConfig) -> tuple[Path, ...]:
-    roots = {config.media_root.resolve(), config.archive_root.resolve()}
-    return tuple(sorted(roots, key=str))
+    return (config.media_root.resolve(),)
 
 
 def _validated_path(path: Path, allowed_roots: tuple[Path, ...]) -> Path:

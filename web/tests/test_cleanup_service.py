@@ -54,7 +54,6 @@ _CATEGORY_FOLDERS = {
     "saved": "SavedClips",
     "event": "SentryClips",
     "encrypted": "EncryptedClips",
-    "archived": "ArchivedClips",
 }
 
 
@@ -148,13 +147,10 @@ class InlineThread:
 @pytest.fixture
 def cleanup_config(tmp_path: Path) -> CleanupConfig:
     media_root = tmp_path / "backing"
-    archive_root = media_root / "ArchivedClips"
     history_db_path = tmp_path / "state" / "cleanup_history.db"
     return CleanupConfig(
         history_db_path=history_db_path,
         media_root=media_root,
-        archive_root=archive_root,
-        archived_clips_dirname="ArchivedClips",
         report_limit=5,
     )
 
@@ -231,8 +227,6 @@ def _insert_waypoints(db_path: Path, *paths: str) -> None:
 
 
 def _category_root(config: CleanupConfig, category: str) -> Path:
-    if category == "archived":
-        return config.archive_root
     return config.media_root / _CATEGORY_FOLDERS[category]
 
 
@@ -280,8 +274,6 @@ def _write_group(  # noqa: PLR0913
 
 
 def _relative_path(config: CleanupConfig, category: str, path: Path) -> str:
-    if category == "archived":
-        return f"{config.archived_clips_dirname}/{path.relative_to(config.archive_root).as_posix()}"
     return path.relative_to(config.media_root).as_posix()
 
 
@@ -331,7 +323,6 @@ class TestCleanupConfigValidation:
             CleanupConfig(
                 history_db_path=Path("relative.db"),
                 media_root=tmp_path / "media",
-                archive_root=tmp_path / "archive",
             )
 
     @pytest.mark.parametrize(
@@ -351,14 +342,6 @@ class TestCleanupConfigValidation:
         with pytest.raises(CleanupConfigError, match=field_name):
             _replace_numeric_field_with_zero(cleanup_config, field_name)
 
-    def test_rejects_blank_archive_dirname(self, cleanup_config: CleanupConfig) -> None:
-        with pytest.raises(CleanupConfigError, match="archived_clips_dirname"):
-            CleanupConfig(
-                history_db_path=cleanup_config.history_db_path,
-                media_root=cleanup_config.media_root,
-                archive_root=cleanup_config.archive_root,
-                archived_clips_dirname="   ",
-            )
 
 
 def test_load_mapping_snapshot_reads_gps_and_index_rows(
@@ -444,7 +427,6 @@ def test_scan_orphans_ignores_recent_groups(
         ("saved", "keep_saved_clips"),
         ("event", "keep_event_clips"),
         ("encrypted", "keep_encrypted_clips"),
-        ("archived", "keep_archived_clips"),
     ],
 )
 def test_build_preview_plan_respects_keep_flags(
@@ -549,28 +531,6 @@ def test_build_preview_plan_selects_for_free_space_target(
     assert plan.candidate_count == 2
     assert plan.projected_free_pct > plan.current_free_pct
 
-
-def test_build_preview_plan_trims_archived_groups_by_size(
-    cleanup_config: CleanupConfig,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "teslausb_web.services.cleanup.preview.shutil.disk_usage",
-        lambda _probe: _disk_usage(10_000, 5_000, 5_000),
-    )
-    _write_group(cleanup_config, "archived", "arch-a", age_days=40, size_bytes=1024 * 1024)
-    _write_group(cleanup_config, "archived", "arch-b", age_days=39, size_bytes=1024 * 1024)
-    snapshot = MappingSnapshot(
-        gps_relative_paths=frozenset(), indexed_paths=(), indexed_canonical_keys=frozenset()
-    )
-    groups = discover_clip_groups(cleanup_config, snapshot)
-    plan = build_preview_plan(
-        cleanup_config,
-        replace(RetentionPolicy(), max_archive_size_gb=0, keep_archived_clips=False),
-        groups,
-    )
-    assert plan.candidate_count == 2
-    assert plan.counts_by_category["archived"] == 2
 
 
 def test_execute_groups_dry_run_leaves_files(cleanup_config: CleanupConfig) -> None:
@@ -846,7 +806,6 @@ def test_make_cleanup_service_builds_from_web_config(
             db_path=state_dir / "mapping.db",
             backup_dir=state_dir / "mapping-backups",
             media_root=tmp_path / "backing",
-            archive_root=tmp_path / "backing" / "ArchivedClips",
         ),
         source_path=None,
     )

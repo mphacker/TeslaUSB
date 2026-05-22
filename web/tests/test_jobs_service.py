@@ -96,9 +96,6 @@ class TestClassifyClipValue:
         v = classify_clip_value(SubsystemKey.CLOUD_SYNC, "/x/RecentClips/y.mp4")
         assert v.tier == "recent"
 
-    def test_archived_is_archived(self) -> None:
-        v = classify_clip_value(SubsystemKey.CLOUD_SYNC, "/x/ArchivedClips/y.mp4")
-        assert v.tier == "archived"
 
     def test_indexer_default_is_index(self) -> None:
         v = classify_clip_value(SubsystemKey.INDEXER, "trip-99")

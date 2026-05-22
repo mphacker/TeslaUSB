@@ -65,7 +65,7 @@ _DEFAULT_DEAD_LETTER_LIMIT: Final[int] = 100
 _DEFAULT_STATUS_CACHE_TTL_SECONDS: Final[float] = 10.0
 _DEFAULT_REMOTE_PATH: Final[str] = ""
 _ALLOWED_EVENT_FOLDERS: Final[frozenset[str]] = frozenset(
-    {"ArchivedClips", "RecentClips", "SavedClips", "SentryClips"}
+    {"RecentClips", "SavedClips", "SentryClips"}
 )
 _UNSUPPORTED_SETTINGS_MESSAGE: Final[str] = (
     "Cloud archive settings updates are not supported in B-1 Phase 5.14d"

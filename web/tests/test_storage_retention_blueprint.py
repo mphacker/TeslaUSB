@@ -170,7 +170,7 @@ class TestJsonPolicyRoutes:
         assert payload["success"] is True
         assert payload["policy"]["max_age_days"] == 30
         assert payload["preview_available"] is True
-        assert len(payload["rows"]) == 5
+        assert len(payload["rows"]) == 4
 
     def test_status_alias_returns_same_shape(self, client: FlaskClient) -> None:
         response = client.get("/api/cleanup/status")

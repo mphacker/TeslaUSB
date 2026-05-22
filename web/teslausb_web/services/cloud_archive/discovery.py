@@ -128,24 +128,6 @@ def _discover_events(
     candidates: list[EventCandidate] = []
     for folder in sync_folders:
         folder_path = config.teslacam_path / folder
-        if folder == "ArchivedClips":
-            if not folder_path.is_dir():
-                continue
-            for child in sorted(folder_path.iterdir()):
-                if not child.is_file() or child.suffix.lower() not in {".mp4", ".ts"}:
-                    continue
-                relative_path = canonical_cloud_path(f"ArchivedClips/{child.name}")
-                if _is_path_skipped(connection, relative_path):
-                    continue
-                candidates.append(
-                    EventCandidate(
-                        local_path=child,
-                        relative_path=relative_path,
-                        size_bytes=child.stat().st_size,
-                        score=_score_event_priority(child, geo_hits),
-                    )
-                )
-            continue
         if not folder_path.is_dir():
             continue
         for child in sorted(folder_path.iterdir()):

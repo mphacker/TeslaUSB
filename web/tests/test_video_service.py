@@ -42,9 +42,8 @@ def _write_clip(path: Path, *, encrypted: bool = False) -> None:
     path.write_bytes(_ENCRYPTED_MP4 if encrypted else _VALID_MP4)
 
 
-def _build_tree(tmp_path: Path) -> tuple[Path, Path]:
+def _build_tree(tmp_path: Path) -> Path:
     teslacam = tmp_path / "TeslaCam"
-    archive = tmp_path / "ArchivedClips"
     cameras = (
         "front",
         "back",
@@ -84,20 +83,12 @@ def _build_tree(tmp_path: Path) -> tuple[Path, Path]:
     _write_clip(recent / "2025-03-01_09-16-00-front.mp4", encrypted=True)
     _write_clip(recent / "2025-03-01_09-16-00-back.mp4")
 
-    # ArchivedClips (flat structure)
-    for cam in cameras:
-        _write_clip(archive / f"2024-12-25_10-00-00-{cam}.mp4")
-
-    return teslacam, archive
+    return teslacam
 
 
 def _make_svc(tmp_path: Path) -> VideoService:
-    teslacam, archive = _build_tree(tmp_path)
-    return VideoService(
-        teslacam_root=teslacam,
-        archive_root=archive,
-        archive_enabled=True,
-    )
+    teslacam = _build_tree(tmp_path)
+    return VideoService(teslacam_root=teslacam)
 
 
 # ---------------------------------------------------------------------------
@@ -106,24 +97,14 @@ def _make_svc(tmp_path: Path) -> VideoService:
 
 
 class TestListing:
-    def test_list_folders_includes_archive(self, tmp_path: Path) -> None:
+    def test_list_folders_includes_known_folders(self, tmp_path: Path) -> None:
         svc = _make_svc(tmp_path)
         folders = svc.list_folders()
         names = {f.name for f in folders}
-        assert {"SentryClips", "SavedClips", "RecentClips", "ArchivedClips"} <= names
-
-    def test_list_folders_skips_archive_when_disabled(self, tmp_path: Path) -> None:
-        teslacam, archive = _build_tree(tmp_path)
-        svc = VideoService(teslacam, archive, archive_enabled=False)
-        names = {f.name for f in svc.list_folders()}
-        assert "ArchivedClips" not in names
+        assert {"SentryClips", "SavedClips", "RecentClips"} <= names
 
     def test_list_folders_empty_when_missing(self, tmp_path: Path) -> None:
-        svc = VideoService(
-            teslacam_root=tmp_path / "absent",
-            archive_root=tmp_path / "absent2",
-            archive_enabled=True,
-        )
+        svc = VideoService(teslacam_root=tmp_path / "absent")
         assert svc.list_folders() == []
 
     def test_get_events_returns_events_with_metadata(self, tmp_path: Path) -> None:
@@ -177,7 +158,6 @@ class TestListing:
     def test_get_folder_structure(self, tmp_path: Path) -> None:
         svc = _make_svc(tmp_path)
         assert svc.get_folder_structure("RecentClips") == "flat"
-        assert svc.get_folder_structure("ArchivedClips") == "flat"
         assert svc.get_folder_structure("SentryClips") == "events"
 
 
@@ -219,11 +199,6 @@ class TestResolveClipPath:
         resolved = svc.resolve_clip_path("RecentClips/2025-03-01_09-15-30-front.mp4")
         assert resolved.path.name == "2025-03-01_09-15-30-front.mp4"
 
-    def test_resolve_archive_clip_with_prefix(self, tmp_path: Path) -> None:
-        svc = _make_svc(tmp_path)
-        resolved = svc.resolve_clip_path("ArchivedClips/2024-12-25_10-00-00-front.mp4")
-        assert resolved.path.name == "2024-12-25_10-00-00-front.mp4"
-        assert resolved.allowed_root == svc.archive_root.resolve()
 
     def test_traversal_with_dotdot_blocked(self, tmp_path: Path) -> None:
         svc = _make_svc(tmp_path)
@@ -395,13 +370,6 @@ class TestExtraCoverage:
         finally:
             zip_path.unlink(missing_ok=True)
 
-    def test_archive_only_session_resolves(self, tmp_path: Path) -> None:
-        svc = _make_svc(tmp_path)
-        # Resolve a clip path without the ArchivedClips/ prefix —
-        # this exercises the no-leading-name branch of resolve_clip_path.
-        clip = svc.archive_root / "2024-12-25_10-00-00-front.mp4"
-        result = svc.resolve_clip_path("ArchivedClips/2024-12-25_10-00-00-front.mp4")
-        assert result.path == clip.resolve()
 
     def test_safe_delete_clip_on_file(self, tmp_path: Path) -> None:
         root = tmp_path / "root"

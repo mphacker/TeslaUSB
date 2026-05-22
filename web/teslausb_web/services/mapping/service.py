@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_ARCHIVED_CLIPS_DIRNAME = "ArchivedClips"
 _DEFAULT_SAMPLE_RATE = 30
 _DEFAULT_TRIP_GAP_MINUTES = 5
 _DEFAULT_INDEX_TOO_NEW_SECONDS = 120.0
@@ -107,9 +106,7 @@ class MappingServiceConfig:
     db_path: Path
     backup_dir: Path
     media_root: Path
-    archive_root: Path
     backup_retention: int = 3
-    archived_clips_dirname: str = _DEFAULT_ARCHIVED_CLIPS_DIRNAME
     sample_rate: int = _DEFAULT_SAMPLE_RATE
     trip_gap_minutes: int = _DEFAULT_TRIP_GAP_MINUTES
     index_too_new_seconds: float = _DEFAULT_INDEX_TOO_NEW_SECONDS
@@ -140,8 +137,6 @@ class MappingServiceConfig:
             raise ValueError("stale_scan_debounce_seconds must be > 0")
         if self.shutdown_timeout_seconds <= 0:
             raise ValueError("shutdown_timeout_seconds must be > 0")
-        if not self.archived_clips_dirname.strip():
-            raise ValueError("archived_clips_dirname must be non-empty")
 
     @property
     def event_thresholds(self) -> dict[str, float]:
@@ -197,7 +192,6 @@ class MappingService:
                 backup_dir=config.backup_dir,
                 backup_retention=config.backup_retention,
                 media_root=config.media_root,
-                archived_clips_dirname=config.archived_clips_dirname,
             ),
             migrations_runner=self._migrations_runner,
         )
@@ -402,8 +396,6 @@ def make_mapping_service(cfg: WebConfig | MappingServiceConfig) -> MappingServic
         backup_dir=cfg.mapping.backup_dir,
         backup_retention=cfg.mapping.backup_retention,
         media_root=cfg.mapping.media_root,
-        archive_root=cfg.mapping.archive_root,
-        archived_clips_dirname=cfg.mapping.archived_clips_dirname,
         sample_rate=cfg.mapping.sample_rate,
         trip_gap_minutes=cfg.mapping.trip_gap_minutes,
         index_too_new_seconds=cfg.mapping.index_too_new_seconds,
@@ -428,7 +420,6 @@ def make_mapping_service(cfg: WebConfig | MappingServiceConfig) -> MappingServic
                 backup_dir=config.backup_dir,
                 backup_retention=config.backup_retention,
                 media_root=config.media_root,
-                archived_clips_dirname=config.archived_clips_dirname,
             ),
             migrations_runner=migrations_runner,
         ),

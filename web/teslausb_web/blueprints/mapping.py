@@ -73,7 +73,6 @@ _DEFAULT_ALL_ROUTES_MAX_POINTS: Final[int] = 200
 _ALL_ROUTES_MAX_POINTS_CAP: Final[int] = 1000
 _MIN_ROUTE_POINT_COUNT: Final[int] = 2
 _MAX_DIAGNOSE_VIDEOS: Final[int] = 10
-_ARCHIVED_CLIPS_DIRNAME: Final[str] = "ArchivedClips"
 _FRONT_CLIP_SUFFIX: Final[str] = "-front.mp4"
 _EVENT_FOLDER_PART_COUNT: Final[int] = 3
 
@@ -171,12 +170,6 @@ def _mapping_response(
     return _redirect_to_mapping(cache_bust=request.args.get("_", "0"))
 
 
-def _normalize_video_path(video_path: str | None) -> str | None:
-    if video_path is None or _ARCHIVED_CLIPS_DIRNAME not in video_path:
-        return video_path
-    return f"{_ARCHIVED_CLIPS_DIRNAME}/{Path(video_path).name}"
-
-
 def _parse_bbox() -> tuple[float, float, float, float] | None:
     keys = ("min_lat", "min_lon", "max_lat", "max_lon")
     values = [request.args.get(key) for key in keys]
@@ -251,7 +244,7 @@ def _serialize_waypoint(waypoint: RouteWaypoint) -> dict[str, object]:
         "heading": waypoint.heading,
         "speed_mps": waypoint.speed_mps,
         "autopilot_state": waypoint.autopilot_state,
-        "video_path": _normalize_video_path(waypoint.video_path),
+        "video_path": waypoint.video_path,
         "frame_offset": waypoint.frame_offset,
         "gap_after": waypoint.gap_after,
     }
@@ -267,7 +260,7 @@ def _serialize_event(event: EventRow) -> dict[str, object]:
         "event_type": event.event_type,
         "severity": event.severity,
         "description": event.description,
-        "video_path": _normalize_video_path(event.video_path),
+        "video_path": event.video_path,
         "frame_offset": event.frame_offset,
         "metadata": event.metadata,
     }
@@ -416,10 +409,6 @@ def _mapping_media_root() -> Path:
     return _cfg().mapping.media_root
 
 
-def _mapping_archive_root() -> Path:
-    return _cfg().mapping.archive_root
-
-
 def _require_mapping_media_root() -> Path:
     root = _mapping_media_root()
     if not root.is_dir():
@@ -429,10 +418,7 @@ def _require_mapping_media_root() -> Path:
 
 def _folder_root(folder: str) -> Path:
     safe_folder = _safe_segment(folder, field_name="folder")
-    if safe_folder == _ARCHIVED_CLIPS_DIRNAME:
-        base = _mapping_archive_root()
-    else:
-        base = _require_mapping_media_root() / safe_folder
+    base = _require_mapping_media_root() / safe_folder
     if not base.is_dir():
         raise MappingNotFoundError(f"Folder not found: {safe_folder}")
     return base
@@ -497,17 +483,6 @@ def _event_clip_listing(folder: str, event_name: str) -> _EventClipListing:
             first_front=clip_name,
             front_clips=(f"{safe_folder}/{clip_name}",),
         )
-    if safe_folder != _ARCHIVED_CLIPS_DIRNAME:
-        archived_clip = _mapping_archive_root() / f"{safe_event}{_FRONT_CLIP_SUFFIX}"
-        if archived_clip.is_file():
-            clip_name = archived_clip.name
-            return _EventClipListing(
-                folder=_ARCHIVED_CLIPS_DIRNAME,
-                event=safe_event,
-                structure="flat",
-                first_front=clip_name,
-                front_clips=(f"{_ARCHIVED_CLIPS_DIRNAME}/{clip_name}",),
-            )
     raise MappingNotFoundError(
         "Video file no longer exists. Tesla may have overwritten it. Try re-indexing."
     )
@@ -592,10 +567,6 @@ def _clear_pending_index_queue(service: MappingService) -> int:
 def _sentry_event_payload(event: EventRow) -> dict[str, object]:
     payload = _serialize_event(event)
     video_path = event.video_path or ""
-    if _ARCHIVED_CLIPS_DIRNAME in video_path:
-        payload["source_folder"] = _ARCHIVED_CLIPS_DIRNAME
-        payload["event_folder"] = ""
-        return payload
     parts = video_path.replace("\\", "/").split("/")
     payload["source_folder"] = parts[0] if parts else ""
     payload["event_folder"] = parts[1] if len(parts) >= _EVENT_FOLDER_PART_COUNT else ""

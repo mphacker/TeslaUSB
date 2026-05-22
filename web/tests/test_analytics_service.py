@@ -156,7 +156,6 @@ class TestServiceConstruction:
                 db_path=tmp_path / "state" / "mapping.sqlite",
                 backup_dir=tmp_path / "state" / "backup",
                 media_root=backing,
-                archive_root=backing / "archive",
             ),
             source_path=None,
         )
@@ -213,7 +212,7 @@ class TestFolderClassification:
             ("TeslaCam/SavedClips/2024/x.mp4", "SavedClips"),
             ("TeslaCam/SentryClips/2024/x.mp4", "SentryClips"),
             ("TeslaCam/RecentClips/x.mp4", "RecentClips"),
-            ("TeslaCam/ArchivedClips/x.mp4", "ArchivedClips"),
+            ("TeslaCam/ArchivedClips/x.mp4", "Other"),
             ("foo/bar.mp4", "Other"),
             ("", "Other"),
             (r"TeslaCam\SavedClips\x.mp4", "SavedClips"),
@@ -256,7 +255,6 @@ class TestVideoStatistics:
             "SavedClips",
             "SentryClips",
             "RecentClips",
-            "ArchivedClips",
             "Other",
         }
         # SavedClips is heaviest (100+200=300) — sorted to the front.
@@ -267,9 +265,7 @@ class TestVideoStatistics:
         assert saved.size_bytes == 300
         assert saved.oldest_iso is not None
         assert saved.newest_iso is not None
-        # ArchivedClips had a null mtime → bucket extrema stay None.
-        archived = next(f for f in stats.folders if f.name == "ArchivedClips")
-        assert archived.oldest_iso is None
+
 
     def test_summarize_helper_handles_empty_sequence(self) -> None:
         assert summarize_indexed_files(()).total_files == 0

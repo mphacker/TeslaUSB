@@ -7,14 +7,14 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .discovery import _iter_archived_with_mtime
+from .discovery import _iter_front_camera_videos_with_mtime
 from .kv import _kv_get, _kv_set
 from .paths import canonical_key
 
 if TYPE_CHECKING:
     from .service import MappingService
 
-_BOOT_CATCHUP_WATERMARK_KEY = "boot_catchup_archived_max_mtime"
+_BOOT_CATCHUP_WATERMARK_KEY = "boot_catchup_front_camera_max_mtime"
 _RANDOM = secrets.SystemRandom()
 
 
@@ -28,7 +28,7 @@ def boot_catchup_scan(service: MappingService, *, source: str = "catchup") -> di
     watermark = _read_watermark(service)
     new_files: list[tuple[Path, float]] = []
     max_mtime = watermark
-    for path, mtime in _iter_archived_with_mtime(service.config.archive_root):
+    for path, mtime in _iter_front_camera_videos_with_mtime(service.config.media_root):
         result["scanned"] += 1
         max_mtime = max(max_mtime, mtime)
         if mtime <= watermark:

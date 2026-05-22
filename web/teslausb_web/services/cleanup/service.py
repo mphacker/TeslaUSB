@@ -112,8 +112,6 @@ class CleanupReport:
 class CleanupConfig:
     history_db_path: Path
     media_root: Path
-    archive_root: Path
-    archived_clips_dirname: str = "ArchivedClips"
     max_concurrent_runs: int = 1
     dry_run_default: bool = True
     orphan_scan_batch_size: int = 500
@@ -127,7 +125,6 @@ class CleanupConfig:
         for path_name, path_value in (
             ("history_db_path", self.history_db_path),
             ("media_root", self.media_root),
-            ("archive_root", self.archive_root),
         ):
             posix_path = PurePosixPath(path_value.as_posix())
             if not path_value.is_absolute() and not posix_path.is_absolute():
@@ -142,8 +139,6 @@ class CleanupConfig:
         ):
             if numeric_value <= 0:
                 raise CleanupConfigError(f"{numeric_name} must be > 0")
-        if not self.archived_clips_dirname.strip():
-            raise CleanupConfigError("archived_clips_dirname must be non-empty")
 
 
 class RetentionSource(Protocol):
@@ -625,8 +620,6 @@ def make_cleanup_service(
         else CleanupConfig(
             history_db_path=cfg.cleanup.history_db_path,
             media_root=cfg.mapping.media_root,
-            archive_root=cfg.mapping.archive_root,
-            archived_clips_dirname=cfg.mapping.archived_clips_dirname,
             max_concurrent_runs=cfg.cleanup.max_concurrent_runs,
             dry_run_default=cfg.cleanup.dry_run_default,
             orphan_scan_batch_size=cfg.cleanup.orphan_scan_batch_size,

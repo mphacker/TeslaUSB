@@ -22,7 +22,7 @@ from werkzeug.datastructures import FileStorage
 
 @pytest.fixture
 def light_show_folder(tmp_path: Path) -> Path:
-    path = tmp_path / "lightshow" / "LightShow"
+    path = tmp_path / "LightShow"
     path.mkdir(parents=True)
     return path
 
@@ -429,7 +429,7 @@ def test_factory_uses_configured_paths() -> None:
 
     service = make_light_show_service(cfg)
 
-    assert service._light_show_folder == Path("/srv/teslausb") / "lightshow" / "CustomShows"
+    assert service._light_show_folder == Path("/srv/teslausb") / "CustomShows"
     assert service._active_show_file == Path("/var/lib/teslausb") / "custom_active.json"
     assert service._max_upload_size == 4096
     assert service._max_zip_size == 8192

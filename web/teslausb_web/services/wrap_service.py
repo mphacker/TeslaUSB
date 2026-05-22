@@ -437,10 +437,15 @@ def _safe_unlink(path: Path) -> None:
 
 
 def make_wrap_service(cfg: WebConfig) -> WrapService:
-    """Build a wrap service rooted at the lightshow USB backing directory."""
-    lightshow_root = cfg.paths.backing_root / _LIGHTSHOW_ROOT_DIRNAME
+    """Build a wrap service rooted at ``<media_root>/<LightShow>/<wraps>``.
+
+    Wraps live under the LightShow folder (Tesla's spec) so the layout
+    on the MEDIA USB volume is exactly what the car expects:
+    ``/LightShow/wraps/<image>.png``.
+    """
+    wraps_folder = cfg.paths.media_root / cfg.light_shows.folder / cfg.wraps.folder
     return WrapService(
-        wraps_folder=lightshow_root / cfg.wraps.folder,
+        wraps_folder=wraps_folder,
         max_size=cfg.wraps.max_size,
         min_dimension=cfg.wraps.min_dimension,
         max_dimension=cfg.wraps.max_dimension,

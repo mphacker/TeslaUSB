@@ -43,7 +43,7 @@ def _make_config(
 
 
 def _ensure_lightshow(cfg: WebConfig) -> Path:
-    target = cfg.paths.backing_root / "lightshow"
+    target = cfg.paths.media_root
     target.mkdir(parents=True, exist_ok=True)
     return target
 

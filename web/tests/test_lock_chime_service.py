@@ -77,7 +77,7 @@ def _ffmpeg_completed(*, returncode: int = 0, stderr: bytes | str = b"") -> Simp
 
 @pytest.fixture
 def chimes_dir(tmp_path: Path) -> Path:
-    path = tmp_path / "lightshow" / "Chimes"
+    path = tmp_path / "Chimes"
     path.mkdir(parents=True)
     return path
 

@@ -22,7 +22,7 @@ from werkzeug.datastructures import FileStorage
 
 @pytest.fixture
 def wraps_folder(tmp_path: Path) -> Path:
-    path = tmp_path / "lightshow" / "Wraps"
+    path = tmp_path / "LightShow" / "wraps"
     path.mkdir(parents=True)
     return path
 
@@ -357,7 +357,7 @@ def test_factory_uses_configured_paths() -> None:
 
     service = make_wrap_service(cfg)
 
-    assert service._wraps_folder == Path("/srv/teslausb") / "lightshow" / "CustomWraps"
+    assert service._wraps_folder == Path("/srv/teslausb") / "LightShow" / "CustomWraps"
     assert service._max_size == 2048
     assert service._min_dimension == 600
     assert service._max_dimension == 900

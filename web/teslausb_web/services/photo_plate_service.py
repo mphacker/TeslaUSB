@@ -436,7 +436,7 @@ def _safe_unlink(path: Path) -> None:
 def make_photo_plate_service(cfg: WebConfig) -> PhotoPlateService:
     """Build a photo-plate service rooted at the lightshow USB backing directory."""
     return PhotoPlateService(
-        plates_folder=cfg.paths.backing_root / _LIGHTSHOW_ROOT_DIRNAME / _PLATES_DIRNAME,
+        plates_folder=cfg.paths.media_root / _PLATES_DIRNAME,
     )
 
 

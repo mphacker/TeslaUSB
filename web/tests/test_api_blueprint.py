@@ -32,7 +32,7 @@ def _write_real_wav(path: Path) -> None:
 def app(tmp_path: Path) -> Flask:
     backing_root = tmp_path / "backing"
     state_dir = tmp_path / "state"
-    (backing_root / "lightshow" / "Chimes").mkdir(parents=True)
+    (backing_root / "Chimes").mkdir(parents=True)
     state_dir.mkdir()
     cfg = WebConfig(
         web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
@@ -58,7 +58,7 @@ def client(app: Flask) -> FlaskClient:
 @pytest.fixture
 def chimes_dir(app: Flask) -> Path:
     cfg = app.config["teslausb_config"]
-    path = cfg.paths.backing_root / "lightshow" / cfg.chimes.chimes_folder
+    path = cfg.paths.media_root / cfg.chimes.chimes_folder
     path.mkdir(parents=True, exist_ok=True)
     return path
 

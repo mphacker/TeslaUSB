@@ -55,7 +55,7 @@ def _cfg() -> WebConfig:
 
 def _wraps_folder() -> Path:
     cfg = _cfg()
-    return cfg.paths.backing_root / _LIGHTSHOW_DIRNAME / cfg.wraps.folder
+    return cfg.paths.media_root / cfg.light_shows.folder / cfg.wraps.folder
 
 
 def _get_service() -> WrapService:

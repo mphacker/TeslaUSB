@@ -366,7 +366,7 @@ def test_wraps_defaults_round_trip(tmp_path: Path) -> None:
     _write(cfg_file, "[wraps]\n")
     cfg = load_config(cfg_file)
     assert cfg.wraps == WrapsSection()
-    assert cfg.wraps.folder == "Wraps"
+    assert cfg.wraps.folder == "wraps"
     assert cfg.wraps.max_upload_count == 10
     assert cfg.wraps.allowed_extensions == (".png",)
 

@@ -46,7 +46,7 @@ _MAX_SIZE_BYTES: Final[int] = 1_048_576
 def app(tmp_path: Path) -> Flask:
     backing_root = tmp_path / "backing"
     state_dir = tmp_path / "state"
-    (backing_root / "lightshow" / "Chimes").mkdir(parents=True)
+    (backing_root / "Chimes").mkdir(parents=True)
     state_dir.mkdir()
     cfg = WebConfig(
         web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
@@ -77,7 +77,7 @@ def invalidator(app: Flask) -> CacheInvalidator:
 @pytest.fixture
 def chimes_dir(app: Flask) -> Path:
     cfg = app.config["teslausb_config"]
-    path = cfg.paths.backing_root / "lightshow" / cfg.chimes.chimes_folder
+    path = cfg.paths.media_root / cfg.chimes.chimes_folder
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -85,7 +85,7 @@ def chimes_dir(app: Flask) -> Path:
 @pytest.fixture
 def active_path(app: Flask) -> Path:
     cfg = app.config["teslausb_config"]
-    return cfg.paths.backing_root / "lightshow" / cfg.chimes.lock_chime_filename
+    return cfg.paths.media_root / cfg.chimes.lock_chime_filename
 
 
 @pytest.fixture

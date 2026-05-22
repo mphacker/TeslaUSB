@@ -46,6 +46,7 @@ _DEFAULT_HOST: str = "127.0.0.1"
 _DEFAULT_MAX_UPLOAD_MB: int = 512
 _DEFAULT_MAX_CHUNK_MB: int = 64
 _DEFAULT_BACKING_ROOT: Path = Path("/srv/teslausb")
+_DEFAULT_MEDIA_ROOT: Path = Path("/srv/teslausb/media")
 _DEFAULT_STATE_DIR: Path = Path("/var/lib/teslausb")
 _DEFAULT_DB_PATH: Path = Path("/var/lib/teslausb/index.sqlite3")
 _DEFAULT_IPC_SOCKET: Path = Path("/run/teslausb/worker.sock")
@@ -66,7 +67,7 @@ _DEFAULT_ACTIVE_SHOW_RELPATH: Final[str] = "lightshow_active.json"
 _DEFAULT_LIGHT_SHOW_MAX_UPLOAD_SIZE: Final[int] = 100 * 1024 * 1024
 _DEFAULT_LIGHT_SHOW_MAX_ZIP_SIZE: Final[int] = 500 * 1024 * 1024
 _DEFAULT_LIGHT_SHOW_ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".fseq", ".mp3", ".wav")
-_DEFAULT_WRAPS_FOLDER: Final[str] = "Wraps"
+_DEFAULT_WRAPS_FOLDER: Final[str] = "wraps"
 _DEFAULT_WRAP_MAX_SIZE: Final[int] = 1 * 1024 * 1024
 _DEFAULT_WRAP_MIN_DIMENSION: Final[int] = 512
 _DEFAULT_WRAP_MAX_DIMENSION: Final[int] = 1024
@@ -268,6 +269,17 @@ class PathsSection:
     """Filesystem locations the web app reads or writes."""
 
     backing_root: Path = _DEFAULT_BACKING_ROOT
+    # Backing root for the MEDIA LUN (teslafat-1) — everything Tesla
+    # reads from the second USB drive (Boombox, LightShow, LockChime,
+    # Chimes library, Wraps library, LicensePlate library) lives at
+    # the *root* of this path. See ``docs/02-LEARNINGS.md`` "Two-LUN
+    # media layout" for the full rationale.
+    #
+    # ``None`` means "fall back to ``backing_root``" — convenient for
+    # tests that only spin up a single ``tmp_path``. Production config
+    # MUST set this explicitly (the toml loader always passes
+    # ``_DEFAULT_MEDIA_ROOT`` when the key is missing).
+    media_root: Path | None = None
     state_dir: Path = _DEFAULT_STATE_DIR
     db_path: Path = _DEFAULT_DB_PATH
     ipc_socket: Path = _DEFAULT_IPC_SOCKET
@@ -286,13 +298,23 @@ class PathsSection:
     # Empty string in config = disabled (serve via Python streaming).
     x_accel_redirect_prefix: str = ""
 
+    def __post_init__(self) -> None:
+        # ``media_root=None`` (the default) means "the same place as
+        # backing_root" — convenient for tests that only stage one
+        # tmp directory. Frozen dataclass requires object.__setattr__
+        # to mutate the field in-place.
+        if self.media_root is None:
+            object.__setattr__(self, "media_root", self.backing_root)
+
     def validate(self) -> None:
         # Config paths are POSIX paths on the target device. We check
         # against PurePosixPath so the validation works the same on
         # Windows dev boxes (where Path("/srv").is_absolute() == False
         # because there's no drive letter) and on Linux production.
+        assert self.media_root is not None  # set by __post_init__
         for name, value in (
             ("backing_root", self.backing_root),
+            ("media_root", self.media_root),
             ("state_dir", self.state_dir),
             ("db_path", self.db_path),
             ("ipc_socket", self.ipc_socket),
@@ -1150,6 +1172,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
     )
     paths_section = PathsSection(
         backing_root=_coerce_path(paths_raw, "backing_root", _DEFAULT_BACKING_ROOT, source),
+        media_root=_coerce_path(paths_raw, "media_root", _DEFAULT_MEDIA_ROOT, source),
         state_dir=_coerce_path(paths_raw, "state_dir", _DEFAULT_STATE_DIR, source),
         db_path=_coerce_path(paths_raw, "db_path", _DEFAULT_DB_PATH, source),
         ipc_socket=_coerce_path(paths_raw, "ipc_socket", _DEFAULT_IPC_SOCKET, source),

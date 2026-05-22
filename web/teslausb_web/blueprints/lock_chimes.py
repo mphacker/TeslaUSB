@@ -119,7 +119,7 @@ def _cfg() -> WebConfig:
 
 
 def _lightshow_dir() -> Path:
-    return _cfg().paths.backing_root / _LIGHTSHOW_DIRNAME
+    return _cfg().paths.media_root
 
 
 def _chimes_dir() -> Path:

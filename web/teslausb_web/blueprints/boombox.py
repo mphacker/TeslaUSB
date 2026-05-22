@@ -56,7 +56,7 @@ def _cfg() -> WebConfig:
 
 
 def _boombox_folder() -> Path:
-    return _cfg().paths.backing_root / _cfg().music.folder / _cfg().boombox.base_dir
+    return _cfg().paths.media_root / _cfg().music.folder / _cfg().boombox.base_dir
 
 
 def _get_service() -> BoomboxService:

@@ -619,8 +619,8 @@ def _size_limit_message(name: str, size_bytes: int, limit_bytes: int) -> str:
 def make_music_service(cfg: WebConfig) -> MusicService:
     """Build a music service rooted at the configured Tesla Music folder."""
     return MusicService(
-        storage_root=cfg.paths.backing_root,
-        music_folder=cfg.paths.backing_root / cfg.music.folder,
+        storage_root=cfg.paths.media_root,
+        music_folder=cfg.paths.media_root / cfg.music.folder,
         max_file_size=cfg.music.max_file_size,
         chunk_size=cfg.music.chunk_size,
         free_space_reserve=cfg.music.free_space_reserve,

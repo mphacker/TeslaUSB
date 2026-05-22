@@ -528,7 +528,7 @@ def _size_limit_message(*, label: str, size_bytes: int, limit_bytes: int) -> str
 
 def make_light_show_service(cfg: WebConfig) -> LightShowService:
     """Build a light-show service using the configured backing-root and state paths."""
-    lightshow_root = cfg.paths.backing_root / _LIGHTSHOW_ROOT_DIRNAME
+    lightshow_root = cfg.paths.media_root
     return LightShowService(
         light_show_folder=lightshow_root / cfg.light_shows.folder,
         active_show_file=cfg.paths.state_dir / cfg.light_shows.active_show_relpath,

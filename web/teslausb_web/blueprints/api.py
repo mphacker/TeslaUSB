@@ -139,7 +139,7 @@ def _cfg() -> WebConfig:
 
 def _chimes_dir() -> Path:
     cfg = _cfg()
-    return cfg.paths.backing_root / _LIGHTSHOW_DIRNAME / cfg.chimes.chimes_folder
+    return cfg.paths.media_root / cfg.chimes.chimes_folder
 
 
 # --- Routes --------------------------------------------------------------------

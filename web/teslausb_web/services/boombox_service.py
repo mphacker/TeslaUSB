@@ -260,7 +260,7 @@ def make_boombox_service(
     """Build a boombox service rooted at the configured Tesla Music/Boombox folder."""
     return BoomboxService(
         BoomboxConfig(
-            base_dir=cfg.paths.backing_root / cfg.music.folder / cfg.boombox.base_dir,
+            base_dir=cfg.paths.media_root / cfg.music.folder / cfg.boombox.base_dir,
             max_file_bytes=cfg.boombox.max_file_bytes,
             max_files=cfg.boombox.max_files,
             allowed_extensions=cfg.boombox.allowed_extensions,

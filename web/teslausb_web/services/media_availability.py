@@ -54,22 +54,23 @@ def probe_media_availability(cfg: WebConfig) -> dict[str, bool]:
     Mirrors v1's ``get_feature_availability`` keys so
     ``media_hub_nav.html`` and ``base.html`` can decide which pills /
     nav buttons to render. LightShow-partition pages (chimes, shows,
-    wraps, plates) share one drive in v1 *and* in B-1's
-    ``backing_root/lightshow`` mount, so they all key off the same
-    directory probe.
+    wraps, plates) all live at the root of the MEDIA LUN
+    (``cfg.paths.media_root``); music + boombox stay on the TeslaCam
+    LUN for now (music browsing is a TeslaCam-side feature).
     """
-    backing = cfg.paths.backing_root
-    lightshow_present = _dir_exists(backing / _LIGHTSHOW_DIRNAME)
-    music_drive_present = _dir_exists(backing / cfg.music.folder)
+    media_root = cfg.paths.media_root
+    media_present = _dir_exists(media_root)
+    music_drive_present = _dir_exists(media_root / cfg.music.folder)
+    boombox_present = _dir_exists(media_root / cfg.music.folder / "Boombox")
     music_enabled = cfg.features.music_enabled
     boombox_enabled = cfg.features.boombox_enabled
     return {
-        "chimes_available": lightshow_present,
-        "shows_available": lightshow_present,
-        "wraps_available": lightshow_present,
-        "license_plates_available": lightshow_present,
+        "chimes_available": media_present,
+        "shows_available": media_present,
+        "wraps_available": media_present,
+        "license_plates_available": media_present,
         "music_available": music_drive_present and music_enabled,
-        "boombox_available": music_drive_present and boombox_enabled,
+        "boombox_available": boombox_present and boombox_enabled,
     }
 
 

@@ -66,7 +66,7 @@ def _cfg() -> WebConfig:
 
 def _light_show_folder() -> Path:
     cfg = _cfg()
-    return cfg.paths.backing_root / _LIGHTSHOW_DIRNAME / cfg.light_shows.folder
+    return cfg.paths.media_root / cfg.light_shows.folder
 
 
 def _get_service() -> LightShowService:

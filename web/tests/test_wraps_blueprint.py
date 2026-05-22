@@ -41,7 +41,7 @@ _XHR = {"X-Requested-With": "XMLHttpRequest"}
 def app(tmp_path: Path) -> Flask:
     backing_root = tmp_path / "backing"
     state_dir = tmp_path / "state"
-    (backing_root / "lightshow" / "Wraps").mkdir(parents=True)
+    (backing_root / "LightShow" / "wraps").mkdir(parents=True)
     state_dir.mkdir()
     cfg = WebConfig(
         web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
@@ -52,7 +52,7 @@ def app(tmp_path: Path) -> Flask:
         ),
         features=FeaturesSection(),
         wraps=WrapsSection(
-            folder="Wraps",
+            folder="wraps",
             max_size=1 * 1024 * 1024,
             min_dimension=512,
             max_dimension=1024,
@@ -85,7 +85,7 @@ def invalidator(app: Flask) -> CacheInvalidator:
 @pytest.fixture
 def wraps_dir(app) -> Path:
     cfg = app.config["teslausb_config"]
-    path = cfg.paths.backing_root / "lightshow" / cfg.wraps.folder
+    path = cfg.paths.media_root / cfg.light_shows.folder / cfg.wraps.folder
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -59,7 +59,7 @@ def _fake_uploads(*uploads: _FakeUpload) -> list[FileStorage]:
 
 @pytest.fixture
 def plates_folder(tmp_path: Path) -> Path:
-    return tmp_path / "lightshow" / "LicensePlate"
+    return tmp_path / "LicensePlate"
 
 
 @pytest.fixture

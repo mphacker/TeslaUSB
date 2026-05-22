@@ -830,6 +830,99 @@ wraps.html):**
 nothing", and the zone is a `<label>` containing the file
 input — that's the bug. There's no JS error in the console.
 
+### Update (2026-05-22): the label→div fix was necessary but NOT SUFFICIENT
+
+After the label→div migration, drag-drop *still* failed in real
+browsers — drag-over showed the "copy" cursor but dropping
+opened the audio file in a new browser tab. Two compounding bugs
+were uncovered, both worth their own learning:
+
+#### (a) Missing Jinja template variables silently abort the entire IIFE
+
+The script started with:
+
+```js
+const maxFileSize = {{ max_file_size }};
+```
+
+The blueprint context only set `max_file_size_str`, not
+`max_file_size`. Jinja rendered the variable as the empty
+string, producing the literal JavaScript:
+
+```js
+const maxFileSize = ;
+```
+
+That is a **parse-time syntax error**. The browser discarded
+the ENTIRE IIFE — so no click handler, no drag handler, NOTHING
+got attached. The default browser behavior (open the dropped
+file as a URL) was all that ran. No console warning, no
+network error, no visible symptom on initial page load.
+
+**Rule:** any Jinja value interpolated directly into a
+JavaScript literal MUST have a known default in the context
+dict, AND a test should assert the rendered page contains the
+fully-formed literal (e.g. `const maxFileSize = 1048576`), not
+just the variable name. A unit test that does
+`assert "maxFileSize" in html` would have passed the bug
+through; what we need is
+`assert re.search(r"const maxFileSize = \\d+", html)`.
+
+#### (b) `fileInput.files = e.dataTransfer.files` is unreliable
+
+The boombox tried to inject the dropped FileList into the form
+input and then call `form.submit()`, to share the upload path
+with click-to-pick. That assignment is only allowed in modern
+Chrome/Firefox/Safari under specific gesture conditions, and
+even there it can silently no-op without throwing. All the
+other working drop zones in this codebase (`light_shows.html`,
+`license_plates.html`, `wraps.html`) use the same pattern
+instead:
+
+```javascript
+const files = Array.from(e.dataTransfer.files);
+const fd = new FormData();
+files.forEach(f => fd.append('field_name', f, f.name));
+const xhr = new XMLHttpRequest();
+xhr.open('POST', form.action, true);
+xhr.onload = () => {
+    if (xhr.status < 400) window.location.reload();
+    else alert('Upload failed (' + xhr.status + ')');
+};
+xhr.send(fd);
+```
+
+This is also what handles upload progress, error display, and
+partial-failure reporting in the bigger pages. **Use it for
+every new drop zone — DO NOT try to bridge through
+`fileInput.files`.**
+
+#### Triage checklist for "drag-and-drop doesn't work"
+
+In this order:
+
+1. View-source the page and grep for empty `const X = ;`
+   patterns left over from Jinja. Fix the context dict.
+2. Open DevTools Console; reload; look for any syntax error.
+   If the IIFE failed to parse, all handlers are missing —
+   that's a "stops at the first broken line" problem, not a
+   drag/drop problem.
+3. Confirm the drop zone is a `<div role="button">`, not a
+   `<label>` (see prior section).
+4. Confirm the drop handler uses FormData + XHR, not
+   `fileInput.files = ...`.
+
+### Diagnose "drag shows copy cursor but drop opens the file in a new tab"
+
+This specific symptom = the page's drop handler is NOT running.
+The browser is taking over because no listener called
+`preventDefault()` on the drop event in time. Almost always
+caused by (a) above — IIFE never attached its handlers because
+a JS syntax error aborted parsing. NOT typically caused by
+"need to preventDefault on document/window" (we don't have to
+do that on the other working pages, so missing handlers is
+the more likely cause).
+
 ### System Health probes must report OUR subsystem's health, not
 ### external activity
 
@@ -890,19 +983,48 @@ test -s /sys/kernel/config/usb_gadget/g1/UDC || echo "GADGET UNBOUND"
 A missing file means the configfs node is gone entirely —
 usb-gadget.service has been stopped or torn down.)
 
-### Tesla writes ARE bursty even in Sentry mode
+### Tesla write behavior — Sentry vs SentryClips vs RecentClips
 
-Don't assume "Sentry on → continuous writes". Sentry mode only
-writes when an event triggers (motion in the camera view). A
-quiet garage / driveway can go 30+ minutes with zero new clips
-and the system is perfectly healthy. The mtime of existing
-files MAY update during that period due to FAT allocation-table
-flushes — these are filesystem-level writes, not new content.
+**Correction to an earlier draft of this section (operator
+feedback, 2026-05-22):** Sentry mode records **continuously**
+while it is on. It writes rolling 1-minute `.mp4` segments
+into `RecentClips/` the whole time the car is armed. What
+Sentry adds on top of that is **event detection**: when the
+car detects something (motion, impact, etc.), it promotes the
+relevant minute into `SentryClips/` (or `SavedClips/` for
+honk-saved / manually-saved events).
 
-To distinguish "Tesla is writing" from "Tesla is bored":
+Correct mental model:
 
-- Count fresh `.mp4` files in `/srv/teslausb/teslacam/TeslaCam/{RecentClips,SentryClips}` whose **filename** date is recent (not just mtime).
-- Filename pattern: `YYYY-MM-DD_HH-MM-SS-{camera}.mp4` — Tesla bakes the clip's start time into the filename when it creates the file. mtime updates from FAT flushes don't change that.
+- `RecentClips/` — rolling buffer, written **continuously**
+  whenever Sentry (or Dashcam while driving) is active. New
+  files every minute per camera. If this directory's filename
+  dates go stale, **something is wrong** — gadget unbound,
+  filesystem read-only, Sentry actually off, etc.
+- `SentryClips/` — created only when an event triggers.
+  Bursty by nature. Zero new files in this directory for hours
+  is normal and healthy in a quiet location.
+- `SavedClips/` — driver-initiated (honk-save). Even burstier;
+  may go days between entries.
+
+**Implications for diagnostics:**
+
+- Stale `RecentClips/` (>2-3 min since newest filename-date)
+  IS a real problem worth investigating.
+- Stale `SentryClips/` or `SavedClips/` is NOT diagnostic on
+  its own — it just means nothing has happened.
+- An indexer "newest clip" age across ALL buckets blends these
+  signals and is therefore non-actionable; that's why the
+  system_health indexer probe was demoted to informational.
+- If we ever add a real "Tesla is writing" probe, scope it to
+  `RecentClips/` filename dates specifically (e.g., WARN if
+  newest RecentClips filename is >5 min behind wall clock).
+
+**Filename invariant (useful for any of these probes):**
+`YYYY-MM-DD_HH-MM-SS-{camera}.mp4` — Tesla bakes the clip's
+start time into the filename when it creates the file. mtime
+can drift due to FAT allocation-table flushes, so always parse
+the filename (not stat) when judging recency.
 
 ### nginx ↔ gunicorn timeout invariant
 
@@ -919,3 +1041,58 @@ upload progress bar already hit 100 percent.
 Both sides are now 300 s. When you bump one, bump the other in
 the same commit, and add a comment on both sides cross-
 referencing each other.
+
+
+### Most "short-uptime boots" in journalctl are OUR dead-man timer, not a real crash
+
+While diagnosing apparent ping drops on cybertruckusb.local, the
+boot history showed a worrying pattern:
+
+` 
+journalctl --list-boots
+... -6  Thu 2026-05-21 12:07:45 EDT  Thu 2026-05-21 12:18:20 EDT   (10 min!)
+... -4  Thu 2026-05-21 16:20:42 EDT  Thu 2026-05-21 16:33:07 EDT   (12 min)
+... -1  Fri 2026-05-22 08:05:04 EDT  Fri 2026-05-22 08:21:17 EDT   (16 min)
+` 
+
+These were NOT crashes or watchdog bites. They were the
+hardware-test skill's dead-man self-reboot timer firing because
+the deploy wrapper forgot to cancel it (SSH lag between deploy
+and cancel, or the operator interrupting mid-script).
+
+**To distinguish dead-man from a real crash:**
+
+` bash
+sudo journalctl -b -1 --no-pager | tail -40
+` 
+
+- Clean shutdown via dead-man = you see
+  `systemd-reboot.service: Deactivated successfully` and
+  `Reached target reboot.target - System Reboot`. Filesystems
+  unmount cleanly. No oops/panic/watchdog trace.
+- Real crash = abrupt journal cutoff, no shutdown sequence, may
+  see kernel oops or `Watchdog has expired` before the gap.
+
+**Deploy wrapper hygiene (binding rule going forward):**
+
+1. Use a 	rap (bash) to cancel the dead-man on script exit, so
+   even an aborted/interrupted deploy still cancels:
+   `trap 'ssh ... "sudo systemctl stop b1-deadman.timer 2>/dev/null; sudo systemctl reset-failed b1-deadman.timer 2>/dev/null" || true' EXIT`.
+2. Don't arm the dead-man at all for changes that can't break
+   SSH/WiFi/boot. Editing web templates and Python blueprints
+   under `/opt/teslausb/web/` and restarting `teslausb-web`
+   is safe — no dead-man needed. Reserve dead-man for changes to
+   `/etc/ssh/`, `/etc/NetworkManager/`, `/etc/wpa_supplicant/`,
+   `/boot/firmware/cmdline.txt`, `/boot/firmware/config.txt`,
+   `/etc/fstab`, kernel modules, or anything that calls
+   `reboot`/`poweroff`.
+3. If you DO arm it, the verification curl call must finish in
+   < 30 s (so 90-120 s dead-man is fine; 180 s is overkill and
+   amplifies the cost of forgetting to cancel).
+
+**Ping drops vs reboots:** sustained ping drops without an
+accompanying reboot in `journalctl --list-boots` are not
+crashes. On a Pi Zero 2 W under heavy iowait (which is normal
+when teslafat is serving the USB gadget) WiFi packet processing
+can briefly stall. The device is fine; it's just the platform
+performance ceiling.

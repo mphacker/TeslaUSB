@@ -157,6 +157,7 @@ def _index_payload(listing: BoomboxListing) -> dict[str, object]:
 
 def _index_context(listing: BoomboxListing) -> dict[str, object]:
     context = _index_payload(listing)
+    max_bytes = _cfg().boombox.max_file_bytes
     context.update(
         {
             "page": "media",
@@ -165,7 +166,9 @@ def _index_context(listing: BoomboxListing) -> dict[str, object]:
             "auto_refresh": False,
             "operation_in_progress": False,
             "boombox_folder": _cfg().boombox.base_dir,
-            "max_file_size_str": _format_size_bytes(_cfg().boombox.max_file_bytes),
+            "max_file_size": max_bytes,
+            "max_file_size_mb": max(1, max_bytes // (1024 * 1024)),
+            "max_file_size_str": _format_size_bytes(max_bytes),
             "tesla_guidance_max_seconds": _TESLA_GUIDANCE_MAX_SECONDS,
         }
     )

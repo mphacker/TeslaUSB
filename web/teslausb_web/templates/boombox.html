@@ -493,30 +493,52 @@
         form.submit();
     });
 
-    // Drag-and-drop wiring (desktop niceness; click-to-pick covers mobile).
-    ['dragenter', 'dragover'].forEach(function(ev) {
-        dropZone.addEventListener(ev, function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            if (!fileInput.disabled) {
-                dropZone.classList.add('is-dragover');
+    // Drag-and-drop wiring — mirrors the proven pattern in light_shows.html
+    // and license_plates.html: collect dropped files, build a FormData, POST
+    // via fetch. Avoids the fragile `fileInput.files = dt.files` assignment
+    // that broke in real browsers (some engines silently no-op, and if the
+    // drop lands a pixel outside the zone the browser navigates to the file).
+
+    function uploadFiles(fileArray) {
+        if (!validateFiles(fileArray)) return;
+        const fd = new FormData();
+        for (let i = 0; i < fileArray.length; i++) {
+            fd.append('boombox_files', fileArray[i], fileArray[i].name);
+        }
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', form.action, true);
+        xhr.onload = function() {
+            // Mirror a form submit: reload to show the updated file list.
+            // The server returns 302 → /boombox on success or an HTML error page.
+            if (xhr.status >= 200 && xhr.status < 400) {
+                window.location.reload();
+            } else {
+                alert('Upload failed (' + xhr.status + '): ' + (xhr.responseText || '').slice(0, 200));
             }
-        });
+        };
+        xhr.onerror = function() { alert('Upload failed: network error'); };
+        xhr.send(fd);
+    }
+
+    dropZone.addEventListener('dragenter', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        if (!fileInput.disabled) dropZone.classList.add('is-dragover');
     });
-    ['dragleave', 'drop'].forEach(function(ev) {
-        dropZone.addEventListener(ev, function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.remove('is-dragover');
-        });
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        if (!fileInput.disabled) dropZone.classList.add('is-dragover');
+    });
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.classList.remove('is-dragover');
     });
     dropZone.addEventListener('drop', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        dropZone.classList.remove('is-dragover');
         if (fileInput.disabled) return;
-        const files = (e.dataTransfer && e.dataTransfer.files) || [];
+        const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
         if (!files.length) return;
-        if (!validateFiles(files)) return;
-        fileInput.files = files;
-        form.submit();
+        uploadFiles(files);
     });
 })();
 </script>

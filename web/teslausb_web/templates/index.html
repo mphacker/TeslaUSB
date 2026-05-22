@@ -330,13 +330,13 @@
 
     <!-- Storage Maintenance -->
     <details class="settings-section">
-        <summary>Auto-Cleanup Settings</summary>
+        <summary>Storage &amp; Auto-Cleanup</summary>
         <div class="section-content">
-            <a href="{{ url_for('cleanup.preview') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
-                <svg class="inline-icon" width="24" height="24" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-sparkles"></use></svg>
+            <a href="{{ url_for('storage.index') }}" class="action-card" style="display:flex; align-items:center; gap:12px; padding:14px; text-decoration:none; color:inherit; border:1px solid var(--border-color); border-radius:8px; min-height:44px;">
+                <svg class="inline-icon" width="24" height="24" aria-hidden="true"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-hard-drive"></use></svg>
                 <div style="flex:1">
-                    <strong>Configure Auto-Cleanup</strong>
-                    <p style="margin:4px 0 0; font-size:0.85rem; color:var(--text-secondary)">Automatic deletion of old videos to free up space</p>
+                    <strong>Storage Settings</strong>
+                    <p style="margin:4px 0 0; font-size:0.85rem; color:var(--text-secondary)">Adjust USB drive sizes and tier-aware auto-cleanup for TeslaCam.</p>
                 </div>
                 <svg class="inline-icon" width="20" height="20" aria-hidden="true" style="color:var(--text-secondary)"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-chevron-right"></use></svg>
             </a>

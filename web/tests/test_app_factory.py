@@ -243,11 +243,12 @@ def test_blueprint_abort_works_alongside_error_handler() -> None:
     assert resp.status_code == 403
 
 
-def test_cleanup_service_registered_on_app(app: Flask) -> None:
-    from teslausb_web.services.cleanup import CleanupService
-
-    cleanup_service = app.extensions["cleanup_service"]
-    assert isinstance(cleanup_service, CleanupService)
+def test_cleanup_service_no_longer_registered(app: Flask) -> None:
+    # AC.7: legacy Python cleanup service was removed. The Rust
+    # worker is now the sole executor for TeslaCam cleanup, and the
+    # /storage page replaces the old /cleanup blueprint.
+    assert "cleanup_service" not in app.extensions
+    assert "storage_retention_service" not in app.extensions
 
 
 def test_cache_invalidator_registered_on_app(app: Flask) -> None:

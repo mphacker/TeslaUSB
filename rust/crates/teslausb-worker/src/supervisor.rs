@@ -40,9 +40,21 @@ use tracing::warn;
 use tracing::{error, info};
 
 use crate::cleanup::Cleanup;
+#[cfg(target_os = "linux")]
+use crate::cleanup_sweep;
 use crate::config::Config;
 use crate::indexer::Indexer;
+#[cfg(target_os = "linux")]
+use crate::storage_config::StorageConfig;
 use crate::store::Store;
+
+/// Path of the AC.1 shared storage config. Read at startup so
+/// the tier-aware sweep ([`cleanup_sweep`]) has its target
+/// free-space floor available; re-read each tick is unnecessary
+/// because the cleanup_sweep call resolves the target itself
+/// from the in-memory config we pass in.
+#[cfg(target_os = "linux")]
+const STORAGE_CONFIG_PATH: &str = "/etc/teslausb/teslausb.toml";
 
 /// Smallest cleanup-tick period we will honour. A misconfigured
 /// `interval_seconds = 1` (or `2`) would otherwise spin the
@@ -290,6 +302,37 @@ async fn steady_state_linux(
                         error!(error = %e, "gc_orphans tick failed");
                         break ShutdownReason::CleanupFailed;
                     }
+                }
+                // AC.7: tier-aware continuous sweep (cleanup_sweep)
+                // enforces the operator-configured `target_free_pct`
+                // floor on the TeslaCam LUN. Re-loads the shared
+                // storage_config.toml each tick so live UI edits
+                // (AC.6 /storage page) take effect without a worker
+                // restart. A missing/invalid config is non-fatal —
+                // we simply skip this pass and log a warning.
+                match StorageConfig::load(std::path::Path::new(STORAGE_CONFIG_PATH)) {
+                    Ok(storage_cfg) => {
+                        match cleanup_sweep::sweep_to_target_now(
+                            indexer.store(),
+                            &config.backing_root,
+                            &storage_cfg,
+                        ) {
+                            Ok(s) => info!(
+                                deleted_tier_a = s.deleted_tier_a,
+                                deleted_tier_b = s.deleted_tier_b,
+                                deleted_tier_c_age = s.deleted_tier_c_age,
+                                deleted_tier_c_last_resort = s.deleted_tier_c_last_resort,
+                                failed = s.failed,
+                                initial_free_pct = s.initial_free_pct,
+                                final_free_pct = s.final_free_pct,
+                                target_pct = s.target_pct,
+                                target_reached = s.target_reached,
+                                "cleanup_sweep tick complete",
+                            ),
+                            Err(e) => warn!(error = %e, "cleanup_sweep tick failed (non-fatal)"),
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "storage_config load failed; skipping cleanup_sweep"),
                 }
             }
         }

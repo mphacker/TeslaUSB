@@ -34,7 +34,6 @@ from teslausb_web.blueprints.analytics import analytics_bp
 from teslausb_web.blueprints.api import api_bp
 from teslausb_web.blueprints.boombox import boombox_bp
 from teslausb_web.blueprints.captive_portal import captive_portal_bp
-from teslausb_web.blueprints.cleanup import cleanup_bp
 from teslausb_web.blueprints.cloud_archive import cloud_archive_bp
 from teslausb_web.blueprints.jobs import jobs_bp
 from teslausb_web.blueprints.license_plates import license_plates_bp
@@ -46,7 +45,6 @@ from teslausb_web.blueprints.music import music_bp
 from teslausb_web.blueprints.settings import settings_dashboard_bp
 from teslausb_web.blueprints.settings_advanced import settings_bp
 from teslausb_web.blueprints.storage import storage_bp
-from teslausb_web.blueprints.storage_retention import storage_retention_bp
 from teslausb_web.blueprints.system_health import system_health_bp
 from teslausb_web.blueprints.videos import videos_bp
 from teslausb_web.blueprints.wraps import wraps_bp
@@ -56,7 +54,6 @@ from teslausb_web.services.boombox_service import make_boombox_service
 from teslausb_web.services.cache_invalidation import CacheInvalidator
 from teslausb_web.services.chime_group_service import make_chime_group_manager
 from teslausb_web.services.chime_scheduler import make_chime_scheduler
-from teslausb_web.services.cleanup import make_cleanup_service
 from teslausb_web.services.cloud_archive import make_cloud_archive_service
 from teslausb_web.services.cloud_oauth_service import CloudOAuthService, make_oauth_service
 from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_rclone_service
@@ -69,7 +66,6 @@ from teslausb_web.services.music_service import make_music_service
 from teslausb_web.services.photo_plate_service import make_photo_plate_service
 from teslausb_web.services.samba_service import SambaError, make_samba_service
 from teslausb_web.services.samba_watcher import make_samba_watcher
-from teslausb_web.services.storage_retention_service import make_storage_retention_service
 from teslausb_web.services.system_settings_service import (
     SystemSettings,
     SystemSettingsService,
@@ -166,7 +162,6 @@ def create_app(
     _register_music_services(app, cfg)
     _register_boombox_services(app, cfg)
     _register_license_plate_services(app, cfg)
-    _register_storage_retention_services(app, cfg)
     _register_system_settings_services(app, cfg)
     system_settings = app.extensions.get("system_settings_service")
     if not isinstance(system_settings, SystemSettingsService):
@@ -186,7 +181,6 @@ def create_app(
         app.register_blueprint(cloud_archive_bp)
     _register_wrap_services(app, cfg)
     _register_mapping_services(app, cfg)
-    _register_cleanup_services(app, cfg)
     _register_analytics_service(app, cfg)
     _register_video_service(app, cfg)
     _register_jobs_service(app)
@@ -277,14 +271,12 @@ def _register_blueprints(app: Flask, extras: Iterable[object]) -> None:
         boombox_bp,
         media_bp,
         license_plates_bp,
-        storage_retention_bp,
         storage_bp,
         settings_dashboard_bp,
         settings_bp,
         captive_portal_bp,
         wraps_bp,
         mapping_bp,
-        cleanup_bp,
         analytics_bp,
         videos_bp,
         jobs_bp,
@@ -361,11 +353,6 @@ def _register_license_plate_services(app: Flask, cfg: WebConfig) -> None:
     """Construct the tracked license-plate service and photo-plate service."""
     app.extensions["license_plate_service"] = make_license_plate_service(cfg)
     app.extensions["photo_plate_service"] = make_photo_plate_service(cfg)
-
-
-def _register_storage_retention_services(app: Flask, cfg: WebConfig) -> None:
-    """Construct the storage-retention service once at app startup."""
-    app.extensions["storage_retention_service"] = make_storage_retention_service(cfg)
 
 
 def _register_system_settings_services(app: Flask, cfg: WebConfig) -> None:
@@ -494,28 +481,6 @@ def _register_mapping_services(app: Flask, cfg: WebConfig) -> None:
     app.extensions["mapping_service_finalizer"] = weakref.finalize(
         app,
         mapping_service.shutdown,
-    )
-
-
-def _register_cleanup_services(app: Flask, cfg: WebConfig) -> None:
-    """Construct the cleanup service after mapping and retention are ready."""
-    retention_service = app.extensions.get("storage_retention_service")
-    mapping_service = app.extensions.get("mapping_service")
-    if retention_service is None or mapping_service is None:
-        raise RuntimeError("cleanup_service requires storage_retention_service and mapping_service")
-    cleanup_service = make_cleanup_service(
-        cfg,
-        retention_service,
-        mapping_service,
-        _get_cache_invalidator(app).schedule,
-    )
-    app.extensions["cleanup_service"] = cleanup_service
-    if hasattr(retention_service, "bind_preview_summary_provider"):
-        retention_service.bind_preview_summary_provider(cleanup_service.preview_summary)
-    atexit.register(cleanup_service.shutdown)
-    app.extensions["cleanup_service_finalizer"] = weakref.finalize(
-        app,
-        cleanup_service.shutdown,
     )
 
 

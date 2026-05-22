@@ -32,7 +32,6 @@ REQUIRED_FILES: tuple[str, ...] = (
     "css/analytics.css",
     "css/audio_trimmer.css",
     "css/bootstrap-icons-subset.css",
-    "css/cleanup.css",
     "css/style.css",
     "js/audio_trimmer.js",
     "js/dashcam-mp4.js",

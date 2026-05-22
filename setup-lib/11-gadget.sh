@@ -77,6 +77,9 @@ B1_NBD_MODULES_LOAD="/etc/modules-load.d/teslausb.conf"
 B1_TESLAFAT_CONF_DIR="/etc/teslausb"
 B1_TESLAFAT_CONF_0="${B1_TESLAFAT_CONF_DIR}/teslafat-0.toml"
 B1_TESLAFAT_CONF_1="${B1_TESLAFAT_CONF_DIR}/teslafat-1.toml"
+# Unified storage + cleanup config (AC.1). Web UI + Rust worker read
+# this file; teslafat-{0,1}.toml are regenerated from it on resize.
+B1_TESLAUSB_CONF="${B1_TESLAFAT_CONF_DIR}/teslausb.toml"
 
 B1_NBD_ATTACH_UNIT="/etc/systemd/system/nbd-attach@.service"
 B1_USB_GADGET_UNIT="/etc/systemd/system/usb-gadget.service"
@@ -92,6 +95,7 @@ B1_GADGET_TARGETS=(
   "${B1_NBD_MODULES_LOAD}"
   "${B1_TESLAFAT_CONF_0}"
   "${B1_TESLAFAT_CONF_1}"
+  "${B1_TESLAUSB_CONF}"
   "${B1_NBD_ATTACH_UNIT}"
   "${B1_USB_GADGET_UNIT}"
   "${B1_GADGET_UP_BIN}"
@@ -104,7 +108,7 @@ B1_GADGET_TARGETS=(
 export B1_GADGET_NAME B1_GADGET_VENDOR_ID B1_GADGET_PRODUCT_ID \
   B1_GADGET_SERIAL B1_GADGET_MANUFACTURER B1_GADGET_PRODUCT \
   B1_NBD_MODPROBE_CONF B1_NBD_MODULES_LOAD B1_TESLAFAT_CONF_DIR \
-  B1_TESLAFAT_CONF_0 B1_TESLAFAT_CONF_1 B1_NBD_ATTACH_UNIT \
+  B1_TESLAFAT_CONF_0 B1_TESLAFAT_CONF_1 B1_TESLAUSB_CONF B1_NBD_ATTACH_UNIT \
   B1_USB_GADGET_UNIT B1_GADGET_UP_BIN B1_GADGET_DOWN_BIN \
   B1_PRESENT_USB_BIN B1_HIDE_USB_BIN B1_WATCH_BIN B1_GADGET_TARGETS
 
@@ -161,6 +165,31 @@ recentclips_hide_after_seconds = 0
 [nbd]
 socket_path = "/run/teslausb/teslafat-1.sock"
 handshake_timeout_seconds = 30
+'
+
+# Unified storage + cleanup config (AC.1). Source of truth for LUN
+# sizes and auto-cleanup knobs. `os_reserve_gb` is documented so
+# operators can edit by hand; minimum 8 GB (see docs/06-OPERATIONS.md).
+# `target_free_pct = 0` means "auto-tune from indexer median clip
+# size"; the Rust worker computes 2x the bytes-per-recording-minute
+# at runtime.
+B1_TESLAUSB_CONF_TEMPLATE='# Managed by teslausb-b1 setup.sh (Phase 6.11) and the web UI.
+# Documented in docs/06-OPERATIONS.md "Editing teslausb.toml".
+
+[storage]
+# Hard reserve for OS + journals + worker scratch. Web UI enforces
+# the same minimum (8 GB). Default 20 GB.
+os_reserve_gb = __OS_RESERVE_GB__
+teslacam_gb = __TESLACAM_GB__
+media_gb = __MEDIA_GB__
+
+[cleanup]
+# 0 = auto-tune to 2x the median 6-camera-1-minute recording size.
+target_free_pct = 0
+# 0 = unlimited (sentry only auto-deleted as last resort).
+sentry_max_age_days = 0
+# RecentClips with GPS/SEI data are preserved over plain clips.
+preserve_with_gps = true
 '
 
 B1_NBD_ATTACH_UNIT_BODY='# Managed by teslausb-b1 setup.sh (Phase 6.11). Do not edit.
@@ -712,6 +741,21 @@ b1_step_11() {
   b1_log "installing teslafat per-LUN configs"
   _b1_install_file "${B1_TESLAFAT_CONF_0}" 0644 "${conf0_body}"
   _b1_install_file "${B1_TESLAFAT_CONF_1}" 0644 "${conf1_body}"
+
+  # 2b. Unified storage+cleanup config. Source of truth for LUN
+  # sizes going forward; existing teslafat-*.toml stay in sync via
+  # the resize helper (AC.3). Preserves an existing file if present
+  # (so the operator's cleanup knobs survive a re-run of setup.sh).
+  if [[ -e "${B1_TESLAUSB_CONF}" ]]; then
+    b1_log "preserving existing ${B1_TESLAUSB_CONF}"
+  else
+    local teslausb_body
+    teslausb_body="${B1_TESLAUSB_CONF_TEMPLATE//__OS_RESERVE_GB__/20}"
+    teslausb_body="${teslausb_body//__TESLACAM_GB__/${teslacam_gb}}"
+    teslausb_body="${teslausb_body//__MEDIA_GB__/${media_gb}}"
+    b1_log "seeding ${B1_TESLAUSB_CONF}"
+    _b1_install_file "${B1_TESLAUSB_CONF}" 0644 "${teslausb_body}"
+  fi
 
   # 3. systemd units.
   b1_log "installing nbd-attach@ + usb-gadget systemd units"

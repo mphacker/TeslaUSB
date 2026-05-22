@@ -50,6 +50,7 @@ def _sample_partition(percent: float = 50.0) -> PartitionUsage:
 def _sample_video_stats() -> VideoStatistics:
     return VideoStatistics(
         total_files=3,
+        clip_count=1,
         total_bytes=600,
         oldest_iso="2024-01-01T00:00:00+00:00",
         newest_iso="2024-06-01T00:00:00+00:00",
@@ -59,6 +60,7 @@ def _sample_video_stats() -> VideoStatistics:
                 description="Manually saved clips",
                 priority="high",
                 count=3,
+                clip_count=1,
                 size_bytes=600,
                 oldest_iso="2024-01-01T00:00:00+00:00",
                 newest_iso="2024-06-01T00:00:00+00:00",

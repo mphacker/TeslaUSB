@@ -29,6 +29,7 @@ from teslausb_web.services.analytics_service._compute import (
     query_indexed_files,
     summarize_indexed_files,
     utc_now,
+    walk_teslacam_videos,
 )
 from teslausb_web.services.analytics_service._models import (
     LABEL_BACKING,
@@ -82,6 +83,7 @@ class AnalyticsService:
         analytics_cfg: AnalyticsSection,
         probes: Sequence[Probe],
         mapping_service: MappingService,
+        clips_root: Path | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not probes:
@@ -89,6 +91,7 @@ class AnalyticsService:
         self._cfg = analytics_cfg
         self._probes = tuple(probes)
         self._mapping_service = mapping_service
+        self._clips_root = clips_root
         self._clock = clock or utc_now
 
     def get_partition_usage(self) -> tuple[PartitionUsage, ...]:
@@ -96,7 +99,18 @@ class AnalyticsService:
         return tuple(probe_usage(probe) for probe in self._probes)
 
     def get_video_statistics(self) -> VideoStatistics:
-        """Per-folder clip counts + sizes from the mapping DB."""
+        """Per-folder clip counts + sizes for the TeslaCam volume.
+
+        Walks the TeslaCam backing tree directly so the totals match
+        what an operator would see on disk (and what Tesla sees on the
+        USB volume). Files are grouped by clip timestamp so the "clips"
+        count reflects multi-angle clip groups, not individual ``.mp4``
+        files. Falls back to the legacy mapping DB ``indexed_files``
+        table for older tests that don't supply ``clips_root``.
+        """
+        if self._clips_root is not None:
+            rows = walk_teslacam_videos(self._clips_root)
+            return summarize_indexed_files(rows)
         try:
             with self._mapping_service.open_db() as connection:
                 rows = query_indexed_files(connection)
@@ -117,7 +131,7 @@ class AnalyticsService:
         try:
             stats = self.get_video_statistics()
         except AnalyticsDataError:
-            stats = VideoStatistics(0, 0, None, None, ())
+            stats = VideoStatistics(0, 0, 0, None, None, ())
         return estimate_recording_hours(
             primary,
             stats,
@@ -131,7 +145,7 @@ class AnalyticsService:
             video_stats = self.get_video_statistics()
         except AnalyticsDataError as exc:
             logger.warning("analytics: video stats unavailable: %s", exc)
-            video_stats = VideoStatistics(0, 0, None, None, ())
+            video_stats = VideoStatistics(0, 0, 0, None, None, ())
         health = compute_health(partitions, self._cfg)
         primary = partitions[0]
         if primary.error is not None or primary.free_bytes <= 0:
@@ -231,6 +245,7 @@ def make_analytics_service(
             analytics_cfg=cfg.analytics,
             probes=probes,
             mapping_service=mapping_service,
+            clips_root=cfg.paths.backing_root,
         )
 
     seen_devs: set[object] = set()
@@ -251,6 +266,7 @@ def make_analytics_service(
         analytics_cfg=cfg.analytics,
         probes=probes,
         mapping_service=mapping_service,
+        clips_root=cfg.paths.backing_root,
     )
 
 

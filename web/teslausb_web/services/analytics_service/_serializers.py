@@ -37,6 +37,7 @@ def folder_to_dict(f: FolderBreakdown) -> dict[str, object]:
         "description": f.description,
         "priority": f.priority,
         "count": f.count,
+        "clip_count": f.clip_count,
         "size_bytes": f.size_bytes,
         "size_gb": round(f.size_gb, 3),
         "oldest_iso": f.oldest_iso,
@@ -47,6 +48,7 @@ def folder_to_dict(f: FolderBreakdown) -> dict[str, object]:
 def video_stats_to_dict(v: VideoStatistics) -> dict[str, object]:
     return {
         "total_files": v.total_files,
+        "clip_count": v.clip_count,
         "total_bytes": v.total_bytes,
         "total_size_gb": round(v.total_size_gb, 3),
         "oldest_iso": v.oldest_iso,

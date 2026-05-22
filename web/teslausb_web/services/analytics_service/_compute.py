@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import shutil
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -77,6 +77,7 @@ class _FolderAccumulator:
     size_bytes: int = 0
     oldest: float | None = None
     newest: float | None = None
+    clip_stems: set[str] = field(default_factory=set)
 
 
 def device_id(path: Path) -> object | None:
@@ -208,6 +209,7 @@ def _accumulate_row(
     bucket = buckets.setdefault(folder, _FolderAccumulator())
     bucket.count += 1
     bucket.size_bytes += row.file_size
+    bucket.clip_stems.add(_clip_stem_from_path(row.file_path))
     mtime = row.file_mtime
     if mtime is None:
         return
@@ -223,7 +225,7 @@ def _accumulate_row(
 
 def summarize_indexed_files(rows: Sequence[IndexedFileRow]) -> VideoStatistics:
     if not rows:
-        return VideoStatistics(0, 0, None, None, ())
+        return VideoStatistics(0, 0, 0, None, None, ())
 
     buckets: dict[str, _FolderAccumulator] = {}
     total_files = 0
@@ -242,6 +244,7 @@ def summarize_indexed_files(rows: Sequence[IndexedFileRow]) -> VideoStatistics:
                     description=FOLDER_DESCRIPTIONS.get(name, FOLDER_DESCRIPTIONS[FOLDER_OTHER]),
                     priority=FOLDER_PRIORITY.get(name, "medium"),
                     count=bucket.count,
+                    clip_count=len(bucket.clip_stems),
                     size_bytes=bucket.size_bytes,
                     oldest_iso=iso_from_mtime(bucket.oldest),
                     newest_iso=iso_from_mtime(bucket.newest),
@@ -252,13 +255,82 @@ def summarize_indexed_files(rows: Sequence[IndexedFileRow]) -> VideoStatistics:
             reverse=True,
         )
     )
+    clip_total = sum(len(bucket.clip_stems) for bucket in buckets.values())
     return VideoStatistics(
         total_files=total_files,
+        clip_count=clip_total,
         total_bytes=total_bytes,
         oldest_iso=iso_from_mtime(extrema[0]),
         newest_iso=iso_from_mtime(extrema[1]),
         folders=folders,
     )
+
+
+# Tesla writes one ``.mp4`` per camera angle, all sharing a timestamp
+# prefix. Stripping the trailing ``-<angle>`` yields the clip stem we
+# count as a single "clip".
+_CAMERA_SUFFIXES: tuple[str, ...] = (
+    "-front",
+    "-back",
+    "-left_pillar",
+    "-right_pillar",
+    "-left_repeater",
+    "-right_repeater",
+)
+
+
+def _clip_stem_from_path(file_path: str) -> str:
+    """Return the timestamp prefix that groups multi-angle clip files."""
+    normalized = file_path.replace("\\", "/")
+    leaf = normalized.rsplit("/", 1)[-1]
+    if leaf.lower().endswith(".mp4"):
+        leaf = leaf[:-4]
+    for suffix in _CAMERA_SUFFIXES:
+        if leaf.endswith(suffix):
+            return leaf[: -len(suffix)]
+    return leaf
+
+
+def walk_teslacam_videos(clips_root: Path) -> tuple[IndexedFileRow, ...]:
+    """Walk the TeslaCam volume and emit one row per ``.mp4`` clip file.
+
+    Returns an empty tuple when ``clips_root`` does not exist (clean
+    install, or the mount is not yet ready). Files we can't ``stat``
+    are skipped — partial data is more useful to the operator than a
+    crashed dashboard.
+    """
+    if not clips_root.is_dir():
+        return ()
+    rows: list[IndexedFileRow] = []
+    stack: list[Path] = [clips_root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry)
+                    continue
+                if not entry.name.lower().endswith(".mp4"):
+                    continue
+                stat_result = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            try:
+                rel = entry.relative_to(clips_root).as_posix()
+            except ValueError:
+                rel = entry.name
+            rows.append(
+                IndexedFileRow(
+                    file_path=rel,
+                    file_size=int(stat_result.st_size),
+                    file_mtime=float(stat_result.st_mtime),
+                )
+            )
+    return tuple(rows)
 
 
 def _escalate(current: str, candidate: str) -> str:

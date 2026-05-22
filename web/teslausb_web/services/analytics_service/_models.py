@@ -100,6 +100,7 @@ class FolderBreakdown:
     description: str
     priority: str
     count: int
+    clip_count: int
     size_bytes: int
     oldest_iso: str | None
     newest_iso: str | None
@@ -111,9 +112,10 @@ class FolderBreakdown:
 
 @dataclass(frozen=True, slots=True)
 class VideoStatistics:
-    """Mapping-DB-derived clip statistics."""
+    """Clip statistics for the TeslaCam volume."""
 
     total_files: int
+    clip_count: int
     total_bytes: int
     oldest_iso: str | None
     newest_iso: str | None

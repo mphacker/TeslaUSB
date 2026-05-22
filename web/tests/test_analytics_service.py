@@ -345,7 +345,7 @@ class TestRecordingEstimate:
     def test_theoretical_when_db_empty(self) -> None:
         estimate = estimate_recording_hours(
             self._primary(),
-            VideoStatistics(0, 0, None, None, ()),
+            VideoStatistics(0, 0, 0, None, None, ()),
             theoretical_gb_per_hour=0.4,
         )
         assert estimate.confidence == "low"
@@ -356,6 +356,7 @@ class TestRecordingEstimate:
     def test_actual_clip_average_used(self) -> None:
         stats = VideoStatistics(
             total_files=200,
+            clip_count=34,
             total_bytes=1024**3,
             oldest_iso=None,
             newest_iso=None,
@@ -368,6 +369,7 @@ class TestRecordingEstimate:
     def test_medium_confidence_below_threshold(self) -> None:
         stats = VideoStatistics(
             total_files=10,
+            clip_count=2,
             total_bytes=1024**3,
             oldest_iso=None,
             newest_iso=None,
@@ -379,6 +381,7 @@ class TestRecordingEstimate:
     def test_zero_average_size_unavailable(self) -> None:
         stats = VideoStatistics(
             total_files=5,
+            clip_count=1,
             total_bytes=0,
             oldest_iso=None,
             newest_iso=None,

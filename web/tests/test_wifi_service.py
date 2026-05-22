@@ -771,3 +771,102 @@ def test_helper_parsers_and_command_message() -> None:
     assert _parse_datetime("2025-01-01T00:00:00") is not None
     assert _to_int("7") == 7
     assert _to_int("nope") is None
+
+
+def test_ap_credentials_for_form_returns_current_values(service: WifiService) -> None:
+    assert service.ap_credentials_for_form() == ("TeslaUSB-Setup", "")
+
+
+def test_update_ap_credentials_persists_and_updates_config(
+    config: WifiConfig, tmp_path: Path
+) -> None:
+    config.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    with patch.object(
+        WifiService,
+        "_load_ap_state",
+        return_value={"requested_enabled": False, "restore_deadline": None},
+    ):
+        svc = WifiService(config)
+    with (
+        patch.object(
+            svc,
+            "_current_connection_details",
+            return_value=(None, None, None, None, False),
+        ),
+    ):
+        svc.update_ap_credentials(ssid="MyNet", passphrase="hunter22")
+    assert svc.ap_credentials_for_form() == ("MyNet", "hunter22")
+    saved = json.loads(
+        (tmp_path / "wifi_credentials_ap_config.json").read_text(encoding="utf-8")
+    )
+    assert saved == {"ssid": "MyNet", "passphrase": "hunter22"}
+
+
+def test_update_ap_credentials_rejects_invalid_passphrase(service: WifiService) -> None:
+    with pytest.raises(WifiConfigError, match="ap_passphrase"):
+        service.update_ap_credentials(ssid="MyNet", passphrase="short")
+
+
+def test_update_ap_credentials_rejects_blank_ssid(service: WifiService) -> None:
+    with pytest.raises(WifiConfigError, match="ap_ssid"):
+        service.update_ap_credentials(ssid="   ", passphrase="hunter22")
+
+
+def test_update_ap_credentials_bounces_active_ap(
+    config: WifiConfig, tmp_path: Path
+) -> None:
+    config.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    with patch.object(
+        WifiService,
+        "_load_ap_state",
+        return_value={"requested_enabled": True, "restore_deadline": None},
+    ):
+        svc = WifiService(config)
+    with (
+        patch.object(
+            svc,
+            "_current_connection_details",
+            return_value=("TeslaUSB-Setup AP", "TeslaUSB-Setup", -50, "10.0.0.1", True),
+        ),
+        patch.object(svc, "_bring_ap_down") as down,
+        patch.object(svc, "_bring_ap_up") as up,
+    ):
+        svc.update_ap_credentials(ssid="NewAP", passphrase="hunter22")
+    down.assert_called_once()
+    up.assert_called_once()
+
+
+def test_persisted_ap_override_applied_at_init(
+    config: WifiConfig, tmp_path: Path
+) -> None:
+    override_path = tmp_path / "wifi_credentials_ap_config.json"
+    override_path.parent.mkdir(parents=True, exist_ok=True)
+    override_path.write_text(
+        json.dumps({"ssid": "Saved", "passphrase": "hunter22"}), encoding="utf-8"
+    )
+    with patch.object(
+        WifiService,
+        "_load_ap_state",
+        return_value={"requested_enabled": False, "restore_deadline": None},
+    ):
+        svc = WifiService(config)
+    assert svc.ap_credentials_for_form() == ("Saved", "hunter22")
+
+
+def test_persisted_ap_override_ignores_corrupt_file(
+    config: WifiConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    override_path = tmp_path / "wifi_credentials_ap_config.json"
+    override_path.parent.mkdir(parents=True, exist_ok=True)
+    override_path.write_text("not json", encoding="utf-8")
+    with (
+        patch.object(
+            WifiService,
+            "_load_ap_state",
+            return_value={"requested_enabled": False, "restore_deadline": None},
+        ),
+        caplog.at_level("WARNING"),
+    ):
+        svc = WifiService(config)
+    assert svc.ap_credentials_for_form() == ("TeslaUSB-Setup", "")
+    assert any("corrupt AP config" in r.message for r in caplog.records)

@@ -135,3 +135,34 @@ class TestStubRoutes:
         response = client.post("/api/settings/wifi/dismiss-status")
         assert response.status_code == HTTPStatus.OK
         assert response.get_json() == {"success": True}
+
+
+class TestConfigureAp:
+    def test_configure_ap_persists_and_redirects(self, client, app) -> None:
+        response = client.post(
+            "/settings/configure_ap",
+            data={"ssid": "MyAP", "passphrase": "hunter22"},
+        )
+        assert response.status_code == HTTPStatus.FOUND
+        assert response.headers["Location"] == "/settings/"
+        service = app.extensions["wifi_service"]
+        assert service.ap_credentials_for_form() == ("MyAP", "hunter22")
+
+    def test_configure_ap_rejects_blank_ssid(self, client, app) -> None:
+        response = client.post(
+            "/settings/configure_ap",
+            data={"ssid": "  ", "passphrase": "hunter22"},
+        )
+        assert response.status_code == HTTPStatus.FOUND
+        service = app.extensions["wifi_service"]
+        ssid, _ = service.ap_credentials_for_form()
+        assert ssid != ""
+
+    def test_configure_ap_rejects_short_passphrase(self, client, app) -> None:
+        before = app.extensions["wifi_service"].ap_credentials_for_form()
+        response = client.post(
+            "/settings/configure_ap",
+            data={"ssid": "MyAP", "passphrase": "short"},
+        )
+        assert response.status_code == HTTPStatus.FOUND
+        assert app.extensions["wifi_service"].ap_credentials_for_form() == before

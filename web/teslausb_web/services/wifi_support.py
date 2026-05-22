@@ -64,8 +64,8 @@ class WifiBinaryPaths:
 @dataclass(frozen=True, slots=True)
 class WifiConfig:
     credentials_path: Path
-    ap_ssid: str = "TeslaUSB-Setup"
-    ap_passphrase: str = ""
+    ap_ssid: str = "TeslaUSB"
+    ap_passphrase: str = "tesla1234"
     ap_idle_timeout_seconds: int = 600
     binary_paths: WifiBinaryPaths = field(default_factory=WifiBinaryPaths)
 

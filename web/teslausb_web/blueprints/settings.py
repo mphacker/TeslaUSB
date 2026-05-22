@@ -29,6 +29,7 @@ from flask import (
     jsonify,
     redirect,
     render_template,
+    request,
     url_for,
 )
 
@@ -38,7 +39,7 @@ from teslausb_web.services.system_settings_service import (
     SystemSettingsService,
     SystemSettingsStateError,
 )
-from teslausb_web.services.wifi_service import WifiError, WifiService
+from teslausb_web.services.wifi_service import WifiConfigError, WifiError, WifiService
 
 if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
@@ -149,8 +150,10 @@ def _get_ip_addresses() -> tuple[str, ...]:
 
 def _wifi_context() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     cfg = _config()
+    service = _get_wifi_service()
+    form_ssid, form_passphrase = service.ap_credentials_for_form()
     try:
-        status = _get_wifi_service().get_status()
+        status = service.get_status()
         wifi_status: dict[str, object] = {
             "connected": status.connected,
             "current_ssid": status.current_ssid,
@@ -168,13 +171,13 @@ def _wifi_context() -> tuple[dict[str, object], dict[str, object], dict[str, obj
             "allow_concurrent": True,
         }
         ap_config: dict[str, object] = {
-            "ssid": status.ap_mode.ssid,
-            "passphrase": "",
+            "ssid": form_ssid,
+            "passphrase": form_passphrase,
         }
         return wifi_status, ap_status, ap_config
     except (RuntimeError, WifiError) as exc:
         logger.warning("settings dashboard Wi-Fi status unavailable: %s", exc)
-        fallback_ssid = cfg.wifi.ap_ssid
+        fallback_ssid = form_ssid or cfg.wifi.ap_ssid
         wifi_status = {
             "connected": False,
             "current_ssid": None,
@@ -191,7 +194,7 @@ def _wifi_context() -> tuple[dict[str, object], dict[str, object], dict[str, obj
             "dhcp_range_end": "10.0.0.50",
             "allow_concurrent": True,
         }
-        ap_config = {"ssid": fallback_ssid, "passphrase": ""}
+        ap_config = {"ssid": fallback_ssid, "passphrase": form_passphrase}
         return wifi_status, ap_status, ap_config
 
 
@@ -262,8 +265,29 @@ def index() -> ResponseReturnValue:
 
 @settings_dashboard_bp.route("/settings/configure_ap", methods=["POST"])
 def configure_ap() -> ResponseReturnValue:
-    """Stub: v1 AP configuration endpoint (B-1 AP config managed via system_settings_service)."""
-    return _stub_save("AP configuration updated via system settings (B-1 stub)")
+    """Persist the operator's AP SSID/passphrase override and apply it.
+
+    The form ships `ssid` (1-32 chars) and `passphrase` (8-63 chars or
+    empty). The WifiService validates and saves these to an override
+    JSON file so they survive restart, and bounces the AP profile if
+    it's currently broadcasting.
+    """
+    ssid = (request.form.get("ssid") or "").strip()
+    passphrase = request.form.get("passphrase") or ""
+    if not ssid:
+        flash("AP SSID is required.", "error")
+        return _redirect_to_index()
+    try:
+        _get_wifi_service().update_ap_credentials(ssid=ssid, passphrase=passphrase)
+    except WifiConfigError as exc:
+        flash(f"Invalid AP credentials: {exc}", "error")
+        return _redirect_to_index()
+    except WifiError as exc:
+        logger.warning("Failed to apply AP credentials: %s", exc)
+        flash(f"Saved AP credentials but failed to apply to live profile: {exc}", "warning")
+        return _redirect_to_index()
+    flash(f"AP credentials updated (SSID: {ssid}).", "success")
+    return _redirect_to_index()
 
 
 @settings_dashboard_bp.route("/settings/force_ap", methods=["POST"])

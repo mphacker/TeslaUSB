@@ -39,6 +39,45 @@ class WifiStateStore:
             f"{self._config.credentials_path.stem}_ap_state.json"
         )
 
+    @property
+    def ap_config_path(self) -> Path:
+        """JSON file holding operator overrides of the AP SSID/passphrase.
+
+        Persisted separately from the read-only `teslausb-web.toml` so
+        the captive-portal "Update AP Credentials" form can mutate it
+        without root. Loaded at WifiService init and overlaid onto the
+        config dataclass, so the override survives service restart.
+        """
+        return self._config.credentials_path.with_name(
+            f"{self._config.credentials_path.stem}_ap_config.json"
+        )
+
+    def load_ap_config(self) -> dict[str, str] | None:
+        path = self.ap_config_path
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise WifiError(f"Failed to read AP config file: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise WifiConfigError(f"Invalid AP config JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise WifiConfigError("AP config file must contain a JSON object")
+        ssid = str(payload.get("ssid", "")).strip()
+        if not ssid:
+            return None
+        return {
+            "ssid": ssid,
+            "passphrase": str(payload.get("passphrase", "")),
+        }
+
+    def save_ap_config(self, *, ssid: str, passphrase: str) -> None:
+        self.write_json_file(
+            self.ap_config_path,
+            {"ssid": ssid, "passphrase": passphrase},
+        )
+
     def load_credentials(self) -> dict[str, WifiCredentials]:
         path = self._config.credentials_path
         if not path.exists():

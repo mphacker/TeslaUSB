@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 from datetime import UTC, datetime, timedelta
@@ -67,13 +68,42 @@ class WifiService:
 
     def __init__(self, config: WifiConfig) -> None:
         config.validate()
-        self._config = config
-        self._state_store = WifiStateStore(config)
-        self._runner = WifiCommandRunner(config)
+        self._config = self._apply_persisted_ap_overrides(config)
+        self._state_store = WifiStateStore(self._config)
+        self._runner = WifiCommandRunner(self._config)
         self._lock = threading.RLock()
         self._restore_timer: threading.Timer | None = None
         restore_deadline = self._load_ap_state().get("restore_deadline")
         self._schedule_restore_timer(_parse_datetime(restore_deadline))
+
+    @staticmethod
+    def _apply_persisted_ap_overrides(config: WifiConfig) -> WifiConfig:
+        """Overlay any operator-saved AP SSID/passphrase onto `config`.
+
+        The captive-portal "Update AP Credentials" form writes its
+        override to a JSON file alongside `credentials_path`. Loading
+        it here means a service restart picks up the operator's last
+        choice instead of reverting to the toml/dataclass defaults.
+        """
+        overlay_store = WifiStateStore(config)
+        try:
+            overrides = overlay_store.load_ap_config()
+        except (WifiConfigError, WifiError) as exc:
+            logger.warning("Ignoring corrupt AP config override: %s", exc)
+            return config
+        if not overrides:
+            return config
+        try:
+            updated = dataclasses.replace(
+                config,
+                ap_ssid=overrides["ssid"],
+                ap_passphrase=overrides["passphrase"],
+            )
+            updated.validate()
+        except WifiConfigError as exc:
+            logger.warning("Ignoring invalid AP config override: %s", exc)
+            return config
+        return updated
 
     def get_status(self) -> WifiStatus:
         with self._lock:
@@ -232,6 +262,64 @@ class WifiService:
                 self._save_ap_state(requested_enabled=False, restore_deadline=None)
                 self._schedule_restore_timer(None)
             return self._current_ap_mode(connection_name=self._current_connection_details()[0])
+
+    def ap_credentials_for_form(self) -> tuple[str, str]:
+        """Return the current AP SSID and passphrase for pre-filling the
+        captive-portal configuration form.
+
+        Reflects any persisted operator override applied at init time.
+        """
+        with self._lock:
+            return self._config.ap_ssid, self._config.ap_passphrase
+
+    def update_ap_credentials(self, *, ssid: str, passphrase: str) -> ApMode:
+        """Persist new AP SSID/passphrase and apply them to the live profile.
+
+        Validates the new credentials, writes them to the AP-config
+        override file so they survive restart, rebuilds the internal
+        WifiConfig, and — if the AP is currently active — bounces it so
+        Tesla/clients see the new credentials immediately.
+
+        Persistence happens before any nmcli probing so that a missing
+        binary or an offline NetworkManager cannot prevent the operator's
+        chosen credentials from sticking across a restart.
+        """
+        clean_ssid = ssid.strip()
+        new_config = dataclasses.replace(
+            self._config,
+            ap_ssid=clean_ssid,
+            ap_passphrase=passphrase,
+        )
+        new_config.validate()
+        with self._lock:
+            try:
+                was_active = self._current_ap_mode(
+                    connection_name=self._current_connection_details()[0]
+                ).active
+            except WifiError as exc:
+                logger.warning(
+                    "Cannot probe live AP state before credential update: %s", exc
+                )
+                was_active = False
+            self._state_store.save_ap_config(ssid=clean_ssid, passphrase=passphrase)
+            self._config = new_config
+            self._state_store = WifiStateStore(self._config)
+            self._runner = WifiCommandRunner(self._config)
+            if was_active:
+                try:
+                    self._bring_ap_down()
+                except WifiError as exc:
+                    logger.warning("Failed to bring AP down for credential rotation: %s", exc)
+                self._bring_ap_up()
+            try:
+                return self._current_ap_mode(
+                    connection_name=self._current_connection_details()[0]
+                )
+            except WifiError as exc:
+                logger.warning(
+                    "Saved AP credentials but cannot read live AP state: %s", exc
+                )
+                return self._current_ap_mode(connection_name=None)
 
     def _saved_networks_snapshot(self, *, active_ssid: str | None) -> tuple[SavedWifiNetwork, ...]:
         saved_connections = self._saved_connection_names()

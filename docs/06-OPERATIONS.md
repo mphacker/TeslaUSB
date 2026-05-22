@@ -63,35 +63,38 @@ preserve_with_gps = true
 
 ## Resizing LUNs (`teslausb-resize-lun`)
 
-Live resize takes the affected LUN offline for ~30–60 s (grow)
-or several minutes (exFAT shrink — see warning below). The
+Live resize takes the affected LUN offline for ~30–60 s. The
 device must remain on AC power during the operation.
 
 Flow when the web UI's "Apply" button is clicked:
 
-1. Validate `teslacam_gb + media_gb <= sd_total_gb - os_reserve_gb`.
-2. Refuse to shrink below `current_used + safety_margin` (worker
-   IPC consults the indexer to compute used bytes).
-3. `teslausb-present-usb down` — UDC unbind, Tesla loses both
-   drives.
-4. `systemctl stop nbd-attach@<n> teslafat@<n>` for the affected
-   LUN.
-5. `truncate -s <new>G` (grow) or full image-copy (shrink).
-6. Filesystem resize (`fsck.exfat` / `mkfs.exfat` rebuild for
-   shrink, `truncate` only for grow on exFAT — Tesla re-formats
-   on first sight).
-7. `systemctl start teslafat@<n> nbd-attach@<n>`.
-8. `teslausb-present-usb up` — UDC re-bind, Tesla sees both
-   drives.
+1. Validate `teslacam_gb + media_gb + os_reserve_gb ≤ sd_total_gb`.
+2. Validate `os_reserve_gb ≥ 8` (hard floor).
+3. Refuse to shrink below the current backing-directory usage
+   (`du -sb /srv/teslausb/<lun>` must be ≤ requested size).
+4. Rewrite `volume_size_gb` in the per-LUN `teslafat-N.toml`.
+5. Rewrite the matching key (`teslacam_gb` or `media_gb`) in
+   `/etc/teslausb/teslausb.toml`.
+6. `teslausb-hide-usb` — UDC unbind, Tesla loses both drives.
+7. `systemctl restart teslafat@<N>` — backend re-synthesises
+   the FAT/exFAT image at the new size from the existing
+   directory tree.
+8. `teslausb-present-usb` — UDC re-bind, Tesla sees both
+   drives at their new sizes.
 
 The helper is invoked through a narrow sudoers fragment
 (`/etc/sudoers.d/teslausb-resize`) that allowlists exactly this
-script. Validated with `visudo -c -f` at install time.
+script with NOPASSWD for the `gadget_web` user; nothing else
+is granted.
 
-> **exFAT shrink is destructive.** No native in-place shrinker
-> exists. The helper copies the live clip set into a smaller
-> fresh image; anything not yet captured by the indexer is
-> lost. The web UI shows a loud warning before allowing shrink.
+> **Note on exFAT shrink.** The teslafat backend synthesises
+> the FAT/exFAT image on demand from the backing directory
+> tree — there is no persistent on-disk image file to copy
+> or rewrite. As long as the `du`-measured usage of the
+> backing dir fits in the new size (step 3), Tesla simply
+> sees a smaller volume after the LUN bounce. If usage does
+> not fit, the helper refuses with `exit 3` and leaves all
+> state untouched.
 
 ## Auto-cleanup behaviour (TeslaCam only)
 

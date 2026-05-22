@@ -601,6 +601,26 @@ OS_RESERVE_GB=$(read_toml_int os_reserve_gb "${TESLAUSB_TOML}" 20)
 CUR_TESLACAM_GB=$(read_toml_int teslacam_gb "${TESLAUSB_TOML}" 64)
 CUR_MEDIA_GB=$(read_toml_int    media_gb    "${TESLAUSB_TOML}" 32)
 
+# Defensive: enforce the os_reserve_gb floor (charter AC.1).
+# Both Python (storage_config.py) and Rust (storage_config.rs)
+# already enforce >= 8 GB on save, but a hand-edited TOML could
+# still slip a smaller value through; refuse to operate in that
+# case so the resize never silently allocates kernel/boot space
+# to a LUN.
+if (( OS_RESERVE_GB < 8 )); then
+  echo "refusing: os_reserve_gb=${OS_RESERVE_GB} GB is below the 8 GB floor" >&2
+  exit 3
+fi
+
+# Defensive: re-validate KEY before it is interpolated into sed
+# below. The case statement above already constrains LUN, but
+# any future change that adds a new LUN must also extend KEY to
+# match this allowlist or the resize aborts safely.
+[[ "${KEY}" =~ ^(teslacam_gb|media_gb)$ ]] || {
+  echo "internal error: invalid KEY '${KEY}'" >&2
+  exit 4
+}
+
 SD_TOTAL_GB=$(df -B1G --output=size /srv/teslausb 2>/dev/null \
   | tail -n1 | tr -d " " || echo 0)
 if [[ -z "${SD_TOTAL_GB}" || ! "${SD_TOTAL_GB}" =~ ^[0-9]+$ ]]; then

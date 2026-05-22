@@ -267,6 +267,27 @@ async fn steady_state_linux(
                 }
             }
             _ = tick.tick() => {
+                // Three-phase cleanup tick (intentionally additive):
+                //   1. `cleanup.run_once` — age-based RecentClips
+                //      retention (`retention_days` from worker.toml).
+                //      Enforces "delete clips older than N days"
+                //      regardless of free-space pressure.
+                //   2. `cleanup.gc_orphans` — drop index rows whose
+                //      backing files vanished.
+                //   3. `cleanup_sweep::sweep_to_target_now` (AC.7) —
+                //      tier-aware free-space sweep keyed off
+                //      `target_free_pct` in /etc/teslausb/teslausb.toml.
+                //      Runs AFTER `run_once` so the age-based deletes
+                //      are already reflected in the statvfs reading;
+                //      any NotFound from a race with `run_once` is
+                //      logged at WARN and counted in
+                //      `SweepSummary::failed`, never fatal.
+                // The two delete paths are complementary, not
+                // redundant: `run_once` ensures Tesla never sees
+                // a clip older than `retention_days` (even when
+                // disk has plenty of free space), while the sweep
+                // keeps a free-space floor for incoming writes
+                // (even when no clip is "old" yet).
                 match cleanup.run_once(indexer.store()) {
                     Ok(summary) => {
                         info!(

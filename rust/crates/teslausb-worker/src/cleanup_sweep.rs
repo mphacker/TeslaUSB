@@ -80,11 +80,19 @@ pub enum CleanupTier {
 
 /// Classify a clip into the tier system. Pure function — easy
 /// to test in isolation without a store.
+///
+/// `preserve_with_gps` (from `storage_config.cleanup`) controls
+/// whether RecentClips carrying GPS waypoints or SEI tesla-data
+/// get the Tier B "delete-second" protection. When `false`, ALL
+/// RecentClips fall into Tier A and are equal candidates for
+/// the oldest-first sweep, regardless of metadata.
 #[must_use]
-pub fn classify_clip(clip: &ClipRecord) -> CleanupTier {
+pub fn classify_clip(clip: &ClipRecord, preserve_with_gps: bool) -> CleanupTier {
     match clip.bucket {
         Bucket::Recent => {
-            if clip.waypoint_count > 0 || clip.gps_waypoint_count > 0 {
+            if preserve_with_gps
+                && (clip.waypoint_count > 0 || clip.gps_waypoint_count > 0)
+            {
                 CleanupTier::B
             } else {
                 CleanupTier::A
@@ -389,9 +397,10 @@ fn build_plan(
     let mut plan = SweepPlan::default();
 
     let recent = store.list_clips_in_bucket_older_than(Bucket::Recent, i64::MAX)?;
+    let preserve = storage_config.cleanup.preserve_with_gps;
     let (tier_a, tier_b): (Vec<_>, Vec<_>) = recent
         .into_iter()
-        .partition(|c| classify_clip(c) == CleanupTier::A);
+        .partition(|c| classify_clip(c, preserve) == CleanupTier::A);
     for clip in tier_a {
         plan.priority.push(PlanEntry {
             clip,
@@ -586,13 +595,13 @@ mod tests {
     #[test]
     fn classify_recent_no_metadata_is_tier_a() {
         let clip = mk(Bucket::Recent, "RecentClips/a.mp4", 0, 0, 0);
-        assert_eq!(classify_clip(&clip), CleanupTier::A);
+        assert_eq!(classify_clip(&clip, true), CleanupTier::A);
     }
 
     #[test]
     fn classify_recent_with_gps_is_tier_b() {
         let clip = mk(Bucket::Recent, "RecentClips/b.mp4", 0, 5, 3);
-        assert_eq!(classify_clip(&clip), CleanupTier::B);
+        assert_eq!(classify_clip(&clip, true), CleanupTier::B);
     }
 
     #[test]
@@ -600,19 +609,26 @@ mod tests {
         // waypoint_count > 0, gps_waypoint_count == 0 — SEI
         // tesla-data present, no GPS fix.
         let clip = mk(Bucket::Recent, "RecentClips/c.mp4", 0, 7, 0);
-        assert_eq!(classify_clip(&clip), CleanupTier::B);
+        assert_eq!(classify_clip(&clip, true), CleanupTier::B);
+    }
+
+    #[test]
+    fn classify_recent_with_gps_falls_to_tier_a_when_preserve_disabled() {
+        // preserve_with_gps = false collapses Tier B into Tier A.
+        let clip = mk(Bucket::Recent, "RecentClips/d.mp4", 0, 5, 3);
+        assert_eq!(classify_clip(&clip, false), CleanupTier::A);
     }
 
     #[test]
     fn classify_saved_is_tier_c() {
         let clip = mk(Bucket::Saved, "SavedClips/x/front.mp4", 0, 0, 0);
-        assert_eq!(classify_clip(&clip), CleanupTier::C);
+        assert_eq!(classify_clip(&clip, true), CleanupTier::C);
     }
 
     #[test]
     fn classify_sentry_is_tier_c() {
         let clip = mk(Bucket::Sentry, "SentryClips/x/front.mp4", 0, 9, 9);
-        assert_eq!(classify_clip(&clip), CleanupTier::C);
+        assert_eq!(classify_clip(&clip, true), CleanupTier::C);
     }
 
     #[test]

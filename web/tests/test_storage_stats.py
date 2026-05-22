@@ -49,6 +49,32 @@ def test_safe_disk_usage_returns_zero_on_missing_path() -> None:
     assert (used, free) == (0, 0)
 
 
+def test_tree_size_bytes_sums_dir(tmp_path: Path) -> None:
+    (tmp_path / "a.mp4").write_bytes(b"x" * 1024)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.mp4").write_bytes(b"y" * 2048)
+    assert ss._tree_size_bytes(tmp_path) == 1024 + 2048
+
+
+def test_tree_size_bytes_returns_zero_for_missing_root() -> None:
+    assert ss._tree_size_bytes(Path("/nonexistent/" + "x" * 40)) == 0
+
+
+def test_tree_size_bytes_ignores_symlinks(tmp_path: Path) -> None:
+    target_dir = tmp_path / "real"
+    target_dir.mkdir()
+    (target_dir / "big.mp4").write_bytes(b"z" * 4096)
+    link_root = tmp_path / "linked"
+    link_root.mkdir()
+    try:
+        (link_root / "lnk").symlink_to(target_dir)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+    # The symlink under link_root must NOT be followed, so total is 0.
+    assert ss._tree_size_bytes(link_root) == 0
+
+
 def test_apply_storage_config_runs_helper_for_changed_lun(tmp_config: Path) -> None:
     new = sc.TeslausbConfig(
         storage=sc.StorageSection(os_reserve_gb=20, teslacam_gb=100, media_gb=32),

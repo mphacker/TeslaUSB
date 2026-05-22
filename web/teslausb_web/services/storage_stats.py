@@ -24,6 +24,7 @@ schema-version negotiation, no daemon-restart dance.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -104,6 +105,44 @@ def _safe_disk_usage(path: Path) -> tuple[int, int]:
     return (usage.used, usage.free)
 
 
+def _tree_size_bytes(root: Path) -> int:
+    """Recursively sum file sizes under ``root`` (the ``du -sb`` answer).
+
+    ``shutil.disk_usage(root)`` reports the *filesystem* used/free,
+    which gives the same value for every path on the SD card —
+    useless for per-LUN accounting because TeslaCam and Media share
+    a backing filesystem. This walks the directory tree once.
+
+    Symlinks are not followed (mirrors ``du -sb`` default). Files
+    that vanish between ``scandir`` and ``stat`` (worker deletes
+    during a sweep) are silently skipped so a transient race never
+    raises into the Flask handler. Returns ``0`` if ``root`` is
+    missing or unreadable.
+    """
+    if not root.exists():
+        return 0
+    total = 0
+    stack: list[Path] = [root]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except (FileNotFoundError, PermissionError, OSError):
+                        continue
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            logger.warning("storage_stats: scandir(%s) failed: %s", cur, exc)
+            continue
+    return total
+
+
 def get_storage_stats(
     config: sc.TeslausbConfig | None = None,
     *,
@@ -121,8 +160,8 @@ def get_storage_stats(
         path = config_path or sc.DEFAULT_CONFIG_PATH
         config = sc.load(path)
 
-    tc_used, _ = _safe_disk_usage(TESLACAM_BACKING_ROOT)
-    md_used, _ = _safe_disk_usage(MEDIA_BACKING_ROOT)
+    tc_used = _tree_size_bytes(TESLACAM_BACKING_ROOT)
+    md_used = _tree_size_bytes(MEDIA_BACKING_ROOT)
     sd_total, sd_free = _sd_capacity_bytes()
 
     teslacam = LunStats(

@@ -140,8 +140,10 @@
 
             <p class="storage-warn">
                 Shrinking a drive below its current usage is refused.
-                If Tesla shows the drive as unformatted after a size
-                change, format it once from the touchscreen.
+                Size changes regenerate the synthesized FAT/exFAT
+                geometry over the same Linux directory tree — your
+                files are not touched, and Tesla will see the new
+                size on the next reconnect without any reformat.
             </p>
         </section>
 

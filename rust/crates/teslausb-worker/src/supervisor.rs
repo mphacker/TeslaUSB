@@ -48,11 +48,12 @@ use crate::indexer::Indexer;
 use crate::storage_config::StorageConfig;
 use crate::store::Store;
 
-/// Path of the AC.1 shared storage config. Read at startup so
-/// the tier-aware sweep ([`cleanup_sweep`]) has its target
-/// free-space floor available; re-read each tick is unnecessary
-/// because the cleanup_sweep call resolves the target itself
-/// from the in-memory config we pass in.
+/// Path of the AC.1 shared storage config. The supervisor
+/// re-reads this file on every cleanup tick so live edits made
+/// through the web UI's `/storage` page propagate to the
+/// tier-aware sweep ([`cleanup_sweep`]) within one tick without
+/// requiring a worker restart. The file is tiny (~1 KB), so the
+/// per-tick read cost is negligible.
 #[cfg(target_os = "linux")]
 const STORAGE_CONFIG_PATH: &str = "/etc/teslausb/teslausb.toml";
 

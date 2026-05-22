@@ -785,6 +785,37 @@
         checkbox.addEventListener("change", updateSelectionState);
     });
 
+    // Folder navigation: clicking a folder row (desktop) or card (mobile)
+    // navigates into that folder. Clicks on action buttons (.action-btn) or
+    // form controls inside the row are excluded so Delete still works.
+    function bindFolderNavigation(selector) {
+        document.querySelectorAll(selector).forEach((row) => {
+            if (!(row instanceof HTMLElement)) return;
+            const dir = row.dataset.dir;
+            if (!dir) return;
+            row.style.cursor = "pointer";
+            row.addEventListener("click", (event) => {
+                const target = event.target;
+                if (target instanceof Element) {
+                    if (target.closest("button, a, input, label, .action-btn")) {
+                        return;
+                    }
+                }
+                window.location.href = currentBrowseUrl(dir);
+            });
+            row.addEventListener("keydown", (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    window.location.href = currentBrowseUrl(dir);
+                }
+            });
+            if (!row.hasAttribute("tabindex")) row.setAttribute("tabindex", "0");
+            if (!row.hasAttribute("role")) row.setAttribute("role", "link");
+        });
+    }
+    bindFolderNavigation(".music-folder-row");
+    bindFolderNavigation(".music-mobile-folder");
+
     if (selectAll instanceof HTMLInputElement) {
         selectAll.addEventListener("change", () => {
             document.querySelectorAll(".js-music-file-select").forEach((checkbox) => {

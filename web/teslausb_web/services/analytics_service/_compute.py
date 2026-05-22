@@ -11,6 +11,7 @@ import shutil
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from teslausb_web.services.analytics_service._models import (
@@ -38,7 +39,6 @@ from teslausb_web.services.analytics_service._models import (
 if TYPE_CHECKING:
     import sqlite3
     from collections.abc import Sequence
-    from pathlib import Path
 
     from teslausb_web.config import AnalyticsSection
 
@@ -47,11 +47,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class Probe:
-    """One filesystem root to report on, with its display label."""
+    """One filesystem root to report on, with its display label.
+
+    When ``capacity_bytes`` is set, the reported ``total_bytes`` is the
+    fixed LUN capacity (the size Tesla sees), and ``used_bytes`` is
+    computed by walking the backing subtree. When ``None`` (legacy /
+    dev-machine fallback) ``shutil.disk_usage`` is used and the totals
+    reflect the underlying filesystem instead of any LUN cap.
+    """
 
     key: str
     label: str
     path: Path
+    capacity_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +87,61 @@ def device_id(path: Path) -> object | None:
         return None
 
 
+def _subtree_used_bytes(root: Path) -> int:
+    """Sum every regular file's size under ``root``. Best-effort: any
+    unreadable entry is skipped silently — partial figures are still
+    more useful than no figure at all on a busy device.
+    """
+    total = 0
+    try:
+        for entry in _iter_files(root):
+            with suppress(OSError):
+                total += entry.stat(follow_symlinks=False).st_size
+    except OSError as exc:
+        logger.warning("analytics: subtree walk failed at %s: %s", root, exc)
+    return total
+
+
+def _iter_files(root: Path):  # noqa: ANN202 — internal iterator
+    import os
+
+    for dirpath, _dirnames, filenames in os.walk(str(root), followlinks=False):
+        for name in filenames:
+            yield Path(dirpath, name)
+
+
 def probe_usage(probe: Probe) -> PartitionUsage:
+    if probe.capacity_bytes is not None:
+        # LUN-mode: total is the LUN cap; used is what's actually on the
+        # backing subtree. Free is whatever's left in the cap.
+        total = probe.capacity_bytes
+        try:
+            used = _subtree_used_bytes(probe.path)
+        except OSError as exc:
+            logger.warning("analytics: subtree walk(%s) failed: %s", probe.path, exc)
+            return PartitionUsage(
+                key=probe.key,
+                label=probe.label,
+                path=str(probe.path),
+                total_bytes=total,
+                used_bytes=0,
+                free_bytes=total,
+                percent_used=0.0,
+                error=str(exc),
+            )
+        # Cap used at total so a runaway tree doesn't render as 200% full.
+        used = min(used, total)
+        free = max(0, total - used)
+        percent = (used / total * PERCENT) if total > 0 else 0.0
+        return PartitionUsage(
+            key=probe.key,
+            label=probe.label,
+            path=str(probe.path),
+            total_bytes=total,
+            used_bytes=used,
+            free_bytes=free,
+            percent_used=percent,
+        )
     try:
         usage = shutil.disk_usage(probe.path)
     except OSError as exc:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from teslausb_web.services.analytics_service._compute import (
@@ -32,6 +33,7 @@ from teslausb_web.services.analytics_service._compute import (
 from teslausb_web.services.analytics_service._models import (
     LABEL_BACKING,
     LABEL_MEDIA,
+    LABEL_SD_CARD,
     STATUS_CAUTION,
     STATUS_CRITICAL,
     STATUS_HEALTHY,
@@ -149,17 +151,88 @@ class AnalyticsService:
         )
 
 
+_TESLAFAT_CONFIG_DIR: Path = Path("/etc/teslausb")
+_BYTES_PER_GB: int = 1024**3
+
+
+def _discover_teslafat_luns(
+    config_dir: Path = _TESLAFAT_CONFIG_DIR,
+) -> list[Probe]:
+    """Read every ``teslafat-N.toml`` and emit one LUN-aware probe per file.
+
+    Each LUN exposes a separate USB volume to Tesla (TeslaCam / MEDIA),
+    so the analytics dashboard should show one card per LUN even when
+    the backing roots share an underlying btrfs filesystem.
+
+    Returns an empty list on dev machines without ``/etc/teslausb``.
+    """
+    import tomllib
+
+    if not config_dir.is_dir():
+        return []
+    probes: list[Probe] = []
+    for path in sorted(config_dir.glob("teslafat-*.toml")):
+        try:
+            with path.open("rb") as handle:
+                data = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            logger.warning("analytics: cannot read %s: %s", path, exc)
+            continue
+        backing_root = data.get("backing_root")
+        volume_label = data.get("volume_label")
+        volume_size_gb = data.get("volume_size_gb")
+        if not isinstance(backing_root, str) or not isinstance(volume_label, str):
+            continue
+        if not isinstance(volume_size_gb, int) or volume_size_gb <= 0:
+            continue
+        stem = path.stem  # "teslafat-0"
+        suffix = stem.rsplit("-", 1)[-1]
+        key = f"lun-{suffix}"
+        capacity = volume_size_gb * _BYTES_PER_GB
+        probes.append(
+            Probe(
+                key=key,
+                label=volume_label,
+                path=Path(backing_root),
+                capacity_bytes=capacity,
+            )
+        )
+    return probes
+
+
 def make_analytics_service(
     cfg: WebConfig,
     mapping_service: MappingService,
 ) -> AnalyticsService:
     """Build the analytics service from a :class:`WebConfig`.
 
-    ``backing_root`` is always probed first. ``media_root`` is
-    added only when it resolves to a distinct filesystem —
-    otherwise the duplicate ``shutil.disk_usage`` results would
-    mislead the operator.
+    On B-1 hardware we emit one probe per teslafat LUN
+    (``/etc/teslausb/teslafat-*.toml``) so the dashboard renders one
+    card per USB volume Tesla sees — even when the LUN backing roots
+    share the underlying btrfs filesystem.
+
+    On dev machines (no ``/etc/teslausb``) we fall back to the legacy
+    behaviour: probe ``backing_root`` and ``mapping.media_root`` via
+    :func:`shutil.disk_usage`, deduplicated by ``st_dev``.
     """
+    lun_probes = _discover_teslafat_luns()
+    if lun_probes:
+        # Add an SD-card probe so the operator can see the *real* free
+        # space on the underlying btrfs filesystem. The LUN cards above
+        # report Tesla's view (capped at volume_size_gb); this card
+        # reports the physical SD card's view.
+        probes: list[Probe] = list(lun_probes)
+        sd_root = cfg.paths.backing_root
+        if sd_root.exists():
+            probes.append(
+                Probe(key="sd-card", label=LABEL_SD_CARD, path=sd_root)
+            )
+        return AnalyticsService(
+            analytics_cfg=cfg.analytics,
+            probes=probes,
+            mapping_service=mapping_service,
+        )
+
     seen_devs: set[object] = set()
     probes: list[Probe] = []
 

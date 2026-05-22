@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 # B-1 has no partitions so we use purpose-named labels instead.
 LABEL_BACKING: Final[str] = "TeslaCam Storage"
 LABEL_MEDIA: Final[str] = "Media Library"
+LABEL_SD_CARD: Final[str] = "SD Card (backing storage)"
 
 # Status tokens — string enum sentinels. v1 used the same vocabulary
 # verbatim; preserved so the template's ``health.status`` branches

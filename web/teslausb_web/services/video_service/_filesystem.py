@@ -47,6 +47,41 @@ _DATETIME_DISPLAY: Final[str] = "%Y-%m-%d %I:%M:%S %p"
 _SPLIT_PARTS_EXPECTED: Final[int] = 2
 
 
+# ---------------------------------------------------------------------------
+# Folder-mtime-keyed cache.
+#
+# Single sync worker (ADR-0008) → no locking required. Each cache entry is
+# (dir_mtime, result). On lookup, we stat the folder; if the mtime matches,
+# we return the cached result. Otherwise the folder has changed (new file,
+# deletion, rename) and we rescan. Tesla appends one clip per minute, so
+# pagination within a 60-second window hits cache; the next minute's request
+# triggers exactly one rescan.
+
+_bucket_cache: dict[str, tuple[float, dict[str, float], dict[str, list[ClipFile]]]] = {}
+_count_cache: dict[str, tuple[float, int]] = {}
+_event_folders_cache: dict[str, tuple[float, list[tuple[str, Path, float]]]] = {}
+
+
+def _folder_mtime(folder_path: Path) -> float | None:
+    try:
+        return folder_path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def invalidate_folder_cache(folder_path: Path | None = None) -> None:
+    """Drop cached scan results for a folder (or all folders)."""
+    if folder_path is None:
+        _bucket_cache.clear()
+        _count_cache.clear()
+        _event_folders_cache.clear()
+        return
+    key = str(folder_path)
+    _bucket_cache.pop(key, None)
+    _count_cache.pop(key, None)
+    _event_folders_cache.pop(key, None)
+
+
 def is_valid_mp4(path: Path) -> bool:
     """Return ``True`` iff the first 12 bytes contain the ``ftyp`` box.
 
@@ -86,7 +121,15 @@ def list_event_folders(folder_path: Path) -> list[tuple[str, Path, float]]:
     """List immediate subdirectories of ``folder_path``.
 
     Returns ``(name, path, mtime)`` tuples sorted newest-first.
+    Results are cached and invalidated by the folder's own mtime.
     """
+    dir_mtime = _folder_mtime(folder_path)
+    if dir_mtime is None:
+        return []
+    key = str(folder_path)
+    cached = _event_folders_cache.get(key)
+    if cached is not None and cached[0] == dir_mtime:
+        return list(cached[1])
     out: list[tuple[str, Path, float]] = []
     try:
         with os.scandir(folder_path) as entries:
@@ -102,6 +145,7 @@ def list_event_folders(folder_path: Path) -> list[tuple[str, Path, float]]:
         logger.debug("list_event_folders: %s: %s", folder_path, exc)
         return []
     out.sort(key=lambda t: t[2], reverse=True)
+    _event_folders_cache[key] = (dir_mtime, list(out))
     return out
 
 
@@ -175,8 +219,11 @@ def group_flat_sessions(
     1. Scan to bucket files into sessions (timestamp prefix). Track
        the newest mtime per session for sort ordering. No size or
        header probes yet — keeps the global pass cheap.
-    2. For the page slice, accumulate size + camera bucket + encrypted
-       flag. We only open file headers for the page being rendered.
+    2. For the page slice, accumulate size + camera bucket. The
+       per-session list view never surfaces the encrypted flag, so
+       we skip the per-file ``is_valid_mp4`` probe here — full
+       encryption detection happens in ``parse_event_full`` for the
+       player route.
     """
     session_timestamps, session_files = _bucket_flat_sessions(folder_path)
     total_count = len(session_timestamps)
@@ -202,8 +249,6 @@ def group_flat_sessions(
                 continue
             if cameras[cam] is None:
                 cameras[cam] = f.name
-                if not is_valid_mp4(Path(f.path)):
-                    encrypted[cam] = True
         ts = session_timestamps[sid]
         result.append(
             SessionGroup(
@@ -254,8 +299,18 @@ def count_videos(folder_path: Path) -> int:
 
     Mirrors v1's two-level scan: walk immediate children, then
     contents of any subdirectory. Deeper nesting isn't valid for
-    TeslaCam folders so we don't recurse further.
+    TeslaCam folders so we don't recurse further. Results are cached
+    and invalidated by the folder's own mtime — accurate enough for a
+    list-summary tile and saves ~366 ``scandir`` entries per request
+    on a busy RecentClips folder.
     """
+    dir_mtime = _folder_mtime(folder_path)
+    if dir_mtime is None:
+        return 0
+    key = str(folder_path)
+    cached = _count_cache.get(key)
+    if cached is not None and cached[0] == dir_mtime:
+        return cached[1]
     total = 0
     try:
         with os.scandir(folder_path) as entries:
@@ -274,6 +329,7 @@ def count_videos(folder_path: Path) -> int:
                     total += 1
     except OSError:
         return 0
+    _count_cache[key] = (dir_mtime, total)
     return total
 
 
@@ -438,6 +494,13 @@ def _split_clip_filename(name: str) -> tuple[str | None, str | None]:
 def _bucket_flat_sessions(
     folder_path: Path,
 ) -> tuple[dict[str, float], dict[str, list[ClipFile]]]:
+    dir_mtime = _folder_mtime(folder_path)
+    if dir_mtime is None:
+        return {}, {}
+    key = str(folder_path)
+    cached = _bucket_cache.get(key)
+    if cached is not None and cached[0] == dir_mtime:
+        return cached[1], cached[2]
     timestamps: dict[str, float] = {}
     files: dict[str, list[ClipFile]] = {}
     try:
@@ -467,6 +530,7 @@ def _bucket_flat_sessions(
     except OSError as exc:
         logger.debug("_bucket_flat_sessions: %s: %s", folder_path, exc)
         return {}, {}
+    _bucket_cache[key] = (dir_mtime, timestamps, files)
     return timestamps, files
 
 

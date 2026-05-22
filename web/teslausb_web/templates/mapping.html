@@ -744,22 +744,15 @@
     }
     .vp-btn:hover { color: var(--text-primary); border-color: var(--accent-primary, var(--mapping-accent-primary)); }
     .vp-btn-danger:hover { color: var(--mapping-accent-danger); border-color: var(--mapping-accent-danger); }
-    .vp-load-more {
+    .vp-sentinel {
         display: block;
         width: 100%;
-        padding: 8px;
-        margin-top: 4px;
-        border: 1px solid var(--border-color, var(--border));
-        border-radius: var(--radius-sm, 4px);
-        background: transparent;
-        color: var(--accent-primary, var(--mapping-accent-primary));
-        font-size: 0.8125rem;
-        cursor: pointer;
-        transition: all 150ms ease;
-    }
-    .vp-load-more:hover {
-        background: var(--accent-primary, var(--mapping-accent-primary));
-        color: var(--mapping-white);
+        padding: 12px 8px;
+        text-align: center;
+        color: var(--text-secondary);
+        font-size: 0.75rem;
+        font-style: italic;
+        opacity: 0.7;
     }
     /* ── Video Panel Tabs ── */
     .vp-tabs { display: flex; gap: 2px; flex: 1; min-width: 0; }
@@ -3444,6 +3437,8 @@ let vpPage = 1;
 let vpHasNext = false;
 let vpFolderStructure = 'events';
 let vpCurrentTab = 'sentry';
+let vpLoading = false;
+let vpScrollObserver = null;
 
 function toggleVideoPanel() {
     videoPanelOpen = !videoPanelOpen;
@@ -3733,9 +3728,15 @@ async function loadTripsTimeline() {
 }
 
 async function loadVideoList(append) {
+    if (vpLoading) return;
     const folder = document.getElementById('vpFolder').value;
     const list = document.getElementById('vpList');
-    if (!append) { list.innerHTML = '<div class="vp-loading">Loading\u2026</div>'; vpPage = 1; }
+    if (!append) {
+        list.innerHTML = '<div class="vp-loading">Loading\u2026</div>';
+        vpPage = 1;
+        if (vpScrollObserver) { vpScrollObserver.disconnect(); vpScrollObserver = null; }
+    }
+    vpLoading = true;
 
     try {
         const resp = await fetch('/videos/?folder=' + encodeURIComponent(folder) + '&page=' + vpPage, {
@@ -3745,6 +3746,10 @@ async function loadVideoList(append) {
         const data = await resp.json();
         vpHasNext = data.has_next;
         vpFolderStructure = data.folder_structure || 'events';
+
+        // Drop any prior sentinel before appending more cards
+        var existingSentinel = list.querySelector('.vp-sentinel');
+        if (existingSentinel) existingSentinel.remove();
 
         if (!append) list.innerHTML = '';
         if (!data.events || data.events.length === 0) {
@@ -3796,21 +3801,41 @@ async function loadVideoList(append) {
             list.appendChild(card);
         });
 
-        // Remove existing load-more button
-        var existingMore = list.querySelector('.vp-load-more');
-        if (existingMore) existingMore.remove();
-
         if (vpHasNext) {
-            var more = document.createElement('button');
-            more.className = 'vp-load-more';
-            more.textContent = 'Load More';
-            more.onclick = function() { vpPage++; more.remove(); loadVideoList(true); };
-            list.appendChild(more);
+            var sentinel = document.createElement('div');
+            sentinel.className = 'vp-sentinel';
+            sentinel.textContent = 'Loading more\u2026';
+            list.appendChild(sentinel);
+            attachVpScrollSentinel(sentinel);
         }
     } catch(e) {
         console.error('Failed to load videos:', e);
         if (!append) list.innerHTML = '<div class="vp-empty">Failed to load videos</div>';
+    } finally {
+        vpLoading = false;
     }
+}
+
+function attachVpScrollSentinel(sentinel) {
+    if (vpScrollObserver) { vpScrollObserver.disconnect(); vpScrollObserver = null; }
+    if (!('IntersectionObserver' in window)) {
+        // Fallback for very old browsers: just immediately load the next page.
+        if (vpHasNext && !vpLoading) { vpPage++; loadVideoList(true); }
+        return;
+    }
+    var root = document.getElementById('vpList');
+    vpScrollObserver = new IntersectionObserver(function(entries) {
+        for (var i = 0; i < entries.length; i++) {
+            if (entries[i].isIntersecting && vpHasNext && !vpLoading) {
+                vpScrollObserver.disconnect();
+                vpScrollObserver = null;
+                vpPage++;
+                loadVideoList(true);
+                break;
+            }
+        }
+    }, { root: root, rootMargin: '200px 0px', threshold: 0 });
+    vpScrollObserver.observe(sentinel);
 }
 
 function vpPlay(folder, name, structure) {

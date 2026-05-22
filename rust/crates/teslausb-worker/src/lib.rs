@@ -27,6 +27,7 @@ pub mod cleanup;
 pub mod config;
 pub mod indexer;
 pub mod sei;
+pub mod storage_config;
 pub mod store;
 pub mod supervisor;
 pub mod watcher;

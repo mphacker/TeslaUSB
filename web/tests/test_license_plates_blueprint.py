@@ -395,29 +395,30 @@ class TestMatchRoute:
         assert response.get_json()["success"] is False
 
 
-class TestPhotoStubRoutes:
-    """Stub photo upload routes return expected degraded responses until implemented."""
+class TestPhotoRoutes:
+    """Photo plate upload/download/delete routes (Tesla custom-background PNGs)."""
 
-    def test_upload_plate_stub_redirects(self, client: FlaskClient) -> None:
+    def test_upload_plate_with_no_file_redirects_with_error(self, client: FlaskClient) -> None:
         response = client.post("/license_plates/upload", data={"plate_region": "na"})
         assert response.status_code == HTTPStatus.FOUND
 
-    def test_upload_multiple_stub_returns_json_error(self, client: FlaskClient) -> None:
+    def test_upload_multiple_with_no_files_returns_json_error(self, client: FlaskClient) -> None:
         response = client.post(
             "/license_plates/upload_multiple",
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
-        assert response.status_code == HTTPStatus.NOT_IMPLEMENTED
+        assert response.status_code == HTTPStatus.BAD_REQUEST
         payload = response.get_json()
         assert payload is not None
-        assert "not yet implemented" in payload.get("error", "").lower()
+        assert payload["success"] is False
+        assert "no files selected" in payload.get("message", "").lower()
 
-    def test_download_plate_stub_redirects(self, client: FlaskClient) -> None:
-        response = client.get("/license_plates/download/na/test.png")
-        assert response.status_code == HTTPStatus.FOUND
+    def test_download_missing_plate_returns_404(self, client: FlaskClient) -> None:
+        response = client.get("/license_plates/download/LightShow/missing.png")
+        assert response.status_code == HTTPStatus.NOT_FOUND
 
-    def test_delete_plate_stub_redirects(self, client: FlaskClient) -> None:
-        response = client.post("/license_plates/delete_image/na/test.png")
+    def test_delete_missing_plate_redirects(self, client: FlaskClient) -> None:
+        response = client.post("/license_plates/delete_image/LightShow/missing.png")
         assert response.status_code == HTTPStatus.FOUND
 
 

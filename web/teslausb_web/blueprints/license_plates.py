@@ -16,6 +16,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_from_directory,
     url_for,
 )
 
@@ -29,6 +30,11 @@ from teslausb_web.services.license_plate_service import (
     PlateMatch,
     PlateNotFoundError,
     RedactionConfig,
+)
+from teslausb_web.services.photo_plate_service import (
+    PhotoPlateError,
+    PhotoPlateFileError,
+    PhotoPlateService,
 )
 
 if TYPE_CHECKING:
@@ -56,6 +62,13 @@ def _get_service() -> LicensePlateService:
     service = current_app.extensions["license_plate_service"]
     if not isinstance(service, LicensePlateService):
         raise RuntimeError("license_plate_service extension is not configured")
+    return service
+
+
+def _get_photo_service() -> PhotoPlateService:
+    service = current_app.extensions.get("photo_plate_service")
+    if not isinstance(service, PhotoPlateService):
+        raise RuntimeError("photo_plate_service extension is not configured")
     return service
 
 
@@ -143,6 +156,12 @@ def _index_context(
     redaction_config: RedactionConfig,
 ) -> dict[str, object]:
     service_config = _get_service().config
+    photo_service = _get_photo_service()
+    try:
+        plate_files = photo_service.list_plates()
+    except PhotoPlateFileError:
+        logger.exception("Failed to list photo plates")
+        plate_files = ()
     return {
         "page": "media",
         "media_tab": "plates",
@@ -156,11 +175,8 @@ def _index_context(
         "max_label_length": service_config.max_label_length,
         "max_notes_length": service_config.max_notes_length,
         "default_partition": _DEFAULT_PARTITION,
-        # Photo plate stub context (Tesla PNG background management).
-        # Populated with spec constants until the photo service is
-        # implemented.  plate_files=() means the photo list section
-        # renders as empty — upload is gated by the stub routes below.
-        "plate_files": (),
+        # Photo plate (Tesla custom-background PNG) section.
+        "plate_files": plate_files,
         "max_file_size": 512 * 1024,  # Tesla spec: 512 KB max per PNG
         "max_filename_length": 12,  # Tesla spec: 12 alphanumeric chars
         "max_plate_count": 5,  # Tesla spec: 5 plates max
@@ -367,57 +383,104 @@ def _serialize_bulk_result(result: PlateBulkOperationResult) -> dict[str, object
 
 
 # ---------------------------------------------------------------------------
-# Photo plate stub routes — referenced by the template's upload/download UI.
-# These return 501 until the photo plate service is wired up in a future
-# phase.  The routes MUST exist so url_for() resolves at render time.
+# Photo plate routes — manage the Tesla custom-background PNGs that live in
+# {backing_root}/lightshow/LicensePlate/ on the lightshow USB partition.
+# Tesla firmware spec: PNG only, 420x75 (NA) or 492x75 (EU), <=512 KB,
+# base name <=12 alphanumeric characters, <=5 plates.
 # ---------------------------------------------------------------------------
+
+
+def _photo_upload_response(
+    *, success: bool, message: str, file_count: int = 0
+) -> ResponseReturnValue:
+    if _wants_json_response():
+        status = HTTPStatus.OK if success else HTTPStatus.BAD_REQUEST
+        return (
+            _json_message_payload(success=success, message=message, file_count=file_count),
+            status,
+        )
+    flash(message, "info" if success else "error")
+    return _redirect_to_license_plates()
 
 
 @license_plates_bp.route("/upload", methods=["POST"])
 def upload_plate() -> ResponseReturnValue:
-    # TODO(#227): implement single-file plate image upload and
-    # conversion via PIL + the photo plate service.
-    if _wants_json_response():
-        return (
-            _json_error_payload("Photo plate upload is not yet implemented"),
-            HTTPStatus.NOT_IMPLEMENTED,
-        )
-    flash("Photo plate upload is not yet implemented.", "error")
-    return _redirect_to_license_plates()
+    """Upload a single PNG plate via the `plate_file` form field."""
+    uploaded = request.files.get("plate_file")
+    if uploaded is None or not (uploaded.filename or "").strip():
+        return _photo_upload_response(success=False, message="No file selected")
+    try:
+        service = _get_photo_service()
+        result = service.upload_files([uploaded])
+    except PhotoPlateFileError as exc:
+        logger.exception("Photo plate upload failed")
+        return _photo_upload_response(success=False, message=str(exc))
+    if result.success:
+        _invalidate_caches(current_app)
+    return _photo_upload_response(
+        success=result.success, message=result.message, file_count=result.file_count
+    )
 
 
 @license_plates_bp.route("/upload_multiple", methods=["POST"])
 def upload_multiple_plates() -> ResponseReturnValue:
-    # TODO(#227): implement multi-file plate image upload.
-    if _wants_json_response():
-        return (
-            _json_error_payload("Photo plate upload is not yet implemented"),
-            HTTPStatus.NOT_IMPLEMENTED,
-        )
-    flash("Photo plate upload is not yet implemented.", "error")
-    return _redirect_to_license_plates()
+    """Upload one or more PNG plates via the `plate_files` form field."""
+    uploads = request.files.getlist("plate_files")
+    if not uploads:
+        return _photo_upload_response(success=False, message="No files selected")
+    try:
+        service = _get_photo_service()
+        result = service.upload_files(uploads)
+    except PhotoPlateFileError as exc:
+        logger.exception("Photo plate upload failed")
+        return _photo_upload_response(success=False, message=str(exc))
+    if result.success:
+        _invalidate_caches(current_app)
+    return _photo_upload_response(
+        success=result.success, message=result.message, file_count=result.file_count
+    )
 
 
 @license_plates_bp.route("/download/<partition>/<path:filename>")
 def download_plate(partition: str, filename: str) -> ResponseReturnValue:
-    # TODO(#227): serve the PNG from the backing store once the
-    # photo plate service can resolve partition + filename to a file path.
-    del partition, filename
-    flash("Photo plate download is not yet implemented.", "error")
-    return _redirect_to_license_plates()
+    """Serve a stored plate PNG so the browser can render the thumbnail."""
+    del partition  # Single-partition (LightShow) layout; kept for URL symmetry.
+    try:
+        service = _get_photo_service()
+        file_path = service.resolve_plate(filename)
+    except PhotoPlateError as exc:
+        return _json_error_payload(str(exc)), HTTPStatus.NOT_FOUND
+    return send_from_directory(
+        directory=service.plates_folder,
+        path=file_path.name,
+        mimetype="image/png",
+        as_attachment=False,
+    )
 
 
 @license_plates_bp.route("/delete_image/<partition>/<path:filename>", methods=["POST"])
 def delete_plate(partition: str, filename: str) -> ResponseReturnValue:
-    # TODO(#227): delete the plate PNG from the backing store and
-    # schedule a cache invalidation after the photo plate service exists.
-    del partition, filename
+    """Delete a stored plate PNG and schedule a UI cache invalidation."""
+    del partition
+    try:
+        service = _get_photo_service()
+        result = service.delete_plate(filename)
+    except PhotoPlateError as exc:
+        if _wants_json_response():
+            return _json_error_payload(str(exc)), HTTPStatus.BAD_REQUEST
+        flash(str(exc), "error")
+        return _redirect_to_license_plates()
+    except PhotoPlateFileError as exc:
+        logger.exception("Photo plate delete failed")
+        if _wants_json_response():
+            return _json_error_payload(str(exc)), HTTPStatus.INTERNAL_SERVER_ERROR
+        flash(str(exc), "error")
+        return _redirect_to_license_plates()
+    if result.success:
+        _invalidate_caches(current_app)
     if _wants_json_response():
-        return (
-            _json_error_payload("Photo plate delete is not yet implemented"),
-            HTTPStatus.NOT_IMPLEMENTED,
-        )
-    flash("Photo plate delete is not yet implemented.", "error")
+        return _json_message_payload(success=result.success, message=result.message)
+    flash(result.message, "info" if result.success else "error")
     return _redirect_to_license_plates()
 
 

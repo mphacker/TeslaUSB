@@ -65,6 +65,7 @@ from teslausb_web.services.light_show_service import make_light_show_service
 from teslausb_web.services.mapping import make_mapping_service
 from teslausb_web.services.mapping.service import MappingService
 from teslausb_web.services.music_service import make_music_service
+from teslausb_web.services.photo_plate_service import make_photo_plate_service
 from teslausb_web.services.samba_service import SambaError, make_samba_service
 from teslausb_web.services.samba_watcher import make_samba_watcher
 from teslausb_web.services.storage_retention_service import make_storage_retention_service
@@ -355,8 +356,9 @@ def _register_boombox_services(app: Flask, cfg: WebConfig) -> None:
 
 
 def _register_license_plate_services(app: Flask, cfg: WebConfig) -> None:
-    """Construct the tracked license-plate service once at app startup."""
+    """Construct the tracked license-plate service and photo-plate service."""
     app.extensions["license_plate_service"] = make_license_plate_service(cfg)
+    app.extensions["photo_plate_service"] = make_photo_plate_service(cfg)
 
 
 def _register_storage_retention_services(app: Flask, cfg: WebConfig) -> None:

@@ -43,9 +43,13 @@ max_upload_mb = 512
 max_chunk_mb = 64
 
 [paths]
-# Root of the btrfs subvolume tree that Tesla writes to and the
-# user can browse. Both `teslacam/` and `media/` live under here.
-backing_root = "/srv/teslausb"
+# Root of the Tesla-facing backing tree. Tesla writes RecentClips /
+# SavedClips / SentryClips under `<backing_root>/TeslaCam/`, which the
+# teslafat daemon presents as the exFAT USB LUN. Free-space probes,
+# storage-writable probes, and the video service all derive from this
+# single root, so keep it pointed at the parent of the `TeslaCam/`
+# directory the LUN exposes (NOT the parent of `teslacam/` + `media/`).
+backing_root = "/srv/teslausb/teslacam"
 
 # SQLite index built by `teslausb-worker`. Read-only from the
 # web app's perspective.

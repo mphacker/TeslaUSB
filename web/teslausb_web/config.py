@@ -189,7 +189,14 @@ _DEFAULT_MAPPING_INITIAL_STALE_SCAN_JITTER_SECONDS: Final[int] = 5 * 60
 _DEFAULT_MAPPING_STALE_SCAN_DEBOUNCE_SECONDS: Final[int] = 10 * 60
 _DEFAULT_MAPPING_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_DB_NAME
 _DEFAULT_MAPPING_BACKUP_DIR: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_BACKUP_DIRNAME
-_DEFAULT_MAPPING_MEDIA_ROOT: Path = _DEFAULT_BACKING_ROOT
+# Mapping's discovery walker iterates ``<media_root>/{Recent,Saved,Sentry}Clips``
+# directly. Tesla writes those folders inside a ``TeslaCam/`` subdirectory of
+# the exFAT LUN, so the media root is always one level deeper than the web
+# app's backing_root. Kept as a named constant so the same suffix can be
+# reused by the video service (which independently builds ``backing_root /
+# TeslaCam``).
+_MAPPING_MEDIA_SUBDIR: Final[str] = "TeslaCam"
+_DEFAULT_MAPPING_MEDIA_ROOT: Path = _DEFAULT_BACKING_ROOT / _MAPPING_MEDIA_SUBDIR
 
 # Analytics dashboard thresholds. Percent-of-disk-used bands that
 # escalate the storage-health banner from healthy → caution → warning
@@ -1716,7 +1723,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             media_root=_coerce_path(
                 mapping_raw,
                 "media_root",
-                paths_section.backing_root,
+                paths_section.backing_root / _MAPPING_MEDIA_SUBDIR,
                 source,
             ),
             sample_rate=_coerce_int(

@@ -1018,7 +1018,11 @@ mod tests {
         // preservation rule only applies to retention, not to
         // phantom-row cleanup — the file is already gone).
         assert_eq!(store.clip_count().unwrap(), 1);
-        assert!(c.backing_root.join("TeslaCam/RecentClips/alive.mp4").exists());
+        assert!(
+            c.backing_root
+                .join("TeslaCam/RecentClips/alive.mp4")
+                .exists()
+        );
     }
 
     #[test]
@@ -1107,7 +1111,8 @@ mod tests {
         );
         // Remove only the saved-clip file.
         std::fs::remove_file(
-            c.backing_root.join("TeslaCam/SavedClips/2026-01-01_12-00-00/front.mp4"),
+            c.backing_root
+                .join("TeslaCam/SavedClips/2026-01-01_12-00-00/front.mp4"),
         )
         .unwrap();
         let cleanup = Cleanup::new(c);

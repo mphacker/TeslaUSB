@@ -144,10 +144,21 @@ def test_validate_png_rejects_non_png(service: WrapService, tmp_path: Path) -> N
     assert "Could not read image dimensions" in result.message
 
 
-def test_validate_png_rejects_non_square(service: WrapService, tmp_path: Path) -> None:
-    result = service.validate_png(_write(tmp_path / "rect.png", _png_bytes(512, 768)))
-    assert result.success is False
-    assert "square" in result.message
+def test_validate_png_accepts_non_square_within_bounds(
+    service: WrapService, tmp_path: Path
+) -> None:
+    """Tesla's own templates (e.g. cybertruck 1024x768) are non-square.
+
+    v1 only enforced min/max dimension bounds. We match that — Tesla's
+    firmware does the final acceptance check. See
+    https://github.com/teslamotors/custom-wraps README ("512x512 to
+    1024x1024 pixels") for the documented spec; in practice the
+    template.png shipped per-model is not always square.
+    """
+    result = service.validate_png(_write(tmp_path / "rect.png", _png_bytes(1024, 768)))
+    assert result.success is True
+    assert result.width == 1024
+    assert result.height == 768
 
 
 def test_validate_png_rejects_too_small(service: WrapService, tmp_path: Path) -> None:
@@ -231,11 +242,11 @@ def test_upload_files_rejects_path_traversal(service: WrapService, name: str) ->
     assert "Invalid filename" in result.message
 
 
-def test_upload_files_rejects_non_square_png(service: WrapService, wraps_folder: Path) -> None:
-    result = service.upload_files([_upload("rect.png", _png_bytes(512, 768))])
-    assert result.success is False
-    assert "square" in result.message
-    assert not (wraps_folder / "rect.png").exists()
+def test_upload_files_accepts_non_square_png(service: WrapService, wraps_folder: Path) -> None:
+    """Non-square PNGs (e.g. Tesla's 1024x768 cybertruck template) are accepted."""
+    result = service.upload_files([_upload("rect.png", _png_bytes(1024, 768))])
+    assert result.success is True
+    assert (wraps_folder / "rect.png").exists()
 
 
 def test_upload_files_rejects_oversize_png(service: WrapService, wraps_folder: Path) -> None:

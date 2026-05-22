@@ -361,15 +361,16 @@ def test_upload_route_rejects_path_traversal(client, invalidator) -> None:
 
 
 def test_upload_route_rejects_wrong_dimensions(client, invalidator) -> None:
+    """Below the min-dimension floor is rejected (square-aspect ratio is OK)."""
     with patch.object(invalidator, "schedule") as schedule_mock:
         response = client.post(
             "/wraps/upload",
-            data=_upload_data("wrap_file", "rect.png", _png_bytes(512, 768)),
+            data=_upload_data("wrap_file", "tiny.png", _png_bytes(100, 100)),
             headers=_XHR,
             content_type="multipart/form-data",
         )
     assert response.status_code == HTTPStatus.BAD_REQUEST
-    assert "square" in response.get_json()["error"]
+    assert "at least" in response.get_json()["error"]
     schedule_mock.assert_not_called()
 
 
@@ -468,7 +469,7 @@ def test_upload_multiple_route_does_not_schedule_cache_when_all_rejected(
     with patch.object(invalidator, "schedule") as schedule_mock:
         response = client.post(
             "/wraps/upload_multiple",
-            data=_multi_upload_data([("rect.png", _png_bytes(512, 768))]),
+            data=_multi_upload_data([("tiny.png", _png_bytes(100, 100))]),
             headers=_XHR,
             content_type="multipart/form-data",
         )
@@ -507,7 +508,7 @@ def test_upload_multiple_route_non_xhr_failure_redirects(client, invalidator) ->
     with patch.object(invalidator, "schedule") as schedule_mock:
         response = client.post(
             "/wraps/upload_multiple",
-            data=_multi_upload_data([("rect.png", _png_bytes(512, 768))]),
+            data=_multi_upload_data([("tiny.png", _png_bytes(100, 100))]),
             content_type="multipart/form-data",
         )
     assert response.status_code == HTTPStatus.FOUND

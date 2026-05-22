@@ -169,14 +169,6 @@ class WrapService:
                     height=None,
                     size_bytes=size_bytes,
                 )
-            if width != height:
-                return ValidationResult(
-                    success=False,
-                    message=f"Image dimensions must be square (got {width}x{height})",
-                    width=width,
-                    height=height,
-                    size_bytes=size_bytes,
-                )
             if width < self._min_dimension or height < self._min_dimension:
                 return ValidationResult(
                     success=False,

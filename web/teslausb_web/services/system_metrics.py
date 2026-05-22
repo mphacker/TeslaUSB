@@ -15,12 +15,6 @@ Charter notes:
 * Frozen `SystemMetrics` dataclass is the in-process model; the
   blueprint calls `metrics_to_dict()` to reshape into the wire JSON
   the existing `index.html` JS already consumes.
-
-Fields the JS reads but the B-1 daemon does not yet expose
-(`task_coordinator`, `queues`, `peek_cache`) are intentionally
-returned as empty placeholder objects; the JS renders an em dash for
-them. Wiring those into the Rust worker is tracked separately
-(Phase 6).
 """
 
 from __future__ import annotations

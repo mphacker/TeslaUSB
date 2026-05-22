@@ -159,27 +159,6 @@
                             &nbsp;
                         </div>
                     </div>
-                    <div class="metric-tile" id="metric-coord">
-                        <div class="metric-label">Active Worker</div>
-                        <div class="metric-value" data-field="coord">—</div>
-                        <div class="metric-detail" data-field="coord-detail">
-                            &nbsp;
-                        </div>
-                    </div>
-                    <div class="metric-tile" id="metric-queues">
-                        <div class="metric-label">Queue Depths</div>
-                        <div class="metric-value" data-field="queues">—</div>
-                        <div class="metric-detail" data-field="queues-detail">
-                            &nbsp;
-                        </div>
-                    </div>
-                    <div class="metric-tile" id="metric-cache">
-                        <div class="metric-label">Stationary Cache</div>
-                        <div class="metric-value" data-field="cache">—</div>
-                        <div class="metric-detail" data-field="cache-detail">
-                            &nbsp;
-                        </div>
-                    </div>
                 </div>
                 <p id="live-metrics-foot"
                    style="margin:0; font-size:0.78rem;
@@ -1228,8 +1207,8 @@ if (document.getElementById('fsck-status-container')) {
 
         var loop = io.loop0 || {};
         // Loop reads are the producer SEI peeks (Issue #208). Sustained
-        // reads above ~3 MB/s with no driving means the cache isn't
-        // catching — surface as warn so the operator notices.
+        // reads above ~3 MB/s with no driving means something is hot —
+        // surface as warn so the operator notices.
         var loopTotal = (loop.read_kbs || 0) + (loop.write_kbs || 0);
         var loopSev = loopTotal > 6144
             ? 'error'
@@ -1239,43 +1218,6 @@ if (document.getElementById('fsck-status-container')) {
                 'r ' + fmtBytes(loop.read_kbs) +
                 '  w ' + fmtBytes(loop.write_kbs),
                 loopSev);
-
-        var coord = p.task_coordinator || {};
-        var coordVal, coordDetail, coordSev;
-        if (coord.busy && coord.task) {
-            coordVal = coord.task;
-            coordDetail = 'held ' + fmtNum(coord.elapsed_seconds, 1) +
-                          's, ' + (coord.waiters || 0) + ' waiting';
-            coordSev = coord.elapsed_seconds > 60
-                ? 'error'
-                : (coord.elapsed_seconds > 30 ? 'warn' : 'ok');
-        } else {
-            coordVal = 'idle';
-            coordDetail = (coord.waiters || 0) + ' waiting';
-            coordSev = 'ok';
-        }
-        setTile('metric-coord', coordVal, coordDetail, coordSev);
-
-        var q = p.queues || {};
-        function qStr(n) { return n == null ? '—' : String(n); }
-        setTile('metric-queues',
-                qStr(q.index_pending) + ' / ' +
-                qStr(q.cloud_pending),
-                'index / cloud',
-                'ok');
-
-        var pc = p.peek_cache || {};
-        var hits = pc.hits || 0;
-        var misses = pc.misses || 0;
-        var total = hits + misses;
-        var hitRate = total > 0 ? (hits / total * 100) : null;
-        setTile('metric-cache',
-                hitRate != null
-                    ? fmtNum(hitRate, 0) + '% hit'
-                    : '—',
-                (pc.size || 0) + ' / ' + (pc.capacity || 0) +
-                ' entries, ' + hits + ' hits / ' + misses + ' misses',
-                'ok');
 
         var ts = p.generated_at
             ? new Date(p.generated_at * 1000)

@@ -638,10 +638,7 @@ def api_system_metrics() -> ResponseReturnValue:
 
     Cheap host counters (`psutil` + ``shutil.disk_usage`` only). The
     JS at ``templates/index.html`` polls this on a 5 s interval while
-    the tab is visible. Per-subsystem fields the B-1 worker has not
-    yet exposed (``task_coordinator`` / ``queues`` / ``peek_cache``)
-    are omitted; the JS renders an em dash for those tiles. Wiring
-    them up is tracked under Phase 6 (Rust daemon IPC).
+    the tab is visible.
     """
     cfg: WebConfig = current_app.config["teslausb_config"]
     metrics = collect_metrics(cfg.paths.backing_root)

@@ -45,10 +45,21 @@ _CPU_TEMP_KEYS: Final[tuple[str, ...]] = ("cpu_thermal", "soc_thermal", "coretem
 
 @dataclass(frozen=True, slots=True)
 class IOSample:
-    """Per-device read/write rates in kilobytes per second."""
+    """Per-device read/write rates in kilobytes per second.
+
+    `read_kbs` / `write_kbs` are *instantaneous* deltas against the
+    previous `collect_metrics()` call. `avg60_read_kbs` /
+    `avg60_write_kbs` are rolling averages over the last ~60 seconds
+    of samples, which smooth over Tesla's bursty USB write pattern
+    (each ~1-min dashcam segment is flushed in a single short burst,
+    leaving the instantaneous rate at 0 between bursts). The averages
+    are `None` until enough history accumulates (≥5 s).
+    """
 
     read_kbs: float
     write_kbs: float
+    avg60_read_kbs: float | None = None
+    avg60_write_kbs: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,9 +101,26 @@ class SystemMetrics:
 # turn them into a KB/s rate we cache the last sample and divide by
 # the wall-clock delta. Guarded by a lock because Flask's dev server
 # may serve concurrent requests.
+#
+# In addition to the single-poll instantaneous rate, we keep a short
+# rolling window of recent samples per device so we can also report a
+# 60-second average. Tesla writes to the USB LUNs in bursts (each
+# dashcam segment is buffered in the camera SoC and flushed in a
+# short burst every ~30-60 s), so the instantaneous rate is 0 most
+# of the time even when the system is healthy.
+
+_IO_WINDOW_SECONDS: Final[float] = 60.0
+# Keep ~10 s of headroom so the 60-second window is always covered
+# even with sparse polling. Anything older is pruned each call.
+_IO_WINDOW_RETAIN_SECONDS: Final[float] = _IO_WINDOW_SECONDS + 10.0
+# Need at least this much elapsed history before we report an
+# avg60 — otherwise the average is just the instantaneous rate by
+# another name and would be misleading on the dashboard.
+_IO_AVG_MIN_WINDOW_SECONDS: Final[float] = 5.0
 
 _io_lock: threading.Lock = threading.Lock()
 _io_last_sample: dict[str, tuple[float, int, int]] = {}
+_io_history: dict[str, list[tuple[float, int, int]]] = {}
 
 
 def _sample_disk_io() -> tuple[dict[str, IOSample], list[str]]:
@@ -112,15 +140,51 @@ def _sample_disk_io() -> tuple[dict[str, IOSample], list[str]]:
             write_bytes = int(snap.write_bytes)
             previous = _io_last_sample.get(device)
             if previous is None:
-                rates[device] = IOSample(read_kbs=0.0, write_kbs=0.0)
+                inst_read = 0.0
+                inst_write = 0.0
             else:
                 last_ts, last_read, last_write = previous
                 dt = max(now - last_ts, 1e-3)
-                rates[device] = IOSample(
-                    read_kbs=max(read_bytes - last_read, 0) / dt / _BYTES_PER_KIB,
-                    write_kbs=max(write_bytes - last_write, 0) / dt / _BYTES_PER_KIB,
-                )
+                inst_read = max(read_bytes - last_read, 0) / dt / _BYTES_PER_KIB
+                inst_write = max(write_bytes - last_write, 0) / dt / _BYTES_PER_KIB
             _io_last_sample[device] = (now, read_bytes, write_bytes)
+
+            history = _io_history.setdefault(device, [])
+            history.append((now, read_bytes, write_bytes))
+            cutoff = now - _IO_WINDOW_RETAIN_SECONDS
+            # Prune in-place; histories stay short (≤ ~30 entries at
+            # a 5 s poll cadence) so an O(n) scan is fine.
+            while history and history[0][0] < cutoff:
+                history.pop(0)
+
+            avg_read: float | None = None
+            avg_write: float | None = None
+            # Find the oldest sample inside the 60 s window; use it
+            # as the baseline for the average so the window length
+            # adapts to whatever history is actually available.
+            window_start = now - _IO_WINDOW_SECONDS
+            baseline: tuple[float, int, int] | None = None
+            for entry in history:
+                if entry[0] >= window_start:
+                    baseline = entry
+                    break
+            if baseline is not None:
+                base_ts, base_read, base_write = baseline
+                window_dt = now - base_ts
+                if window_dt >= _IO_AVG_MIN_WINDOW_SECONDS:
+                    avg_read = (
+                        max(read_bytes - base_read, 0) / window_dt / _BYTES_PER_KIB
+                    )
+                    avg_write = (
+                        max(write_bytes - base_write, 0) / window_dt / _BYTES_PER_KIB
+                    )
+
+            rates[device] = IOSample(
+                read_kbs=inst_read,
+                write_kbs=inst_write,
+                avg60_read_kbs=avg_read,
+                avg60_write_kbs=avg_write,
+            )
     return rates, warnings_out
 
 
@@ -291,7 +355,20 @@ def metrics_to_dict(m: SystemMetrics) -> dict[str, object]:
             "used_pct": m.disk_percent,
         },
         "io": {
-            device: {"read_kbs": round(sample.read_kbs, 2), "write_kbs": round(sample.write_kbs, 2)}
+            device: {
+                "read_kbs": round(sample.read_kbs, 2),
+                "write_kbs": round(sample.write_kbs, 2),
+                "avg60_read_kbs": (
+                    round(sample.avg60_read_kbs, 2)
+                    if sample.avg60_read_kbs is not None
+                    else None
+                ),
+                "avg60_write_kbs": (
+                    round(sample.avg60_write_kbs, 2)
+                    if sample.avg60_write_kbs is not None
+                    else None
+                ),
+            }
             for device, sample in m.disk_io.items()
         },
         "cpu_temp_celsius": m.cpu_temp_celsius,

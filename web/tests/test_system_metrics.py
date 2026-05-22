@@ -70,8 +70,10 @@ class _FakeTemp:
 def _reset_io_cache() -> Iterator[None]:
     # Each test must start with an empty IO baseline.
     system_metrics._io_last_sample.clear()
+    system_metrics._io_history.clear()
     yield
     system_metrics._io_last_sample.clear()
+    system_metrics._io_history.clear()
 
 
 @pytest.fixture
@@ -170,7 +172,12 @@ def test_io_rates_zero_on_first_call_then_populate(
     monkeypatch.setattr(time, "monotonic", lambda: next(fake_clock))
 
     first = collect_metrics(tmp_path)
-    assert first.disk_io["mmcblk0"] == IOSample(read_kbs=0.0, write_kbs=0.0)
+    assert first.disk_io["mmcblk0"] == IOSample(
+        read_kbs=0.0,
+        write_kbs=0.0,
+        avg60_read_kbs=None,
+        avg60_write_kbs=None,
+    )
 
     # Second sample, 5 s later, counters doubled.
     monkeypatch.setattr(
@@ -188,6 +195,59 @@ def test_io_rates_zero_on_first_call_then_populate(
     # 1 MB delta over 5 s ≈ 195 KiB/s
     assert second.disk_io["mmcblk0"].read_kbs == pytest.approx(195.3, abs=1.0)
     assert second.disk_io["mmcblk0"].write_kbs == pytest.approx(97.7, abs=1.0)
+    # 5 s window meets the minimum, so avg60 is populated and equals
+    # the instantaneous rate when there are only two samples.
+    assert second.disk_io["mmcblk0"].avg60_read_kbs == pytest.approx(195.3, abs=1.0)
+    assert second.disk_io["mmcblk0"].avg60_write_kbs == pytest.approx(97.7, abs=1.0)
+
+
+@pytest.mark.usefixtures("_patched_psutil")
+def test_io_avg60_smooths_bursty_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tesla flushes a dashcam segment as one short burst then idles.
+
+    Instantaneous rate is 0 between bursts; avg60 must reflect the
+    sustained throughput so the dashboard doesn't look broken.
+    """
+    # 7 polls 10 s apart: a 50 MB write burst lands between polls
+    # 2 and 3, then nothing for the rest of the window.
+    clock = iter([0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
+
+    counters_per_call: list[dict[str, _FakeIO]] = [
+        {"nbd0": _FakeIO(0, 0)},
+        {"nbd0": _FakeIO(0, 0)},
+        {"nbd0": _FakeIO(0, 50_000_000)},  # 50 MB burst
+        {"nbd0": _FakeIO(0, 50_000_000)},
+        {"nbd0": _FakeIO(0, 50_000_000)},
+        {"nbd0": _FakeIO(0, 50_000_000)},
+        {"nbd0": _FakeIO(0, 50_000_000)},
+    ]
+    call_index = {"n": 0}
+
+    def _fake_counters(perdisk: bool = False) -> dict[str, _FakeIO]:  # noqa: FBT001, FBT002
+        del perdisk
+        snap = counters_per_call[call_index["n"]]
+        call_index["n"] += 1
+        return snap
+
+    monkeypatch.setattr(psutil, "disk_io_counters", _fake_counters)
+
+    last: IOSample | None = None
+    for _ in range(7):
+        m = collect_metrics(tmp_path)
+        last = m.disk_io["nbd0"]
+    assert last is not None
+    # Last poll: 10 s gap, no new bytes since the burst → inst = 0.
+    assert last.write_kbs == pytest.approx(0.0, abs=0.1)
+    # avg60: 50 MB across the full 60 s window ≈ 814 KiB/s.
+    assert last.avg60_write_kbs is not None
+    assert last.avg60_write_kbs == pytest.approx(
+        50_000_000 / 60 / 1024,
+        rel=0.05,
+    )
 
 
 @pytest.mark.usefixtures("_patched_psutil")
@@ -302,7 +362,12 @@ def test_metrics_to_dict_matches_js_wire_shape(tmp_path: Path) -> None:
     assert "mmcblk0" in io
     assert "nbd0" in io
     assert "nbd1" in io
-    assert set(io["mmcblk0"].keys()) == {"read_kbs", "write_kbs"}
+    assert set(io["mmcblk0"].keys()) == {
+        "read_kbs",
+        "write_kbs",
+        "avg60_read_kbs",
+        "avg60_write_kbs",
+    }
 
     assert isinstance(payload["generated_at"], int)
     assert isinstance(payload["uptime_seconds"], int)

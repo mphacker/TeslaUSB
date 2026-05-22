@@ -1200,9 +1200,17 @@ if (document.getElementById('fsck-status-container')) {
 
         var io = p.io || {};
         var sd = io.mmcblk0 || {};
+        // SD I/O is teslafat backing-file traffic plus everything
+        // else on mmcblk0. Show 60s avg as the headline (smooths
+        // over per-call bursts), instantaneous in the detail.
+        var sdAvgR = (sd.avg60_read_kbs != null) ? sd.avg60_read_kbs : sd.read_kbs;
+        var sdAvgW = (sd.avg60_write_kbs != null) ? sd.avg60_write_kbs : sd.write_kbs;
+        var sdAvgTotal = (sdAvgR || 0) + (sdAvgW || 0);
         setTile('metric-sd',
-                fmtBytes((sd.read_kbs || 0) + (sd.write_kbs || 0)),
-                'r ' + fmtBytes(sd.read_kbs) + '  w ' + fmtBytes(sd.write_kbs),
+                fmtBytes(sdAvgTotal),
+                'now r ' + fmtBytes(sd.read_kbs) +
+                '  w ' + fmtBytes(sd.write_kbs) +
+                '  · 60s avg',
                 'ok');
 
         // USB I/O = nbd0 (TESLACAM LUN) + nbd1 (MEDIA LUN). These
@@ -1210,21 +1218,38 @@ if (document.getElementById('fsck-status-container')) {
         // to Tesla. The v1 build used loop0 for a loopback image
         // file; B-1 does not have a loopback image (LUNs are NBD-
         // backed by the teslafat daemon) so loop0 was always 0.
+        //
+        // Tesla writes are bursty (each ~1-min dashcam segment is
+        // flushed by the camera SoC in a short burst), so the
+        // instantaneous rate is 0 most of the time even when the
+        // system is healthy. Headline is the 60s rolling average
+        // for that reason; detail shows the live instantaneous rate.
         var nbd0 = io.nbd0 || {};
         var nbd1 = io.nbd1 || {};
-        var usbRead = (nbd0.read_kbs || 0) + (nbd1.read_kbs || 0);
-        var usbWrite = (nbd0.write_kbs || 0) + (nbd1.write_kbs || 0);
-        var usbTotal = usbRead + usbWrite;
-        // Sustained USB throughput above ~6 MB/s warrants a glance
-        // (Tesla's normal write rate is ~1–3 MB/s); above 12 MB/s
-        // is suspicious on a Pi Zero 2 W and likely a runaway.
-        var usbSev = usbTotal > 12288
+        var usbInstR = (nbd0.read_kbs || 0) + (nbd1.read_kbs || 0);
+        var usbInstW = (nbd0.write_kbs || 0) + (nbd1.write_kbs || 0);
+        var nbd0AvgR = (nbd0.avg60_read_kbs != null)
+            ? nbd0.avg60_read_kbs : nbd0.read_kbs;
+        var nbd0AvgW = (nbd0.avg60_write_kbs != null)
+            ? nbd0.avg60_write_kbs : nbd0.write_kbs;
+        var nbd1AvgR = (nbd1.avg60_read_kbs != null)
+            ? nbd1.avg60_read_kbs : nbd1.read_kbs;
+        var nbd1AvgW = (nbd1.avg60_write_kbs != null)
+            ? nbd1.avg60_write_kbs : nbd1.write_kbs;
+        var usbAvgR = (nbd0AvgR || 0) + (nbd1AvgR || 0);
+        var usbAvgW = (nbd0AvgW || 0) + (nbd1AvgW || 0);
+        var usbAvgTotal = usbAvgR + usbAvgW;
+        // Sustained USB throughput above ~6 MB/s averaged warrants
+        // a glance; above 12 MB/s is suspicious on a Pi Zero 2 W
+        // and likely indicates a runaway producer/consumer.
+        var usbSev = usbAvgTotal > 12288
             ? 'error'
-            : (usbTotal > 6144 ? 'warn' : 'ok');
+            : (usbAvgTotal > 6144 ? 'warn' : 'ok');
         setTile('metric-usb',
-                fmtBytes(usbTotal),
-                'r ' + fmtBytes(usbRead) +
-                '  w ' + fmtBytes(usbWrite),
+                fmtBytes(usbAvgTotal),
+                'now r ' + fmtBytes(usbInstR) +
+                '  w ' + fmtBytes(usbInstW) +
+                '  · 60s avg',
                 usbSev);
 
         var ts = p.generated_at

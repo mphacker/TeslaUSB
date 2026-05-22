@@ -218,11 +218,11 @@ def make_analytics_service(
     lun_probes = _discover_teslafat_luns()
     if lun_probes:
         # Add an SD-card probe so the operator can see the *real* free
-        # space on the underlying btrfs filesystem. The LUN cards above
+        # space on the underlying physical storage. The LUN cards above
         # report Tesla's view (capped at volume_size_gb); this card
-        # reports the physical SD card's view.
+        # reports the root filesystem's view of the SD card.
         probes: list[Probe] = list(lun_probes)
-        sd_root = cfg.paths.backing_root
+        sd_root = Path("/")
         if sd_root.exists():
             probes.append(
                 Probe(key="sd-card", label=LABEL_SD_CARD, path=sd_root)

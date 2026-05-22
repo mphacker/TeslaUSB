@@ -267,6 +267,35 @@ impl ClusterMap {
         keys.len()
     }
 
+    /// Remove and return every extent whose cluster range intersects
+    /// the half-open range `[start, end_exclusive)`, in ascending
+    /// `first_cluster` order.
+    ///
+    /// Used when a freshly-arrived directory entry authoritatively
+    /// claims a cluster range. Tesla may have freed the prior
+    /// owner via the allocation bitmap without rewriting the
+    /// directory entry (so [`Self::remove_at`] /
+    /// [`Self::remove_file`] never fire), leaving stale extents
+    /// in the map. Without eviction those stale extents block
+    /// [`Self::insert`] with [`ClusterMapError::Overlap`] and the
+    /// new file's data writes end up stashed in `pending_data`
+    /// forever (zero-filled gaps on the backing tree, observed
+    /// in the wild as ~1,200 "cluster map insert overlaps a
+    /// different owner; skipping" warnings per boot on
+    /// 2026-05-22).
+    pub fn remove_overlapping(&mut self, start: u32, end_exclusive: u32) -> Vec<FileExtent> {
+        if end_exclusive <= start {
+            return Vec::new();
+        }
+        let keys: Vec<u32> = self
+            .extents_in_range(start, end_exclusive)
+            .map(|e| e.first_cluster)
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| self.extents.remove(&k))
+            .collect()
+    }
+
     /// Iterate the map's extents in ascending `first_cluster`
     /// order.
     pub fn extents(&self) -> impl Iterator<Item = &FileExtent> {
@@ -682,5 +711,122 @@ mod tests {
         let r = e.cluster_range();
         assert_eq!(r.start, 10);
         assert_eq!(r.end, 15);
+    }
+
+    // ---------------------------------------------------------
+    // remove_overlapping — stale-extent eviction for the
+    // "Tesla freed via bitmap, now reusing the clusters" case.
+    // (Production bug: 2026-05-22, ~1,200 overlap warnings/boot.)
+    // ---------------------------------------------------------
+
+    #[test]
+    fn remove_overlapping_empty_map_returns_empty() {
+        let mut m = ClusterMap::new();
+        assert!(m.remove_overlapping(10, 20).is_empty());
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn remove_overlapping_returns_empty_when_no_intersection() {
+        let mut m = ClusterMap::new();
+        m.insert(extent(10, 5, "a")).expect("a");
+        m.insert(extent(30, 5, "b")).expect("b");
+        // Range [20, 25) doesn't touch any extent.
+        let evicted = m.remove_overlapping(20, 25);
+        assert!(evicted.is_empty());
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn remove_overlapping_evicts_extent_starting_before_range() {
+        let mut m = ClusterMap::new();
+        m.insert(extent(10, 10, "a")).expect("a"); // [10, 20)
+        // Range [15, 25) clips into the right half of `a`.
+        let evicted = m.remove_overlapping(15, 25);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].file_path, PathBuf::from("a"));
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn remove_overlapping_evicts_extent_starting_inside_range() {
+        let mut m = ClusterMap::new();
+        m.insert(extent(15, 10, "a")).expect("a"); // [15, 25)
+        // Range [10, 20) clips into the left half of `a`.
+        let evicted = m.remove_overlapping(10, 20);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].file_path, PathBuf::from("a"));
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn remove_overlapping_evicts_extent_fully_inside_range() {
+        let mut m = ClusterMap::new();
+        m.insert(extent(15, 3, "a")).expect("a"); // [15, 18)
+        let evicted = m.remove_overlapping(10, 25);
+        assert_eq!(evicted.len(), 1);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn remove_overlapping_evicts_extent_fully_containing_range() {
+        let mut m = ClusterMap::new();
+        m.insert(extent(10, 20, "a")).expect("a"); // [10, 30)
+        let evicted = m.remove_overlapping(15, 20);
+        assert_eq!(evicted.len(), 1);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn remove_overlapping_evicts_multiple_extents_in_order() {
+        let mut m = ClusterMap::new();
+        m.insert(extent(10, 5, "a")).expect("a"); // [10, 15)
+        m.insert(extent(20, 5, "b")).expect("b"); // [20, 25)
+        m.insert(extent(30, 5, "c")).expect("c"); // [30, 35)
+        m.insert(extent(50, 5, "d")).expect("d"); // [50, 55) — outside
+        let evicted = m.remove_overlapping(12, 32);
+        let paths: Vec<&Path> = evicted.iter().map(|e| e.file_path.as_path()).collect();
+        assert_eq!(
+            paths,
+            vec![Path::new("a"), Path::new("b"), Path::new("c")]
+        );
+        assert_eq!(m.len(), 1);
+        assert!(m.lookup(50).is_some());
+    }
+
+    #[test]
+    fn remove_overlapping_does_not_evict_adjacent_extent() {
+        let mut m = ClusterMap::new();
+        m.insert(extent(10, 5, "a")).expect("a"); // [10, 15)
+        m.insert(extent(15, 5, "b")).expect("b"); // [15, 20) — abuts but doesn't overlap
+        let evicted = m.remove_overlapping(10, 15);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].file_path, PathBuf::from("a"));
+        assert!(m.lookup(15).is_some(), "adjacent extent must survive");
+    }
+
+    #[test]
+    fn remove_overlapping_empty_range_is_noop() {
+        let mut m = ClusterMap::new();
+        m.insert(extent(10, 5, "a")).expect("a");
+        assert!(m.remove_overlapping(10, 10).is_empty());
+        assert!(m.remove_overlapping(20, 5).is_empty());
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn insert_after_remove_overlapping_succeeds_for_stale_extent_reuse() {
+        // The regression scenario: stale extent `a` blocks insertion
+        // of new extent `b` until `remove_overlapping` evicts it.
+        let mut m = ClusterMap::new();
+        m.insert(extent(100, 50, "stale_clip.mp4")).expect("stale");
+        let new_extent = extent(110, 30, "fresh_clip.mp4"); // overlaps `a`
+        let evicted = m.remove_overlapping(
+            new_extent.first_cluster,
+            new_extent.first_cluster + new_extent.cluster_count,
+        );
+        assert_eq!(evicted.len(), 1);
+        m.insert(new_extent).expect("insert must succeed after eviction");
+        assert_eq!(m.lookup(120).expect("hit").extent.file_path, PathBuf::from("fresh_clip.mp4"));
     }
 }

@@ -863,15 +863,55 @@ impl ExfatWriteState {
                 "replacing stale extents for updated dir entry"
             );
         }
+        // Bug "exfat-cluster-reuse" (2026-05-22): Tesla can free a
+        // file's clusters via the allocation bitmap without
+        // rewriting the dir entry that previously owned them (so
+        // `remove_file` above doesn't catch it), then reallocate
+        // those clusters to a different file. The stale extent
+        // would block `insert` below with `ClusterMapError::Overlap`,
+        // the warn-and-skip path would leave the new file's data
+        // writes orphaned in `pending_data`, and the backing file
+        // would be silently truncated / zero-filled. Hardware
+        // symptom: 1,228 "cluster map insert overlaps" warns per
+        // boot, USB endpoint stalls, Tesla disconnects the drive.
+        //
+        // A freshly-arrived directory entry is authoritative for
+        // its cluster range, so evict any stale extents that
+        // overlap before insertion.
+        for extent in &extents {
+            let end_excl = extent.first_cluster.saturating_add(extent.cluster_count);
+            let evicted = self
+                .cluster_map
+                .remove_overlapping(extent.first_cluster, end_excl);
+            for stale in &evicted {
+                tracing::debug!(
+                    evicted_first = stale.first_cluster,
+                    evicted_count = stale.cluster_count,
+                    evicted_path = ?stale.file_path,
+                    new_first = extent.first_cluster,
+                    new_count = extent.cluster_count,
+                    ?relative_path,
+                    "evicted stale cluster-map extent for cluster reuse"
+                );
+            }
+        }
         for extent in extents {
             match self.cluster_map.insert(extent.clone()) {
                 Ok(()) => {}
                 Err(ClusterMapError::Overlap { .. }) => {
-                    tracing::warn!(
+                    // Post-eviction this is unreachable unless the
+                    // new chain itself contains internally-overlapping
+                    // extents (e.g., FAT-walker bug). Surface loudly.
+                    tracing::error!(
                         first_cluster = extent.first_cluster,
                         cluster_count = extent.cluster_count,
                         ?relative_path,
-                        "cluster map insert overlaps a different owner; skipping"
+                        "cluster map insert overlapped after eviction \
+                         (internal invariant violation)"
+                    );
+                    debug_assert!(
+                        false,
+                        "post-eviction overlap is a coding bug; see error log"
                     );
                 }
                 Err(other) => return Err(other.into()),
@@ -1827,6 +1867,103 @@ mod tests {
         // Sanity: cluster map didn't lose extents (could have
         // collapsed contiguous extents but should be ≥ short count).
         assert!(s.extent_count() >= extents_after_short);
+    }
+
+    // === Bug "exfat-cluster-reuse" regression tests (2026-05-22) ===
+
+    /// Tesla can free a file's clusters via the allocation bitmap
+    /// alone — no dir-entry rewrite, no FAT-chain update — and
+    /// then allocate the same clusters to a different file. Pre-
+    /// fix, the stale extent for the old file blocked the new
+    /// file's `cluster_map.insert` with `Overlap`, the warn-and-
+    /// skip path orphaned the new file's data writes in
+    /// `pending_data`, and Tesla saw a partially-zeroed backing
+    /// file — eventually disconnecting the drive because the
+    /// exFAT structures appeared corrupted (hardware-observed
+    /// 2026-05-22: 1,228 overlap warnings, USB endpoint stalls,
+    /// Tesla stopped writing for ~1 h).
+    #[test]
+    fn exfat_cluster_reuse_for_different_path_evicts_stale_extent_and_writes_correct_bytes() {
+        let tmp = TempDir::new().unwrap();
+        // Pre-seed cluster_map with a stale extent for an "old"
+        // clip at cluster 5 (the synth handed clusters [5..6) to
+        // it at startup). Tesla then "freed" those clusters via
+        // the bitmap and reused them for a new clip.
+        let old_extent = PreExistingExfatExtent {
+            first_cluster: 5,
+            cluster_count: 1,
+            first_byte_in_file: 0,
+            file_size_bytes: 64,
+            relative_path: PathBuf::from("old_clip.mp4"),
+        };
+        fs::write(tmp.path().join("old_clip.mp4"), vec![0u8; 64]).unwrap();
+        let mut s = ExfatWriteState::new(geo(), writer(&tmp), &[old_extent]);
+        assert_eq!(s.extent_count(), 1);
+
+        // Tesla writes the new clip's dir entry first (cluster 5,
+        // same as the stale extent), then the data cluster. Pre-
+        // fix order matters: dir-first means try_resolve_file
+        // hits Overlap and skips, so the later data write at
+        // cluster 5 would route to old_clip.mp4 (corruption).
+        let payload = vec![0xBBu8; 64];
+        let entry = build_file_entry("new_clip.mp4", 5, payload.len() as u64, true);
+        s.apply_write(root_cluster_byte(), &entry).expect("dir");
+        write_cluster_data(&mut s, 5, &payload);
+        s.flush().expect("flush");
+
+        // Eviction outcome: cluster_map now owns new_clip.mp4 at
+        // cluster 5; the backing file contains exactly the
+        // payload bytes (no zero gap).
+        let new_bytes =
+            fs::read(tmp.path().join("new_clip.mp4")).expect("new clip must be finalized");
+        assert_eq!(
+            new_bytes, payload,
+            "new clip's data must reach its own backing file (not old_clip.mp4)"
+        );
+        // The old backing file must NOT have been overwritten —
+        // eviction is in-memory only.
+        let old_bytes = fs::read(tmp.path().join("old_clip.mp4")).unwrap();
+        assert!(
+            old_bytes.iter().all(|&b| b == 0),
+            "old clip's bytes must be untouched by the reuse"
+        );
+        assert_eq!(s.extent_count(), 1, "cluster_map must hold only the new extent");
+    }
+
+    /// Partial-overlap variant: Tesla allocates a new clip whose
+    /// cluster range only partially covers a stale extent (e.g.,
+    /// the stale extent was bigger than the new clip's needs).
+    /// All overlapping extents must still be evicted so the new
+    /// clip's `insert` succeeds.
+    #[test]
+    fn exfat_cluster_reuse_partial_overlap_evicts_stale_extent() {
+        let tmp = TempDir::new().unwrap();
+        // Stale extent occupies clusters [5, 10).
+        let old_extent = PreExistingExfatExtent {
+            first_cluster: 5,
+            cluster_count: 5,
+            first_byte_in_file: 0,
+            file_size_bytes: 64,
+            relative_path: PathBuf::from("old_clip.mp4"),
+        };
+        fs::write(tmp.path().join("old_clip.mp4"), vec![0u8; 64]).unwrap();
+        let mut s = ExfatWriteState::new(geo(), writer(&tmp), &[old_extent]);
+        assert_eq!(s.extent_count(), 1);
+
+        // New clip claims cluster 7 only (inside the stale range).
+        let payload = vec![0xCCu8; 64];
+        let entry = build_file_entry("new_clip.mp4", 7, payload.len() as u64, true);
+        s.apply_write(root_cluster_byte(), &entry).expect("dir");
+        write_cluster_data(&mut s, 7, &payload);
+        s.flush().expect("flush");
+
+        let new_bytes =
+            fs::read(tmp.path().join("new_clip.mp4")).expect("new clip must be finalized");
+        assert_eq!(new_bytes, payload);
+        // The stale extent at [5, 10) overlapped the new [7, 8) so
+        // it must be fully evicted (we don't trim — the dir-entry
+        // is authoritative for the whole region it claims).
+        assert_eq!(s.extent_count(), 1);
     }
 
     /// Bug H3-2 regression: a read covering the FAT and root

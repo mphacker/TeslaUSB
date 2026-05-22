@@ -834,17 +834,54 @@ impl Fat32WriteState {
                 "replacing stale extents for updated dir entry"
             );
         }
+        // Bug "fat32-cluster-reuse" (2026-05-22, symmetric to the
+        // exFAT fix in `exfat_write::try_resolve_file`): Tesla can
+        // free a file's clusters via the FSInfo / FAT-chain writes
+        // without our `remove_file` path catching every prior
+        // owner, then reallocate those clusters to a different
+        // file. The stale extent would block the `insert` below
+        // with `ClusterMapError::Overlap`, the warn-and-skip path
+        // would orphan the new file's data writes in
+        // `pending_data`, and the backing file would be silently
+        // zero-filled / truncated.
+        //
+        // A freshly-arrived directory entry is authoritative for
+        // its cluster range, so evict any stale extents that
+        // overlap before insertion.
+        for extent in &extents {
+            let end_excl = extent.first_cluster.saturating_add(extent.cluster_count);
+            let evicted = self
+                .cluster_map
+                .remove_overlapping(extent.first_cluster, end_excl);
+            for stale in &evicted {
+                tracing::debug!(
+                    evicted_first = stale.first_cluster,
+                    evicted_count = stale.cluster_count,
+                    evicted_path = ?stale.file_path,
+                    new_first = extent.first_cluster,
+                    new_count = extent.cluster_count,
+                    ?relative_path,
+                    "evicted stale cluster-map extent for cluster reuse"
+                );
+            }
+        }
         for extent in extents {
             match self.cluster_map.insert(extent.clone()) {
                 Ok(()) => {}
                 Err(ClusterMapError::Overlap { .. }) => {
-                    // Overlap with a different owner — log and
-                    // skip rather than crash.
-                    tracing::warn!(
+                    // Post-eviction this is unreachable unless the
+                    // new chain itself contains internally-
+                    // overlapping extents (FAT-walker bug).
+                    tracing::error!(
                         first_cluster = extent.first_cluster,
                         cluster_count = extent.cluster_count,
                         ?relative_path,
-                        "cluster map insert overlaps a different owner; skipping"
+                        "cluster map insert overlapped after eviction \
+                         (internal invariant violation)"
+                    );
+                    debug_assert!(
+                        false,
+                        "post-eviction overlap is a coding bug; see error log"
                     );
                 }
                 Err(other) => return Err(other.into()),
@@ -1737,6 +1774,96 @@ mod tests {
                 i * bpc
             );
         }
+    }
+
+    // === Bug "fat32-cluster-reuse" regression tests (2026-05-22) ===
+    // Symmetric to the exFAT fix; same root cause.
+
+    /// Tesla can free a file's clusters and reuse them for a
+    /// different file without our `remove_file` / `remove_at`
+    /// paths catching every prior owner. Pre-fix, the stale
+    /// extent blocked the new file's `cluster_map.insert`,
+    /// orphaned the new file's data writes in `pending_data`,
+    /// and routed any subsequent data writes for the reused
+    /// clusters to the old file's backing path (silent
+    /// corruption of both files).
+    #[test]
+    fn fat32_cluster_reuse_for_different_path_evicts_stale_extent_and_writes_correct_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let bpc = g.bytes_per_cluster() as usize;
+
+        // Pre-seed cluster_map with a stale 1-cluster extent for
+        // an "old" clip at cluster 3.
+        let old_extent = PreExistingExtent {
+            first_cluster: 3,
+            cluster_count: 1,
+            first_byte_in_file: 0,
+            file_size_bytes: bpc as u64,
+            relative_path: PathBuf::from("OLD.MP4"),
+        };
+        fs::write(tmp.path().join("OLD.MP4"), vec![0u8; bpc]).unwrap();
+        let mut s = Fat32WriteState::new(g.clone(), writer(&tmp), &[old_extent]);
+        assert_eq!(s.extent_count(), 1);
+
+        // Tesla advertises NEW.MP4 at the same cluster 3 (bitmap
+        // / FSInfo reuse). Sequence: dir entry → FAT → data, with
+        // dir-entry first to expose the pre-fix ordering bug.
+        let payload = vec![0xBBu8; bpc];
+        let entry = build_file_dir_entry("NEW.MP4", 3, payload.len() as u32);
+        s.apply_write(cluster_to_volume_byte(&g, 2), &entry)
+            .expect("dir");
+        write_fat_entry(&mut s, 3, 0x0FFF_FFFF);
+        s.apply_write(cluster_to_volume_byte(&g, 3), &payload)
+            .expect("data");
+        s.flush().expect("flush");
+
+        // Post-fix: NEW.MP4 owns cluster 3, data lands in it.
+        let new_bytes =
+            fs::read(tmp.path().join("NEW.MP4")).expect("NEW.MP4 must be finalized");
+        assert_eq!(new_bytes, payload);
+        // OLD.MP4 is untouched — eviction is in-memory only.
+        let old_bytes = fs::read(tmp.path().join("OLD.MP4")).unwrap();
+        assert!(
+            old_bytes.iter().all(|&b| b == 0),
+            "old clip's backing bytes must not be overwritten via the reused cluster"
+        );
+    }
+
+    /// Partial-overlap variant: the new file's chain only partly
+    /// overlaps a stale extent. Eviction is whole-extent, not
+    /// per-cluster trim — the dir entry is authoritative.
+    #[test]
+    fn fat32_cluster_reuse_partial_overlap_evicts_stale_extent() {
+        let tmp = TempDir::new().unwrap();
+        let g = geo();
+        let bpc = g.bytes_per_cluster() as usize;
+        // Stale extent at [5, 10).
+        let old_extent = PreExistingExtent {
+            first_cluster: 5,
+            cluster_count: 5,
+            first_byte_in_file: 0,
+            file_size_bytes: bpc as u64,
+            relative_path: PathBuf::from("OLD.MP4"),
+        };
+        fs::write(tmp.path().join("OLD.MP4"), vec![0u8; bpc]).unwrap();
+        let mut s = Fat32WriteState::new(g.clone(), writer(&tmp), &[old_extent]);
+        assert_eq!(s.extent_count(), 1);
+
+        // New clip claims only cluster 7 (mid-range of the stale).
+        let payload = vec![0xCCu8; bpc];
+        let entry = build_file_dir_entry("NEW.MP4", 7, payload.len() as u32);
+        s.apply_write(cluster_to_volume_byte(&g, 2), &entry)
+            .expect("dir");
+        write_fat_entry(&mut s, 7, 0x0FFF_FFFF);
+        s.apply_write(cluster_to_volume_byte(&g, 7), &payload)
+            .expect("data");
+        s.flush().expect("flush");
+
+        let new_bytes =
+            fs::read(tmp.path().join("NEW.MP4")).expect("NEW.MP4 must be finalized");
+        assert_eq!(new_bytes, payload);
+        assert_eq!(s.extent_count(), 1);
     }
 
     /// Bug H3-2 regression: a read covering the FAT and root

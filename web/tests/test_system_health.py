@@ -71,7 +71,7 @@ def test_health_endpoint_returns_json_with_required_keys(client: FlaskClient) ->
     assert response.status_code == 200
     body = response.get_json()
     assert isinstance(body, dict)
-    for key in ("disk", "daemon", "samba", "overall", "generated_at"):
+    for key in ("disk", "teslafat_0", "teslafat_1", "samba", "overall", "generated_at"):
         assert key in body
 
 
@@ -105,35 +105,35 @@ def test_samba_block_reflects_config(tmp_path: Path) -> None:
     not hasattr(socket, "AF_UNIX"),
     reason="AF_UNIX required for daemon socket; Linux-only.",
 )
-def test_daemon_block_reports_error_when_socket_missing(client: FlaskClient) -> None:
-    # The default test config points ipc_socket at /run/teslafat.sock,
-    # which does not exist on the dev box. Probe must NOT raise; it
-    # reports SEV_ERROR with a short message.
-    body = client.get("/api/system/health").get_json()
-    daemon = body["daemon"]
-    assert daemon["severity"] == SEV_ERROR
-    assert isinstance(daemon["message"], str)
-    assert len(daemon["message"]) <= 120
+def test_teslafat_ipc_block_reports_error_when_socket_missing(tmp_path: Path) -> None:
+    """When ipc_daemon_enabled, missing socket → SEV_ERROR teslafat_ipc."""
+    cfg = WebConfig(
+        web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
+        paths=PathsSection(backing_root=tmp_path, ipc_socket=tmp_path / "missing.sock"),
+        features=FeaturesSection(ipc_daemon_enabled=True),
+        source_path=None,
+    )
+    app = create_app(cfg)
+    body = app.test_client().get("/api/system/health").get_json()
+    assert "teslafat_ipc" in body
+    assert body["teslafat_ipc"]["severity"] == SEV_ERROR
+    assert isinstance(body["teslafat_ipc"]["message"], str)
+    assert len(body["teslafat_ipc"]["message"]) <= 120
 
 
-@pytest.mark.skipif(
-    not hasattr(socket, "AF_UNIX"),
-    reason="AF_UNIX required for daemon socket; Linux-only.",
-)
-def test_overall_rolls_up_worst_severity(client: FlaskClient) -> None:
+def test_teslafat_ipc_block_absent_when_flag_disabled(client: FlaskClient) -> None:
+    # Default test config leaves ipc_daemon_enabled=False, so the
+    # optional supplementary block must NOT appear in the payload.
     body = client.get("/api/system/health").get_json()
-    # Daemon socket is missing in the test env, so overall must be at
-    # least SEV_ERROR (samba is fine, disk is fine on dev boxes).
-    assert body["overall"]["severity"] == SEV_ERROR
-    assert body["overall"]["subsystem"] == "daemon"
+    assert "teslafat_ipc" not in body
 
 
 @pytest.mark.skipif(
     not hasattr(socket, "AF_UNIX"),
     reason="AF_UNIX required for live socket round-trip; Linux-only.",
 )
-def test_daemon_block_serving_state_against_fake_socket(tmp_path: Path) -> None:
-    """End-to-end: a fake teslafat replies with STATUS → block reports OK."""
+def test_teslafat_ipc_block_serving_state_against_fake_socket(tmp_path: Path) -> None:
+    """End-to-end: a fake teslafat replies with STATUS → teslafat_ipc reports OK."""
     import json
     import threading
 
@@ -145,7 +145,6 @@ def test_daemon_block_serving_state_against_fake_socket(tmp_path: Path) -> None:
     def serve_once() -> None:
         conn, _ = listener.accept()
         with conn:
-            # Read one NDJSON line, write one back.
             buf = bytearray()
             while not buf.endswith(b"\n"):
                 chunk = conn.recv(4096)
@@ -173,7 +172,7 @@ def test_daemon_block_serving_state_against_fake_socket(tmp_path: Path) -> None:
         cfg = WebConfig(
             web=WebSection(secret_key="x" * 32, max_upload_mb=8, max_chunk_mb=1),
             paths=PathsSection(backing_root=tmp_path, ipc_socket=sock_path),
-            features=FeaturesSection(),
+            features=FeaturesSection(ipc_daemon_enabled=True),
             source_path=None,
         )
         app = create_app(cfg)
@@ -181,9 +180,9 @@ def test_daemon_block_serving_state_against_fake_socket(tmp_path: Path) -> None:
     finally:
         thread.join(timeout=2)
         listener.close()
-    assert body["daemon"]["severity"] == SEV_OK
-    assert body["daemon"]["state"] == "SERVING"
-    assert body["daemon"]["volume_label"] == "TESLACAM"
+    assert body["teslafat_ipc"]["severity"] == SEV_OK
+    assert body["teslafat_ipc"]["state"] == "SERVING"
+    assert body["teslafat_ipc"]["volume_label"] == "TESLACAM"
 
 
 # -------------------------------------------------------------------
@@ -466,7 +465,7 @@ def test_health_endpoint_includes_all_new_blocks(tmp_path: Path) -> None:
     app = create_app(cfg)
     body = app.test_client().get("/api/system/health").get_json()
     for key in (
-        "disk", "daemon", "samba", "gadget", "indexer", "worker",
+        "disk", "teslafat_0", "teslafat_1", "samba", "gadget", "indexer", "worker",
         "network", "storage_writable", "journal", "overall",
     ):
         assert key in body, f"missing key: {key}"

@@ -36,7 +36,9 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import tomllib
 from http import HTTPStatus
+from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Final
 
@@ -126,52 +128,100 @@ def _disk_block(cfg: WebConfig) -> dict[str, object]:
     }
 
 
-def _daemon_block(cfg: WebConfig) -> dict[str, object]:
-    """``teslafat`` daemon snapshot via the Unix-socket IPC client.
+# Per-LUN TeslaFAT daemon configs live alongside the web app config.
+# Each instance N has a ``teslafat-N.toml`` declaring its volume label
+# and filesystem type (exfat for TeslaCam, fat32 for media). The matching
+# systemd unit is ``teslafat@N.service``.
+_TESLAFAT_CONFIG_DIR: Final[Path] = Path("/etc/teslausb")
 
-    When ``features.ipc_daemon_enabled`` is false (the default in B-1
-    today — the IPC server is a phase-7 deliverable, only the wire
-    types ship today), this short-circuits to a green "Disabled"
-    block. That prevents the System Health card + nav-bar dot from
-    flagging the inherent absence of a not-yet-built daemon as a
-    red error. Operators wiring up the daemon flip the flag in
-    ``/etc/teslausb/teslausb-web.toml`` and the strict probe path
-    below resumes.
+
+def _read_teslafat_lun_config(lun_index: int) -> dict[str, str]:
+    """Return ``{volume_label, fs_type}`` for LUN N, or empty dict on error."""
+    path = _TESLAFAT_CONFIG_DIR / f"teslafat-{lun_index}.toml"
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    out: dict[str, str] = {}
+    label = data.get("volume_label")
+    if isinstance(label, str):
+        out["volume_label"] = label
+    fs_type = data.get("fs_type")
+    if isinstance(fs_type, str):
+        out["fs_type"] = fs_type
+    return out
+
+
+def _teslafat_lun_block(lun_index: int) -> dict[str, object]:
+    """Per-LUN TeslaFAT daemon probe — systemd unit + LUN config."""
+    cfg_data = _read_teslafat_lun_config(lun_index)
+    label = cfg_data.get("volume_label", f"LUN {lun_index}")
+    fs_type = cfg_data.get("fs_type", "?")
+    fs_display = {"exfat": "exFAT", "fat32": "FAT32"}.get(fs_type.lower(), fs_type)
+    unit = f"teslafat@{lun_index}.service"
+    state = _systemctl_is_active(unit)
+    if state is None:
+        return {
+            "severity": SEV_UNKNOWN,
+            "message": _truncate(f"Cannot probe {unit}"),
+            "lun_id": lun_index,
+            "volume_label": label,
+            "fs_type": fs_type,
+            "unit": unit,
+        }
+    if state == "active":
+        severity = SEV_OK
+        message = f"Active — {label} ({fs_display})"
+    elif state in {"activating", "reloading"}:
+        severity = SEV_WARN
+        message = f"{state.title()} — {label} ({fs_display})"
+    else:
+        severity = SEV_ERROR
+        message = _truncate(f"{state} — {label} ({fs_display})")
+    return {
+        "severity": severity,
+        "message": message,
+        "state": state,
+        "lun_id": lun_index,
+        "volume_label": label,
+        "fs_type": fs_type,
+        "unit": unit,
+    }
+
+
+def _teslafat_ipc_block(cfg: WebConfig) -> dict[str, object] | None:
+    """Optional IPC-server probe — only used once ``ipc_daemon_enabled``.
+
+    The phase-7 IPC server, when wired up, exposes richer state
+    (SERVING/DRAINING, uptime). We surface that as a separate detail
+    only when the feature flag is on; otherwise the per-LUN systemd
+    probes above are the source of truth.
     """
     if not cfg.features.ipc_daemon_enabled:
-        return {"severity": SEV_OK, "message": "Disabled"}
-
+        return None
     client = TeslaFatClient(cfg.paths.ipc_socket)
     try:
         body = client.status()
     except FileNotFoundError:
         return {"severity": SEV_ERROR, "message": "Daemon socket missing"}
     except (ConnectionError, TimeoutError, BlockingIOError) as exc:
-        return {
-            "severity": SEV_ERROR,
-            "message": _truncate(f"Daemon unreachable: {exc}"),
-        }
+        return {"severity": SEV_ERROR, "message": _truncate(f"Daemon unreachable: {exc}")}
     except IpcDaemonError as exc:
-        return {
-            "severity": SEV_WARN,
-            "message": _truncate(f"Daemon error: {exc.body.code}"),
-        }
+        return {"severity": SEV_WARN, "message": _truncate(f"Daemon error: {exc.body.code}")}
     except IpcProtocolError as exc:
         return {"severity": SEV_UNKNOWN, "message": _truncate(f"Protocol error: {exc}")}
-
-    state = body.state
     severity_for_state: dict[str, str] = {
         "SERVING": SEV_OK,
         "INITIALIZING": SEV_WARN,
         "DRAINING": SEV_WARN,
         "STOPPED": SEV_ERROR,
     }
-    severity = severity_for_state.get(state, SEV_UNKNOWN)
-    message = f"{state.title()} — LUN {body.lun_id} ({body.volume_label})"
+    severity = severity_for_state.get(body.state, SEV_UNKNOWN)
     return {
         "severity": severity,
-        "message": message,
-        "state": state,
+        "message": f"{body.state.title()} — LUN {body.lun_id} ({body.volume_label})",
+        "state": body.state,
         "lun_id": body.lun_id,
         "volume_label": body.volume_label,
         "uptime_seconds": body.uptime_seconds,
@@ -511,7 +561,8 @@ def _build_health(cfg: WebConfig) -> dict[str, object]:
     """Compose the full payload, isolating per-subsystem crashes."""
     blocks: tuple[tuple[str, Callable[[WebConfig], dict[str, object]]], ...] = (
         ("disk", _disk_block),
-        ("daemon", _daemon_block),
+        ("teslafat_0", lambda _c: _teslafat_lun_block(0)),
+        ("teslafat_1", lambda _c: _teslafat_lun_block(1)),
         ("samba", _samba_block),
         ("gadget", _gadget_block),
         ("indexer", _indexer_block),
@@ -542,6 +593,19 @@ def _build_health(cfg: WebConfig) -> dict[str, object]:
             worst_severity = block_severity
             worst_message = str(block.get("message", ""))
             worst_subsystem = name
+
+    try:
+        ipc_block = _teslafat_ipc_block(cfg)
+    except Exception as exc:  # noqa: BLE001 — must never raise
+        logger.exception("system_health: teslafat_ipc block crashed")
+        ipc_block = {"severity": SEV_UNKNOWN, "message": _truncate(f"Block error: {exc}")}
+    if ipc_block is not None:
+        payload["teslafat_ipc"] = ipc_block
+        block_severity = str(ipc_block.get("severity", SEV_UNKNOWN))
+        if _SEV_RANK.get(block_severity, 0) > _SEV_RANK.get(worst_severity, 0):
+            worst_severity = block_severity
+            worst_message = str(ipc_block.get("message", ""))
+            worst_subsystem = "teslafat_ipc"
 
     payload["overall"] = {
         "severity": worst_severity,

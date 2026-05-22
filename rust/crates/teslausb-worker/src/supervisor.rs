@@ -270,6 +270,27 @@ async fn steady_state_linux(
                         break ShutdownReason::CleanupFailed;
                     }
                 }
+                // Second pass on the same tick: drop index
+                // rows whose backing files have disappeared
+                // (power-cut truncations, manual deletions,
+                // exFAT recovery). Per-row failures are
+                // non-fatal; only a fundamental list_all_clips
+                // failure breaks the supervisor.
+                match cleanup.gc_orphans(indexer.store()) {
+                    Ok(gc) => {
+                        info!(
+                            scanned = gc.scanned,
+                            removed = gc.removed,
+                            failed = gc.failed,
+                            skipped_unsafe = gc.skipped_unsafe,
+                            "gc_orphans tick complete",
+                        );
+                    }
+                    Err(e) => {
+                        error!(error = %e, "gc_orphans tick failed");
+                        break ShutdownReason::CleanupFailed;
+                    }
+                }
             }
         }
     };
@@ -332,6 +353,10 @@ async fn steady_state_non_linux(
             _ = tick.tick() => {
                 if let Err(e) = cleanup.run_once(indexer.store()) {
                     error!(error = %e, "cleanup tick failed");
+                    break ShutdownReason::CleanupFailed;
+                }
+                if let Err(e) = cleanup.gc_orphans(indexer.store()) {
+                    error!(error = %e, "gc_orphans tick failed");
                     break ShutdownReason::CleanupFailed;
                 }
             }

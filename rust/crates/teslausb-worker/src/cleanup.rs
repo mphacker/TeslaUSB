@@ -298,6 +298,117 @@ impl Cleanup {
         })?;
         Ok(free_pct < f64::from(self.config.cleanup.min_free_pct))
     }
+
+    /// Walk every row in the index and drop any whose backing
+    /// file no longer exists on disk. This is a "second pass"
+    /// that runs alongside the GPS-aware retention sweep and
+    /// catches the case where a clip was removed out-of-band:
+    ///
+    /// * a power-cut or `dead-man` reboot truncated an
+    ///   in-flight write so the file never landed;
+    /// * an operator (or recovery tool) deleted the file
+    ///   directly under `backing_root`;
+    /// * a filesystem-level corruption fix discarded the inode.
+    ///
+    /// Without this, the indexer keeps reporting phantom clips
+    /// to the web UI long after the underlying file is gone —
+    /// observed live on cybertruckusb.local as a ~1,090-clip
+    /// drift between `clips` rows and on-disk mp4 count after
+    /// a sequence of hard reboots.
+    ///
+    /// Deletion follows the same "store first, then file"
+    /// ordering as [`Self::delete_one`] (here the file is
+    /// already gone, so the second half is a no-op). Waypoints
+    /// cascade out via the schema's `ON DELETE CASCADE`.
+    ///
+    /// Per-row store failures (e.g. SQLite lock contention)
+    /// are logged at WARN and counted in `failed`; a single
+    /// bad row never aborts the pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` only if the initial `list_all_clips`
+    /// query fails (e.g. the DB is closed). Per-row failures
+    /// are non-fatal.
+    pub fn gc_orphans(&self, store: &Store) -> Result<GcSummary> {
+        let mut summary = GcSummary::default();
+        let rows = store.list_all_clips()?;
+        summary.scanned = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+        for clip in rows {
+            // Path-traversal guard mirrors `delete_one`: we
+            // never trust a `relative_path` to be safe even
+            // though the indexer normalises them. A bad row
+            // is skipped (and stays in the DB so an operator
+            // can inspect it) rather than risking a stat on
+            // an attacker-controlled path.
+            let Some(absolute) = self.safe_absolute_path(&clip.relative_path) else {
+                summary.skipped_unsafe += 1;
+                warn!(
+                    path = %clip.relative_path.display(),
+                    "gc_orphans: skipping unsafe relative_path; row left in store",
+                );
+                continue;
+            };
+            // `Path::try_exists` returns Ok(false) only when
+            // we got a definitive "not present" answer. A
+            // permissions error returns Err — we treat that
+            // as "leave it alone, retry next tick" rather
+            // than risking a false-positive orphan.
+            match absolute.try_exists() {
+                Ok(true) => {} // alive
+                Ok(false) => match store.delete_clip_by_path(&clip.relative_path) {
+                    Ok(_) => {
+                        summary.removed += 1;
+                        debug!(
+                            path = %clip.relative_path.display(),
+                            "gc_orphans: dropped phantom row",
+                        );
+                    }
+                    Err(e) => {
+                        summary.failed += 1;
+                        warn!(
+                            path = %clip.relative_path.display(),
+                            error = %e,
+                            "gc_orphans: store delete failed; will retry next tick",
+                        );
+                    }
+                },
+                Err(e) => {
+                    summary.failed += 1;
+                    warn!(
+                        path = %absolute.display(),
+                        error = %e,
+                        "gc_orphans: stat failed; leaving row alone",
+                    );
+                }
+            }
+        }
+        info!(
+            scanned = summary.scanned,
+            removed = summary.removed,
+            failed = summary.failed,
+            skipped_unsafe = summary.skipped_unsafe,
+            "gc_orphans pass complete",
+        );
+        Ok(summary)
+    }
+}
+
+/// Summary returned by [`Cleanup::gc_orphans`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcSummary {
+    /// Rows the store reported (every bucket, every age).
+    pub scanned: u32,
+    /// Rows whose backing file was missing AND whose delete
+    /// succeeded — these are the "phantoms" that just stopped
+    /// showing up in the web UI.
+    pub removed: u32,
+    /// Rows where the stat or the store delete returned an
+    /// error. Left in the DB for the next tick to retry.
+    pub failed: u32,
+    /// Rows whose `relative_path` failed the path-traversal
+    /// guard. Left in the DB for an operator to inspect.
+    pub skipped_unsafe: u32,
 }
 
 #[derive(Debug, Error)]
@@ -865,5 +976,144 @@ mod tests {
             .list_clips_in_bucket_older_than(Bucket::Recent, 10_000_000)
             .unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    // ---------------------- gc_orphans ----------------------
+
+    #[test]
+    fn gc_orphans_drops_rows_whose_files_are_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path(), true);
+        let mut store = Store::open_in_memory().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        // Two clips: one on disk + indexed, one indexed but
+        // its file removed out-of-band (simulating a power-cut
+        // truncation or operator `rm`).
+        record(
+            &mut store,
+            &c,
+            Bucket::Recent,
+            "TeslaCam/RecentClips/alive.mp4",
+            Some(now),
+            false,
+        );
+        record(
+            &mut store,
+            &c,
+            Bucket::Recent,
+            "TeslaCam/RecentClips/ghost.mp4",
+            Some(now),
+            true, // GPS-tagged — gc_orphans must still drop it
+        );
+        std::fs::remove_file(c.backing_root.join("TeslaCam/RecentClips/ghost.mp4")).unwrap();
+
+        let cleanup = Cleanup::new(c.clone());
+        let s = cleanup.gc_orphans(&store).unwrap();
+        assert_eq!(s.scanned, 2);
+        assert_eq!(s.removed, 1);
+        assert_eq!(s.failed, 0);
+        assert_eq!(s.skipped_unsafe, 0);
+        // The alive clip survives; the ghost is gone from the
+        // index even though it carried GPS waypoints (the GPS
+        // preservation rule only applies to retention, not to
+        // phantom-row cleanup — the file is already gone).
+        assert_eq!(store.clip_count().unwrap(), 1);
+        assert!(c.backing_root.join("TeslaCam/RecentClips/alive.mp4").exists());
+    }
+
+    #[test]
+    fn gc_orphans_keeps_rows_with_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path(), true);
+        let mut store = Store::open_in_memory().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        for name in ["a.mp4", "b.mp4", "c.mp4"] {
+            record(
+                &mut store,
+                &c,
+                Bucket::Recent,
+                &format!("TeslaCam/RecentClips/{name}"),
+                Some(now),
+                false,
+            );
+        }
+        let cleanup = Cleanup::new(c);
+        let s = cleanup.gc_orphans(&store).unwrap();
+        assert_eq!(s.scanned, 3);
+        assert_eq!(s.removed, 0);
+        assert_eq!(s.failed, 0);
+        assert_eq!(store.clip_count().unwrap(), 3);
+    }
+
+    #[test]
+    fn gc_orphans_cascades_waypoints_via_fk() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path(), true);
+        let mut store = Store::open_in_memory().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        record(
+            &mut store,
+            &c,
+            Bucket::Recent,
+            "TeslaCam/RecentClips/with_wp.mp4",
+            Some(now),
+            true,
+        );
+        assert!(store.waypoint_count().unwrap() > 0);
+        std::fs::remove_file(c.backing_root.join("TeslaCam/RecentClips/with_wp.mp4")).unwrap();
+        let cleanup = Cleanup::new(c);
+        let s = cleanup.gc_orphans(&store).unwrap();
+        assert_eq!(s.removed, 1);
+        assert_eq!(store.clip_count().unwrap(), 0);
+        // ON DELETE CASCADE must have removed the waypoint
+        // rows when the clip row went.
+        assert_eq!(store.waypoint_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn gc_orphans_handles_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path(), true);
+        let store = Store::open_in_memory().unwrap();
+        let cleanup = Cleanup::new(c);
+        let s = cleanup.gc_orphans(&store).unwrap();
+        assert_eq!(s, GcSummary::default());
+    }
+
+    #[test]
+    fn gc_orphans_spans_all_buckets() {
+        // Retention sweep only touches RecentClips. gc_orphans
+        // must NOT inherit that restriction — a missing Saved
+        // or Sentry clip is just as much a phantom row.
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path(), true);
+        let mut store = Store::open_in_memory().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        record(
+            &mut store,
+            &c,
+            Bucket::Saved,
+            "TeslaCam/SavedClips/2026-01-01_12-00-00/front.mp4",
+            Some(now),
+            false,
+        );
+        record(
+            &mut store,
+            &c,
+            Bucket::Sentry,
+            "TeslaCam/SentryClips/2026-01-02_12-00-00/back.mp4",
+            Some(now),
+            false,
+        );
+        // Remove only the saved-clip file.
+        std::fs::remove_file(
+            c.backing_root.join("TeslaCam/SavedClips/2026-01-01_12-00-00/front.mp4"),
+        )
+        .unwrap();
+        let cleanup = Cleanup::new(c);
+        let s = cleanup.gc_orphans(&store).unwrap();
+        assert_eq!(s.scanned, 2);
+        assert_eq!(s.removed, 1);
+        assert_eq!(store.clip_count().unwrap(), 1);
     }
 }

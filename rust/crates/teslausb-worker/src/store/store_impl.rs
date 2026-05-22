@@ -298,6 +298,37 @@ impl Store {
         Ok(row.map(|n| n > 0))
     }
 
+    /// List ALL clips in the index (every bucket), ordered by
+    /// `id` ascending for a stable iteration. Used by
+    /// [`crate::cleanup::Cleanup::gc_orphans`] to find rows
+    /// whose backing files have been removed out-of-band (e.g.
+    /// by an exFAT recovery, a manual `rm`, or a power-cut
+    /// truncation) and drop them so the index stops reporting
+    /// phantom clips.
+    ///
+    /// On very large indexes this allocates one row per clip
+    /// (a few dozen bytes each). The worker is the only caller
+    /// and runs on the 5-minute cleanup tick, so the peak is
+    /// bounded by the disk's clip capacity — well under 100k
+    /// even on a year-long deployment.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on a SQLite error or an unknown bucket
+    /// string in a row.
+    pub fn list_all_clips(&self) -> Result<Vec<ClipRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, relative_path, bucket, clip_started_utc,
+                    indexed_at_utc, waypoint_count, gps_waypoint_count
+             FROM clips
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], clip_record_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect()
+    }
+
     /// List clips in `bucket` whose `clip_started_utc` is
     /// strictly less than `cutoff_unix_s`. Clips with a NULL
     /// `clip_started_utc` (missing `mvhd`) fall back to

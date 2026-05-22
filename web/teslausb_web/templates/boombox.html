@@ -328,8 +328,9 @@
 
     <form method="post" action="{{ url_for('boombox.upload_boombox') }}"
           enctype="multipart/form-data" id="boomboxUploadForm">
-        <label for="boomboxFileInput" class="boombox-drop-zone {% if file_count >= max_file_count %}is-disabled{% endif %}"
-               id="boomboxDropZone">
+        <div class="boombox-drop-zone {% if file_count >= max_file_count %}is-disabled{% endif %}"
+             id="boomboxDropZone" role="button" tabindex="0"
+             aria-label="Drop audio files here or click to choose">
             <svg class="drop-icon" aria-hidden="true">
                 <use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-upload"></use>
             </svg>
@@ -349,7 +350,7 @@
                    {% if file_count < max_file_count %}multiple{% endif %}
                    style="display: none;"
                    {% if file_count >= max_file_count %}disabled{% endif %}>
-        </label>
+        </div>
         <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: -8px; margin-bottom: 16px;">
             <button type="submit" class="action-btn primary"
                     id="boomboxSubmitBtn"
@@ -439,6 +440,21 @@
     const allowedExts = ['.mp3', '.wav'];
 
     if (!dropZone || !fileInput || !form) return;
+
+    // Click + keyboard delegation (replaces what the old <label for=…> gave us).
+    dropZone.addEventListener('click', function(e) {
+        if (fileInput.disabled) return;
+        // Don't double-trigger if the user actually clicked the input itself.
+        if (e.target === fileInput) return;
+        fileInput.click();
+    });
+    dropZone.addEventListener('keydown', function(e) {
+        if (fileInput.disabled) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            fileInput.click();
+        }
+    });
 
     function validateFiles(fileList) {
         const remaining = maxFileCount - currentCount;

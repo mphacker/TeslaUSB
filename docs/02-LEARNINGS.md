@@ -461,6 +461,75 @@ debugging, and older Tesla firmware (rare but exists).
 
 ---
 
+## Two-LUN media layout (TESLACAM vs MEDIA)
+
+Tesla expects USB drives to follow specific root-level folder names
+for non-recording features:
+
+| Tesla folder | Purpose |
+|---|---|
+| `Boombox/` | Custom Boombox horn sounds (max 5 files, alphabetical) |
+| `LightShow/` | Sequence files for Light Show (paired `.fseq` + `.wav`) |
+| `LockChime.wav` | Custom lock chime file |
+
+On B-1 the TESLACAM LUN (LUN 0, exFAT, 256 GB) is reserved for
+recordings. **All media-feature files must land on the MEDIA LUN
+(LUN 1, FAT32, 32 GB)** — backing root `/srv/teslausb/media`. If
+they land on the TeslaCam LUN, the analytics dashboard double-counts
+them against the TeslaCam quota AND Tesla can't find them on the
+expected drive.
+
+The historical layout (carried over from v1) was wrong:
+
+| Feature | Old path (TESLACAM, wrong) | New path (MEDIA, correct) |
+|---|---|---|
+| Boombox | `/srv/teslausb/teslacam/Music/Boombox/` | `/srv/teslausb/media/Boombox/` |
+| Light Show | `/srv/teslausb/teslacam/lightshow/LightShow/` | `/srv/teslausb/media/LightShow/` |
+| Lock Chime (active) | `/srv/teslausb/teslacam/lightshow/LockChime.wav` | `/srv/teslausb/media/LockChime.wav` |
+| Chime library | `/srv/teslausb/teslacam/lightshow/Chimes/` | `/srv/teslausb/media/Chimes/` |
+| Wrap library | `/srv/teslausb/teslacam/lightshow/Wraps/` | `/srv/teslausb/media/Wraps/` |
+| License plates | `/srv/teslausb/teslacam/lightshow/LicensePlate/` | `/srv/teslausb/media/LicensePlate/` |
+
+Notice that the new layout also drops the `lightshow/` wrapper —
+Tesla's spec is unambiguous that `LightShow/` lives at root.
+
+### Config rule for future media features
+
+When adding any new "media" feature (anything Tesla itself reads from
+the USB drive, or anything in the website's Media section):
+
+1. Add a `media_root` reference in `PathsSection`, default
+   `/srv/teslausb/media`. **Do not** anchor at `paths.backing_root`.
+2. Use Tesla's exact folder name at the root of `media_root`. Do
+   not nest under a wrapper folder unless Tesla itself expects one
+   (e.g., wraps go under `LightShow/wraps/` when *active*, but the
+   *library* lives at `media_root/Wraps/`).
+3. Update the analytics LUN probe expectations — both LUN backing
+   roots resolve to the same btrfs filesystem, so the LUN cards
+   show the LUN's `volume_size_gb` cap, not the underlying fs
+   size. Adding/removing files only moves the per-LUN `du`-based
+   "used" number, not the displayed total.
+
+### Migration note
+
+When changing media-file storage locations between releases, the
+upgrade script must `mv` (not `cp`) the existing files from the
+old location to the new one and **delete the old parent folders**.
+Leaving stale empty directories on the TESLACAM LUN causes
+operators to think the migration is partial and to manually re-copy
+files, double-storing them on both LUNs.
+
+### Symptom → cause cheat sheet
+
+| Symptom | Likely cause |
+|---|---|
+| Analytics MEDIA card shows `0 used` despite uploaded files | Code is still writing to `backing_root/lightshow/...` instead of `media_root/...` |
+| Tesla doesn't see uploaded Light Show / Lock Chime | Files landed under `lightshow/` wrapper instead of root of MEDIA LUN |
+| Boombox upload "works" but car doesn't play it | Wrote to `Music/Boombox/` on TESLACAM instead of `/Boombox` on MEDIA |
+| Analytics TESLACAM card shows usage growing for non-recording files | A media feature is still anchored on `backing_root` instead of `media_root` |
+
+---
+
 ## Anti-patterns (DO NOT REPEAT)
 
 From v1's history, things we will deliberately avoid in B-1:

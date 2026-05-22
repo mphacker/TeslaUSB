@@ -272,6 +272,19 @@ class PathsSection:
     db_path: Path = _DEFAULT_DB_PATH
     ipc_socket: Path = _DEFAULT_IPC_SOCKET
     cache_invalidate_script: Path = _DEFAULT_CACHE_SCRIPT
+    # When set (e.g. "/_protected_teslacam"), the /videos/stream/,
+    # /videos/sei/, /videos/download/ routes return an empty 200
+    # response with an ``X-Accel-Redirect`` header pointing at this
+    # URL prefix + the resolved clip path. nginx then serves the
+    # file directly with native HTTP Range support, freeing the
+    # single sync gunicorn worker immediately. Without this, the
+    # browser's parallel Range requests (one for the start, one for
+    # the moov atom at the end of Tesla MP4s) serialize behind the
+    # single worker and the HTML5 video element hangs on a loading
+    # spinner. nginx must have a matching ``internal`` location
+    # block aliased to ``backing_root / TeslaCam``.
+    # Empty string in config = disabled (serve via Python streaming).
+    x_accel_redirect_prefix: str = ""
 
     def validate(self) -> None:
         # Config paths are POSIX paths on the target device. We check
@@ -1145,6 +1158,9 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             "cache_invalidate_script",
             _DEFAULT_CACHE_SCRIPT,
             source,
+        ),
+        x_accel_redirect_prefix=_coerce_str(
+            paths_raw, "x_accel_redirect_prefix", "", source
         ),
     )
     features = FeaturesSection(

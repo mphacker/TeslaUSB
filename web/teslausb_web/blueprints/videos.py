@@ -52,6 +52,61 @@ from teslausb_web.services.video_service import (
 if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
 
+    from teslausb_web.config import WebConfig
+
+
+def _x_accel_prefix() -> str:
+    """Return the configured nginx X-Accel-Redirect prefix, or "".
+
+    See ``PathsSection.x_accel_redirect_prefix`` for the rationale.
+    Returns the empty string in tests / dev where nginx isn't in
+    front of gunicorn so callers fall back to Python streaming.
+    """
+    cfg = cast("WebConfig", current_app.config.get("teslausb_config"))
+    if cfg is None:
+        return ""
+    prefix = cfg.paths.x_accel_redirect_prefix.strip()
+    return prefix.rstrip("/")
+
+
+def _x_accel_redirect_response(
+    rel_path: str,
+    *,
+    download_name: str | None = None,
+    cache_control: str | None = None,
+) -> Response:
+    """Build an empty 200 with an ``X-Accel-Redirect`` header.
+
+    nginx intercepts the header, serves the file directly with
+    native Range support, and frees the gunicorn worker immediately.
+    The Flask response body MUST be empty — nginx ignores it but
+    sending bytes would just waste socket time.
+    """
+    prefix = _x_accel_prefix()
+    resp = Response(status=200, mimetype="video/mp4")
+    # rel_path comes from a path that has already passed
+    # resolve_clip_path's allow-list check, so it cannot escape the
+    # teslacam root. Still encode whitespace defensively because
+    # nginx parses this as a URI.
+    redirect_target = f"{prefix}/{rel_path.lstrip('/')}".replace(" ", "%20")
+    resp.headers["X-Accel-Redirect"] = redirect_target
+    resp.headers["Accept-Ranges"] = "bytes"
+    if download_name is not None:
+        resp.headers["Content-Disposition"] = f'attachment; filename="{download_name}"'
+    if cache_control is not None:
+        resp.headers["Cache-Control"] = cache_control
+    return resp
+
+
+def _resolved_rel_path(resolved_abs: Path, teslacam_root: Path) -> str:
+    """Return ``resolved_abs`` relative to ``teslacam_root`` as POSIX.
+
+    Used for X-Accel-Redirect URL construction. Symlinks have
+    already been resolved by ``resolve_clip_path`` so there's no
+    traversal risk here — this is purely a string transform.
+    """
+    return resolved_abs.relative_to(teslacam_root).as_posix()
+
 logger = logging.getLogger(__name__)
 
 videos_bp = Blueprint("videos", __name__, url_prefix="/videos")
@@ -149,12 +204,26 @@ def file_browser() -> ResponseReturnValue:
 
 @videos_bp.route("/stream/<path:filepath>", endpoint="stream_video")
 def stream_video(filepath: str) -> ResponseReturnValue:
-    """Serve a clip with HTTP Range support (206 / 200)."""
+    """Serve a clip with HTTP Range support (206 / 200).
+
+    When ``paths.x_accel_redirect_prefix`` is configured, hand the
+    file off to nginx via ``X-Accel-Redirect`` — this is essential
+    in production because the single sync gunicorn worker cannot
+    serve two parallel Range requests from the same browser (one
+    for the MP4 start, one for the moov atom at end-of-file in
+    Tesla's MP4 layout) without serializing them, which deadlocks
+    the HTML5 video element on a loading spinner.
+    """
     svc = _get_service()
     try:
         resolved = svc.resolve_clip_path(filepath)
     except (PathSecurityError, FileNotFoundError):
         abort(404)
+
+    prefix = _x_accel_prefix()
+    if prefix:
+        rel = _resolved_rel_path(resolved.path, svc.teslacam_root)
+        return _x_accel_redirect_response(rel)
 
     file_size = resolved.path.stat().st_size
     range_header = request.headers.get("Range")
@@ -195,6 +264,10 @@ def fetch_video_for_sei(filepath: str) -> ResponseReturnValue:
         resolved = svc.resolve_clip_path(filepath)
     except (PathSecurityError, FileNotFoundError):
         abort(404)
+    prefix = _x_accel_prefix()
+    if prefix:
+        rel = _resolved_rel_path(resolved.path, svc.teslacam_root)
+        return _x_accel_redirect_response(rel, cache_control="public, max-age=3600")
     response = send_file(
         resolved.path,
         mimetype="video/mp4",
@@ -213,6 +286,10 @@ def download_video(filepath: str) -> ResponseReturnValue:
         resolved = svc.resolve_clip_path(filepath)
     except (PathSecurityError, FileNotFoundError):
         abort(404)
+    prefix = _x_accel_prefix()
+    if prefix:
+        rel = _resolved_rel_path(resolved.path, svc.teslacam_root)
+        return _x_accel_redirect_response(rel, download_name=resolved.path.name)
     return send_file(
         resolved.path,
         as_attachment=True,

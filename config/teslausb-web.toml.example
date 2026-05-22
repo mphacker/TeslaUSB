@@ -65,6 +65,21 @@ ipc_socket = "/run/teslausb/worker.sock"
 # /etc/sudoers.d/teslausb-cache-invalidate (Phase 4c.2).
 cache_invalidate_script = "/usr/local/bin/tesla_cache_invalidate.sh"
 
+# nginx X-Accel-Redirect prefix for serving video clips directly via
+# nginx instead of streaming through the single sync gunicorn worker.
+# When set, /videos/stream/, /videos/sei/, and /videos/download/
+# return a small response with `X-Accel-Redirect: <prefix>/<path>`;
+# nginx then serves the file with native Range support and zero-copy
+# sendfile, freeing the worker immediately. Without this, the HTML5
+# <video> element's parallel Range requests (start of file + moov
+# atom at end-of-file for Tesla MP4s) serialize behind the lone
+# worker and the player hangs on the loading spinner.
+#
+# Must match the matching `internal` location in
+# /etc/nginx/sites-available/teslausb (see config/nginx-teslausb.conf).
+# Set to "" to disable (dev / tests without nginx).
+x_accel_redirect_prefix = "/_protected_teslacam"
+
 [features]
 # Music browsing UI. Disabled by default to match v1; users can
 # flip this in Settings. When false the /media/music page returns

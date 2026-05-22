@@ -50,11 +50,15 @@ threads = 1
 
 # --- Timeouts -----------------------------------------------------------
 
-# A large lightshow ZIP upload can take real wall time on a Pi Zero 2 W
-# (USB 2.0 high-speed peaks ~30 MB/s and uploads land on the SD card,
-# which is much slower). 120 s covers a 500 MiB upload at 5 MB/s with
-# headroom; if the user hits this they have other problems.
-timeout = 120
+# A large lightshow ZIP upload OR a 50-file lightshow batch can take
+# real wall time on a Pi Zero 2 W (USB 2.0 high-speed peaks ~30 MB/s
+# and uploads land on the SD card, which is much slower — call it
+# 5–10 MB/s with fsync overhead). 300 s covers a 50-file mixed batch
+# with comfortable headroom; if the user hits this they have other
+# problems. MUST stay >= the nginx proxy_read_timeout / client_body_
+# timeout in config/nginx-teslausb.conf, otherwise nginx returns 502
+# Bad Gateway while the worker is still finishing the write.
+timeout = 300
 graceful_timeout = 30
 
 # Keep-alive only matters for the nginx -> gunicorn hop. nginx sets

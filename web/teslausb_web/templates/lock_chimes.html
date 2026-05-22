@@ -9,12 +9,6 @@
     {% include 'media_hub_nav.html' %}
     <h2>Lock Chimes</h2>
     
-    <!-- Gadget State Indicator -->
-    <div id="gadgetStateIndicator" style="display: none; margin: 15px 0; padding: 12px; border-radius: 8px; font-size: 14px;">
-        <strong id="gadgetStateTitle"></strong>
-        <div id="gadgetStateDetails" style="margin-top: 5px; font-size: 13px;"></div>
-    </div>
-    
     <!-- iOS Safari Warning -->
     <div id="iosWarning" class="ios-warning">
         <p><strong>⚠️ iOS Browser Limitation:</strong> File uploading is only available through Safari when running on iOS. Please open this page in Safari to upload files.</p>
@@ -1986,7 +1980,6 @@ details > summary::-webkit-details-marker {
 <script>
 // Check gadget state on page load
 document.addEventListener('DOMContentLoaded', function() {
-    checkGadgetState();
     initializeUploadModeToggle();
 });
 
@@ -2391,64 +2384,6 @@ function showChimeUploadResults(results, overallSuccess) {
     
     resultsDiv.innerHTML = html;
     resultsDiv.style.display = 'block';
-}
-
-async function checkGadgetState() {
-    try {
-        const response = await fetch('/api/gadget_state');
-        const state = await response.json();
-        
-        const indicator = document.getElementById('gadgetStateIndicator');
-        const title = document.getElementById('gadgetStateTitle');
-        const details = document.getElementById('gadgetStateDetails');
-        
-        if (!state.healthy) {
-            // Show warning state
-            indicator.style.display = 'block';
-            indicator.style.background = 'var(--warning-bg, #fff3cd)';
-            indicator.style.borderLeft = '4px solid var(--warning-border, #ffc107)';
-            indicator.style.color = 'var(--text-primary)';
-            
-            title.textContent = '⚠️ Gadget State Issues Detected';
-            title.style.color = 'var(--text-primary)';
-            
-            let detailsHtml = '<ul style="margin: 5px 0 0 20px; padding: 0; color: var(--text-primary);">';
-            state.issues_found.forEach(issue => {
-                detailsHtml += `<li>${issue}</li>`;
-            });
-            detailsHtml += '</ul>';
-            
-            if (state.fixes_applied.length > 0) {
-                detailsHtml += '<div style="margin-top: 5px; color: var(--success-text, #28a745); font-weight: 600;">✓ Auto-fixed: ' + state.fixes_applied.join(', ') + '</div>';
-            }
-            
-            if (state.errors.length > 0) {
-                detailsHtml += '<div style="margin-top: 5px; color: var(--error-text, #dc3545); font-weight: 600;">✗ Errors: ' + state.errors.join(', ') + '</div>';
-                detailsHtml += '<div style="margin-top: 5px; font-size: 12px; color: var(--text-secondary);">Tip: Switch to Edit mode and back to Present mode to reset gadget state.</div>';
-            }
-            
-            details.innerHTML = detailsHtml;
-            
-        } else if (state.fixes_applied.length > 0) {
-            // Show success state (issues were found and fixed)
-            indicator.style.display = 'block';
-            indicator.style.background = 'var(--success-bg, #d4edda)';
-            indicator.style.borderLeft = '4px solid var(--success-border, #28a745)';
-            indicator.style.color = 'var(--text-primary)';
-            
-            title.textContent = '✓ Gadget State Recovered';
-            details.innerHTML = '<div style="color: var(--success-text, #28a745);">Fixed: ' + state.fixes_applied.join(', ') + '</div>';
-            
-            // Auto-hide after 10 seconds
-            setTimeout(() => {
-                indicator.style.display = 'none';
-            }, 10000);
-        }
-        // If healthy and no fixes, don't show indicator
-        
-    } catch (error) {
-        console.error('Error checking gadget state:', error);
-    }
 }
 </script>
 {% endblock %}

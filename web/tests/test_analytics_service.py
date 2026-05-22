@@ -233,7 +233,12 @@ class TestVideoStatistics:
         stats = service.get_video_statistics()
         assert stats.total_files == 0
         assert stats.total_bytes == 0
-        assert stats.folders == ()
+        # The three canonical TeslaCam folders are always shown (with
+        # zero counts) so the dashboard layout stays consistent.
+        assert {f.name for f in stats.folders} == {
+            "SavedClips", "SentryClips", "RecentClips",
+        }
+        assert all(f.count == 0 and f.size_bytes == 0 for f in stats.folders)
         assert stats.oldest_iso is None
         assert stats.newest_iso is None
 
@@ -487,10 +492,14 @@ class TestSerializers:
         assert d["total_files"] == 1
         folders_dict = d["folders"]
         assert isinstance(folders_dict, list)
-        assert len(folders_dict) == 1
-        folder_dict = folder_to_dict(stats.folders[0])
-        assert folder_dict["name"] == "SavedClips"
-        assert folder_dict["count"] == 1
+        # Always 3 canonical folders; only SavedClips has data here.
+        assert len(folders_dict) == 3
+        by_name = {f.name: f for f in stats.folders}
+        assert by_name["SavedClips"].count == 1
+        assert by_name["SentryClips"].count == 0
+        assert by_name["RecentClips"].count == 0
+        # Top folder (highest size) should be SavedClips.
+        assert folder_to_dict(stats.folders[0])["name"] == "SavedClips"
 
     def test_health_serialization_round_trips_status(self) -> None:
         health = compute_health((_usage(50.0),), AnalyticsSection())

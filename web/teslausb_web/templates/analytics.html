@@ -171,11 +171,11 @@
         {% if video_stats.oldest_iso %}
         <div class="totals-row" id="videoStatsRange">
             <div class="total-stat">
-                <div class="total-number">{{ video_stats.oldest_iso }}</div>
+                <div class="total-number"><time class="js-local-time" datetime="{{ video_stats.oldest_iso }}">{{ video_stats.oldest_iso }}</time></div>
                 <div class="total-label">Oldest Clip</div>
             </div>
             <div class="total-stat">
-                <div class="total-number">{{ video_stats.newest_iso }}</div>
+                <div class="total-number"><time class="js-local-time" datetime="{{ video_stats.newest_iso }}">{{ video_stats.newest_iso }}</time></div>
                 <div class="total-label">Newest Clip</div>
             </div>
         </div>
@@ -221,8 +221,8 @@
                             </div>
                             {{ "%.1f"|format(size_pct) }}%
                         </td>
-                        <td class="date-cell">{{ folder.oldest_iso or 'N/A' }}</td>
-                        <td class="date-cell">{{ folder.newest_iso or 'N/A' }}</td>
+                        <td class="date-cell">{% if folder.oldest_iso %}<time class="js-local-time" datetime="{{ folder.oldest_iso }}">{{ folder.oldest_iso }}</time>{% else %}N/A{% endif %}</td>
+                        <td class="date-cell">{% if folder.newest_iso %}<time class="js-local-time" datetime="{{ folder.newest_iso }}">{{ folder.newest_iso }}</time>{% else %}N/A{% endif %}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -260,8 +260,8 @@
                     <div class="mini-progress-bar" data-percent="{{ size_pct | round(1) }}" style="width: {{ size_pct | round(1) }}%"></div>
                 </div>
                 <div class="folder-card-dates">
-                    <div><small>Oldest: {{ folder.oldest_iso or 'N/A' }}</small></div>
-                    <div><small>Newest: {{ folder.newest_iso or 'N/A' }}</small></div>
+                    <div><small>Oldest: {% if folder.oldest_iso %}<time class="js-local-time" datetime="{{ folder.oldest_iso }}">{{ folder.oldest_iso }}</time>{% else %}N/A{% endif %}</small></div>
+                    <div><small>Newest: {% if folder.newest_iso %}<time class="js-local-time" datetime="{{ folder.newest_iso }}">{{ folder.newest_iso }}</time>{% else %}N/A{% endif %}</small></div>
                 </div>
             </div>
             {% endfor %}

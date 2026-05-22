@@ -103,7 +103,29 @@
         };
     }
 
+    function localizeTimes() {
+        // Convert server-rendered ISO timestamps to the operator's
+        // browser locale + tz. Server emits UTC ISO strings; we
+        // replace the textContent with a locale-formatted string and
+        // set title= to the original ISO for hover-debug.
+        var nodes = document.querySelectorAll('time.js-local-time');
+        for (var i = 0; i < nodes.length; i += 1) {
+            var node = nodes[i];
+            var iso = node.getAttribute('datetime');
+            if (!iso) { continue; }
+            var d = new Date(iso);
+            if (isNaN(d.getTime())) { continue; }
+            try {
+                node.textContent = d.toLocaleString();
+                node.title = iso;
+            } catch (err) {
+                warn('localizeTimes failed', err);
+            }
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', function () {
+        localizeTimes();
         loadDrivingStats();
     });
     // Expose for tests and ad-hoc debugging only when the debug flag is on.

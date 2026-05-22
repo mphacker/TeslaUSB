@@ -224,9 +224,6 @@ def _accumulate_row(
 
 
 def summarize_indexed_files(rows: Sequence[IndexedFileRow]) -> VideoStatistics:
-    if not rows:
-        return VideoStatistics(0, 0, 0, None, None, ())
-
     buckets: dict[str, _FolderAccumulator] = {}
     total_files = 0
     total_bytes = 0
@@ -235,6 +232,13 @@ def summarize_indexed_files(rows: Sequence[IndexedFileRow]) -> VideoStatistics:
         total_files += 1
         total_bytes += row.file_size
         _accumulate_row(row, buckets, extrema)
+
+    # Always surface the three canonical TeslaCam folders so the
+    # dashboard table shows the full layout (with 0/0/0 rows) even on
+    # a freshly-wiped volume — operators expect to see all buckets,
+    # not just the ones that happen to have data right now.
+    for canonical in (FOLDER_SAVED, FOLDER_SENTRY, FOLDER_RECENT):
+        buckets.setdefault(canonical, _FolderAccumulator())
 
     folders = tuple(
         sorted(

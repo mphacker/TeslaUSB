@@ -12,8 +12,6 @@ fire-and-forget filesystem move with no queue; see
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from teslausb_web.services.jobs_service._classifier import (
     classify_clip_value,
     classify_recommendation,
@@ -33,9 +31,6 @@ from teslausb_web.services.jobs_service._models import (
     ValueTier,
 )
 from teslausb_web.services.jobs_service._redactor import redact_last_error
-
-if TYPE_CHECKING:
-    from teslausb_web.services.mapping.service import MappingService
 
 
 class JobsServiceError(RuntimeError):
@@ -136,13 +131,16 @@ class JobsService:
 
 def make_jobs_service(
     *,
-    mapping_service: MappingService | None,
+    mapping_service: object | None,
     cloud_archive_service: CloudSyncAdapterProtocol | None,
 ) -> JobsService:
     """Factory used by the Flask app factory.
 
-    Both arguments are optional so tests can stand the service up
-    with whichever subset of backing services they need.
+    ``mapping_service`` is accepted for backwards-compatibility and
+    only forwarded to the indexer adapter — the Rust worker now owns
+    indexing so this seam is a stub. Both arguments are optional so
+    tests can stand the service up with whichever subset of backing
+    services they need.
     """
     return JobsService(
         indexer=IndexerAdapter(mapping_service),

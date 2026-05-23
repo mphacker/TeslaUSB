@@ -20,7 +20,6 @@ Tracking issue: https://github.com/mphacker/TeslaUSB/issues/222
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from teslausb_web.services.jobs_service._classifier import (
     classify_clip_value,
@@ -32,29 +31,25 @@ from teslausb_web.services.jobs_service._models import (
 )
 from teslausb_web.services.jobs_service._redactor import redact_last_error
 
-if TYPE_CHECKING:
-    from teslausb_web.services.mapping.service import MappingService
-
 logger = logging.getLogger(__name__)
 
 
 class IndexerAdapter:
-    """Adapts the mapping service into the Failed Jobs row contract.
+    """Adapts the (now-Rust-owned) indexer into the Failed Jobs row contract.
 
-    Currently a stub: see module docstring. The mapping service is
-    accepted at construction time so the adapter has a stable
-    seam — when the dead-letter store lands, only this file
-    changes.
+    Currently a stub: see module docstring. The mapping owner argument
+    is accepted as ``object | None`` so the adapter has a stable seam —
+    when the dead-letter store lands, only this file changes.
     """
 
-    def __init__(self, mapping_service: MappingService | None) -> None:
-        self._mapping_service = mapping_service
+    def __init__(self, mapping_owner: object | None) -> None:
+        self._mapping_owner = mapping_owner
 
     def list_rows(self, limit: int) -> list[FailedJobRow]:  # noqa: ARG002
         # TODO(https://github.com/mphacker/TeslaUSB/issues/222):
-        #   Wire to the mapping dead-letter store when B-1 grows one.
-        if self._mapping_service is None:
-            logger.debug("IndexerAdapter.list_rows: mapping service missing")
+        #   Wire to the worker's dead-letter store when it grows one.
+        if self._mapping_owner is None:
+            logger.debug("IndexerAdapter.list_rows: mapping owner missing")
         return []
 
     def count(self) -> int:

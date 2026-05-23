@@ -330,30 +330,6 @@
        ~38 px tall) so the banner never covers the All / FSD Disengage / etc.
        filter buttons. When the pills row is empty (`:empty { display: none }`)
        a small visual gap remains above the banner, which is acceptable. */
-    .indexer-status {
-        position: absolute;
-        top: 60px;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 1000;
-        padding: 8px 16px;
-        border-radius: var(--radius-lg, 12px);
-        font-size: 0.8125rem;
-        background: var(--bg-secondary);
-        color: var(--text-primary);
-        border: 1px solid var(--border-color, var(--border));
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-        backdrop-filter: blur(8px);
-        max-width: calc(100vw - 120px);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-    [data-theme="dark"] .indexer-status {
-        background: rgba(30, 41, 59, 0.9);
-    }
-    .indexer-status.running { border-left: 3px solid var(--warning-border, var(--mapping-accent-warning)); }
-
     .popup-video-link { color: var(--accent-primary, var(--mapping-accent-primary)); cursor: pointer; text-decoration: underline; }
     .popup-day-link { color: var(--accent-primary, var(--mapping-accent-primary)); cursor: pointer; text-decoration: underline; }
 
@@ -593,7 +569,7 @@
 
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
-        .map-fab, .trip-nav-btn, .trip-card, .indexer-status,
+        .map-fab, .trip-nav-btn, .trip-card,
         .event-filter-pill {
             transition: none !important;
         }
@@ -898,13 +874,7 @@
         <button class="map-fab" id="btnSpeedLegend" onclick="toggleSpeedLegend()" aria-label="Speed color legend" title="Speed Legend">
             <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-zap"></use></svg>
         </button>
-        <button class="map-fab" id="btnScan" onclick="scanForNewClips()" aria-label="Scan for new clips" title="Scan for new clips">
-            <svg class="nav-icon"><use href="{{ url_for('static', filename='icons/lucide-sprite.svg') }}#icon-refresh-cw"></use></svg>
-        </button>
     </div>
-
-    <!-- Indexer status (floating, centered top) -->
-    <div class="indexer-status" id="indexerStatus" style="display:none"></div>
 
     <!-- Video Browser Slide-out Panel -->
     <div class="video-panel" id="videoPanel">
@@ -3300,136 +3270,10 @@ function toggleFsdOverlay() {
     }
 }
 
-// --- Indexer ---
-//
-// The "Scan for new clips" button asks the server to walk the
-// TeslaCam tree and enqueue any orphans it finds. The actual
-// parsing happens asynchronously in the indexing-worker thread;
-// the floating banner stays visible whenever a file is being
-// parsed (driven by `active_file` in /api/index/status). The
-// banner does NOT appear during the scan itself — only when the
-// worker is mid-parse.
-
-const INDEX_POLL_BUSY_MS = 3000;   // active parse: poll every 3 s
-const INDEX_POLL_IDLE_MS = 15000;  // idle: poll every 15 s
-const INDEX_TRIP_REFRESH_MS = 10000;
-
-async function scanForNewClips() {
-    const btn = document.getElementById('btnScan');
-    btn.disabled = true;
-    btn.classList.add('spinning');
-
-    try {
-        const resp = await fetch(BOOTSTRAP.api.index_trigger, { method: 'POST' });
-        const data = await resp.json();
-        if (data.success) {
-            const summary = data.summary || {};
-            const enq = summary.enqueued || 0;
-            // Surface a transient "scan complete" message.
-            const statusDiv = document.getElementById('indexerStatus');
-            statusDiv.className = 'indexer-status';
-            statusDiv.style.display = 'block';
-            statusDiv.textContent = enq > 0
-                ? `Scan complete: ${enq} new clip(s) queued for indexing.`
-                : 'Scan complete: no new clips found.';
-            setTimeout(() => {
-                if (!pollIndexer._activeFile) {
-                    statusDiv.style.display = 'none';
-                }
-            }, 5000);
-            // Bump poll rate so the banner appears quickly when the
-            // worker picks up the first orphan.
-            pollIndexer();
-        } else {
-            alert(data.message || 'Failed to scan for new clips');
-        }
-    } catch(e) {
-        alert('Failed to scan for new clips: ' + e.message);
-    } finally {
-        btn.disabled = false;
-        btn.classList.remove('spinning');
-    }
-}
-
-function _bannerTextForSource(source, filesDone) {
-    // Human-friendly banner text. `filesDone` is per-session worker
-    // count, so it bumps as each file completes.
-    switch (source) {
-        case 'watcher':
-            return 'Indexing new clip from drive…';
-        case 'archive':
-            return 'Indexing archived clip…';
-        case 'manual':
-            return `Rebuilding map index (${filesDone} done)…`;
-        case 'catchup':
-            return `Indexing existing clip (${filesDone} done)…`;
-        default:
-            return 'Indexing video…';
-    }
-}
-
-async function pollIndexer() {
-    // Cancel any previously-scheduled poll so we don't run multiple
-    // overlapping chains (scanForNewClips and the page-load init both
-    // call pollIndexer() directly).
-    if (pollIndexer._timeoutId) {
-        clearTimeout(pollIndexer._timeoutId);
-        pollIndexer._timeoutId = null;
-    }
-    const statusDiv = document.getElementById('indexerStatus');
-
-    try {
-        const resp = await fetch(BOOTSTRAP.api.index_status);
-        const data = await resp.json();
-
-        const active = data.active_file;
-        pollIndexer._activeFile = active;
-
-        if (active) {
-            // A file is being parsed right now → banner on.
-            statusDiv.style.display = 'block';
-            statusDiv.className = 'indexer-status running';
-            statusDiv.textContent = _bannerTextForSource(
-                data.source, data.files_done_session || 0,
-            );
-            // Refresh days/stats on a slower cadence so the user
-            // sees new data trickle in without hammering the API.
-            // refreshCurrentView() respects the dayLoadSeq race
-            // token, so it can't clobber a navigation in flight.
-            if (!pollIndexer._lastTripRefresh ||
-                Date.now() - pollIndexer._lastTripRefresh > INDEX_TRIP_REFRESH_MS) {
-                pollIndexer._lastTripRefresh = Date.now();
-                refreshCurrentView();
-                loadStats();
-            }
-            pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_BUSY_MS);
-        } else {
-            // Worker idle (queue empty or all rows deferred). Hide
-            // banner unless we just finished a session — refresh data
-            // one last time.
-            const wasBusy = !!pollIndexer._wasBusyLastTick;
-            statusDiv.style.display = 'none';
-            if (wasBusy) {
-                pollIndexer._lastTripRefresh = 0;
-                loadStats();
-                refreshCurrentView();
-            }
-            pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_IDLE_MS);
-        }
-        pollIndexer._wasBusyLastTick = !!active;
-    } catch(e) {
-        // Network blip — try again on the slow cadence.
-        pollIndexer._timeoutId = setTimeout(pollIndexer, INDEX_POLL_IDLE_MS);
-    }
-}
-
-// Re-fetch the current view's data after the indexer ticks.
-// Always reloads the day list (so new days show up in the navigator),
-// then either reloads the currently-displayed day or rebuilds the
-// "All time" overview, whichever is active.
-function refreshCurrentView() {
-    loadDays();
-}
+// --- Indexer (legacy, removed in B-1) ---
+// Indexing is performed by the Rust worker (teslausb-worker.service)
+// against /var/lib/teslausb/index.sqlite3. The web UI is now a pure
+// read-only consumer of that DB and no longer triggers or polls scans.
 
 // --- Video Browser Panel ---
 let videoPanelOpen = false;
@@ -4091,10 +3935,6 @@ document.addEventListener('keydown', function (e) {
     }
 });
 
-// Kick off the indexing-status poll loop. It self-schedules with
-// a fast cadence while a file is being parsed and a slow cadence
-// when idle, so the banner appears within ~3 s of any background
-// indexing activity without hammering the API in steady state.
-pollIndexer();
+// Indexing is owned by the Rust worker; nothing to poll here.
 </script>
 {% endblock %}

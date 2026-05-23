@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from teslausb_web.config import AnalyticsSection, WebConfig
-    from teslausb_web.services.mapping.service import MappingService
+    from teslausb_web.services.mapping_queries import MappingQueries
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class AnalyticsService:
         *,
         analytics_cfg: AnalyticsSection,
         probes: Sequence[Probe],
-        mapping_service: MappingService,
+        mapping_queries: MappingQueries,
         clips_root: Path | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -90,7 +90,7 @@ class AnalyticsService:
             raise AnalyticsConfigError("AnalyticsService requires at least one probe")
         self._cfg = analytics_cfg
         self._probes = tuple(probes)
-        self._mapping_service = mapping_service
+        self._mapping_queries = mapping_queries
         self._clips_root = clips_root
         self._clock = clock or utc_now
 
@@ -112,7 +112,7 @@ class AnalyticsService:
             rows = walk_teslacam_videos(self._clips_root)
             return summarize_indexed_files(rows)
         try:
-            with self._mapping_service.open_db() as connection:
+            with self._mapping_queries.open_db() as connection:
                 rows = query_indexed_files(connection)
         except sqlite3.Error as exc:
             logger.warning("analytics: indexed_files query failed: %s", exc)
@@ -216,7 +216,7 @@ def _discover_teslafat_luns(
 
 def make_analytics_service(
     cfg: WebConfig,
-    mapping_service: MappingService,
+    mapping_queries: MappingQueries,
 ) -> AnalyticsService:
     """Build the analytics service from a :class:`WebConfig`.
 
@@ -238,13 +238,11 @@ def make_analytics_service(
         probes: list[Probe] = list(lun_probes)
         sd_root = Path("/")
         if sd_root.exists():
-            probes.append(
-                Probe(key="sd-card", label=LABEL_SD_CARD, path=sd_root)
-            )
+            probes.append(Probe(key="sd-card", label=LABEL_SD_CARD, path=sd_root))
         return AnalyticsService(
             analytics_cfg=cfg.analytics,
             probes=probes,
-            mapping_service=mapping_service,
+            mapping_queries=mapping_queries,
             clips_root=cfg.paths.backing_root,
         )
 
@@ -265,7 +263,7 @@ def make_analytics_service(
     return AnalyticsService(
         analytics_cfg=cfg.analytics,
         probes=probes,
-        mapping_service=mapping_service,
+        mapping_queries=mapping_queries,
         clips_root=cfg.paths.backing_root,
     )
 

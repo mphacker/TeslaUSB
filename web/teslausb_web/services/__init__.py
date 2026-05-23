@@ -1,4 +1,3 @@
-# ruff: noqa: RUF022
 """Business-orchestration services.
 
 Layer 2 in the hexagonal layering: blueprints call services;
@@ -120,27 +119,6 @@ from teslausb_web.services.lock_chime_service import (
     upload_chime_file,
     validate_tesla_wav,
 )
-from teslausb_web.services.mapping import (
-    DiagnoseError,
-    IndexerError,
-    IndexOutcome,
-    IndexResult,
-    MappingService,
-    MappingServiceConfig,
-    MappingServiceError,
-    make_mapping_service,
-)
-from teslausb_web.services.mapping_migrations import (
-    _BACKUP_RETENTION,
-    _SCHEMA_VERSION,
-    MappingDatabaseError,
-    MappingMigrationError,
-    MigrationsConfig,
-    MigrationsRunner,
-    _backup_db,
-    _init_db,
-    make_migrations_runner,
-)
 from teslausb_web.services.mapping_queries import (
     AllRoutesTrip,
     ChartCount,
@@ -215,8 +193,6 @@ from teslausb_web.services.wrap_service import (
 )
 
 __all__ = (
-    "_BACKUP_RETENTION",
-    "_SCHEMA_VERSION",
     "ActiveChimeResolution",
     "AllRoutesTrip",
     "ApMode",
@@ -244,7 +220,6 @@ __all__ = (
     "DayRouteTrip",
     "DayRow",
     "DeleteResult",
-    "DiagnoseError",
     "DisconnectResult",
     "DrivingStats",
     "EventChartData",
@@ -255,25 +230,15 @@ __all__ = (
     "FsdTimelinePoint",
     "GroupOperationResult",
     "HolidaySchedule",
-    "IndexOutcome",
-    "IndexResult",
-    "IndexerError",
     "LicensePlate",
     "LicensePlateConfig",
     "LicensePlateError",
     "LicensePlateService",
     "LockChimeAudioError",
     "LockChimeFileError",
-    "MappingDatabaseError",
-    "MappingMigrationError",
     "MappingQueries",
     "MappingQueriesConfig",
     "MappingQueryError",
-    "MappingService",
-    "MappingServiceConfig",
-    "MappingServiceError",
-    "MigrationsConfig",
-    "MigrationsRunner",
     "OAuthConfig",
     "OAuthConfigError",
     "OAuthCredentials",
@@ -348,8 +313,6 @@ __all__ = (
     "WrapFileError",
     "WrapInfo",
     "WrapService",
-    "_backup_db",
-    "_init_db",
     "delete_chime_file",
     "format_last_run",
     "format_schedule_display",
@@ -359,8 +322,6 @@ __all__ = (
     "make_chime_scheduler",
     "make_license_plate_service",
     "make_mapping_queries",
-    "make_mapping_service",
-    "make_migrations_runner",
     "make_oauth_service",
     "make_rclone_service",
     "make_samba_service",

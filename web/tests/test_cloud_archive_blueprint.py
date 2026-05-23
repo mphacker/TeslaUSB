@@ -84,7 +84,6 @@ def app(tmp_path: Path) -> Flask:
         ),
         mapping=MappingSection(
             db_path=state_dir / "mapping.db",
-            backup_dir=state_dir / "mapping-backups",
             media_root=teslacam_root,
         ),
         source_path=None,

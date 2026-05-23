@@ -54,7 +54,7 @@ _SAMPLE_MTIME_NEW = datetime(2024, 6, 7, 8, 9, 10, tzinfo=UTC).timestamp()
 _TEN_GIB = 10 * 1024**3
 
 
-class _FakeMappingService:
+class _FakeMappingQueries:
     """Minimal MappingService stand-in exposing :meth:`open_db`."""
 
     def __init__(self, rows: list[tuple[str, int, float | None]]) -> None:
@@ -89,13 +89,13 @@ def _fixed_clock() -> datetime:
 
 def _build_service(
     rows: list[tuple[str, int, float | None]] | None = None,
-) -> tuple[AnalyticsService, _FakeMappingService]:
-    mapping = _FakeMappingService(rows or [])
+) -> tuple[AnalyticsService, _FakeMappingQueries]:
+    mapping = _FakeMappingQueries(rows or [])
     probes = (Probe(key="backing", label="TeslaCam Storage", path=Path.cwd()),)
     service = AnalyticsService(
         analytics_cfg=AnalyticsSection(),
         probes=probes,
-        mapping_service=mapping,  # type: ignore[arg-type]
+        mapping_queries=mapping,  # type: ignore[arg-type]
         clock=_fixed_clock,
     )
     return service, mapping
@@ -143,7 +143,7 @@ class TestServiceConstruction:
             AnalyticsService(
                 analytics_cfg=AnalyticsSection(),
                 probes=(),
-                mapping_service=_FakeMappingService([]),  # type: ignore[arg-type]
+                mapping_queries=_FakeMappingQueries([]),  # type: ignore[arg-type]
             )
 
     def test_factory_dedups_partitions_by_device(self, tmp_path: Path) -> None:
@@ -154,12 +154,11 @@ class TestServiceConstruction:
             paths=PathsSection(backing_root=backing),
             mapping=MappingSection(
                 db_path=tmp_path / "state" / "mapping.sqlite",
-                backup_dir=tmp_path / "state" / "backup",
                 media_root=backing,
             ),
             source_path=None,
         )
-        service = make_analytics_service(cfg, _FakeMappingService([]))  # type: ignore[arg-type]
+        service = make_analytics_service(cfg, _FakeMappingQueries([]))  # type: ignore[arg-type]
         partitions = service.get_partition_usage()
         assert len(partitions) == 1
         assert partitions[0].label == "TeslaCam Storage"
@@ -236,7 +235,9 @@ class TestVideoStatistics:
         # The three canonical TeslaCam folders are always shown (with
         # zero counts) so the dashboard layout stays consistent.
         assert {f.name for f in stats.folders} == {
-            "SavedClips", "SentryClips", "RecentClips",
+            "SavedClips",
+            "SentryClips",
+            "RecentClips",
         }
         assert all(f.count == 0 and f.size_bytes == 0 for f in stats.folders)
         assert stats.oldest_iso is None
@@ -270,7 +271,6 @@ class TestVideoStatistics:
         assert saved.size_bytes == 300
         assert saved.oldest_iso is not None
         assert saved.newest_iso is not None
-
 
     def test_summarize_helper_handles_empty_sequence(self) -> None:
         assert summarize_indexed_files(()).total_files == 0

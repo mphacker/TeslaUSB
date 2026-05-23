@@ -38,7 +38,6 @@ def _make_cfg(tmp_path: Path) -> WebConfig:
         ),
         mapping=MappingSection(
             db_path=tmp_path / "state" / "mapping.db",
-            backup_dir=tmp_path / "state" / "mapping-backups",
             media_root=teslacam,
         ),
         source_path=None,
@@ -280,7 +279,6 @@ class TestExtraCoverage:
             ),
             mapping=MappingSection(
                 db_path=tmp_path / "state" / "m.db",
-                backup_dir=tmp_path / "state" / "mb",
                 media_root=backing / "TeslaCam",
             ),
             source_path=None,

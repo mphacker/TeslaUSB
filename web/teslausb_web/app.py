@@ -60,8 +60,7 @@ from teslausb_web.services.cloud_rclone_service import CloudRcloneService, make_
 from teslausb_web.services.jobs_service import CloudSyncAdapterProtocol, make_jobs_service
 from teslausb_web.services.license_plate_service import make_license_plate_service
 from teslausb_web.services.light_show_service import make_light_show_service
-from teslausb_web.services.mapping import make_mapping_service
-from teslausb_web.services.mapping.service import MappingService
+from teslausb_web.services.mapping_queries import MappingQueries, make_mapping_queries
 from teslausb_web.services.music_service import make_music_service
 from teslausb_web.services.photo_plate_service import make_photo_plate_service
 from teslausb_web.services.samba_service import SambaError, make_samba_service
@@ -474,22 +473,16 @@ def _register_wrap_services(app: Flask, cfg: WebConfig) -> None:
 
 
 def _register_mapping_services(app: Flask, cfg: WebConfig) -> None:
-    """Construct the mapping service once and register cleanup hooks."""
-    mapping_service = make_mapping_service(cfg)
-    app.extensions["mapping_service"] = mapping_service
-    atexit.register(mapping_service.shutdown)
-    app.extensions["mapping_service_finalizer"] = weakref.finalize(
-        app,
-        mapping_service.shutdown,
-    )
+    """Register the read-only worker-DB query service."""
+    app.extensions["mapping_queries"] = make_mapping_queries(cfg)
 
 
 def _register_analytics_service(app: Flask, cfg: WebConfig) -> None:
-    """Construct the analytics service after the mapping service is ready."""
-    mapping_service = app.extensions.get("mapping_service")
-    if not isinstance(mapping_service, MappingService):
-        raise RuntimeError("analytics_service requires mapping_service")
-    app.extensions["analytics_service"] = make_analytics_service(cfg, mapping_service)
+    """Construct the analytics service after the mapping queries are ready."""
+    mapping_queries = app.extensions.get("mapping_queries")
+    if not isinstance(mapping_queries, MappingQueries):
+        raise RuntimeError("analytics_service requires mapping_queries")
+    app.extensions["analytics_service"] = make_analytics_service(cfg, mapping_queries)
 
 
 def _register_video_service(app: Flask, cfg: WebConfig) -> None:
@@ -500,13 +493,11 @@ def _register_video_service(app: Flask, cfg: WebConfig) -> None:
 def _register_jobs_service(app: Flask) -> None:
     """Construct the unified Failed Jobs facade.
 
-    Depends on mapping_service (indexer adapter) and
-    cloud_archive_service (cloud_sync adapter) — both are already
-    registered by the time we get here.
+    Depends on cloud_archive_service (cloud_sync adapter) — already
+    registered by the time we get here. The indexer adapter no longer
+    needs a mapping service (the Rust worker owns indexing).
     """
-    mapping_service = app.extensions.get("mapping_service")
     cloud_archive_service = app.extensions.get("cloud_archive_service")
-    typed_mapping = mapping_service if isinstance(mapping_service, MappingService) else None
     # CloudArchiveService satisfies CloudSyncAdapterProtocol structurally.
     typed_cloud = (
         cast("CloudSyncAdapterProtocol", cloud_archive_service)
@@ -514,7 +505,7 @@ def _register_jobs_service(app: Flask) -> None:
         else None
     )
     app.extensions["jobs_service"] = make_jobs_service(
-        mapping_service=typed_mapping,
+        mapping_service=None,
         cloud_archive_service=typed_cloud,
     )
 

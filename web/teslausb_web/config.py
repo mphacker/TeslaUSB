@@ -172,24 +172,15 @@ _DEFAULT_CLOUD_SYNC_FOLDERS: Final[tuple[str, ...]] = (
     "SavedClips",
 )
 _DEFAULT_CLOUD_DEAD_LETTER_MAX_AGE_DAYS: Final[int] = 30
-_DEFAULT_MAPPING_DB_NAME: Final[str] = "mapping.db"
-_DEFAULT_MAPPING_BACKUP_DIRNAME: Final[str] = "mapping-backups"
-_DEFAULT_MAPPING_BACKUP_RETENTION: Final[int] = 3
-_DEFAULT_MAPPING_SAMPLE_RATE: Final[int] = 30
+_DEFAULT_MAPPING_DB_NAME: Final[str] = "index.sqlite3"
 _DEFAULT_MAPPING_TRIP_GAP_MINUTES: Final[int] = 5
-_DEFAULT_MAPPING_INDEX_TOO_NEW_SECONDS: Final[int] = 120
 _DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD: Final[float] = -4.0
 _DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD: Final[float] = -7.0
 _DEFAULT_MAPPING_HARD_ACCEL_THRESHOLD: Final[float] = 3.5
 _DEFAULT_MAPPING_SHARP_TURN_LATERAL_MPS2: Final[float] = 4.0
 _DEFAULT_MAPPING_SPEED_LIMIT_MPS: Final[float] = 35.76
-_DEFAULT_MAPPING_STALE_SCAN_INTERVAL_SECONDS: Final[int] = 30 * 24 * 60 * 60
-_DEFAULT_MAPPING_STALE_SCAN_JITTER_SECONDS: Final[int] = 24 * 60 * 60
-_DEFAULT_MAPPING_INITIAL_STALE_SCAN_BASE_SECONDS: Final[int] = 5 * 60
-_DEFAULT_MAPPING_INITIAL_STALE_SCAN_JITTER_SECONDS: Final[int] = 5 * 60
-_DEFAULT_MAPPING_STALE_SCAN_DEBOUNCE_SECONDS: Final[int] = 10 * 60
-_DEFAULT_MAPPING_DB_PATH: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_DB_NAME
-_DEFAULT_MAPPING_BACKUP_DIR: Path = _DEFAULT_STATE_DIR / _DEFAULT_MAPPING_BACKUP_DIRNAME
+_DEFAULT_MAPPING_PLAYABLE_TRIPS_TTL_SECONDS: Final[float] = 60.0
+_DEFAULT_MAPPING_DB_PATH: Path = Path("/var/lib/teslausb") / _DEFAULT_MAPPING_DB_NAME
 # Mapping's discovery walker iterates ``<media_root>/{Recent,Saved,Sentry}Clips``
 # directly. Tesla writes those folders inside a ``TeslaCam/`` subdirectory of
 # the exFAT LUN, so the media root is always one level deeper than the web
@@ -893,25 +884,21 @@ class CloudSection:
 
 @dataclass(frozen=True, slots=True)
 class MappingSection:
-    """Mapping DB, media roots, indexing thresholds, and stale-scan cadence."""
+    """Read-only mapping DB + event-derivation thresholds.
+
+    The Rust worker (``teslausb-worker``) is the sole writer of
+    ``db_path``; the Python layer only reads. See ADR-0017.
+    """
 
     db_path: Path = _DEFAULT_MAPPING_DB_PATH
-    backup_retention: int = _DEFAULT_MAPPING_BACKUP_RETENTION
-    backup_dir: Path = _DEFAULT_MAPPING_BACKUP_DIR
     media_root: Path = _DEFAULT_MAPPING_MEDIA_ROOT
-    sample_rate: int = _DEFAULT_MAPPING_SAMPLE_RATE
     trip_gap_minutes: int = _DEFAULT_MAPPING_TRIP_GAP_MINUTES
-    index_too_new_seconds: int = _DEFAULT_MAPPING_INDEX_TOO_NEW_SECONDS
     harsh_brake_threshold: float = _DEFAULT_MAPPING_HARSH_BRAKE_THRESHOLD
     emergency_brake_threshold: float = _DEFAULT_MAPPING_EMERGENCY_BRAKE_THRESHOLD
     hard_accel_threshold: float = _DEFAULT_MAPPING_HARD_ACCEL_THRESHOLD
     sharp_turn_lateral_mps2: float = _DEFAULT_MAPPING_SHARP_TURN_LATERAL_MPS2
     speed_limit_mps: float = _DEFAULT_MAPPING_SPEED_LIMIT_MPS
-    stale_scan_interval_seconds: int = _DEFAULT_MAPPING_STALE_SCAN_INTERVAL_SECONDS
-    stale_scan_jitter_seconds: int = _DEFAULT_MAPPING_STALE_SCAN_JITTER_SECONDS
-    initial_stale_scan_base_seconds: int = _DEFAULT_MAPPING_INITIAL_STALE_SCAN_BASE_SECONDS
-    initial_stale_scan_jitter_seconds: int = _DEFAULT_MAPPING_INITIAL_STALE_SCAN_JITTER_SECONDS
-    stale_scan_debounce_seconds: int = _DEFAULT_MAPPING_STALE_SCAN_DEBOUNCE_SECONDS
+    playable_trips_ttl_seconds: float = _DEFAULT_MAPPING_PLAYABLE_TRIPS_TTL_SECONDS
 
     def __post_init__(self) -> None:
         self.validate()
@@ -919,30 +906,16 @@ class MappingSection:
     def validate(self) -> None:
         for name, value in (
             ("db_path", self.db_path),
-            ("backup_dir", self.backup_dir),
             ("media_root", self.media_root),
         ):
             if not value.is_absolute() and not PurePosixPath(value.as_posix()).is_absolute():
                 raise ConfigError(None, f"[mapping] {name} must be absolute, got {value!r}")
-        if self.backup_retention <= 0:
-            raise ConfigError(None, "[mapping] backup_retention must be > 0")
-        if self.sample_rate <= 0:
-            raise ConfigError(None, "[mapping] sample_rate must be > 0")
         if self.trip_gap_minutes <= 0:
             raise ConfigError(None, "[mapping] trip_gap_minutes must be > 0")
-        if self.index_too_new_seconds <= 0:
-            raise ConfigError(None, "[mapping] index_too_new_seconds must be > 0")
         if self.speed_limit_mps < 0:
             raise ConfigError(None, "[mapping] speed_limit_mps must be >= 0")
-        for int_name, int_value in (
-            ("stale_scan_interval_seconds", self.stale_scan_interval_seconds),
-            ("stale_scan_jitter_seconds", self.stale_scan_jitter_seconds),
-            ("initial_stale_scan_base_seconds", self.initial_stale_scan_base_seconds),
-            ("initial_stale_scan_jitter_seconds", self.initial_stale_scan_jitter_seconds),
-            ("stale_scan_debounce_seconds", self.stale_scan_debounce_seconds),
-        ):
-            if int_value <= 0:
-                raise ConfigError(None, f"[mapping] {int_name} must be > 0")
+        if self.playable_trips_ttl_seconds <= 0:
+            raise ConfigError(None, "[mapping] playable_trips_ttl_seconds must be > 0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1182,9 +1155,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             _DEFAULT_CACHE_SCRIPT,
             source,
         ),
-        x_accel_redirect_prefix=_coerce_str(
-            paths_raw, "x_accel_redirect_prefix", "", source
-        ),
+        x_accel_redirect_prefix=_coerce_str(paths_raw, "x_accel_redirect_prefix", "", source),
     )
     features = FeaturesSection(
         music_enabled=_coerce_bool(features_raw, "music_enabled", default=False, source=source),
@@ -1744,19 +1715,7 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
             db_path=_coerce_path(
                 mapping_raw,
                 "db_path",
-                paths_section.state_dir / _DEFAULT_MAPPING_DB_NAME,
-                source,
-            ),
-            backup_retention=_coerce_int(
-                mapping_raw,
-                "backup_retention",
-                _DEFAULT_MAPPING_BACKUP_RETENTION,
-                source,
-            ),
-            backup_dir=_coerce_path(
-                mapping_raw,
-                "backup_dir",
-                paths_section.state_dir / _DEFAULT_MAPPING_BACKUP_DIRNAME,
+                _DEFAULT_MAPPING_DB_PATH,
                 source,
             ),
             media_root=_coerce_path(
@@ -1765,22 +1724,10 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 paths_section.backing_root / _MAPPING_MEDIA_SUBDIR,
                 source,
             ),
-            sample_rate=_coerce_int(
-                mapping_raw,
-                "sample_rate",
-                _DEFAULT_MAPPING_SAMPLE_RATE,
-                source,
-            ),
             trip_gap_minutes=_coerce_int(
                 mapping_raw,
                 "trip_gap_minutes",
                 _DEFAULT_MAPPING_TRIP_GAP_MINUTES,
-                source,
-            ),
-            index_too_new_seconds=_coerce_int(
-                mapping_raw,
-                "index_too_new_seconds",
-                _DEFAULT_MAPPING_INDEX_TOO_NEW_SECONDS,
                 source,
             ),
             harsh_brake_threshold=_coerce_float(
@@ -1813,34 +1760,10 @@ def _parse_config(raw: dict[str, object], source: Path | None) -> WebConfig:
                 _DEFAULT_MAPPING_SPEED_LIMIT_MPS,
                 source,
             ),
-            stale_scan_interval_seconds=_coerce_int(
+            playable_trips_ttl_seconds=_coerce_float(
                 mapping_raw,
-                "stale_scan_interval_seconds",
-                _DEFAULT_MAPPING_STALE_SCAN_INTERVAL_SECONDS,
-                source,
-            ),
-            stale_scan_jitter_seconds=_coerce_int(
-                mapping_raw,
-                "stale_scan_jitter_seconds",
-                _DEFAULT_MAPPING_STALE_SCAN_JITTER_SECONDS,
-                source,
-            ),
-            initial_stale_scan_base_seconds=_coerce_int(
-                mapping_raw,
-                "initial_stale_scan_base_seconds",
-                _DEFAULT_MAPPING_INITIAL_STALE_SCAN_BASE_SECONDS,
-                source,
-            ),
-            initial_stale_scan_jitter_seconds=_coerce_int(
-                mapping_raw,
-                "initial_stale_scan_jitter_seconds",
-                _DEFAULT_MAPPING_INITIAL_STALE_SCAN_JITTER_SECONDS,
-                source,
-            ),
-            stale_scan_debounce_seconds=_coerce_int(
-                mapping_raw,
-                "stale_scan_debounce_seconds",
-                _DEFAULT_MAPPING_STALE_SCAN_DEBOUNCE_SECONDS,
+                "playable_trips_ttl_seconds",
+                _DEFAULT_MAPPING_PLAYABLE_TRIPS_TTL_SECONDS,
                 source,
             ),
         )

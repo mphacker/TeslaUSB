@@ -1229,6 +1229,64 @@ view) instead.
 
 ---
 
+## Phase O — Materialise trips and detected_events (ADR-0019)
+
+Triggered by 2026-05-23 hardware measurement on
+`cybertruckusb.local`: the `/mapping` page took 15-35 s to first
+paint because seven parallel API calls each ran
+`MappingQueries._load_snapshot()` end-to-end (load clips + load
+waypoints + group + flatten + derive events) over the full
+archive (1369 clips, 95089 waypoints). Architecture decision in
+ADR-0019 (supersedes ADR-0017 §B): pivot back to v1's model —
+worker writes denormalised `trips`/`detected_events`/
+`clip_trip_map` tables once at index time; web layer reads them
+with small targeted SQL.
+
+| Step | Description | Status |
+|---|---|---|
+| O.0 | ADR-0019 written | ✅ |
+| O.1 | Schema v3 migration: `trips`, `detected_events`, `clip_trip_map` + indexes + ON DELETE CASCADE; v3 test | ✅ |
+| O.2 | `materializer.rs` module: trip grouping + ADR-0017 event thresholds in Rust (10 unit tests) | ✅ |
+| O.3 | `Store::rebuild_trips_now/_if_dirty`; `record_clip` sets `trips_dirty` meta flag | ✅ |
+| O.4 | Supervisor wiring: forced startup pass after bootstrap + 4th phase in cleanup tick | ✅ |
+| O.5 | `StoreError::Materializer(#[from])` for clean error propagation | ✅ |
+| O.6 | `Indexer::store_mut()` accessor; cross-build aarch64 binary | ✅ |
+| O.7a | Python `MappingQueries` snapshot cache (mtime+TTL keyed) to coalesce parallel calls | ✅ |
+| O.7b | Python rewrite: read trips/events from materialised tables instead of deriving | ⏳ |
+| O.8 | Delete `mapping_trip_derivation.py` + `mapping_event_derivation.py` (after O.7b) | ⏳ |
+| O.9 | Update web tests | ⏳ |
+| O.10 | Mark ADR-0017 §B Superseded; this PROGRESS update | ✅ (partial) |
+| O.11 | Charter-review on Phase O diff | ⏳ |
+| O.12 | Hardware deploy + verify map page < 2 s | ⏳ |
+
+**O.6/O.7a deploy verification (2026-05-23):**
+- Binary sha256 on device: `0bddcce3b455ba9ddebc831768ad822fbe831cab20bc942f955a1022bb827420`.
+- Schema migrated to v3: `trips`, `detected_events`,
+  `clip_trip_map` tables present.
+- Materialised tables empty (worker still in long bootstrap
+  re-indexing 1593 clips with many `mdat-not-found` retries —
+  startup materialise pass is queued behind bootstrap).
+- `mapping_queries.py` snapshot cache deployed on
+  `/opt/teslausb/web/`. Measured timings (sequential, after
+  restart, single sync gunicorn worker):
+  - 1st `/api/stats` (cold): 31.5 s
+  - 2nd `/api/stats` (cache hit): 6.9 s
+  - 3rd `/api/stats`: 1.3 s
+  - Cold parallel 7-API simulation: 23 s (was 15-35 s)
+- O.7a alone cannot reach v1's sub-second target because each
+  endpoint still iterates 95k waypoints / hundreds of events in
+  Python over the cached snapshot. The remaining work in O.7b
+  is to replace those iterations with SQL against the new
+  materialised tables (requires either Python-side
+  reconstruction of `description`/`video_path`/`frame_offset`,
+  or a schema extension to carry them on `detected_events`).
+
+**Open follow-ups (NOT blocking O.6/O.7a):**
+- O.7b Python rewrite still pending — biggest perf win is here.
+- Charter-review on Phase O diff (O.11).
+
+---
+
 ## Session log
 
 ### 2026-05-19 — Session start

@@ -1,6 +1,6 @@
 # ADR-0017 — Mapping uses the worker DB as the single source of truth
 
-- **Status**: Accepted
+- **Status**: Accepted (§B superseded by ADR-0019 on 2026-05-23)
 - **Date**: 2026-05-22
 - **Branch**: `b1-userspace-rust`
 - **Driver**: Operator (binding): *"I want it simple with no

@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 _TRIP_GAP_SECONDS_DEFAULT: Final[int] = 300
 _PLAYABLE_TRIPS_TTL_SECONDS: Final[float] = 60.0
+_SNAPSHOT_CACHE_TTL_SECONDS: Final[float] = 60.0
 _DEFAULT_TRIP_LIMIT: Final[int] = 50
 _DEFAULT_EVENT_LIMIT: Final[int] = 100
 _DEFAULT_DAY_LIMIT: Final[int] = 60
@@ -298,6 +299,16 @@ class _Snapshot:
     sentry_events: tuple[DerivedEvent, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _SnapshotCacheEntry:
+    """A cached snapshot keyed by the worker DB's mtime+size."""
+
+    db_mtime_ns: int
+    db_size: int
+    computed_at: float
+    snapshot: _Snapshot
+
+
 class MappingQueries:
     """Read-only query service over the Rust worker's index DB."""
 
@@ -311,6 +322,8 @@ class MappingQueries:
         del migrations_runner
         self._playable_trips_cache: dict[str, _PlayableTripsCacheEntry] = {}
         self._playable_trips_cache_lock = threading.RLock()
+        self._snapshot_cache: _SnapshotCacheEntry | None = None
+        self._snapshot_lock = threading.RLock()
 
     @contextmanager
     def open_db(self) -> Iterator[sqlite3.Connection]:
@@ -583,6 +596,41 @@ class MappingQueries:
             self._playable_trips_cache.clear()
 
     def _load_snapshot(self) -> _Snapshot:
+        mtime_ns, size = self._stat_db()
+        now = time.monotonic()
+        with self._snapshot_lock:
+            cached = self._snapshot_cache
+            if (
+                cached is not None
+                and cached.db_mtime_ns == mtime_ns
+                and cached.db_size == size
+                and (now - cached.computed_at) < _SNAPSHOT_CACHE_TTL_SECONDS
+            ):
+                return cached.snapshot
+        snapshot = self._build_snapshot()
+        with self._snapshot_lock:
+            # Re-stat under the lock so we record the mtime that was
+            # actually observed when the snapshot was built. If another
+            # caller raced ahead with a newer snapshot, keep theirs.
+            current = self._snapshot_cache
+            if current is not None and current.computed_at > now:
+                return current.snapshot
+            self._snapshot_cache = _SnapshotCacheEntry(
+                db_mtime_ns=mtime_ns,
+                db_size=size,
+                computed_at=time.monotonic(),
+                snapshot=snapshot,
+            )
+        return snapshot
+
+    def _stat_db(self) -> tuple[int, int]:
+        try:
+            stat = self._config.db_path.stat()
+        except OSError:
+            return (0, 0)
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _build_snapshot(self) -> _Snapshot:
         try:
             with self.open_db() as connection:
                 clips = load_clips(connection, require_gps=True)
@@ -607,6 +655,11 @@ class MappingQueries:
             )
         sentry_events = derive_sentry_events(sentry_clips)
         return _Snapshot(trips=tuple(materialised), sentry_events=sentry_events)
+
+    def reset_snapshot_cache_for_tests(self) -> None:
+        """Force the next `_load_snapshot` to rebuild from the DB."""
+        with self._snapshot_lock:
+            self._snapshot_cache = None
 
     def _fetch_clip_counts(self) -> _ClipCounts:
         try:

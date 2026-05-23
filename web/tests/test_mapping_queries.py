@@ -17,6 +17,7 @@ import pytest
 from teslausb_web.services.mapping_queries import (
     MappingQueries,
     MappingQueriesConfig,
+    MappingQueryError,
 )
 
 if TYPE_CHECKING:
@@ -435,3 +436,108 @@ class TestAggregates:
         clip_id, wps = q.waypoints_for_video("RecentClips/nope.mp4")
         assert clip_id is None
         assert wps == ()
+
+
+# ---------------------------------------------------------------------------
+# Error paths & extra coverage (no blueprint required)
+# ---------------------------------------------------------------------------
+
+
+class TestErrors:
+    def test_missing_db_raises_mapping_query_error(self, tmp_path: Path) -> None:
+        cfg = MappingQueriesConfig(
+            db_path=tmp_path / "does-not-exist.sqlite3",
+            media_root=tmp_path,
+        )
+        queries = MappingQueries(config=cfg)
+        with pytest.raises(MappingQueryError, match="Failed to open worker DB"):
+            queries.query_trips()
+
+    def test_make_mapping_queries_from_webconfig(self, tmp_path: Path) -> None:
+        from teslausb_web.config import (
+            MappingSection,
+            PathsSection,
+            StorageRetentionSection,
+            WebConfig,
+            WebSection,
+        )
+        from teslausb_web.services.mapping_queries import make_mapping_queries
+
+        backing = tmp_path / "backing"
+        backing.mkdir()
+        cfg = WebConfig(
+            web=WebSection(secret_key="x" * 32),
+            paths=PathsSection(
+                backing_root=backing,
+                state_dir=tmp_path / "state",
+                cache_invalidate_script=tmp_path / "invalidate.sh",
+            ),
+            storage_retention=StorageRetentionSection(
+                policy_path=tmp_path / "state" / "retention_policy.json"
+            ),
+            mapping=MappingSection(
+                db_path=tmp_path / "index.sqlite3",
+                media_root=backing,
+            ),
+            source_path=None,
+        )
+        queries = make_mapping_queries(cfg)
+        assert isinstance(queries, MappingQueries)
+
+    def test_make_mapping_queries_from_explicit_config(self, tmp_path: Path) -> None:
+        from teslausb_web.services.mapping_queries import make_mapping_queries
+
+        backing = tmp_path / "backing"
+        backing.mkdir()
+        cfg = MappingQueriesConfig(
+            db_path=tmp_path / "index.sqlite3",
+            media_root=backing,
+        )
+        queries = make_mapping_queries(cfg)
+        assert isinstance(queries, MappingQueries)
+
+
+class TestPlayableCache:
+    def test_cache_hit_returns_same_payload(self, worker_db_factory: WorkerDbFactory) -> None:
+        q = worker_db_factory([])
+        first = q.playable_trips_for_date("2024-06-01")
+        second = q.playable_trips_for_date("2024-06-01")
+        # Cache hit returns the exact same tuple instance.
+        assert first is second
+
+    def test_cache_trims_when_oversized(self, worker_db_factory: WorkerDbFactory) -> None:
+        q = worker_db_factory([])
+        # 65 distinct dates pushes the cache past _MAX_PLAYABLE_CACHE_ENTRIES (64).
+        for day in range(1, 32):
+            q.playable_trips_for_date(f"2024-01-{day:02d}")
+        for day in range(1, 35):
+            q.playable_trips_for_date(f"2024-02-{day:02d}")
+        # After trimming, the internal map must be <= 64 entries.
+        assert len(q._playable_trips_cache) <= 64  # whitebox check
+
+
+class TestSimplifiedRoutes:
+    def test_all_routes_caps_dense_trip(self, worker_db_factory: WorkerDbFactory) -> None:
+        base = _epoch(2024, 7, 1, 8)
+        waypoints = [
+            {
+                "lat": 37.0 + i * 0.0005,
+                "lon": -122.0 + i * 0.0005,
+                "speed_mps": 15.0,
+                "timestamp_ms": i * 1000.0,
+            }
+            for i in range(60)
+        ]
+        q = worker_db_factory(
+            [
+                {
+                    "relative_path": "RecentClips/dense-front.mp4",
+                    "bucket": "recent",
+                    "clip_started_utc": base,
+                    "waypoints": waypoints,
+                }
+            ]
+        )
+        trips = q.query_all_routes_simplified(max_points_per_trip=10)
+        assert len(trips) == 1
+        assert len(trips[0].waypoints) <= 10

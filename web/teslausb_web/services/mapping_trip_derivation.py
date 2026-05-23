@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Sequence
 
 _BUCKET_TO_FOLDER: Final[dict[str, str]] = {
     "recent": "RecentClips",
@@ -189,7 +189,7 @@ def group_trips(clips: Sequence[WorkerClip], gap_seconds: int) -> tuple[TripGrou
     if not clips:
         return ()
     trips: list[list[WorkerClip]] = [[clips[0]]]
-    for previous, current in _consecutive_pairs(clips):
+    for previous, current in pairwise(clips):
         if current.clip_started_utc - previous.clip_started_utc > gap_seconds:
             trips.append([current])
         else:
@@ -227,7 +227,7 @@ def compute_trip_metrics(waypoints: Sequence[AbsoluteWaypoint]) -> TripMetrics:
     start_epoch = waypoints[0].abs_epoch
     end_epoch = waypoints[-1].abs_epoch
     distance = 0.0
-    for previous, current in _consecutive_pairs(waypoints):
+    for previous, current in pairwise(waypoints):
         distance += haversine_km(
             previous.waypoint.latitude_deg,
             previous.waypoint.longitude_deg,
@@ -351,10 +351,6 @@ def _distance_sq_to_segment(
         return (px - x1) ** 2 + (py - y1) ** 2
     numerator = dy * px - dx * py + x2 * y1 - y2 * x1
     return (numerator * numerator) / denom
-
-
-def _consecutive_pairs(items: Sequence[object]) -> Iterable[tuple[object, object]]:
-    return pairwise(items)
 
 
 def _clip_from_row(row: sqlite3.Row) -> WorkerClip:

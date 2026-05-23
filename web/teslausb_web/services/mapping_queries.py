@@ -19,8 +19,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 from teslausb_web.services.mapping_event_derivation import (
-    EVENT_AUTOPILOT_DISENGAGED,
-    EVENT_AUTOPILOT_ENGAGED,
     EVENT_SENTRY,
     SEVERITY_CRITICAL,
     SEVERITY_WARNING,
@@ -33,8 +31,6 @@ from teslausb_web.services.mapping_trip_derivation import (
     AbsoluteWaypoint,
     TripGroup,
     TripMetrics,
-    WorkerClip,
-    WorkerWaypoint,
     bucket_to_folder,
     cap_indices_uniform,
     compute_trip_metrics,
@@ -1138,22 +1134,6 @@ def _events_per_100km(event_count: int, distance_km: float) -> float:
     if distance_km <= 0:
         return 0.0
     return event_count / distance_km * 100.0
-
-
-# Re-export private types for the tests to construct fixtures without
-# touching SQL directly. These are not part of the stable surface.
-_INTERNAL_TYPES: Final[tuple[type, ...]] = (
-    AbsoluteWaypoint,
-    DerivedEvent,
-    TripGroup,
-    TripMetrics,
-    WorkerClip,
-    WorkerWaypoint,
-)
-
-# Keep import-or-prune happy.
-_ = EVENT_AUTOPILOT_DISENGAGED
-_ = EVENT_AUTOPILOT_ENGAGED
 
 
 __all__ = (

@@ -1176,13 +1176,56 @@ ADR-0018 (supersedes ADR-0012).
 | N.6 | Tests cover 256/257 GiB overflow scenario + `lun_size_bytes=0` no-op path | ✅ |
 | N.7 | ADR-0018 written | ✅ |
 | N.8 | Charter-review on full N.* diff | ⏳ |
-| N.9 | Hardware deploy + verify post-fix `cleanup_sweep` log shows real LUN-fill | ⏳ |
+| N.9 | Hardware deploy + verify post-fix `cleanup_sweep` log shows real LUN-fill | ✅ |
+| N.10 | Supervisor `select!` tick-priority fix (chatty inotify was starving cleanup) | ✅ |
 
 **Pre-existing test fix folded into N.1:**
 - `config::tests::example_worker_toml_parses_and_validates`
   asserted `backing_root == /srv/teslausb` but the shipped
   `examples/worker.toml` says `/srv/teslausb/teslacam` (production
   value). Updated the assertion to match the example.
+
+**N.10 — supervisor tick-priority fix (live-discovered):**
+During N.9 hardware verification, the freshly-deployed worker
+never produced a cleanup-tick log line on the device. Root
+cause: the steady-state `tokio::select!` is `biased` and had
+`rx.recv()` (watcher events) listed BEFORE `tick.tick()`. With
+Tesla actively recording and the inotify channel receiving
+~1 CLOSE_WRITE every 1-5 s, the tick arm was perpetually
+starved — observed for 11+ minutes while LUN was at 102% fill
+on cybertruckusb.local. Fix: reorder the select arms so
+`tick.tick()` is polled BEFORE `rx.recv()`. The mpsc channel
+buffers any queued watcher events for the next iteration — no
+events lost. Verified on hardware: after the fix-deploy +
+reboot recovered the LUN to 24% fill, the next tick fired at
+the requested 5-minute cadence and reported `initial_free_pct
+= 75.81%` (the correct LUN-aware reading, matching `(256 - 61)
+/ 256`). The old statvfs path would have read ~38% (SD-card
+view) instead.
+
+**N.9 verification log:**
+- Pre-deploy LUN: 262 GiB / 256 GiB cap (102% — the bug).
+- Reboot during deploy (dead-man fired during long sleep, not
+  caused by the deploy itself) shrank the LUN to 61 GiB via
+  teslafat fsck.
+- Post-deploy first tick (15:31:41 EDT 2026-05-23) logged:
+  `cleanup pass complete pressure=false`,
+  `gc_orphans tick complete scanned=1369 removed=0`,
+  `cleanup_sweep tick complete initial_free_pct=75.81
+   target_pct=5.0 target_reached=true`.
+- Binary sha256 on device: `fb7980353d7136367c50bd2f73eec4a10ceb256eec47521428acae7792c4995d`.
+
+**Open follow-ups (NOT blocking Phase N):**
+- During post-reboot bootstrap the indexer logged `sqlite
+  error: attempt to write a readonly database` for several
+  clips. The DB file recovered on its own (subsequent ticks
+  succeed), but this should be investigated as a separate
+  bug — possibly SQLite WAL recovery interacting with the
+  worker user's permissions or with a stale `-wal` file
+  after the unclean reboot.
+- A large RecentClips backlog of "MP4 box 'mdat' not found"
+  errors suggests a class of partial/truncated clips that
+  the indexer keeps retrying. Tracking under a future task.
 
 ---
 

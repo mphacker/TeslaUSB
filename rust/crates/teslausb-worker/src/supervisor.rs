@@ -259,15 +259,15 @@ async fn steady_state_linux(
             biased;
             _ = sigterm.recv() => break ShutdownReason::Sigterm,
             _ = sigint.recv()  => break ShutdownReason::Sigint,
-            maybe_event = rx.recv() => {
-                let Some(event) = maybe_event else {
-                    error!("watcher channel closed unexpectedly");
-                    break ShutdownReason::WatcherFailed;
-                };
-                if let Err(e) = indexer.handle_event(&event) {
-                    warn!(error = %e, "indexer.handle_event failed (per-clip; not fatal)");
-                }
-            }
+            // Cleanup tick is polled BEFORE watcher events so a
+            // chatty inotify stream (one CLOSE_WRITE per camera per
+            // minute = ~5/min sustained) can never starve the
+            // periodic cleanup. The mpsc channel buffers any
+            // queued events for the next loop iteration; no events
+            // are lost. Without this priority a continuously-busy
+            // Tesla can lock out cleanup indefinitely — observed
+            // on cybertruckusb.local 2026-05-23 (no tick fired in
+            // 11+ min while LUN was at 102% fill).
             _ = tick.tick() => {
                 // Three-phase cleanup tick (intentionally additive):
                 //   1. `cleanup.run_once` — age-based RecentClips
@@ -366,6 +366,15 @@ async fn steady_state_linux(
                         "cleanup_sweep tick complete",
                     ),
                     Err(e) => warn!(error = %e, "cleanup_sweep tick failed (non-fatal)"),
+                }
+            }
+            maybe_event = rx.recv() => {
+                let Some(event) = maybe_event else {
+                    error!("watcher channel closed unexpectedly");
+                    break ShutdownReason::WatcherFailed;
+                };
+                if let Err(e) = indexer.handle_event(&event) {
+                    warn!(error = %e, "indexer.handle_event failed (per-clip; not fatal)");
                 }
             }
         }

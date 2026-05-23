@@ -175,6 +175,10 @@ impl Store {
     /// waypoints are deleted and replaced — re-indexing a
     /// clip is idempotent.
     ///
+    /// Sets the `trips_dirty` meta flag at the end of the
+    /// transaction so the supervisor's next materialise tick
+    /// rebuilds the derived `trips` / `detected_events` rows.
+    ///
     /// # Errors
     ///
     /// Returns `Err` on any SQLite error, on a timestamp that
@@ -256,6 +260,10 @@ impl Store {
             }
         }
         tx.commit()?;
+        // Out-of-transaction UPSERT into meta is fine: it's a
+        // best-effort hint to the supervisor; missing it would
+        // only delay the next rebuild by one tick.
+        crate::materializer::mark_trips_dirty(&self.conn)?;
         Ok(clip_id)
     }
 
@@ -425,5 +433,37 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM waypoints", [], |r| r.get(0))?;
         u64::try_from(n)
             .map_err(|_| StoreError::SchemaCorrupt(format!("negative waypoint count: {n}")))
+    }
+
+    /// Run the trip+event materialiser if the `trips_dirty`
+    /// flag is set. No-op when the flag is clear, so callers
+    /// can drive this from a periodic tick without paying for
+    /// repeated rebuilds.
+    ///
+    /// Returns `Some(stats)` when a rebuild ran, `None`
+    /// otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on any SQLite error during the rebuild.
+    pub fn rebuild_trips_if_dirty(&mut self) -> Result<Option<crate::materializer::RebuildStats>> {
+        if !crate::materializer::trips_dirty(&self.conn)? {
+            return Ok(None);
+        }
+        let stats = crate::materializer::Materializer::default().rebuild_all(&mut self.conn)?;
+        Ok(Some(stats))
+    }
+
+    /// Force a trip+event rebuild regardless of the dirty
+    /// flag. Used by the supervisor's startup backfill so the
+    /// first deploy after schema-v3 migration always lands
+    /// derived rows before the web layer reads them.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on any SQLite error during the rebuild.
+    pub fn rebuild_trips_now(&mut self) -> Result<crate::materializer::RebuildStats> {
+        let stats = crate::materializer::Materializer::default().rebuild_all(&mut self.conn)?;
+        Ok(stats)
     }
 }

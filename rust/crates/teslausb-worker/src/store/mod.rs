@@ -58,3 +58,14 @@ pub use bucket::Bucket;
 pub use schema::CURRENT_SCHEMA_VERSION;
 pub use store_impl::Store;
 pub use types::{ClipRecord, Result, StoreError};
+
+/// Test-only accessor for the ordered migration list. Lets
+/// sibling modules (the materialiser tests) stand up a raw
+/// `rusqlite::Connection` that mirrors the schema the [`Store`]
+/// would produce. Crate-private and behind `cfg(test)` so it
+/// cannot leak into production callers that should be using
+/// the `Store` API.
+#[cfg(test)]
+pub(crate) fn migrations_for_tests() -> &'static [&'static str] {
+    schema::MIGRATIONS
+}

@@ -86,8 +86,66 @@ ALTER TABLE waypoints_v2 RENAME TO waypoints;
 CREATE INDEX waypoints_by_clip ON waypoints(clip_id);
 CREATE INDEX waypoints_by_clip_frame ON waypoints(clip_id, frame_index);
 ",
+    // v2 -> v3: materialise trips + detected_events (ADR-0019).
+    //
+    // Adds the derived tables the mapping layer used to
+    // recompute in Python on every web request. The worker
+    // now writes them once at index time and the web layer
+    // runs small targeted SQL — matching v1's proven model.
+    //
+    // The CREATE TABLE / CREATE INDEX statements below leave
+    // the new tables empty. A one-shot backfill job
+    // (Indexer::backfill_trips_and_events) populates them on
+    // first startup after the migration; the same code path
+    // also handles incremental updates as new clips arrive.
+    //
+    // ON DELETE CASCADE on trip_id keeps detected_events and
+    // clip_trip_map consistent when the cleanup task evicts
+    // a clip — no stale derived rows can leak.
+    "\
+CREATE TABLE trips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    start_utc INTEGER NOT NULL,
+    end_utc INTEGER NOT NULL,
+    start_clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    end_clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    start_lat REAL,
+    start_lon REAL,
+    end_lat REAL,
+    end_lon REAL,
+    distance_km REAL NOT NULL DEFAULT 0,
+    duration_seconds INTEGER NOT NULL DEFAULT 0,
+    waypoint_count INTEGER NOT NULL DEFAULT 0,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    video_count INTEGER NOT NULL DEFAULT 0,
+    bucket TEXT NOT NULL DEFAULT 'recent'
+);
+CREATE INDEX trips_by_start_utc ON trips(start_utc DESC);
+CREATE INDEX trips_by_end_utc ON trips(end_utc DESC);
+CREATE TABLE detected_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id INTEGER REFERENCES trips(id) ON DELETE CASCADE,
+    clip_id INTEGER REFERENCES clips(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    timestamp_utc INTEGER NOT NULL,
+    latitude_deg REAL,
+    longitude_deg REAL,
+    speed_mps REAL,
+    metadata_json TEXT
+);
+CREATE INDEX events_by_trip ON detected_events(trip_id);
+CREATE INDEX events_by_type_ts ON detected_events(event_type, timestamp_utc DESC);
+CREATE INDEX events_by_severity_ts ON detected_events(severity, timestamp_utc DESC);
+CREATE INDEX events_by_ts ON detected_events(timestamp_utc DESC);
+CREATE TABLE clip_trip_map (
+    clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+    trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE
+);
+CREATE INDEX clip_trip_map_by_trip ON clip_trip_map(trip_id);
+",
 ];
 
 /// Current schema version. Bump when appending to the
 /// `MIGRATIONS` constant.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;

@@ -37,6 +37,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use tracing::warn;
+#[cfg(not(target_os = "linux"))]
+#[allow(unused_imports)]
+use tracing::warn;
 use tracing::{error, info};
 
 use crate::cleanup::Cleanup;
@@ -205,6 +208,36 @@ pub async fn run(opts: RunOptions) -> Result<ShutdownReason> {
         return Ok(ShutdownReason::BootstrapOnly);
     }
 
+    // Phase O — startup materialise pass. If the bootstrap
+    // pass freshly indexed clips (or the v2 → v3 migration
+    // just landed against a populated DB), the derived
+    // `trips` / `detected_events` tables are stale or empty.
+    // Force one rebuild before the watcher starts so the web
+    // layer never races against an empty derived view on
+    // first paint. Subsequent updates flow through the
+    // dirty-flag tick inside the cleanup loop.
+    {
+        let (indexer_back, rebuild_outcome) = tokio::task::spawn_blocking(move || {
+            let mut idx = indexer;
+            let stats = idx.store_mut().rebuild_trips_now();
+            (idx, stats)
+        })
+        .await
+        .context("startup materialise task panicked")?;
+        indexer = indexer_back;
+        match rebuild_outcome {
+            Ok(stats) => info!(
+                clips_seen = stats.clips_seen,
+                trips_written = stats.trips_written,
+                events_written = stats.events_written,
+                trips_skipped_short = stats.trips_skipped_short,
+                "startup materialise complete",
+            ),
+            Err(e) => warn!(error = %e,
+                "startup materialise failed; web map may be empty until next tick"),
+        }
+    }
+
     let cfg_for_cleanup = config.clone();
     let interval = cleanup_interval_with_floor(config.cleanup.interval());
     let cleanup = Cleanup::new(cfg_for_cleanup);
@@ -366,6 +399,24 @@ async fn steady_state_linux(
                         "cleanup_sweep tick complete",
                     ),
                     Err(e) => warn!(error = %e, "cleanup_sweep tick failed (non-fatal)"),
+                }
+                // Phase O — materialise tick. Rebuilds
+                // `trips` / `detected_events` from the current
+                // clips/waypoints whenever a clip insert has
+                // set the dirty flag. No-op when the flag is
+                // clear, so we don't pay the rebuild cost on
+                // idle ticks.
+                match indexer.store_mut().rebuild_trips_if_dirty() {
+                    Ok(None) => {}
+                    Ok(Some(stats)) => info!(
+                        clips_seen = stats.clips_seen,
+                        trips_written = stats.trips_written,
+                        events_written = stats.events_written,
+                        trips_skipped_short = stats.trips_skipped_short,
+                        "materialise tick rebuilt trips",
+                    ),
+                    Err(e) => warn!(error = %e,
+                        "materialise tick failed (non-fatal; will retry next tick)"),
                 }
             }
             maybe_event = rx.recv() => {

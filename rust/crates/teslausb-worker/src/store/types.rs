@@ -78,6 +78,11 @@ pub enum StoreError {
     /// Unix epoch, which Tesla footage never produces.
     #[error("timestamp {0:?} is before the Unix epoch")]
     TimestampUnderflow(SystemTime),
+    /// Error from the trip+event materialiser. Wrapped so the
+    /// indexer / supervisor can propagate a single `StoreError`
+    /// instead of forking error types per layer.
+    #[error("materializer error: {0}")]
+    Materializer(#[from] crate::materializer::MaterializerError),
 }
 
 /// Result alias for store operations.

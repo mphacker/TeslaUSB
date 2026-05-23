@@ -649,3 +649,62 @@ fn migration_from_v1_preserves_existing_waypoints() {
         .unwrap();
     assert_eq!(n, 2);
 }
+
+#[test]
+fn migration_v3_creates_trips_events_and_clip_trip_map() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    for table in ["trips", "detected_events", "clip_trip_map"] {
+        let n: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1",
+                params![table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "expected table {table} after v3 migration");
+    }
+    for index in [
+        "trips_by_start_utc",
+        "events_by_trip",
+        "events_by_type_ts",
+        "clip_trip_map_by_trip",
+    ] {
+        let n: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                params![index],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "expected index {index} after v3 migration");
+    }
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO clips (relative_path, bucket, indexed_at_utc)
+                VALUES ('a.mp4', 'recent', 100);
+             INSERT INTO trips (start_utc, end_utc, start_clip_id, end_clip_id)
+                VALUES (100, 200, 1, 1);
+             INSERT INTO clip_trip_map (clip_id, trip_id) VALUES (1, 1);
+             INSERT INTO detected_events
+                (trip_id, clip_id, event_type, severity, timestamp_utc)
+                VALUES (1, 1, 'harsh-brake', 'warning', 150);",
+        )
+        .unwrap();
+    store
+        .conn
+        .execute("DELETE FROM clips WHERE id = 1", [])
+        .unwrap();
+    for tbl in ["clip_trip_map", "trips", "detected_events"] {
+        let n: i64 = store
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM {tbl}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "clip delete should cascade {tbl}");
+    }
+}

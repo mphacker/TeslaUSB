@@ -215,6 +215,15 @@ impl Indexer {
         &self.store
     }
 
+    /// Mutable borrow of the inner store. Used by the
+    /// supervisor's materialise tick which needs `&mut Store`
+    /// to run [`Store::rebuild_trips_if_dirty`] inside a write
+    /// transaction.
+    #[must_use]
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
     /// `WatchKind`s are recorded only for log clarity; this
     /// helper lets the supervisor surface them in startup
     /// logs without leaking the enum.

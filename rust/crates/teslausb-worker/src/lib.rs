@@ -28,6 +28,7 @@ pub mod cleanup_sweep;
 pub mod config;
 pub mod indexer;
 pub mod lun_pressure;
+pub mod materializer;
 pub mod sei;
 pub mod storage_config;
 pub mod store;

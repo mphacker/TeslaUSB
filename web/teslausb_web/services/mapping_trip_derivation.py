@@ -384,7 +384,9 @@ def _waypoint_from_row(row: sqlite3.Row) -> WorkerWaypoint:
 def _optional_float(value: object) -> float | None:
     if value is None:
         return None
-    return float(value)  # type: ignore[arg-type]
+    if isinstance(value, (int, float)):
+        return float(value)
+    raise TypeError(f"expected numeric SQLite column, got {type(value).__name__}")
 
 
 def _optional_str(value: object) -> str | None:

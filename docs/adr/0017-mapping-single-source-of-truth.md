@@ -202,6 +202,52 @@ purpose.
 - M.14: charter-review skill on the full Phase M diff.
 - M.15: per-increment commits to `b1-userspace-rust`.
 
+## Known charter exceptions (granted by this ADR)
+
+### `services/mapping_queries.py` at ~1,000 LOC
+
+Charter §1 caps modules at 500 LOC (target ≤ 300). The rewritten
+`mapping_queries.py` lands at ~1,000 LOC (was 1,161 before M.5b
+dead-code removal).
+
+**Why this exception is granted:**
+The module is the public read surface for the mapping subsystem.
+It owns ~18 dataclass definitions (the contract with the
+blueprint, analytics, and jobs adapters), a small set of
+`MappingQueries` methods, and the SQL/decoding helpers that
+materialise rows into those dataclasses. Splitting this would
+either (a) scatter the dataclass-and-its-decoder across multiple
+modules — making the contract harder to read in one place — or
+(b) create a "types" file with no behaviour, which is itself an
+anti-pattern (charter pillar 2: "SRP — `utils`/`types` modules
+without a real responsibility are a smell").
+
+The behaviour-heavy logic that COULD be split has already moved
+to siblings:
+- Trip derivation → `mapping_trip_derivation.py` (414 LOC)
+- Event derivation → `mapping_event_derivation.py` (255 LOC)
+
+What remains in `mapping_queries.py` is mostly declarative:
+dataclass schemas, SQL string constants, row-to-dataclass
+decoders, the public `MappingQueries` orchestration class, and
+the cache.
+
+**Follow-up (non-blocking):** A future increment may extract the
+~600 LOC of dataclass + decoder code into
+`mapping_queries_types.py` once the public API stabilises and we
+have a clearer picture of which dataclasses third-party consumers
+(analytics, jobs) actually use. Tracked as a charter-debt item;
+not a Phase M blocker.
+
+### `playable_trips_ttl_seconds` not wired through `WebConfig`
+
+`make_mapping_queries(cfg: WebConfig)` ignores
+`cfg.mapping.playable_trips_ttl_seconds` and uses the
+module-level default. Caught during M.5b coverage work. Not
+fixed in Phase M because the config field exists but no operator
+override has been requested. Follow-up: thread the value through
+`MappingQueriesConfig` if/when operator wants to tune it.
+
 ## References
 
 - Operator directive on duplication: 2026-05-22 session,

@@ -82,3 +82,5 @@ dist/
 .tox/
 rust/teslafat-out
 
+
+rust/target-aarch64-out/

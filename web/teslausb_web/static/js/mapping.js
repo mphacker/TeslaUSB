@@ -1,5 +1,4 @@
 import { createEventsPanel } from "./mapping/events_panel.js";
-import { createIndexerPanel } from "./mapping/indexer_panel.js";
 import { createMapRenderer } from "./mapping/map_renderer.js";
 import { createSentryInspector } from "./mapping/sentry_inspector.js";
 
@@ -202,30 +201,8 @@ const sentryInspector = createSentryInspector({
     notify,
 });
 
-const indexerPanel = createIndexerPanel({
-    statusLabel: document.getElementById("mappingIndexStatusLabel"),
-    statusPill: document.getElementById("mappingIndexStatusPill"),
-    statusText: document.getElementById("mappingIndexStatusText"),
-    metaContainer: document.getElementById("mappingIndexMeta"),
-    diagnoseOutput: document.getElementById("mappingDiagnoseOutput"),
-    triggerButton: document.getElementById("mappingIndexTriggerButton"),
-    rebuildButton: document.getElementById("mappingIndexRebuildButton"),
-    cancelButton: document.getElementById("mappingIndexCancelButton"),
-    diagnoseButton: document.getElementById("mappingDiagnoseButton"),
-    api: bootstrap.api,
-    fetchJson,
-    notify,
-    onRefresh: async () => {
-        await Promise.all([loadDays(), loadStats()]);
-        if (state.showingAllRoutes) {
-            await loadAllRoutes();
-            return;
-        }
-        if (state.currentDate) {
-            await loadDay(state.currentDate, state.currentTripId || undefined);
-        }
-    },
-});
+// Indexer panel removed in M.6 (ADR-0017): the Rust worker indexes
+// continuously, so there is no queue/button surface to bind here.
 
 function setEnabledTypes(events) {
     const available = new Set(events.map((event) => event.event_type || "unknown"));
@@ -402,5 +379,3 @@ Promise.all([loadStats(), loadSentryEvents(), loadDays()])
         notify(error.message, "warning");
         mapRenderer.clear();
     });
-
-indexerPanel.start();

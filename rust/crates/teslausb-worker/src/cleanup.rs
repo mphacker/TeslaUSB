@@ -38,6 +38,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
+use crate::lun_pressure::{lun_free_pct, lun_used_bytes};
 use crate::store::{Bucket, ClipRecord, Store, StoreError};
 
 /// Errors emitted by the cleanup worker. Per-clip filesystem
@@ -49,10 +50,13 @@ pub enum CleanupError {
     /// Underlying store error.
     #[error("store error: {0}")]
     Store(#[from] StoreError),
-    /// `statvfs` failed when measuring free-space pressure.
-    #[error("statvfs({path:?}) failed: {source}")]
-    Statvfs {
-        /// Path we tried to stat.
+    /// Recursive walk of `backing_root` failed when measuring
+    /// LUN-fill pressure. Per-entry errors are logged and
+    /// skipped; only an initial `read_dir` failure on
+    /// `backing_root` itself surfaces here.
+    #[error("lun_used_bytes({path:?}) failed: {source}")]
+    LunWalk {
+        /// Path we tried to walk.
         path: PathBuf,
         /// Underlying I/O error.
         #[source]
@@ -103,19 +107,25 @@ impl Cleanup {
     /// repeatedly on an interval (the supervisor does this
     /// every `config.cleanup.interval_seconds`).
     ///
+    /// `lun_size_bytes` is the LUN-visible capacity (from
+    /// `storage_config.storage.teslacam_gb * 1 GiB`) used to
+    /// gate the free-space-pressure floor. Pass `0` to disable
+    /// pressure detection entirely (the configured
+    /// `min_free_pct = 0` floor also disables it).
+    ///
     /// # Errors
     ///
     /// Returns `Err` only on a store error or a fatal clock
-    /// / `statvfs` failure. Per-clip unlink failures count
+    /// / LUN-walk failure. Per-clip unlink failures count
     /// toward `failed` in the summary but do NOT abort the
     /// pass.
-    pub fn run_once(&self, store: &Store) -> Result<CleanupSummary> {
+    pub fn run_once(&self, store: &Store, lun_size_bytes: u64) -> Result<CleanupSummary> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_err(|_| CleanupError::ClockBeforeEpoch)?
             .as_secs();
         let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
-        let pressure = self.measure_pressure()?;
+        let pressure = self.measure_pressure(lun_size_bytes)?;
         let cutoff = self.effective_cutoff(now_i64, pressure);
         self.run_once_with(store, cutoff, pressure)
     }
@@ -287,15 +297,20 @@ impl Cleanup {
         Some(self.config.backing_root.join(relative))
     }
 
-    fn measure_pressure(&self) -> Result<bool> {
-        if self.config.cleanup.min_free_pct == 0 {
-            // Floor disabled.
+    fn measure_pressure(&self, lun_size_bytes: u64) -> Result<bool> {
+        if self.config.cleanup.min_free_pct == 0 || lun_size_bytes == 0 {
+            // Floor disabled (operator opt-out or supervisor
+            // could not load the storage config). The cleanup
+            // pass still runs — it just falls back to pure
+            // age-based retention with no pressure broadening.
             return Ok(false);
         }
-        let free_pct = free_pct(&self.config.backing_root).map_err(|e| CleanupError::Statvfs {
-            path: self.config.backing_root.clone(),
-            source: e,
-        })?;
+        let used =
+            lun_used_bytes(&self.config.backing_root).map_err(|e| CleanupError::LunWalk {
+                path: self.config.backing_root.clone(),
+                source: e,
+            })?;
+        let free_pct = lun_free_pct(used, lun_size_bytes);
         Ok(free_pct < f64::from(self.config.cleanup.min_free_pct))
     }
 
@@ -427,34 +442,15 @@ enum DeleteError {
     UnsafePath { path: PathBuf },
 }
 
-/// Free-space percent of the volume containing `path`.
+/// Free-space percent of the LUN containing `backing_root` —
+/// REMOVED in favour of [`crate::lun_pressure::lun_free_pct`].
 ///
-/// Linux uses `statvfs(3)` via `rustix` (no `unsafe`); on
-/// non-Linux hosts the function returns `100.0` so the
-/// dev-workstation test suite never sees synthetic free-space
-/// pressure.
-#[cfg(target_os = "linux")]
-// Filesystem block counts fit comfortably in an `f64` mantissa
-// (53 bits). For a 1 PB volume with 4 KiB blocks `f_blocks` is
-// ~2^38, four orders of magnitude below the precision threshold;
-// the resulting `free / total` ratio is exact to ~15 digits.
-#[allow(clippy::cast_precision_loss)]
-fn free_pct(path: &Path) -> std::io::Result<f64> {
-    let stat = rustix::fs::statvfs(path).map_err(std::io::Error::from)?;
-    let total = stat.f_blocks as f64 * stat.f_frsize as f64;
-    let free = stat.f_bavail as f64 * stat.f_frsize as f64;
-    if total <= 0.0 {
-        return Ok(100.0);
-    }
-    Ok((free / total) * 100.0)
-}
-
-#[cfg(not(target_os = "linux"))]
-#[allow(clippy::unnecessary_wraps)] // unified signature with Linux variant
-fn free_pct(_path: &Path) -> std::io::Result<f64> {
-    Ok(100.0)
-}
-
+/// The historical implementation called `statvfs(backing_root)`
+/// which measures the HOST filesystem's free space, not the
+/// LUN-visible fill level. That bug caused the 2026-05-23
+/// outage on cybertruckusb.local (266 GiB backing tree on a
+/// 256 GiB LUN, while statvfs reported 176 GB free). See
+/// ADR-0018.
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -793,7 +789,7 @@ mod tests {
         let c = cfg(dir.path(), true);
         let store = Store::open_in_memory().unwrap();
         let cleanup = Cleanup::new(c);
-        let s = cleanup.run_once(&store).unwrap();
+        let s = cleanup.run_once(&store, 0).unwrap();
         assert_eq!(s, CleanupSummary::default());
     }
 
@@ -867,16 +863,59 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn free_pct_real_statvfs_returns_sane_percent() {
-        // Exercises the rustix::fs::statvfs path on Linux only.
-        // The dev workstation skips this; the Pi (and any
-        // Linux CI runner) runs it.
+    fn measure_pressure_returns_false_when_floor_disabled() {
+        // Floor disabled by config (`min_free_pct = 0`) — the
+        // function must short-circuit without walking the
+        // backing tree.
         let dir = tempfile::tempdir().unwrap();
-        let pct = super::free_pct(dir.path()).unwrap();
-        assert!(
-            (0.0..=100.0).contains(&pct),
-            "free_pct returned out-of-range value: {pct}",
-        );
+        let mut c = cfg(dir.path(), true);
+        c.cleanup.min_free_pct = 0;
+        let cleanup = Cleanup::new(c);
+        // 256 GiB LUN — would otherwise trigger pressure if
+        // we ignored the floor=0 short-circuit.
+        let pressure = cleanup.measure_pressure(256u64 * (1 << 30)).unwrap();
+        assert!(!pressure);
+    }
+
+    #[test]
+    fn measure_pressure_returns_false_when_lun_size_zero() {
+        // Caller could not load storage_config (file absent,
+        // parse error). We must fail-open rather than crash
+        // the supervisor.
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path(), true);
+        c.cleanup.min_free_pct = 10;
+        let cleanup = Cleanup::new(c);
+        let pressure = cleanup.measure_pressure(0).unwrap();
+        assert!(!pressure);
+    }
+
+    #[test]
+    fn measure_pressure_triggers_when_backing_tree_overflows_lun() {
+        // Reproduces the 2026-05-23 outage shape: backing tree
+        // bytes >= LUN size. `min_free_pct = 10`, LUN sized so
+        // the synthetic 4 KiB file alone fills it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path(), true);
+        c.cleanup.min_free_pct = 10;
+        // Write 4 KiB of payload.
+        std::fs::write(dir.path().join("clip.mp4"), vec![0u8; 4096]).unwrap();
+        let cleanup = Cleanup::new(c);
+        // LUN sized to exactly the payload → 0% free → < 10%.
+        let pressure = cleanup.measure_pressure(4096).unwrap();
+        assert!(pressure);
+    }
+
+    #[test]
+    fn measure_pressure_quiet_when_backing_tree_well_under_lun() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path(), true);
+        c.cleanup.min_free_pct = 10;
+        std::fs::write(dir.path().join("clip.mp4"), vec![0u8; 4096]).unwrap();
+        let cleanup = Cleanup::new(c);
+        // 1 GiB LUN with 4 KiB used → ~100% free.
+        let pressure = cleanup.measure_pressure(1u64 << 30).unwrap();
+        assert!(!pressure);
     }
 
     // ------------------------------------------------------------------

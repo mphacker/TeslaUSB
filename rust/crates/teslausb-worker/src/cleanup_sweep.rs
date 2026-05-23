@@ -47,6 +47,7 @@ use std::time::SystemTime;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use crate::lun_pressure::{lun_free_pct, lun_used_bytes};
 use crate::storage_config::{StorageConfig, TARGET_FREE_PCT_MAX};
 use crate::store::{Bucket, ClipRecord, Store, StoreError};
 
@@ -62,9 +63,10 @@ pub const AUTO_TUNE_FALLBACK_PCT: f64 = 5.0;
 /// stat-storming the filesystem on every sweep.
 const AUTO_TUNE_SAMPLE_SIZE: usize = 50;
 
-/// How often (in deletions) the sweep re-checks free space.
-/// statvfs is cheap but not free; recomputing every 5 deletes
-/// keeps the loop responsive without thrashing.
+/// How often (in deletions) the sweep re-checks LUN-fill.
+/// Walking the backing tree to recompute `lun_used_bytes` is
+/// non-trivial on the Pi; rechecking every 5 deletes keeps the
+/// loop responsive without thrashing.
 const FREE_RECHECK_INTERVAL: u32 = 5;
 
 /// Cleanup priority tier. Lower variants are deleted first.
@@ -90,9 +92,7 @@ pub enum CleanupTier {
 pub fn classify_clip(clip: &ClipRecord, preserve_with_gps: bool) -> CleanupTier {
     match clip.bucket {
         Bucket::Recent => {
-            if preserve_with_gps
-                && (clip.waypoint_count > 0 || clip.gps_waypoint_count > 0)
-            {
+            if preserve_with_gps && (clip.waypoint_count > 0 || clip.gps_waypoint_count > 0) {
                 CleanupTier::B
             } else {
                 CleanupTier::A
@@ -110,10 +110,13 @@ pub enum SweepError {
     /// Store-level error (e.g. SQLite locked, schema mismatch).
     #[error("store error: {0}")]
     Store(#[from] StoreError),
-    /// `statvfs` failed when measuring free-space.
-    #[error("statvfs({path:?}) failed: {source}")]
-    Statvfs {
-        /// Path we tried to stat.
+    /// Recursive walk of `backing_root` failed when measuring
+    /// LUN-fill. Per-entry errors are logged and skipped; only
+    /// an initial `read_dir` failure on `backing_root` itself
+    /// surfaces here.
+    #[error("lun_used_bytes({path:?}) failed: {source}")]
+    LunWalk {
+        /// Path we tried to walk.
         path: PathBuf,
         /// Underlying I/O error.
         #[source]
@@ -168,23 +171,36 @@ impl SweepSummary {
 /// `storage_config.cleanup.target_free_pct`.
 ///
 /// * `backing_root` — the directory under which RecentClips /
-///   SavedClips / SentryClips live AND whose free-space we
-///   target (statvfs is taken on this path).
+///   SavedClips / SentryClips live AND whose LUN-fill we
+///   target (the per-file size sum of the tree is compared
+///   against `lun_size_bytes`).
+/// * `lun_size_bytes` — the LUN-visible capacity (from
+///   `storage_config.storage.teslacam_gb * 1 GiB`). Pass `0` to
+///   skip the sweep entirely (no useful target can be computed
+///   without knowing the LUN size).
 /// * `now_unix_s` is a parameter so tests can pin the clock.
 ///
 /// # Errors
 ///
 /// Returns `Err` only on a store-level failure or a fatal
-/// statvfs error. Per-clip unlink failures are counted in
+/// LUN-walk error. Per-clip unlink failures are counted in
 /// `failed` and never abort the sweep.
 pub fn sweep_to_target(
     store: &Store,
     backing_root: &Path,
     storage_config: &StorageConfig,
+    lun_size_bytes: u64,
     now_unix_s: i64,
 ) -> Result<SweepSummary, SweepError> {
-    let target_pct = effective_target_pct(store, backing_root, storage_config);
-    let initial_free = measure_free_pct(backing_root)?;
+    if lun_size_bytes == 0 {
+        // No usable LUN size — supervisor could not load the
+        // storage config. Skip the sweep rather than guess at
+        // a free-space target on the host filesystem.
+        warn!("sweep_to_target: lun_size_bytes == 0; skipping sweep");
+        return Ok(SweepSummary::default());
+    }
+    let target_pct = effective_target_pct(store, backing_root, storage_config, lun_size_bytes);
+    let initial_free = measure_lun_free_pct(backing_root, lun_size_bytes)?;
     let mut summary = SweepSummary {
         initial_free_pct: initial_free,
         final_free_pct: initial_free,
@@ -226,7 +242,7 @@ pub fn sweep_to_target(
             }
         }
         if deletes_since_recheck >= FREE_RECHECK_INTERVAL {
-            current_free = measure_free_pct(backing_root)?;
+            current_free = measure_lun_free_pct(backing_root, lun_size_bytes)?;
             deletes_since_recheck = 0;
         }
     }
@@ -234,7 +250,7 @@ pub fn sweep_to_target(
     // Last-resort: only after every higher-priority candidate
     // has been considered AND the target is still unmet.
     if !summary.target_reached {
-        current_free = measure_free_pct(backing_root)?;
+        current_free = measure_lun_free_pct(backing_root, lun_size_bytes)?;
         if current_free < target_pct {
             for clip in &plan.last_resort {
                 if current_free >= target_pct {
@@ -257,14 +273,14 @@ pub fn sweep_to_target(
                     }
                 }
                 if deletes_since_recheck >= FREE_RECHECK_INTERVAL {
-                    current_free = measure_free_pct(backing_root)?;
+                    current_free = measure_lun_free_pct(backing_root, lun_size_bytes)?;
                     deletes_since_recheck = 0;
                 }
             }
         }
     }
 
-    summary.final_free_pct = measure_free_pct(backing_root)?;
+    summary.final_free_pct = measure_lun_free_pct(backing_root, lun_size_bytes)?;
     if summary.final_free_pct >= target_pct {
         summary.target_reached = true;
     }
@@ -292,26 +308,35 @@ pub fn sweep_to_target_now(
     store: &Store,
     backing_root: &Path,
     storage_config: &StorageConfig,
+    lun_size_bytes: u64,
 ) -> Result<SweepSummary, SweepError> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|_| SweepError::ClockBeforeEpoch)?
         .as_secs();
     let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
-    let summary = sweep_to_target(store, backing_root, storage_config, now_i64)?;
+    let summary = sweep_to_target(store, backing_root, storage_config, lun_size_bytes, now_i64)?;
     debug!("sweep_to_target_now: pass complete");
     Ok(summary)
 }
 
-fn effective_target_pct(store: &Store, backing_root: &Path, storage_config: &StorageConfig) -> f64 {
+fn effective_target_pct(
+    store: &Store,
+    backing_root: &Path,
+    storage_config: &StorageConfig,
+    lun_size_bytes: u64,
+) -> f64 {
     let configured = f64::from(storage_config.cleanup.target_free_pct);
     if configured > 0.0 {
         return configured;
     }
-    auto_tune_target_pct(store, backing_root)
+    auto_tune_target_pct(store, backing_root, lun_size_bytes)
 }
 
-fn auto_tune_target_pct(store: &Store, backing_root: &Path) -> f64 {
+fn auto_tune_target_pct(store: &Store, backing_root: &Path, lun_size_bytes: u64) -> f64 {
+    if lun_size_bytes == 0 {
+        return AUTO_TUNE_FALLBACK_PCT;
+    }
     let candidates = match store.list_clips_in_bucket_older_than(Bucket::Recent, i64::MAX) {
         Ok(rows) => rows,
         Err(e) => {
@@ -350,14 +375,10 @@ fn auto_tune_target_pct(store: &Store, backing_root: &Path) -> f64 {
     let median = sizes_bytes.get(sizes_bytes.len() / 2).copied().unwrap_or(0);
     // 2 minutes × 6 cameras = 12× median single-clip size.
     let target_bytes = median.saturating_mul(12);
-    let capacity_bytes = match measure_total_bytes(backing_root) {
-        Ok(b) if b > 0 => b,
-        _ => return AUTO_TUNE_FALLBACK_PCT,
-    };
     // Cast precision loss is bounded — target_bytes ≤ ~600 MB,
     // capacity ≤ ~2 TB; the ratio has > 15 digits of mantissa.
     #[allow(clippy::cast_precision_loss)]
-    let pct = (target_bytes as f64 / capacity_bytes as f64) * 100.0;
+    let pct = (target_bytes as f64 / lun_size_bytes as f64) * 100.0;
     pct.clamp(0.5, f64::from(TARGET_FREE_PCT_MAX))
 }
 
@@ -517,43 +538,17 @@ enum DeleteError {
     UnsafePath { path: PathBuf },
 }
 
-/// Free-space percent of the volume containing `path`. On
-/// non-Linux hosts returns 100.0 so the dev-workstation test
-/// suite never sees synthetic free-space pressure.
-#[cfg(target_os = "linux")]
-#[allow(clippy::cast_precision_loss)]
-fn measure_free_pct(path: &Path) -> Result<f64, SweepError> {
-    let stat = rustix::fs::statvfs(path).map_err(|e| SweepError::Statvfs {
-        path: path.to_path_buf(),
-        source: std::io::Error::from(e),
+/// LUN-fill-aware free-space percent. Walks `backing_root` to
+/// total the bytes Tesla sees through the synthesised volume,
+/// then divides by the configured `lun_size_bytes`. Replaces
+/// the legacy `statvfs(backing_root)` measurement that
+/// reported the SD-card's free space — see ADR-0018.
+fn measure_lun_free_pct(backing_root: &Path, lun_size_bytes: u64) -> Result<f64, SweepError> {
+    let used = lun_used_bytes(backing_root).map_err(|e| SweepError::LunWalk {
+        path: backing_root.to_path_buf(),
+        source: e,
     })?;
-    let total = stat.f_blocks as f64 * stat.f_frsize as f64;
-    let free = stat.f_bavail as f64 * stat.f_frsize as f64;
-    if total <= 0.0 {
-        return Ok(100.0);
-    }
-    Ok((free / total) * 100.0)
-}
-
-#[cfg(not(target_os = "linux"))]
-#[allow(clippy::unnecessary_wraps)]
-fn measure_free_pct(_path: &Path) -> Result<f64, SweepError> {
-    Ok(100.0)
-}
-
-/// Total bytes of the volume containing `path`. Returns
-/// `Ok(0)` on non-Linux hosts so the auto-tune falls back to
-/// the static default during dev-box tests.
-#[cfg(target_os = "linux")]
-fn measure_total_bytes(path: &Path) -> std::io::Result<u64> {
-    let stat = rustix::fs::statvfs(path).map_err(std::io::Error::from)?;
-    Ok(stat.f_blocks.saturating_mul(stat.f_frsize))
-}
-
-#[cfg(not(target_os = "linux"))]
-#[allow(clippy::unnecessary_wraps)] // unified signature with Linux variant
-fn measure_total_bytes(_path: &Path) -> std::io::Result<u64> {
-    Ok(0)
+    Ok(lun_free_pct(used, lun_size_bytes))
 }
 
 #[cfg(test)]
@@ -686,7 +681,7 @@ mod tests {
     fn effective_target_returns_configured_when_nonzero() {
         let cfg = storage(7, 0);
         let store = Store::open_in_memory().unwrap();
-        let pct = effective_target_pct(&store, Path::new("/tmp"), &cfg);
+        let pct = effective_target_pct(&store, Path::new("/tmp"), &cfg, 64u64 * (1 << 30));
         assert!((pct - 7.0).abs() < f64::EPSILON);
     }
 
@@ -695,7 +690,14 @@ mod tests {
         // Empty store -> fallback.
         let cfg = storage(0, 0);
         let store = Store::open_in_memory().unwrap();
-        let pct = effective_target_pct(&store, Path::new("/tmp"), &cfg);
+        let pct = effective_target_pct(&store, Path::new("/tmp"), &cfg, 64u64 * (1 << 30));
+        assert!((pct - AUTO_TUNE_FALLBACK_PCT).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn auto_tune_falls_back_when_lun_size_zero() {
+        let store = Store::open_in_memory().unwrap();
+        let pct = auto_tune_target_pct(&store, Path::new("/tmp"), 0);
         assert!((pct - AUTO_TUNE_FALLBACK_PCT).abs() < f64::EPSILON);
     }
 
@@ -714,5 +716,30 @@ mod tests {
         let plan = build_plan(&store, &cfg, 0).unwrap();
         assert!(plan.priority.is_empty());
         assert!(plan.last_resort.is_empty());
+    }
+
+    #[test]
+    fn sweep_to_target_skips_when_lun_size_zero() {
+        // Defensive: caller passed lun_size_bytes = 0 because
+        // storage_config could not be loaded. Sweep must no-op
+        // rather than crash.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let cfg = storage(5, 0);
+        let s = sweep_to_target(&store, dir.path(), &cfg, 0, 1_000).unwrap();
+        assert_eq!(s, SweepSummary::default());
+    }
+
+    #[test]
+    fn sweep_to_target_noop_when_lun_under_target() {
+        // 1 GiB LUN, 4 KiB used = ~100% free, target 5% -> no-op.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dummy.mp4"), vec![0u8; 4096]).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let cfg = storage(5, 0);
+        let s = sweep_to_target(&store, dir.path(), &cfg, 1u64 << 30, 1_000).unwrap();
+        assert!(s.target_reached);
+        assert_eq!(s.total_deleted(), 0);
+        assert!(s.initial_free_pct >= 5.0);
     }
 }

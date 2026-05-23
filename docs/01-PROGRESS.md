@@ -1155,6 +1155,37 @@ read layer.
 
 ---
 
+## Phase N — LUN-aware cleanup pressure (ADR-0018)
+
+Triggered by the 2026-05-23 outage on `cybertruckusb.local`:
+`teslafat@0.service` crash-looped with `exFAT cluster allocator
+out of capacity` while the worker reported "no free-space
+pressure" because every cleanup measurement called
+`statvfs(backing_root)` — the SD-card's free space, not the
+LUN-visible fill. Operator had to hand-delete 28.7 GB of
+RecentClips to recover. Architecture decision locked in via
+ADR-0018 (supersedes ADR-0012).
+
+| Step | Description | Status |
+|---|---|---|
+| N.1 | New `lun_pressure` module (`lun_size_bytes`, `lun_used_bytes`, `lun_free_pct`) + unit tests | ✅ |
+| N.2 | `Cleanup::run_once` + `measure_pressure` switch to LUN-fill measurement | ✅ |
+| N.3 | `cleanup_sweep::sweep_to_target{,_now}` switch to LUN-fill measurement; remove `measure_total_bytes` | ✅ |
+| N.4 | Supervisor plumbs `lun_size_bytes` from `StorageConfig.storage.teslacam_gb` once per tick | ✅ |
+| N.5 | Drop `rustix` dep (statvfs path removed); ADR-0012 marked Superseded | ✅ |
+| N.6 | Tests cover 256/257 GiB overflow scenario + `lun_size_bytes=0` no-op path | ✅ |
+| N.7 | ADR-0018 written | ✅ |
+| N.8 | Charter-review on full N.* diff | ⏳ |
+| N.9 | Hardware deploy + verify post-fix `cleanup_sweep` log shows real LUN-fill | ⏳ |
+
+**Pre-existing test fix folded into N.1:**
+- `config::tests::example_worker_toml_parses_and_validates`
+  asserted `backing_root == /srv/teslausb` but the shipped
+  `examples/worker.toml` says `/srv/teslausb/teslacam` (production
+  value). Updated the assertion to match the example.
+
+---
+
 ## Session log
 
 ### 2026-05-19 — Session start

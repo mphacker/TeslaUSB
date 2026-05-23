@@ -1819,8 +1819,7 @@ mod tests {
         s.flush().expect("flush");
 
         // Post-fix: NEW.MP4 owns cluster 3, data lands in it.
-        let new_bytes =
-            fs::read(tmp.path().join("NEW.MP4")).expect("NEW.MP4 must be finalized");
+        let new_bytes = fs::read(tmp.path().join("NEW.MP4")).expect("NEW.MP4 must be finalized");
         assert_eq!(new_bytes, payload);
         // OLD.MP4 is untouched — eviction is in-memory only.
         let old_bytes = fs::read(tmp.path().join("OLD.MP4")).unwrap();
@@ -1860,8 +1859,7 @@ mod tests {
             .expect("data");
         s.flush().expect("flush");
 
-        let new_bytes =
-            fs::read(tmp.path().join("NEW.MP4")).expect("NEW.MP4 must be finalized");
+        let new_bytes = fs::read(tmp.path().join("NEW.MP4")).expect("NEW.MP4 must be finalized");
         assert_eq!(new_bytes, payload);
         assert_eq!(s.extent_count(), 1);
     }

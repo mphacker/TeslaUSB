@@ -57,12 +57,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # half of `watcher` and cfg-gate out the `ClipWatcher` type.
 [target.'cfg(target_os = "linux")'.dependencies]
 inotify = "0.10"
-# Safe POSIX bindings for statvfs(3) — the cleanup worker's
-# free-space-pressure check. Chosen over direct libc so the
-# cleanup module stays `unsafe`-free; the workspace lint
-# `unsafe_code = "deny"` would otherwise force a per-block
-# allow on every libc call. See ADR-0012.
-rustix = { version = "0.38", features = ["fs"] }
 
 [dependencies.tokio]
 version = "1.36"

@@ -1927,7 +1927,11 @@ mod tests {
             old_bytes.iter().all(|&b| b == 0),
             "old clip's bytes must be untouched by the reuse"
         );
-        assert_eq!(s.extent_count(), 1, "cluster_map must hold only the new extent");
+        assert_eq!(
+            s.extent_count(),
+            1,
+            "cluster_map must hold only the new extent"
+        );
     }
 
     /// Partial-overlap variant: Tesla allocates a new clip whose

@@ -1,11 +1,20 @@
 # ADR-0012 — `rustix` for `statvfs(3)` in the cleanup worker
 
-| Status   | Accepted |
+| Status   | Superseded by ADR-0018 (2026-05-23) |
 |----------|----------|
 | Date     | 2026-05-20 |
 | Deciders | mphacker (operator), Copilot CLI (charter enforcement) |
 | Phase    | Phase 4b.3 (cleanup) |
 | Triggers | Charter §"ADR discipline" — new third-party dep; introduces (avoids) `unsafe` |
+
+> **Superseded:** The cleanup worker no longer measures host-FS
+> free space via `statvfs(3)`. ADR-0018 replaces that
+> measurement with a LUN-fill computation
+> (`sum(file sizes under backing_root) / lun_size_bytes`) that
+> uses only `std::fs` and therefore needs no `rustix`
+> dependency. The decision below is preserved for historical
+> context.
+
 
 ## Context
 

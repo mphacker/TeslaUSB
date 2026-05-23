@@ -45,6 +45,8 @@ use crate::cleanup_sweep;
 use crate::config::Config;
 use crate::indexer::Indexer;
 #[cfg(target_os = "linux")]
+use crate::lun_pressure::lun_size_bytes;
+#[cfg(target_os = "linux")]
 use crate::storage_config::StorageConfig;
 use crate::store::Store;
 
@@ -278,17 +280,31 @@ async fn steady_state_linux(
                 //      tier-aware free-space sweep keyed off
                 //      `target_free_pct` in /etc/teslausb/teslausb.toml.
                 //      Runs AFTER `run_once` so the age-based deletes
-                //      are already reflected in the statvfs reading;
+                //      are already reflected in the LUN-fill reading;
                 //      any NotFound from a race with `run_once` is
                 //      logged at WARN and counted in
                 //      `SweepSummary::failed`, never fatal.
                 // The two delete paths are complementary, not
                 // redundant: `run_once` ensures Tesla never sees
                 // a clip older than `retention_days` (even when
-                // disk has plenty of free space), while the sweep
-                // keeps a free-space floor for incoming writes
-                // (even when no clip is "old" yet).
-                match cleanup.run_once(indexer.store()) {
+                // the LUN has plenty of free space), while the
+                // sweep keeps a free-space floor for incoming
+                // writes (even when no clip is "old" yet).
+                //
+                // Both phases use the SAME shared StorageConfig
+                // snapshot for this tick so they agree on the LUN
+                // size — see ADR-0018. A missing/invalid file
+                // means lun_size_bytes = 0, which disables BOTH
+                // the pressure floor (in cleanup.run_once) and the
+                // sweep (it no-ops).
+                let storage_cfg = StorageConfig::load(std::path::Path::new(STORAGE_CONFIG_PATH))
+                    .unwrap_or_else(|e| {
+                        warn!(error = %e,
+                            "storage_config load failed; LUN pressure disabled this tick");
+                        StorageConfig::default()
+                    });
+                let lun_bytes = lun_size_bytes(storage_cfg.storage.teslacam_gb);
+                match cleanup.run_once(indexer.store(), lun_bytes) {
                     Ok(summary) => {
                         info!(
                             considered = summary.considered,
@@ -325,36 +341,31 @@ async fn steady_state_linux(
                         break ShutdownReason::CleanupFailed;
                     }
                 }
-                // AC.7: tier-aware continuous sweep (cleanup_sweep)
-                // enforces the operator-configured `target_free_pct`
-                // floor on the TeslaCam LUN. Re-loads the shared
-                // storage_config.toml each tick so live UI edits
-                // (AC.6 /storage page) take effect without a worker
-                // restart. A missing/invalid config is non-fatal —
-                // we simply skip this pass and log a warning.
-                match StorageConfig::load(std::path::Path::new(STORAGE_CONFIG_PATH)) {
-                    Ok(storage_cfg) => {
-                        match cleanup_sweep::sweep_to_target_now(
-                            indexer.store(),
-                            &config.backing_root,
-                            &storage_cfg,
-                        ) {
-                            Ok(s) => info!(
-                                deleted_tier_a = s.deleted_tier_a,
-                                deleted_tier_b = s.deleted_tier_b,
-                                deleted_tier_c_age = s.deleted_tier_c_age,
-                                deleted_tier_c_last_resort = s.deleted_tier_c_last_resort,
-                                failed = s.failed,
-                                initial_free_pct = s.initial_free_pct,
-                                final_free_pct = s.final_free_pct,
-                                target_pct = s.target_pct,
-                                target_reached = s.target_reached,
-                                "cleanup_sweep tick complete",
-                            ),
-                            Err(e) => warn!(error = %e, "cleanup_sweep tick failed (non-fatal)"),
-                        }
-                    }
-                    Err(e) => warn!(error = %e, "storage_config load failed; skipping cleanup_sweep"),
+                // AC.7: tier-aware continuous sweep
+                // (cleanup_sweep) enforces the operator-configured
+                // `target_free_pct` floor on the TeslaCam LUN.
+                // Re-uses the storage_cfg / lun_bytes snapshot
+                // computed above so all three phases of this tick
+                // agree on what the LUN looks like.
+                match cleanup_sweep::sweep_to_target_now(
+                    indexer.store(),
+                    &config.backing_root,
+                    &storage_cfg,
+                    lun_bytes,
+                ) {
+                    Ok(s) => info!(
+                        deleted_tier_a = s.deleted_tier_a,
+                        deleted_tier_b = s.deleted_tier_b,
+                        deleted_tier_c_age = s.deleted_tier_c_age,
+                        deleted_tier_c_last_resort = s.deleted_tier_c_last_resort,
+                        failed = s.failed,
+                        initial_free_pct = s.initial_free_pct,
+                        final_free_pct = s.final_free_pct,
+                        target_pct = s.target_pct,
+                        target_reached = s.target_reached,
+                        "cleanup_sweep tick complete",
+                    ),
+                    Err(e) => warn!(error = %e, "cleanup_sweep tick failed (non-fatal)"),
                 }
             }
         }
@@ -416,7 +427,10 @@ async fn steady_state_non_linux(
                 break ShutdownReason::Sigint;
             }
             _ = tick.tick() => {
-                if let Err(e) = cleanup.run_once(indexer.store()) {
+                // Non-Linux dev fallback: no /etc config, just
+                // pass lun_size_bytes = 0 so pressure is disabled
+                // (this code path is not reached on the live Pi).
+                if let Err(e) = cleanup.run_once(indexer.store(), 0) {
                     error!(error = %e, "cleanup tick failed");
                     break ShutdownReason::CleanupFailed;
                 }

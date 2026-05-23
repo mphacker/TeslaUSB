@@ -458,7 +458,7 @@ bogus = 1
         let raw = include_str!("../examples/worker.toml");
         let cfg: Config = toml::from_str(raw).unwrap();
         cfg.validate().unwrap();
-        assert_eq!(cfg.backing_root, PathBuf::from("/srv/teslausb"));
+        assert_eq!(cfg.backing_root, PathBuf::from("/srv/teslausb/teslacam"));
         assert_eq!(
             cfg.db_path,
             PathBuf::from("/var/lib/teslausb/index.sqlite3")

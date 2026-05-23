@@ -786,10 +786,7 @@ mod tests {
         m.insert(extent(50, 5, "d")).expect("d"); // [50, 55) — outside
         let evicted = m.remove_overlapping(12, 32);
         let paths: Vec<&Path> = evicted.iter().map(|e| e.file_path.as_path()).collect();
-        assert_eq!(
-            paths,
-            vec![Path::new("a"), Path::new("b"), Path::new("c")]
-        );
+        assert_eq!(paths, vec![Path::new("a"), Path::new("b"), Path::new("c")]);
         assert_eq!(m.len(), 1);
         assert!(m.lookup(50).is_some());
     }
@@ -826,7 +823,11 @@ mod tests {
             new_extent.first_cluster + new_extent.cluster_count,
         );
         assert_eq!(evicted.len(), 1);
-        m.insert(new_extent).expect("insert must succeed after eviction");
-        assert_eq!(m.lookup(120).expect("hit").extent.file_path, PathBuf::from("fresh_clip.mp4"));
+        m.insert(new_extent)
+            .expect("insert must succeed after eviction");
+        assert_eq!(
+            m.lookup(120).expect("hit").extent.file_path,
+            PathBuf::from("fresh_clip.mp4")
+        );
     }
 }
